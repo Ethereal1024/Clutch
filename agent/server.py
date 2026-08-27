@@ -33,6 +33,7 @@ from .events import (
     Event,
     EventLog,
     PermissionRequestEvent,
+    StateUpdateEvent,
     event_from_dict,
     event_to_json,
 )
@@ -356,6 +357,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         q = self._broadcaster.subscribe()
         try:
+            # always reset the UI status first so a stale "running" never locks the
+            # taskbar after a session switch or an interrupted run
+            self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
             # replay the current session history first
             for ev in self._state.log.events():
                 self._write_sse(ev)

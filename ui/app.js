@@ -462,6 +462,7 @@ async function switchSession(id) {
     const ld = await lr.json();
     clearStream();
     currentSession = id;
+    setStatus("idle"); // reset busy so Run/taskbar work after switching
     for (const ev of ld.events || []) addEvent(ev);
     markCurrentSession();
   } catch (e) {}
@@ -474,17 +475,43 @@ els.session.addEventListener("change", async () => {
   await switchSession(id);
 });
 
-$("#new-session-btn").addEventListener("click", async () => {
-  if (busy) return;
-  if (!confirm("Start a new conversation? The current one will still be saved.")) return;
+// ---- confirmation dialog (replaces window.confirm, which is unreliable in Electron) ----
+const confirmModal = $("#confirm-modal");
+let pendingConfirm = null;
+function askConfirm(msg, onOk) {
+  $("#confirm-msg").textContent = msg;
+  pendingConfirm = onOk;
+  confirmModal.classList.remove("hidden");
+}
+function closeConfirm() {
+  confirmModal.classList.add("hidden");
+  pendingConfirm = null;
+}
+$("#confirm-ok").addEventListener("click", () => {
+  const fn = pendingConfirm;
+  closeConfirm();
+  if (fn) fn();
+});
+$("#confirm-cancel").addEventListener("click", closeConfirm);
+confirmModal.addEventListener("click", (e) => {
+  if (e.target === confirmModal) closeConfirm();
+});
+
+async function newSession() {
   try {
     const r = await fetch("/api/session/new", { method: "POST" });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
     currentSession = data.session_id;
     clearStream();
+    setStatus("idle"); // ensure busy is reset so Run/taskbar work again
     markCurrentSession();
   } catch (e) {}
+}
+
+$("#new-session-btn").addEventListener("click", () => {
+  if (busy) return;
+  askConfirm("Start a new conversation? The current one will still be saved.", newSession);
 });
 
 setInterval(refreshTree, 4000);
