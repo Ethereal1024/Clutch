@@ -421,7 +421,8 @@ function renderNode(node, depth) {
     const children = document.createElement("div");
     children.className = "tree-children";
     let open = false;
-    el.onclick = () => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't bubble to ancestor dirs (would collapse them)
       open = !open;
       el.querySelector(".icon").textContent = open ? "▾" : "▸";
       if (open) {
@@ -429,9 +430,13 @@ function renderNode(node, depth) {
         for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
       }
       children.style.display = open ? "" : "none";
-    };
+    });
     children.style.display = "none";
     el.appendChild(children);
+  } else {
+    // files have no action, but still stop propagation so clicking a file
+    // inside a nested dir never bubbles to collapse its parent
+    el.addEventListener("click", (e) => e.stopPropagation());
   }
   return el;
 }
