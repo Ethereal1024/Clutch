@@ -108,6 +108,43 @@ def main() -> None:
     section = lib.to_system_section("make a website")
     check("app.test.js" in section, "skill content injected as system section")
 
+    # 8. proxy: socks scheme must never crash the client (the user's environment bug)
+    import os
+    from agent.llm.proxy import get_proxy_for_url
+
+    saved = {k: os.environ.get(k) for k in ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY")}
+    try:
+        # environment with ALL_PROXY=socks:// must yield None (direct), not crash
+        os.environ["ALL_PROXY"] = "socks://127.0.0.1:7890/"
+        os.environ["all_proxy"] = "socks://127.0.0.1:7890/"
+        os.environ.pop("https_proxy", None)
+        os.environ.pop("HTTPS_PROXY", None)
+        os.environ.pop("no_proxy", None)
+        os.environ.pop("NO_PROXY", None)
+        check(get_proxy_for_url("https://api.deepseek.com") is None, "socks all_proxy skipped (no crash)")
+
+        # http proxy is passed through for httpx
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890/"
+        check(
+            get_proxy_for_url("https://api.deepseek.com") == "http://127.0.0.1:7890/",
+            "http https_proxy passed through",
+        )
+
+        # no_proxy match -> direct
+        os.environ["NO_PROXY"] = "api.deepseek.com"
+        check(get_proxy_for_url("https://api.deepseek.com") is None, "no_proxy bypasses proxy")
+        os.environ.pop("NO_PROXY", None)
+        check(
+            get_proxy_for_url("https://api.deepseek.com") == "http://127.0.0.1:7890/",
+            "proxy restored after no_proxy cleared",
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     print("\nall passed")
     return 0
 

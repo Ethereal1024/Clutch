@@ -3,6 +3,8 @@
 - API key comes from the environment only; never committed.
 - Retry with backoff: network/rate-limit/5xx, bounded attempts.
 - Errors normalized to LlmError; the caller decides retry vs abort.
+- Proxy: resolved through our own env logic (see proxy.py) so the socks://
+  scheme httpx cannot parse never reaches it.
 """
 
 from __future__ import annotations
@@ -12,12 +14,16 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import httpx2
 from openai import OpenAI
+
+from .proxy import get_proxy_for_url
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 MAX_RETRIES = 3
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+REQUEST_TIMEOUT = 60.0
 
 
 @dataclass
@@ -38,7 +44,12 @@ class LlmClient:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         if not self.api_key:
             raise RuntimeError("missing DEEPSEEK_API_KEY (env or argument)")
-        self.client = OpenAI(api_key=self.api_key, base_url=base_url)
+        # Build our own httpx transport: trust_env=False so httpx never reads the
+        # ambient *proxy vars (socks:// would crash it); instead we feed it a single
+        # proxy URL resolved through proxy.py, which skips unsupported schemes.
+        proxy = get_proxy_for_url(base_url)
+        http_client = httpx2.Client(proxy=proxy, trust_env=False, timeout=REQUEST_TIMEOUT)
+        self.client = OpenAI(api_key=self.api_key, base_url=base_url, http_client=http_client)
         self.model = model
 
     def chat(
