@@ -46,7 +46,11 @@ class LlmClient:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Single non-streaming chat completion; returns an OpenAI message dict."""
+        """Single non-streaming chat completion.
+
+        Returns a message dict with finish_reason attached; reasoning_content
+        (DeepSeek thinking) is returned separately and never fed back to the model.
+        """
         last_err: LlmError | None = None
         for attempt in range(MAX_RETRIES):
             try:
@@ -54,7 +58,12 @@ class LlmClient:
                 if tools:
                     kwargs["tools"] = tools
                 resp = self.client.chat.completions.create(**kwargs)
-                return resp.choices[0].message.model_dump(exclude_none=True)
+                choice = resp.choices[0]
+                msg = choice.message.model_dump(exclude_none=True)
+                reasoning = msg.pop("reasoning_content", None)
+                msg["finish_reason"] = choice.finish_reason
+                msg["_reasoning"] = reasoning
+                return msg
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = _classify(e)
                 if not last_err.retryable or attempt == MAX_RETRIES - 1:

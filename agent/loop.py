@@ -90,13 +90,7 @@ class Agent:
 
             # max-tokens truncation: drop incomplete tool calls, ask to be concise
             if finish_reason == "length":
-                self._emit(
-                    ToolResultEvent(
-                        tool_call_id="",
-                        content=render("max_tokens.md"),
-                        is_error=True,
-                    )
-                )
+                self._emit(UserMessageEvent(content=render("max_tokens.md")))
                 continue
 
             if content:
@@ -146,13 +140,7 @@ class Agent:
                 return content
 
             # gate failed: feed verification output back and keep iterating
-            self._emit(
-                ToolResultEvent(
-                    tool_call_id="",
-                    content=render("verify_failed.md", output=v.verify_output),
-                    is_error=True,
-                )
-            )
+            self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
             if self.terminator.check_turn_budget(turn):
                 self._emit(
                     FinalEvent(

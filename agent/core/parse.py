@@ -38,7 +38,9 @@ def parse_message(message: Dict[str, Any]) -> Tuple[Optional[str], List[Dict[str
 
     Returns (content, tool_calls, finish_reason).
     tool_calls entries are [{id, name, arguments(raw string)}].
+    Internal _reasoning is dropped so it never reaches the model as content.
     """
+    message = {k: v for k, v in message.items() if k != "_reasoning"}
     content = message.get("content")
     if isinstance(content, list):  # newer openai content block array
         content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
