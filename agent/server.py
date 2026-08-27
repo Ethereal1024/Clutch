@@ -37,6 +37,29 @@ from .tools.registry import ToolRegistry, build_default_tools
 from .tools.sandbox import Sandbox
 
 
+def _settings_path() -> Path:
+    return Path.home() / ".clutch" / "settings.json"
+
+
+def load_settings() -> dict:
+    """Read persisted settings (api_key). The file lives outside the repo on purpose."""
+    p = _settings_path()
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(data: dict) -> None:
+    p = _settings_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        p.chmod(0o600)  # owner-only, the file holds a credential
+    except OSError:
+        pass
+
+
 class Broadcaster:
     """Fan events out to subscribers. Each subscriber owns a queue.Queue."""
 
@@ -73,6 +96,7 @@ class RunState:
         self.log = EventLog()
         self.sandbox: Optional[Sandbox] = None
         self._sessions_dir = sessions_dir
+        self.api_key: Optional[str] = None
 
     def start(self, task: str, sandbox: Sandbox, cancel: threading.Event) -> bool:
         with self.lock:
@@ -161,6 +185,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self._run()
             elif parsed.path == "/api/stop":
                 self._stop()
+            elif parsed.path == "/api/settings":
+                self._settings()
             else:
                 self._json({"error": "not found"}, status=404)
         except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
@@ -203,7 +229,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "task is required"}, status=400)
 
         try:
-            llm = LlmClient(model=config.model, base_url=config.base_url)
+            llm = LlmClient(
+                api_key=self._state.api_key or config.api_key,
+                model=config.model,
+                base_url=config.base_url,
+            )
         except Exception as e:  # noqa: BLE001 -- key/proxy/config failures are user-facing
             return self._json({"error": f"LLM init failed: {e}"}, status=500)
 
@@ -239,6 +269,19 @@ class Handler(SimpleHTTPRequestHandler):
         if self._state.cancel:
             self._state.cancel.set()
         self._json({"status": "cancelling"})
+
+    def _settings(self) -> None:
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:  # noqa: BLE001
+            return self._json({"error": "bad json body"}, status=400)
+        api_key = (body.get("api_key") or "").strip()
+        if not api_key:
+            return self._json({"error": "api_key is required"}, status=400)
+        with self._state.lock:
+            self._state.api_key = api_key
+        save_settings({"api_key": api_key})
+        self._json({"status": "ok"})
 
     def _sse(self) -> None:
         self.send_response(200)
@@ -421,6 +464,8 @@ def main() -> int:
 
     broadcaster = Broadcaster()
     state = RunState(sessions_dir)
+    # restore the API key persisted by the GUI settings (outside the repo)
+    state.api_key = load_settings().get("api_key")
 
     srv = build(config, ui_dir, sessions_dir, broadcaster, state)
     print(f"[clutch-server] http://127.0.0.1:{config.port}  (ui: {ui_dir})", flush=True)

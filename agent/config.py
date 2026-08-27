@@ -18,6 +18,8 @@ class Config:
     model: str = "deepseek-v4-flash"
     base_url: str = "https://api.deepseek.com"
     max_tokens: int = 4096
+    # API key from the GUI settings (persisted outside the repo); env still applies
+    api_key: str | None = None
 
     # Loop budget
     max_turns: int = 20

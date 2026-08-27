@@ -134,6 +134,46 @@ els.task.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
 });
 
+// ---- API settings modal ----
+const modal = $("#settings-modal");
+const keyInput = $("#api-key-input");
+
+function openSettings() {
+  modal.classList.remove("hidden");
+  keyInput.value = localStorage.getItem("clutch_api_key") || "";
+  keyInput.focus();
+}
+function closeSettings() {
+  modal.classList.add("hidden");
+}
+async function saveSettings() {
+  const key = keyInput.value.trim();
+  if (!key) {
+    closeSettings();
+    return;
+  }
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: key }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+    localStorage.setItem("clutch_api_key", key);
+    closeSettings();
+  } catch (e) {
+    closeSettings();
+    addEvent({ type: "final", status: "error", summary: "save settings failed: " + e.message });
+  }
+}
+$("#settings-btn").addEventListener("click", openSettings);
+$("#settings-save").addEventListener("click", saveSettings);
+$("#settings-close").addEventListener("click", closeSettings);
+modal.addEventListener("click", (e) => {
+  if (e.target === modal) closeSettings();
+});
+
 // ---- sandbox tree ----
 async function refreshTree() {
   try {

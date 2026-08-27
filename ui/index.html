@@ -17,8 +17,22 @@
     <select id="session-select" title="replay a past session">
       <option value="">live session</option>
     </select>
+    <button id="settings-btn" title="API settings">⚙</button>
     <button id="stop-btn" disabled title="cancel the running agent">■ Stop</button>
   </header>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>API settings</h3>
+      <label for="api-key-input">DeepSeek API key</label>
+      <input id="api-key-input" type="password" placeholder="sk-..." autocomplete="off" />
+      <p class="muted">Stored outside the repo (~/.clutch/settings.json). Overrides the environment variable for this server.</p>
+      <div class="modal-actions">
+        <button id="settings-save" class="primary">Save</button>
+        <button id="settings-close">Cancel</button>
+      </div>
+    </div>
+  </div>
 
   <main>
     <section id="left">

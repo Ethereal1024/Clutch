@@ -51,6 +51,30 @@ def http_post(url: str, body: dict) -> tuple[int, str]:
 
 
 def main() -> int:
+    # isolate settings persistence to a temp file so the test never touches ~/.clutch
+    from unittest import mock
+
+    import agent.server as server_mod
+
+    with tempfile.TemporaryDirectory() as sdir0:
+        fake_settings = Path(sdir0) / "settings.json"
+
+        def fake_load() -> dict:
+            try:
+                return json.loads(fake_settings.read_text())
+            except (OSError, json.JSONDecodeError):
+                return {}
+
+        def fake_save(data: dict) -> None:
+            fake_settings.write_text(json.dumps(data))
+
+        with mock.patch.object(server_mod, "load_settings", fake_load), mock.patch.object(
+            server_mod, "save_settings", fake_save
+        ):
+            _run_server_test()
+
+
+def _run_server_test() -> int:
     config = Config(port=8899)
     broadcaster = Broadcaster()
 
@@ -78,6 +102,15 @@ def main() -> int:
         # 2. reject empty task
         st, body = http_post(f"{base_url}/api/run", {"task": "   "})
         check(st == 400, "empty task rejected")
+
+        # 2b. settings: persist an API key in-memory + to user dir
+        st, body = http_post(f"{base_url}/api/settings", {"api_key": "sk-test-123"})
+        check(st == 200, "settings accepted")
+        check(state.api_key == "sk-test-123", "settings stored in state")
+        st, body = http_post(f"{base_url}/api/settings", {"api_key": "  "})
+        check(st == 400, "settings rejects empty key")
+        # reset so the real run below falls back to the env key (GUI key takes priority)
+        state.api_key = None
 
         # 3. real run (only with key)
         key = os.environ.get("DEEPSEEK_API_KEY")
