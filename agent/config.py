@@ -52,3 +52,6 @@ class Config:
     sandbox_dir: str | None = None
     log_path: str | None = None
     prompts_dir: Path = PROMPTS_DIR
+    # Skills: on-demand domain knowledge injected into the system prompt
+    enable_skills: bool = True
+    skills_dir: Path = Path(__file__).resolve().parent / "skills"

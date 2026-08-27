@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 from ..config import Config
 from ..events import AssistantMessageEvent, EventLog, ToolResultEvent, UserMessageEvent
 from ..prompts import render
+from ..skills import cached_library
 
 
 def _to_messages(events: List[Any]) -> List[Dict[str, Any]]:
@@ -79,7 +80,13 @@ def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, 
                 {"role": "user", "content": render("context_omitted.md", count=len(folded_idx))}
             ] + _to_messages(kept)
 
+    system = render("system.md")
+    if config.enable_skills:
+        skill_section = cached_library(config.skills_dir).to_system_section(task)
+        if skill_section:
+            system += "\n\n" + skill_section
+
     return [
-        {"role": "system", "content": render("system.md")},
+        {"role": "system", "content": system},
         {"role": "user", "content": render("task.md", task=task)},
     ] + msgs

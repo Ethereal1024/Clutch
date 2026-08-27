@@ -17,6 +17,7 @@ from .core.terminate import Terminator
 from .events import AssistantMessageEvent, EventLog, ToolResultEvent
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.sandbox import Sandbox
+from .skills import load_skill_library
 
 
 def check(cond: bool, name: str) -> None:
@@ -91,6 +92,17 @@ def main() -> None:
         vterm2 = Terminator(Config(verify_command="false"))
         v = vterm2.verify(sb)
         check(not v.done and v.status == "verify_failed", "verify gate fails on failure")
+
+    # 7. skills: frontmatter parse + keyword match + task-driven injection
+    from pathlib import Path
+
+    lib = load_skill_library(Path(__file__).resolve().parent / "skills")
+    check(len(lib.skills) >= 1, "skill library loads at least web-design")
+    matched = lib.match("build a landing page for our product with html and css")
+    check(any(s.name == "web-design" for s in matched), "web-design matches on frontend keywords")
+    check(lib.match("implement a sorting algorithm") == [], "unrelated task matches nothing")
+    section = lib.to_system_section("make a website")
+    check("app.test.js" in section, "skill content injected as system section")
 
     print("\nall passed")
     return 0
