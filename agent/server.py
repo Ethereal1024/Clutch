@@ -398,6 +398,12 @@ class Handler(SimpleHTTPRequestHandler):
         self.directory = str(self._ui_dir)
         super().do_GET()
 
+    def end_headers(self) -> None:
+        # HTML is regenerated as we develop; never let the client serve a stale copy
+        if self.path.endswith(".html") or self.path in ("/", "/index.html"):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def _json(self, obj: Dict[str, Any], status: int = 200) -> None:
         data = json.dumps(obj).encode("utf-8")
         self.send_response(status)

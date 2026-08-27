@@ -58,6 +58,12 @@ app.whenReady().then(async () => {
     },
   });
 
+  // Clear the persistent HTTP disk cache so a stale index.html is never served
+  // (Electron can cache the top-level navigation even when the server sends
+  // Cache-Control: no-cache). The ?v= query also defeats any remaining cache.
+  await win.webContents.session.clearCache();
+  win.loadURL(`http://127.0.0.1:${PORT}/?v=${Date.now()}`);
+
   // Native dialogs for creating / opening project files.
   ipcMain.handle("dialog:pickDirectory", async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -76,8 +82,6 @@ app.whenReady().then(async () => {
     });
     return res.canceled ? null : res.filePaths[0];
   });
-
-  win.loadURL(`http://127.0.0.1:${PORT}/`);
 });
 
 app.on("window-all-closed", () => {
