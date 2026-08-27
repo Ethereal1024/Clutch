@@ -36,14 +36,26 @@ const toolCalls = {};
 // the group block currently collecting consecutive tool_calls (for merging)
 let toolGroupEl = null;
 
+function isReadTool(name) {
+  return name === "read_file" || name === "list_dir";
+}
+
 // Render one tool_call row; consecutive calls append to the same group block.
+// Read tools (read_file/list_dir) keep their results in the same block too (A2).
 function addToolCallRow(ev) {
-  if (!toolGroupEl) {
-    toolGroupEl = document.createElement("div");
-    toolGroupEl.className = "event tool_group";
-    toolGroupEl.innerHTML = '<div class="hdr">tools</div>';
-    stream.appendChild(toolGroupEl);
+  const readGroup = isReadTool(ev.name);
+  if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
+    toolGroupEl = {
+      el: document.createElement("div"),
+      ids: new Set(),
+      readGroup,
+      closed: false,
+    };
+    toolGroupEl.el.className = "event tool_group";
+    toolGroupEl.el.innerHTML = '<div class="hdr">tools</div>';
+    stream.appendChild(toolGroupEl.el);
   }
+  toolGroupEl.ids.add(ev.tool_call_id);
   const row = document.createElement("div");
   row.className = "tool-row";
   row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
@@ -66,13 +78,45 @@ function addToolCallRow(ev) {
     }
   };
   row.appendChild(argsBtn);
-  toolGroupEl.appendChild(row);
+  toolGroupEl.el.appendChild(row);
+  stream.scrollTop = stream.scrollHeight;
+}
+
+// Append a read tool's result as a collapsible row inside the tool group.
+function addReadResultRow(ev) {
+  const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
+  const toolName = call.name || "";
+  const lines = ev.content ? ev.content.split("\n").length : 0;
+  const summary = toolName === "list_dir"
+    ? `${ev.content ? ev.content.split("\n").length : 0} entries`
+    : `read ${call.args.path || "file"} (${lines} lines)`;
+  const row = document.createElement("div");
+  row.className = "read-row";
+  const toggle = document.createElement("span");
+  toggle.className = "read-toggle";
+  toggle.textContent = "▸";
+  const lbl = document.createElement("span");
+  lbl.textContent = summary;
+  row.appendChild(toggle);
+  row.appendChild(lbl);
+  const full = document.createElement("pre");
+  full.className = "read-detail hidden";
+  full.textContent = ev.content;
+  row.onclick = () => {
+    const expanded = full.classList.toggle("hidden");
+    toggle.textContent = expanded ? "▸" : "▾";
+    if (expanded) row.appendChild(full);
+    else full.remove();
+  };
+  toolGroupEl.el.appendChild(row);
   stream.scrollTop = stream.scrollHeight;
 }
 
 function addEvent(ev) {
-  // consecutive tool_calls group into one block; any other event breaks the group
-  if (ev.type !== "tool_call") {
+  // events that break a tool group: new user turn, agent text, thinking, final.
+  // assistant_message is just a record (not shown) and does NOT break the group,
+  // because results follow the tool_calls they belong to.
+  if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
     toolGroupEl = null;
   }
   if (ev.type === "assistant_message") {
@@ -95,6 +139,16 @@ function addEvent(ev) {
     toolCalls[ev.tool_call_id] = { name: ev.name, args };
     addToolCallRow(ev);
     return;
+  }
+
+  // read tool results merge into the group block; other results render independently
+  if (ev.type === "tool_result" && toolGroupEl && toolGroupEl.ids.has(ev.tool_call_id)) {
+    const call = toolCalls[ev.tool_call_id] || { name: "" };
+    if (isReadTool(call.name)) {
+      addReadResultRow(ev);
+      toolGroupEl.closed = true; // this group's calls have completed
+      return;
+    }
   }
 
   // streaming text: accumulate into the existing agent block and re-render
