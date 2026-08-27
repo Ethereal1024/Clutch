@@ -38,9 +38,11 @@ class Config:
     output_tail: int = 2500
     read_max_chars: int = 20000
 
-    # Verification gate (acceptance criteria for the demo game)
-    verify_command: str = "python3 {file} --test"
-    game_file: str = "snake.py"
+    # Verification gate: an explicit command (e.g. a test suite) that the agent
+    # must pass before the task counts as done. Empty = no verification (the
+    # agent's own "done" reply is trusted, per the open-source norm that a
+    # verification command is part of the task spec, never a built-in default).
+    verify_command: str = ""
 
     # Commands that hang in a non-TTY pipe
     blocked_prefixes: list[str] = field(

@@ -67,6 +67,24 @@ def _agent(fake: FakeLLM, config: Config, sandbox: Sandbox, log: EventLog | None
 def main() -> None:
     config = Config(verify_command="echo ok")
 
+    # 0. no verify command (default): a generic task completes directly, no gate runs
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Sandbox(tmp)
+        no_gate = Config()  # verify_command defaults to ""
+        fake = FakeLLM(
+            responses=[_resp(content="done")],
+            fallback=_resp(content="done"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(no_gate)),
+            sandbox=sb,
+            config=no_gate,
+        )
+        result = agent.run("write an intro file")
+        check(result == "done", "no verify command: natural finish, no gate")
+        check(len(fake.calls) == 1, "no verify command: no extra LLM round trips")
+
     # 1. tool execution round trip: write a file, then no-tool answer -> verify passes
     with tempfile.TemporaryDirectory() as tmp:
         sb = Sandbox(tmp)

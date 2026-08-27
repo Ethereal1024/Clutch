@@ -1,12 +1,15 @@
-"""Scenario harness: run each scenario through the agent and record results.
+"""Evaluation harness: run each eval scenario through the agent and record results.
 
-A scenario dir contains:
+This is a standalone dev/eval tool, decoupled from the product. The agent core
+never references it.
+
+An eval scenario dir contains:
   task.md      - the prompt given to the agent
   seed/        - files copied into a fresh sandbox before the run
   verify.sh    - verification gate command (run inside the sandbox)
 
 Usage:
-  uv run python -m scenarios.harness [--scenario s2_landing] [--repeat N]
+  uv run python -m eval.harness [--scenario s2_landing] [--repeat N]
 
 Output: one JSONL line per run under reports/ with scenario, pass/fail, turns,
 duration and the sandbox path (so artifacts are inspectable).

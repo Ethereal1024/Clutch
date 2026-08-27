@@ -16,17 +16,20 @@ tool-calling 接口。
 2. 设置密钥：export DEEPSEEK_API_KEY=你的key   （密钥仅经环境变量，不入库）
 3. 启动产品界面：uv run python -m agent.server
    然后用浏览器打开 http://127.0.0.1:8890 （或运行 Electron 壳：ui/main.js）
-4. 命令行模式：uv run python -m agent "任务描述" --verify "python3 file.py --test"
-5. 跑内建演示：界面里点场景下拉「s2 landing」，再点 Run
+4. 命令行模式：uv run python -m agent "任务描述" [--verify "测试命令"]
+5. 独立评测工具（可选）：uv run python -m eval.harness，见 eval/
 
 特色功能
 --------
 · 事件流驱动架构：会话日志、界面、回放都从唯一事件流派生（借鉴 Claude Code / OpenHands）
-· 验证门终止：模型说"完成了"不算数，必须通过确定性自测命令才判定成功
+· 验证门终止：任务可显式附带验证命令（如测试套件），模型说"完成了"不算数，
+  必须通过该命令才判定成功；不提供则自然终止（对齐 Anthropic「给 agent 一个
+  验证自己工作的方法」原则）
 · 错误即数据：工具失败会喂回给模型，让它读错自纠、迭代修复
-· 沙盒隔离：所有命令在临时目录内执行，路径校验防逃逸、超时防挂死
+· 沙盒隔离：所有命令在沙盒目录内执行，路径校验防逃逸（含命令参数）、超时防挂死
 · Skills：按任务关键词动态注入领域知识（如 web-design），保持基础提示精简
-· 多场景评测套件：scenarios/ 内置落地页 / 修 bug / 重构 三个场景，harness 可重复跑
+· 独立评测工具：eval/ 内置落地页 / 修 bug / 重构 三个场景，harness 可重复跑
+  （评测工具与产品解耦，产品不依赖它）
 · 产品化界面：任务输入 + 运行/停止 + 实时事件流 + 沙盒文件树预览 + 会话回放
 
 核心模块（题目必写 5 项一一对应）
@@ -42,7 +45,7 @@ tool-calling 接口。
   uv run python -m agent.selfcheck     核心逻辑自检
   uv run python -m agent.loop_test     循环路径测试（假模型驱动，零成本）
   uv run python -m agent.server_test   HTTP+SSE 端到端测试
-  uv run python -m scenarios.harness   跑全部演示场景并记录结果
+  uv run python -m eval.harness        跑全部评测场景并记录结果
 
 其它说明
 --------

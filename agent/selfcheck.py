@@ -77,6 +77,12 @@ def main() -> None:
         check(r.get("error"), "registry rejects unknown tool")
         r = reg.execute(sb, config, "write_file", {"path": "../../escape.txt", "content": "x"})
         check(r.get("error"), "tool blocks path escape")
+        r = reg.execute(sb, config, "run_command", {"command": "cat /home/user/secret.txt"})
+        check(r.get("error"), "run_command blocks absolute path escape")
+        r = reg.execute(sb, config, "run_command", {"command": "cat ../../etc/passwd"})
+        check(r.get("error"), "run_command blocks .. path escape")
+        r = reg.execute(sb, config, "run_command", {"command": "ls -la"})
+        check(not r.get("error"), "run_command allows normal relative commands")
 
         # 5. doom-loop detection
         term = Terminator(config)

@@ -33,6 +33,17 @@ def run_command(sandbox: Sandbox, config: Config, command: str) -> dict:
     if not args:
         return {"content": "ERROR: empty command", "error": True}
 
+    # Path escape guard: reject tokens that look like file paths resolving outside
+    # the sandbox. Absolute paths (e.g. `cat /etc/passwd`) and `..` segments are the
+    # only ways a command can escape; plain relative paths stay inside the sandbox.
+    for tok in args:
+        if tok.startswith("/") or "/../" in tok or tok.startswith("../") or tok.endswith("/.."):
+            try:
+                p = sandbox.resolve(tok)
+            except ValueError:
+                return {"content": f"ERROR: path escapes sandbox: {tok!r}", "error": True}
+            # resolve() already guaranteed containment for absolute paths
+
     if args[0] in ("python", "python3"):
         file_arg = next((a for a in args[1:] if not a.startswith("-") and a.endswith(".py")), None)
         if file_arg:

@@ -2,9 +2,10 @@
 
 Layered termination:
 - Inner (natural): model replies with no tool call => candidate done.
-- Outer (verification gate): do NOT trust the model; run the verify command
-  (demo game: `python3 <file> --test`). Pass => truly done; fail => feed back and retry.
-  "Give the agent a way to verify its work" (Anthropic).
+- Outer (verification gate): if the caller supplied a verify command (e.g. a test
+  suite), do NOT trust the model; run that command. Pass => truly done; fail =>
+  feed the output back and retry. "Give the agent a way to verify its work"
+  (Anthropic). Empty command = no gate, natural termination only.
 - Budget: max turns; doom-loop: N identical tool calls in a row => abort.
 """
 
@@ -45,8 +46,10 @@ class Terminator:
         return turn > self.config.max_turns
 
     def verify(self, sandbox: Sandbox) -> TerminateResult:
-        """Run the verification gate. No-op success if no command is configured."""
-        cmd = self.config.verify_command.format(file=self.config.game_file)
+        """Run the verification gate. No command configured => pass-through."""
+        cmd = self.config.verify_command
+        if not cmd:
+            return TerminateResult(done=True, status="completed", reason="no_verify_command")
         result = run_command(sandbox, self.config, cmd)
         # judge by exit status, not by scanning text (a self-test may legitimately
         # print "ERROR" while exercising error paths)
