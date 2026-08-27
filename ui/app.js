@@ -11,10 +11,12 @@ const els = {
   tree: $("#tree"),
   sandbox: $("#sandbox-path"),
   session: $("#session-select"),
+  scenario: $("#scenario-select"),
 };
 
 let busy = false;
 const stream = $("#stream");
+let scenarioPayload = null;
 
 function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
@@ -106,11 +108,12 @@ async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
   stream.innerHTML = "";
+  const payload = Object.assign({ task }, scenarioPayload || {});
   try {
     const r = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task }),
+      body: JSON.stringify(payload),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
@@ -223,6 +226,37 @@ els.session.addEventListener("change", async () => {
   } catch (e) {}
 });
 
+async function loadScenarios() {
+  try {
+    const r = await fetch("/api/scenarios");
+    const data = await r.json();
+    for (const s of data.scenarios || []) {
+      const opt = document.createElement("option");
+      opt.value = s.name;
+      opt.textContent = s.label;
+      els.scenario.appendChild(opt);
+    }
+  } catch (e) {}
+}
+
+els.scenario.addEventListener("change", () => {
+  const name = els.scenario.value;
+  if (!name) {
+    scenarioPayload = null;
+    return;
+  }
+  // fetch the selected scenario's task + verify to populate the input
+  fetch("/api/scenarios")
+    .then((r) => r.json())
+    .then((data) => {
+      const s = data.scenarios.find((x) => x.name === name);
+      if (!s) return;
+      els.task.value = s.task;
+      scenarioPayload = { scenario: name };
+    });
+});
+
 setInterval(refreshTree, 4000);
 loadSessions();
+loadScenarios();
 connectSSE();

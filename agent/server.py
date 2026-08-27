@@ -1,9 +1,10 @@
 """HTTP + SSE server that hosts the agent as a product.
 
 Endpoints (all JSON except static/SSE):
-  POST /api/run        {task, verify?, game?} -> start run in background thread (409 if busy)
+  POST /api/run        {task, verify?, game?, scenario?} -> start run (409 if busy)
   POST /api/stop       cancel the running agent
   GET  /api/events     SSE: replay current session history, then live events
+  GET  /api/scenarios  built-in demo scenarios (name, task, verify)
   GET  /api/sandbox/tree   file tree under the sandbox root
   GET  /api/sandbox/file?path=  file content (sandbox-constrained)
   GET  /api/sessions   list session JSONL files for replay
@@ -19,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import shutil
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -120,6 +122,10 @@ class Handler(SimpleHTTPRequestHandler):
     def _sessions_dir(self) -> Path:
         return self.server.sessions_dir  # type: ignore[attr-defined]
 
+    @property
+    def _scenarios_dir(self) -> Path:
+        return self.server.scenarios_dir  # type: ignore[attr-defined]
+
     # ---- routing ----
     def do_GET(self) -> None:  # noqa: N802
         try:
@@ -137,6 +143,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self._sessions()
             elif path == "/api/sessions/replay":
                 self._session_replay(parsed.query)
+            elif path == "/api/scenarios":
+                self._scenarios()
             else:
                 self._static(path)
         except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
@@ -180,6 +188,19 @@ class Handler(SimpleHTTPRequestHandler):
             config = _replace(config, game_file=body["game"])
 
         sandbox = Sandbox(config.sandbox_dir)
+
+        # scenario preset: seed the sandbox from scenarios/<name>/seed and use its verify
+        scenario = body.get("scenario")
+        if scenario:
+            sdir = self._scenarios_dir / scenario
+            seed = sdir / "seed"
+            if sdir.exists() and seed.exists():
+                shutil.copytree(seed, sandbox.root, dirs_exist_ok=True)
+            verify_file = sdir / "verify.sh"
+            if verify_file.exists():
+                verify_cmd = verify_file.read_text(encoding="utf-8").strip().splitlines()[0]
+                config = _replace(config, verify_command=verify_cmd)
+
         try:
             llm = LlmClient(model=config.model, base_url=config.base_url)
         except Exception as e:  # noqa: BLE001 -- key/proxy/config failures are user-facing
@@ -274,6 +295,21 @@ class Handler(SimpleHTTPRequestHandler):
             items.append({"name": f.stem, "path": str(f), "size": f.stat().st_size})
         self._json({"sessions": items})
 
+    def _scenarios(self) -> None:
+        items = []
+        for d in sorted(self._scenarios_dir.iterdir()):
+            task_file = d / "task.md"
+            verify_file = d / "verify.sh"
+            if not (task_file.exists() and verify_file.exists()):
+                continue
+            items.append({
+                "name": d.name,
+                "label": d.name.replace("_", " "),
+                "task": task_file.read_text(encoding="utf-8").strip(),
+                "verify": verify_file.read_text(encoding="utf-8").strip().splitlines()[0],
+            })
+        self._json({"scenarios": items})
+
     def _session_replay(self, query: str) -> None:
         from urllib.parse import parse_qs
 
@@ -339,6 +375,7 @@ def build(
     sessions_dir: Path,
     broadcaster: Broadcaster,
     state: RunState,
+    scenarios_dir: Optional[Path] = None,
 ) -> ClutchServer:
     srv = ClutchServer(("127.0.0.1", config.port), Handler)
     srv.broadcaster = broadcaster  # type: ignore[attr-defined]
@@ -346,6 +383,7 @@ def build(
     srv.state = state  # type: ignore[attr-defined]
     srv.ui_dir = ui_dir  # type: ignore[attr-defined]
     srv.sessions_dir = sessions_dir  # type: ignore[attr-defined]
+    srv.scenarios_dir = scenarios_dir or (Path(__file__).resolve().parent.parent / "scenarios")  # type: ignore[attr-defined]
     return srv
 
 
