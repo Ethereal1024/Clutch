@@ -25,10 +25,9 @@ function setStatus(state) {
   els.stop.disabled = !busy;
 }
 
-// tracks the most recent agent text block so assistant_message (a duplicate of a
-// just-emitted text_delta) and final (status badge on the same line) can merge
+// tracks the most recent agent text block (created by streaming text_delta)
 let lastTextEl = null;
-let lastTextContent = null;
+let lastTextContent = "";
 // thinking (reasoning) block
 let thinkingEl = null;
 let thinkingContent = "";
@@ -38,8 +37,10 @@ const toolCalls = {};
 
 function addEvent(ev) {
   if (ev.type === "assistant_message") {
-    // the authoritative full message duplicates a text_delta already shown
-    if (ev.content && lastTextContent === ev.content) return;
+    // Body is already streamed via text_delta; nothing to render here.
+    // lastTextEl still points at the streamed text block, so final's status
+    // badge lands on that block.
+    return;
   }
   if (ev.type === "final") {
     // merge the completion badge onto the last agent text line instead of a new block
@@ -83,7 +84,7 @@ function addEvent(ev) {
 
   if (ev.type === "step_start") {
     lastTextEl = null;
-    lastTextContent = null;
+    lastTextContent = "";
     thinkingEl = null;
     thinkingContent = "";
   }
@@ -92,11 +93,7 @@ function addEvent(ev) {
   if (el) {
     stream.appendChild(el);
     stream.scrollTop = stream.scrollHeight;
-    if (ev.type === "assistant_message") {
-      lastTextEl = el;
-      lastTextContent = ev.content || "";
-      typesetMath(el);
-    } else if (ev.type === "final") {
+    if (ev.type === "final") {
       typesetMath(el);
     }
   }
@@ -144,13 +141,18 @@ function renderEvent(ev) {
       wrap.innerHTML = '<div class="hdr">—— step ——</div>';
       break;
     }
-    case "text_delta":
-    case "assistant_message": {
+    case "text_delta": {
       if (!ev.content) return null;
       wrap.className = "event text";
       wrap.innerHTML = '<div class="hdr">agent</div>';
       body.innerHTML = renderMarkdown(ev.content);
       break;
+    }
+    case "assistant_message": {
+      // The body is streamed via text_delta; assistant_message carries the full
+      // text only as the authoritative record (for context/logging), never for
+      // display — rendering it here would duplicate the streamed output.
+      return null;
     }
     case "tool_call": {
       wrap.className = "event tool_call";
@@ -422,7 +424,7 @@ let currentSession = "";
 function clearStream() {
   stream.innerHTML = "";
   lastTextEl = null;
-  lastTextContent = null;
+  lastTextContent = "";
   thinkingEl = null;
   thinkingContent = "";
 }
