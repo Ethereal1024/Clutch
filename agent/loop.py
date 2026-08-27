@@ -17,6 +17,7 @@ Events are the single source of truth: log, GUI and context all derive from them
 from __future__ import annotations
 
 import sys
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from .config import Config
@@ -54,6 +55,7 @@ class Agent:
         config: Config,
         log: Optional[EventLog] = None,
         sink: Optional[EventSink] = None,
+        cancel: Optional[threading.Event] = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -62,6 +64,7 @@ class Agent:
         self.terminator = Terminator(config)
         self.log = log or EventLog(path=config.log_path)
         self.sink = sink
+        self.cancel = cancel
 
     def _emit(self, event: Event) -> None:
         self.log.append(event)
@@ -83,6 +86,8 @@ class Agent:
 
         turn = 0
         while True:
+            if self.cancel and self.cancel.is_set():
+                return self._finish("aborted", render("cancelled.md"))
             turn += 1
             # budget is enforced at the top so every path terminates
             if self.terminator.check_turn_budget(turn):

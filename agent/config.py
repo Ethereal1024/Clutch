@@ -49,6 +49,7 @@ class Config:
     )
 
     # Runtime
+    port: int = 8890
     sandbox_dir: str | None = None
     log_path: str | None = None
     prompts_dir: Path = PROMPTS_DIR

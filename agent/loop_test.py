@@ -165,6 +165,25 @@ def main() -> None:
         result = agent.run("t")
         check(result == "done", "throwing sink does not kill agent")
 
+    # 7. cancellation: a pre-set cancel event aborts before any LLM call
+    import threading
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Sandbox(tmp)
+        fake = FakeLLM(responses=[_resp(content="done")], fallback=_resp(content="done"))
+        cancel = threading.Event()
+        cancel.set()
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            sandbox=sb,
+            config=config,
+            cancel=cancel,
+        )
+        result = agent.run("t")
+        check(result == "ABORTED", "pre-set cancel aborts before LLM call")
+        check(len(fake.calls) == 0, "cancel prevents any LLM call")
+
     print("\nall passed")
     return 0
 

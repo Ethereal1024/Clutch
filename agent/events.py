@@ -86,16 +86,16 @@ class FinalEvent(Event):
 
 
 EVENT_TYPES: Dict[str, type] = {
-    e.type: e
-    for e in [
-        UserMessageEvent(),
-        StepStartEvent(),
-        TextDeltaEvent(),
-        AssistantMessageEvent(),
-        ToolCallEvent(),
-        ToolResultEvent(),
-        StateUpdateEvent(),
-        FinalEvent(),
+    cls.type: cls
+    for cls in [
+        UserMessageEvent,
+        StepStartEvent,
+        TextDeltaEvent,
+        AssistantMessageEvent,
+        ToolCallEvent,
+        ToolResultEvent,
+        StateUpdateEvent,
+        FinalEvent,
     ]
 }
 
