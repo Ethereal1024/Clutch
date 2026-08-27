@@ -1,0 +1,62 @@
+"""Conversation history and context management.
+
+The event log is the single source of truth; model-visible messages are derived from it.
+Strategy:
+- sticky: system prompt + the original task are never evicted
+- windowing: keep the last N turns; older tool results fold into one omitted line
+- truncation: oversized tool output is head/tail trimmed at the tools layer
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+from ..config import Config
+from ..events import AssistantMessageEvent, EventLog, ToolResultEvent, UserMessageEvent
+from ..prompts import render
+
+
+def _to_messages(events: List[Any]) -> List[Dict[str, Any]]:
+    """Project events to OpenAI messages; assistant and tool results must stay paired."""
+    msgs: List[Dict[str, Any]] = []
+    for ev in events:
+        if isinstance(ev, UserMessageEvent):
+            msgs.append({"role": "user", "content": ev.content})
+        elif isinstance(ev, AssistantMessageEvent):
+            msg: Dict[str, Any] = {"role": "assistant"}
+            if ev.content:
+                msg["content"] = ev.content
+            if ev.tool_calls:
+                msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    }
+                    for tc in ev.tool_calls
+                ]
+            msgs.append(msg)
+        elif isinstance(ev, ToolResultEvent):
+            msgs.append({"role": "tool", "tool_call_id": ev.tool_call_id, "content": ev.content})
+    return msgs
+
+
+def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, Any]]:
+    """Derive model messages from the event log, applying windowing."""
+    events = log.events()
+    assistant_idx = [i for i, e in enumerate(events) if isinstance(e, AssistantMessageEvent)]
+
+    if len(assistant_idx) > config.max_history_turns:
+        cutoff = assistant_idx[-config.max_history_turns]
+        kept = events[cutoff:]
+        dropped = sum(1 for e in events[:cutoff] if isinstance(e, ToolResultEvent))
+        msgs = [
+            {"role": "user", "content": render("context_omitted.md", count=dropped)}
+        ] + _to_messages(kept)
+    else:
+        msgs = _to_messages(events)
+
+    return [
+        {"role": "system", "content": render("system.md")},
+        {"role": "user", "content": render("task.md", task=task)},
+    ] + msgs
