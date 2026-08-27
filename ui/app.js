@@ -73,6 +73,7 @@ function renderEvent(ev) {
     case "user_message": {
       wrap.className = "event user";
       wrap.innerHTML = '<div class="hdr">task</div>';
+      body.className = "body md-plain";
       body.textContent = ev.content;
       break;
     }
@@ -86,7 +87,7 @@ function renderEvent(ev) {
       if (!ev.content) return null;
       wrap.className = "event text";
       wrap.innerHTML = '<div class="hdr">agent</div>';
-      body.textContent = ev.content;
+      body.innerHTML = renderMarkdown(ev.content);
       break;
     }
     case "tool_call": {
@@ -107,6 +108,7 @@ function renderEvent(ev) {
     case "tool_result": {
       wrap.className = "event tool_result" + (ev.is_error ? " error" : "");
       wrap.innerHTML = `<div class="hdr">${ev.is_error ? "result ⚠" : "result"}</div>`;
+      body.className = "body md-plain";
       body.textContent = ev.content;
       break;
     }
@@ -121,7 +123,7 @@ function renderEvent(ev) {
     case "final": {
       wrap.className = "event final" + (ev.status !== "completed" ? " aborted" : "");
       wrap.innerHTML = `<div class="hdr">${escapeHtml(ev.status)}</div>`;
-      body.textContent = ev.summary;
+      body.innerHTML = renderMarkdown(ev.summary);
       break;
     }
     default:
@@ -135,6 +137,20 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
+}
+
+// Render LLM output as markdown. LLM output is untrusted: DOMPurify strips any
+// raw HTML/script before it reaches the DOM. Falls back to plain text if the
+// vendor libs are unavailable (e.g. offline without the vendor files).
+function renderMarkdown(text) {
+  if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+    return escapeHtml(text);
+  }
+  try {
+    return DOMPurify.sanitize(marked.parse(String(text)));
+  } catch (e) {
+    return escapeHtml(text);
+  }
 }
 
 // ---- run / stop ----

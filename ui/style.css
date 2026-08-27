@@ -106,7 +106,38 @@ main { display: flex; flex: 1; min-height: 0; }
 
 .event { margin-bottom: 6px; padding: 6px 10px; border-radius: 6px; border-left: 3px solid var(--border); background: var(--bg2); }
 .event .hdr { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
-.event .body { white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+.event .body { word-break: break-word; font-size: 13px; line-height: 1.55; }
+.event .body.md-plain { white-space: pre-wrap; font-family: monospace; }
+
+/* rendered markdown inside event bodies */
+.event .body h1, .event .body h2, .event .body h3, .event .body h4 {
+  margin: 10px 0 6px; line-height: 1.3; font-weight: 650;
+}
+.event .body h1 { font-size: 17px; }
+.event .body h2 { font-size: 15px; }
+.event .body h3, .event .body h4 { font-size: 14px; }
+.event .body p { margin: 6px 0; }
+.event .body ul, .event .body ol { margin: 6px 0; padding-left: 20px; }
+.event .body li { margin: 3px 0; }
+.event .body code {
+  background: #0b0e13; padding: 1px 5px; border-radius: 4px;
+  font-family: monospace; font-size: 12px;
+}
+.event .body pre {
+  background: #0b0e13; padding: 8px 10px; border-radius: 6px;
+  overflow-x: auto; margin: 8px 0; line-height: 1.45;
+}
+.event .body pre code { background: none; padding: 0; }
+.event .body blockquote {
+  margin: 6px 0; padding-left: 12px; border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+.event .body a { color: var(--accent); }
+.event .body table { border-collapse: collapse; margin: 8px 0; }
+.event .body th, .event .body td {
+  border: 1px solid var(--border); padding: 4px 10px; font-size: 12px;
+}
+.event .body th { background: var(--bg); }
 
 .event.user { border-left-color: var(--accent); }
 .event.user .hdr { color: var(--accent); }
