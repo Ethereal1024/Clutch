@@ -199,8 +199,20 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.final .hdr { color: var(--green); font-size: 12px; }
 .event.final.aborted::before { background: var(--red); }
 .event.final.aborted .hdr { color: var(--red); }
-.event.tool_call::before { background: var(--yellow); }
-.event.tool_call .hdr { color: var(--yellow); }
+.event.tool_group::before { background: var(--yellow); }
+.event.tool_group .hdr { color: var(--yellow); }
+.tool-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 2px 0; font-size: 12px;
+}
+.tool-name { color: var(--text); font-family: var(--font-mono); }
+.tool-args-btn { color: var(--muted); cursor: pointer; font-size: 11px; user-select: none; }
+.tool-args-btn:hover { color: var(--text); }
+.tool-args-detail {
+  background: #0b0e13; padding: 6px 8px; border-radius: 4px;
+  font-family: var(--font-mono); font-size: 11px; overflow-x: auto;
+  margin-top: 2px; flex-basis: 100%;
+}
 .event.tool_result::before { background: var(--green); }
 .event.tool_result .hdr { color: var(--green); }
 .event.tool_result.error::before { background: var(--red); }
@@ -208,13 +220,23 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.tool_result.read::before { background: var(--muted); }
 .event.tool_result.read .hdr { color: var(--muted); }
 
-/* thinking (reasoning): distinct muted stream, italic */
+/* thinking (reasoning): compact muted row, expandable full text */
 .event.thinking::before { background: var(--yellow); }
 .event.thinking .hdr { color: var(--yellow); font-size: 11px; }
-.thinking-body {
-  color: var(--muted); font-size: 12px; white-space: pre-wrap;
-  font-style: italic; font-family: var(--font-mono);
+.thinking-row {
+  display: flex; align-items: center; gap: 6px;
+  color: #69707e; font-size: 12px; cursor: pointer;
+  user-select: none; font-style: italic; font-family: var(--font-mono);
 }
+.thinking-row:hover { color: var(--muted); }
+.thinking-label { color: #69707e; font-style: italic; }
+.thinking-full {
+  background: #0b0e13; padding: 8px 10px; border-radius: 6px;
+  margin: 4px 0 0; font-family: var(--font-mono); font-size: 12px;
+  max-height: 320px; overflow-y: auto; color: #69707e; white-space: pre-wrap;
+  line-height: 1.5;
+}
+.thinking-full.hidden { display: none; }
 
 .status-badge {
   display: inline-block;

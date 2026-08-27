@@ -33,8 +33,48 @@ let thinkingContent = "";
 
 // map tool_call_id -> {name, args} so a tool_result knows which tool produced it
 const toolCalls = {};
+// the group block currently collecting consecutive tool_calls (for merging)
+let toolGroupEl = null;
+
+// Render one tool_call row; consecutive calls append to the same group block.
+function addToolCallRow(ev) {
+  if (!toolGroupEl) {
+    toolGroupEl = document.createElement("div");
+    toolGroupEl.className = "event tool_group";
+    toolGroupEl.innerHTML = '<div class="hdr">tools</div>';
+    stream.appendChild(toolGroupEl);
+  }
+  const row = document.createElement("div");
+  row.className = "tool-row";
+  row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
+  // args expandable per row
+  let argsTxt = ev.arguments;
+  try { argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1); } catch (e) {}
+  const argsBtn = document.createElement("span");
+  argsBtn.className = "tool-args-btn";
+  argsBtn.textContent = "args ▸";
+  argsBtn.onclick = () => {
+    if (argsBtn.textContent.includes("▾")) {
+      argsBtn.textContent = "args ▸";
+      row.querySelector(".tool-args-detail")?.remove();
+    } else {
+      argsBtn.textContent = "args ▾";
+      const pre = document.createElement("pre");
+      pre.className = "tool-args-detail";
+      pre.textContent = argsTxt;
+      row.appendChild(pre);
+    }
+  };
+  row.appendChild(argsBtn);
+  toolGroupEl.appendChild(row);
+  stream.scrollTop = stream.scrollHeight;
+}
 
 function addEvent(ev) {
+  // consecutive tool_calls group into one block; any other event breaks the group
+  if (ev.type !== "tool_call") {
+    toolGroupEl = null;
+  }
   if (ev.type === "assistant_message") {
     // Body is already streamed via text_delta; nothing to render here.
     // lastTextEl still points at the streamed text block, so final's status
@@ -53,6 +93,8 @@ function addEvent(ev) {
     let args = {};
     try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
     toolCalls[ev.tool_call_id] = { name: ev.name, args };
+    addToolCallRow(ev);
+    return;
   }
 
   // streaming text: accumulate into the existing agent block and re-render
@@ -68,16 +110,39 @@ function addEvent(ev) {
     return;
   }
 
-  // streaming reasoning: accumulate into a distinct thinking block
+  // streaming reasoning: compact row while streaming, expandable on click
   if (ev.type === "reasoning_delta" && ev.content) {
+    thinkingContent += ev.content;
     if (!thinkingEl) {
       thinkingEl = document.createElement("div");
       thinkingEl.className = "event thinking";
-      thinkingEl.innerHTML = '<div class="hdr">thinking</div><div class="body thinking-body"></div>';
+      thinkingEl.innerHTML = '<div class="hdr">thinking</div>';
+      const row = document.createElement("div");
+      row.className = "thinking-row";
+      const toggle = document.createElement("span");
+      toggle.className = "read-toggle";
+      toggle.textContent = "▸";
+      const lbl = document.createElement("span");
+      lbl.className = "thinking-label";
+      row.appendChild(toggle);
+      row.appendChild(lbl);
+      thinkingEl.appendChild(row);
+      const full = document.createElement("pre");
+      full.className = "thinking-full hidden";
+      thinkingEl.appendChild(full);
+      // click toggles between the compact row and the full reasoning text
+      row.onclick = () => {
+        const expanded = full.classList.toggle("hidden");
+        toggle.textContent = expanded ? "▸" : "▾";
+        if (expanded) full.textContent = thinkingContent;
+      };
       stream.appendChild(thinkingEl);
     }
-    thinkingContent += ev.content;
-    thinkingEl.querySelector(".body").textContent = thinkingContent;
+    thinkingEl.querySelector(".thinking-label").textContent =
+      "thinking… " + thinkingContent.length + " chars";
+    // if the full text is open, keep it live-updated
+    const full = thinkingEl.querySelector(".thinking-full");
+    if (full && !full.classList.contains("hidden")) full.textContent = thinkingContent;
     stream.scrollTop = stream.scrollHeight;
     return;
   }
@@ -152,21 +217,6 @@ function renderEvent(ev) {
       // text only as the authoritative record (for context/logging), never for
       // display — rendering it here would duplicate the streamed output.
       return null;
-    }
-    case "tool_call": {
-      wrap.className = "event tool_call";
-      wrap.innerHTML = `<div class="hdr">tool · ${escapeHtml(ev.name)}</div>`;
-      let argsTxt = ev.arguments;
-      try { argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1); } catch (e) {}
-      const args = document.createElement("div");
-      args.className = "args";
-      args.textContent = "args ▸";
-      args.onclick = () => {
-        if (args.innerHTML.includes("<pre>")) args.innerHTML = "args ▸";
-        else args.innerHTML = "args ▾<pre>" + escapeHtml(argsTxt) + "</pre>";
-      };
-      wrap.appendChild(args);
-      break;
     }
     case "tool_result": {
       const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
