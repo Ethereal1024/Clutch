@@ -25,6 +25,16 @@ class Sandbox:
             raise ValueError(f"path escapes sandbox: {rel_path!r}")
         return p
 
+    def reset(self) -> None:
+        """Clear all contents, keeping the root dir (avoids residue from past runs)."""
+        import shutil
+
+        for child in self.root.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+
     def cleanup(self) -> None:
         if self._own_dir:
             import shutil

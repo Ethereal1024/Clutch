@@ -29,22 +29,21 @@ def run_command(sandbox: Sandbox, config: Config, command: str) -> dict:
     if reason:
         return {"content": f"ERROR: {reason}", "error": True}
 
-    args = shlex.split(command)
-    if not args:
+    if not command.strip():
         return {"content": "ERROR: empty command", "error": True}
 
     # Path escape guard: reject tokens that look like file paths resolving outside
-    # the sandbox. Absolute paths (e.g. `cat /etc/passwd`) and `..` segments are the
-    # only ways a command can escape; plain relative paths stay inside the sandbox.
-    for tok in args:
+    # the sandbox. We check the tokenized command first, then run the raw string
+    # through a shell so `&&`, pipes and redirections keep their real meaning.
+    for tok in shlex.split(command):
         if tok.startswith("/") or "/../" in tok or tok.startswith("../") or tok.endswith("/.."):
             try:
-                p = sandbox.resolve(tok)
+                sandbox.resolve(tok)
             except ValueError:
                 return {"content": f"ERROR: path escapes sandbox: {tok!r}", "error": True}
-            # resolve() already guaranteed containment for absolute paths
 
-    if args[0] in ("python", "python3"):
+    args = shlex.split(command)
+    if args and args[0] in ("python", "python3"):
         file_arg = next((a for a in args[1:] if not a.startswith("-") and a.endswith(".py")), None)
         if file_arg:
             try:
@@ -56,15 +55,16 @@ def run_command(sandbox: Sandbox, config: Config, command: str) -> dict:
                 return {"content": f"ERROR: {err}", "error": True}
 
     try:
+        # shell=True keeps shell semantics (&&, pipes, redirects) that the model
+        # expects; sandbox cwd + the path guard above bound what it can touch.
         r = subprocess.run(
-            args,
+            command,
+            shell=True,
             cwd=sandbox.root,
             capture_output=True,
             text=True,
             timeout=config.command_timeout,
         )
-    except FileNotFoundError:
-        return {"content": f"ERROR: command not found: {args[0]!r}", "error": True}
     except subprocess.TimeoutExpired:
         return {
             "content": f"ERROR: command timed out ({config.command_timeout:.0f}s). {INTERACTIVE_HINT}",

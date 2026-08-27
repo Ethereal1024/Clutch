@@ -49,6 +49,7 @@ def main() -> int:
         return 1
 
     sandbox = Sandbox(config.sandbox_dir)
+    sandbox.reset()  # clear residue from previous runs; each task starts clean
     print(f"[clutch] sandbox: {sandbox.root}", flush=True)
 
     agent = Agent(

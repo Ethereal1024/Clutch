@@ -58,6 +58,10 @@ def main() -> None:
             check(True, "sandbox blocks path escape")
         p = sb.resolve("sub/x.py")
         check(str(p).startswith(tmp), "sandbox resolves inside")
+        (sb.root / "old.txt").write_text("residue")
+        sb.reset()
+        check(not (sb.root / "old.txt").exists(), "sandbox.reset clears residue")
+        check(sb.root.exists(), "sandbox.reset keeps the root dir")
 
         # 4. tool execution + write/read roundtrip
         reg = ToolRegistry(build_default_tools(config))
@@ -67,6 +71,12 @@ def main() -> None:
         check(r["content"].strip() == "hello", "read_file roundtrip")
         r = reg.execute(sb, config, "run_command", {"command": "echo hi"})
         check("hi" in r["content"], "run_command executes")
+        r = reg.execute(sb, config, "run_command", {"command": "echo a && echo b"})
+        check("a" in r["content"] and "b" in r["content"], "run_command supports && (shell semantics)")
+        r = reg.execute(sb, config, "run_command", {"command": "echo hi | tr a-z A-Z"})
+        check("HI" in r["content"], "run_command supports pipes")
+        r = reg.execute(sb, config, "run_command", {"command": "echo data > out.txt && cat out.txt"})
+        check("data" in r["content"], "run_command supports redirects")
         r = reg.execute(sb, config, "run_command", {"command": "python3 -m json.tool --help 2>&1 || true"})
         check(not r.get("error"), "run_command allows python3 -m module mode")
         r = reg.execute(sb, config, "run_command", {"command": "python3"})

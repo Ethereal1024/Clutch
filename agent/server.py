@@ -199,6 +199,7 @@ class Handler(SimpleHTTPRequestHandler):
         if body.get("verify"):
             config = _replace(config, verify_command=body["verify"])
         sandbox = Sandbox(config.sandbox_dir)
+        sandbox.reset()  # clear residue from previous runs; each task starts clean
 
         if not task:
             return self._json({"error": "task is required"}, status=400)
