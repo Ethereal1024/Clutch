@@ -116,11 +116,13 @@ class Agent:
                 self._emit(UserMessageEvent(content=render("max_tokens.md")))
                 continue
 
-            if content:
-                self._emit(TextDeltaEvent(content=content))
-
             # ---- tool calls: execute and feed results back ----
             if tool_calls:
+                # emit the accompanying text first (a tool round often carries a
+                # short explanation); the final answer below emits assistant_message
+                # only, so the UI never shows the same text twice
+                if content:
+                    self._emit(TextDeltaEvent(content=content))
                 tc_events: List[ToolCallEvent] = []
                 for tc in tool_calls:
                     ev = ToolCallEvent(

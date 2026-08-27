@@ -25,12 +25,43 @@ function setStatus(state) {
   els.stop.disabled = !busy;
 }
 
+// tracks the most recent agent text block so assistant_message (a duplicate of a
+// just-emitted text_delta) and final (status badge on the same line) can merge
+let lastTextEl = null;
+let lastTextContent = null;
+
 function addEvent(ev) {
+  if (ev.type === "assistant_message") {
+    // the authoritative full message duplicates a text_delta already shown
+    if (ev.content && lastTextContent === ev.content) return;
+  }
+  if (ev.type === "final") {
+    // merge the completion badge onto the last agent text line instead of a new block
+    if (lastTextEl) {
+      appendStatusBadge(lastTextEl, ev.status);
+      return;
+    }
+  }
   const el = renderEvent(ev);
   if (el) {
     stream.appendChild(el);
     stream.scrollTop = stream.scrollHeight;
+    if (ev.type === "text_delta" || ev.type === "assistant_message") {
+      lastTextEl = el;
+      lastTextContent = ev.content || "";
+    } else if (ev.type === "step_start") {
+      lastTextEl = null;
+      lastTextContent = null;
+    }
   }
+}
+
+function appendStatusBadge(blockEl, status) {
+  const badge = document.createElement("span");
+  badge.className = "status-badge " + (status === "completed" ? "done" : "fail");
+  badge.textContent = status === "completed" ? "✓ completed" : `✗ ${status}`;
+  blockEl.appendChild(badge);
+  stream.scrollTop = stream.scrollHeight;
 }
 
 function renderEvent(ev) {
@@ -111,6 +142,8 @@ async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
   stream.innerHTML = "";
+  lastTextEl = null;
+  lastTextContent = null;
   const payload = { task };
   const wd = els.workdir.value.trim();
   if (wd) payload.workdir = wd;
@@ -300,6 +333,8 @@ els.session.addEventListener("change", async () => {
     const lr = await fetch("/api/sessions/replay?path=" + encodeURIComponent(path));
     const ld = await lr.json();
     stream.innerHTML = "";
+    lastTextEl = null;
+    lastTextContent = null;
     for (const ev of ld.events || []) addEvent(ev);
   } catch (e) {}
 });
