@@ -16,6 +16,7 @@ Events are the single source of truth: log, GUI and context all derive from them
 
 from __future__ import annotations
 
+import sys
 from typing import Any, Callable, Dict, List, Optional
 
 from .config import Config
@@ -65,7 +66,16 @@ class Agent:
     def _emit(self, event: Event) -> None:
         self.log.append(event)
         if self.sink:
-            self.sink(event)
+            # isolate the sink: a failing subscriber must not kill the agent
+            try:
+                self.sink(event)
+            except Exception:  # noqa: BLE001 -- subscriber failure is non-fatal
+                print(f"[clutch] sink error: {event.type}", file=sys.stderr)
+
+    def _finish(self, status: str, summary: str) -> str:
+        self._emit(FinalEvent(status=status, summary=summary))
+        self._emit(StateUpdateEvent(value="finished"))
+        return "ABORTED" if status != "completed" else summary
 
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
@@ -74,6 +84,11 @@ class Agent:
         turn = 0
         while True:
             turn += 1
+            # budget is enforced at the top so every path terminates
+            if self.terminator.check_turn_budget(turn):
+                return self._finish(
+                    "aborted", render("budget_exceeded.md", max_turns=self.config.max_turns)
+                )
             self._emit(StepStartEvent())
             msgs = context.derive_messages(self.log, self.config, task)
 
@@ -119,6 +134,9 @@ class Agent:
 
                 for ev in tc_events:
                     if self.terminator.record_call(ev.name, ev.arguments):
+                        # doom loop: repeated identical calls; escalate to abort unless disabled
+                        if self.config.abort_on_doom_loop:
+                            return self._finish("aborted", render("doom_loop.md"))
                         result = {"content": render("doom_loop.md"), "error": True}
                     else:
                         result = self._execute_tool(ev)
@@ -135,21 +153,10 @@ class Agent:
             self._emit(AssistantMessageEvent(content=content))
             v = self.terminator.verify(self.sandbox)
             if v.done:
-                self._emit(FinalEvent(status="completed", summary=content))
-                self._emit(StateUpdateEvent(value="finished"))
-                return content
+                return self._finish("completed", content)
 
             # gate failed: feed verification output back and keep iterating
             self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
-            if self.terminator.check_turn_budget(turn):
-                self._emit(
-                    FinalEvent(
-                        status="aborted",
-                        summary=render("budget_exceeded.md", max_turns=self.config.max_turns),
-                    )
-                )
-                self._emit(StateUpdateEvent(value="finished"))
-                return "ABORTED"
 
     def _execute_tool(self, ev: ToolCallEvent) -> Dict[str, Any]:
         """Parse arguments and run the tool; any failure feeds back as tool error."""

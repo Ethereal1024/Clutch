@@ -69,6 +69,9 @@ def main() -> int:
         if e.detail:
             print(e.detail, file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\n[clutch] interrupted", file=sys.stderr)
+        return 130
     except Exception:  # noqa: BLE001 -- last-resort guard, never lose the run
         traceback.print_exc()
         return 1

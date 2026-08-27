@@ -132,8 +132,23 @@ class ToolRegistry:
                 "error": True,
             }
         try:
+            args = self._coerce_types(tool, args)
             return tool.func(sandbox, config, **args)
         except TypeError as e:
             return {"content": f"ERROR: invalid arguments ({e}); check names and types", "error": True}
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
             return {"content": f"ERROR: tool exception: {e}", "error": True}
+
+    @staticmethod
+    def _coerce_types(tool: Tool, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Coerce args to the declared JSON Schema types (models sometimes pass strings)."""
+        props = tool.parameters.get("properties", {})
+        for key, spec in props.items():
+            if key not in args:
+                continue
+            if spec.get("type") == "integer" and not isinstance(args[key], int):
+                try:
+                    args[key] = int(args[key])
+                except (TypeError, ValueError):
+                    pass
+        return args

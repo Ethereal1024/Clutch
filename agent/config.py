@@ -22,6 +22,12 @@ class Config:
     # Loop budget
     max_turns: int = 20
     doom_loop_limit: int = 4
+    abort_on_doom_loop: bool = True
+
+    # Context management
+    max_history_turns: int = 24
+    # soft char budget for tool outputs fed to the model; older results fold below it
+    context_char_budget: int = 60000
 
     # Tool execution
     command_timeout: float = 30.0
@@ -29,9 +35,6 @@ class Config:
     output_head: int = 2500
     output_tail: int = 2500
     read_max_chars: int = 20000
-
-    # Context management
-    max_history_turns: int = 24
 
     # Verification gate (acceptance criteria for the demo game)
     verify_command: str = "python3 {file} --test"

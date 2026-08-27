@@ -42,13 +42,15 @@ class Terminator:
         return False
 
     def check_turn_budget(self, turn: int) -> bool:
-        return turn >= self.config.max_turns
+        return turn > self.config.max_turns
 
     def verify(self, sandbox: Sandbox) -> TerminateResult:
         """Run the verification gate. No-op success if no command is configured."""
         cmd = self.config.verify_command.format(file=self.config.game_file)
         result = run_command(sandbox, self.config, cmd)
-        ok = not result.get("error") and "ERROR" not in result.get("content", "")
+        # judge by exit status, not by scanning text (a self-test may legitimately
+        # print "ERROR" while exercising error paths)
+        ok = not result.get("error")
         return TerminateResult(
             done=ok,
             status="completed" if ok else "verify_failed",

@@ -95,6 +95,8 @@ def _blocked_reason(config: Config, command: str) -> str | None:
 
 
 def _syntax_check(path: Path) -> str | None:
+    if not path.is_file():
+        return f"syntax check failed: file not found: {path}"
     r = subprocess.run(
         [sys.executable, "-m", "py_compile", str(path)],
         capture_output=True,
