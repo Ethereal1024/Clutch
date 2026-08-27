@@ -4,8 +4,8 @@ Endpoints (all JSON except static/SSE):
   POST /api/run        {task, verify?} -> start run (409 if busy)
   POST /api/stop       cancel the running agent
   GET  /api/events     SSE: replay current session history, then live events
-  GET  /api/sandbox/tree   file tree under the sandbox root
-  GET  /api/sandbox/file?path=  file content (sandbox-constrained)
+  GET  /api/workspace/tree   file tree under the workspace root
+  GET  /api/workspace/file?path=  file content (workspace-constrained)
   GET  /api/sessions   list session JSONL files for replay
   GET  /api/health     {ok}
   GET  /*              static files from --ui-dir (the product frontend)
@@ -28,11 +28,18 @@ from urllib.parse import urlparse, unquote
 
 from .config import Config
 from .core.terminate import Terminator
-from .events import Event, EventLog, event_from_dict, event_to_json
+from .core.permission import PermissionEvaluator, PermissionGate
+from .events import (
+    Event,
+    EventLog,
+    PermissionRequestEvent,
+    event_from_dict,
+    event_to_json,
+)
 from .llm.client import LlmClient
 from .loop import Agent
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.sandbox import Sandbox
+from .tools.workspace import Workspace
 
 
 def _settings_path() -> Path:
@@ -92,18 +99,19 @@ class RunState:
         self.busy = False
         self.cancel: Optional[threading.Event] = None
         self.log = EventLog()
-        self.sandbox: Optional[Sandbox] = None
+        self.workspace: Optional[Workspace] = None
         self._sessions_dir = sessions_dir
         self.api_key: Optional[str] = None
+        self.gate: Optional[PermissionGate] = None
 
-    def start(self, task: str, sandbox: Sandbox, cancel: threading.Event) -> bool:
+    def start(self, task: str, workspace: Workspace, cancel: threading.Event) -> bool:
         with self.lock:
             if self.busy:
                 return False
             self.busy = True
             self.task = task
             self.cancel = cancel
-            self.sandbox = sandbox
+            self.workspace = workspace
             # persist each run to a timestamped session file for replay
             import time
 
@@ -112,7 +120,7 @@ class RunState:
         return True
 
     def finish(self) -> None:
-        # keep the last sandbox + log for inspection after the run completes;
+        # keep the last workspace + log for inspection after the run completes;
         # only release the busy flag so a new run can start
         with self.lock:
             self.busy = False
@@ -153,10 +161,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json({"ok": True})
             elif path == "/api/events":
                 self._sse()
-            elif path == "/api/sandbox/tree":
-                self._sandbox_tree()
-            elif path == "/api/sandbox/file":
-                self._sandbox_file(parsed.query)
+            elif path == "/api/workspace/tree":
+                self._workspace_tree()
+            elif path == "/api/workspace/file":
+                self._workspace_file(parsed.query)
             elif path == "/api/sessions":
                 self._sessions()
             elif path == "/api/sessions/replay":
@@ -179,6 +187,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self._stop()
             elif parsed.path == "/api/settings":
                 self._settings()
+            elif parsed.path == "/api/permission/respond":
+                self._permission_respond()
             else:
                 self._json({"error": "not found"}, status=404)
         except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
@@ -198,8 +208,10 @@ class Handler(SimpleHTTPRequestHandler):
         config = self._cfg
         if body.get("verify"):
             config = _replace(config, verify_command=body["verify"])
-        sandbox = Sandbox(config.sandbox_dir)
-        sandbox.reset()  # clear residue from previous runs; each task starts clean
+        if body.get("workdir"):
+            config = _replace(config, workdir=body["workdir"])
+        # the workspace is the user's working directory; do not reset it between runs
+        workspace = Workspace(config.workdir)
 
         if not task:
             return self._json({"error": "task is required"}, status=400)
@@ -218,18 +230,35 @@ class Handler(SimpleHTTPRequestHandler):
 
         # start() claims the slot and creates the persisted session log FIRST,
         # so the agent writes into a file-backed log we can replay later.
-        if not self._state.start(task, sandbox, cancel):
+        if not self._state.start(task, workspace, cancel):
             return self._json({"error": "a run is already active"}, status=409)
         log = self._state.log
+
+        def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> None:
+            # publish the permission request to the UI; the agent blocks until
+            # the UI replies via /api/permission/respond
+            self._broadcaster.publish(
+                PermissionRequestEvent(
+                    request_id=request_id, tool=tool, args_repr=args_repr, reason=reason
+                )
+            )
+
+        gate = PermissionGate(
+            evaluator=PermissionEvaluator(),
+            on_ask=_on_ask,
+            auto_allow=config.non_interactive,
+        )
+        self._state.gate = gate
 
         agent = Agent(
             llm=llm,
             registry=ToolRegistry(build_default_tools(config)),
-            sandbox=sandbox,
+            workspace=workspace,
             config=config,
             log=log,
             sink=self._broadcaster.publish,
             cancel=cancel,
+            gate=gate,
         )
 
         def _worker() -> None:
@@ -239,7 +268,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self._state.finish()
 
         threading.Thread(target=_worker, daemon=True).start()
-        self._json({"status": "started", "sandbox": str(sandbox.root)})
+        self._json({"status": "started", "workspace": str(workspace.root)})
 
     def _stop(self) -> None:
         if self._state.cancel:
@@ -257,6 +286,20 @@ class Handler(SimpleHTTPRequestHandler):
         with self._state.lock:
             self._state.api_key = api_key
         save_settings({"api_key": api_key})
+        self._json({"status": "ok"})
+
+    def _permission_respond(self) -> None:
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:  # noqa: BLE001
+            return self._json({"error": "bad json body"}, status=400)
+        request_id = (body.get("request_id") or "").strip()
+        allow = bool(body.get("allow"))
+        gate = self._state.gate
+        if gate is None or not request_id:
+            return self._json({"error": "no pending permission request"}, status=400)
+        if not gate.resolve(request_id, allow):
+            return self._json({"error": "request not found or already resolved"}, status=404)
         self._json({"status": "ok"})
 
     def _sse(self) -> None:
@@ -287,16 +330,16 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(f"data: {event_to_json(ev)}\n\n".encode("utf-8"))
         self.wfile.flush()
 
-    def _sandbox_tree(self) -> None:
-        sb = self._state.sandbox
+    def _workspace_tree(self) -> None:
+        sb = self._state.workspace
         if sb is None:
             return self._json({"tree": [], "root": None})
         self._json({"tree": _walk(sb.root), "root": str(sb.root)})
 
-    def _sandbox_file(self, query: str) -> None:
-        sb = self._state.sandbox
+    def _workspace_file(self, query: str) -> None:
+        sb = self._state.workspace
         if sb is None:
-            return self._json({"error": "no active sandbox"}, status=400)
+            return self._json({"error": "no active workspace"}, status=400)
         from urllib.parse import parse_qs
 
         rel = (parse_qs(query).get("path") or [""])[0]
@@ -394,7 +437,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="clutch-server")
     parser.add_argument("--port", type=int, default=8890)
     parser.add_argument("--model", default="deepseek-v4-flash")
-    parser.add_argument("--sandbox", default=None, help="default sandbox dir")
+    parser.add_argument("--workdir", dest="workdir", default=None, help="default working directory (GUI can override per run)")
     parser.add_argument("--verify", default=None, help="verification command; empty disables the gate")
     parser.add_argument("--ui-dir", default=None, help="static frontend dir (default: ui/)")
     parser.add_argument("--sessions-dir", default=None, help="session JSONL dir (default: ./sessions)")
@@ -403,8 +446,8 @@ def main() -> int:
     config = Config()
     config.port = args.port
     config.model = args.model
-    if args.sandbox:
-        config.sandbox_dir = args.sandbox
+    if args.workdir:
+        config.workdir = args.workdir
     if args.verify:
         config.verify_command = args.verify
 
@@ -412,11 +455,11 @@ def main() -> int:
     ui_dir = Path(args.ui_dir) if args.ui_dir else base / "ui"
     sessions_dir = Path(args.sessions_dir) if args.sessions_dir else base / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    # persistent default sandbox so artifacts survive across runs (and are inspectable)
-    if not config.sandbox_dir:
-        default_sb = base / "sandbox"
-        default_sb.mkdir(parents=True, exist_ok=True)
-        config.sandbox_dir = str(default_sb)
+    # default working directory outside the repo, so the agent cannot see clutch itself
+    if not config.workdir:
+        default_wd = Path.home() / "clutch-work"
+        default_wd.mkdir(parents=True, exist_ok=True)
+        config.workdir = str(default_wd)
 
     broadcaster = Broadcaster()
     state = RunState(sessions_dir)
@@ -425,7 +468,7 @@ def main() -> int:
 
     srv = build(config, ui_dir, sessions_dir, broadcaster, state)
     print(f"[clutch-server] http://127.0.0.1:{config.port}  (ui: {ui_dir})", flush=True)
-    print(f"[clutch-server] sandbox default: {config.sandbox_dir or '(temp)'}", flush=True)
+    print(f"[clutch-server] workspace default: {config.workspace_dir or '(temp)'}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

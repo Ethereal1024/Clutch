@@ -31,21 +31,34 @@
     </div>
   </div>
 
+  <div id="perm-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>Permission required</h3>
+      <p id="perm-tool" class="muted"></p>
+      <pre id="perm-args" class="args"></pre>
+      <div class="modal-actions">
+        <button id="perm-deny">Deny</button>
+        <button id="perm-allow" class="primary">Allow</button>
+      </div>
+    </div>
+  </div>
+
   <main>
     <section id="left">
       <div id="taskbar">
         <textarea id="task-input" rows="3"
           placeholder="Describe a coding task for the agent, e.g.: build a landing page for our product from content.md"></textarea>
         <div class="actions">
+          <input id="workdir-input" type="text" placeholder="/path/to/your/project" title="working directory for this run" />
           <button id="run-btn" class="primary">▶ Run</button>
-          <span id="sandbox-path" class="muted" title="active sandbox directory"></span>
+          <span id="workspace-path" class="muted" title="active working directory"></span>
         </div>
       </div>
       <div id="stream" class="scroll"></div>
     </section>
 
     <aside id="right">
-      <div class="panel-head">sandbox <span id="tree-refresh" class="muted">⟳</span></div>
+      <div class="panel-head">workspace <span id="tree-refresh" class="muted">⟳</span></div>
       <div id="tree" class="scroll"></div>
     </aside>
   </main>

@@ -15,7 +15,7 @@ from .events import Event, event_to_json
 from .llm.client import LlmClient
 from .loop import Agent
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.sandbox import Sandbox
+from .tools.workspace import Workspace
 
 
 def _emit_sink(event: Event) -> None:
@@ -27,7 +27,7 @@ def main() -> int:
     parser.add_argument("task", nargs="?", help="task description; empty shows help")
     parser.add_argument("--model", default=None)
     parser.add_argument("--base-url", default=None)
-    parser.add_argument("--sandbox", dest="sandbox_dir", default=None, help="sandbox dir (default: temp dir)")
+    parser.add_argument("--workdir", dest="workdir", default=None, help="working directory (default: temp dir)")
     parser.add_argument("--verify", dest="verify_command", default=None, help="verification command; empty disables the gate")
     parser.add_argument("--max-turns", dest="max_turns", type=int, default=None)
     parser.add_argument("--log", dest="log_path", default=None, help="event log JSONL path")
@@ -48,14 +48,13 @@ def main() -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    sandbox = Sandbox(config.sandbox_dir)
-    sandbox.reset()  # clear residue from previous runs; each task starts clean
-    print(f"[clutch] sandbox: {sandbox.root}", flush=True)
+    workspace = Workspace(config.workdir)
+    print(f"[clutch] workspace: {workspace.root}", flush=True)
 
     agent = Agent(
         llm=llm,
         registry=ToolRegistry(build_default_tools(config)),
-        sandbox=sandbox,
+        workspace=workspace,
         config=config,
         sink=_emit_sink,
     )
@@ -76,7 +75,7 @@ def main() -> int:
         traceback.print_exc()
         return 1
     finally:
-        sandbox.cleanup()
+        workspace.cleanup()
 
 
 if __name__ == "__main__":

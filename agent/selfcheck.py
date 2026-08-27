@@ -1,7 +1,7 @@
 """Self-check: validates core logic without needing the LLM.
 
 Run: uv run python -m agent.selfcheck
-Covers: parsing, message derivation, sandbox path safety, tool execution,
+Covers: parsing, message derivation, workspace path safety, tool execution,
 doom-loop detection, verification gate.
 """
 
@@ -16,7 +16,7 @@ from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
 from .events import AssistantMessageEvent, EventLog, ToolResultEvent
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.sandbox import Sandbox
+from .tools.workspace import Workspace
 from .skills import load_skill_library
 
 
@@ -48,20 +48,18 @@ def main() -> None:
     check(msgs[2]["role"] == "assistant" and msgs[2]["tool_calls"][0]["id"] == "c1", "assistant tool_calls preserved")
     check(msgs[3] == {"role": "tool", "tool_call_id": "c1", "content": "file content"}, "tool result paired")
 
-    # 3. sandbox path escape protection
+    # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         try:
             sb.resolve("../outside.txt")
-            check(False, "sandbox blocks path escape")
+            check(False, "workspace blocks path escape")
         except ValueError:
-            check(True, "sandbox blocks path escape")
+            check(True, "workspace blocks path escape")
         p = sb.resolve("sub/x.py")
-        check(str(p).startswith(tmp), "sandbox resolves inside")
-        (sb.root / "old.txt").write_text("residue")
-        sb.reset()
-        check(not (sb.root / "old.txt").exists(), "sandbox.reset clears residue")
-        check(sb.root.exists(), "sandbox.reset keeps the root dir")
+        check(str(p).startswith(tmp), "workspace resolves inside")
+        check(sb.is_in_workspace("sub/x.py"), "workspace.is_in_workspace true inside")
+        check(not sb.is_in_workspace("../../etc/passwd"), "workspace.is_in_workspace false outside")
 
         # 4. tool execution + write/read roundtrip
         reg = ToolRegistry(build_default_tools(config))
@@ -160,6 +158,33 @@ def main() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+    # 9. permission: rules match the actual command, not the JSON envelope
+    from agent.core.permission import PermissionEvaluator
+
+    with tempfile.TemporaryDirectory() as wtmp:
+        ws = Workspace(wtmp)
+        pe = PermissionEvaluator()
+        check(
+            pe.evaluate("run_command", '{"command": "rm old.txt"}', ws) == "ask",
+            "permission asks on rm",
+        )
+        check(
+            pe.evaluate("run_command", '{"command": "rm -rf /tmp/x"}', ws) == "ask",
+            "permission asks on rm -rf",
+        )
+        check(
+            pe.evaluate("run_command", '{"command": "echo hi"}', ws) == "allow",
+            "permission allows harmless command",
+        )
+        check(
+            pe.evaluate("write_file", '{"path": "a.txt"}', ws) == "allow",
+            "permission allows in-workspace write",
+        )
+        check(
+            pe.evaluate("write_file", '{"path": "../x.txt"}', ws) == "ask",
+            "permission asks on escaping write",
+        )
 
     print("\nall passed")
     return 0

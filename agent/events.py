@@ -85,6 +85,15 @@ class FinalEvent(Event):
     summary: str = ""
 
 
+@dataclass
+class PermissionRequestEvent(Event):
+    type: str = "permission_request"
+    request_id: str = ""
+    tool: str = ""
+    args_repr: str = ""
+    reason: str = ""
+
+
 EVENT_TYPES: Dict[str, type] = {
     cls.type: cls
     for cls in [
@@ -96,6 +105,7 @@ EVENT_TYPES: Dict[str, type] = {
         ToolResultEvent,
         StateUpdateEvent,
         FinalEvent,
+        PermissionRequestEvent,
     ]
 }
 

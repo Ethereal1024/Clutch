@@ -2,7 +2,7 @@
 
 Run: uv run python -m agent.server_test [--task "optional real task"]
 Static/health/sessions are always checked. If DEEPSEEK_API_KEY is set, also runs a
-real task through /api/run, collects SSE events, and checks the sandbox tree + session
+real task through /api/run, collects SSE events, and checks the workspace tree + session
 file. Skips the real-run section when no key is present (network-free mode).
 """
 
@@ -158,12 +158,12 @@ def _run_server_test() -> int:
         finals = [e for e in events if e["type"] == "final"]
         check(finals and finals[-1]["status"] == "completed", "final status completed")
 
-        # 4. sandbox tree + file after run
-        st, body = http_get(f"{base_url}/api/sandbox/tree")
+        # 4. workspace tree + file after run
+        st, body = http_get(f"{base_url}/api/workspace/tree")
         data = json.loads(body)
-        check(st == 200 and data.get("root"), "sandbox tree has root")
-        st, body = http_get(f"{base_url}/api/sandbox/file?path=hello.txt")
-        check(st == 200 and "hi" in body, "sandbox file readable")
+        check(st == 200 and data.get("root"), "workspace tree has root")
+        st, body = http_get(f"{base_url}/api/workspace/file?path=hello.txt")
+        check(st == 200 and "hi" in body, "workspace file readable")
 
         # 5. session persisted + replay
         st, body = http_get(f"{base_url}/api/sessions")

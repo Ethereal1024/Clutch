@@ -1,4 +1,4 @@
 from .registry import ToolRegistry, build_default_tools
-from .sandbox import Sandbox
+from .workspace import Workspace
 
-__all__ = ["ToolRegistry", "build_default_tools", "Sandbox"]
+__all__ = ["ToolRegistry", "build_default_tools", "Workspace"]

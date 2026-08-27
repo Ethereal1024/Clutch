@@ -5,14 +5,14 @@ never references it.
 
 An eval scenario dir contains:
   task.md      - the prompt given to the agent
-  seed/        - files copied into a fresh sandbox before the run
-  verify.sh    - verification gate command (run inside the sandbox)
+  seed/        - files copied into a fresh workspace before the run
+  verify.sh    - verification gate command (run inside the workspace)
 
 Usage:
   uv run python -m eval.harness [--scenario s2_landing] [--repeat N]
 
 Output: one JSONL line per run under reports/ with scenario, pass/fail, turns,
-duration and the sandbox path (so artifacts are inspectable).
+duration and the workspace path (so artifacts are inspectable).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from agent.events import EventLog, event_to_json  # noqa: E402
 from agent.llm.client import LlmClient  # noqa: E402
 from agent.loop import Agent  # noqa: E402
 from agent.tools.registry import ToolRegistry, build_default_tools  # noqa: E402
-from agent.tools.sandbox import Sandbox  # noqa: E402
+from agent.tools.workspace import Workspace  # noqa: E402
 
 SCENARIOS_DIR = Path(__file__).resolve().parent
 
@@ -43,25 +43,34 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
     task = (scenario_dir / "task.md").read_text(encoding="utf-8").strip()
     verify_cmd = (scenario_dir / "verify.sh").read_text(encoding="utf-8").strip().splitlines()[0]
 
-    sandbox = Sandbox()
-    # seed -> fresh sandbox
+    workspace = Workspace()
+    # seed -> fresh workspace
     seed = scenario_dir / "seed"
     if seed.exists():
-        shutil.copytree(seed, sandbox.root, dirs_exist_ok=True)
+        shutil.copytree(seed, workspace.root, dirs_exist_ok=True)
 
     run_cfg = Config(
         verify_command=verify_cmd,
         max_turns=config.max_turns,
         model=config.model,
+        non_interactive=True,
     )
     llm = LlmClient(model=config.model)
     log = EventLog()
+    # unattended eval: auto-allow everything (no permission prompts in CI)
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+
+    gate = PermissionGate(
+        evaluator=PermissionEvaluator(rules=[Rule("allow", "*", "")]),
+        auto_allow=True,
+    )
     agent = Agent(
         llm=llm,
         registry=ToolRegistry(build_default_tools(run_cfg)),
-        sandbox=sandbox,
+        workspace=workspace,
         config=run_cfg,
         log=log,
+        gate=gate,
     )
 
     started = time.time()
@@ -73,7 +82,7 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
         "result": "",
         "turns": 0,
         "duration_s": 0.0,
-        "sandbox": str(sandbox.root),
+        "workspace": str(workspace.root),
     }
     try:
         result = agent.run(task)
@@ -93,7 +102,7 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
         with open(log_path, "a", encoding="utf-8") as f:
             for ev in log.events():
                 f.write(event_to_json(ev) + "\n")
-        sandbox.cleanup()
+        workspace.cleanup()
     return outcome
 
 

@@ -54,9 +54,12 @@ class Config:
 
     # Runtime
     port: int = 8890
-    sandbox_dir: str | None = None
+    # working directory the agent operates in; empty => temp dir (or ~/clutch-work)
+    workdir: str = ""
     log_path: str | None = None
     prompts_dir: Path = PROMPTS_DIR
     # Skills: on-demand domain knowledge injected into the system prompt
     enable_skills: bool = True
     skills_dir: Path = Path(__file__).resolve().parent / "skills"
+    # Permission: confirm risky actions with the user (opencode-style), not a sandbox
+    non_interactive: bool = False  # auto-allow (used by eval harness / unattended runs)

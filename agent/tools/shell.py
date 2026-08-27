@@ -1,4 +1,4 @@
-"""Shell tool: run_command inside the sandbox.
+"""Shell tool: run_command inside the workspace.
 
 Poka-yoke (make it hard for the model to misuse):
 - syntax pre-check: py_compile Python files before running
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from ..config import Config
-from .sandbox import Sandbox
+from .workspace import Workspace
 
 INTERACTIVE_HINT = (
     "Interactive commands are blocked here. Write code with write_file and run it as "
@@ -24,7 +24,7 @@ INTERACTIVE_HINT = (
 )
 
 
-def run_command(sandbox: Sandbox, config: Config, command: str) -> dict:
+def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     reason = _blocked_reason(config, command)
     if reason:
         return {"content": f"ERROR: {reason}", "error": True}
@@ -33,21 +33,21 @@ def run_command(sandbox: Sandbox, config: Config, command: str) -> dict:
         return {"content": "ERROR: empty command", "error": True}
 
     # Path escape guard: reject tokens that look like file paths resolving outside
-    # the sandbox. We check the tokenized command first, then run the raw string
+    # the workspace. We check the tokenized command first, then run the raw string
     # through a shell so `&&`, pipes and redirections keep their real meaning.
     for tok in shlex.split(command):
         if tok.startswith("/") or "/../" in tok or tok.startswith("../") or tok.endswith("/.."):
             try:
-                sandbox.resolve(tok)
+                workspace.resolve(tok)
             except ValueError:
-                return {"content": f"ERROR: path escapes sandbox: {tok!r}", "error": True}
+                return {"content": f"ERROR: path escapes workspace: {tok!r}", "error": True}
 
     args = shlex.split(command)
     if args and args[0] in ("python", "python3"):
         file_arg = next((a for a in args[1:] if not a.startswith("-") and a.endswith(".py")), None)
         if file_arg:
             try:
-                p: Path = sandbox.resolve(file_arg)
+                p: Path = workspace.resolve(file_arg)
             except ValueError as e:
                 return {"content": f"ERROR: {e}", "error": True}
             err = _syntax_check(p)
@@ -56,11 +56,11 @@ def run_command(sandbox: Sandbox, config: Config, command: str) -> dict:
 
     try:
         # shell=True keeps shell semantics (&&, pipes, redirects) that the model
-        # expects; sandbox cwd + the path guard above bound what it can touch.
+        # expects; workspace cwd + the path guard above bound what it can touch.
         r = subprocess.run(
             command,
             shell=True,
-            cwd=sandbox.root,
+            cwd=workspace.root,
             capture_output=True,
             text=True,
             timeout=config.command_timeout,

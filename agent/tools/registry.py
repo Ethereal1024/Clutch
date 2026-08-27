@@ -13,9 +13,9 @@ from typing import Any, Callable, Dict, List
 from ..config import Config
 from ..prompts import render
 from . import filesystem, shell
-from .sandbox import Sandbox
+from .workspace import Workspace
 
-# (sandbox, config, **args) -> dict{content, error?}
+# (workspace, config, **args) -> dict{content, error?}
 ToolImpl = Callable[..., Dict[str, Any]]
 
 
@@ -50,12 +50,12 @@ def build_default_tools(config: Config) -> List[Tool]:
         Tool(
             name="read_file",
             description=(
-                "Read a file in the sandbox. path is relative to the sandbox root. "
+                "Read a file in the workspace. path is relative to the workspace root. "
                 "Large files are truncated; use max_chars to control the size."
             ),
             parameters={
                 "properties": {
-                    "path": _str_param("file path, relative to the sandbox root"),
+                    "path": _str_param("file path, relative to the workspace root"),
                     "max_chars": {
                         "type": "integer",
                         "description": "max chars to read (default 20000)",
@@ -68,13 +68,13 @@ def build_default_tools(config: Config) -> List[Tool]:
         Tool(
             name="write_file",
             description=(
-                "Create or overwrite a file in the sandbox. path is relative to the "
-                "sandbox root. This is the only way to create/modify code files: "
+                "Create or overwrite a file in the workspace. path is relative to the "
+                "workspace root. This is the only way to create/modify code files: "
                 "whole-file rewrite, do not edit files any other way."
             ),
             parameters={
                 "properties": {
-                    "path": _str_param("file path, relative to the sandbox root"),
+                    "path": _str_param("file path, relative to the workspace root"),
                     "content": _str_param("full file content"),
                 },
                 "required": ["path", "content"],
@@ -83,10 +83,10 @@ def build_default_tools(config: Config) -> List[Tool]:
         ),
         Tool(
             name="list_dir",
-            description="List the contents of a directory in the sandbox. path defaults to '.'.",
+            description="List the contents of a directory in the workspace. path defaults to '.'.",
             parameters={
                 "properties": {
-                    "path": _str_param("directory path, relative to the sandbox root", required=False),
+                    "path": _str_param("directory path, relative to the workspace root", required=False),
                 },
                 "required": [],
             },
@@ -95,8 +95,8 @@ def build_default_tools(config: Config) -> List[Tool]:
         Tool(
             name="run_command",
             description=(
-                "Run a shell command in the sandbox and return its output. cwd is fixed to "
-                "the sandbox root. Run Python with `python3 file.py` (syntax-checked first). "
+                "Run a shell command in the workspace and return its output. cwd is fixed to "
+                "the workspace root. Run Python with `python3 file.py` (syntax-checked first). "
                 "Interactive commands are blocked (bare python, vi, vim, less). When a program "
                 "needs input, use scripted input (stdin pipe or CLI args), or add a `--test` "
                 "self-test mode that verifies behavior without interaction."
@@ -122,7 +122,7 @@ class ToolRegistry:
     def names(self) -> List[str]:
         return list(self._tools)
 
-    def execute(self, sandbox: Sandbox, config: Config, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, workspace: Workspace, config: Config, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         tool = self._tools.get(name)
         if tool is None:
             return {
@@ -133,7 +133,7 @@ class ToolRegistry:
             }
         try:
             args = self._coerce_types(tool, args)
-            return tool.func(sandbox, config, **args)
+            return tool.func(workspace, config, **args)
         except TypeError as e:
             return {"content": f"ERROR: invalid arguments ({e}); check names and types", "error": True}
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model

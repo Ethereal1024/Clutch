@@ -24,6 +24,7 @@ from .config import Config
 from .core import context
 from .core import errors as agent_errors
 from .core.parse import ParseError, parse_arguments, parse_message
+from .core.permission import PermissionGate, PermissionRequired
 from .core.terminate import Terminator
 from .events import (
     AssistantMessageEvent,
@@ -40,7 +41,7 @@ from .events import (
 from .llm.client import LlmClient, LlmError
 from .prompts import render
 from .tools.registry import ToolRegistry
-from .tools.sandbox import Sandbox
+from .tools.workspace import Workspace
 
 # Callback for subscribers (GUI/SSE); the engine does not care who listens.
 EventSink = Callable[[Event], None]
@@ -51,20 +52,22 @@ class Agent:
         self,
         llm: LlmClient,
         registry: ToolRegistry,
-        sandbox: Sandbox,
+        workspace: Workspace,
         config: Config,
         log: Optional[EventLog] = None,
         sink: Optional[EventSink] = None,
         cancel: Optional[threading.Event] = None,
+        gate: Optional[PermissionGate] = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
-        self.sandbox = sandbox
+        self.workspace = workspace
         self.config = config
         self.terminator = Terminator(config)
         self.log = log or EventLog(path=config.log_path)
         self.sink = sink
         self.cancel = cancel
+        self.gate = gate
 
     def _emit(self, event: Event) -> None:
         self.log.append(event)
@@ -156,7 +159,7 @@ class Agent:
 
             # ---- no tool call: candidate done -> verification gate ----
             self._emit(AssistantMessageEvent(content=content))
-            v = self.terminator.verify(self.sandbox)
+            v = self.terminator.verify(self.workspace)
             if v.done:
                 return self._finish("completed", content)
 
@@ -164,9 +167,19 @@ class Agent:
             self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
 
     def _execute_tool(self, ev: ToolCallEvent) -> Dict[str, Any]:
-        """Parse arguments and run the tool; any failure feeds back as tool error."""
+        """Parse arguments, check permission, then run the tool.
+
+        A denied or user-rejected action feeds an error back to the model
+        (error-as-data), so it can change its approach instead of crashing.
+        """
         try:
             args = parse_arguments(ev.arguments)
         except ParseError as e:
             return {"content": f"ERROR: {e.message}", "error": True}
-        return self.registry.execute(self.sandbox, self.config, ev.name, args)
+        args_repr = ev.arguments
+        if self.gate is not None:
+            try:
+                self.gate.require(ev.name, args_repr, self.workspace)
+            except PermissionRequired as e:
+                return {"content": f"ERROR: {e.reason}", "error": True}
+        return self.registry.execute(self.workspace, self.config, ev.name, args)

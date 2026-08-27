@@ -4,5 +4,4 @@ __pycache__/
 .env
 sessions/
 node_modules/
-sandbox/
 reports/

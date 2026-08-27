@@ -17,7 +17,7 @@ from .events import EventLog
 from .llm.client import LlmClient
 from .loop import Agent
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.sandbox import Sandbox
+from .tools.workspace import Workspace
 
 
 class FakeLLM:
@@ -54,11 +54,11 @@ def check(cond: bool, name: str) -> None:
     print(f"ok:   {name}")
 
 
-def _agent(fake: FakeLLM, config: Config, sandbox: Sandbox, log: EventLog | None = None) -> Agent:
+def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: EventLog | None = None) -> Agent:
     return Agent(
         llm=fake,  # type: ignore[arg-type] -- duck-typed chat()
         registry=ToolRegistry(build_default_tools(config)),
-        sandbox=sandbox,
+        workspace=workspace,
         config=config,
         log=log or EventLog(),
     )
@@ -69,7 +69,7 @@ def main() -> None:
 
     # 0. no verify command (default): a generic task completes directly, no gate runs
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         no_gate = Config()  # verify_command defaults to ""
         fake = FakeLLM(
             responses=[_resp(content="done")],
@@ -78,7 +78,7 @@ def main() -> None:
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
             registry=ToolRegistry(build_default_tools(no_gate)),
-            sandbox=sb,
+            workspace=sb,
             config=no_gate,
         )
         result = agent.run("write an intro file")
@@ -87,7 +87,7 @@ def main() -> None:
 
     # 1. tool execution round trip: write a file, then no-tool answer -> verify passes
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
@@ -102,7 +102,7 @@ def main() -> None:
 
     # 2. verify gate fails (marker absent), model writes marker, then passes
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         gate_cfg = Config(verify_command="test -f ok.txt")
         fake = FakeLLM(
             responses=[
@@ -122,7 +122,7 @@ def main() -> None:
 
     # 3. budget abort: model keeps returning tool calls until turns exhausted
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         budget = Config(verify_command="echo ok", max_turns=3)
         fake = FakeLLM(
             responses=[
@@ -138,7 +138,7 @@ def main() -> None:
 
     # 4. doom-loop abort: 4 identical calls in a row
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("list_dir", '{"path": "."}')]),
@@ -153,7 +153,7 @@ def main() -> None:
 
     # 5. max-tokens truncation: drop tool calls, feed user message, model retries
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         fake = FakeLLM(
             responses=[
                 _resp(content="", tool_calls=[_tool_call("list_dir", "{}")], finish="length"),
@@ -167,7 +167,7 @@ def main() -> None:
 
     # 6. sink isolation: a throwing sink must not kill the agent
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         fake = FakeLLM(responses=[_resp(content="done")], fallback=_resp(content="done"))
 
         def bad_sink(_ev: Any) -> None:
@@ -176,7 +176,7 @@ def main() -> None:
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
             registry=ToolRegistry(build_default_tools(config)),
-            sandbox=sb,
+            workspace=sb,
             config=config,
             sink=bad_sink,
         )
@@ -187,20 +187,98 @@ def main() -> None:
     import threading
 
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Sandbox(tmp)
+        sb = Workspace(tmp)
         fake = FakeLLM(responses=[_resp(content="done")], fallback=_resp(content="done"))
         cancel = threading.Event()
         cancel.set()
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
             registry=ToolRegistry(build_default_tools(config)),
-            sandbox=sb,
+            workspace=sb,
             config=config,
             cancel=cancel,
         )
         result = agent.run("t")
         check(result == "ABORTED", "pre-set cancel aborts before LLM call")
         check(len(fake.calls) == 0, "cancel prevents any LLM call")
+
+    # 8. permission gate: allow executes the tool
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Workspace(tmp)
+        always_allow = PermissionEvaluator(rules=[Rule("allow", "*", "")])
+        gate = PermissionGate(evaluator=always_allow)
+        fake = FakeLLM(
+            responses=[_resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]), _resp(content="done")],
+            fallback=_resp(content="done"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            gate=gate,
+        )
+        result = agent.run("t")
+        check(result == "done", "permission allow executes tool")
+        check((sb.root / "a.txt").read_text() == "hi", "allowed tool wrote file")
+
+    # 9. permission gate: deny raises, tool error fed back, model recovers
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Workspace(tmp)
+        deny_all = PermissionEvaluator(rules=[Rule("deny", "*", "")])
+        gate = PermissionGate(evaluator=deny_all)
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
+                _resp(content="gave up"),
+            ],
+            fallback=_resp(content="gave up"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            gate=gate,
+        )
+        result = agent.run("t")
+        check(result == "gave up", "permission deny feeds error and agent continues")
+        check(not (sb.root / "a.txt").exists(), "denied tool did not run")
+
+    # 10. permission gate: ask blocks until the UI resolves; allow lets it proceed
+    import threading as _threading
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Workspace(tmp)
+        ask_all = PermissionEvaluator(rules=[Rule("ask", "*", "")])
+        gate = PermissionGate(evaluator=ask_all)
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            gate=gate,
+        )
+
+        def _auto_allow() -> None:
+            _threading.Event().wait(0.2)  # let the agent block on ask
+            for rid in gate.pending_ids():
+                gate.resolve(rid, True)
+
+        resolver = _threading.Thread(target=_auto_allow, daemon=True)
+        resolver.start()
+        result = agent.run("t")
+        check(result == "done", "permission ask resolved by UI then executes")
+        check((sb.root / "a.txt").read_text() == "hi", "asked-and-allowed tool wrote file")
 
     print("\nall passed")
     return 0

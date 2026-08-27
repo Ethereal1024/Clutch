@@ -4,12 +4,13 @@ const $ = (s) => document.querySelector(s);
 
 const els = {
   task: $("#task-input"),
+  workdir: $("#workdir-input"),
   run: $("#run-btn"),
   stop: $("#stop-btn"),
   status: $("#status"),
   stream: $("#stream"),
   tree: $("#tree"),
-  sandbox: $("#sandbox-path"),
+  workspace: $("#workspace-path"),
   session: $("#session-select"),
 };
 
@@ -82,6 +83,10 @@ function renderEvent(ev) {
       if (ev.key === "execution_status" && ev.value) setStatus(ev.value);
       return null;
     }
+    case "permission_request": {
+      openPerm(ev);
+      return null;
+    }
     case "final": {
       wrap.className = "event final" + (ev.status !== "completed" ? " aborted" : "");
       wrap.innerHTML = `<div class="hdr">${escapeHtml(ev.status)}</div>`;
@@ -106,15 +111,18 @@ async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
   stream.innerHTML = "";
+  const payload = { task };
+  const wd = els.workdir.value.trim();
+  if (wd) payload.workdir = wd;
   try {
     const r = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task }),
+      body: JSON.stringify(payload),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
-    if (data.sandbox) els.sandbox.textContent = data.sandbox;
+    if (data.workspace) els.workspace.textContent = data.workspace;
     refreshTree();
   } catch (e) {
     addEvent({ type: "final", status: "error", summary: "run failed: " + e.message });
@@ -171,12 +179,45 @@ modal.addEventListener("click", (e) => {
   if (e.target === modal) closeSettings();
 });
 
-// ---- sandbox tree ----
+// ---- permission confirm ----
+const permModal = $("#perm-modal");
+let pendingPerm = null;
+function openPerm(ev) {
+  pendingPerm = ev;
+  $("#perm-tool").textContent = `Tool: ${ev.tool} — ${ev.reason || ""}`;
+  $("#perm-args").textContent = ev.args_repr || "";
+  permModal.classList.remove("hidden");
+  setStatus("waiting");
+}
+function closePerm() {
+  permModal.classList.add("hidden");
+  pendingPerm = null;
+}
+async function respondPerm(allow) {
+  if (!pendingPerm) return;
+  const rid = pendingPerm.request_id;
+  closePerm();
+  setStatus("running");
+  try {
+    await fetch("/api/permission/respond", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: rid, allow }),
+    });
+  } catch (e) {}
+}
+$("#perm-allow").addEventListener("click", () => respondPerm(true));
+$("#perm-deny").addEventListener("click", () => respondPerm(false));
+permModal.addEventListener("click", (e) => {
+  if (e.target === permModal) respondPerm(false);
+});
+
+// ---- workspace tree ----
 async function refreshTree() {
   try {
-    const r = await fetch("/api/sandbox/tree");
+    const r = await fetch("/api/workspace/tree");
     const data = await r.json();
-    if (data.root) els.sandbox.textContent = data.root;
+    if (data.root) els.workspace.textContent = data.root;
     els.tree.innerHTML = "";
     for (const node of data.tree || []) els.tree.appendChild(renderNode(node, 0));
   } catch (e) {}
@@ -210,7 +251,7 @@ function renderNode(node, depth) {
 
 async function previewFile(path) {
   try {
-    const r = await fetch("/api/sandbox/file?path=" + encodeURIComponent(path));
+    const r = await fetch("/api/workspace/file?path=" + encodeURIComponent(path));
     const data = await r.json();
     if (!r.ok) return;
     let prev = stream.parentElement.querySelector(".file-preview");

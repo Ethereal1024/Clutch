@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from ..config import Config
-from ..tools.sandbox import Sandbox
+from ..tools.workspace import Workspace
 from ..tools.shell import run_command
 
 
@@ -45,12 +45,12 @@ class Terminator:
     def check_turn_budget(self, turn: int) -> bool:
         return turn > self.config.max_turns
 
-    def verify(self, sandbox: Sandbox) -> TerminateResult:
+    def verify(self, workspace: Workspace) -> TerminateResult:
         """Run the verification gate. No command configured => pass-through."""
         cmd = self.config.verify_command
         if not cmd:
             return TerminateResult(done=True, status="completed", reason="no_verify_command")
-        result = run_command(sandbox, self.config, cmd)
+        result = run_command(workspace, self.config, cmd)
         # judge by exit status, not by scanning text (a self-test may legitimately
         # print "ERROR" while exercising error paths)
         ok = not result.get("error")
