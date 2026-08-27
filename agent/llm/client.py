@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import httpx2
 from openai import OpenAI
@@ -75,6 +76,99 @@ class LlmClient:
                 msg["finish_reason"] = choice.finish_reason
                 msg["_reasoning"] = reasoning
                 return msg
+            except Exception as e:  # noqa: BLE001 -- classify then decide to retry
+                last_err = _classify(e)
+                if not last_err.retryable or attempt == MAX_RETRIES - 1:
+                    break
+                time.sleep((2**attempt) + attempt * 0.5)
+        assert last_err is not None
+        raise last_err
+
+
+    def stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Streamed chat completion.
+
+        Yields event dicts as tokens arrive:
+          {"type":"reasoning","delta":str}          thinking tokens
+          {"type":"text","delta":str}               content tokens
+          {"type":"tool_call_start","index":..,"id":..,"name":..}
+          {"type":"tool_call_delta","index":..,"delta":str}
+          {"type":"finish","reason":str,"content":str,"tool_calls":[{id,name,arguments}]}
+        """
+        last_err: LlmError | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
+                if tools:
+                    kwargs["tools"] = tools
+                resp = self.client.chat.completions.create(**kwargs, stream=True)
+                content_parts: List[str] = []
+                tool_args: Dict[int, Dict[str, Any]] = {}
+
+                for chunk in resp:
+                    choice = chunk.choices[0] if chunk.choices else None
+                    if choice is None:
+                        continue
+                    delta = choice.delta
+                    if delta is None:
+                        continue
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning:
+                        yield {"type": "reasoning", "delta": reasoning}
+                    if delta.content:
+                        content_parts.append(delta.content)
+                        yield {"type": "text", "delta": delta.content}
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_args:
+                                tool_args[idx] = {"id": tc.id or "", "name": (tc.function.name if tc.function else "") or "", "args": ""}
+                                yield {
+                                    "type": "tool_call_start",
+                                    "index": idx,
+                                    "id": tool_args[idx]["id"],
+                                    "name": tool_args[idx]["name"],
+                                }
+                            entry = tool_args[idx]
+                            if tc.id:
+                                entry["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                entry["name"] = tc.function.name
+                            if tc.function and tc.function.arguments:
+                                entry["args"] += tc.function.arguments
+                                yield {
+                                    "type": "tool_call_delta",
+                                    "index": idx,
+                                    "delta": tc.function.arguments,
+                                }
+                    if choice.finish_reason:
+                        tool_calls = [
+                            {
+                                "id": entry["id"],
+                                "name": entry["name"],
+                                "arguments": entry["args"],
+                            }
+                            for entry in tool_args.values()
+                        ]
+                        yield {
+                            "type": "finish",
+                            "reason": choice.finish_reason,
+                            "content": "".join(content_parts),
+                            "tool_calls": tool_calls,
+                        }
+                        return
+                # stream ended without finish (defensive)
+                yield {
+                    "type": "finish",
+                    "reason": "stop",
+                    "content": "".join(content_parts),
+                    "tool_calls": [],
+                }
+                return
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = _classify(e)
                 if not last_err.retryable or attempt == MAX_RETRIES - 1:

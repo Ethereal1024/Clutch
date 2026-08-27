@@ -29,6 +29,9 @@ def _to_messages(events: List[Any]) -> List[Dict[str, Any]]:
             msg: Dict[str, Any] = {"role": "assistant"}
             if ev.content:
                 msg["content"] = ev.content
+            if ev.reasoning:
+                # DeepSeek requires thinking content to be passed back to the API
+                msg["reasoning_content"] = ev.reasoning
             if ev.tool_calls:
                 msg["tool_calls"] = [
                     {

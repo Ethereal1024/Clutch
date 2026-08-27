@@ -47,10 +47,20 @@ class TextDeltaEvent(Event):
 
 
 @dataclass
+class ReasoningDeltaEvent(Event):
+    """Streamed thinking tokens (DeepSeek reasoning_content). Displayed as a
+    distinct 'thinking' block so the user sees the model working."""
+
+    type: str = "reasoning_delta"
+    content: str = ""
+
+
+@dataclass
 class AssistantMessageEvent(Event):
     type: str = "assistant_message"
     content: str = ""
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)  # [{id,name,arguments}]
+    reasoning: str = ""  # thinking content, must be passed back to DeepSeek
 
 
 @dataclass
@@ -100,6 +110,7 @@ EVENT_TYPES: Dict[str, type] = {
         UserMessageEvent,
         StepStartEvent,
         TextDeltaEvent,
+        ReasoningDeltaEvent,
         AssistantMessageEvent,
         ToolCallEvent,
         ToolResultEvent,

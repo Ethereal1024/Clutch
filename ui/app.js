@@ -29,6 +29,9 @@ function setStatus(state) {
 // just-emitted text_delta) and final (status badge on the same line) can merge
 let lastTextEl = null;
 let lastTextContent = null;
+// thinking (reasoning) block
+let thinkingEl = null;
+let thinkingContent = "";
 
 // map tool_call_id -> {name, args} so a tool_result knows which tool produced it
 const toolCalls = {};
@@ -50,21 +53,60 @@ function addEvent(ev) {
     try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
     toolCalls[ev.tool_call_id] = { name: ev.name, args };
   }
+
+  // streaming text: accumulate into the existing agent block and re-render
+  if (ev.type === "text_delta" && ev.content) {
+    if (!lastTextEl) {
+      lastTextEl = createAgentTextBlock();
+      stream.appendChild(lastTextEl);
+    }
+    lastTextContent += ev.content;
+    lastTextEl.querySelector(".body").innerHTML = renderMarkdown(lastTextContent);
+    typesetMath(lastTextEl);
+    stream.scrollTop = stream.scrollHeight;
+    return;
+  }
+
+  // streaming reasoning: accumulate into a distinct thinking block
+  if (ev.type === "reasoning_delta" && ev.content) {
+    if (!thinkingEl) {
+      thinkingEl = document.createElement("div");
+      thinkingEl.className = "event thinking";
+      thinkingEl.innerHTML = '<div class="hdr">thinking</div><div class="body thinking-body"></div>';
+      stream.appendChild(thinkingEl);
+    }
+    thinkingContent += ev.content;
+    thinkingEl.querySelector(".body").textContent = thinkingContent;
+    stream.scrollTop = stream.scrollHeight;
+    return;
+  }
+
+  if (ev.type === "step_start") {
+    lastTextEl = null;
+    lastTextContent = null;
+    thinkingEl = null;
+    thinkingContent = "";
+  }
+
   const el = renderEvent(ev);
   if (el) {
     stream.appendChild(el);
     stream.scrollTop = stream.scrollHeight;
-    if (ev.type === "text_delta" || ev.type === "assistant_message") {
+    if (ev.type === "assistant_message") {
       lastTextEl = el;
       lastTextContent = ev.content || "";
       typesetMath(el);
     } else if (ev.type === "final") {
       typesetMath(el);
-    } else if (ev.type === "step_start") {
-      lastTextEl = null;
-      lastTextContent = null;
     }
   }
+}
+
+function createAgentTextBlock() {
+  const wrap = document.createElement("div");
+  wrap.className = "event text";
+  wrap.innerHTML = '<div class="hdr">agent</div><div class="body"></div>';
+  return wrap;
 }
 
 // Render LaTeX ($...$, $$...$$) inside a freshly-inserted markdown block.

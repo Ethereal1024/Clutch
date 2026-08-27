@@ -145,6 +145,17 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.step .hdr { color: var(--muted); }
 .event.text .hdr { color: var(--muted); }
 
+/* thinking (reasoning) stream: distinct muted block, not shown as agent output */
+.event.thinking {
+  border-left-color: var(--yellow);
+  background: rgba(210, 153, 34, 0.05);
+}
+.event.thinking .hdr { color: var(--yellow); font-size: 11px; }
+.thinking-body {
+  color: var(--muted); font-size: 12px; white-space: pre-wrap;
+  font-style: italic;
+}
+
 .status-badge {
   display: inline-block;
   margin-left: 8px;

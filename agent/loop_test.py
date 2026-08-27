@@ -34,6 +34,36 @@ class FakeLLM:
             return self._responses.pop(0)
         return dict(self._fallback)
 
+    def stream(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]):
+        """Emit the canned response as stream events (text chunks, tool_calls, finish)."""
+        self.calls.append(messages)
+        resp = dict(self._responses.pop(0)) if self._responses else dict(self._fallback)
+        content = resp.get("content") or ""
+        finish = resp.get("finish_reason") or "stop"
+        for i in range(0, len(content), 4):  # small chunks to exercise accumulation
+            yield {"type": "text", "delta": content[i:i + 4]}
+        tool_calls = resp.get("tool_calls") or []
+        for idx, tc in enumerate(tool_calls):
+            fn = tc.get("function", {})
+            yield {
+                "type": "tool_call_start",
+                "index": idx,
+                "id": tc.get("id", f"call_{idx}"),
+                "name": fn.get("name", ""),
+            }
+            args = fn.get("arguments", "{}")
+            for i in range(0, len(args), 4):
+                yield {"type": "tool_call_delta", "index": idx, "delta": args[i:i + 4]}
+        yield {
+            "type": "finish",
+            "reason": finish,
+            "content": content,
+            "tool_calls": [
+                {"id": tc.get("id", f"call_{idx}"), "name": tc.get("function", {}).get("name", ""), "arguments": tc.get("function", {}).get("arguments", "{}")}
+                for idx, tc in enumerate(tool_calls)
+            ],
+        }
+
 
 def _resp(content: str = "", tool_calls: List[Dict[str, Any]] = None, finish: str = "stop") -> Dict[str, Any]:
     m: Dict[str, Any] = {"role": "assistant", "content": content}

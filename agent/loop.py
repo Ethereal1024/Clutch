@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .config import Config
 from .core import context
 from .core import errors as agent_errors
-from .core.parse import ParseError, parse_arguments, parse_message
+from .core.parse import ParseError, parse_arguments
 from .core.permission import PermissionGate, PermissionRequired
 from .core.terminate import Terminator
 from .events import (
@@ -31,6 +31,7 @@ from .events import (
     Event,
     EventLog,
     FinalEvent,
+    ReasoningDeltaEvent,
     StateUpdateEvent,
     StepStartEvent,
     TextDeltaEvent,
@@ -83,6 +84,51 @@ class Agent:
         self._emit(StateUpdateEvent(value="finished"))
         return "ABORTED" if status != "completed" else summary
 
+    def _llm_call(
+        self, msgs: List[Dict[str, Any]]
+    ) -> tuple[str, List[Dict[str, Any]], str, str]:
+        """Stream one LLM turn; emits incremental reasoning/text events.
+
+        Returns (content, tool_calls, finish_reason, reasoning). tool_calls
+        entries are [{id, name, arguments(raw json string)}].
+        """
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        tool_accum: Dict[int, Dict[str, Any]] = {}
+        finish_reason = "stop"
+
+        try:
+            for ev in self.llm.stream(msgs, tools=self.registry.schemas()):
+                t = ev["type"]
+                if t == "reasoning":
+                    reasoning_parts.append(ev["delta"])
+                    self._emit(ReasoningDeltaEvent(content=ev["delta"]))
+                elif t == "text":
+                    content_parts.append(ev["delta"])
+                    # incremental text: the UI accumulates + re-renders markdown
+                    self._emit(TextDeltaEvent(content=ev["delta"]))
+                elif t == "tool_call_start":
+                    tool_accum.setdefault(ev["index"], {"id": ev["id"], "name": ev["name"], "args": ""})
+                elif t == "tool_call_delta":
+                    entry = tool_accum.setdefault(ev["index"], {"id": "", "name": "", "args": ""})
+                    entry["args"] += ev["delta"]
+                elif t == "finish":
+                    finish_reason = ev["reason"]
+                    content = "".join(content_parts)
+                    tool_calls = [
+                        {"id": e["id"], "name": e["name"], "arguments": e["args"]}
+                        for e in tool_accum.values()
+                    ]
+                    return content, tool_calls, finish_reason, "".join(reasoning_parts)
+        except LlmError as e:
+            if e.code == "context_window_exceeded":
+                raise agent_errors.context_window_error(e.message)
+            raise agent_errors.AgentError(code=e.code, message=e.message)
+        except Exception as e:  # noqa: BLE001 -- normalize unexpected errors
+            raise agent_errors.AgentError(code="llm_unknown", message=str(e))
+
+        return "".join(content_parts), [], finish_reason, "".join(reasoning_parts)
+
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
         self._emit(UserMessageEvent(content=task))
@@ -100,16 +146,7 @@ class Agent:
             self._emit(StepStartEvent())
             msgs = context.derive_messages(self.log, self.config, task)
 
-            try:
-                message = self.llm.chat(msgs, tools=self.registry.schemas())
-            except LlmError as e:
-                if e.code == "context_window_exceeded":
-                    raise agent_errors.context_window_error(e.message)
-                raise agent_errors.AgentError(code=e.code, message=e.message)
-            except Exception as e:  # noqa: BLE001 -- normalize unexpected errors
-                raise agent_errors.AgentError(code="llm_unknown", message=str(e))
-
-            content, tool_calls, finish_reason = parse_message(message)
+            content, tool_calls, finish_reason, reasoning = self._llm_call(msgs)
 
             # max-tokens truncation: drop incomplete tool calls, ask to be concise
             if finish_reason == "length":
@@ -118,11 +155,8 @@ class Agent:
 
             # ---- tool calls: execute and feed results back ----
             if tool_calls:
-                # emit the accompanying text first (a tool round often carries a
-                # short explanation); the final answer below emits assistant_message
-                # only, so the UI never shows the same text twice
-                if content:
-                    self._emit(TextDeltaEvent(content=content))
+                # content was already streamed incrementally as text_delta;
+                # emit the tool calls now
                 tc_events: List[ToolCallEvent] = []
                 for tc in tool_calls:
                     ev = ToolCallEvent(
@@ -131,7 +165,8 @@ class Agent:
                     self._emit(ev)
                     tc_events.append(ev)
 
-                # record the assistant turn with tool_calls before executing
+                # record the assistant turn with tool_calls before executing;
+                # reasoning is stored so it can be passed back to DeepSeek
                 self._emit(
                     AssistantMessageEvent(
                         content=content,
@@ -139,6 +174,7 @@ class Agent:
                             {"id": ev.tool_call_id, "name": ev.name, "arguments": ev.arguments}
                             for ev in tc_events
                         ],
+                        reasoning=reasoning,
                     )
                 )
 
@@ -160,7 +196,7 @@ class Agent:
                 continue
 
             # ---- no tool call: candidate done -> verification gate ----
-            self._emit(AssistantMessageEvent(content=content))
+            self._emit(AssistantMessageEvent(content=content, reasoning=reasoning))
             v = self.terminator.verify(self.workspace)
             if v.done:
                 return self._finish("completed", content)
