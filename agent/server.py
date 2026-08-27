@@ -468,7 +468,7 @@ def main() -> int:
 
     srv = build(config, ui_dir, sessions_dir, broadcaster, state)
     print(f"[clutch-server] http://127.0.0.1:{config.port}  (ui: {ui_dir})", flush=True)
-    print(f"[clutch-server] workspace default: {config.workspace_dir or '(temp)'}", flush=True)
+    print(f"[clutch-server] workspace default: {config.workdir or '(temp)'}", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
