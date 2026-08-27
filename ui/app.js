@@ -30,6 +30,9 @@ function setStatus(state) {
 let lastTextEl = null;
 let lastTextContent = null;
 
+// map tool_call_id -> {name, args} so a tool_result knows which tool produced it
+const toolCalls = {};
+
 function addEvent(ev) {
   if (ev.type === "assistant_message") {
     // the authoritative full message duplicates a text_delta already shown
@@ -41,6 +44,11 @@ function addEvent(ev) {
       appendStatusBadge(lastTextEl, ev.status);
       return;
     }
+  }
+  if (ev.type === "tool_call" && ev.tool_call_id) {
+    let args = {};
+    try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
+    toolCalls[ev.tool_call_id] = { name: ev.name, args };
   }
   const el = renderEvent(ev);
   if (el) {
@@ -118,9 +126,38 @@ function renderEvent(ev) {
       break;
     }
     case "tool_result": {
-      wrap.className = "event tool_result" + (ev.is_error ? " error" : "");
-      wrap.innerHTML = `<div class="hdr">${ev.is_error ? "result ⚠" : "result"}</div>`;
+      const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
+      const toolName = call.name || "";
+      const isRead = toolName === "read_file" || toolName === "list_dir";
+      const isWrite = toolName === "write_file";
+
+      wrap.className = "event tool_result" + (ev.is_error ? " error" : "")
+        + (isRead ? " read" : "") + (isWrite ? " write" : "");
+      const hdr = isWrite ? "✓ wrote" : (ev.is_error ? "result ⚠" : "result");
+      wrap.innerHTML = `<div class="hdr">${hdr}</div>`;
       body.className = "body md-plain";
+
+      if (isRead) {
+        // exploration reads are collapsed to a one-line summary; click to expand
+        const path = call.args.path || "";
+        const lines = ev.content ? ev.content.split("\n").length : 0;
+        const summary = toolName === "list_dir"
+          ? `↳ ${ev.content ? ev.content.split("\n").length : 0} entries`
+          : `↳ read ${path || "file"} (${lines} lines)`;
+        body.textContent = summary;
+        body.title = "click to expand";
+        const full = document.createElement("pre");
+        full.className = "read-detail hidden";
+        full.textContent = ev.content;
+        wrap.appendChild(body);
+        wrap.appendChild(full);
+        body.onclick = () => {
+          full.classList.toggle("hidden");
+          body.textContent = full.classList.contains("hidden") ? summary : "";
+          stream.scrollTop = stream.scrollHeight;
+        };
+        break;
+      }
       body.textContent = ev.content;
       break;
     }

@@ -161,6 +161,32 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.tool_result .hdr { color: var(--green); }
 .event.tool_result.error { border-left-color: var(--red); }
 .event.tool_result.error .hdr { color: var(--red); }
+
+/* exploration reads: collapsed summary, expand on click */
+.event.tool_result.read { border-left-color: var(--muted); background: transparent; }
+.event.tool_result.read .hdr { color: var(--muted); }
+.event.tool_result.read .body {
+  color: var(--muted); cursor: pointer; font-size: 12px;
+}
+.event.tool_result.read .body:hover { color: var(--text); }
+.read-detail.hidden { display: none; }
+.read-detail {
+  background: #0b0e13; padding: 8px 10px; border-radius: 6px;
+  overflow-x: auto; margin: 4px 0 0; font-family: monospace; font-size: 12px;
+  max-height: 320px; overflow-y: auto;
+}
+
+/* write results are the meaningful "output" steps: emphasized */
+.event.tool_result.write {
+  border-left: 4px solid var(--green); background: rgba(63, 185, 80, 0.06);
+}
+.event.tool_result.write .hdr { color: var(--green); font-weight: 600; }
+
+/* command output: cap height with a scrollbar instead of filling the stream */
+.event.tool_result .body {
+  max-height: 320px; overflow-y: auto;
+}
+.event.tool_result.write .body { max-height: none; }
 .event.final { border: 1px solid var(--green); border-left: 4px solid var(--green); }
 .event.final.aborted { border-color: var(--red); border-left-color: var(--red); }
 .event.final .hdr { color: var(--green); font-size: 12px; }

@@ -51,7 +51,9 @@ def build_default_tools(config: Config) -> List[Tool]:
             name="read_file",
             description=(
                 "Read a file in the workspace. path is relative to the workspace root. "
-                "Large files are truncated; use max_chars to control the size."
+                "Large files are truncated; use max_chars to control the size. "
+                "Only read files relevant to the task; content-creation tasks do not "
+                "need to explore the workspace."
             ),
             parameters={
                 "properties": {
