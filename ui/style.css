@@ -27,6 +27,13 @@
 
 * { box-sizing: border-box; }
 
+/* thin, subdued scrollbars matching the graphite palette */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #333a44; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3d4551; }
+* { scrollbar-width: thin; scrollbar-color: #333a44 transparent; }
+
 html, body {
   height: 100%;
   margin: 0;
