@@ -248,10 +248,8 @@ function renderMarkdown(text) {
 async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
-  stream.innerHTML = "";
-  lastTextEl = null;
-  lastTextContent = null;
-  const payload = { task };
+  // keep the existing conversation on screen; runs append to the current session
+  const payload = { task, session_id: currentSession };
   const wd = els.workdir.value.trim();
   if (wd) payload.workdir = wd;
   try {
@@ -263,6 +261,10 @@ async function run() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
     if (data.workspace) els.workspace.textContent = data.workspace;
+    if (data.session_id) {
+      currentSession = data.session_id;
+      markCurrentSession();
+    }
     refreshTree();
   } catch (e) {
     addEvent({ type: "final", status: "error", summary: "run failed: " + e.message });
@@ -415,34 +417,73 @@ function connectSSE() {
   es.onerror = () => { /* auto-reconnect */ };
 }
 
+let currentSession = "";
+
+function clearStream() {
+  stream.innerHTML = "";
+  lastTextEl = null;
+  lastTextContent = null;
+  thinkingEl = null;
+  thinkingContent = "";
+}
+
+function markCurrentSession() {
+  els.session.value = currentSession;
+}
+
 async function loadSessions() {
   try {
     const r = await fetch("/api/sessions");
     const data = await r.json();
-    els.session.innerHTML = '<option value="">live session</option>';
+    els.session.innerHTML = '<option value="">— select conversation —</option>';
     for (const s of data.sessions || []) {
       const opt = document.createElement("option");
-      opt.value = s.path;
-      opt.textContent = s.name;
+      opt.value = s.id;
+      opt.textContent = (s.summary ? s.summary + " — " : "") + s.name;
       els.session.appendChild(opt);
+    }
+    if (currentSession) {
+      els.session.value = currentSession;
+    } else if ((data.sessions || []).length > 0) {
+      // resume the most recent session on load
+      currentSession = data.sessions[data.sessions.length - 1].id;
+      await switchSession(currentSession);
     }
   } catch (e) {}
 }
 
-els.session.addEventListener("change", async () => {
-  const path = els.session.value;
-  if (!path) return;
+async function switchSession(id) {
   try {
     const r = await fetch("/api/sessions");
     const data = await r.json();
-    const s = data.sessions.find((x) => x.path === path);
+    const s = data.sessions.find((x) => x.id === id);
     if (!s) return;
-    const lr = await fetch("/api/sessions/replay?path=" + encodeURIComponent(path));
+    const lr = await fetch("/api/sessions/replay?path=" + encodeURIComponent(s.path));
     const ld = await lr.json();
-    stream.innerHTML = "";
-    lastTextEl = null;
-    lastTextContent = null;
+    clearStream();
+    currentSession = id;
     for (const ev of ld.events || []) addEvent(ev);
+    markCurrentSession();
+  } catch (e) {}
+}
+
+els.session.addEventListener("change", async () => {
+  const id = els.session.value;
+  if (!id) return;
+  if (busy) { markCurrentSession(); return; }
+  await switchSession(id);
+});
+
+$("#new-session-btn").addEventListener("click", async () => {
+  if (busy) return;
+  if (!confirm("Start a new conversation? The current one will still be saved.")) return;
+  try {
+    const r = await fetch("/api/session/new", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+    currentSession = data.session_id;
+    clearStream();
+    markCurrentSession();
   } catch (e) {}
 });
 

@@ -90,7 +90,12 @@ class Broadcaster:
 
 
 class RunState:
-    """Holds the live agent + cancel flag for the single active run."""
+    """Holds the live agent + cancel flag for the single active run.
+
+    Sessions: a session is a persistent EventLog (sessions/<id>.jsonl). Runs
+    within the same session share that log so the conversation continues;
+    a new session starts with a fresh log.
+    """
 
     def __init__(self, sessions_dir: Path) -> None:
         self.lock = threading.Lock()
@@ -99,12 +104,21 @@ class RunState:
         self.busy = False
         self.cancel: Optional[threading.Event] = None
         self.log = EventLog()
+        self.current_session: str = ""
+        self.current_workdir: str = ""
         self.workspace: Optional[Workspace] = None
         self._sessions_dir = sessions_dir
         self.api_key: Optional[str] = None
         self.gate: Optional[PermissionGate] = None
 
-    def start(self, task: str, workspace: Workspace, cancel: threading.Event) -> bool:
+    def start(
+        self,
+        task: str,
+        workspace: Workspace,
+        cancel: threading.Event,
+        session_id: str = "",
+        new_session: bool = False,
+    ) -> bool:
         with self.lock:
             if self.busy:
                 return False
@@ -112,16 +126,32 @@ class RunState:
             self.task = task
             self.cancel = cancel
             self.workspace = workspace
-            # persist each run to a timestamped session file for replay
+
             import time
 
-            name = time.strftime("session-%Y%m%d-%H%M%S")
-            self.log = EventLog(path=str(self._sessions_dir / f"{name}.jsonl"))
+            if new_session or not session_id:
+                # start a brand-new session
+                seq = time.strftime("%Y%m%d-%H%M%S")
+                self.current_session = f"session-{seq}"
+                self.log = EventLog(path=str(self._sessions_dir / f"{self.current_session}.jsonl"))
+                self.current_workdir = str(workspace.root)
+                # bind the workdir to this session for follow-up runs
+                wd_path = self._sessions_dir / f"{self.current_session}.workdir"
+                wd_path.write_text(self.current_workdir, encoding="utf-8")
+            else:
+                # resume the given session (its log already exists)
+                path = self._sessions_dir / f"{session_id}.jsonl"
+                self.current_session = session_id
+                if path.exists():
+                    self.log = EventLog.load(str(path))
+                else:
+                    self.log = EventLog(path=str(path))
+                wd_path = self._sessions_dir / f"{session_id}.workdir"
+                self.current_workdir = wd_path.read_text(encoding="utf-8").strip() if wd_path.exists() else ""
         return True
 
     def finish(self) -> None:
-        # keep the last workspace + log for inspection after the run completes;
-        # only release the busy flag so a new run can start
+        # keep the last workspace + log + session so a follow-up run can continue
         with self.lock:
             self.busy = False
             self.agent = None
@@ -187,6 +217,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self._stop()
             elif parsed.path == "/api/settings":
                 self._settings()
+            elif parsed.path == "/api/session/new":
+                self._session_new()
             elif parsed.path == "/api/permission/respond":
                 self._permission_respond()
             else:
@@ -205,16 +237,24 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             return self._json({"error": "bad json body"}, status=400)
         task = (body.get("task") or "").strip()
+        session_id = (body.get("session_id") or "").strip()
+        new_session = bool(body.get("new_session"))
         config = self._cfg
         if body.get("verify"):
             config = _replace(config, verify_command=body["verify"])
         if body.get("workdir"):
             config = _replace(config, workdir=body["workdir"])
-        # the workspace is the user's working directory; do not reset it between runs
-        workspace = Workspace(config.workdir)
 
         if not task:
             return self._json({"error": "task is required"}, status=400)
+
+        # session-bound workdir: a resumed session reuses its bound workdir;
+        # a new session binds the requested (or default) workdir.
+        if not new_session and session_id:
+            bound = self._session_workdir(session_id)
+            if bound:
+                config = _replace(config, workdir=bound)
+        workspace = Workspace(config.workdir)
 
         try:
             llm = LlmClient(
@@ -228,9 +268,11 @@ class Handler(SimpleHTTPRequestHandler):
         terminator = Terminator(config)
         cancel = threading.Event()
 
-        # start() claims the slot and creates the persisted session log FIRST,
+        # start() claims the slot and creates/loads the session log FIRST,
         # so the agent writes into a file-backed log we can replay later.
-        if not self._state.start(task, workspace, cancel):
+        if not self._state.start(
+            task, workspace, cancel, session_id=session_id, new_session=new_session
+        ):
             return self._json({"error": "a run is already active"}, status=409)
         log = self._state.log
 
@@ -268,7 +310,11 @@ class Handler(SimpleHTTPRequestHandler):
                 self._state.finish()
 
         threading.Thread(target=_worker, daemon=True).start()
-        self._json({"status": "started", "workspace": str(workspace.root)})
+        self._json({
+            "status": "started",
+            "workspace": str(workspace.root),
+            "session_id": self._state.current_session,
+        })
 
     def _stop(self) -> None:
         if self._state.cancel:
@@ -352,10 +398,37 @@ class Handler(SimpleHTTPRequestHandler):
         content = p.read_text(encoding="utf-8", errors="replace")
         self._json({"path": rel, "content": content})
 
+    def _session_workdir(self, session_id: str) -> str:
+        """Return the workdir bound to a session, or ''."""
+        wd = self._sessions_dir / f"{session_id}.workdir"
+        try:
+            return wd.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _session_new(self) -> None:
+        if self._state.busy:
+            return self._json({"error": "a run is active; wait for it to finish"}, status=409)
+        import time
+
+        seq = time.strftime("%Y%m%d-%H%M%S")
+        session_id = f"session-{seq}"
+        self._state.current_session = session_id
+        self._state.log = EventLog(path=str(self._sessions_dir / f"{session_id}.jsonl"))
+        self._state.current_workdir = ""
+        self._json({"status": "ok", "session_id": session_id})
+
     def _sessions(self) -> None:
         items = []
         for f in sorted(self._sessions_dir.glob("*.jsonl")):
-            items.append({"name": f.stem, "path": str(f), "size": f.stat().st_size})
+            summary = _session_summary(f)
+            items.append({
+                "name": f.stem,
+                "id": f.stem,
+                "path": str(f),
+                "size": f.stat().st_size,
+                "summary": summary,
+            })
         self._json({"sessions": items})
 
     def _session_replay(self, query: str) -> None:
@@ -395,6 +468,24 @@ def _replace(config: Config, **kw: Any) -> Config:
     import dataclasses
 
     return dataclasses.replace(config, **kw)
+
+
+def _session_summary(path: Path) -> str:
+    """First user task of a session file, as a readable label."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if data.get("type") == "user_message":
+                task = (data.get("content") or "").strip().replace("\n", " ")
+                return task[:60]
+    except OSError:
+        pass
+    return ""
 
 
 def _walk(root: Path, prefix: str = "") -> list:
