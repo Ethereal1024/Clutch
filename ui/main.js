@@ -49,7 +49,7 @@ app.whenReady().then(async () => {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
-    title: "clutch",
+    title: "Clutch",
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
@@ -69,7 +69,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("dialog:pickProjectFile", async () => {
     const res = await dialog.showOpenDialog(win, {
-      title: "Open a clutch project",
+      title: "Open a Clutch project",
       buttonLabel: "Open project",
       properties: ["openFile"],
       filters: [{ name: "Clutch project", extensions: ["clc"] }],
