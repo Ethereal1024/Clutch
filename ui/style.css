@@ -286,3 +286,22 @@ main { display: flex; flex: 1; min-height: 0; }
   padding: 10px 22px; font-size: 14px; border-radius: 8px;
 }
 .welcome-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* unified diff view */
+.diff-file { color: var(--green); font-weight: 600; }
+.diff-view {
+  background: #0b0e13; padding: 6px 0; border-radius: 6px;
+  overflow-x: auto; margin: 4px 0 0; font-family: monospace; font-size: 12px;
+  max-height: 320px; overflow-y: auto; line-height: 1.45;
+}
+.diff-view div { padding: 0 10px; white-space: pre; }
+.diff-view .diff-add { background: rgba(63, 185, 80, 0.12); color: #6cc96f; }
+.diff-view .diff-del { background: rgba(248, 81, 73, 0.10); color: #f4857f; }
+.diff-view .diff-meta { color: var(--accent); background: rgba(79, 140, 255, 0.06); }
+.diff-view .diff-hunk { color: var(--yellow); }
+.diff-view.diff-collapsed { max-height: 140px; overflow-y: hidden; }
+.diff-expand {
+  margin-top: 4px; background: var(--bg2); border: 1px solid var(--border);
+  color: var(--accent); border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer;
+}
+.diff-expand:hover { border-color: var(--accent); }

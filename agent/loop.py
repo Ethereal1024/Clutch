@@ -191,6 +191,7 @@ class Agent:
                             tool_call_id=ev.tool_call_id,
                             content=result.get("content", ""),
                             is_error=result.get("error", False),
+                            diff=result.get("diff", ""),
                         )
                     )
                 continue

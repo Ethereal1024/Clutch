@@ -200,6 +200,29 @@ function renderEvent(ev) {
         };
         break;
       }
+
+      if (isWrite && ev.diff) {
+        // show the file change as a unified diff (# Wrote <path> + coloured lines)
+        const path = call.args.path || "";
+        wrap.innerHTML = `<div class="hdr">✓ wrote <span class="diff-file">${escapeHtml(path)}</span></div>`;
+        body.textContent = ev.content; // summary line (e.g. OK: wrote /x (+5 -2 lines))
+        wrap.appendChild(body);
+        const pre = renderDiff(ev.diff);
+        wrap.appendChild(pre);
+        if (ev.diff.split("\n").length > 60) {
+          pre.classList.add("diff-collapsed");
+          const expand = document.createElement("button");
+          expand.className = "diff-expand";
+          expand.textContent = "Show full diff";
+          expand.onclick = () => {
+            pre.classList.remove("diff-collapsed");
+            expand.remove();
+          };
+          wrap.appendChild(expand);
+        }
+        break;
+      }
+
       body.textContent = ev.content;
       break;
     }
@@ -242,6 +265,28 @@ function renderMarkdown(text) {
   } catch (e) {
     return escapeHtml(text);
   }
+}
+
+// Render a unified diff string as a <pre> with per-line +/- colouring.
+function renderDiff(diff) {
+  const pre = document.createElement("pre");
+  pre.className = "diff-view";
+  const lines = diff.split("\n");
+  for (const line of lines) {
+    const div = document.createElement("div");
+    div.textContent = line;
+    if (line.startsWith("+++") || line.startsWith("---")) {
+      div.className = "diff-hunk";
+    } else if (line.startsWith("+")) {
+      div.className = "diff-add";
+    } else if (line.startsWith("-")) {
+      div.className = "diff-del";
+    } else if (line.startsWith("@")) {
+      div.className = "diff-meta";
+    }
+    pre.appendChild(div);
+  }
+  return pre;
 }
 
 // ---- run / stop ----

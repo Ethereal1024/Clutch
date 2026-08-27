@@ -77,6 +77,7 @@ class ToolResultEvent(Event):
     tool_call_id: str = ""
     content: str = ""  # model-visible content
     is_error: bool = False
+    diff: str = ""  # unified diff (UI display only, not model-visible)
 
 
 @dataclass
