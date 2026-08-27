@@ -81,10 +81,13 @@ def _blocked_reason(config: Config, command: str) -> str | None:
     parts = stripped.split(maxsplit=1)
     first = parts[0] if parts else ""
 
-    # bare python/python3 (no .py file arg) would drop into a REPL and hang
+    # bare python/python3 (no file or -m module arg) would drop into a REPL and hang
     if first in ("python", "python3"):
-        rest = parts[1] if len(parts) > 1 else ""
-        if not any(a.endswith(".py") for a in shlex.split(rest) if not a.startswith("-")):
+        rest = shlex.split(parts[1]) if len(parts) > 1 else []
+        # safe non-interactive forms: `python3 file.py` or `python3 -m module`
+        has_file = any(a.endswith(".py") for a in rest if not a.startswith("-"))
+        has_module = "-m" in rest
+        if not (has_file or has_module):
             return INTERACTIVE_HINT
         return None
 
