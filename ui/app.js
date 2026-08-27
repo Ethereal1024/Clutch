@@ -49,11 +49,23 @@ function addEvent(ev) {
     if (ev.type === "text_delta" || ev.type === "assistant_message") {
       lastTextEl = el;
       lastTextContent = ev.content || "";
+      typesetMath(el);
+    } else if (ev.type === "final") {
+      typesetMath(el);
     } else if (ev.type === "step_start") {
       lastTextEl = null;
       lastTextContent = null;
     }
   }
+}
+
+// Render LaTeX ($...$, $$...$$) inside a freshly-inserted markdown block.
+// MathJax scans text nodes; pre/code are skipped via skipHtmlTags so code stays
+// literal. Content is already DOMPurify-sanitized before this runs.
+function typesetMath(el) {
+  if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
+  if (!el || !el.textContent || el.textContent.indexOf("$") === -1) return;
+  MathJax.typesetPromise([el]).catch(() => {});
 }
 
 function appendStatusBadge(blockEl, status) {

@@ -65,6 +65,21 @@
 
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/purify.min.js"></script>
+  <script>
+    // MathJax config: recognize $...$ (inline) and $$...$$ (display) math.
+    // Must be set before mathjax loads.
+    window.MathJax = {
+      tex: {
+        inlineMath: [["$", "$"]],
+        displayMath: [["$$", "$$"]],
+        processEscapes: true,
+      },
+      options: {
+        skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      },
+    };
+  </script>
+  <script src="/vendor/mathjax-tex-chtml.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
