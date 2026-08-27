@@ -19,6 +19,8 @@ def read_file(workspace: Workspace, config: Config, path: str, max_chars: int = 
     limit = max_chars or config.read_max_chars
     try:
         p: Path = workspace.resolve(path)
+        if workspace.is_protected(p):
+            return _result(f"ERROR: cannot read protected file: {path}", error=True)
         if not p.is_file():
             return _result(f"ERROR: not a file or missing: {path}", error=True)
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -34,6 +36,8 @@ def read_file(workspace: Workspace, config: Config, path: str, max_chars: int = 
 def write_file(workspace: Workspace, config: Config, path: str, content: str) -> dict:
     try:
         p: Path = workspace.resolve(path)
+        if workspace.is_protected(p):
+            return _result(f"ERROR: cannot write protected file: {path}", error=True)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return _result(f"OK: wrote {p} ({len(content)} chars)")
@@ -48,7 +52,7 @@ def list_dir(workspace: Workspace, config: Config, path: str = ".") -> dict:
         p: Path = workspace.resolve(path)
         if not p.is_dir():
             return _result(f"ERROR: not a directory: {path}", error=True)
-        lines = sorted(f.name + ("/" if f.is_dir() else "") for f in p.iterdir())
+        lines = sorted(f.name + ("/" if f.is_dir() else "") for f in workspace.visible_entries(p))
         return _result("\n".join(lines) if lines else "(empty directory)")
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)

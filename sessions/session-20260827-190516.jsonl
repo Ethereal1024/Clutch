@@ -1,0 +1,90 @@
+{"type": "state_update", "timestamp": 1787828716.067454, "id": "cacba011d9fd", "key": "execution_status", "value": "running"}
+{"type": "user_message", "timestamp": 1787828716.0678122, "id": "98a7b69ca214", "content": "写一个文件 demo.txt 内容是 流式输出测试"}
+{"type": "step_start", "timestamp": 1787828716.0678566, "id": "378941eec8c8"}
+{"type": "reasoning_delta", "timestamp": 1787828717.0391378, "id": "44a2762b4c3d", "content": "The"}
+{"type": "reasoning_delta", "timestamp": 1787828717.245041, "id": "bc35fd398d16", "content": " user"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2453692, "id": "2c65977e4beb", "content": " wants"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2455087, "id": "4af136759ec1", "content": " me"}
+{"type": "reasoning_delta", "timestamp": 1787828717.245631, "id": "35692198ecc1", "content": " to"}
+{"type": "reasoning_delta", "timestamp": 1787828717.245747, "id": "b937a5415bfe", "content": " create"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2459352, "id": "aac2c1473ecd", "content": " a"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2460618, "id": "567145ebce63", "content": " file"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2461748, "id": "4b1cc9e802ed", "content": " demo"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2463465, "id": "3bf5a45877bc", "content": ".txt"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2464616, "id": "8eda5646f055", "content": " with"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2465723, "id": "3ee5f52c81d1", "content": " content"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2466824, "id": "26034fb4519c", "content": " \""}
+{"type": "reasoning_delta", "timestamp": 1787828717.2467995, "id": "ff6b75ebfa89", "content": "流"}
+{"type": "reasoning_delta", "timestamp": 1787828717.246916, "id": "5b20229442b4", "content": "式"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2470899, "id": "a4ac0c12c602", "content": "输出"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2472079, "id": "ac4d05e30772", "content": "测试"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2473207, "id": "b8fa65e9198c", "content": "\"."}
+{"type": "reasoning_delta", "timestamp": 1787828717.2474356, "id": "b6e4716c5a9a", "content": " This"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2475462, "id": "5e5785b101ae", "content": " is"}
+{"type": "reasoning_delta", "timestamp": 1787828717.247658, "id": "6b2d5074cf7f", "content": " a"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2562368, "id": "069ad3704578", "content": " simple"}
+{"type": "reasoning_delta", "timestamp": 1787828717.256361, "id": "68b8285a97a0", "content": " content"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2564757, "id": "b6c50b982e82", "content": "-"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2565908, "id": "780bb338de16", "content": "creation"}
+{"type": "reasoning_delta", "timestamp": 1787828717.256702, "id": "114e9b40fde7", "content": " task"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2568119, "id": "895f84a1cb02", "content": "."}
+{"type": "reasoning_delta", "timestamp": 1787828717.278799, "id": "90367219f6d6", "content": " I"}
+{"type": "reasoning_delta", "timestamp": 1787828717.2790575, "id": "7e5569ca99a1", "content": " just"}
+{"type": "reasoning_delta", "timestamp": 1787828717.3029265, "id": "3d735647fd90", "content": " need"}
+{"type": "reasoning_delta", "timestamp": 1787828717.3031943, "id": "4b3316b9b059", "content": " to"}
+{"type": "reasoning_delta", "timestamp": 1787828717.3033216, "id": "727fe84cfd0a", "content": " write"}
+{"type": "reasoning_delta", "timestamp": 1787828717.3034403, "id": "e019e14d8097", "content": " the"}
+{"type": "reasoning_delta", "timestamp": 1787828717.3035533, "id": "72b9a27a2826", "content": " file"}
+{"type": "reasoning_delta", "timestamp": 1787828717.3036644, "id": "830505a01aff", "content": "."}
+{"type": "tool_call", "timestamp": 1787828717.573558, "id": "3aa0581ecd1f", "name": "write_file", "arguments": "{\"path\": \"demo.txt\", \"content\": \"流式输出测试\"}", "tool_call_id": "call_00_mbP7q2tr9XBEVirquV1G1533"}
+{"type": "assistant_message", "timestamp": 1787828717.573721, "id": "c92511135571", "content": "", "tool_calls": [{"id": "call_00_mbP7q2tr9XBEVirquV1G1533", "name": "write_file", "arguments": "{\"path\": \"demo.txt\", \"content\": \"流式输出测试\"}"}], "reasoning": "The user wants me to create a file demo.txt with content \"流式输出测试\". This is a simple content-creation task. I just need to write the file."}
+{"type": "tool_result", "timestamp": 1787828717.5741181, "id": "873cbed808e4", "tool_call_id": "call_00_mbP7q2tr9XBEVirquV1G1533", "content": "OK: wrote /tmp/opencode/streamclean/demo.txt (6 chars)", "is_error": false}
+{"type": "step_start", "timestamp": 1787828717.5741627, "id": "094c761c5adf"}
+{"type": "reasoning_delta", "timestamp": 1787828718.167225, "id": "1fb7b2c9542e", "content": "The"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3699977, "id": "8ae1eecffbed", "content": " file"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3703284, "id": "891d98b5f317", "content": " was"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3704674, "id": "be22a967f540", "content": " written"}
+{"type": "reasoning_delta", "timestamp": 1787828718.37059, "id": "5f365f9e8a2f", "content": " successfully"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3707068, "id": "647c25fd402d", "content": "."}
+{"type": "reasoning_delta", "timestamp": 1787828718.3708756, "id": "36b17ab8f8c1", "content": " Let"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3709943, "id": "58197a2be736", "content": " me"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3711593, "id": "69166d63c0aa", "content": " verify"}
+{"type": "reasoning_delta", "timestamp": 1787828718.3712742, "id": "137a497c0fa9", "content": " it"}
+{"type": "reasoning_delta", "timestamp": 1787828718.371385, "id": "c2e324e09a5e", "content": "."}
+{"type": "tool_call", "timestamp": 1787828718.5176256, "id": "638680ff345f", "name": "run_command", "arguments": "{\"command\": \"cat demo.txt\"}", "tool_call_id": "call_00_w00QNenxOVQGn2aP6QtZ4235"}
+{"type": "assistant_message", "timestamp": 1787828718.517808, "id": "a0eb49647ddd", "content": "", "tool_calls": [{"id": "call_00_w00QNenxOVQGn2aP6QtZ4235", "name": "run_command", "arguments": "{\"command\": \"cat demo.txt\"}"}], "reasoning": "The file was written successfully. Let me verify it."}
+{"type": "tool_result", "timestamp": 1787828718.5202231, "id": "9a4e21b931f6", "tool_call_id": "call_00_w00QNenxOVQGn2aP6QtZ4235", "content": "OK: command succeeded\nstdout:\n流式输出测试", "is_error": false}
+{"type": "step_start", "timestamp": 1787828718.5203137, "id": "d4d02a7fe1f7"}
+{"type": "text_delta", "timestamp": 1787828719.2924352, "id": "39b2ab81559c", "content": "已完成"}
+{"type": "text_delta", "timestamp": 1787828719.3048956, "id": "4b2d77735c67", "content": "。"}
+{"type": "text_delta", "timestamp": 1787828719.3051436, "id": "d773172d5cd7", "content": "创建"}
+{"type": "text_delta", "timestamp": 1787828719.3283308, "id": "3ff7c84c46ba", "content": "了"}
+{"type": "text_delta", "timestamp": 1787828719.3285697, "id": "c7cb74199345", "content": " `"}
+{"type": "text_delta", "timestamp": 1787828719.3286996, "id": "26beb6b76bf3", "content": "demo"}
+{"type": "text_delta", "timestamp": 1787828719.328819, "id": "1b043d558d7f", "content": ".txt"}
+{"type": "text_delta", "timestamp": 1787828719.3289344, "id": "9d63565bcf3c", "content": "`"}
+{"type": "text_delta", "timestamp": 1787828719.329053, "id": "c33d603e404e", "content": " "}
+{"type": "text_delta", "timestamp": 1787828719.345282, "id": "6beaff6933a2", "content": "文件"}
+{"type": "text_delta", "timestamp": 1787828719.3455317, "id": "a532aef196ff", "content": "，"}
+{"type": "text_delta", "timestamp": 1787828719.345665, "id": "ff333aa3f992", "content": "内容"}
+{"type": "text_delta", "timestamp": 1787828719.3457878, "id": "7bcc95999a72", "content": "为"}
+{"type": "text_delta", "timestamp": 1787828719.3459024, "id": "0a6ee27ccaa8", "content": "「"}
+{"type": "text_delta", "timestamp": 1787828719.346024, "id": "39e25aa95a92", "content": "流"}
+{"type": "text_delta", "timestamp": 1787828719.441494, "id": "e5be2011b967", "content": "式"}
+{"type": "text_delta", "timestamp": 1787828719.441793, "id": "053eebeb6f9a", "content": "输出"}
+{"type": "text_delta", "timestamp": 1787828719.4419444, "id": "4aad37c125d8", "content": "测试"}
+{"type": "text_delta", "timestamp": 1787828719.4420695, "id": "36ba1f7b4e84", "content": "」，"}
+{"type": "text_delta", "timestamp": 1787828719.4421875, "id": "eb3d56cd35c6", "content": "并"}
+{"type": "text_delta", "timestamp": 1787828719.4423065, "id": "13237efe7e6a", "content": "已"}
+{"type": "text_delta", "timestamp": 1787828719.442529, "id": "1fffdbe9ef3f", "content": "通过"}
+{"type": "text_delta", "timestamp": 1787828719.4426515, "id": "99375333d27f", "content": " `"}
+{"type": "text_delta", "timestamp": 1787828719.4428217, "id": "11e78c1eb864", "content": "cat"}
+{"type": "text_delta", "timestamp": 1787828719.4429364, "id": "b20610c8be7d", "content": "`"}
+{"type": "text_delta", "timestamp": 1787828719.4430497, "id": "ebef1b7f1fd2", "content": " "}
+{"type": "text_delta", "timestamp": 1787828719.443161, "id": "2d2738455042", "content": "验证"}
+{"type": "text_delta", "timestamp": 1787828719.4432716, "id": "140df919f50b", "content": "输出"}
+{"type": "text_delta", "timestamp": 1787828719.4433835, "id": "df69741e6a79", "content": "正确"}
+{"type": "text_delta", "timestamp": 1787828719.443556, "id": "1165a48b18e4", "content": "。"}
+{"type": "assistant_message", "timestamp": 1787828719.4437225, "id": "9a204cec5403", "content": "已完成。创建了 `demo.txt` 文件，内容为「流式输出测试」，并已通过 `cat` 验证输出正确。", "tool_calls": [], "reasoning": ""}
+{"type": "final", "timestamp": 1787828719.4437683, "id": "577320bab349", "status": "completed", "summary": "已完成。创建了 `demo.txt` 文件，内容为「流式输出测试」，并已通过 `cat` 验证输出正确。"}
+{"type": "state_update", "timestamp": 1787828719.443798, "id": "1e2253389e74", "key": "execution_status", "value": "finished"}

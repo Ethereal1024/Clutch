@@ -1,14 +1,11 @@
 [project]
 name = "clutch"
 version = "0.1.0"
-description = "A minimal coding agent built from scratch: LLM loop + tools + sandbox, driven by an event stream."
+description = "A self-built coding agent: LLM loop + tools + events, driven by a GUI. CLI removed."
 requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0",
 ]
-
-[project.scripts]
-clutch = "agent.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

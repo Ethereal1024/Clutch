@@ -41,6 +41,12 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
                 workspace.resolve(tok)
             except ValueError:
                 return {"content": f"ERROR: path escapes workspace: {tok!r}", "error": True}
+        # protected files (the .clc project file) are off-limits to commands too
+        try:
+            if workspace.is_protected(workspace.resolve(tok)):
+                return {"content": f"ERROR: cannot operate on protected file: {tok!r}", "error": True}
+        except ValueError:
+            pass
 
     args = shlex.split(command)
     if args and args[0] in ("python", "python3"):

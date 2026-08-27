@@ -186,6 +186,30 @@ def main() -> None:
             "permission asks on escaping write",
         )
 
+    # 10. project file: .clc round-trip + protected visibility
+    from agent.project import create_project, open_project
+    from agent.events import UserMessageEvent
+
+    with tempfile.TemporaryDirectory() as ptmp:
+        proj = create_project(Path(ptmp) / "demo", "demo")
+        proj.log.append(UserMessageEvent(content="hi"))
+        proj.log.append(UserMessageEvent(content="there"))
+        check(proj.path.exists(), "project .clc created")
+        check(proj.workdir == Path(ptmp), "project workdir is parent dir")
+        reloaded = open_project(proj.path)
+        check(
+            [e.content for e in reloaded.events()] == ["hi", "there"],
+            "project round-trips events",
+        )
+        ws = Workspace(str(ptmp))
+        ws.protect(proj.path)
+        check(ws.is_protected(proj.path), "workspace protects .clc")
+        reg = ToolRegistry(build_default_tools(config))
+        r = reg.execute(ws, config, "read_file", {"path": proj.path.name})
+        check(r.get("error"), "read_file refuses protected .clc")
+        r = reg.execute(ws, config, "list_dir", {"path": "."})
+        check(proj.path.name not in r["content"], "list_dir hides .clc")
+
     print("\nall passed")
     return 0
 

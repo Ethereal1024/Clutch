@@ -4,14 +4,13 @@ const $ = (s) => document.querySelector(s);
 
 const els = {
   task: $("#task-input"),
-  workdir: $("#workdir-input"),
   run: $("#run-btn"),
   stop: $("#stop-btn"),
   status: $("#status"),
   stream: $("#stream"),
   tree: $("#tree"),
   workspace: $("#workspace-path"),
-  session: $("#session-select"),
+  projectLabel: $("#project-label"),
 };
 
 let busy = false;
@@ -21,7 +20,7 @@ function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
   els.status.textContent = state || "idle";
   busy = state === "running";
-  els.run.disabled = busy;
+  els.run.disabled = busy || !currentProject;
   els.stop.disabled = !busy;
 }
 
@@ -137,9 +136,8 @@ function renderEvent(ev) {
       break;
     }
     case "step_start": {
-      wrap.className = "event step";
-      wrap.innerHTML = '<div class="hdr">—— step ——</div>';
-      break;
+      // internal loop step; reset state but don't show a divider line
+      return null;
     }
     case "text_delta": {
       if (!ev.content) return null;
@@ -250,10 +248,9 @@ function renderMarkdown(text) {
 async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
-  // keep the existing conversation on screen; runs append to the current session
-  const payload = { task, session_id: currentSession };
-  const wd = els.workdir.value.trim();
-  if (wd) payload.workdir = wd;
+  if (!currentProject) return;
+  // runs append to the active project's conversation
+  const payload = { task };
   try {
     const r = await fetch("/api/run", {
       method: "POST",
@@ -263,10 +260,6 @@ async function run() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
     if (data.workspace) els.workspace.textContent = data.workspace;
-    if (data.session_id) {
-      currentSession = data.session_id;
-      markCurrentSession();
-    }
     refreshTree();
   } catch (e) {
     addEvent({ type: "final", status: "error", summary: "run failed: " + e.message });
@@ -419,7 +412,7 @@ function connectSSE() {
   es.onerror = () => { /* auto-reconnect */ };
 }
 
-let currentSession = "";
+let currentProject = ""; // path of the active .clc project file
 
 function clearStream() {
   stream.innerHTML = "";
@@ -429,93 +422,116 @@ function clearStream() {
   thinkingContent = "";
 }
 
-function markCurrentSession() {
-  els.session.value = currentSession;
+function setProjectInfo(info) {
+  currentProject = info.project || "";
+  els.projectLabel.textContent = info.name || "";
+  els.projectLabel.title = currentProject;
+  if (info.workdir) els.workspace.textContent = info.workdir;
+  setStatus("idle");
+  markCurrentProject();
 }
 
-async function loadSessions() {
+function markCurrentProject() {
+  // no dropdown; the label already shows the project name
+}
+
+function showWelcome() {
+  document.getElementById("welcome").classList.remove("hidden");
+  els.run.disabled = true;
+}
+function hideWelcome() {
+  document.getElementById("welcome").classList.add("hidden");
+  els.run.disabled = busy || !currentProject;
+}
+
+async function openProject(path) {
+  if (busy) return;
   try {
-    const r = await fetch("/api/sessions");
-    const data = await r.json();
-    els.session.innerHTML = '<option value="">— select conversation —</option>';
-    for (const s of data.sessions || []) {
-      const opt = document.createElement("option");
-      opt.value = s.id;
-      opt.textContent = (s.summary ? s.summary + " — " : "") + s.name;
-      els.session.appendChild(opt);
-    }
-    if (currentSession) {
-      els.session.value = currentSession;
-    } else if ((data.sessions || []).length > 0) {
-      // resume the most recent session on load
-      currentSession = data.sessions[data.sessions.length - 1].id;
-      await switchSession(currentSession);
-    }
-  } catch (e) {}
-}
-
-async function switchSession(id) {
-  try {
-    const r = await fetch("/api/sessions");
-    const data = await r.json();
-    const s = data.sessions.find((x) => x.id === id);
-    if (!s) return;
-    const lr = await fetch("/api/sessions/replay?path=" + encodeURIComponent(s.path));
-    const ld = await lr.json();
-    clearStream();
-    currentSession = id;
-    setStatus("idle"); // reset busy so Run/taskbar work after switching
-    for (const ev of ld.events || []) addEvent(ev);
-    markCurrentSession();
-  } catch (e) {}
-}
-
-els.session.addEventListener("change", async () => {
-  const id = els.session.value;
-  if (!id) return;
-  if (busy) { markCurrentSession(); return; }
-  await switchSession(id);
-});
-
-// ---- confirmation dialog (replaces window.confirm, which is unreliable in Electron) ----
-const confirmModal = $("#confirm-modal");
-let pendingConfirm = null;
-function askConfirm(msg, onOk) {
-  $("#confirm-msg").textContent = msg;
-  pendingConfirm = onOk;
-  confirmModal.classList.remove("hidden");
-}
-function closeConfirm() {
-  confirmModal.classList.add("hidden");
-  pendingConfirm = null;
-}
-$("#confirm-ok").addEventListener("click", () => {
-  const fn = pendingConfirm;
-  closeConfirm();
-  if (fn) fn();
-});
-$("#confirm-cancel").addEventListener("click", closeConfirm);
-confirmModal.addEventListener("click", (e) => {
-  if (e.target === confirmModal) closeConfirm();
-});
-
-async function newSession() {
-  try {
-    const r = await fetch("/api/session/new", { method: "POST" });
+    const r = await fetch("/api/project/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
-    currentSession = data.session_id;
     clearStream();
-    setStatus("idle"); // ensure busy is reset so Run/taskbar work again
-    markCurrentSession();
-  } catch (e) {}
+    setProjectInfo(data);
+    hideWelcome();
+    for (const ev of data.events || []) addEvent(ev);
+    refreshTree();
+  } catch (e) {
+    alert("Failed to open project: " + e.message);
+  }
 }
 
-$("#new-session-btn").addEventListener("click", () => {
+async function createProject(dir, name) {
   if (busy) return;
-  askConfirm("Start a new conversation? The current one will still be saved.", newSession);
+  try {
+    const r = await fetch("/api/project/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir, name }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+    clearStream();
+    setProjectInfo(data);
+    hideWelcome();
+    refreshTree();
+  } catch (e) {
+    alert("Failed to create project: " + e.message);
+  }
+}
+
+// ---- new project modal ----
+const projectModal = $("#project-modal");
+let pickedDir = "";
+async function startNewProject() {
+  if (busy) return;
+  if (window.clutchDialog && window.clutchDialog.pickDirectory) {
+    pickedDir = await window.clutchDialog.pickDirectory();
+    if (!pickedDir) return;
+  } else {
+    pickedDir = prompt("Directory to create the project in:");
+    if (!pickedDir) return;
+  }
+  $("#project-dir-input").value = pickedDir;
+  $("#project-name-input").value = "";
+  projectModal.classList.remove("hidden");
+  $("#project-name-input").focus();
+}
+function closeProjectModal() {
+  projectModal.classList.add("hidden");
+}
+$("#project-create").addEventListener("click", () => {
+  const name = $("#project-name-input").value.trim();
+  if (!name) return;
+  closeProjectModal();
+  createProject(pickedDir, name);
+});
+$("#project-cancel").addEventListener("click", closeProjectModal);
+projectModal.addEventListener("click", (e) => {
+  if (e.target === projectModal) closeProjectModal();
 });
 
+// ---- open project ----
+async function pickAndOpenProject() {
+  if (busy) return;
+  if (window.clutchDialog && window.clutchDialog.pickProjectFile) {
+    const path = await window.clutchDialog.pickProjectFile();
+    if (!path) return;
+    await openProject(path);
+  } else {
+    const path = prompt("Path to the .clc project file:");
+    if (!path) return;
+    await openProject(path);
+  }
+}
+
+$("#new-project-btn").addEventListener("click", startNewProject);
+$("#open-project-btn").addEventListener("click", pickAndOpenProject);
+$("#welcome-new").addEventListener("click", startNewProject);
+$("#welcome-open").addEventListener("click", pickAndOpenProject);
+
 setInterval(refreshTree, 4000);
-loadSessions();
 connectSSE();

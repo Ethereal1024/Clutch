@@ -1,7 +1,7 @@
 // Electron shell: spawns the local Python server and opens the product UI in a window.
 // The shell holds no app logic — everything lives in the Python server + static frontend.
 
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
@@ -54,8 +54,25 @@ app.whenReady().then(async () => {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"),
     },
   });
+
+  // Native dialogs for creating / opening project files.
+  ipcMain.handle("dialog:pickDirectory", async () => {
+    const res = await dialog.showOpenDialog(win, {
+      properties: ["openDirectory", "createDirectory"],
+    });
+    return res.canceled ? null : res.filePaths[0];
+  });
+  ipcMain.handle("dialog:pickProjectFile", async () => {
+    const res = await dialog.showOpenDialog(win, {
+      properties: ["openFile"],
+      filters: [{ name: "Clutch project", extensions: ["clc"] }],
+    });
+    return res.canceled ? null : res.filePaths[0];
+  });
+
   win.loadURL(`http://127.0.0.1:${PORT}/`);
 });
 

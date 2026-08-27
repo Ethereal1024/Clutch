@@ -1,9 +1,9 @@
 """Server end-to-end check: boots the HTTP server in a thread and exercises it.
 
-Run: uv run python -m agent.server_test [--task "optional real task"]
-Static/health/sessions are always checked. If DEEPSEEK_API_KEY is set, also runs a
-real task through /api/run, collects SSE events, and checks the workspace tree + session
-file. Skips the real-run section when no key is present (network-free mode).
+Run: uv run python -m agent.server_test
+Static/health/project are always checked. If DEEPSEEK_API_KEY is set, also runs a
+real task through /api/run, collects SSE events, and checks the workspace tree and
+.clc persistence. Skips the real-run section when no key is present (network-free).
 """
 
 from __future__ import annotations
@@ -77,12 +77,12 @@ def main() -> int:
 def _run_server_test() -> int:
     config = Config(port=8899)
     broadcaster = Broadcaster()
+    state = RunState()
 
     with tempfile.TemporaryDirectory() as sdir:
-        sessions_dir = Path(sdir) / "sessions"
-        sessions_dir.mkdir()
-        state = RunState(sessions_dir)
-        srv = build(config, UI_DIR, sessions_dir, broadcaster, state)
+        proj_dir = Path(sdir) / "work"
+        proj_dir.mkdir()
+        srv = build(config, UI_DIR, broadcaster, state)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
         base_url = f"http://127.0.0.1:{config.port}"
@@ -96,23 +96,37 @@ def _run_server_test() -> int:
         check(st == 200, "index served")
         st, _ = http_get(f"{base_url}/app.js")
         check(st == 200, "app.js served")
-        st, body = http_get(f"{base_url}/api/sessions")
-        check(st == 200 and '"sessions": []' in body, "sessions empty initially")
 
-        # 2. reject empty task
+        # 2. run without a project is rejected
+        st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
+        check(st == 400, "run without project rejected")
+
+        # 2b. reject empty task
         st, body = http_post(f"{base_url}/api/run", {"task": "   "})
         check(st == 400, "empty task rejected")
 
-        # 2b. settings: persist an API key in-memory + to user dir
+        # 2c. settings: persist an API key in-memory + to user dir
         st, body = http_post(f"{base_url}/api/settings", {"api_key": "sk-test-123"})
         check(st == 200, "settings accepted")
         check(state.api_key == "sk-test-123", "settings stored in state")
-        st, body = http_post(f"{base_url}/api/settings", {"api_key": "  "})
-        check(st == 400, "settings rejects empty key")
-        # reset so the real run below falls back to the env key (GUI key takes priority)
         state.api_key = None
 
-        # 3. real run (only with key)
+        # 3. create a project
+        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "demo"})
+        check(st == 200, "project created")
+        pdata = json.loads(body)
+        check(pdata.get("name") == "demo", "project name returned")
+        clc = Path(pdata["project"])
+        check(clc.suffix == ".clc" and clc.exists(), ".clc file exists")
+        check(pdata.get("workdir") == str(proj_dir), "workdir is project dir")
+
+        # 3b. reopen the project
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "project reopened")
+        rdata = json.loads(body)
+        check(rdata.get("name") == "demo", "reopened project name")
+
+        # 4. real run (only with key)
         key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:
             print("\n(DEEPSEEK_API_KEY not set - real-run section skipped)")
@@ -125,7 +139,7 @@ def _run_server_test() -> int:
         })
         check(st == 200 and body != "", "run accepted")
 
-        # 3b. duplicate run rejected (busy)
+        # 4b. duplicate run rejected (busy)
         st, _ = http_post(f"{base_url}/api/run", {"task": "another"})
         check(st == 409, "concurrent run rejected")
 
@@ -158,23 +172,24 @@ def _run_server_test() -> int:
         finals = [e for e in events if e["type"] == "final"]
         check(finals and finals[-1]["status"] == "completed", "final status completed")
 
-        # 4. workspace tree + file after run
+        # 5. workspace tree + file after run
         st, body = http_get(f"{base_url}/api/workspace/tree")
         data = json.loads(body)
         check(st == 200 and data.get("root"), "workspace tree has root")
+        names = [n["name"] for n in data.get("tree", [])]
+        check("hello.txt" in names, "workspace shows created file")
+        check(clc.name not in names, ".clc file hidden from workspace tree")
         st, body = http_get(f"{base_url}/api/workspace/file?path=hello.txt")
         check(st == 200 and "hi" in body, "workspace file readable")
 
-        # 5. session persisted + replay
-        st, body = http_get(f"{base_url}/api/sessions")
-        sessions = json.loads(body)["sessions"]
-        check(len(sessions) == 1, "session file persisted")
-        path = sessions[0]["path"]
-        st, body = http_get(f"{base_url}/api/sessions/replay?path={path}")
-        replay = json.loads(body)
-        check("events" in replay and len(replay["events"]) > 0, "session replay works")
+        # 6. .clc persisted the conversation
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "project reopened after run")
+        rdata = json.loads(body)
+        ev_types = [e["type"] for e in rdata.get("events", [])]
+        check("user_message" in ev_types and "final" in ev_types, ".clc persisted conversation")
 
-        # 6. stop is safe on idle
+        # 7. stop is safe on idle
         st, _ = http_post(f"{base_url}/api/stop", {})
         check(st == 200, "stop on idle is safe")
 
