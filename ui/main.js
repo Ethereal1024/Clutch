@@ -61,12 +61,16 @@ app.whenReady().then(async () => {
   // Native dialogs for creating / opening project files.
   ipcMain.handle("dialog:pickDirectory", async () => {
     const res = await dialog.showOpenDialog(win, {
+      title: "Choose a folder for the new project",
+      buttonLabel: "Choose folder",
       properties: ["openDirectory", "createDirectory"],
     });
     return res.canceled ? null : res.filePaths[0];
   });
   ipcMain.handle("dialog:pickProjectFile", async () => {
     const res = await dialog.showOpenDialog(win, {
+      title: "Open a clutch project",
+      buttonLabel: "Open project",
       properties: ["openFile"],
       filters: [{ name: "Clutch project", extensions: ["clc"] }],
     });
