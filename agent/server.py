@@ -176,30 +176,31 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         except Exception:  # noqa: BLE001
             return self._json({"error": "bad json body"}, status=400)
+        scenario = body.get("scenario")
         task = (body.get("task") or "").strip()
-        if not task:
-            return self._json({"error": "task is required"}, status=400)
-
         config = self._cfg
-        # per-request overrides for the verification gate
         if body.get("verify"):
             config = _replace(config, verify_command=body["verify"])
         if body.get("game"):
             config = _replace(config, game_file=body["game"])
-
         sandbox = Sandbox(config.sandbox_dir)
 
-        # scenario preset: seed the sandbox from scenarios/<name>/seed and use its verify
-        scenario = body.get("scenario")
+        # scenario preset: load task + verify from scenarios/<name>/, seed the sandbox
         if scenario:
             sdir = self._scenarios_dir / scenario
+            task_file = sdir / "task.md"
+            verify_file = sdir / "verify.sh"
+            if task_file.exists():
+                task = task_file.read_text(encoding="utf-8").strip()
             seed = sdir / "seed"
             if sdir.exists() and seed.exists():
                 shutil.copytree(seed, sandbox.root, dirs_exist_ok=True)
-            verify_file = sdir / "verify.sh"
             if verify_file.exists():
                 verify_cmd = verify_file.read_text(encoding="utf-8").strip().splitlines()[0]
                 config = _replace(config, verify_command=verify_cmd)
+
+        if not task:
+            return self._json({"error": "task is required"}, status=400)
 
         try:
             llm = LlmClient(model=config.model, base_url=config.base_url)
