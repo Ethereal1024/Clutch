@@ -187,6 +187,17 @@ main { display: flex; flex: 1; min-height: 0; }
   max-height: 320px; overflow-y: auto;
 }
 
+.read-row {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 12px; cursor: pointer;
+  user-select: none;
+}
+.read-row:hover { color: var(--text); }
+.read-toggle {
+  display: inline-block; width: 14px; text-align: center;
+  font-size: 10px; color: var(--muted);
+}
+
 /* write results are the meaningful "output" steps: emphasized */
 .event.tool_result.write {
   border-left: 4px solid var(--green); background: rgba(63, 185, 80, 0.06);
@@ -222,15 +233,6 @@ main { display: flex; flex: 1; min-height: 0; }
 .tree-node .icon { opacity: 0.6; margin-right: 4px; }
 .tree-children { margin-left: 14px; }
 
-.file-preview { margin-top: 6px; }
-.file-preview pre {
-  background: #0b0e13;
-  padding: 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  max-height: 300px;
-  overflow: auto;
-}
 
 /* settings modal */
 .modal {
@@ -291,10 +293,10 @@ main { display: flex; flex: 1; min-height: 0; }
 .diff-file { color: var(--green); font-weight: 600; }
 .diff-view {
   background: #0b0e13; padding: 6px 0; border-radius: 6px;
-  overflow-x: auto; margin: 4px 0 0; font-family: monospace; font-size: 12px;
+  margin: 4px 0 0; font-family: monospace; font-size: 12px;
   max-height: 320px; overflow-y: auto; line-height: 1.45;
 }
-.diff-view div { padding: 0 10px; white-space: pre; }
+.diff-view div { padding: 0 10px; white-space: pre-wrap; word-break: break-all; }
 .diff-view .diff-add { background: rgba(63, 185, 80, 0.12); color: #6cc96f; }
 .diff-view .diff-del { background: rgba(248, 81, 73, 0.10); color: #f4857f; }
 .diff-view .diff-meta { color: var(--accent); background: rgba(79, 140, 255, 0.06); }

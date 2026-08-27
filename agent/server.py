@@ -7,7 +7,6 @@ Endpoints (all JSON except static/SSE):
   POST /api/stop           cancel the running agent
   GET  /api/events         SSE: replay active project history, then live events
   GET  /api/workspace/tree   file tree under the project's working directory
-  GET  /api/workspace/file?path=  file content (workspace-constrained)
   GET  /api/health         {ok}
   GET  /*                  static files from --ui-dir (the product frontend)
 
@@ -165,8 +164,6 @@ class Handler(SimpleHTTPRequestHandler):
                 self._sse()
             elif path == "/api/workspace/tree":
                 self._workspace_tree()
-            elif path == "/api/workspace/file":
-                self._workspace_file(parsed.query)
             else:
                 self._static(path)
         except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
@@ -346,24 +343,6 @@ class Handler(SimpleHTTPRequestHandler):
         if sb is None:
             return self._json({"tree": [], "root": None})
         self._json({"tree": _walk(sb.root, sb), "root": str(sb.root)})
-
-    def _workspace_file(self, query: str) -> None:
-        sb = self._state.workspace
-        if sb is None:
-            return self._json({"error": "no active workspace"}, status=400)
-        from urllib.parse import parse_qs
-
-        rel = (parse_qs(query).get("path") or [""])[0]
-        try:
-            p = sb.resolve(rel)
-        except ValueError as e:
-            return self._json({"error": str(e)}, status=400)
-        if sb.is_protected(p):
-            return self._json({"error": "protected file"}, status=403)
-        if not p.is_file():
-            return self._json({"error": "not a file"}, status=400)
-        content = p.read_text(encoding="utf-8", errors="replace")
-        self._json({"path": rel, "content": content})
 
     def _project_new(self) -> None:
         if self._state.busy:

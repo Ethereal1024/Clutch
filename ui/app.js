@@ -45,8 +45,9 @@ function addEvent(ev) {
     // merge the completion badge onto the last agent text line instead of a new block
     if (lastTextEl) {
       appendStatusBadge(lastTextEl, ev.status);
-      return;
     }
+    refreshTree(); // a run finished; reflect any new files in the tree
+    return;
   }
   if (ev.type === "tool_call" && ev.tool_call_id) {
     let args = {};
@@ -180,23 +181,29 @@ function renderEvent(ev) {
       body.className = "body md-plain";
 
       if (isRead) {
-        // exploration reads are collapsed to a one-line summary; click to expand
+        // exploration reads: a summary row with a ▸/▾ toggle; click to expand/collapse
         const path = call.args.path || "";
         const lines = ev.content ? ev.content.split("\n").length : 0;
         const summary = toolName === "list_dir"
-          ? `↳ ${ev.content ? ev.content.split("\n").length : 0} entries`
-          : `↳ read ${path || "file"} (${lines} lines)`;
-        body.textContent = summary;
-        body.title = "click to expand";
+          ? `${ev.content ? ev.content.split("\n").length : 0} entries`
+          : `read ${path || "file"} (${lines} lines)`;
+        const toggle = document.createElement("span");
+        toggle.className = "read-toggle";
+        toggle.textContent = "▸";
+        const row = document.createElement("div");
+        row.className = "read-row";
+        row.appendChild(toggle);
+        const lbl = document.createElement("span");
+        lbl.textContent = summary;
+        row.appendChild(lbl);
+        wrap.appendChild(row);
         const full = document.createElement("pre");
         full.className = "read-detail hidden";
         full.textContent = ev.content;
-        wrap.appendChild(body);
         wrap.appendChild(full);
-        body.onclick = () => {
-          full.classList.toggle("hidden");
-          body.textContent = full.classList.contains("hidden") ? summary : "";
-          stream.scrollTop = stream.scrollHeight;
+        row.onclick = () => {
+          const expanded = full.classList.toggle("hidden");
+          toggle.textContent = expanded ? "▸" : "▾";
         };
         break;
       }
@@ -425,27 +432,8 @@ function renderNode(node, depth) {
     };
     children.style.display = "none";
     el.appendChild(children);
-  } else {
-    el.onclick = () => previewFile(node.path);
   }
   return el;
-}
-
-async function previewFile(path) {
-  try {
-    const r = await fetch("/api/workspace/file?path=" + encodeURIComponent(path));
-    const data = await r.json();
-    if (!r.ok) return;
-    let prev = stream.parentElement.querySelector(".file-preview");
-    if (prev) prev.remove();
-    prev = document.createElement("div");
-    prev.className = "file-preview";
-    prev.innerHTML = `<div class="event"><div class="hdr">preview · ${escapeHtml(path)}</div></div>`;
-    const pre = document.createElement("pre");
-    pre.textContent = data.content;
-    prev.appendChild(pre);
-    stream.parentElement.appendChild(prev);
-  } catch (e) {}
 }
 
 // ---- SSE live stream + session list ----
@@ -578,5 +566,4 @@ $("#open-project-btn").addEventListener("click", pickAndOpenProject);
 $("#welcome-new").addEventListener("click", startNewProject);
 $("#welcome-open").addEventListener("click", pickAndOpenProject);
 
-setInterval(refreshTree, 4000);
 connectSSE();

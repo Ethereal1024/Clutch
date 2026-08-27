@@ -172,15 +172,13 @@ def _run_server_test() -> int:
         finals = [e for e in events if e["type"] == "final"]
         check(finals and finals[-1]["status"] == "completed", "final status completed")
 
-        # 5. workspace tree + file after run
+        # 5. workspace tree after run (file preview endpoint was removed)
         st, body = http_get(f"{base_url}/api/workspace/tree")
         data = json.loads(body)
         check(st == 200 and data.get("root"), "workspace tree has root")
         names = [n["name"] for n in data.get("tree", [])]
         check("hello.txt" in names, "workspace shows created file")
         check(clc.name not in names, ".clc file hidden from workspace tree")
-        st, body = http_get(f"{base_url}/api/workspace/file?path=hello.txt")
-        check(st == 200 and "hi" in body, "workspace file readable")
 
         # 6. .clc persisted the conversation
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
