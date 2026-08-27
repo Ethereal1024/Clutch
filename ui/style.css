@@ -23,6 +23,7 @@
   --yellow: #b59a6a;
   --font-display: "Space Grotesk", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "JetBrains Mono", "PingFang SC", "Microsoft YaHei", monospace;
+  --code-bg: #0c0e12; /* deeper than --bg, gives scroll/code blocks a visible edge */
 }
 
 * { box-sizing: border-box; }
@@ -178,12 +179,12 @@ main { display: flex; flex: 1; min-height: 0; }
 .event .body ul, .event .body ol { margin: 6px 0; padding-left: 20px; }
 .event .body li { margin: 3px 0; }
 .event .body code {
-  background: #0b0e13; padding: 1px 5px; border-radius: 4px;
+  background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
   font-family: monospace; font-size: 12px;
 }
 .event .body pre {
-  background: #0b0e13; padding: 8px 10px; border-radius: 6px;
-  overflow-x: auto; margin: 8px 0; line-height: 1.45;
+  background: var(--code-bg); padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border); overflow-x: auto; margin: 8px 0; line-height: 1.45;
 }
 .event .body pre code { background: none; padding: 0; }
 .event .body blockquote {
@@ -216,7 +217,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .tool-args-btn { color: var(--muted); cursor: pointer; font-size: 11px; user-select: none; }
 .tool-args-btn:hover { color: var(--text); }
 .tool-args-detail {
-  background: #0b0e13; padding: 6px 8px; border-radius: 4px;
+  background: var(--code-bg); padding: 6px 8px; border-radius: 4px;
+  border: 1px solid var(--border);
   font-family: var(--font-mono); font-size: 11px; overflow-x: auto;
   margin-top: 2px; flex-basis: 100%;
 }
@@ -238,7 +240,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .thinking-row:hover { color: var(--muted); }
 .thinking-label { color: #69707e; font-style: italic; }
 .thinking-full {
-  background: #0b0e13; padding: 8px 10px; border-radius: 6px;
+  background: var(--code-bg); padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
   margin: 4px 0 0; font-family: var(--font-mono); font-size: 12px;
   max-height: 320px; overflow-y: auto; color: #69707e; white-space: pre-wrap;
   line-height: 1.5;
@@ -264,7 +267,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.tool_result.read .body:hover { color: var(--text); }
 .read-detail.hidden { display: none; }
 .read-detail {
-  background: #0b0e13; padding: 8px 10px; border-radius: 6px;
+  background: var(--code-bg); padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
   overflow-x: auto; margin: 4px 0 0; font-family: var(--font-mono); font-size: 12px;
   max-height: 320px; overflow-y: auto;
 }
@@ -292,7 +296,7 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.final { margin-top: 8px; }
 
 .args { font-size: 12px; color: var(--muted); cursor: pointer; }
-.args pre { background: #0b0e13; padding: 6px 8px; border-radius: 4px; margin: 4px 0 0; overflow-x: auto; }
+.args pre { background: var(--code-bg); padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border); margin: 4px 0 0; overflow-x: auto; }
 
 #right {
   width: 320px;
@@ -375,7 +379,8 @@ main { display: flex; flex: 1; min-height: 0; }
 /* unified diff view */
 .diff-file { color: var(--green); font-weight: 600; }
 .diff-view {
-  background: #0b0e13; padding: 6px 0; border-radius: 6px;
+  background: var(--code-bg); padding: 6px 0; border-radius: 6px;
+  border: 1px solid var(--border);
   margin: 4px 0 0; font-family: var(--font-mono); font-size: 12px;
   max-height: 320px; overflow-y: auto; line-height: 1.45;
 }
