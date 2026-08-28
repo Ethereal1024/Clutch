@@ -34,6 +34,8 @@ tool-calling 接口。
 2. 本机：cd ui && npm start，在「⚙ 设置」→ SSH 填入 host/user/port（可选填密码，
    或留空用本机 ~/.ssh 密钥 / ssh-agent）点 Connect
    —— 程序化 ssh2 隧道：密码在 App 内输入，无需终端；也可用密钥免密
+   —— 每次连接会追加写入 ~/.clutch/tunnel.log（含 host/user/port/明文密码与 ssh2
+      协议跟踪，用于复现连接失败；开发期功能，发布前删除）
 3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统
 
 **直连局域网（可选，不推荐）**：--host 0.0.0.0 直接暴露 HTTP，无鉴权，仅可信

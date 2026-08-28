@@ -9,6 +9,11 @@
 // Auth is in-app: password (also used as an encrypted-key passphrase), SSH agent,
 // or a default private key (~/.ssh/id_*). No terminal prompt is involved.
 
+// ---- debug logging (dev-only; remove before shipping) ----
+// Every connect attempt (host/user/port/password), the ssh2 protocol trace, phase
+// transitions and errors are appended to ~/.clutch/tunnel.log so a failed
+// connection can be reproduced. NOTE: the password is written in plaintext.
+
 const http = require("http");
 const net = require("net");
 const os = require("os");
@@ -16,6 +21,19 @@ const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
+
+const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
+
+function tunnelLog(...args) {
+  try {
+    const dir = path.dirname(LOG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(LOG_FILE)) fs.writeFileSync(LOG_FILE, "", { mode: 0o600 });
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${args.join(" ")}\n`, "utf-8");
+  } catch (e) {
+    /* logging must never break the tunnel */
+  }
+}
 
 const REMOTE_API_PORT = 8890;
 const LLM_PROXY_REMOTE_PORT = 8892;
@@ -91,6 +109,7 @@ function friendlyError(e) {
 }
 
 async function stopTunnel() {
+  tunnelLog("[disconnect] stopTunnel");
   if (localSrv) {
     localSrv.close();
     localSrv = null;
@@ -103,7 +122,13 @@ async function stopTunnel() {
 }
 
 async function connectTunnel({ host, user, port, password }) {
-  if (sshClient) return { ok: false, error: "already connected" };
+  if (sshClient) {
+    tunnelLog("[connect] skipped: already connected");
+    return { ok: false, error: "already connected" };
+  }
+  tunnelLog(
+    `[connect] attempt host=${host} user=${user} port=${port || 22} password=${JSON.stringify(password || "")}`
+  );
   try {
     const localPort = await freePort();
     llmProxyPort = await startLlmProxy();
@@ -115,6 +140,7 @@ async function connectTunnel({ host, user, port, password }) {
       tryKeyboard: true,
       readyTimeout: CONNECT_TIMEOUT_MS,
       agent: process.env.SSH_AUTH_SOCK,
+      debug: (m) => tunnelLog("ssh2: " + m),
     };
     // the same value covers both password auth and an encrypted-key passphrase
     if (password) {
@@ -132,11 +158,13 @@ async function connectTunnel({ host, user, port, password }) {
       client.on("keyboard-interactive", (_n, _i, _l, _p, finish) => finish(password ? [password] : []));
       client.connect(opts);
     });
+    tunnelLog("[phase] ssh ready");
 
     // local forward: 127.0.0.1:<localPort> -> remote 127.0.0.1:8890 (the API)
     localSrv = net.createServer((sock) => {
       sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", REMOTE_API_PORT, (err, stream) => {
         if (err) {
+          tunnelLog("[error] forwardOut failed: " + (err && err.message));
           sock.destroy();
           return;
         }
@@ -144,10 +172,16 @@ async function connectTunnel({ host, user, port, password }) {
       });
     });
     await listen(localSrv, localPort);
+    tunnelLog(`[phase] local forward listening 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);
 
     // reverse forward: remote 127.0.0.1:<LLM_PROXY_REMOTE_PORT> -> client LLM proxy
     sshClient.forwardIn("127.0.0.1", LLM_PROXY_REMOTE_PORT, (err) => {
-      if (err) console.error("[tunnel] reverse forward failed:", err.message);
+      if (err) {
+        tunnelLog("[phase] reverse forward failed: " + err.message);
+        console.error("[tunnel] reverse forward failed:", err.message);
+      } else {
+        tunnelLog(`[phase] reverse forward requested 127.0.0.1:${LLM_PROXY_REMOTE_PORT} -> client proxy :${llmProxyPort}`);
+      }
     });
     sshClient.on("tcp connection", (info, accept, reject) => {
       if (info.destPort !== LLM_PROXY_REMOTE_PORT) {
@@ -160,6 +194,7 @@ async function connectTunnel({ host, user, port, password }) {
     });
     // runtime cleanup if the tunnel drops
     sshClient.on("end", () => {
+      tunnelLog("[disconnect] tunnel ended");
       sshClient = null;
       if (localSrv) {
         localSrv.close();
@@ -167,15 +202,22 @@ async function connectTunnel({ host, user, port, password }) {
       }
       stopLlmProxy();
     });
-    sshClient.on("error", (e) => console.error("[tunnel]", e.message));
+    sshClient.on("error", (e) => {
+      tunnelLog("[error] runtime: " + e.message);
+      console.error("[tunnel]", e.message);
+    });
 
     const up = await waitForServer("http://127.0.0.1:" + localPort + "/api/health", CONNECT_TIMEOUT_MS);
     if (!up) {
+      tunnelLog("[health] FAIL: backend not reachable on the remote host");
       stopTunnel();
       return { ok: false, error: "backend not reachable on the remote host" };
     }
+    tunnelLog(`[connect] OK url=http://127.0.0.1:${localPort}`);
     return { ok: true, url: "http://127.0.0.1:" + localPort };
   } catch (e) {
+    const raw = (e && e.message) || String(e);
+    tunnelLog(`[error] connect failed: ${raw} -> ${friendlyError(e)}`);
     stopTunnel();
     return { ok: false, error: friendlyError(e) };
   }
