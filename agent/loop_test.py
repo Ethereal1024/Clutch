@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 from .config import Config
 from .events import EventLog
 from .loop import Agent
+from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import Workspace
 
@@ -73,13 +74,6 @@ def _resp(content: str = "", tool_calls: List[Dict[str, Any]] = None, finish: st
 
 def _tool_call(name: str, arguments: str, cid: str = "call_1") -> Dict[str, Any]:
     return {"id": cid, "type": "function", "function": {"name": name, "arguments": arguments}}
-
-
-def check(cond: bool, name: str) -> None:
-    if not cond:
-        print(f"FAIL: {name}")
-        sys.exit(1)
-    print(f"ok:   {name}")
 
 
 def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: EventLog | None = None) -> Agent:

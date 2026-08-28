@@ -15,16 +15,10 @@ from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
 from .events import AssistantMessageEvent, EventLog, ToolResultEvent
+from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import Workspace
 from .skills import load_skill_library
-
-
-def check(cond: bool, name: str) -> None:
-    if not cond:
-        print(f"FAIL: {name}")
-        sys.exit(1)
-    print(f"ok:   {name}")
 
 
 def main() -> None:

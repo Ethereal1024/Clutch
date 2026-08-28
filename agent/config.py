@@ -56,3 +56,13 @@ class Config:
     skills_dir: Path = Path(__file__).resolve().parent / "skills"
     # Permission: confirm risky actions with the user (opencode-style), not a sandbox
     non_interactive: bool = False  # auto-allow (used by eval harness / unattended runs)
+
+    def truncate(self, text: str) -> str:
+        """Head/tail trim oversized output; the middle is replaced with an omitted note."""
+        if len(text) <= self.output_limit:
+            return text
+        omitted = len(text) - self.output_head - self.output_tail
+        return (
+            f"{text[:self.output_head]}\n... [{omitted} chars omitted] ...\n"
+            f"{text[-self.output_tail:]}"
+        )

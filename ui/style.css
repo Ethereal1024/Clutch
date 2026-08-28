@@ -78,9 +78,15 @@ body { display: flex; flex-direction: column; }
 .badge.running { color: #0F0F10; background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
 .badge.waiting { color: #0F0F10; background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+:root { --arrival: cubic-bezier(.23, 1, .32, 1); }
 .badge.finished { color: var(--text); border-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
-  .badge.running, .badge.waiting { animation: none; }
+  * { transition: none !important; animation: none !important; }
 }
 
 button {
@@ -93,8 +99,10 @@ button {
   font-family: var(--font-display);
   font-size: 13px;
   letter-spacing: 0.02em;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
 }
 button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+button:active:not(:disabled) { transform: translateY(1px); }
 button:disabled { opacity: 0.4; cursor: default; }
 button:focus-visible, #task-input:focus-visible, .modal-box input:focus-visible, select:focus-visible {
   outline: 2px solid var(--accent);
@@ -126,10 +134,11 @@ main { display: flex; flex: 1; min-height: 0; }
   border-radius: 0;
   color: var(--text);
   padding: 10px;
-  resize: vertical;
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.5;
+  overflow-y: auto;
+  transition: height .18s ease;
 }
 #task-input:focus { outline: none; border-color: var(--accent); }
 .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
@@ -142,7 +151,10 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .open-progress.hidden { display: none; }
 .open-progress-track { flex: 1; height: 3px; background: var(--border); }
-.open-progress-fill { height: 100%; width: 0%; background: var(--accent); }
+.open-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .18s linear; }
+.open-progress {
+  animation: fadeIn .2s ease-out;
+}
 .open-progress-label {
   font-family: var(--font-mono); font-size: 12px; color: var(--muted);
   min-width: 3.5ch; text-align: right;
@@ -165,6 +177,7 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 #stream { position: relative; }
 
+#stream.replaying .event { animation: none; }
 .event {
   position: relative;
   margin: 0 0 12px;
@@ -172,6 +185,7 @@ main { display: flex; flex: 1; min-height: 0; }
   border: none;
   background: none;
   counter-increment: step;
+  animation: fadeSlideUp .2s var(--arrival);
 }
 .event::before {
   /* node symbol: a square marker threaded through the connector line,
@@ -266,6 +280,7 @@ main { display: flex; flex: 1; min-height: 0; }
   border: 1px solid var(--border);
   font-family: var(--font-mono); font-size: 12px; overflow-x: auto;
   margin-top: 4px; flex-basis: 100%;
+  animation: fadeSlideUp .2s var(--arrival);
 }
 .event.tool_result::before { background: var(--accent); }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
@@ -290,6 +305,7 @@ main { display: flex; flex: 1; min-height: 0; }
   margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; color: var(--muted); white-space: pre-wrap;
   line-height: 1.5;
+  animation: fadeSlideUp .2s var(--arrival);
 }
 .thinking-full.hidden { display: none; }
 
@@ -300,6 +316,7 @@ main { display: flex; flex: 1; min-height: 0; }
   color: var(--accent);
   font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.35em;
+  animation: fadeIn .26s ease-out;
 }
 .completion::before, .completion::after {
   content: ""; flex: 1; height: 1px;
@@ -311,6 +328,7 @@ main { display: flex; flex: 1; min-height: 0; }
   margin: -24px 0 28px; padding-left: 16px;
   color: var(--muted); font-family: var(--font-mono);
   font-size: 12px; line-height: 1.5;
+  animation: fadeIn .26s ease-out;
 }
 
 /* exploration reads: collapsed summary, expand on click */
@@ -320,6 +338,7 @@ main { display: flex; flex: 1; min-height: 0; }
   border: 1px solid var(--border);
   overflow-x: auto; margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; flex-basis: 100%;
+  animation: fadeSlideUp .2s var(--arrival);
 }
 
 .read-row {
@@ -405,6 +424,7 @@ main { display: flex; flex: 1; min-height: 0; }
   align-items: center;
   justify-content: center;
   z-index: 100;
+  animation: fadeIn .2s ease-out;
 }
 .modal.hidden { display: none; }
 .modal-box {
@@ -416,6 +436,7 @@ main { display: flex; flex: 1; min-height: 0; }
   width: 420px;
   max-width: 90vw;
   box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.6);
+  animation: fadeSlideUp .2s var(--arrival);
 }
 .modal-box h3 { margin: 0 0 16px; font-family: var(--font-display); font-weight: 600; font-size: 16px; }
 .modal-box label { display: block; margin-bottom: 8px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }

@@ -89,17 +89,7 @@ def run_verify(workspace: Workspace, config: Config, command: str) -> dict:
 def _format_output(config: Config, r) -> List[str]:
     parts = []
     if r.stdout:
-        parts.append("stdout:\n" + _truncate(config, r.stdout))
+        parts.append("stdout:\n" + config.truncate(r.stdout))
     if r.stderr:
-        parts.append("stderr:\n" + _truncate(config, r.stderr))
+        parts.append("stderr:\n" + config.truncate(r.stderr))
     return parts
-
-
-def _truncate(config: Config, text: str) -> str:
-    if len(text) <= config.output_limit:
-        return text
-    omitted = len(text) - config.output_head - config.output_tail
-    return (
-        f"{text[:config.output_head]}\n... [{omitted} chars omitted] ...\n"
-        f"{text[-config.output_tail:]}"
-    )

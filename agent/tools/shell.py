@@ -77,9 +77,9 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
 
     parts = []
     if r.stdout:
-        parts.append(f"stdout:\n{_truncate(config, r.stdout)}")
+        parts.append(f"stdout:\n{config.truncate(r.stdout)}")
     if r.stderr:
-        parts.append(f"stderr:\n{_truncate(config, r.stderr)}")
+        parts.append(f"stderr:\n{config.truncate(r.stderr)}")
 
     if r.returncode != 0:
         body = "\n".join(parts) if parts else "(no output)"
@@ -121,13 +121,3 @@ def _syntax_check(path: Path) -> str | None:
     if r.returncode != 0:
         return f"syntax check failed:\n{r.stderr.strip()[:2000]}"
     return None
-
-
-def _truncate(config: Config, text: str) -> str:
-    if len(text) <= config.output_limit:
-        return text
-    omitted = len(text) - config.output_head - config.output_tail
-    return (
-        f"{text[:config.output_head]}\n... [{omitted} chars omitted] ...\n"
-        f"{text[-config.output_tail:]}"
-    )

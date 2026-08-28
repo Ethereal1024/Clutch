@@ -19,16 +19,10 @@ from pathlib import Path
 
 from .config import Config
 from .server import Broadcaster, RunState, build
+from .testsupport import check
 
 BASE = Path(__file__).resolve().parent.parent
 UI_DIR = BASE / "ui"
-
-
-def check(cond: bool, name: str) -> None:
-    if not cond:
-        print(f"FAIL: {name}")
-        sys.exit(1)
-    print(f"ok:   {name}")
 
 
 def http_get(url: str) -> tuple[int, str]:

@@ -289,7 +289,7 @@ function appendCompletion(status, summary) {
     note.textContent = summary;
     stream.appendChild(note);
   }
-  stream.scrollTop = stream.scrollHeight;
+  stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
 }
 
 function renderEvent(ev) {
@@ -418,6 +418,7 @@ async function run() {
   if (!task || busy) return;
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
+  els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
   // runs append to the active project's conversation
   const payload = { task };
   try {
@@ -443,6 +444,18 @@ els.run.addEventListener("click", () => (busy ? stop() : run()));
 els.task.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
 });
+
+// ---- task input auto-grow (grows as you type, shrinks back after sending) ----
+const TASK_BASE_H = els.task.offsetHeight; // default 3-row height
+function autoGrowTask() {
+  if (!els.task.value.trim()) {
+    els.task.style.height = TASK_BASE_H + "px";
+    return;
+  }
+  els.task.style.height = "auto";
+  els.task.style.height = Math.min(els.task.scrollHeight, Math.round(window.innerHeight * 0.3)) + "px";
+}
+els.task.addEventListener("input", autoGrowTask);
 
 // ---- API settings modal ----
 const modal = $("#settings-modal");
@@ -623,6 +636,7 @@ async function openProject(path) {
       throw new Error(err.error || r.status);
     }
     clearStream();
+    stream.classList.add("replaying"); // history reconstruction: no entrance motion
     prog.classList.remove("hidden");
     setPct(0);
     // /api/project/open streams NDJSON: meta, progress, event, done
@@ -659,9 +673,12 @@ async function openProject(path) {
     }
     if (started) setPct(100);
     prog.classList.add("hidden");
+    stream.classList.remove("replaying");
     refreshTree();
+    stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
   } catch (e) {
     prog.classList.add("hidden");
+    stream.classList.remove("replaying");
     alert("Failed to open project: " + e.message);
   }
 }
