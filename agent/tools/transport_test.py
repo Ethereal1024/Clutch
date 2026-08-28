@@ -105,6 +105,18 @@ def main() -> int:
             check(True, "remote list raises NotADirectoryError")
         r = ws.run("pwd", 30.0)
         check(r.code == 0 and r.stdout.strip() == rtmp, "remote run cwd = root")
+
+        # oversized run_command: rejected up front (TransportError) instead of killing
+        # the tunnel — and it never reaches the bridge (max_cmd_len stays small)
+        try:
+            ws.run("echo " + ("x" * 20000), 30.0)
+            check(False, "oversized command raises TransportError")
+        except TransportError:
+            check(True, "oversized command raises TransportError before exec")
+        check(
+            MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200,
+            f"rejected command never reached the bridge (max {MockBridge.max_cmd_len} bytes)",
+        )
         ws.protect(Path(rtmp) / "sub" / "secret.txt")
         ws.write("sub/secret.txt", "x")
         check("secret.txt" not in ws.list("sub"), "remote list hides protected files")

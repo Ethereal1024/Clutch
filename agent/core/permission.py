@@ -71,16 +71,20 @@ class PermissionEvaluator:
     rules: List[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
     def evaluate(self, tool: str, args_repr: str, workspace: Workspace) -> Action:
-        # For run_command, rules match the actual command, not the JSON envelope.
-        # Extract it so `rm ...` etc. is matched correctly.
+        # Rules match the ACTUAL argument they guard, not the whole JSON envelope:
+        # run_command matches the command; write_file matches the target path.
+        # Matching against the full args would flag e.g. a report whose CONTENT
+        # contains "~" or "../" — content is data, not a path, and must never
+        # prompt a write it doesn't touch.
         match_text = args_repr
-        if tool == "run_command":
+        if tool in ("run_command", "write_file"):
             import json as _json
 
+            key = "command" if tool == "run_command" else "path"
             try:
                 parsed = _json.loads(args_repr)
-                if isinstance(parsed, dict) and "command" in parsed:
-                    match_text = parsed["command"]
+                if isinstance(parsed, dict) and key in parsed:
+                    match_text = parsed[key]
             except (ValueError, TypeError):
                 pass
         # last matching rule wins (opencode findLast semantics)
@@ -107,10 +111,12 @@ class PermissionGate:
         evaluator: PermissionEvaluator,
         on_ask: Optional[Callable[[str, str, str, str], None]] = None,
         auto_allow: bool = False,
+        ask_timeout: float = 60.0,
     ) -> None:
         self.evaluator = evaluator
         self.on_ask = on_ask  # (request_id, tool, args_repr, reason) -> None
         self.auto_allow = auto_allow
+        self.ask_timeout = ask_timeout
         self._pending: dict[str, threading.Event] = {}
         self._decisions: dict[str, bool] = {}
         self._lock = threading.Lock()
@@ -135,7 +141,12 @@ class PermissionGate:
         reason = f"permission {action}: {tool} with args {args_repr[:120]}"
         if self.on_ask:
             self.on_ask(request_id, tool, args_repr, reason)
-        if not ev.wait(timeout=60):
+        if not ev.wait(timeout=self.ask_timeout):
+            # clean up so a late /api/permission/respond finds nothing (404) and
+            # no stale request lingers after the run has moved on
+            with self._lock:
+                self._pending.pop(request_id, None)
+                self._decisions.pop(request_id, None)
             raise PermissionRequired(request_id, tool, args_repr, "permission request timed out")
         allowed = self._decisions.get(request_id, False)
         with self._lock:

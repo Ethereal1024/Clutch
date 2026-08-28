@@ -215,6 +215,12 @@ class Handler(BaseHTTPRequestHandler):
     def _stop(self) -> None:
         if self._state.cancel:
             self._state.cancel.set()
+        # a run may be blocked on a permission prompt (gate.require waits): Stop
+        # must unblock it, otherwise the agent stays stuck until the 60s timeout
+        gate = self._state.gate
+        if gate is not None:
+            for rid in list(gate.pending_ids()):
+                gate.resolve(rid, False)
         self._json({"status": "cancelling"})
 
     def _settings(self) -> None:

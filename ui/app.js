@@ -176,6 +176,9 @@ function addEvent(ev) {
     return;
   }
   if (ev.type === "final") {
+    // the run is over: any open permission prompt is stale — dismiss it so a
+    // late approve can't flip the UI back into a stuck "running" state
+    if (pendingPerm) closePerm();
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree

@@ -18,7 +18,7 @@ import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .transport import CommandResult, LocalTransport, SshTransport, Transport
+from .transport import CommandResult, LocalTransport, SshTransport, Transport, TransportError
 
 
 def shq(s: str) -> str:
@@ -113,8 +113,11 @@ class LocalWorkspace(Workspace):
 
 # ponytail: minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a
 # single exec request over ~8KB (measured on the test router: 7929 B ok, 9636 B
-# died). Every remote write/append is chunked well below that.
+# died). Every remote write/append is chunked well below that, and run_command
+# commands are capped so an oversized inline command fails cleanly instead of
+# killing the tunnel (which would teach the model a hard limit).
 _EXEC_CHUNK_BYTES = 3500
+_EXEC_MAX_COMMAND_BYTES = 6000
 
 
 class RemoteWorkspace(Workspace):
@@ -131,7 +134,17 @@ class RemoteWorkspace(Workspace):
         super().__init__(root, transport=SshTransport(bridge_url))
 
     def run(self, command: str, timeout: float) -> CommandResult:
-        return self._transport.run(f"cd {shq(str(self.root))} && {command}", timeout)
+        cmd = f"cd {shq(str(self.root))} && {command}"
+        # pre-check: an oversized exec command would make a minimal sshd drop the
+        # connection. Fail cleanly up front (guide the model to write_file) rather
+        # than let the tunnel die and teach the model a hard size limit.
+        size = len(cmd.encode("utf-8"))
+        if size > _EXEC_MAX_COMMAND_BYTES:
+            raise TransportError(
+                f"command too long to send over the remote transport ({size} bytes); "
+                "write large content with write_file and run it"
+            )
+        return self._transport.run(cmd, timeout)
 
     def read(self, path: str) -> str:
         p = self.resolve(path)

@@ -261,6 +261,29 @@ def main() -> None:
             pe.evaluate("write_file", '{"path": "../x.txt"}', ws) == "ask",
             "permission asks on escaping write",
         )
+        # write_file rules must match the PATH, not the content: a report whose text
+        # contains "~" (e.g. "16:07 UTC ~ 16:09 UTC") must not trigger an ask — that
+        # was teaching the model a fake "large-file limit" via permission timeouts
+        check(
+            pe.evaluate("write_file", '{"content": "16:07 UTC ~ 16:09 UTC", "path": "report.md"}', ws) == "allow",
+            "write_file content with ~ does not prompt (path-only matching)",
+        )
+        check(
+            pe.evaluate("write_file", '{"content": "x", "path": "~/x"}', ws) == "ask",
+            "write_file path with ~ still asks",
+        )
+
+        # 9b. gate: a timed-out ask is cleaned up, so a late resolve finds nothing
+        from agent.core.permission import PermissionGate, PermissionRequired
+
+        gate = PermissionGate(evaluator=pe, ask_timeout=0.2)
+        try:
+            gate.require("run_command", '{"command": "rm -rf /tmp/x"}', ws)
+            check(False, "permission ask raises PermissionRequired on timeout")
+        except PermissionRequired:
+            check(True, "permission ask raises on timeout")
+        check(len(gate.pending_ids()) == 0, "timed-out ask cleaned from pending")
+        check(gate.resolve("perm-1", True) is False, "late resolve after timeout finds nothing")
 
     # 10. project file: .clc round-trip + protected visibility
     from agent.project import create_project, open_project
