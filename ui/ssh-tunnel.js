@@ -43,7 +43,12 @@ let sftpHandle = null;
 let lastProbe = null;
 let currentUrl = null;
 let wasDisconnected = true;
+let lastStrategy = null;
+let lastHome = null;
+let healTimer = null;
 const endListeners = new Set();
+
+const HEAL_INTERVAL_MS = 15000;
 
 function tunnelLog(...args) {
   try {
@@ -242,11 +247,16 @@ async function installServer(probe, { force } = {}) {
     strategy = force;
   } else if (process.env.CLUTCH_TUNNEL_FORCE) {
     strategy = process.env.CLUTCH_TUNNEL_FORCE;
+  } else if (sameArch) {
+    // unified: same-arch remotes use the self-contained bundle (embedded, known-good
+    // client python) — the remote's own python3 with downloaded wheels has already
+    // been seen segfaulting (native extension crash) on a NAS
+    strategy = "bundle";
   } else if (probe.python) {
-    // client downloads the exact wheels for the target; the remote never runs pip
+    // cross-arch: client downloads the exact wheels for the target; remote never runs pip
     strategy = "pylibs";
   } else {
-    strategy = sameArch ? "bundle" : "assist";
+    strategy = "assist";
   }
   if (strategy === "assist") {
     return {
@@ -259,7 +269,10 @@ async function installServer(probe, { force } = {}) {
 
   const home = probe.home || "~";
   const dir = `${home}/.clutch-server`;
+  lastStrategy = strategy;
+  lastHome = home;
 
+  let reinstalled = false;
   if (!installed) {
     await remoteExec(`mkdir -p ${dir}`);
     if (strategy === "bundle") {
@@ -289,15 +302,23 @@ async function installServer(probe, { force } = {}) {
     }
     await remoteExec(`echo ${version} > ${dir}/VERSION && echo ${strategy} > ${dir}/STRATEGY`);
     tunnelLog("[bootstrap] installed");
+    reinstalled = true;
   }
 
-  // ensure it is running
+  // ensure the server runs the CURRENT code: a reinstall must not leave a stale
+  // process running, so force a restart when the install changed
   const run = await remoteExec(remoteRunningCmd(probe));
-  if (!run.stdout.includes("UP")) {
+  if (reinstalled || !run.stdout.includes("UP")) {
+    if (reinstalled) {
+      tunnelLog("[bootstrap] killing stale server before restart");
+      await remoteExec(stopServerCmd(strategy));
+    }
     tunnelLog("[bootstrap] starting server");
-    await remoteExec(startCommand(strategy, home));
+    // short timeout: the start command backgrounds the server; do not wait up to
+    // the default 60s for its exec channel to close
+    await remoteExec(startCommand(strategy, home), 10000);
     // give it a moment to bind
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 12; i++) {
       const chk = await remoteExec(remoteRunningCmd(probe));
       if (chk.stdout.includes("UP")) break;
       await new Promise((r) => setTimeout(r, 500));
@@ -308,8 +329,17 @@ async function installServer(probe, { force } = {}) {
   return { installed: true, strategy };
 }
 
+function stopServerCmd(strategy) {
+  // bracket guards avoid the pkill matching the command's own shell
+  if (strategy === "bundle") {
+    return "pkill -f '[a]gent-server' 2>/dev/null; true";
+  }
+  return "pkill -f '[a]gent.server' 2>/dev/null; true";
+}
+
 async function stopTunnel() {
   tunnelLog("[disconnect] stopTunnel");
+  stopHealing();
   if (localSrv) {
     localSrv.close();
     localSrv = null;
@@ -345,6 +375,59 @@ function onTunnelEnd(cb) {
 
 function tunnelStatus() {
   return { active: Boolean(sshClient), url: currentUrl };
+}
+
+// ---- dead-backend self-healing ----
+// The tunnel can stay up while the remote agent.server dies (e.g. a native crash
+// like the segfault seen on the NAS). Periodically health-check the forward and,
+// if the backend is gone, restart it via the tunnel; if that fails, tear the
+// tunnel down so the renderer falls back to a clear state.
+
+async function collectRemoteDiagnostics() {
+  try {
+    const r = await remoteExec(
+      "echo '--- server log ---'; tail -30 /tmp/clutch-server.log 2>/dev/null; " +
+        "echo '--- ps ---'; ps aux | grep -E '[a]gent' | head -5; " +
+        "echo '--- dmesg segfault ---'; (dmesg 2>/dev/null | grep -iE 'segfault|python3' | tail -3) || echo '(dmesg needs root)'"
+    );
+    tunnelLog("[heal] remote diagnostics:\n" + (r.stdout || "").slice(0, 1500));
+  } catch (e) {
+    tunnelLog("[heal] diagnostics failed: " + e.message);
+  }
+}
+
+async function restartRemoteServer() {
+  if (!sshClient || !lastStrategy || !lastHome) return false;
+  tunnelLog("[heal] restarting remote server");
+  await remoteExec(stopServerCmd(lastStrategy));
+  await remoteExec(startCommand(lastStrategy, lastHome));
+  return waitForServer(currentUrl + "/api/health", 20000);
+}
+
+async function healOnce() {
+  if (!sshClient || !currentUrl) return;
+  const up = await waitForServer(currentUrl + "/api/health", 3000);
+  if (up) return;
+  tunnelLog("[heal] backend unreachable through the live tunnel");
+  const ok = await restartRemoteServer();
+  if (!ok) {
+    tunnelLog("[heal] restart did not recover; collecting diagnostics + tearing down");
+    await collectRemoteDiagnostics();
+    await stopTunnel(); // triggers onEnd -> renderer clears the stale URL
+  } else {
+    tunnelLog("[heal] backend recovered");
+  }
+}
+
+function startHealing() {
+  stopHealing();
+  healTimer = setInterval(healOnce, HEAL_INTERVAL_MS);
+}
+function stopHealing() {
+  if (healTimer) {
+    clearInterval(healTimer);
+    healTimer = null;
+  }
 }
 
 async function connectTunnel({ host, user, port, password }) {
@@ -406,6 +489,7 @@ async function connectTunnel({ host, user, port, password }) {
     });
     sshClient.on("end", () => {
       tunnelLog("[disconnect] tunnel ended");
+      stopHealing();
       sshClient = null;
       currentUrl = null;
       if (localSrv) {
@@ -481,6 +565,7 @@ async function establishForwardAndHealth(localPort) {
   tunnelLog(`[connect] OK url=http://127.0.0.1:${localPort}`);
   currentUrl = "http://127.0.0.1:" + localPort;
   wasDisconnected = false;
+  startHealing();
   return { ok: true, url: currentUrl };
 }
 
