@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 
 from ..config import Config
@@ -112,12 +111,10 @@ def _blocked_reason(config: Config, command: str) -> str | None:
 def _syntax_check(path: Path) -> str | None:
     if not path.is_file():
         return f"syntax check failed: file not found: {path}"
-    r = subprocess.run(
-        [sys.executable, "-m", "py_compile", str(path)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if r.returncode != 0:
-        return f"syntax check failed:\n{r.stderr.strip()[:2000]}"
+    # compile() in-process: no subprocess/interpreter to invoke, so it also works
+    # under PyInstaller (where sys.executable is the bundle, not a python binary)
+    try:
+        compile(path.read_text(encoding="utf-8"), str(path), "exec")
+    except SyntaxError as e:
+        return f"syntax check failed: {e.msg} (line {e.lineno})"
     return None

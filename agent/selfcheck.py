@@ -88,6 +88,12 @@ def main() -> None:
         check(r["error"], "run_command blocks .. path escape")
         r = reg.execute(sb, config, "run_command", {"command": "ls -la"})
         check(not r["error"], "run_command allows normal relative commands")
+        reg.execute(sb, config, "write_file", {"path": "good.py", "content": "print(1)\n"})
+        r = reg.execute(sb, config, "run_command", {"command": "python3 good.py"})
+        check(not r["error"] and "1" in r["content"], "syntax check passes good python")
+        reg.execute(sb, config, "write_file", {"path": "bad.py", "content": "if True print(1)\n"})
+        r = reg.execute(sb, config, "run_command", {"command": "python3 bad.py"})
+        check(r["error"] and "syntax check failed" in r["content"], "syntax check rejects bad python")
 
         # 5. doom-loop detection
         term = Terminator(config)
