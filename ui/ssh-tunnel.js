@@ -40,6 +40,7 @@ let sshClient = null;
 let localSrv = null;
 let llmProxyPort = null;
 let sftpHandle = null;
+let sftpUnavailable = false; // the current host has no SFTP subsystem: use exec uploads
 let lastProbe = null;
 let currentUrl = null;
 let wasDisconnected = true;
@@ -123,6 +124,9 @@ function friendlyError(e) {
   if (m.includes("ECONNREFUSED") || m.includes("ENETUNREACH")) {
     return "cannot reach the SSH host";
   }
+  if (m.includes("Unable to exec")) {
+    return "remote shell failed to run a command — the connection dropped or the device's SSH channel limit was hit";
+  }
   return m;
 }
 
@@ -161,10 +165,14 @@ function remoteExec(command, timeoutMs = 60000) {
 function getSftp() {
   // one sftp subsystem reused across uploads: opening one per file blows past
   // sshd's MaxSessions and the channel open gets refused
+  if (sftpUnavailable) return Promise.reject(new Error("SFTP unavailable on this host"));
   if (sftpHandle) return Promise.resolve(sftpHandle);
   return new Promise((resolve, reject) => {
     sshClient.sftp((err, sftp) => {
-      if (err) return reject(err);
+      if (err) {
+        sftpUnavailable = true; // don't reopen a doomed subsystem for every file
+        return reject(err);
+      }
       sftpHandle = sftp;
       resolve(sftp);
     });
@@ -180,19 +188,39 @@ function uploadFile(localPath, remotePath) {
   }).catch(() => uploadFileViaExec(localPath, remotePath)); // no SFTP subsystem? exec it
 }
 
+function checkExec(r) {
+  if (r.code !== 0) {
+    throw new Error(`remote upload failed (exit ${r.code}): ${(r.stderr || r.stdout || "").slice(0, 300).trim()}`);
+  }
+}
+
 // Fallback upload for remotes whose sshd has no SFTP subsystem (e.g. minimal
-// embedded devices): transfer the file as chunked base64 through exec. base64's
-// alphabet has no quotes, and the remote paths here are internal, so the command
-// is safe to build inline.
+// embedded devices). Text files go through a quoted heredoc (no base64 needed,
+// which minimal devices often lack); binary files fall back to chunked base64.
+// Every exec's exit code is checked so a missing tool fails loudly instead of
+// silently writing nothing.
 function uploadFileViaExec(localPath, remotePath, timeoutMs = 120000) {
-  const data = fs.readFileSync(localPath).toString("base64");
+  const buf = fs.readFileSync(localPath);
+  if (!buf.includes(0)) {
+    const content = buf.toString("utf8");
+    // a quoted heredoc always appends one newline; strip the file's own trailing
+    // newline so newline-terminated files are written back byte-for-byte (a file
+    // with no trailing newline gets one appended — harmless for source files)
+    const body = content.endsWith("\n") ? content.slice(0, -1) : content;
+    const delim = "CLUTCH_EOF_" + Date.now().toString(36);
+    const cmd = `cat > '${remotePath}' <<'${delim}'\n${body}\n${delim}`;
+    return remoteExec(cmd, timeoutMs).then(checkExec);
+  }
+  const data = buf.toString("base64");
   let first = true;
   let p = Promise.resolve();
   for (let i = 0; i < data.length; i += 30000) {
     const part = data.slice(i, i + 30000);
     const op = first ? ">" : ">>";
     first = false;
-    p = p.then(() => remoteExec(`echo '${part}' | base64 -d ${op} '${remotePath}'`, timeoutMs));
+    p = p.then(() =>
+      remoteExec(`echo '${part}' | base64 -d ${op} '${remotePath}'`, timeoutMs).then(checkExec)
+    );
   }
   return p;
 }
@@ -275,6 +303,15 @@ async function installServer(probe, { force, progress } = {}) {
     strategy = "pylibs";
   } else {
     strategy = "assist";
+  }
+  // hard reject: no python3 AND no matching-arch bundle on a niche platform — the
+  // LLM-guided install would have to build a Python runtime from source, which is
+  // impractical; fail fast with a clear reason instead of staging into a doomed run
+  if (strategy === "assist" && !["x86_64", "aarch64", "armv7l", "armv6l", "amd64", "i386", "i686"].includes(probe.arch)) {
+    return {
+      ok: false,
+      error: `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc). Clutch needs a Python 3 runtime, and there is no matching-architecture bundle to install; building one from source on this platform is impractical. Install python3 on the device or use a different host.`,
+    };
   }
   if (strategy === "assist") {
     return {
@@ -482,6 +519,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     tunnelLog("[connect] existing tunnel is dead or still starting; resetting");
     await stopTunnel();
   }
+  sftpUnavailable = false; // SFTP capability is per connection/host
   tunnelLog(
     `[connect] attempt host=${host} user=${user} port=${port || 22} password=${JSON.stringify(password || "")}`
   );
@@ -560,6 +598,11 @@ async function connectTunnel({ host, user, port, password }, progress) {
     const probe = parseProbe(probeOut.stdout);
     if (progress) progress("install");
     const boot = await installServer(probe, { progress });
+    if (boot && boot.ok === false) {
+      // hard reject (e.g. unsupportable target): no staging, no assist
+      tunnelLog("[bootstrap] rejected: " + boot.error);
+      return { ok: false, error: boot.error };
+    }
     if (boot.needsAssist) {
       // keep the connection open for the LLM-guided installer; stage the source
       tunnelLog("[bootstrap] needsAssist: " + boot.error);
