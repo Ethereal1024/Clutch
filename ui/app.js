@@ -672,6 +672,7 @@ function openSettings() {
   sshHost.value = localStorage.getItem("clutch_ssh_host") || "";
   sshUser.value = localStorage.getItem("clutch_ssh_user") || "";
   sshPort.value = localStorage.getItem("clutch_ssh_port") || "22";
+  sshPassword.value = ""; // never persist the SSH password
   renderSshStatus();
   keyInput.focus();
 }
@@ -713,6 +714,7 @@ modal.addEventListener("click", (e) => {
 const sshHost = $("#ssh-host-input");
 const sshUser = $("#ssh-user-input");
 const sshPort = $("#ssh-port-input");
+const sshPassword = $("#ssh-password-input");
 const sshStatus = $("#ssh-status");
 
 function renderSshStatus() {
@@ -735,9 +737,14 @@ async function connectSsh() {
     sshStatus.textContent = "host and user are required";
     return;
   }
-  sshStatus.textContent = "connecting (an ssh password prompt, if any, appears in the terminal)…";
+  sshStatus.textContent = "connecting…";
   try {
-    const res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
+    const res = await window.clutchTunnel.connect({
+      host,
+      user,
+      port: Number(port),
+      password: sshPassword.value,
+    });
     if (res.ok) {
       localStorage.setItem("clutch_ssh_host", host);
       localStorage.setItem("clutch_ssh_user", user);

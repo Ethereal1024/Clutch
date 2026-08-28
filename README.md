@@ -27,9 +27,9 @@ tool-calling 接口。
 1. 远端：uv run python -m agent.server
    --base-url http://127.0.0.1:8892/v1
    —— 绑定 127.0.0.1、无需外网、无需 key；LLM 走客户端反代（经 SSH 反向隧道）
-2. 本机：cd ui && npm start，在「⚙ 设置」→ SSH 填入 host/user/port 点 Connect
-   —— 建立 SSH 隧道（-L 转发 API、-R 转发 LLM 反代），密码提示出现在启动终端的
-   命令行（建议用密钥免密）
+2. 本机：cd ui && npm start，在「⚙ 设置」→ SSH 填入 host/user/port（可选填密码，
+   或留空用本机 ~/.ssh 密钥 / ssh-agent）点 Connect
+   —— 程序化 ssh2 隧道：密码在 App 内输入，无需终端；也可用密钥免密
 3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统
 
 **直连局域网（可选，不推荐）**：--host 0.0.0.0 直接暴露 HTTP，无鉴权，仅可信
