@@ -273,17 +273,43 @@ def main() -> None:
             "write_file path with ~ still asks",
         )
 
-        # 9b. gate: a timed-out ask is cleaned up, so a late resolve finds nothing
+        # 9b. gate: an ask blocks until resolved (no timeout — the model must never
+        # see "permission request timed out"); resolve(False) unblocks as a deny
+        import threading as _threading
+
         from agent.core.permission import PermissionGate, PermissionRequired
 
-        gate = PermissionGate(evaluator=pe, ask_timeout=0.2)
+        gate = PermissionGate(evaluator=pe)
+        outcome: dict = {}
+
+        def _require() -> None:
+            try:
+                gate.require("run_command", '{"command": "rm -rf /tmp/x"}', ws)
+                outcome["raised"] = None
+            except PermissionRequired as e:
+                outcome["raised"] = e.reason
+
+        t = _threading.Thread(target=_require, daemon=True)
+        t.start()
+        import time as _time
+
+        _time.sleep(0.2)
+        check(len(gate.pending_ids()) == 1, "ask stays pending while waiting for the user")
+        check(gate.resolve("perm-1", False), "pending ask resolved by the UI")
+        t.join(timeout=2)
+        check(outcome.get("raised") == "denied by user", "denied ask unblocks the agent with 'denied by user'")
+
+        # 9c. no UI attached (on_ask returns False): the gate denies instead of hanging
+        gate2 = PermissionGate(evaluator=pe, on_ask=lambda *a: False)
         try:
-            gate.require("run_command", '{"command": "rm -rf /tmp/x"}', ws)
-            check(False, "permission ask raises PermissionRequired on timeout")
-        except PermissionRequired:
-            check(True, "permission ask raises on timeout")
-        check(len(gate.pending_ids()) == 0, "timed-out ask cleaned from pending")
-        check(gate.resolve("perm-1", True) is False, "late resolve after timeout finds nothing")
+            gate2.require("run_command", '{"command": "rm -rf /tmp/x"}', ws)
+            check(False, "no-UI ask is denied, not executed")
+        except PermissionRequired as e:
+            check(
+                "no user interface" in e.reason,
+                f"no-UI ask denies with a clear reason ({e.reason!r})",
+            )
+        check(len(gate2.pending_ids()) == 0, "no-UI ask leaves no pending entry")
 
     # 10. project file: .clc round-trip + protected visibility
     from agent.project import create_project, open_project

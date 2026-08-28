@@ -49,6 +49,11 @@ class Broadcaster:
         for q in subs:
             q.put(event)
 
+    def count(self) -> int:
+        """Number of live SSE subscribers (is anyone watching the UI?)."""
+        with self._lock:
+            return len(self._subs)
+
 
 class RunState:
     """Holds the live agent, cancel flag, and the active project.

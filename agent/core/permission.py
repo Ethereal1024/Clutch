@@ -102,21 +102,24 @@ class PermissionGate:
 
     The agent calls `require(tool, args, workspace)`: it evaluates permission and,
     if the action is "ask", blocks on a threading.Event until the UI responds via
-    `resolve(request_id, allow)`. The evaluator lives in the loop; the gate is
-    supplied by the server so the UI can actually resolve requests.
+    `resolve(request_id, allow)` — it waits as long as the user needs (no timeout,
+    so the model never sees a spurious "permission request timed out"). The only
+    ways out of the wait: the user allows/denies, the server's Stop resolves every
+    pending ask as denied, or `on_ask` reports that no UI is attached (returns
+    False), in which case the action is denied rather than left hanging.
     """
 
     def __init__(
         self,
         evaluator: PermissionEvaluator,
-        on_ask: Optional[Callable[[str, str, str, str], None]] = None,
+        on_ask: Optional[Callable[[str, str, str, str], Optional[bool]]] = None,
         auto_allow: bool = False,
-        ask_timeout: float = 60.0,
     ) -> None:
         self.evaluator = evaluator
-        self.on_ask = on_ask  # (request_id, tool, args_repr, reason) -> None
+        # (request_id, tool, args_repr, reason) -> None to block, or False when no
+        # UI is attached to confirm (the gate then denies instead of hanging)
+        self.on_ask = on_ask
         self.auto_allow = auto_allow
-        self.ask_timeout = ask_timeout
         self._pending: dict[str, threading.Event] = {}
         self._decisions: dict[str, bool] = {}
         self._lock = threading.Lock()
@@ -139,15 +142,14 @@ class PermissionGate:
             self._pending[request_id] = ev
             self._decisions[request_id] = False
         reason = f"permission {action}: {tool} with args {args_repr[:120]}"
-        if self.on_ask:
-            self.on_ask(request_id, tool, args_repr, reason)
-        if not ev.wait(timeout=self.ask_timeout):
-            # clean up so a late /api/permission/respond finds nothing (404) and
-            # no stale request lingers after the run has moved on
+        if self.on_ask and self.on_ask(request_id, tool, args_repr, reason) is False:
+            # nobody can see/answer the prompt (renderer disconnected): deny rather
+            # than wait forever on an invisible request
             with self._lock:
                 self._pending.pop(request_id, None)
                 self._decisions.pop(request_id, None)
-            raise PermissionRequired(request_id, tool, args_repr, "permission request timed out")
+            raise PermissionRequired(request_id, tool, args_repr, "no user interface connected to confirm this action")
+        ev.wait()  # no timeout: the prompt stays up until the user confirms
         allowed = self._decisions.get(request_id, False)
         with self._lock:
             self._pending.pop(request_id, None)

@@ -171,12 +171,17 @@ class Handler(BaseHTTPRequestHandler):
         if project is None:
             return self._json({"error": "no project open; create or open one first"}, status=400)
 
-        def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> None:
+        def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
             # publish the permission request to the UI; the agent blocks until
-            # the UI replies via /api/permission/respond
+            # the UI replies via /api/permission/respond. With no live SSE
+            # subscriber the prompt is invisible, so report that back and let the
+            # gate deny instead of blocking forever on an unseen request.
+            if self._broadcaster.count() == 0:
+                return False
             self._broadcaster.publish(
                 PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason)
             )
+            return True
 
         try:
             agent = self._app.start_task(task, project, on_ask=_on_ask, cancel=None, config=config)
