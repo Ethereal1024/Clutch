@@ -33,10 +33,10 @@ tool-calling 接口。
    或留空用本机 ~/.ssh 密钥 / ssh-agent）点 Connect
    —— 程序化 ssh2 隧道：密码在 App 内输入，无需终端；也可用密钥免密
    —— **自动安装**（对齐 VSCode Remote）：按远端环境自适应——
-      有 python3+外网 → venv+pip 装源码；有 python3 无外网且同架构 → 便携
-      site-packages；无 python3 且同架构 → 自包含二进制（PyInstaller 现构建）；
-      其余极端环境（异架构/异 libc）→ 客户端 LLM 引导安装（模型在远端执行命令，
-      装 python3/pip 并启动）
+      远端有 python3 → 客户端按其 os/架构/libc/python 版本**下载对应 wheel 打包上传**
+      （`PYTHONPATH` 直跑，**远端永不运行 pip/venv、无需外网**，跨平台亦然）；
+      无 python3 且同架构 → 自包含二进制（PyInstaller 现构建）；
+      其余极端环境 → 客户端 LLM 引导安装（模型在远端执行命令，装 python3/pip 并启动）
    —— 启动命令固定带 --base-url http://127.0.0.1:8892/v1（LLM 走客户端反代）
    —— 每次连接会追加写入 ~/.clutch/tunnel.log（含 host/user/port/明文密码与 ssh2
       协议跟踪，用于复现连接失败；开发期功能，发布前删除）

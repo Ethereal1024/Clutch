@@ -1,13 +1,13 @@
 // Bundle builder + cache for the remote clutch-server.
 //
-// Two self-contained artifacts, both cached in ~/.clutch/bundles/ keyed by
-// <platform>-<git HEAD>:
+// Two self-contained artifacts, cached in ~/.clutch/bundles/ keyed by the target
+// platform + git HEAD:
 //   - agent-server-<os>-<arch>-<ver>        PyInstaller onefile (no python needed)
-//   - agent-pylibs-<os>-<arch>-<ver>.tar.gz source + venv site-packages (runs on a
-//     remote python3 of the same minor/arch, no internet required)
+//   - agent-pylibs-<os>-<arch>-<libc>-<pyver>-<ver>.tar.gz source + site-packages
+//     downloaded for the TARGET platform (client runs pip; the remote never does)
 //
-// Cross-platform remotes are not pre-built: the adaptive installer (venv+pip or
-// the client-side LLM assist) handles them instead of an infinite build matrix.
+// Anything the deterministic paths can't cover goes to the client-side LLM
+// assisted installer instead of an infinite build matrix.
 
 const { spawnSync } = require("child_process");
 const os = require("os");
@@ -29,11 +29,6 @@ function platformTag() {
   return `${OS_MAP[os.platform()] || os.platform()}-${ARCH_MAP[os.arch()] || os.arch()}`;
 }
 
-function clientPythonMinor() {
-  const r = spawnSync(path.join(REPO, ".venv", "bin", "python"), ["-c", "import sys;print('%d.%d'%sys.version_info[:2])"]);
-  return r.stdout.toString().trim() || "";
-}
-
 function ensureBundle(version = getVersion()) {
   const out = path.join(CACHE, `agent-server-${platformTag()}-${version}`);
   if (fs.existsSync(out)) return out;
@@ -46,16 +41,29 @@ function ensureBundle(version = getVersion()) {
   return out;
 }
 
-function ensurePyLibsTar(version = getVersion()) {
-  const out = path.join(CACHE, `agent-pylibs-${platformTag()}-${version}.tar.gz`);
+// target: { os, arch, libc, pyver } from the remote probe. Downloads the exact
+// wheels for that platform on the client and packages agent + site-packages.
+function ensurePyLibsTar(version, target) {
+  const key = `${target.os}-${target.arch}-${target.libc}-${target.pyver}-${version}`;
+  const out = path.join(CACHE, `agent-pylibs-${key}.tar.gz`);
   if (fs.existsSync(out)) return out;
   fs.mkdirSync(CACHE, { recursive: true });
-  const r = spawnSync("bash", [path.join(REPO, "scripts", "build-pylibs-tar.sh"), version, out], {
-    cwd: REPO,
-    stdio: "inherit",
-  });
+  const r = spawnSync(
+    "bash",
+    [
+      path.join(REPO, "scripts", "build-pylibs-tar.sh"),
+      key,
+      out,
+      target.os,
+      target.arch,
+      target.libc,
+      target.pyver,
+    ],
+    { cwd: REPO, stdio: "inherit" }
+  );
   if (r.status !== 0) throw new Error("pylibs tar build failed");
   return out;
 }
 
-module.exports = { getVersion, platformTag, clientPythonMinor, ensureBundle, ensurePyLibsTar };
+module.exports = { getVersion, platformTag, ensureBundle, ensurePyLibsTar };
+

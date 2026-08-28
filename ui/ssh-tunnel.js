@@ -29,7 +29,7 @@ const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
-const { getVersion, platformTag, clientPythonMinor, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
+const { getVersion, platformTag, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
 
 const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
 const REMOTE_API_PORT = 8890;
@@ -180,6 +180,7 @@ const PROBE_CMD = [
   'echo "__HOME__"; echo "$HOME"',
   'echo "__OSREL__"; (grep -E "^(NAME|VERSION)=" /etc/os-release 2>/dev/null || true) | head -2',
   'echo "__PY__"; (command -v python3 >/dev/null && python3 -c "import sys;print(\'%d.%d\'%sys.version_info[:2])") || echo NONE',
+  'echo "__LIBC__"; (ldd --version 2>&1 | head -1 | grep -qi musl && echo musl) || ([ -f /etc/alpine-release ] && echo musl) || (ldd --version 2>&1 | head -1 | grep -qE "GLIBC|glibc|GNU libc" && echo glibc) || echo unknown',
   'echo "__VER__"; (cat "$HOME/.clutch-server/VERSION" 2>/dev/null) || echo NONE',
   'echo "__STRATEGY__"; (cat "$HOME/.clutch-server/STRATEGY" 2>/dev/null) || echo NONE',
   'echo "__ART__"; (test -x "$HOME/.clutch-server/agent-server" && echo bundle || true); (test -x "$HOME/.clutch-server/venv/bin/python" && echo pip || true); (test -d "$HOME/.clutch-server/site-packages" && echo pylibs || true)',
@@ -199,6 +200,7 @@ function parseProbe(out) {
     home: section("__HOME__"),
     osrel: section("__OSREL__"),
     python: section("__PY__") === "NONE" ? "" : section("__PY__"),
+    libc: section("__LIBC__"),
     installedVersion: section("__VER__"),
     installedStrategy: section("__STRATEGY__"),
     artifacts: arts,
@@ -212,9 +214,6 @@ function startCommand(strategy, home) {
   const nohup = "nohup setsid ";
   if (strategy === "bundle") {
     return `${nohup}${home}/.clutch-server/agent-server ${base} >/tmp/clutch-server.log 2>&1 </dev/null &`;
-  }
-  if (strategy === "pip") {
-    return `${nohup}${home}/.clutch-server/venv/bin/python -m agent.server ${base} >/tmp/clutch-server.log 2>&1 </dev/null &`;
   }
   // pylibs
   return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.server ${base} >/tmp/clutch-server.log 2>&1 </dev/null &`;
@@ -231,9 +230,8 @@ function remoteRunningCmd(probe) {
 async function installServer(probe, { force } = {}) {
   const version = getVersion();
   const sameArch = probe.arch === platformTag().split("-")[1];
-  const samePy = probe.python === clientPythonMinor();
   tunnelLog(
-    `[bootstrap] probe os=${probe.os} arch=${probe.arch} py=${probe.python || "none"} net=${probe.internet} sameArch=${sameArch} samePy=${samePy}`
+    `[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} py=${probe.python || "none"} sameArch=${sameArch}`
   );
 
   let strategy;
@@ -242,14 +240,15 @@ async function installServer(probe, { force } = {}) {
   } else if (process.env.CLUTCH_TUNNEL_FORCE) {
     strategy = process.env.CLUTCH_TUNNEL_FORCE;
   } else if (probe.python) {
-    strategy = probe.internet ? "pip" : sameArch && samePy ? "pylibs" : "assist";
+    // client downloads the exact wheels for the target; the remote never runs pip
+    strategy = "pylibs";
   } else {
     strategy = sameArch ? "bundle" : "assist";
   }
   if (strategy === "assist") {
     return {
       needsAssist: true,
-      error: `unsupported remote environment (${probe.os}/${probe.arch}, python=${probe.python || "none"})`,
+      error: `unsupported remote environment (${probe.os}/${probe.arch}/${probe.libc || "?"}, python=${probe.python || "none"})`,
     };
   }
   const installed = probe.installedStrategy === strategy && probe.installedVersion === version && probe.artifacts.includes(strategy);
@@ -265,28 +264,25 @@ async function installServer(probe, { force } = {}) {
       tunnelLog(`[bootstrap] uploading bundle ${path.basename(artifact)}`);
       await uploadFile(artifact, `${dir}/agent-server`);
       await remoteExec(`chmod +x ${dir}/agent-server`);
-    } else if (strategy === "pylibs") {
-      const artifact = ensurePyLibsTar(version);
+    } else {
+      // pylibs: build the target-platform site-packages on the client, then upload
+      let artifact;
+      try {
+        artifact = ensurePyLibsTar(version, {
+          os: probe.os,
+          arch: probe.arch,
+          libc: probe.libc || "unknown",
+          pyver: probe.python,
+        });
+      } catch (e) {
+        tunnelLog("[bootstrap] pylibs build failed: " + e.message);
+        return { needsAssist: true, error: "cannot obtain wheels for target: " + e.message };
+      }
       tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
       await uploadFile(artifact, `${dir}/pylibs.tar.gz`);
       await remoteExec(
         `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${dir}')" && rm -f ${dir}/pylibs.tar.gz`
       );
-    } else {
-      // pip: upload the source tree + pyproject, build a venv, pip install (needs internet)
-      tunnelLog("[bootstrap] pip strategy: uploading source, installing into a venv");
-      await remoteExec(`mkdir -p ${dir}/src`);
-      await uploadDir(path.join(__dirname, "..", "agent"), `${dir}/src/agent`);
-      await uploadFile(path.join(__dirname, "..", "pyproject.toml"), `${dir}/src/pyproject.toml`);
-      const pi = await remoteExec(
-        `cd ${dir} && python3 -m venv venv && venv/bin/pip install --quiet src 2>&1 | tail -3`,
-        300000
-      );
-      if (pi.code !== 0) {
-        const detail = (pi.stderr || pi.stdout || "exec timed out").trim().slice(0, 400);
-        tunnelLog(`[bootstrap] pip install failed (exit ${pi.code}): ${detail}`);
-        return { needsAssist: true, error: `remote pip install failed: ${detail}` };
-      }
     }
     await remoteExec(`echo ${version} > ${dir}/VERSION && echo ${strategy} > ${dir}/STRATEGY`);
     tunnelLog("[bootstrap] installed");
@@ -461,7 +457,11 @@ async function runAssist() {
     probe: lastProbe,
   });
   tunnelLog(`[assist] result ok=${r.ok}${r.error ? " " + r.error : ""}`);
-  if (!r.ok) return r;
+  if (!r.ok) {
+    // tear the connection down so a retry starts clean (no stale "already connected")
+    stopTunnel();
+    return r;
+  }
   try {
     lastProbe = null;
     const localPort = await freePort();

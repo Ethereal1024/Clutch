@@ -18,11 +18,24 @@ const fs = require("fs");
 const { ProxyAgent } = require("proxy-agent");
 
 const UPSTREAM = process.env.CLUTCH_LLM_UPSTREAM || "https://api.deepseek.com";
-const API_KEY = process.env.DEEPSEEK_API_KEY || process.env.CLUTCH_API_KEY || "";
 const UPSTREAM_TIMEOUT_MS = 90000;
 
 let server = null;
 let agent = null;
+
+// Client API key: env first, then the local settings file the app writes
+// (~/.clutch/settings.json), so a key saved in the UI is honored too.
+function getApiKey() {
+  const e = process.env;
+  if (e.DEEPSEEK_API_KEY || e.CLUTCH_API_KEY) return e.DEEPSEEK_API_KEY || e.CLUTCH_API_KEY;
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
+    if (d.api_key) return d.api_key;
+  } catch (e) {
+    /* no local settings */
+  }
+  return "";
+}
 
 function detectProxy() {
   const e = process.env;
@@ -73,7 +86,7 @@ function startLlmProxy() {
             headers: {
               "Content-Type": req.headers["content-type"] || "application/json",
               Accept: req.headers["accept"] || "application/json",
-              Authorization: "Bearer " + API_KEY,
+              Authorization: "Bearer " + getApiKey(),
               "Content-Length": body.length,
             },
           },
