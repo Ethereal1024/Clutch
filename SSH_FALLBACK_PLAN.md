@@ -437,7 +437,9 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
    非本层新增风险。
 5. **隧道断开**：桥 503，agent 的 `.clc` 追加或工具调用会抛 `TransportError`——运行终止。
    server 侧 `_worker` 已捕获并发布 error final（§3.8），UI 显示错误而非静默 idle；远端 `.clc`
-   停在缺失最后一条 durable 事件的中间状态，重连后可续跑。
+   停在缺失最后一条 durable 事件的**悬空批**（assistant 的 tool_calls 未配全 tool_result）。
+   恢复运行前 `derive_messages._repair_dangling` 会剥离不完整 tool_calls 块（保留有实文的
+   assistant 文本、丢弃残缺 tool 消息），续跑不再触发 OpenAI 400。
 6. **exec 命令长度上限（实测坑）**：最小 sshd（OpenWrt/dropbear）单条 exec 请求 ~8KB 就掉连接
    （实测 7,929B OK / 9,636B 断）。因此所有远端写/追加必须分块（`printf`，cap 3.5KB/exec），
    **绝不能在一条 exec 里塞大内容**（heredoc 也不行——内容整个在 exec 请求里）。

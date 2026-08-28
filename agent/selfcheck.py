@@ -14,7 +14,7 @@ from .config import Config
 from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
-from .events import AssistantMessageEvent, EventLog, ToolResultEvent
+from .events import AssistantMessageEvent, EventLog, ToolResultEvent, UserMessageEvent
 from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -41,6 +41,43 @@ def main() -> None:
     check(msgs[0]["role"] == "system", "derive_messages prepends system")
     check(msgs[2]["role"] == "assistant" and msgs[2]["tool_calls"][0]["id"] == "c1", "assistant tool_calls preserved")
     check(msgs[3] == {"role": "tool", "tool_call_id": "c1", "content": "file content"}, "tool result paired")
+
+    # 2b. dangling tool_calls (crash/connection drop left the .clc mid-batch) must not
+    # reach the API: the incomplete assistant block is stripped, the user turn survives
+    log = EventLog()
+    log.append(
+        AssistantMessageEvent(
+            content="",
+            tool_calls=[
+                {"id": "c1", "name": "read_file", "arguments": "{}"},
+                {"id": "c2", "name": "read_file", "arguments": "{}"},
+            ],
+        )
+    )
+    log.append(ToolResultEvent(tool_call_id="c1", content="only c1 landed"))
+    log.append(UserMessageEvent(content="continue"))
+    msgs = derive_messages(log, config, "test")
+    check(
+        not any(m["role"] == "assistant" and "tool_calls" in m for m in msgs),
+        "dangling tool_calls stripped from context",
+    )
+    check(not any(m["role"] == "tool" for m in msgs), "orphan/partial tool messages dropped")
+    check(msgs[-1] == {"role": "user", "content": "continue"}, "user turn survives dangling block")
+
+    # 2c. assistant with real text + dangling tool_calls keeps the text, drops the calls
+    log = EventLog()
+    log.append(
+        AssistantMessageEvent(
+            content="I started exploring",
+            tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}],
+        )
+    )
+    msgs = derive_messages(log, config, "test")
+    last_assistant = [m for m in msgs if m["role"] == "assistant"][-1]
+    check(
+        last_assistant.get("content") == "I started exploring" and "tool_calls" not in last_assistant,
+        "dangling block keeps text, drops tool_calls",
+    )
 
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
@@ -208,7 +245,6 @@ def main() -> None:
         )
 
     # 10. project file: .clc round-trip + protected visibility
-    from agent.events import UserMessageEvent
     from agent.project import create_project, open_project
 
     with tempfile.TemporaryDirectory() as ptmp:

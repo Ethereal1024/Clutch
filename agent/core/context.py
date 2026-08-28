@@ -44,7 +44,45 @@ def _to_messages(events: List[Any]) -> List[Dict[str, Any]]:
             msgs.append(msg)
         elif isinstance(ev, ToolResultEvent):
             msgs.append({"role": "tool", "tool_call_id": ev.tool_call_id, "content": ev.content})
-    return msgs
+    return _repair_dangling(msgs)
+
+
+def _repair_dangling(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Enforce the OpenAI pairing contract when the log ends mid-batch.
+
+    A crash / tunnel drop can persist an assistant's tool_calls without every
+    tool result (the .clc is appended one durable event at a time). The API
+    rejects an assistant message whose tool_calls are not each followed by a
+    tool message, so such incomplete blocks are stripped here: the assistant
+    loses its tool_calls (kept if it has real text/reasoning, dropped
+    otherwise) and the partial tool messages that belonged to the block are
+    discarded, along with any orphan tool message. Healthy logs are untouched.
+    """
+    out: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(msgs):
+        m = msgs[i]
+        if m["role"] == "assistant" and "tool_calls" in m:
+            ids = [tc["id"] for tc in m["tool_calls"]]
+            j = i + 1
+            responded: set[str] = set()
+            while j < len(msgs) and msgs[j]["role"] == "tool":
+                responded.add(msgs[j]["tool_call_id"])
+                j += 1
+            if all(tid in responded for tid in ids):
+                out.extend(msgs[i:j])  # complete block: keep as-is
+            else:
+                # interrupted block: drop tool_calls (and the partial tool msgs)
+                cleaned = {k: v for k, v in m.items() if k != "tool_calls"}
+                if cleaned.get("content") or cleaned.get("reasoning_content"):
+                    out.append(cleaned)
+            i = j
+        elif m["role"] == "tool":
+            i += 1  # orphan tool message (no owning assistant block): drop
+        else:
+            out.append(m)
+            i += 1
+    return out
 
 
 def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, Any]]:
