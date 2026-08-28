@@ -8,10 +8,11 @@ error texts live in agent/prompts/.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from ..config import Config
 from ..prompts import render
+from ..skills import cached_library
 from . import filesystem, shell
 from .workspace import Workspace
 
@@ -46,7 +47,7 @@ def _str_param(desc: str, required: bool = True) -> dict:
 
 
 def build_default_tools(config: Config) -> List[Tool]:
-    return [
+    tools = [
         Tool(
             name="read_file",
             description=(
@@ -114,6 +115,65 @@ def build_default_tools(config: Config) -> List[Tool]:
             func=lambda sb, cfg, **kw: shell.run_command(sb, cfg, **kw),
         ),
     ]
+
+    if config.enable_skills:
+        skill_tool = _build_load_skill(config)
+        if skill_tool is not None:
+            tools.append(skill_tool)
+    return tools
+
+
+def _build_load_skill(config: Config) -> Optional[Tool]:
+    """Model-chosen skill loader: enum of available skills; content pulled on demand."""
+    lib = cached_library(config.skills_dir)
+    if not lib.skills:
+        return None
+    names = lib.names()
+    return Tool(
+        name="load_skill",
+        description=(
+            "Load a skill's instructions into context. Available skills are listed in "
+            "the system prompt; call this ONLY when the task falls in a skill's domain, "
+            "otherwise ignore them. The loaded instructions then guide how you work."
+        ),
+        parameters={
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "skill to load, one of: " + ", ".join(names),
+                },
+                "file": _str_param(
+                    "optional file inside the skill directory to read instead of SKILL.md "
+                    "(e.g. resources/template.html)",
+                    required=False,
+                ),
+            },
+            "required": ["name"],
+        },
+        func=_load_skill,
+    )
+
+
+def _load_skill(workspace: Workspace, config: Config, name: str, file: str = "SKILL.md") -> dict:
+    """Serve SKILL.md (or a sub-file) from the skill's directory; error-as-data."""
+    lib = cached_library(config.skills_dir)
+    skill = lib.get(name)
+    if skill is None:
+        return {
+            "content": f"ERROR: unknown skill {name!r}; available: {', '.join(lib.names()) or 'none'}",
+            "error": True,
+        }
+    root = skill.dir.resolve()
+    path = (skill.dir / file).resolve()
+    if not path.is_relative_to(root):
+        return {"content": f"ERROR: skill file escapes skill directory: {file!r}", "error": True}
+    if not path.is_file():
+        return {"content": f"ERROR: no such file in skill {name!r}: {file!r}", "error": True}
+    try:
+        return {"content": path.read_text(encoding="utf-8", errors="replace")}
+    except OSError as e:
+        return {"content": f"ERROR: cannot read skill file: {e}", "error": True}
 
 
 class ToolRegistry:

@@ -85,9 +85,10 @@ def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, 
 
     system = render("system.md")
     if config.enable_skills:
-        skill_section = cached_library(config.skills_dir).to_system_section(task)
-        if skill_section:
-            system += "\n\n" + skill_section
+        # model-visible catalog: the model decides whether to load a skill
+        catalog = cached_library(config.skills_dir).to_catalog_section()
+        if catalog:
+            system += "\n\n" + catalog
 
     return [
         {"role": "system", "content": system},

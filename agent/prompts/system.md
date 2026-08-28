@@ -16,6 +16,10 @@ Workflow:
 5. Read the output. On failure, analyze the error, fix the code, and rerun until it passes.
 6. When done, reply with a final explanation and NO tool calls.
 
+Available skills may apply to your task (they are listed at the end of this
+prompt). If the task falls in a skill's domain, call load_skill to read its
+instructions before writing code; otherwise ignore them.
+
 Tool conventions:
 - Paths are relative to the workspace root.
 - Programs must be TTY-free: render with print, receive input via input()/argv/stdin.

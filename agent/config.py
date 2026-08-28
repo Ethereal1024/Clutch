@@ -51,7 +51,7 @@ class Config:
 
     # Runtime
     port: int = 8890
-    # Skills: on-demand domain knowledge injected into the system prompt
+    # Skills: catalog in the system prompt; model loads one on demand via load_skill
     enable_skills: bool = True
     skills_dir: Path = Path(__file__).resolve().parent / "skills"
     # Permission: confirm risky actions with the user (opencode-style), not a sandbox

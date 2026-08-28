@@ -114,16 +114,34 @@ def main() -> None:
         v = vterm2.verify(sb)
         check(not v.done and v.status == "verify_failed", "verify gate fails on failure")
 
-    # 7. skills: frontmatter parse + keyword match + task-driven injection
+    # 7. skills: catalog + load_skill (model-chosen; no keyword matching, no hardcoded skill)
     from pathlib import Path
 
     lib = load_skill_library(Path(__file__).resolve().parent / "skills")
-    check(len(lib.skills) >= 1, "skill library loads at least web-design")
-    matched = lib.match("build a landing page for our product with html and css")
-    check(any(s.name == "web-design" for s in matched), "web-design matches on frontend keywords")
-    check(lib.match("implement a sorting algorithm") == [], "unrelated task matches nothing")
-    section = lib.to_system_section("make a website")
-    check("app.test.js" in section, "skill content injected as system section")
+    check(len(lib.skills) >= 1, "skill library loads at least one skill")
+    first = lib.names()[0]
+    check(lib.get(first) is not None and bool(lib.get(first).content), "skill content retrievable by name")
+    check(lib.get("no-such-skill") is None, "unknown skill name returns None")
+    catalog = lib.to_catalog_section()
+    check(first in catalog and catalog.startswith("Available skills"), "catalog lists skill names")
+
+    from agent.core.context import derive_messages
+    from agent.events import EventLog
+
+    disabled = Config(enable_skills=False)
+    sys_off = derive_messages(EventLog(), disabled, "t")[0]["content"]
+    check("Available skills (call load_skill" not in sys_off, "no catalog when skills disabled")
+    check("load_skill" not in ToolRegistry(build_default_tools(disabled)).names(), "no load_skill tool when disabled")
+
+    with tempfile.TemporaryDirectory() as stmp:
+        sws = Workspace(stmp)
+        reg = ToolRegistry(build_default_tools(config))
+        r = reg.execute(sws, config, "load_skill", {"name": first})
+        check(not r.get("error") and bool(r.get("content")), "load_skill returns skill content")
+        r = reg.execute(sws, config, "load_skill", {"name": "no-such-skill"})
+        check(r.get("error"), "load_skill rejects unknown skill")
+        r = reg.execute(sws, config, "load_skill", {"name": first, "file": "../escape.txt"})
+        check(r.get("error"), "load_skill blocks path escape from skill dir")
 
     # 8. proxy: socks scheme must never crash the client (the user's environment bug)
     import os
