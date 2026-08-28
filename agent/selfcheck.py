@@ -18,7 +18,7 @@ from .events import AssistantMessageEvent, EventLog, ToolResultEvent
 from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import Workspace
+from .tools.workspace import LocalWorkspace
 
 
 def main() -> None:
@@ -44,7 +44,7 @@ def main() -> None:
 
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         try:
             sb.resolve("../outside.txt")
             check(False, "workspace blocks path escape")
@@ -131,7 +131,7 @@ def main() -> None:
     check("load_skill" not in ToolRegistry(build_default_tools(disabled)).names(), "no load_skill tool when disabled")
 
     with tempfile.TemporaryDirectory() as stmp:
-        sws = Workspace(stmp)
+        sws = LocalWorkspace(stmp)
         reg = ToolRegistry(build_default_tools(config))
         r = reg.execute(sws, config, "load_skill", {"name": first})
         check(not r["error"] and bool(r.get("content")), "load_skill returns skill content")
@@ -184,7 +184,7 @@ def main() -> None:
     from agent.core.permission import PermissionEvaluator
 
     with tempfile.TemporaryDirectory() as wtmp:
-        ws = Workspace(wtmp)
+        ws = LocalWorkspace(wtmp)
         pe = PermissionEvaluator()
         check(
             pe.evaluate("run_command", '{"command": "rm old.txt"}', ws) == "ask",
@@ -222,7 +222,7 @@ def main() -> None:
             [e.content for e in reloaded.events()] == ["hi", "there"],
             "project round-trips events",
         )
-        ws = Workspace(str(ptmp))
+        ws = LocalWorkspace(str(ptmp))
         ws.protect(proj.path)
         check(ws.is_protected(proj.path), "workspace protects .clc")
         reg = ToolRegistry(build_default_tools(config))

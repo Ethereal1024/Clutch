@@ -22,11 +22,12 @@ def read_file(workspace: Workspace, config: Config, path: str, max_chars: int = 
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
             return _result(f"ERROR: cannot read protected file: {path}", error=True)
-        if not p.is_file():
+        try:
+            text = workspace.read(str(p))
+        except FileNotFoundError:
             return _result(f"ERROR: not a file or missing: {path}", error=True)
-        text = p.read_text(encoding="utf-8", errors="replace")
         if len(text) > limit:
-            text = text[:limit] + f"\n... [truncated, file is {p.stat().st_size} bytes]"
+            text = text[:limit] + f"\n... [truncated, file is {len(text)} chars]"
         return _result(text)
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
@@ -41,10 +42,11 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
             return _result(f"ERROR: cannot write protected file: {path}", error=True)
         # capture the previous content (if any) to build a unified diff
         old = ""
-        if p.is_file():
-            old = p.read_text(encoding="utf-8", errors="replace")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        try:
+            old = workspace.read(str(p))
+        except FileNotFoundError:
+            pass
+        workspace.write(str(p), content)
         diff = _unified_diff(old, content, rel=p.relative_to(workspace.root))
         adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
         dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
@@ -68,9 +70,11 @@ def _unified_diff(old: str, new: str, rel: str) -> str:
 def list_dir(workspace: Workspace, config: Config, path: str = ".") -> dict:
     try:
         p: Path = workspace.resolve(path)
-        if not p.is_dir():
+        try:
+            entries = workspace.list(str(p))
+        except NotADirectoryError:
             return _result(f"ERROR: not a directory: {path}", error=True)
-        lines = sorted(f.name + ("/" if f.is_dir() else "") for f in workspace.visible_entries(p))
+        lines = sorted(entries)
         return _result("\n".join(lines) if lines else "(empty directory)")
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)

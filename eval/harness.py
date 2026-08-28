@@ -32,7 +32,7 @@ from agent.events import EventLog, event_to_json  # noqa: E402
 from agent.llm.client import LlmClient  # noqa: E402
 from agent.loop import Agent  # noqa: E402
 from agent.tools.registry import ToolRegistry, build_default_tools  # noqa: E402
-from agent.tools.workspace import Workspace  # noqa: E402
+from agent.tools.workspace import LocalWorkspace  # noqa: E402
 
 SCENARIOS_DIR = Path(__file__).resolve().parent
 
@@ -41,7 +41,7 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
     task = (scenario_dir / "task.md").read_text(encoding="utf-8").strip()
     verify_cmd = (scenario_dir / "verify.sh").read_text(encoding="utf-8").strip().splitlines()[0]
 
-    workspace = Workspace()
+    workspace = LocalWorkspace()
     # seed -> fresh workspace
     seed = scenario_dir / "seed"
     if seed.exists():

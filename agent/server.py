@@ -44,7 +44,7 @@ from .llm.client import LlmClient
 from .loop import Agent
 from .project import Project, create_project, open_project, read_header
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import Workspace
+from .tools.workspace import LocalWorkspace, Workspace
 
 
 def _settings_path() -> Path:
@@ -114,7 +114,7 @@ class RunState:
     def set_project(self, project: Project) -> Workspace:
         with self.lock:
             self.project = project
-            self.workspace = Workspace(str(project.workdir))
+            self.workspace = LocalWorkspace(str(project.workdir))
             self.workspace.protect(project.path)
             return self.workspace
 
@@ -221,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
         project = self._state.project
         if project is None:
             return self._json({"error": "no project open; create or open one first"}, status=400)
-        workspace = self._state.workspace or Workspace(str(project.workdir))
+        workspace = self._state.workspace or LocalWorkspace(str(project.workdir))
         workspace.protect(project.path)
 
         try:
@@ -504,7 +504,7 @@ def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hid
     """Lazy partial tree walk: list children only for the root, the currently
     expanded dirs, and their direct children (one level of lookahead). Deeper
     levels are fetched as they get expanded, so opening a big project never walks
-    the whole tree up front. show_hidden keeps dotfiles out of every level."""
+    the whole tree up front.     show_hidden keeps dotfiles out of every level."""
     expanded = set(expanded)
 
     def list_entries(p: Path) -> list[Path]:

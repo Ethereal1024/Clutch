@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from ..config import Config
+from ..tools.transport import TransportError
 from ..tools.workspace import Workspace
 
 
@@ -62,24 +63,17 @@ class Terminator:
 
 
 def run_verify(workspace: Workspace, config: Config, command: str) -> dict:
-    """Run the verify command as a raw subprocess (trusted input, no tool guards)."""
-    import subprocess
-
+    """Run the verify command through the workspace transport (trusted input, no tool guards)."""
     try:
-        r = subprocess.run(
-            command,
-            shell=True,
-            cwd=workspace.root,
-            capture_output=True,
-            text=True,
-            timeout=config.command_timeout,
-        )
-    except subprocess.TimeoutExpired:
+        r = workspace.run(command, config.command_timeout)
+    except TransportError as e:
+        if not e.timeout:
+            raise
         return {"content": f"ERROR: verify command timed out ({config.command_timeout:.0f}s)", "error": True}
     body = _format_output(config, r)
-    if r.returncode != 0:
+    if r.code != 0:
         text = "\n".join(body) if body else "(no output)"
-        return {"content": f"ERROR: verify command failed (exit {r.returncode})\n{text}", "error": True}
+        return {"content": f"ERROR: verify command failed (exit {r.code})\n{text}", "error": True}
     text = "OK: verify command succeeded"
     if body:
         text += "\n" + "\n".join(body)

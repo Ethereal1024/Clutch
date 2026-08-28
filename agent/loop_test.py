@@ -16,7 +16,7 @@ from .events import EventLog
 from .loop import Agent
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import Workspace
+from .tools.workspace import LocalWorkspace, Workspace
 
 
 class FakeLLM:
@@ -95,7 +95,7 @@ def main() -> None:
 
     # 0. no verify command (default): a generic task completes directly, no gate runs
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         no_gate = Config()  # verify_command defaults to ""
         fake = FakeLLM(
             responses=[_resp(content="done")],
@@ -113,7 +113,7 @@ def main() -> None:
 
     # 1. tool execution round trip: write a file, then no-tool answer -> verify passes
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
@@ -128,7 +128,7 @@ def main() -> None:
 
     # 2. verify gate fails (marker absent), model writes marker, then passes
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         gate_cfg = Config(verify_command="test -f ok.txt")
         fake = FakeLLM(
             responses=[
@@ -148,7 +148,7 @@ def main() -> None:
 
     # 3. budget abort: model keeps returning tool calls until turns exhausted
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         budget = Config(verify_command="echo ok", max_turns=3)
         fake = FakeLLM(
             responses=[
@@ -164,7 +164,7 @@ def main() -> None:
 
     # 4. doom-loop abort: 4 identical calls in a row
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("list_dir", '{"path": "."}')]),
@@ -179,7 +179,7 @@ def main() -> None:
 
     # 5. max-tokens truncation: drop tool calls, feed user message, model retries
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         fake = FakeLLM(
             responses=[
                 _resp(content="", tool_calls=[_tool_call("list_dir", "{}")], finish="length"),
@@ -193,7 +193,7 @@ def main() -> None:
 
     # 6. sink isolation: a throwing sink must not kill the agent
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         fake = FakeLLM(responses=[_resp(content="done")], fallback=_resp(content="done"))
 
         def bad_sink(_ev: Any) -> None:
@@ -213,7 +213,7 @@ def main() -> None:
     import threading
 
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         fake = FakeLLM(responses=[_resp(content="done")], fallback=_resp(content="done"))
         cancel = threading.Event()
         cancel.set()
@@ -232,7 +232,7 @@ def main() -> None:
     from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
 
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         always_allow = PermissionEvaluator(rules=[Rule("allow", "*", "")])
         gate = PermissionGate(evaluator=always_allow)
         fake = FakeLLM(
@@ -255,7 +255,7 @@ def main() -> None:
 
     # 9. permission gate: deny raises, tool error fed back, model recovers
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         deny_all = PermissionEvaluator(rules=[Rule("deny", "*", "")])
         gate = PermissionGate(evaluator=deny_all)
         fake = FakeLLM(
@@ -280,7 +280,7 @@ def main() -> None:
     import threading as _threading
 
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
         ask_all = PermissionEvaluator(rules=[Rule("ask", "*", "")])
         gate = PermissionGate(evaluator=ask_all)
         fake = FakeLLM(
@@ -313,7 +313,7 @@ def main() -> None:
     from agent.core.errors import AgentError
 
     with tempfile.TemporaryDirectory() as tmp:
-        sb = Workspace(tmp)
+        sb = LocalWorkspace(tmp)
 
         class BoomLLM:
             def stream(self, messages, tools):

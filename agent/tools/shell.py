@@ -11,10 +11,10 @@ Poka-yoke (make it hard for the model to misuse):
 from __future__ import annotations
 
 import shlex
-import subprocess
 from pathlib import Path
 
 from ..config import Config
+from .transport import TransportError
 from .workspace import Workspace
 
 INTERACTIVE_HINT = (
@@ -51,26 +51,19 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
                 p: Path = workspace.resolve(file_arg)
             except ValueError as e:
                 return {"content": f"ERROR: {e}", "error": True}
-            err = _syntax_check(p)
+            err = _syntax_check(workspace, str(p))
             if err:
                 return {"content": f"ERROR: {err}", "error": True}
 
     try:
-        # shell=True keeps shell semantics (&&, pipes, redirects) that the model
-        # expects; workspace cwd + the path guard above bound what it can touch.
-        r = subprocess.run(
-            command,
-            shell=True,
-            cwd=workspace.root,
-            capture_output=True,
-            text=True,
-            timeout=config.command_timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "content": f"ERROR: command timed out ({config.command_timeout:.0f}s). {INTERACTIVE_HINT}",
-            "error": True,
-        }
+        r = workspace.run(command, config.command_timeout)
+    except TransportError as e:
+        if e.timeout:
+            return {
+                "content": f"ERROR: command timed out ({config.command_timeout:.0f}s). {INTERACTIVE_HINT}",
+                "error": True,
+            }
+        return {"content": f"ERROR: execution failed: {e}", "error": True}
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
         return {"content": f"ERROR: execution failed: {e}", "error": True}
 
@@ -80,9 +73,9 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     if r.stderr:
         parts.append(f"stderr:\n{config.truncate(r.stderr)}")
 
-    if r.returncode != 0:
+    if r.code != 0:
         body = "\n".join(parts) if parts else "(no output)"
-        return {"content": f"ERROR: command failed (exit {r.returncode})\n{body}", "error": True}
+        return {"content": f"ERROR: command failed (exit {r.code})\n{body}", "error": True}
     if not parts:
         return {"content": "OK: command succeeded, no output."}
     return {"content": "OK: command succeeded\n" + "\n".join(parts)}
@@ -108,13 +101,15 @@ def _blocked_reason(config: Config, command: str) -> str | None:
     return None
 
 
-def _syntax_check(path: Path) -> str | None:
-    if not path.is_file():
+def _syntax_check(workspace: Workspace, path: str) -> str | None:
+    try:
+        text = workspace.read(path)
+    except FileNotFoundError:
         return f"syntax check failed: file not found: {path}"
     # compile() in-process: no subprocess/interpreter to invoke, so it also works
     # under PyInstaller (where sys.executable is the bundle, not a python binary)
     try:
-        compile(path.read_text(encoding="utf-8"), str(path), "exec")
+        compile(text, path, "exec")
     except SyntaxError as e:
         return f"syntax check failed: {e.msg} (line {e.lineno})"
     return None
