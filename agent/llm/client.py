@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from dataclasses import dataclass
@@ -63,7 +62,6 @@ class LlmClient:
         Returns a message dict with finish_reason attached; reasoning_content
         (DeepSeek thinking) is returned separately and never fed back to the model.
         """
-        last_err: LlmError | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
@@ -79,10 +77,8 @@ class LlmClient:
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = _classify(e)
                 if not last_err.retryable or attempt == MAX_RETRIES - 1:
-                    break
+                    raise last_err
                 time.sleep((2**attempt) + attempt * 0.5)
-        assert last_err is not None
-        raise last_err
 
 
     def stream(
@@ -99,7 +95,6 @@ class LlmClient:
           {"type":"tool_call_delta","index":..,"delta":str}
           {"type":"finish","reason":str,"content":str,"tool_calls":[{id,name,arguments}]}
         """
-        last_err: LlmError | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
@@ -172,10 +167,8 @@ class LlmClient:
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = _classify(e)
                 if not last_err.retryable or attempt == MAX_RETRIES - 1:
-                    break
+                    raise last_err
                 time.sleep((2**attempt) + attempt * 0.5)
-        assert last_err is not None
-        raise last_err
 
 
 def _classify(e: Exception) -> LlmError:

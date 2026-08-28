@@ -58,8 +58,11 @@ def main() -> None:
             check(True, "workspace blocks path escape")
         p = sb.resolve("sub/x.py")
         check(str(p).startswith(tmp), "workspace resolves inside")
-        check(sb.is_in_workspace("sub/x.py"), "workspace.is_in_workspace true inside")
-        check(not sb.is_in_workspace("../../etc/passwd"), "workspace.is_in_workspace false outside")
+        try:
+            sb.resolve("../../etc/passwd")
+            check(False, "workspace.resolve rejects outside path")
+        except ValueError:
+            check(True, "workspace.resolve rejects outside path")
 
         # 4. tool execution + write/read roundtrip
         reg = ToolRegistry(build_default_tools(config))

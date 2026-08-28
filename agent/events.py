@@ -155,16 +155,3 @@ class EventLog:
 
     def events(self) -> List[Event]:
         return list(self._events)
-
-    def count(self) -> int:
-        return len(self._events)
-
-    @classmethod
-    def load(cls, path: str) -> "EventLog":
-        log = cls(path=path)
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    log._events.append(event_from_dict(json.loads(line)))
-        return log

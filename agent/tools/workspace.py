@@ -48,14 +48,6 @@ class Workspace:
             raise ValueError(f"path escapes workspace: {rel_path!r}")
         return p
 
-    def is_in_workspace(self, path: str) -> bool:
-        """True if the given (possibly absolute) path resolves inside the root."""
-        try:
-            p = (self.root / path).resolve()
-            return p.is_relative_to(self.root)
-        except (ValueError, OSError):
-            return False
-
     def cleanup(self) -> None:
         if self._own_dir:
             import shutil

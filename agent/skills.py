@@ -19,7 +19,6 @@ class Skill:
     name: str
     description: str
     content: str
-    path: Path
 
 
 @dataclass
@@ -69,7 +68,6 @@ def load_skill_library(skills_dir: Path) -> SkillLibrary:
                 name=fm.get("name", sk.name),
                 description=fm.get("description", ""),
                 content=fm.get("content", text),
-                path=skill_file,
             )
         )
     return lib

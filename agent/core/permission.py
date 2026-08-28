@@ -66,13 +66,9 @@ DEFAULT_RULES: List[Rule] = [
 ]
 
 
-def _default_rules() -> List[Rule]:
-    return [Rule(r.action, r.tool, r.pattern) for r in DEFAULT_RULES]
-
-
 @dataclass
 class PermissionEvaluator:
-    rules: List[Rule] = field(default_factory=_default_rules)
+    rules: List[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
     def evaluate(self, tool: str, args_repr: str, workspace: Workspace) -> Action:
         # For run_command, rules match the actual command, not the JSON envelope.

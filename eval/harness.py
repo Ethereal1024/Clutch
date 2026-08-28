@@ -29,7 +29,6 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 from agent.config import Config  # noqa: E402
-from agent.core.terminate import Terminator  # noqa: E402
 from agent.events import EventLog, event_to_json  # noqa: E402
 from agent.llm.client import LlmClient  # noqa: E402
 from agent.loop import Agent  # noqa: E402

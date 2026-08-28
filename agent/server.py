@@ -24,13 +24,14 @@ import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse
 
 from .config import Config
 from .core.terminate import Terminator
 from .core.permission import PermissionEvaluator, PermissionGate
 from .events import (
     Event,
+    FinalEvent,
     PermissionRequestEvent,
     StateUpdateEvent,
     event_to_json,
@@ -99,8 +100,6 @@ class RunState:
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.agent: Optional[Agent] = None
-        self.task: str = ""
         self.busy = False
         self.cancel: Optional[threading.Event] = None
         self.project: Optional[Project] = None
@@ -120,7 +119,6 @@ class RunState:
             if self.busy:
                 return False
             self.busy = True
-            self.task = task
             self.cancel = cancel
             self.workspace = workspace
         return True
@@ -129,7 +127,6 @@ class RunState:
         # keep the project + workspace so a follow-up run can continue
         with self.lock:
             self.busy = False
-            self.agent = None
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -139,21 +136,29 @@ class Handler(SimpleHTTPRequestHandler):
     # this property exposes them uniformly to the handler.
     @property
     def _cfg(self) -> Config:
-        return self.server.config  # type: ignore[attr-defined]
+        return self.server.config
 
     @property
     def _state(self) -> RunState:
-        return self.server.state  # type: ignore[attr-defined]
+        return self.server.state
 
     @property
     def _broadcaster(self) -> Broadcaster:
-        return self.server.broadcaster  # type: ignore[attr-defined]
+        return self.server.broadcaster
 
     @property
     def _ui_dir(self) -> Path:
-        return self.server.ui_dir  # type: ignore[attr-defined]
+        return self.server.ui_dir
 
     # ---- routing ----
+    def _on_error(self, e: Exception) -> None:
+        # never let a handler crash the server; a response may already be started
+        print(f"[clutch-server] handler error: {e}", file=sys.stderr)
+        try:
+            self._json({"error": f"internal error: {e}"}, status=500)
+        except Exception:  # noqa: BLE001 -- response already started
+            pass
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
@@ -167,11 +172,7 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self._static(path)
         except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
-            print(f"[clutch-server] handler error: {e}", file=sys.stderr)
-            try:
-                self._json({"error": f"internal error: {e}"}, status=500)
-            except Exception:  # noqa: BLE001 -- response already started
-                pass
+            self._on_error(e)
 
     def do_POST(self) -> None:  # noqa: N802
         try:
@@ -191,17 +192,19 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 self._json({"error": "not found"}, status=404)
         except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
-            print(f"[clutch-server] handler error: {e}", file=sys.stderr)
-            try:
-                self._json({"error": f"internal error: {e}"}, status=500)
-            except Exception:  # noqa: BLE001 -- response already started
-                pass
+            self._on_error(e)
 
     # ---- API implementations ----
-    def _run(self) -> None:
+    def _read_body(self) -> Optional[dict]:
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:  # noqa: BLE001
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:  # noqa: BLE001 -- malformed body/headers are user errors
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _run(self) -> None:
+        body = self._read_body()
+        if body is None:
             return self._json({"error": "bad json body"}, status=400)
         task = (body.get("task") or "").strip()
         config = self._cfg
@@ -263,6 +266,11 @@ class Handler(SimpleHTTPRequestHandler):
         def _worker() -> None:
             try:
                 agent.run(task)
+            except Exception as e:  # noqa: BLE001 -- last line of defense: never die silently
+                print(f"[clutch-server] run failed: {e}", file=sys.stderr)
+                self._broadcaster.publish(
+                    FinalEvent(status="error", summary=f"internal error: {e}")
+                )
             finally:
                 self._state.finish()
 
@@ -279,9 +287,8 @@ class Handler(SimpleHTTPRequestHandler):
         self._json({"status": "cancelling"})
 
     def _settings(self) -> None:
-        try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:  # noqa: BLE001
+        body = self._read_body()
+        if body is None:
             return self._json({"error": "bad json body"}, status=400)
         api_key = (body.get("api_key") or "").strip()
         if not api_key:
@@ -292,9 +299,8 @@ class Handler(SimpleHTTPRequestHandler):
         self._json({"status": "ok"})
 
     def _permission_respond(self) -> None:
-        try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:  # noqa: BLE001
+        body = self._read_body()
+        if body is None:
             return self._json({"error": "bad json body"}, status=400)
         request_id = (body.get("request_id") or "").strip()
         allow = bool(body.get("allow"))
@@ -347,9 +353,8 @@ class Handler(SimpleHTTPRequestHandler):
     def _project_new(self) -> None:
         if self._state.busy:
             return self._json({"error": "a run is active; wait for it to finish"}, status=409)
-        try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:  # noqa: BLE001
+        body = self._read_body()
+        if body is None:
             return self._json({"error": "bad json body"}, status=400)
         dirname = (body.get("dir") or "").strip()
         name = (body.get("name") or "").strip()
@@ -370,9 +375,8 @@ class Handler(SimpleHTTPRequestHandler):
     def _project_open(self) -> None:
         if self._state.busy:
             return self._json({"error": "a run is active; wait for it to finish"}, status=409)
-        try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:  # noqa: BLE001
+        body = self._read_body()
+        if body is None:
             return self._json({"error": "bad json body"}, status=400)
         path = (body.get("path") or "").strip()
         if not path:
@@ -380,13 +384,11 @@ class Handler(SimpleHTTPRequestHandler):
         full = Path(path).resolve()
         if not full.is_file() or full.suffix != ".clc":
             return self._json({"error": "not a .clc project file"}, status=400)
-        try:
-            self._open_stream_start(full)
-        except Exception as e:  # noqa: BLE001 -- stream already started; report inline
-            return
+        self._open_stream_start(full)
 
     def _open_stream_start(self, full: Path) -> None:
-        # stream the open as NDJSON so the UI can show real file-parse progress
+        # stream the open as NDJSON so the UI can show real file-parse progress;
+        # errors after headers are reported inline as an {"error": ...} line
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Cache-Control", "no-cache")
@@ -399,8 +401,12 @@ class Handler(SimpleHTTPRequestHandler):
         def on_progress(done: int, total: int) -> None:
             emit({"progress": {"done": done, "total": total}})
 
+        try:
+            meta = read_header(full)
+        except OSError as e:
+            emit({"error": f"cannot open project: {e}"})
+            return
         # meta first so the UI can leave the welcome screen and show the bar
-        meta = read_header(full)
         emit({
             "meta": {
                 "project": str(full),
@@ -447,16 +453,17 @@ def _replace(config: Config, **kw: Any) -> Config:
     return dataclasses.replace(config, **kw)
 
 
-def _walk(root: Path, workspace: Optional[Workspace] = None, prefix: str = "") -> list:
+def _walk(root: Path, workspace: Optional[Workspace] = None) -> list:
     """Build a simple file tree [{name, path, dir, children}], skipping protected files."""
+    if workspace is not None:
+        entries = workspace.visible_entries(root)
+    else:
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except OSError:
+            return []
     out = []
-    try:
-        entries = sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-    except OSError:
-        return out
     for e in entries:
-        if workspace is not None and workspace.is_protected(e):
-            continue
         rel = str(e.relative_to(root))
         node: Dict[str, Any] = {"name": e.name, "path": rel, "dir": e.is_dir()}
         if e.is_dir():
@@ -466,7 +473,11 @@ def _walk(root: Path, workspace: Optional[Workspace] = None, prefix: str = "") -
 
 
 class ClutchServer(ThreadingHTTPServer):
-    pass
+    # shared runtime state, injected by build(); the Handler reaches them via self.server
+    config: Config
+    state: "RunState"
+    broadcaster: "Broadcaster"
+    ui_dir: Path
 
 
 def build(
@@ -476,10 +487,10 @@ def build(
     state: RunState,
 ) -> ClutchServer:
     srv = ClutchServer(("127.0.0.1", config.port), Handler)
-    srv.broadcaster = broadcaster  # type: ignore[attr-defined]
-    srv.config = config  # type: ignore[attr-defined]
-    srv.state = state  # type: ignore[attr-defined]
-    srv.ui_dir = ui_dir  # type: ignore[attr-defined]
+    srv.broadcaster = broadcaster
+    srv.config = config
+    srv.state = state
+    srv.ui_dir = ui_dir
     return srv
 
 

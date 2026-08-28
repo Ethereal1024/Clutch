@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
-
 
 @dataclass
 class Config:
@@ -47,17 +45,14 @@ class Config:
     # Commands that hang in a non-TTY pipe
     blocked_prefixes: list[str] = field(
         default_factory=lambda: [
-            "python", "python3", "vim", "vi", "emacs", "nano",
+            "vim", "vi", "emacs", "nano",
             "less", "more", "tail -f", "top", "htop", "make",
         ]
     )
 
     # Runtime
     port: int = 8890
-    # working directory the agent operates in; empty => temp dir (or ~/clutch-work)
-    workdir: str = ""
     log_path: str | None = None
-    prompts_dir: Path = PROMPTS_DIR
     # Skills: on-demand domain knowledge injected into the system prompt
     enable_skills: bool = True
     skills_dir: Path = Path(__file__).resolve().parent / "skills"

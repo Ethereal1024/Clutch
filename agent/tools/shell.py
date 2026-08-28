@@ -36,17 +36,13 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     # the workspace. We check the tokenized command first, then run the raw string
     # through a shell so `&&`, pipes and redirections keep their real meaning.
     for tok in shlex.split(command):
-        if tok.startswith("/") or "/../" in tok or tok.startswith("../") or tok.endswith("/.."):
-            try:
-                workspace.resolve(tok)
-            except ValueError:
-                return {"content": f"ERROR: path escapes workspace: {tok!r}", "error": True}
-        # protected files (the .clc project file) are off-limits to commands too
         try:
-            if workspace.is_protected(workspace.resolve(tok)):
-                return {"content": f"ERROR: cannot operate on protected file: {tok!r}", "error": True}
+            p = workspace.resolve(tok)
         except ValueError:
-            pass
+            return {"content": f"ERROR: path escapes workspace: {tok!r}", "error": True}
+        # protected files (the .clc project file) are off-limits to commands too
+        if workspace.is_protected(p):
+            return {"content": f"ERROR: cannot operate on protected file: {tok!r}", "error": True}
 
     args = shlex.split(command)
     if args and args[0] in ("python", "python3"):
@@ -98,13 +94,12 @@ def _blocked_reason(config: Config, command: str) -> str | None:
     parts = stripped.split(maxsplit=1)
     first = parts[0] if parts else ""
 
-    # bare python/python3 (no file or -m module arg) would drop into a REPL and hang
+    # bare python/python3 (no file, -m module, or -c code arg) would drop into a REPL and hang
     if first in ("python", "python3"):
         rest = shlex.split(parts[1]) if len(parts) > 1 else []
-        # safe non-interactive forms: `python3 file.py` or `python3 -m module`
+        # safe non-interactive forms: `python3 file.py`, `python3 -m module`, `python3 -c code`
         has_file = any(a.endswith(".py") for a in rest if not a.startswith("-"))
-        has_module = "-m" in rest
-        if not (has_file or has_module):
+        if not (has_file or "-m" in rest or "-c" in rest):
             return INTERACTIVE_HINT
         return None
 

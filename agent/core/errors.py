@@ -31,7 +31,3 @@ def context_window_error(detail: str) -> AgentError:
         message="Context window is full; cannot continue. Restart with a more focused task.",
         detail=detail,
     )
-
-
-def budget_exceeded_error(kind: str, detail: str) -> AgentError:
-    return AgentError(code=f"budget_{kind}", message=f"Budget exceeded ({kind}).", detail=detail)

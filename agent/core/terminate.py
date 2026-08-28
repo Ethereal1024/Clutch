@@ -16,7 +16,6 @@ from typing import List, Tuple
 
 from ..config import Config
 from ..tools.workspace import Workspace
-from ..tools.shell import run_command
 
 
 @dataclass
@@ -50,7 +49,7 @@ class Terminator:
         cmd = self.config.verify_command
         if not cmd:
             return TerminateResult(done=True, status="completed", reason="no_verify_command")
-        result = run_command(workspace, self.config, cmd)
+        result = run_verify(workspace, self.config, cmd)
         # judge by exit status, not by scanning text (a self-test may legitimately
         # print "ERROR" while exercising error paths)
         ok = not result.get("error")
@@ -60,3 +59,47 @@ class Terminator:
             reason="verify_gate_passed" if ok else "verify_gate_failed",
             verify_output=result.get("content", ""),
         )
+
+
+def run_verify(workspace: Workspace, config: Config, command: str) -> dict:
+    """Run the verify command as a raw subprocess (trusted input, no tool guards)."""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            command,
+            shell=True,
+            cwd=workspace.root,
+            capture_output=True,
+            text=True,
+            timeout=config.command_timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"content": f"ERROR: verify command timed out ({config.command_timeout:.0f}s)", "error": True}
+    body = _format_output(config, r)
+    if r.returncode != 0:
+        text = "\n".join(body) if body else "(no output)"
+        return {"content": f"ERROR: verify command failed (exit {r.returncode})\n{text}", "error": True}
+    text = "OK: verify command succeeded"
+    if body:
+        text += "\n" + "\n".join(body)
+    return {"content": text}
+
+
+def _format_output(config: Config, r) -> List[str]:
+    parts = []
+    if r.stdout:
+        parts.append("stdout:\n" + _truncate(config, r.stdout))
+    if r.stderr:
+        parts.append("stderr:\n" + _truncate(config, r.stderr))
+    return parts
+
+
+def _truncate(config: Config, text: str) -> str:
+    if len(text) <= config.output_limit:
+        return text
+    omitted = len(text) - config.output_head - config.output_tail
+    return (
+        f"{text[:config.output_head]}\n... [{omitted} chars omitted] ...\n"
+        f"{text[-config.output_tail:]}"
+    )

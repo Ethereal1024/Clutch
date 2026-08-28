@@ -12,9 +12,7 @@ import tempfile
 from typing import Any, Dict, List
 
 from .config import Config
-from .core import context
 from .events import EventLog
-from .llm.client import LlmClient
 from .loop import Agent
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import Workspace
@@ -309,6 +307,33 @@ def main() -> None:
         result = agent.run("t")
         check(result == "done", "permission ask resolved by UI then executes")
         check((sb.root / "a.txt").read_text() == "hi", "asked-and-allowed tool wrote file")
+
+    # 11. fatal LLM error (context overflow) -> graceful error final, no crash
+    from agent.core.errors import AgentError
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = Workspace(tmp)
+
+        class BoomLLM:
+            def stream(self, messages, tools):
+                raise AgentError(
+                    code="context_window_exceeded",
+                    message="Context window is full; cannot continue. Restart with a more focused task.",
+                )
+
+        log = EventLog()
+        agent = Agent(
+            llm=BoomLLM(),  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            log=log,
+        )
+        result = agent.run("t")
+        check(result == "ABORTED", "fatal LLM error aborts run")
+        finals = [e for e in log.events() if e.type == "final"]
+        check(finals and finals[-1].status == "error", "fatal LLM error emits error final")
+        check(any(e.type == "state_update" and e.value == "error" for e in log.events()), "error state emitted")
 
     print("\nall passed")
     return 0

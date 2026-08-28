@@ -20,28 +20,10 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .events import Event, EventLog, event_from_dict, event_to_json
+from .events import EventLog, event_from_dict
 
 HEADER_PREFIX = "# clutch project v1"
 SEPARATOR = "---"
-
-
-class ProjectLog(EventLog):
-    """EventLog whose appends are persisted into the .clc file (after the header).
-
-    The in-memory list is the single source of truth for the running session;
-    every append also writes a JSON line to the .clc file for persistence.
-    """
-
-    def __init__(self, file_path: Path) -> None:
-        super().__init__()
-        self._file_path = file_path
-
-    def append(self, event: Event) -> Event:
-        self._events.append(event)
-        with open(self._file_path, "a", encoding="utf-8") as f:
-            f.write(event_to_json(event) + "\n")
-        return event
 
 
 @dataclass
@@ -70,7 +52,8 @@ def create_project(path: Path, name: str, model: str = "") -> Project:
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = ProjectMeta(name=name, model=model)
     _write_header(path, meta)
-    return Project(path=path, meta=meta, log=ProjectLog(path))
+    # EventLog(path=...) persists every append to the .clc file after the header
+    return Project(path=path, meta=meta, log=EventLog(path=str(path)))
 
 
 def open_project(path: Path, on_progress=None) -> Project:
@@ -78,9 +61,22 @@ def open_project(path: Path, on_progress=None) -> Project:
     file is parsed (byte-based, single pass)."""
     path = path.with_suffix(".clc")
     meta, loaded = _read_file(path, on_progress)
-    log = ProjectLog(path)
+    log = EventLog(path=str(path))
     log._events.extend(loaded.events())
     return Project(path=path, meta=meta, log=log)
+
+
+def read_header(path: Path) -> ProjectMeta:
+    """Read only the header of a .clc file (up to the --- separator), fast."""
+    path = path.with_suffix(".clc")
+    meta = ProjectMeta()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line.strip() == SEPARATOR:
+                break
+            _apply_meta(meta, line)
+    return meta
 
 
 def _write_header(path: Path, meta: ProjectMeta) -> None:
@@ -91,6 +87,19 @@ def _write_header(path: Path, meta: ProjectMeta) -> None:
         SEPARATOR,
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _apply_meta(meta: ProjectMeta, line: str) -> None:
+    """Apply one header line to meta; ignore comments and malformed lines."""
+    if line.startswith("#") or ":" not in line:
+        return
+    k, v = line.split(":", 1)
+    k = k.strip()
+    v = v.strip()
+    if k == "name":
+        meta.name = v
+    elif k == "model":
+        meta.model = v
 
 
 def _read_file(path: Path, on_progress=None) -> tuple[ProjectMeta, EventLog]:
@@ -109,47 +118,12 @@ def _read_file(path: Path, on_progress=None) -> tuple[ProjectMeta, EventLog]:
                 if line.strip() == SEPARATOR:
                     in_events = True
                     continue
-                if line.startswith("#"):
-                    continue
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    k = k.strip()
-                    v = v.strip()
-                    if k == "name":
-                        meta.name = v
-                    elif k == "model":
-                        meta.model = v
+                _apply_meta(meta, line)
                 continue
             if line.strip():
                 try:
                     log._events.append(event_from_dict(json.loads(line)))
-                except (ValueError, json.JSONDecodeError):
+                except ValueError:
                     # skip corrupt lines; keep the rest of the history
                     continue
     return meta, log
-
-
-def read_header(path: Path) -> ProjectMeta:
-    """Read only the header of a .clc file (up to the --- separator), fast."""
-    path = path.with_suffix(".clc")
-    meta = ProjectMeta()
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if line.strip() == SEPARATOR:
-                break
-            if line.startswith("#") or ":" not in line:
-                continue
-            k, v = line.split(":", 1)
-            k = k.strip()
-            v = v.strip()
-            if k == "name":
-                meta.name = v
-            elif k == "model":
-                meta.model = v
-    return meta
-
-
-def project_meta(path: Path) -> ProjectMeta:
-    """Read only the header of a .clc file."""
-    return read_header(path)

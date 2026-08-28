@@ -81,7 +81,8 @@ class Agent:
 
     def _finish(self, status: str, summary: str) -> str:
         self._emit(FinalEvent(status=status, summary=summary))
-        self._emit(StateUpdateEvent(value="finished"))
+        state = "error" if status == "error" else "finished"
+        self._emit(StateUpdateEvent(value=state))
         return "ABORTED" if status != "completed" else summary
 
     def _llm_call(
@@ -134,76 +135,81 @@ class Agent:
         self._emit(UserMessageEvent(content=task))
 
         turn = 0
-        while True:
-            if self.cancel and self.cancel.is_set():
-                return self._finish("aborted", render("cancelled.md"))
-            turn += 1
-            # budget is enforced at the top so every path terminates
-            if self.terminator.check_turn_budget(turn):
-                return self._finish(
-                    "aborted", render("budget_exceeded.md", max_turns=self.config.max_turns)
-                )
-            self._emit(StepStartEvent())
-            msgs = context.derive_messages(self.log, self.config, task)
-
-            content, tool_calls, finish_reason, reasoning = self._llm_call(msgs)
-
-            # max-tokens truncation: drop incomplete tool calls, ask to be concise
-            if finish_reason == "length":
-                self._emit(UserMessageEvent(content=render("max_tokens.md")))
-                continue
-
-            # ---- tool calls: execute and feed results back ----
-            if tool_calls:
-                # content was already streamed incrementally as text_delta;
-                # emit the tool calls now
-                tc_events: List[ToolCallEvent] = []
-                for tc in tool_calls:
-                    ev = ToolCallEvent(
-                        name=tc["name"], arguments=tc["arguments"], tool_call_id=tc["id"]
+        try:
+            while True:
+                if self.cancel and self.cancel.is_set():
+                    return self._finish("aborted", render("cancelled.md"))
+                turn += 1
+                # budget is enforced at the top so every path terminates
+                if self.terminator.check_turn_budget(turn):
+                    return self._finish(
+                        "aborted", render("budget_exceeded.md", max_turns=self.config.max_turns)
                     )
-                    self._emit(ev)
-                    tc_events.append(ev)
+                self._emit(StepStartEvent())
+                msgs = context.derive_messages(self.log, self.config, task)
 
-                # record the assistant turn with tool_calls before executing;
-                # reasoning is stored so it can be passed back to DeepSeek
-                self._emit(
-                    AssistantMessageEvent(
-                        content=content,
-                        tool_calls=[
-                            {"id": ev.tool_call_id, "name": ev.name, "arguments": ev.arguments}
-                            for ev in tc_events
-                        ],
-                        reasoning=reasoning,
-                    )
-                )
+                content, tool_calls, finish_reason, reasoning = self._llm_call(msgs)
 
-                for ev in tc_events:
-                    if self.terminator.record_call(ev.name, ev.arguments):
-                        # doom loop: repeated identical calls; escalate to abort unless disabled
-                        if self.config.abort_on_doom_loop:
-                            return self._finish("aborted", render("doom_loop.md"))
-                        result = {"content": render("doom_loop.md"), "error": True}
-                    else:
-                        result = self._execute_tool(ev)
+                # max-tokens truncation: drop incomplete tool calls, ask to be concise
+                if finish_reason == "length":
+                    self._emit(UserMessageEvent(content=render("max_tokens.md")))
+                    continue
+
+                # ---- tool calls: execute and feed results back ----
+                if tool_calls:
+                    # content was already streamed incrementally as text_delta;
+                    # emit the tool calls now
+                    tc_events: List[ToolCallEvent] = []
+                    for tc in tool_calls:
+                        ev = ToolCallEvent(
+                            name=tc["name"], arguments=tc["arguments"], tool_call_id=tc["id"]
+                        )
+                        self._emit(ev)
+                        tc_events.append(ev)
+
+                    # record the assistant turn with tool_calls before executing;
+                    # reasoning is stored so it can be passed back to DeepSeek
                     self._emit(
-                        ToolResultEvent(
-                            tool_call_id=ev.tool_call_id,
-                            content=result.get("content", ""),
-                            is_error=result.get("error", False),
-                            diff=result.get("diff", ""),
+                        AssistantMessageEvent(
+                            content=content,
+                            tool_calls=[
+                                {"id": ev.tool_call_id, "name": ev.name, "arguments": ev.arguments}
+                                for ev in tc_events
+                            ],
+                            reasoning=reasoning,
                         )
                     )
-                continue
 
-            # ---- no tool call: candidate done -> verification gate ----
-            self._emit(AssistantMessageEvent(content=content, reasoning=reasoning))
-            v = self.terminator.verify(self.workspace)
-            if v.done:
-                return self._finish("completed", content)
+                    for ev in tc_events:
+                        if self.terminator.record_call(ev.name, ev.arguments):
+                            # doom loop: repeated identical calls; escalate to abort unless disabled
+                            if self.config.abort_on_doom_loop:
+                                return self._finish("aborted", render("doom_loop.md"))
+                            result = {"content": render("doom_loop.md"), "error": True}
+                        else:
+                            result = self._execute_tool(ev)
+                        self._emit(
+                            ToolResultEvent(
+                                tool_call_id=ev.tool_call_id,
+                                content=result.get("content", ""),
+                                is_error=result.get("error", False),
+                                diff=result.get("diff", ""),
+                            )
+                        )
+                    continue
 
-            # gate failed: feed verification output back and keep iterating
-            self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
+                # ---- no tool call: candidate done -> verification gate ----
+                self._emit(AssistantMessageEvent(content=content, reasoning=reasoning))
+                v = self.terminator.verify(self.workspace)
+                if v.done:
+                    return self._finish("completed", content)
+
+                # gate failed: feed verification output back and keep iterating
+                self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
+        except agent_errors.AgentError as e:
+            # fatal LLM/context failures terminate gracefully instead of dying
+            # silently in the worker thread
+            return self._finish("error", str(e))
 
     def _execute_tool(self, ev: ToolCallEvent) -> Dict[str, Any]:
         """Parse arguments, check permission, then run the tool.

@@ -55,7 +55,7 @@ def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, 
     if len(assistant_idx) > config.max_history_turns:
         cutoff = assistant_idx[-config.max_history_turns]
         kept = events[cutoff:]
-        dropped = sum(1 for e in events[:cutoff] if isinstance(e, ToolResultEvent))
+        dropped = cutoff  # windowing evicts every event before the cutoff, not just tool results
         msgs = [
             {"role": "user", "content": render("context_omitted.md", count=dropped)}
         ] + _to_messages(kept)

@@ -1,1 +1,1 @@
-(Earlier $count tool results omitted.)
+(Earlier $count messages omitted.)
