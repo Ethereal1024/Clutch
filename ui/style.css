@@ -474,8 +474,9 @@ main { display: flex; flex: 1; min-height: 0; }
 #fs-modal .modal-box { width: 560px; }
 .fs-conn { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 /* when the picker body is collapsed (SSH connect/failure), the conn bar is the
-   last thing in the modal — drop its divider so no stray line sits under it */
-.fs-conn:has(+ #fs-body.collapsed) { border-bottom: none; }
+   last thing in the modal — drop its divider and bottom spacing so no stray line
+   or gap sits under it */
+.fs-conn:has(+ #fs-body.collapsed) { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
 .fs-conn-row { display: flex; gap: 8px; align-items: center; }
 .fs-conn-row select {
   flex: 1;
@@ -497,11 +498,14 @@ main { display: flex; flex: 1; min-height: 0; }
 @keyframes conn-slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
 #conn-reset { margin-top: 8px; padding: 2px 8px; font-size: 12px; }
 /* the file-browsing body collapses smoothly during SSH connect (height + fade).
-   grid-template-rows animates the real content height without a max-height guess */
-#fs-body { display: grid; grid-template-rows: 1fr; opacity: 1;
-           transition: grid-template-rows .3s ease, opacity .25s ease; }
-#fs-body.collapsed { grid-template-rows: 0fr; opacity: 0; }
-#fs-body > .fs-body-inner { overflow: hidden; min-height: 0; }
+   max-height clamps it deterministically so the hidden body can never leave a
+   dead height (the 260px file list) behind */
+#fs-body {
+  overflow: hidden;
+  max-height: 480px;
+  transition: max-height .3s ease, opacity .25s ease;
+}
+#fs-body.collapsed { max-height: 0; opacity: 0; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
 label.hidden-toggle {
