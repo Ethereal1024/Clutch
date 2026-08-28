@@ -22,13 +22,14 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import queue
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .config import Config
 from .core.permission import PermissionEvaluator, PermissionGate
@@ -174,6 +175,8 @@ class Handler(BaseHTTPRequestHandler):
             self._sse()
         elif path == "/api/workspace/tree":
             self._workspace_tree()
+        elif path == "/api/fs/list":
+            self._fs_list()
         else:
             self._json({"error": "not found"}, status=404)
 
@@ -352,6 +355,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"tree": [], "root": None})
         self._json({"tree": _walk(sb.root, sb), "root": str(sb.root)})
 
+    def _fs_list(self) -> None:
+        """Server-side directory browser (the UI picks projects from here).
+
+        One level, starts at the server user's home. Reachable only via the
+        local bind or the SSH tunnel, so no auth is needed.
+        """
+        qs = parse_qs(urlparse(self.path).query)
+        raw = (qs.get("path") or [""])[0]
+        if raw:
+            p = Path(raw).expanduser()
+            if not p.is_absolute():
+                p = Path.home() / p
+            root = p.resolve()
+        else:
+            root = Path.home()
+        if not root.is_dir():
+            return self._json({"error": f"not a directory: {root}"})
+        try:
+            entries = sorted(root.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except OSError as e:
+            return self._json({"error": f"cannot list directory: {e}"})
+        parent = str(root.parent) if root.parent != root else None
+        self._json(
+            {
+                "path": str(root),
+                "parent": parent,
+                "entries": [{"name": e.name, "path": str(e), "dir": e.is_dir()} for e in entries],
+                "error": None,
+            }
+        )
+
     def _project_new(self) -> None:
         if self._state.busy:
             return self._json({"error": "a run is active; wait for it to finish"}, status=409)
@@ -495,6 +529,14 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1", help="bind address (0.0.0.0 to expose to other devices)")
     parser.add_argument("--port", type=int, default=8890)
     parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help=(
+            "LLM API base URL. Point at the client-side proxy "
+            "(http://127.0.0.1:8892/v1) when the server has no internet."
+        ),
+    )
     parser.add_argument("--verify", default=None, help="verification command; empty disables the gate")
     args = parser.parse_args()
 
@@ -502,6 +544,11 @@ def main() -> int:
     config.host = args.host
     config.port = args.port
     config.model = args.model
+    if args.base_url:
+        config.base_url = args.base_url
+        # the client-side proxy injects the real key; server only needs a placeholder
+        if not (config.api_key or os.environ.get("DEEPSEEK_API_KEY")):
+            config.api_key = "proxy"
     if args.verify:
         config.verify_command = args.verify
 

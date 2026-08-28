@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import quote
 
 from .config import Config
 from .server import Broadcaster, RunState, build
@@ -123,6 +124,20 @@ def _run_server_test() -> int:
         check(st == 200, "project reopened")
         rdata = json.loads(body.splitlines()[0])
         check(rdata.get("meta", {}).get("name") == "demo", "reopened project name")
+
+        # 3c. server file browser (/api/fs/list)
+        st, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
+        data = json.loads(body)
+        check(
+            data.get("error") is None and any(e["name"] == "demo.clc" and not e["dir"] for e in data["entries"]),
+            "fs list shows the project file",
+        )
+        st, body = http_get(f"{base_url}/api/fs/list")
+        data = json.loads(body)
+        check(data.get("path") == str(Path.home()), "fs list defaults to home")
+        st, body = http_get(f"{base_url}/api/fs/list?path=/nonexistent_clutch_xyz")
+        data = json.loads(body)
+        check(data.get("error"), "fs list reports a bad path")
 
         # 4. real run (only with key)
         key = os.environ.get("DEEPSEEK_API_KEY")

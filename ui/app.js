@@ -82,17 +82,18 @@ function addToolCallRow(ev) {
   argsBtn.className = "tool-args-btn";
   argsBtn.textContent = "args ▸";
   argsBtn.onclick = () => {
-    const existing = row.querySelector(".tool-args-detail");
+    const existing = row.querySelector(".fold");
     if (existing) {
-      animateFold(existing, existing.offsetHeight, 0, () => existing.remove());
+      foldCollapse(existing, () => existing.remove());
       argsBtn.textContent = "args ▸";
     } else {
       argsBtn.textContent = "args ▾";
       const pre = document.createElement("pre");
       pre.className = "tool-args-detail";
       pre.textContent = argsTxt;
-      row.appendChild(pre);
-      expandFold(pre);
+      const fold = wrapFold(pre);
+      row.appendChild(fold);
+      foldExpand(fold);
     }
   };
   row.appendChild(argsBtn);
@@ -127,14 +128,15 @@ function buildReadRow(call, content) {
   row.appendChild(toggle);
   row.appendChild(lbl);
   const full = document.createElement("pre");
-  full.className = "read-detail hidden";
+  full.className = "read-detail"; // the wrapper carries the hidden state
   full.textContent = content;
   highlightPreByPath(full, path);
+  const fold = wrapFold(full);
   row.onclick = () => {
-    const wasHidden = toggleFold(full);
+    const wasHidden = toggleFold(fold);
     toggle.textContent = wasHidden ? "▾" : "▸";
   };
-  return { row, full };
+  return { row, full: fold };
 }
 
 function addEvent(ev) {
@@ -225,12 +227,13 @@ function addEvent(ev) {
       row.appendChild(lbl);
       thinkingEl.appendChild(row);
       const full = document.createElement("pre");
-      full.className = "thinking-full hidden";
+      full.className = "thinking-full";
       full._content = ""; // per-block copy; survives step_start resetting the globals
-      thinkingEl.appendChild(full);
+      const fold = wrapFold(full);
+      thinkingEl.appendChild(fold);
       // click toggles between the compact row and the full reasoning text
       row.onclick = () => {
-        const wasHidden = toggleFold(full, () => { full.textContent = full._content; });
+        const wasHidden = toggleFold(fold, () => { full.textContent = full._content; });
         toggle.textContent = wasHidden ? "▾" : "▸";
       };
       eventsEl.appendChild(thinkingEl);
@@ -240,7 +243,8 @@ function addEvent(ev) {
     // keep the block's own copy in sync; if the full text is open, update it live
     const full = thinkingEl.querySelector(".thinking-full");
     full._content = thinkingContent;
-    if (!full.classList.contains("hidden")) full.textContent = full._content;
+    const fold = thinkingEl.querySelector(".fold");
+    if (fold && !fold.classList.contains("hidden")) full.textContent = full._content;
     autoScroll();
     return;
   }
@@ -266,10 +270,8 @@ function createAgentTextBlock() {
   return wrap;
 }
 
-// Height animation shared by every foldable: expand and collapse both drive an
-// explicit height animation from -> to (px) via the Web Animations API, then run
-// onDone. Only overflow-y is suppressed while it runs, so a horizontal scrollbar
-// stays present through the whole motion instead of popping back at the end.
+// Height animation shared by the diff expand (partial collapse to 140px): animates
+// an explicit height via WAAPI; overflow-y is suppressed so no scrollbar shifts.
 const FOLD_EASE = "cubic-bezier(.23, 1, .32, 1)";
 
 function animateFold(el, from, to, onDone) {
@@ -278,7 +280,7 @@ function animateFold(el, from, to, onDone) {
   el.style.overflowY = "hidden";
   el.style.height = from + "px";
   const settle = () => {
-    if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} } // release the fill effect
+    if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
     el._foldAnim = null;
     onDone();
   };
@@ -289,7 +291,7 @@ function animateFold(el, from, to, onDone) {
   }
   const anim = el.animate(
     [{ height: from + "px" }, { height: to + "px" }],
-    { duration: 200, easing: FOLD_EASE, fill: "forwards" } // hold the end height so collapse never flashes back open
+    { duration: 200, easing: FOLD_EASE, fill: "forwards" }
   );
   el._foldAnim = anim;
   anim.onfinish = settle;
@@ -298,31 +300,6 @@ function animateFold(el, from, to, onDone) {
 function resetFold(el) {
   el.style.height = "";
   el.style.overflowY = "";
-}
-
-function expandFold(el) {
-  el.classList.remove("hidden");
-  const max = parseInt(getComputedStyle(el).maxHeight, 10) || Infinity;
-  const target = Math.min(el.scrollHeight, max);
-  animateFold(el, 0, target, () => resetFold(el));
-}
-
-function collapseFold(el) {
-  animateFold(el, el.offsetHeight, 0, () => {
-    el.classList.add("hidden");
-    resetFold(el);
-  });
-}
-
-function toggleFold(el, onExpand) {
-  const wasHidden = el.classList.contains("hidden");
-  if (wasHidden) {
-    if (onExpand) onExpand(); // fill content BEFORE the height is measured
-    expandFold(el);
-  } else {
-    collapseFold(el);
-  }
-  return wasHidden;
 }
 
 // Diff expand: grow from its collapsed 140px to the content height.
@@ -338,6 +315,64 @@ function collapseDiff(pre) {
     pre.classList.add("diff-collapsed");
     resetFold(pre);
   });
+}
+
+// Grid-rows accordion wrapper: the container height animates 0fr<->1fr while the
+// inner content is clipped — large text never reflows per frame and scrollbars
+// never shift (unlike animating height on the content itself).
+function wrapFold(contentEl) {
+  const inner = document.createElement("div");
+  inner.className = "fold-inner";
+  inner.appendChild(contentEl);
+  const fold = document.createElement("div");
+  fold.className = "fold hidden";
+  fold.appendChild(inner);
+  return fold;
+}
+
+function reducedMotion() {
+  return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function foldExpand(fold) {
+  if (fold._foldAnim) { try { fold._foldAnim.cancel(); } catch (e) {} }
+  fold._foldAnim = null;
+  fold.classList.remove("hidden");
+  if (reducedMotion()) { fold.classList.add("open"); return; }
+  const anim = fold.animate(
+    [{ gridTemplateRows: "0fr" }, { gridTemplateRows: "1fr" }],
+    { duration: 200, easing: FOLD_EASE }
+  );
+  fold._foldAnim = anim;
+  anim.onfinish = () => { fold._foldAnim = null; fold.classList.add("open"); };
+}
+
+function foldCollapse(fold, onDone) {
+  if (fold._foldAnim) { try { fold._foldAnim.cancel(); } catch (e) {} }
+  fold._foldAnim = null;
+  fold.classList.remove("open");
+  if (reducedMotion()) { fold.classList.add("hidden"); if (onDone) onDone(); return; }
+  const anim = fold.animate(
+    [{ gridTemplateRows: "1fr" }, { gridTemplateRows: "0fr" }],
+    { duration: 200, easing: FOLD_EASE }
+  );
+  fold._foldAnim = anim;
+  anim.onfinish = () => {
+    fold._foldAnim = null;
+    fold.classList.add("hidden");
+    if (onDone) onDone();
+  };
+}
+
+function toggleFold(fold, onExpand) {
+  const wasHidden = fold.classList.contains("hidden");
+  if (wasHidden) {
+    if (onExpand) onExpand(); // fill content before the wrapper sizes itself
+    foldExpand(fold);
+  } else {
+    foldCollapse(fold);
+  }
+  return wasHidden;
 }
 
 // A collapsed thinking row rebuilt once from a stored assistant_message.reasoning
@@ -358,11 +393,12 @@ function appendThinkingRow(reasoning) {
   row.appendChild(lbl);
   el.appendChild(row);
   const full = document.createElement("pre");
-  full.className = "thinking-full hidden";
+  full.className = "thinking-full";
   full.textContent = reasoning;
-  el.appendChild(full);
+  const fold = wrapFold(full);
+  el.appendChild(fold);
   row.onclick = () => {
-    const wasHidden = toggleFold(full);
+    const wasHidden = toggleFold(fold);
     toggle.textContent = wasHidden ? "▾" : "▸";
   };
   eventsEl.appendChild(el);
@@ -633,6 +669,10 @@ function openSettings() {
   modal.classList.remove("hidden");
   keyInput.value = localStorage.getItem("clutch_api_key") || "";
   urlInput.value = localStorage.getItem("clutch_api_url") || "";
+  sshHost.value = localStorage.getItem("clutch_ssh_host") || "";
+  sshUser.value = localStorage.getItem("clutch_ssh_user") || "";
+  sshPort.value = localStorage.getItem("clutch_ssh_port") || "22";
+  renderSshStatus();
   keyInput.focus();
 }
 function closeSettings() {
@@ -668,6 +708,58 @@ $("#settings-close").addEventListener("click", closeSettings);
 modal.addEventListener("click", (e) => {
   if (e.target === modal) closeSettings();
 });
+
+// ---- SSH tunnel to a remote backend ----
+const sshHost = $("#ssh-host-input");
+const sshUser = $("#ssh-user-input");
+const sshPort = $("#ssh-port-input");
+const sshStatus = $("#ssh-status");
+
+function renderSshStatus() {
+  if (!window.clutchTunnel) {
+    sshStatus.textContent = "SSH requires the desktop app (Electron).";
+    return;
+  }
+  const override = localStorage.getItem("clutch_api_url");
+  sshStatus.textContent = override
+    ? "Connected: " + override
+    : "Not connected. Using " + API_BASE + ".";
+}
+
+async function connectSsh() {
+  if (!window.clutchTunnel) return;
+  const host = sshHost.value.trim();
+  const user = sshUser.value.trim();
+  const port = sshPort.value.trim() || "22";
+  if (!host || !user) {
+    sshStatus.textContent = "host and user are required";
+    return;
+  }
+  sshStatus.textContent = "connecting (an ssh password prompt, if any, appears in the terminal)…";
+  try {
+    const res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
+    if (res.ok) {
+      localStorage.setItem("clutch_ssh_host", host);
+      localStorage.setItem("clutch_ssh_user", user);
+      localStorage.setItem("clutch_ssh_port", port);
+      localStorage.setItem("clutch_api_url", res.url);
+      location.reload();
+    } else {
+      sshStatus.textContent = "connection failed: " + (res.error || "unknown");
+    }
+  } catch (e) {
+    sshStatus.textContent = "connection failed: " + e.message;
+  }
+}
+
+async function disconnectSsh() {
+  await window.clutchTunnel.disconnect();
+  localStorage.removeItem("clutch_api_url");
+  location.reload();
+}
+
+$("#ssh-connect").addEventListener("click", connectSsh);
+$("#ssh-disconnect").addEventListener("click", disconnectSsh);
 
 // ---- permission confirm ----
 const permModal = $("#perm-modal");
@@ -897,54 +989,93 @@ async function createProject(dir, name) {
   }
 }
 
-// ---- new project modal ----
-const projectModal = $("#project-modal");
-let pickedDir = "";
-async function startNewProject() {
-  if (busy) return;
-  if (window.clutchDialog && window.clutchDialog.pickDirectory) {
-    pickedDir = await window.clutchDialog.pickDirectory();
-    if (!pickedDir) return;
-  } else {
-    pickedDir = prompt("Directory to create the project in:");
-    if (!pickedDir) return;
-  }
-  $("#project-dir-input").value = pickedDir;
-  $("#project-name-input").value = "";
-  projectModal.classList.remove("hidden");
-  $("#project-name-input").focus();
-}
-function closeProjectModal() {
-  projectModal.classList.add("hidden");
-}
-$("#project-create").addEventListener("click", () => {
-  const name = $("#project-name-input").value.trim();
-  if (!name) return;
-  closeProjectModal();
-  createProject(pickedDir, name);
-});
-$("#project-cancel").addEventListener("click", closeProjectModal);
-projectModal.addEventListener("click", (e) => {
-  if (e.target === projectModal) closeProjectModal();
-});
+// ---- server file browser (unified open/new on the backend's filesystem) ----
+const fsModal = $("#fs-modal");
+let fsMode = "open";
+let fsPath = "";
+let fsParent = null;
 
-// ---- open project ----
-async function pickAndOpenProject() {
+function openFsBrowser(mode) {
   if (busy) return;
-  if (window.clutchDialog && window.clutchDialog.pickProjectFile) {
-    const path = await window.clutchDialog.pickProjectFile();
-    if (!path) return;
-    await openProject(path);
-  } else {
-    const path = prompt("Path to the .clc project file:");
-    if (!path) return;
-    await openProject(path);
-  }
+  fsMode = mode;
+  fsPath = "";
+  fsParent = null;
+  $("#fs-title").textContent = mode === "new" ? "New project" : "Open project";
+  $("#fs-new").classList.toggle("hidden", mode !== "new");
+  $("#fs-create").classList.toggle("hidden", mode !== "new");
+  $("#fs-name-input").value = "";
+  fsModal.classList.remove("hidden");
+  loadDir("");
 }
 
-$("#new-project-btn").addEventListener("click", startNewProject);
-$("#open-project-btn").addEventListener("click", pickAndOpenProject);
-$("#welcome-new").addEventListener("click", startNewProject);
-$("#welcome-open").addEventListener("click", pickAndOpenProject);
+function closeFsBrowser() {
+  fsModal.classList.add("hidden");
+}
+
+function fsRow(label, cls, onClick) {
+  const row = document.createElement("div");
+  row.className = "fs-row " + cls;
+  row.textContent = label;
+  if (onClick) row.addEventListener("click", onClick);
+  return row;
+}
+
+async function loadDir(path) {
+  const listEl = $("#fs-list");
+  listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
+  try {
+    const r = await fetch(API_BASE + "/api/fs/list?path=" + encodeURIComponent(path));
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || r.status);
+    fsPath = data.path;
+    fsParent = data.parent;
+    $("#fs-path-input").value = data.path;
+    listEl.innerHTML = "";
+    if (data.parent) {
+      listEl.appendChild(fsRow(".. (up)", "dir", () => loadDir(data.parent)));
+    }
+    for (const e of data.entries) {
+      if (e.dir) {
+        listEl.appendChild(fsRow(e.name, "dir", () => loadDir(e.path)));
+      } else if (e.name.endsWith(".clc") && fsMode === "open") {
+        listEl.appendChild(
+          fsRow(e.name, "file clc", () => {
+            closeFsBrowser();
+            openProject(e.path);
+          })
+        );
+      } else {
+        listEl.appendChild(fsRow(e.name, "file plain"));
+      }
+    }
+    if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
+  } catch (e) {
+    listEl.innerHTML = "";
+    listEl.appendChild(fsRow("Error: " + (e.message || e), "error-row"));
+  }
+}
+
+$("#fs-cancel").addEventListener("click", closeFsBrowser);
+$("#fs-up").addEventListener("click", () => {
+  if (fsParent) loadDir(fsParent);
+});
+$("#fs-go").addEventListener("click", () => loadDir($("#fs-path-input").value.trim()));
+$("#fs-path-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadDir($("#fs-path-input").value.trim());
+});
+$("#fs-create").addEventListener("click", () => {
+  const name = $("#fs-name-input").value.trim();
+  if (!name || !fsPath) return;
+  closeFsBrowser();
+  createProject(fsPath, name);
+});
+fsModal.addEventListener("click", (e) => {
+  if (e.target === fsModal) closeFsBrowser();
+});
+
+$("#new-project-btn").addEventListener("click", () => openFsBrowser("new"));
+$("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
+$("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
+$("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
 connectSSE();

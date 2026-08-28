@@ -44,6 +44,9 @@ def get_proxy_for_url(input_url: str) -> Optional[str]:
     hostname = parsed.hostname or ""
     if not hostname or _no_proxy_match(hostname):
         return None
+    if hostname in ("127.0.0.1", "localhost", "::1"):
+        # loopback never needs a proxy (e.g. the client-side LLM proxy via SSH -R)
+        return None
 
     proxy = _env(f"{parsed.scheme}_proxy") or _env("all_proxy")
     if not proxy:

@@ -13,17 +13,29 @@ tool-calling 接口。
 如何运行
 --------
 前后端已解耦：后端是纯 API 服务，前端是独立的 Electron 程序（或任意静态托管），
-两者通过 HTTP 通信，可以跑在**两台设备**上。
+两者通过 HTTP 通信。跨设备走 **SSH 隧道**（对齐 VSCode Remote）：客户端连到远端
+后端，后端无需暴露端口、无需外网、无需 API key——客户端自己充当 LLM 反代。
 
+**本机模式**
 1. 安装依赖：pip install uv && uv sync  （前端另需：cd ui && npm install）
-2. 设置密钥：export DEEPSEEK_API_KEY=你的key   （密钥仅经环境变量，不入库）
-3. 启动后端：uv run python -m agent.server
-   （默认绑定 127.0.0.1:8890；要跨设备访问加 --host 0.0.0.0）
-4. 启动前端：cd ui && npm start        （Electron 窗口）
-   - 默认连 http://127.0.0.1:8890；连远程后端设 CLUTCH_API_URL=http://主机:8890
-   - 也可以在「⚙ 设置」里填 Backend URL 覆盖
-5. 在欢迎界面新建或打开一个项目（.clc 文件）后开始对话
-6. 独立评测工具（可选）：uv run python -m eval.harness，见 eval/
+2. 设置密钥：export DEEPSEEK_API_KEY=你的key
+3. 启动后端：uv run python -m agent.server   （绑定 127.0.0.1:8890）
+4. 启动前端：cd ui && npm start   （或用 npm run dev 同时起前后端）
+5. 在欢迎界面用**文件浏览器**新建/打开项目（.clc 文件）后开始对话
+
+**跨设备（两台机器）**
+1. 远端：uv run python -m agent.server
+   --base-url http://127.0.0.1:8892/v1
+   —— 绑定 127.0.0.1、无需外网、无需 key；LLM 走客户端反代（经 SSH 反向隧道）
+2. 本机：cd ui && npm start，在「⚙ 设置」→ SSH 填入 host/user/port 点 Connect
+   —— 建立 SSH 隧道（-L 转发 API、-R 转发 LLM 反代），密码提示出现在启动终端的
+   命令行（建议用密钥免密）
+3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统
+
+**直连局域网（可选，不推荐）**：--host 0.0.0.0 直接暴露 HTTP，无鉴权，仅可信
+局域网内使用；此时后端需自行连接 LLM（设 DEEPSEEK_API_KEY 或 --base-url）。
+
+独立评测工具（可选）：uv run python -m eval.harness，见 eval/
 
 特色功能
 --------
@@ -40,8 +52,9 @@ tool-calling 接口。
   保持基础提示精简
 · 独立评测工具：eval/ 内置落地页 / 修 bug / 重构 三个场景，harness 可重复跑
   （评测工具与产品解耦，产品不依赖它）
-· 产品化界面：独立 Electron 前端（与后端解耦，可跨设备运行）+ 欢迎界面（新建/打开
-  项目）+ 任务输入 + 运行/停止 + 实时流式输出（文本/思考流式渲染）+ 项目文件树预览
+· 产品化界面：独立 Electron 前端（与后端解耦，可经 SSH 隧道跨设备运行，客户端自带
+  LLM 反代让远端无需外网）+ 欢迎界面（服务器文件浏览器新建/打开项目）+ 任务输入 +
+  运行/停止 + 实时流式输出（文本/思考流式渲染）+ 项目文件树预览
 
 核心模块（题目必写 5 项一一对应）
 --------------------------------
