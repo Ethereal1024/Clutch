@@ -669,11 +669,6 @@ function openSettings() {
   modal.classList.remove("hidden");
   keyInput.value = localStorage.getItem("clutch_api_key") || "";
   urlInput.value = localStorage.getItem("clutch_api_url") || "";
-  sshHost.value = localStorage.getItem("clutch_ssh_host") || "";
-  sshUser.value = localStorage.getItem("clutch_ssh_user") || "";
-  sshPort.value = localStorage.getItem("clutch_ssh_port") || "22";
-  sshPassword.value = ""; // never persist the SSH password
-  renderSshStatus();
   keyInput.focus();
 }
 function closeSettings() {
@@ -710,79 +705,209 @@ modal.addEventListener("click", (e) => {
   if (e.target === modal) closeSettings();
 });
 
-// ---- SSH tunnel to a remote backend ----
-const sshHost = $("#ssh-host-input");
-const sshUser = $("#ssh-user-input");
-const sshPort = $("#ssh-port-input");
-const sshPassword = $("#ssh-password-input");
-const sshStatus = $("#ssh-status");
+// ---- SSH connection (in the project picker) ----
+const connSelect = $("#conn-select");
+const connStatus = $("#conn-status");
+const connNewForm = $("#conn-new-form");
+const connNewHost = $("#conn-new-host");
+const connNewUser = $("#conn-new-user");
+const connNewPort = $("#conn-new-port");
 
-function renderSshStatus() {
-  if (!window.clutchTunnel) {
-    sshStatus.textContent = "SSH requires the desktop app (Electron).";
-    return;
+const passModal = $("#ssh-pass-modal");
+const passInput = $("#ssh-pass-input");
+const passLabel = $("#ssh-pass-label");
+let passResolve = null;
+
+function sshConns() {
+  try {
+    return JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+  } catch (e) {
+    return [];
   }
-  const override = localStorage.getItem("clutch_api_url");
-  sshStatus.textContent = override
-    ? "Connected: " + override
-    : "Not connected. Using " + API_BASE + ".";
 }
 
-async function connectSsh() {
+function upsertConn(host, user, port) {
+  const list = sshConns().filter((c) => !(c.host === host && c.user === user && String(c.port) === String(port)));
+  list.unshift({ host, user, port: String(port) });
+  localStorage.setItem("clutch_ssh_connections", JSON.stringify(list));
+  localStorage.setItem("clutch_ssh_host", host);
+  localStorage.setItem("clutch_ssh_user", user);
+  localStorage.setItem("clutch_ssh_port", String(port));
+}
+
+function connLabel(c) {
+  return `${c.user}@${c.host}:${c.port}`;
+}
+
+function renderConnSelector() {
+  const override = localStorage.getItem("clutch_api_url");
+  const connected = override && localStorage.getItem("clutch_ssh_connected");
+  connSelect.innerHTML = "";
+  const localOpt = document.createElement("option");
+  localOpt.value = "local";
+  localOpt.textContent = "Local backend (127.0.0.1:8890)";
+  connSelect.appendChild(localOpt);
+  for (const c of sshConns()) {
+    const opt = document.createElement("option");
+    opt.value = "ssh:" + connLabel(c);
+    opt.textContent = connLabel(c);
+    connSelect.appendChild(opt);
+  }
+  if (connected) {
+    const opt = document.createElement("option");
+    opt.value = "ssh:__connected__";
+    opt.textContent = "SSH: " + override + " ✓";
+    connSelect.appendChild(opt);
+    connSelect.value = "ssh:__connected__";
+  } else {
+    connSelect.value = "local";
+  }
+  connStatus.textContent = connected ? "Connected: " + override : "Using " + API_BASE;
+}
+
+async function connectToSsh({ host, user, port, password }) {
   if (!window.clutchTunnel) return;
-  const host = sshHost.value.trim();
-  const user = sshUser.value.trim();
-  const port = sshPort.value.trim() || "22";
-  if (!host || !user) {
-    sshStatus.textContent = "host and user are required";
+  const res = await window.clutchTunnel.connect({ host, user, port: Number(port), password });
+  if (res.needsAssist) {
+    connStatus.textContent =
+      "Remote environment not recognized (" + (res.error || "?") + "). Running LLM-guided install…";
+    const a = await window.clutchTunnel.assist();
+    if (a.ok) {
+      upsertConn(host, user, port);
+      localStorage.setItem("clutch_api_url", a.url);
+      localStorage.setItem("clutch_ssh_connected", "1");
+      location.reload();
+    } else {
+      connStatus.textContent = "auto-install failed: " + (a.error || "unknown");
+    }
     return;
   }
-  sshStatus.textContent = "connecting…";
+  if (res.ok) {
+    upsertConn(host, user, port);
+    localStorage.setItem("clutch_api_url", res.url);
+    localStorage.setItem("clutch_ssh_connected", "1");
+    location.reload();
+  } else {
+    connStatus.textContent = "connection failed: " + (res.error || "unknown");
+  }
+}
+
+function showPasswordPrompt(label) {
+  return new Promise((resolve) => {
+    passLabel.textContent = label;
+    passInput.value = "";
+    passResolve = resolve;
+    passModal.classList.remove("hidden");
+    passInput.focus();
+  });
+}
+
+function closePasswordPrompt() {
+  passModal.classList.add("hidden");
+  if (passResolve) passResolve(null);
+  passResolve = null;
+}
+
+async function handleSshConnect(host, user, port, statusEl) {
+  if (!window.clutchTunnel) {
+    statusEl.textContent = "SSH requires the desktop app (Electron).";
+    return;
+  }
+  if (!host || !user) {
+    statusEl.textContent = "host and user are required";
+    return;
+  }
+  statusEl.textContent = "connecting…";
   try {
-    const res = await window.clutchTunnel.connect({
-      host,
-      user,
-      port: Number(port),
-      password: sshPassword.value,
-    });
+    // try keys/agent first; only prompt for a password if auth fails
+    let res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
+    if (!res.ok && res.error && /authentication/i.test(res.error) && !res.needsAssist) {
+      const pw = await showPasswordPrompt("Password for " + user + "@" + host);
+      if (!pw) {
+        statusEl.textContent = "connection cancelled";
+        return;
+      }
+      res = await window.clutchTunnel.connect({ host, user, port: Number(port), password: pw });
+    }
     if (res.needsAssist) {
-      // exotic remote: ask before spending LLM tokens on the guided installer
-      sshStatus.textContent =
+      statusEl.textContent =
         "Remote environment not recognized (" + (res.error || "?") + "). Running LLM-guided install…";
       const a = await window.clutchTunnel.assist();
       if (a.ok) {
+        upsertConn(host, user, port);
         localStorage.setItem("clutch_api_url", a.url);
         localStorage.setItem("clutch_ssh_connected", "1");
         location.reload();
       } else {
-        sshStatus.textContent = "auto-install failed: " + (a.error || "unknown");
+        statusEl.textContent = "auto-install failed: " + (a.error || "unknown");
       }
       return;
     }
     if (res.ok) {
-      localStorage.setItem("clutch_ssh_host", host);
-      localStorage.setItem("clutch_ssh_user", user);
-      localStorage.setItem("clutch_ssh_port", port);
+      upsertConn(host, user, port);
       localStorage.setItem("clutch_api_url", res.url);
       localStorage.setItem("clutch_ssh_connected", "1");
       location.reload();
     } else {
-      sshStatus.textContent = "connection failed: " + (res.error || "unknown");
+      statusEl.textContent = "connection failed: " + (res.error || "unknown");
     }
   } catch (e) {
-    sshStatus.textContent = "connection failed: " + e.message;
+    statusEl.textContent = "connection failed: " + e.message;
   }
 }
 
-async function disconnectSsh() {
-  localStorage.removeItem("clutch_api_url");
-  localStorage.removeItem("clutch_ssh_connected");
-  await window.clutchTunnel.disconnect();
-  location.reload();
-}
+connSelect.addEventListener("change", async () => {
+  const v = connSelect.value;
+  if (v === "local") {
+    if (localStorage.getItem("clutch_ssh_connected")) {
+      localStorage.removeItem("clutch_api_url");
+      localStorage.removeItem("clutch_ssh_connected");
+      await window.clutchTunnel.disconnect();
+      location.reload();
+    }
+    return;
+  }
+  if (v.startsWith("ssh:") && !v.includes("__connected__")) {
+    // switching: drop any current tunnel first, then connect to the new host
+    if (localStorage.getItem("clutch_ssh_connected")) {
+      await window.clutchTunnel.disconnect();
+      localStorage.removeItem("clutch_api_url");
+      localStorage.removeItem("clutch_ssh_connected");
+    }
+    const [user, hostPort] = v.slice(4).split("@");
+    const [host, port] = hostPort.split(":");
+    connNewForm.classList.add("hidden");
+    await handleSshConnect(host, user, port || "22", connStatus);
+  }
+});
 
-$("#ssh-connect").addEventListener("click", connectSsh);
-$("#ssh-disconnect").addEventListener("click", disconnectSsh);
+$("#conn-new").addEventListener("click", () => {
+  connNewForm.classList.toggle("hidden");
+  connNewHost.value = localStorage.getItem("clutch_ssh_host") || "";
+  connNewUser.value = localStorage.getItem("clutch_ssh_user") || "";
+  connNewPort.value = localStorage.getItem("clutch_ssh_port") || "22";
+  if (!connNewForm.classList.contains("hidden")) connNewHost.focus();
+});
+$("#conn-new-cancel").addEventListener("click", () => connNewForm.classList.add("hidden"));
+$("#conn-new-connect").addEventListener("click", () => {
+  const host = connNewHost.value.trim();
+  const user = connNewUser.value.trim();
+  const port = connNewPort.value.trim() || "22";
+  handleSshConnect(host, user, port, connStatus);
+});
+$("#ssh-pass-ok").addEventListener("click", () => {
+  const pw = passInput.value;
+  passModal.classList.add("hidden");
+  if (passResolve) passResolve(pw);
+  passResolve = null;
+});
+$("#ssh-pass-cancel").addEventListener("click", closePasswordPrompt);
+passModal.addEventListener("click", (e) => {
+  if (e.target === passModal) closePasswordPrompt();
+});
+passInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("#ssh-pass-ok").click();
+});
 
 // True for URLs that look like SSH-tunnel leftovers (127.0.0.1 on a non-default
 // port); manual LAN/domain backend URLs are not affected.
@@ -1074,6 +1199,8 @@ function openFsBrowser(mode) {
   $("#fs-new").classList.toggle("hidden", mode !== "new");
   $("#fs-create").classList.toggle("hidden", mode !== "new");
   $("#fs-name-input").value = "";
+  connNewForm.classList.add("hidden");
+  renderConnSelector();
   fsModal.classList.remove("hidden");
   loadDir("");
 }

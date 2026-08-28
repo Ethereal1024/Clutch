@@ -468,6 +468,22 @@ main { display: flex; flex: 1; min-height: 0; }
 
 /* server file browser */
 #fs-modal .modal-box { width: 560px; }
+.fs-conn { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.fs-conn-row { display: flex; gap: 8px; align-items: center; }
+.fs-conn-row select {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.fs-conn-row select:focus { outline: none; border-color: var(--accent); }
+.fs-conn-row button { white-space: nowrap; }
+#conn-new-form { margin-top: 10px; }
+#conn-status { margin: 8px 0 0; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
 #fs-list {

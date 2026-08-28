@@ -38,22 +38,7 @@
       <p class="muted">Stored on the backend (~/.clutch/settings.json). Only needed when the backend talks to the LLM itself.</p>
       <label for="backend-url-input">Backend URL</label>
       <input id="backend-url-input" type="text" placeholder="http://127.0.0.1:8890" autocomplete="off" />
-      <p class="muted">Where the agent API runs. The SSH connection below sets this automatically.</p>
-      <h4>SSH to a remote backend</h4>
-      <p class="muted">Connects the UI to a backend on another machine over an SSH tunnel (no port exposure, encrypted). The client also serves as the LLM proxy, so the remote needs no internet or API key.</p>
-      <label for="ssh-host-input">SSH host</label>
-      <input id="ssh-host-input" type="text" placeholder="remote.example.com" autocomplete="off" />
-      <label for="ssh-user-input">SSH user</label>
-      <input id="ssh-user-input" type="text" placeholder="user" autocomplete="off" />
-      <label for="ssh-port-input">SSH port</label>
-      <input id="ssh-port-input" type="text" placeholder="22" autocomplete="off" />
-      <label for="ssh-password-input">SSH password (optional)</label>
-      <input id="ssh-password-input" type="password" placeholder="or leave empty to use SSH keys" autocomplete="off" />
-      <p id="ssh-status" class="muted"></p>
-      <div class="modal-actions">
-        <button id="ssh-connect" class="primary">Connect via SSH</button>
-        <button id="ssh-disconnect">Disconnect</button>
-      </div>
+      <p class="muted">Where the agent API runs. The SSH connection in the project picker sets this automatically.</p>
       <div class="modal-actions">
         <button id="settings-save" class="primary">Save</button>
         <button id="settings-close">Cancel</button>
@@ -77,6 +62,25 @@
     <div class="modal-box">
       <h3 id="fs-title">Open project</h3>
       <p class="muted">Browse the backend's filesystem. Projects are single <code>.clc</code> files.</p>
+      <div class="fs-conn">
+        <div class="fs-conn-row">
+          <select id="conn-select"></select>
+          <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
+        </div>
+        <p id="conn-status" class="muted"></p>
+        <div id="conn-new-form" class="hidden">
+          <label for="conn-new-host">SSH host</label>
+          <input id="conn-new-host" type="text" placeholder="remote.example.com" autocomplete="off" />
+          <label for="conn-new-user">SSH user</label>
+          <input id="conn-new-user" type="text" placeholder="user" autocomplete="off" />
+          <label for="conn-new-port">SSH port</label>
+          <input id="conn-new-port" type="text" placeholder="22" autocomplete="off" />
+          <div class="modal-actions">
+            <button id="conn-new-cancel">Cancel</button>
+            <button id="conn-new-connect" class="primary">Connect</button>
+          </div>
+        </div>
+      </div>
       <div class="fs-toolbar">
         <button id="fs-up" title="up one level">..</button>
         <input id="fs-path-input" type="text" placeholder="/home/user" autocomplete="off" />
@@ -90,6 +94,19 @@
       <div class="modal-actions">
         <button id="fs-cancel">Cancel</button>
         <button id="fs-create" class="primary hidden">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ssh-pass-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>SSH password</h3>
+      <p id="ssh-pass-label" class="muted"></p>
+      <label for="ssh-pass-input">Password</label>
+      <input id="ssh-pass-input" type="password" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="ssh-pass-cancel">Cancel</button>
+        <button id="ssh-pass-ok" class="primary">Connect</button>
       </div>
     </div>
   </div>
