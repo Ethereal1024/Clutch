@@ -36,6 +36,9 @@
 ::-webkit-scrollbar-thumb:hover { background: #3a3a41; }
 * { scrollbar-width: thin; scrollbar-color: #2e2e33 transparent; }
 
+/* text selection: red fill + near-black text, the theme's single accent */
+::selection { background: var(--accent); color: #0F0F10; }
+
 html, body {
   height: 100%;
   margin: 0;
@@ -503,9 +506,33 @@ main { display: flex; flex: 1; min-height: 0; }
   display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
   cursor: pointer; user-select: none;
 }
+.hidden-toggle:hover { color: var(--text); }
 .hidden-toggle input {
-  margin: 0; width: auto; padding: 0; border: none; background: none;
-  accent-color: var(--accent); flex: 0;
+  margin: 0; padding: 0; flex: 0;
+}
+/* themed checkbox: graphite sharp-cornered box, red fill + dark check when on */
+.hidden-toggle input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  border-radius: 0;
+  cursor: pointer;
+  position: relative;
+}
+.hidden-toggle input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.hidden-toggle input[type="checkbox"]:checked::after {
+  content: "✓";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #0F0F10; font-size: 11px; font-weight: 700; line-height: 1;
+}
+.hidden-toggle input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 #fs-toolbar .hidden-toggle { align-self: center; }
 /* beat #fs-toolbar input { flex: 1 } so the checkbox stays its natural size */
