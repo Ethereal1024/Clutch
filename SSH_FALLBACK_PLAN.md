@@ -16,7 +16,7 @@
 | `base.py` | **（新）** 服务器基类 | `Broadcaster`、`RunState`（`backend_mode/bridge_url/remote_root` + `build_workspace`）、`BaseServer`（`build_llm/build_tools/build_workspace(abstract)/start_task`） |
 | `server.py` | HTTP+SSE 服务器 | `HttpAgentServer(BaseServer)`、`Handler`（经 `self.server.app`）、`ClutchServer`、`build()` 工厂、`_run/_sse/_fs_list/_fs_list_remote/_workspace_tree/_walk/_walk_remote/_backend` |
 | `loop.py` | agent 循环 | `Agent`、`_emit`、`run`、`_execute_tool` |
-| `tools/workspace.py` | 工作区抽象 | `Workspace` ABC（root/protect/is_protected/visible_entries/resolve/run/read/write/list/append_line）+ `LocalWorkspace` + `RemoteWorkspace`（tool→sh：cat/heredoc/ls）+ `shq` |
+| `tools/workspace.py` | 工作区抽象 | `Workspace` ABC（root/protect/is_protected/visible_entries/resolve/run/read/write/list/append_line）+ `LocalWorkspace` + `RemoteWorkspace`（tool→sh：cat/ls/`printf` 分块写，cap 3.5KB/exec）+ `shq` |
 | `tools/filesystem.py` | 文件工具 | `read_file/write_file/list_dir/_unified_diff`（经 `workspace.read/write/list`） |
 | `tools/shell.py` | 命令工具 | `run_command`（path-guard + blocked + `workspace.run` + _syntax_check） |
 | `tools/registry.py` | 工具注册 | `Tool`、`build_default_tools`、`ToolRegistry.execute` |
@@ -193,7 +193,7 @@ class RemoteWorkspace(Workspace):  # tool→sh 转译
 |------|------|
 | `run(command, timeout)` | `cd '<root>' && <command>`（LocalWorkspace.run 用 subprocess cwd=root，语义一致） |
 | `read(path)` | `cat '<abs>'`；`code!=0` → `FileNotFoundError(path)`；stdout 即内容 |
-| `write(path, content)` | 先 `cat '<abs>'`（`code==0` 取旧内容，否则视为新文件）；再单条 heredoc：`cat > '<abs>' <<'<uniq>'\n<body>\n<uniq>`；`code!=0` → 抛错 |
+| `write(path, content)` | 分块 `printf '%s' '<chunk>' > '<abs>'`（首块带 `mkdir -p`）/ `>>`（后续块）；`code!=0` → 抛错 |
 | `list(path)` | `ls -1AF '<abs>'`；`code!=0` → `NotADirectoryError(path)`；解析行尾 `/` 为目录（`name/`），剥 `*`/`@` |
 
 要点：
@@ -201,15 +201,21 @@ class RemoteWorkspace(Workspace):  # tool→sh 转译
   全用绝对路径，不依赖 cwd。
 - **缺文件/缺目录语义**：不额外 `test -f`（省一次 exec），直接用 `cat`/`ls` 的退出码判定，
   工具层把 `FileNotFoundError`/`NotADirectoryError` 格式化为现有报错文案。
-- **write heredoc 细节**（与 Node `uploadFileViaExec` 同思路）：
-  - 定界符唯一：`CLUTCH_EOF_<time_ns()>`（Python）或 `<Date.now().toString(36)>`（Node）。
-  - 引号定界符 `<<'<uniq>'` 下内容全字面（`$`/反引号/引号都安全），不依赖 base64。
-  - **尾部换行**：content 若以 `\n` 结尾，先剥掉一个，让 heredoc 自带的换行补回 → 逐字节一致
-    （实测含 `$VAR`/反引号/单双引号/tab 的文件 round-trip 一致；无尾换行的文本会多一个 `\n`，
-    对源码无害，注释说明）。
-  - 文本无需分块（heredoc 走 shell stdin，不走 argv，无 ARG_MAX 问题）；若有 null 字节
-    （不应出现在 write_file 的模型文本里）则回退 base64 分块。
-- **binary read**：`cat` 输出按 `errors="replace"` 解码，与本地 `read_text(errors="replace")` 一致。
+- **write/append 用 `printf '%s'` + 分块**（替代初版 heredoc，实测结论）：
+  - **exec 请求长度上限**：最小 sshd（OpenWrt/dropbear 实测）对单条 exec 请求有 ~8KB 上限，
+    超限直接掉连接（实测 7,929B OK / 9,636B 断）。heredoc 内容整条塞进 exec 请求，大文件写
+    必炸——初版"heredoc 走 stdin、无 argv 上限、无需分块"的假设不成立。
+  - **为什么 printf**：`printf` 是 POSIX sh 内建（无 base64 的设备也有）；格式 `%s` 把参数
+    逐字节原样输出、**不加换行**，可在任意字符处切块而文件逐字节不变（`$`/反引号/引号/tab/
+    换行全字面）。单行 JSON 事件（.clc 每行一条，无法按行分块）也因此能安全分块。
+  - **分块 cap**：`_EXEC_CHUNK_BYTES = 3500`，按**转义后线上字节**计（`'` 计 4 字节，因
+    `shq` 展开为 `'\''`），保证每条 exec ≤ ~3.6KB，留 ~2.2x 余量。每条 durable 事件从 1 次
+    exec 变 N 次，LAN 每次 ~10ms，可接受。
+  - **尾换行**：printf 不加换行 → write 逐字节精确（顺带修掉 heredoc 的"无尾换行多一个
+    `\n`"）；`append_line` 最后一块用 `printf '%s\n'` 补回 JSONL 行尾。
+  - **空内容**：write 空串时发一条 `printf '%s' '' > path` 建空文件。
+  - **binary read**：`cat` 输出按 `errors="replace"` 解码，与本地 `read_text(errors="replace")` 一致。
+  - null 字节仍无法经 exec 命令串携带（同 heredoc）；模型文本不应包含，若出现回退 base64。
 
 ### 3.4 工具层改道（P1 核心）
 
@@ -286,10 +292,10 @@ POST /api/backend {mode:"local"} → {status:"ok"}
 | 关注点 | 数值/行为 |
 |--------|----------|
 | 工具调用开销 | 本地 3–10ms；SSH LAN 5–30ms；WAN +50–100ms。被 LLM 秒级延迟淹没，整体 +5–10% |
-| `.clc` 追加 | 每 durable 事件一次 SSH 往返（LAN ~10ms；WAN 每任务 +4–12s）。逐条写最稳；不批量（避免崩溃丢缓冲） |
+| `.clc` 追加 | 每 durable 事件 1–N 次 SSH 往返（LAN 每次 ~10ms；WAN 每任务 +4–12s）。逐条写最稳；不批量（避免崩溃丢缓冲）。N 来自 `printf` 分块：>3.5KB 的事件拆多条 exec，每条 ≤ ~3.6KB |
 | LLM 少一跳 | 远端模型经反向转发绕回客户端；本地模型直连，更快 |
-| 隧道中断 | 运行中 `.clc` 追加失败会报错（本地 .clc 无此故障模式）。退化层可接受；可选缓冲追加缓解 |
-| 大文件写 | heredoc 单命令走 shell stdin，无 argv 上限；无需分块 |
+| 隧道中断 | 运行中 `.clc` 追加失败会报错（本地 .clc 无此故障模式）。退化层可接受；可选缓冲追加缓解。server 侧 `_worker` 捕获异常发布 error final，UI 显示错误而非静默 idle |
+| 大文件写 | `printf '%s'` 分块（cap 3.5KB/exec），任意切分点逐字节精确；无单条 exec 超长问题 |
 | 超时 | `config.command_timeout`(30s) → bridge timeout；SSH exec 超时杀通道，远端已 fork 的后台进程可能残留（与本地 subprocess 超时行为类似，可接受） |
 
 ---
@@ -409,7 +415,7 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 ## 6. 验证要点
 
 - P1：本地 transport 与原 subprocess 输出逐字节一致（diff/截断/路径防护文案不变）。
-- P2：heredoc 追加 round-trip（单引号/`$`/反引号内容逐字节一致）；远端 .clc 打开/追加/压缩；
+- P2：`printf` 追加 round-trip（单引号/`$`/反引号内容逐字节一致）；大文件/大单行事件分块后逐字节一致且每条 exec ≤ cap；远端 .clc 打开/追加/压缩；
   `run_verify` 经桥；picker/tree 经桥；隧道断开后桥返回 503。
 - P3：`eval/harness.py` 改用 `BaseServer` 后与现 eval 一致；`server_test` 的 `build()` 调用不变。
 - P4：`CLUTCH_TUNNEL_FORCE` 或 mock bridge 模拟 bootstrap 失败 → 自动降级 → 复位。
@@ -428,13 +434,18 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 4. **安全边界不弱于本地**：path-guard 分词、protected 检查、blocked_prefixes 全部保留（字符串级，
    本地/远端通用）。但远端执行与本地同样有 `rm -rf .` 这类语义缺口（guard 只拒逃逸+受保护文件），
    非本层新增风险。
-5. **隧道断开**：桥 503，agent 的 `.clc` 追加或工具调用会报错——运行终止，可接受。
-6. **二进制 read**：`cat` + `errors="replace"`，与本地一致；write_file 的模型文本不应含 null 字节，
+5. **隧道断开**：桥 503，agent 的 `.clc` 追加或工具调用会抛 `TransportError`——运行终止。
+   server 侧 `_worker` 已捕获并发布 error final（§3.8），UI 显示错误而非静默 idle；远端 `.clc`
+   停在缺失最后一条 durable 事件的中间状态，重连后可续跑。
+6. **exec 命令长度上限（实测坑）**：最小 sshd（OpenWrt/dropbear）单条 exec 请求 ~8KB 就掉连接
+   （实测 7,929B OK / 9,636B 断）。因此所有远端写/追加必须分块（`printf`，cap 3.5KB/exec），
+   **绝不能在一条 exec 里塞大内容**（heredoc 也不行——内容整个在 exec 请求里）。
+7. **二进制 read**：`cat` + `errors="replace"`，与本地一致；write_file 的模型文本不应含 null 字节，
    若出现回退 base64。
-7. **并发**：单 run（RunState.busy），`.clc` 追加只在 agent 线程，无并发写。
-8. **exec bridge 端口**：动态 `freePort()`，经 `tunnelStatus.execBridge` 暴露；不用固定端口。
-9. **LLM 反向转发**：退化层远端不调 LLM，`startLlmProxy`/反向 forward 对该模式非必需（留着无害）。
-10. **`Workspace()` 无参语义**：eval/harness 依赖"无参→临时目录"，P1 必须保留（LocalWorkspace
+8. **并发**：单 run（RunState.busy），`.clc` 追加只在 agent 线程，无并发写。
+9. **exec bridge 端口**：动态 `freePort()`，经 `tunnelStatus.execBridge` 暴露；不用固定端口。
+10. **LLM 反向转发**：退化层远端不调 LLM，`startLlmProxy`/反向 forward 对该模式非必需（留着无害）。
+11. **`Workspace()` 无参语义**：eval/harness 依赖"无参→临时目录"，P1 必须保留（LocalWorkspace
     无根时回退 `tempfile.mkdtemp`）。
 
 ---

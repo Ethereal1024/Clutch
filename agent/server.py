@@ -36,6 +36,7 @@ from .config import Config
 from .events import (
     DURABLE_TYPES,
     Event,
+    FinalEvent,
     PermissionRequestEvent,
     StateUpdateEvent,
     event_to_json,
@@ -187,11 +188,18 @@ class Handler(BaseHTTPRequestHandler):
         self._state.gate = agent.gate
 
         def _worker() -> None:
-            # an unexpected error here propagates: Python prints the thread
-            # traceback, and finally resets the busy flag. run() already emits a
-            # graceful error final for anticipated AgentError failures.
+            # run() emits a graceful error final for anticipated AgentError
+            # failures; anything else (e.g. the SSH tunnel dying under a degraded
+            # backend) must surface as an error final instead of a silent idle.
             try:
                 agent.run(task)
+            except Exception as e:  # noqa: BLE001 -- last-resort user-facing final
+                print(f"[clutch] run crashed: {e}", file=sys.stderr)
+                try:
+                    self._broadcaster.publish(FinalEvent(status="error", summary=f"run crashed: {e}"))
+                    self._broadcaster.publish(StateUpdateEvent(value="error"))
+                except Exception:  # noqa: BLE001
+                    pass
             finally:
                 self._state.finish()
 

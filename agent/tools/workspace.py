@@ -15,7 +15,6 @@ so local and remote behave identically.
 from __future__ import annotations
 
 import tempfile
-import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -112,13 +111,20 @@ class LocalWorkspace(Workspace):
             f.write(line + "\n")
 
 
+# ponytail: minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a
+# single exec request over ~8KB (measured on the test router: 7929 B ok, 9636 B
+# died). Every remote write/append is chunked well below that.
+_EXEC_CHUNK_BYTES = 3500
+
+
 class RemoteWorkspace(Workspace):
     """Workspace whose files live on a remote host reached over the exec bridge.
 
     Every exec starts a fresh shell, so read/write/list use absolute paths and
     run() prefixes `cd '<root>' &&` for the same cwd semantics as LocalWorkspace.
-    File operations are plain POSIX sh — cat, a quoted heredoc (no base64, no
-    SFTP), ls — so any device that can run an sshd shell works.
+    File operations are plain POSIX sh — cat, ls, and `printf '%s'` appends (no
+    base64, no SFTP) — so any device that can run an sshd shell works. Writes and
+    appends are chunked so no single exec command exceeds the sshd's limit.
     """
 
     def __init__(self, root: str | None, bridge_url: str) -> None:
@@ -134,16 +140,54 @@ class RemoteWorkspace(Workspace):
             raise FileNotFoundError(str(p))
         return r.stdout
 
+    def _chunk_content(self, content: str) -> list[str]:
+        """Split into pieces whose ON-WIRE size (after shq quoting) stays under
+        _EXEC_CHUNK_BYTES. A single quote inflates to the 4-char sequence '\''
+        in the shell command, so it is budgeted at 4; multibyte chars are never
+        split mid-character."""
+        chunks: list[str] = []
+        cur: list[str] = []
+        size = 0
+        for ch in content:
+            sz = 4 if ch == "'" else len(ch.encode("utf-8"))
+            if cur and size + sz > _EXEC_CHUNK_BYTES:
+                chunks.append("".join(cur))
+                cur, size = [ch], sz
+            else:
+                cur.append(ch)
+                size += sz
+        if cur:
+            chunks.append("".join(cur))
+        return chunks
+
+    def _exec_append(
+        self,
+        p: Path,
+        content: str,
+        first_op: str,
+        add_trailing_nl: bool,
+        ensure_dir: bool,
+    ) -> None:
+        """Write/append content via one small `printf '%s'` per chunk.
+
+        printf is a POSIX sh builtin (present even where base64 is not) and `%s`
+        emits its argument byte-for-byte with no added newline, so chunks can be
+        cut anywhere and the file stays byte-exact. The last chunk optionally
+        uses `%s\\n` to restore the JSONL terminator.
+        """
+        chunks = self._chunk_content(content) or [""]
+        for i, chunk in enumerate(chunks):
+            fmt = "%s\n" if (add_trailing_nl and i == len(chunks) - 1) else "%s"
+            op = first_op if i == 0 else ">>"
+            prefix = f"mkdir -p {shq(str(p.parent))} && " if (ensure_dir and i == 0) else ""
+            cmd = f"{prefix}printf '{fmt}' {shq(chunk)} {op} {shq(str(p))}"
+            r = self._transport.run(cmd, 60.0)
+            if r.code != 0:
+                raise OSError(f"write failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+
     def write(self, path: str, content: str) -> None:
         p = self.resolve(path)
-        # quoted heredoc: content is fully literal ($, backticks, quotes all safe);
-        # strips the file's own trailing newline so the heredoc's own one restores it
-        delim = f"CLUTCH_EOF_{time.time_ns()}"
-        body = content[:-1] if content.endswith("\n") else content
-        cmd = f"mkdir -p {shq(str(p.parent))} && cat > {shq(str(p))} <<'{delim}'\n{body}\n{delim}"
-        r = self._transport.run(cmd, 60.0)
-        if r.code != 0:
-            raise OSError(f"write failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+        self._exec_append(p, content, first_op=">", add_trailing_nl=False, ensure_dir=True)
 
     def list(self, path: str) -> list[str]:
         p = self.resolve(path)
@@ -167,8 +211,4 @@ class RemoteWorkspace(Workspace):
 
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
-        delim = f"CLUTCH_EOF_{time.time_ns()}"
-        cmd = f"cat >> {shq(str(p))} <<'{delim}'\n{line}\n{delim}"
-        r = self._transport.run(cmd, 30.0)
-        if r.code != 0:
-            raise OSError(f"append failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+        self._exec_append(p, line, first_op=">>", add_trailing_nl=True, ensure_dir=False)

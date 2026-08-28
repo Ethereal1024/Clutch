@@ -21,10 +21,14 @@ from pathlib import Path
 
 from ..testsupport import check
 from .transport import SshTransport, TransportError
-from .workspace import LocalWorkspace, RemoteWorkspace
+from .workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
 
 
 class MockBridge(BaseHTTPRequestHandler):
+    # peak single exec-command length seen (asserts RemoteWorkspace chunking caps
+    # the command under the sshd's limit even for large content)
+    max_cmd_len = 0
+
     def log_message(self, *a) -> None:  # silence request spam
         pass
 
@@ -35,11 +39,10 @@ class MockBridge(BaseHTTPRequestHandler):
             return
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         cmd = body.get("command", "")
+        MockBridge.max_cmd_len = max(MockBridge.max_cmd_len, len(cmd.encode("utf-8")))
         timeout_ms = body.get("timeout", 60000)
         try:
-            r = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=timeout_ms / 1000
-            )
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_ms / 1000)
             code, stdout, stderr = r.returncode, r.stdout or "", r.stderr or ""
         except subprocess.TimeoutExpired:
             code, stdout, stderr = -1, "", ""
@@ -64,9 +67,28 @@ def main() -> int:
         check(ws.read("sub/deep/f.txt") == tricky, "remote write/read byte-identical")
         check(ws.read("sub/deep/f.txt") == LocalWorkspace(rtmp).read("sub/deep/f.txt"), "matches local bytes")
 
-        # trailing-newline semantics (heredoc adds one; documented)
+        # byte-exact writes: printf adds no newline (heredoc's trailing-\n caveat is gone)
         ws.write("no-nl.txt", "abc")
-        check(ws.read("no-nl.txt") == "abc\n", "remote write appends one trailing newline")
+        check(ws.read("no-nl.txt") == "abc", "remote write is byte-exact (no added newline)")
+
+        # large content: single multi-KB command would kill a minimal sshd — chunking
+        # must keep every exec command under the cap AND preserve the bytes exactly
+        big = "".join(f"line {i:04d} with $VAR and 'quotes' and \"dquotes\" and \ttab\t\n" for i in range(300))  # ~21KB
+        ws.write("big.txt", big)
+        check(ws.read("big.txt") == big, "large remote write byte-exact (chunked)")
+
+        # the .clc case: one huge single-line event (JSONL) appends without a newline split
+        event = '{"type": "tool_result", "content": "' + ("x" * 24000) + '"}'
+        ws.append_line("session.clc", event)
+        check(
+            LocalWorkspace(rtmp).read("session.clc") == event + "\n",
+            "large single-line append byte-exact (chunked, one trailing newline)",
+        )
+        # every exec command stays well under the sshd's ~8KB drop threshold
+        check(
+            MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200,
+            f"exec commands chunked under the cap (max {MockBridge.max_cmd_len} bytes)",
+        )
 
         # ls parsing + cd semantics + protected hiding + error mapping
         entries = ws.list(".")
