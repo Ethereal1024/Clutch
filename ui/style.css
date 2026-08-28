@@ -473,6 +473,9 @@ main { display: flex; flex: 1; min-height: 0; }
 /* server file browser */
 #fs-modal .modal-box { width: 560px; }
 .fs-conn { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+/* when the picker body is collapsed (SSH connect/failure), the conn bar is the
+   last thing in the modal — drop its divider so no stray line sits under it */
+.fs-conn:has(+ #fs-body.collapsed) { border-bottom: none; }
 .fs-conn-row { display: flex; gap: 8px; align-items: center; }
 .fs-conn-row select {
   flex: 1;
