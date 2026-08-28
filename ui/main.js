@@ -9,7 +9,7 @@
 
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
-const { connectTunnel, stopTunnel, runAssist, tunnelLog } = require("./ssh-tunnel");
+const { connectTunnel, stopTunnel, runAssist, tunnelLog, tunnelStatus, onTunnelEnd } = require("./ssh-tunnel");
 
 const API_BASE = process.env.CLUTCH_API_URL || "http://127.0.0.1:8890";
 
@@ -39,9 +39,15 @@ app.whenReady().then(() => {
 
   ipcMain.handle("tunnel:connect", async (_e, cfg) => connectTunnel(cfg));
   ipcMain.handle("tunnel:assist", async () => runAssist());
+  ipcMain.handle("tunnel:status", async () => tunnelStatus());
   ipcMain.handle("tunnel:disconnect", async () => {
     await stopTunnel();
     return { ok: true };
+  });
+
+  // tell the renderer the moment a tunnel dies, so it can drop a stale API URL
+  onTunnelEnd(() => {
+    if (!win.isDestroyed()) win.webContents.send("tunnel:ended");
   });
 });
 

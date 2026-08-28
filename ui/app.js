@@ -752,6 +752,7 @@ async function connectSsh() {
       const a = await window.clutchTunnel.assist();
       if (a.ok) {
         localStorage.setItem("clutch_api_url", a.url);
+        localStorage.setItem("clutch_ssh_connected", "1");
         location.reload();
       } else {
         sshStatus.textContent = "auto-install failed: " + (a.error || "unknown");
@@ -763,6 +764,7 @@ async function connectSsh() {
       localStorage.setItem("clutch_ssh_user", user);
       localStorage.setItem("clutch_ssh_port", port);
       localStorage.setItem("clutch_api_url", res.url);
+      localStorage.setItem("clutch_ssh_connected", "1");
       location.reload();
     } else {
       sshStatus.textContent = "connection failed: " + (res.error || "unknown");
@@ -773,13 +775,40 @@ async function connectSsh() {
 }
 
 async function disconnectSsh() {
-  await window.clutchTunnel.disconnect();
   localStorage.removeItem("clutch_api_url");
+  localStorage.removeItem("clutch_ssh_connected");
+  await window.clutchTunnel.disconnect();
   location.reload();
 }
 
 $("#ssh-connect").addEventListener("click", connectSsh);
 $("#ssh-disconnect").addEventListener("click", disconnectSsh);
+
+// Drop a stale tunnel URL: on startup, if we last connected over SSH but no tunnel
+// is alive (restart / dropped), fall back to the default backend instead of
+// pointing every fetch at a dead port ("Failed to fetch").
+async function reconcileStaleTunnel() {
+  if (!window.clutchTunnel) return;
+  if (!localStorage.getItem("clutch_ssh_connected")) return;
+  const s = await window.clutchTunnel.status();
+  if (!s.active) {
+    localStorage.removeItem("clutch_api_url");
+    localStorage.removeItem("clutch_ssh_connected");
+    location.reload();
+  }
+}
+
+// When a live tunnel dies mid-session (not an intentional disconnect), clear the
+// stored URL and reload to the default backend so the UI stops failing.
+if (window.clutchTunnel) {
+  window.clutchTunnel.onEnd(() => {
+    if (localStorage.getItem("clutch_ssh_connected")) {
+      localStorage.removeItem("clutch_api_url");
+      localStorage.removeItem("clutch_ssh_connected");
+      location.reload();
+    }
+  });
+}
 
 // ---- permission confirm ----
 const permModal = $("#perm-modal");
@@ -1073,7 +1102,9 @@ async function loadDir(path) {
     if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
   } catch (e) {
     listEl.innerHTML = "";
-    listEl.appendChild(fsRow("Error: " + (e.message || e), "error-row"));
+    listEl.appendChild(
+      fsRow("Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Reconnect SSH or check the backend URL.", "error-row")
+    );
   }
 }
 
@@ -1100,4 +1131,6 @@ $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
 $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
 $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
+// clear a stale SSH tunnel URL before anything else fires a fetch
+reconcileStaleTunnel();
 connectSSE();

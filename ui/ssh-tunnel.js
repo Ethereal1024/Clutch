@@ -41,6 +41,9 @@ let localSrv = null;
 let llmProxyPort = null;
 let sftpHandle = null;
 let lastProbe = null;
+let currentUrl = null;
+let wasDisconnected = true;
+const endListeners = new Set();
 
 function tunnelLog(...args) {
   try {
@@ -315,10 +318,33 @@ async function stopTunnel() {
     sshClient.end();
     sshClient = null;
   }
+  currentUrl = null;
   if (sftpHandle) {
     sftpHandle = null;
   }
   stopLlmProxy();
+  notifyEnd();
+}
+
+function notifyEnd() {
+  if (wasDisconnected) return; // both stopTunnel and the ssh 'end' event fire; emit once
+  wasDisconnected = true;
+  for (const cb of endListeners) {
+    try {
+      cb();
+    } catch (e) {
+      /* listener errors are non-fatal */
+    }
+  }
+}
+
+function onTunnelEnd(cb) {
+  endListeners.add(cb);
+  return () => endListeners.delete(cb);
+}
+
+function tunnelStatus() {
+  return { active: Boolean(sshClient), url: currentUrl };
 }
 
 async function connectTunnel({ host, user, port, password }) {
@@ -373,11 +399,13 @@ async function connectTunnel({ host, user, port, password }) {
     sshClient.on("end", () => {
       tunnelLog("[disconnect] tunnel ended");
       sshClient = null;
+      currentUrl = null;
       if (localSrv) {
         localSrv.close();
         localSrv = null;
       }
       stopLlmProxy();
+      notifyEnd();
     });
     sshClient.on("error", (e) => {
       tunnelLog("[error] runtime: " + e.message);
@@ -443,7 +471,9 @@ async function establishForwardAndHealth(localPort) {
     return { ok: false, error: "backend not reachable on the remote host" };
   }
   tunnelLog(`[connect] OK url=http://127.0.0.1:${localPort}`);
-  return { ok: true, url: "http://127.0.0.1:" + localPort };
+  currentUrl = "http://127.0.0.1:" + localPort;
+  wasDisconnected = false;
+  return { ok: true, url: currentUrl };
 }
 
 // LLM-guided install (remote-install-assist.js) on the still-open connection.
@@ -487,4 +517,4 @@ async function uploadDir(localDir, remoteDir) {
   }
 }
 
-module.exports = { connectTunnel, stopTunnel, remoteExec, runAssist, tunnelLog };
+module.exports = { connectTunnel, stopTunnel, remoteExec, runAssist, tunnelLog, onTunnelEnd, tunnelStatus };
