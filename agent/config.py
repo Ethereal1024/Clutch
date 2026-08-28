@@ -59,6 +59,7 @@ class Config:
 
     # Runtime
     port: int = 8890
+    host: str = "127.0.0.1"  # bind address; 0.0.0.0 exposes the API to other devices
     # Skills: catalog in the system prompt; model loads one on demand via load_skill
     enable_skills: bool = True
     skills_dir: Path = Path(__file__).resolve().parent / "skills"

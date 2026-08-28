@@ -1,7 +1,7 @@
 """Server end-to-end check: boots the HTTP server in a thread and exercises it.
 
 Run: uv run python -m agent.server_test
-Static/health/project are always checked. If DEEPSEEK_API_KEY is set, also runs a
+API/health/project are always checked. If DEEPSEEK_API_KEY is set, also runs a
 real task through /api/run, collects SSE events, and checks the workspace tree and
 .clc persistence. Skips the real-run section when no key is present (network-free).
 """
@@ -21,13 +21,13 @@ from .config import Config
 from .server import Broadcaster, RunState, build
 from .testsupport import check
 
-BASE = Path(__file__).resolve().parent.parent
-UI_DIR = BASE / "ui"
-
 
 def http_get(url: str) -> tuple[int, str]:
-    with urllib.request.urlopen(url, timeout=15) as r:
-        return r.status, r.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            return r.status, r.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace")
 
 
 def http_post(url: str, body: dict) -> tuple[int, str]:
@@ -77,20 +77,23 @@ def _run_server_test() -> int:
     with tempfile.TemporaryDirectory() as sdir:
         proj_dir = Path(sdir) / "work"
         proj_dir.mkdir()
-        srv = build(config, UI_DIR, broadcaster, state)
+        srv = build(config, broadcaster, state)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
         base_url = f"http://127.0.0.1:{config.port}"
 
         time.sleep(0.5)
 
-        # 1. health + static
+        # 1. health + CORS + API-only routing (no static files)
         st, body = http_get(f"{base_url}/api/health")
         check(st == 200 and '"ok": true' in body, "health ok")
+        req = urllib.request.Request(f"{base_url}/api/health")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            check(r.headers.get("Access-Control-Allow-Origin") == "*", "CORS allow-origin present")
         st, _ = http_get(f"{base_url}/")
-        check(st == 200, "index served")
+        check(st == 404, "root is not served (API-only server)")
         st, _ = http_get(f"{base_url}/app.js")
-        check(st == 200, "app.js served")
+        check(st == 404, "static assets not served")
 
         # 2. run without a project is rejected
         st, body = http_post(f"{base_url}/api/run", {"task": "hi"})

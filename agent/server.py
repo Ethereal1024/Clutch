@@ -1,14 +1,17 @@
-"""HTTP + SSE server that hosts the agent as a product.
+"""API-only HTTP + SSE server hosting the agent (the UI is a separate app).
 
-Endpoints (all JSON except static/SSE):
+Endpoints (all JSON except SSE/NDJSON):
   POST /api/project/new    {dir, name} -> create a .clc project file
-  POST /api/project/open   {path} -> load a .clc project (returns meta + events)
+  POST /api/project/open   {path} -> load a .clc project (NDJSON stream)
   POST /api/run            {task} -> start run on the active project (409 if busy)
   POST /api/stop           cancel the running agent
   GET  /api/events         SSE: replay active project history, then live events
   GET  /api/workspace/tree   file tree under the project's working directory
   GET  /api/health         {ok}
-  GET  /*                  static files from --ui-dir (the product frontend)
+
+CORS is wide open (Access-Control-Allow-Origin: *) so the decoupled UI can live
+on another origin/host. The API key travels in request bodies, not cookies, so a
+wildcard origin leaks nothing. Bind --host 0.0.0.0 to expose beyond localhost.
 
 The agent's existing sink is fed into a thread-safe broadcaster; each SSE subscriber
 gets a private queue. One run at a time; Stop sets a cancel flag checked by the loop.
@@ -22,7 +25,7 @@ import json
 import queue
 import sys
 import threading
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -129,10 +132,10 @@ class RunState:
             self.busy = False
 
 
-class Handler(SimpleHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     server: ClutchServer  # type: ignore
 
-    # config/broadcaster/state/ui_dir are set on the server instance;
+    # config/broadcaster/state are set on the server instance;
     # this property exposes them uniformly to the handler.
     @property
     def _cfg(self) -> Config:
@@ -146,13 +149,21 @@ class Handler(SimpleHTTPRequestHandler):
     def _broadcaster(self) -> Broadcaster:
         return self.server.broadcaster
 
-    @property
-    def _ui_dir(self) -> Path:
-        return self.server.ui_dir
-
     # ---- routing ----
     # Handlers raise on unexpected errors: ThreadingHTTPServer prints the full
     # traceback (handle_error) and closes the connection, exposing bugs loudly.
+
+    def _cors(self) -> None:
+        # the UI runs on its own origin/host; every response must be readable there
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        # CORS preflight for POST + Content-Type from the UI's origin
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -164,7 +175,7 @@ class Handler(SimpleHTTPRequestHandler):
         elif path == "/api/workspace/tree":
             self._workspace_tree()
         else:
-            self._static(path)
+            self._json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -301,6 +312,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _sse(self) -> None:
         self.send_response(200)
+        self._cors()
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
@@ -382,6 +394,7 @@ class Handler(SimpleHTTPRequestHandler):
         # stream the open as NDJSON so the UI can show real file-parse progress;
         # errors after headers are reported inline as an {"error": ...} line
         self.send_response(200)
+        self._cors()
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
@@ -422,20 +435,10 @@ class Handler(SimpleHTTPRequestHandler):
             emit({"event": json.loads(event_to_json(ev))})
         emit({"done": True})
 
-    def _static(self, path: str) -> None:
-        # delegate to SimpleHTTPRequestHandler against ui_dir
-        self.directory = str(self._ui_dir)
-        super().do_GET()
-
-    def end_headers(self) -> None:
-        # HTML is regenerated as we develop; never let the client serve a stale copy
-        if self.path.endswith(".html") or self.path in ("/", "/index.html"):
-            self.send_header("Cache-Control", "no-cache")
-        super().end_headers()
-
     def _json(self, obj: dict[str, Any], status: int = 200) -> None:
         data = json.dumps(obj).encode("utf-8")
         self.send_response(status)
+        self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -473,48 +476,42 @@ class ClutchServer(ThreadingHTTPServer):
     config: Config
     state: RunState
     broadcaster: Broadcaster
-    ui_dir: Path
 
 
 def build(
     config: Config,
-    ui_dir: Path,
     broadcaster: Broadcaster,
     state: RunState,
 ) -> ClutchServer:
-    srv = ClutchServer(("127.0.0.1", config.port), Handler)
+    srv = ClutchServer((config.host, config.port), Handler)
     srv.broadcaster = broadcaster
     srv.config = config
     srv.state = state
-    srv.ui_dir = ui_dir
     return srv
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="clutch-server")
+    parser.add_argument("--host", default="127.0.0.1", help="bind address (0.0.0.0 to expose to other devices)")
     parser.add_argument("--port", type=int, default=8890)
     parser.add_argument("--model", default="deepseek-v4-flash")
     parser.add_argument("--verify", default=None, help="verification command; empty disables the gate")
-    parser.add_argument("--ui-dir", default=None, help="static frontend dir (default: ui/)")
     args = parser.parse_args()
 
     config = Config()
+    config.host = args.host
     config.port = args.port
     config.model = args.model
     if args.verify:
         config.verify_command = args.verify
-
-    base = Path(__file__).resolve().parent.parent
-    ui_dir = Path(args.ui_dir) if args.ui_dir else base / "ui"
 
     broadcaster = Broadcaster()
     state = RunState()
     # restore the API key persisted by the GUI settings (outside the repo)
     state.api_key = load_settings().get("api_key")
 
-    srv = build(config, ui_dir, broadcaster, state)
-    print(f"[clutch-server] http://127.0.0.1:{config.port}  (ui: {ui_dir})", flush=True)
-    print("[clutch-server] open or create a project from the UI", flush=True)
+    srv = build(config, broadcaster, state)
+    print(f"[clutch-server] http://{config.host}:{config.port}  (API only; start the UI separately)", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

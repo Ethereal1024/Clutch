@@ -1,5 +1,12 @@
 "use strict";
 
+// Where the agent API lives. Resolution order: in-app setting (localStorage) >
+// Electron preload env (window.clutchApi.baseUrl) > default localhost.
+const API_BASE =
+  ((localStorage.getItem("clutch_api_url") || "").replace(/\/+$/, "")) ||
+  (window.clutchApi && window.clutchApi.baseUrl) ||
+  "http://127.0.0.1:8890";
+
 const $ = (s) => document.querySelector(s);
 
 const els = {
@@ -582,7 +589,7 @@ async function run() {
   // runs append to the active project's conversation
   const payload = { task };
   try {
-    const r = await fetch("/api/run", {
+    const r = await fetch(API_BASE + "/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -597,7 +604,7 @@ async function run() {
 }
 
 async function stop() {
-  await fetch("/api/stop", { method: "POST" });
+  await fetch(API_BASE + "/api/stop", { method: "POST" });
 }
 
 els.run.addEventListener("click", () => (busy ? stop() : run()));
@@ -620,10 +627,12 @@ els.task.addEventListener("input", autoGrowTask);
 // ---- API settings modal ----
 const modal = $("#settings-modal");
 const keyInput = $("#api-key-input");
+const urlInput = $("#backend-url-input");
 
 function openSettings() {
   modal.classList.remove("hidden");
   keyInput.value = localStorage.getItem("clutch_api_key") || "";
+  urlInput.value = localStorage.getItem("clutch_api_url") || "";
   keyInput.focus();
 }
 function closeSettings() {
@@ -631,12 +640,15 @@ function closeSettings() {
 }
 async function saveSettings() {
   const key = keyInput.value.trim();
+  const url = urlInput.value.trim();
+  if (url) localStorage.setItem("clutch_api_url", url);
+  else localStorage.removeItem("clutch_api_url");
   if (!key) {
     closeSettings();
     return;
   }
   try {
-    const r = await fetch("/api/settings", {
+    const r = await fetch(API_BASE + "/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: key }),
@@ -690,7 +702,7 @@ async function respondPerm(allow) {
   closePerm();
   setStatus("running");
   try {
-    await fetch("/api/permission/respond", {
+    await fetch(API_BASE + "/api/permission/respond", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ request_id: rid, allow }),
@@ -706,7 +718,7 @@ permModal.addEventListener("click", (e) => {
 // ---- workspace tree ----
 async function refreshTree() {
   try {
-    const r = await fetch("/api/workspace/tree");
+    const r = await fetch(API_BASE + "/api/workspace/tree");
     const data = await r.json();
     if (data.root) els.workspace.textContent = data.root;
     els.tree.innerHTML = "";
@@ -746,7 +758,7 @@ function renderNode(node, depth) {
 
 // ---- SSE live stream + session list ----
 function connectSSE() {
-  const es = new EventSource("/api/events");
+  const es = new EventSource(API_BASE + "/api/events");
   es.onmessage = (e) => {
     try { addEvent(JSON.parse(e.data)); } catch (err) {}
   };
@@ -795,7 +807,7 @@ async function openProject(path) {
     label.textContent = Math.round(pct) + "%";
   };
   try {
-    const r = await fetch("/api/project/open", {
+    const r = await fetch(API_BASE + "/api/project/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -869,7 +881,7 @@ async function openProject(path) {
 async function createProject(dir, name) {
   if (busy) return;
   try {
-    const r = await fetch("/api/project/new", {
+    const r = await fetch(API_BASE + "/api/project/new", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dir, name }),

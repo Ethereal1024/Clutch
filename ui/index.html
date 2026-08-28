@@ -4,9 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Clutch — coding agent</title>
-  <link rel="stylesheet" href="/style.css" />
-  <link rel="preload" href="/vendor/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin />
-  <link rel="preload" href="/vendor/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preload" href="vendor/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="vendor/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin />
 </head>
 <body>
   <header id="topbar">
@@ -32,10 +32,13 @@
 
   <div id="settings-modal" class="modal hidden">
     <div class="modal-box">
-      <h3>API settings</h3>
+      <h3>Settings</h3>
       <label for="api-key-input">DeepSeek API key</label>
       <input id="api-key-input" type="password" placeholder="sk-..." autocomplete="off" />
-      <p class="muted">Stored outside the repo (~/.clutch/settings.json). Overrides the environment variable for this server.</p>
+      <p class="muted">Stored on the backend (~/.clutch/settings.json). Overrides the environment variable.</p>
+      <label for="backend-url-input">Backend URL</label>
+      <input id="backend-url-input" type="text" placeholder="http://127.0.0.1:8890" autocomplete="off" />
+      <p class="muted">Where the agent API runs. Defaults to <code>http://127.0.0.1:8890</code>; point it at a remote host to run the UI and backend on different machines.</p>
       <div class="modal-actions">
         <button id="settings-save" class="primary">Save</button>
         <button id="settings-close">Cancel</button>
@@ -60,7 +63,7 @@
       <h3>New project</h3>
       <p class="muted">A project is a single <code>.clc</code> file; the agent works in the directory that contains it.</p>
       <label for="project-dir-input">Directory</label>
-      <input id="project-dir-input" type="text" placeholder="/path/to/containing/folder" readonly />
+      <input id="project-dir-input" type="text" placeholder="/path/to/containing/folder" />
       <label for="project-name-input">Project name</label>
       <input id="project-name-input" type="text" placeholder="my-project" />
       <div class="modal-actions">
@@ -95,9 +98,9 @@
     </aside>
   </main>
 
-  <script src="/vendor/marked.min.js"></script>
-  <script src="/vendor/purify.min.js"></script>
-  <script src="/vendor/highlight.min.js"></script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
   <script>
     // MathJax config: recognize $...$ (inline) and $$...$$ (display) math.
     // Must be set before mathjax loads.
@@ -112,7 +115,7 @@
       },
     };
   </script>
-  <script src="/vendor/mathjax-tex-chtml.js"></script>
-  <script src="/app.js"></script>
+  <script src="vendor/mathjax-tex-chtml.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

@@ -12,12 +12,18 @@ tool-calling 接口。
 
 如何运行
 --------
-1. 安装依赖：pip install uv && uv sync
+前后端已解耦：后端是纯 API 服务，前端是独立的 Electron 程序（或任意静态托管），
+两者通过 HTTP 通信，可以跑在**两台设备**上。
+
+1. 安装依赖：pip install uv && uv sync  （前端另需：cd ui && npm install）
 2. 设置密钥：export DEEPSEEK_API_KEY=你的key   （密钥仅经环境变量，不入库）
-3. 启动产品界面：uv run python -m agent.server
-   然后用浏览器打开 http://127.0.0.1:8890 （或运行 Electron 壳：ui/main.js）
-4. 在欢迎界面新建或打开一个项目（.clc 文件）后开始对话
-5. 独立评测工具（可选）：uv run python -m eval.harness，见 eval/
+3. 启动后端：uv run python -m agent.server
+   （默认绑定 127.0.0.1:8890；要跨设备访问加 --host 0.0.0.0）
+4. 启动前端：cd ui && npm start        （Electron 窗口）
+   - 默认连 http://127.0.0.1:8890；连远程后端设 CLUTCH_API_URL=http://主机:8890
+   - 也可以在「⚙ 设置」里填 Backend URL 覆盖
+5. 在欢迎界面新建或打开一个项目（.clc 文件）后开始对话
+6. 独立评测工具（可选）：uv run python -m eval.harness，见 eval/
 
 特色功能
 --------
@@ -30,11 +36,12 @@ tool-calling 接口。
 · 错误即数据：工具失败会喂回给模型，让它读错自纠、迭代修复
 · 工作目录 + 权限确认（对齐 opencode）：agent 在项目目录里干活、产物直接落在那；
   危险操作（如 rm -rf、写项目目录外）会弹出确认框，由你决定放行或拒绝
-· Skills：按任务关键词动态注入领域知识（如 web-design），保持基础提示精简
+· Skills：系统提示里列目录，模型按需用 load_skill 拉取领域知识（如 web-design），
+  保持基础提示精简
 · 独立评测工具：eval/ 内置落地页 / 修 bug / 重构 三个场景，harness 可重复跑
   （评测工具与产品解耦，产品不依赖它）
-· 产品化界面：欢迎界面（新建/打开项目）+ 任务输入 + 运行/停止 + 实时流式输出
-  （文本/思考流式渲染）+ 项目文件树预览
+· 产品化界面：独立 Electron 前端（与后端解耦，可跨设备运行）+ 欢迎界面（新建/打开
+  项目）+ 任务输入 + 运行/停止 + 实时流式输出（文本/思考流式渲染）+ 项目文件树预览
 
 核心模块（题目必写 5 项一一对应）
 --------------------------------
