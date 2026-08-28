@@ -500,11 +500,15 @@ main { display: flex; flex: 1; min-height: 0; }
 .fs-toolbar input { flex: 1; }
 .hidden-toggle {
   font-family: var(--font-mono); font-size: 11px; color: var(--muted);
-  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
-  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  cursor: pointer; user-select: none;
 }
-.hidden-toggle input { margin: 0; }
+.hidden-toggle input {
+  margin: 0; width: auto; padding: 0; border: none; background: none;
+  accent-color: var(--accent); flex: 0;
+}
 #fs-toolbar .hidden-toggle { align-self: center; }
+/* beat #fs-toolbar input { flex: 1 } so the checkbox stays its natural size */
 #fs-toolbar .hidden-toggle input { flex: 0; }
 #fs-list {
   height: 260px;
