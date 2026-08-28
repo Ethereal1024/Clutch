@@ -7,7 +7,7 @@
 
 ## 0. 现状代码地图（改动手册）
 
-仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交 `6f117f7`（P3 完成）。
+仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交（P4 完成）。
 
 ### Python 后端（`agent/`，本地 server 默认 8890）
 
@@ -34,11 +34,11 @@
 
 | 文件 | 角色 | 关键符号 |
 |------|------|---------|
-| `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`（顺带起 exec bridge）、`stopTunnel`、`uploadFile/uploadFileViaExec/checkExec`、`getSftp`、`tunnelStatus`（含 `execBridge`）、`onTunnelEnd` |
+| `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`（顺带起 exec bridge；硬拒绝 `ok:false` 时隧道保持存活并置 `wasDisconnected=false` 供 onEnd 复位）、`stopTunnel`、`uploadFile/uploadFileViaExec/checkExec`、`getSftp`、`tunnelStatus`（含 `execBridge`）、`onTunnelEnd` |
 | `exec-bridge.js` | **（新）** | `startExecBridge`/`stopExecBridge`；`POST /exec {command,timeout}` → `{code,stdout,stderr}`；无隧道 503 |
-| `main.js` | Electron 主进程 | ipcMain handle（tunnel:connect/assist/status/disconnect/ended） |
-| `preload.js` | 渲染桥 | `clutchTunnel`（connect/assist/status/disconnect/onEnd/onProgress） |
-| `app.js` | 渲染器 | `DEFAULT_BASE(8890)`、`API_BASE`、`switchBackend/refreshPicker`、`connectSSE`、`reconciledBackendUrl`、`handleSshConnect`、`setFsConnecting/Error`、`updateConnProgress`、`loadDir/openFsBrowser` |
+| `main.js` | Electron 主进程 | ipcMain handle（tunnel:connect/assist/status/disconnect/ended）；execBridge 经 `tunnelStatus` 自动带出，无需改动 |
+| `preload.js` | 渲染桥 | `clutchTunnel`（connect/assist/status/disconnect/onEnd/onProgress）；`status()` 已含 execBridge |
+| `app.js` | 渲染器 | `DEFAULT_BASE(8890)`、`API_BASE`、`switchBackend/refreshPicker`、`connectSSE`、`reconciledBackendUrl`、`handleSshConnect`（失败→`tryDegradeToSshTools`）、`resetBackendLocal`、`setFsConnecting/Error`、`updateConnProgress`、`loadDir/openFsBrowser` |
 | `dev.sh` | 本地起服 | `.venv/bin/python -m agent.server`（8890） |
 | `exec-bridge.js` | **（新）** | 本地 HTTP，暴露 `remoteExec` 给 Python |
 
@@ -360,12 +360,18 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 
 1. 连接 → bootstrap 尝试 → **硬拒绝/失败**（installServer 已加 `ok:false` 分支，返回清晰错误）。
 2. 渲染器收到 `{ok:false, ...}`（非 needsAssist）→ 触发降级：
-   `window.clutchTunnel.status()` 取 `execBridge` URL。
-3. `POST /api/backend {mode:"ssh", bridge, workspace:"<远端 home>"}`（DEFAULT_BASE=8890）。
+   `window.clutchTunnel.status()` 取 `execBridge` URL，并校验 `active`（隧道若已死则降级
+   无从谈起，走普通连接失败）。
+3. `POST /api/backend {mode:"ssh", bridge, workspace:"~"}`（DEFAULT_BASE=8890）；`~` 由服务端
+   `_fs_list_remote` 经桥 `echo $HOME` 惰性解析（无需 Node 侧暴露 home）。
 4. `switchBackend(DEFAULT_BASE)` + `refreshPicker()`：选择器改走本地 server 的
    `_fs_list`（内部经 transport `ls`）浏览远端，选远端 `.clc`。
 5. `BaseServer.start_task` 用 `RemoteWorkspace` 跑 agent；工具/验证/.clc 全走桥。
-6. 断开 → `POST /api/backend {mode:"local"}` 复位（随 `onEnd`/connSelect 一起）。
+6. 断开 → `POST /api/backend {mode:"local"}` 复位（随 `onEnd`/connSelect/conn-reset 一起，
+   `resetBackendLocal()` 封装）。硬拒绝路径在 ssh-tunnel 侧置 `wasDisconnected=false`，
+   保证降级期间隧道意外死亡会触发 `onEnd` → 渲染器复位。
+7. `reconciledBackendUrl` 把"隧道存活但无 forward URL（降级态）"当作已连接（目标 DEFAULT_BASE），
+   启动/开选择器时不会误清 `clutch_ssh_connected` 标志。
 
 ---
 
@@ -376,7 +382,7 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 | **P1 — A 层纯重构** | `transport.py`（Transport/LocalTransport）+ `Workspace` 基类/`LocalWorkspace` + 工具改道；本地行为逐字节不变 | `uv run python -m agent.selfcheck && uv run python -m agent.loop_test && uv run python -m agent.server_test && node --check ui/app.js ui/ssh-tunnel.js` | ✅ `2525e99` |
 | **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 | ✅ `c59e744` |
 | **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 | ✅ `6f117f7` |
-| **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ⬜ |
+| **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ✅ 见 P4 提交 |
 
 P1 子步骤：
 1. `agent/tools/transport.py`：`CommandResult`/`TransportError`/`Transport` ABC/`LocalTransport`。
@@ -435,7 +441,7 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 
 ## 8. 仓库现状与新会话入口
 
-- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD `6f117f7`（P3 完成）。
+- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD（P4 完成，全部阶段 ✅）。
 - 回滚分支：`pre-refactor-rollback` @ `6e52ca7`。
 - 测试：`uv run python -m agent.selfcheck` / `agent.loop_test` / `agent.server_test`；
   `uv run ruff check .` / `uv run ruff format --check .`；`node --check ui/*.js`；`bash -n ui/dev.sh`。

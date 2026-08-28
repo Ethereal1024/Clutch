@@ -797,6 +797,43 @@ function switchBackend(url) {
   reconnectSSE();
 }
 
+// ---- SSH-tools degradation (host alive but unusable for bootstrap) ----
+// A host with no Python and no matching bundle is still fully usable through the
+// exec bridge: the local server runs the agent, and every file/command operation
+// goes over the SSH tunnel. These two helpers toggle that mode on the local
+// server's /api/backend. Both are best-effort against the local backend.
+
+async function tryDegradeToSshTools() {
+  if (!window.clutchTunnel) return false;
+  const s = await window.clutchTunnel.status();
+  // degradable only while the tunnel itself is still alive: a dead tunnel has no
+  // bridge to exec through (this also filters out genuine connection failures)
+  if (!s.active || !s.execBridge) return false;
+  try {
+    const r = await fetch(DEFAULT_BASE + "/api/backend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "ssh", bridge: s.execBridge, workspace: "~" }),
+    });
+    if (!r.ok) return false;
+  } catch (e) {
+    return false;
+  }
+  return true;
+}
+
+async function resetBackendLocal() {
+  try {
+    await fetch(DEFAULT_BASE + "/api/backend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "local" }),
+    });
+  } catch (e) {
+    /* the local server may be down; the renderer still falls back in place */
+  }
+}
+
 // Bring the file picker back to its normal browsing state after a connect or
 // disconnect: show the body, load the (possibly new) backend's files, re-render
 // the connection selector.
@@ -936,6 +973,16 @@ async function handleSshConnect(host, user, port, statusEl) {
       refreshPicker();
       return true;
     } else {
+      // hard bootstrap reject (host alive, but no Python/bundle to install):
+      // degrade to SSH-tools — local server runs the agent, tools go over the bridge
+      const degraded = await tryDegradeToSshTools();
+      if (degraded) {
+        upsertConn(host, user, port);
+        localStorage.setItem("clutch_ssh_connected", "1");
+        switchBackend(DEFAULT_BASE); // the local server is now remote-backed
+        refreshPicker();
+        return true;
+      }
       setFsConnectError("connection failed: " + (res.error || "unknown"), statusEl);
     }
   } catch (e) {
@@ -951,6 +998,7 @@ connSelect.addEventListener("change", async () => {
     if (localStorage.getItem("clutch_ssh_connected")) {
       await window.clutchTunnel.disconnect();
       localStorage.removeItem("clutch_ssh_connected");
+      await resetBackendLocal(); // end any SSH degradation on the local server
       switchBackend(DEFAULT_BASE); // stay in the picker, back to the local backend
       refreshPicker();
     }
@@ -1000,6 +1048,7 @@ connNewHost.addEventListener("keydown", (e) => {
 });
 $("#conn-reset").addEventListener("click", () => {
   localStorage.removeItem("clutch_ssh_connected");
+  resetBackendLocal(); // end any SSH degradation on the local server
   switchBackend(DEFAULT_BASE); // in-place fallback to the local backend
   refreshPicker();
 });
@@ -1036,15 +1085,18 @@ function isTunnelLike(url) {
 // effects — the caller switches and refreshes. A live tunnel is authoritative; a
 // dead-tunnel leftover (flag set, or a tunnel-like stored URL) falls back to the
 // local backend instead of pointing every fetch at a dead port ("Failed to fetch").
+// Degraded mode counts as connected too: the tunnel has no forward URL, but its
+// exec bridge is live, so the local server (DEFAULT_BASE) is the right target.
 async function reconciledBackendUrl() {
   if (!window.clutchTunnel) return null;
   const s = await window.clutchTunnel.status();
   const override = localStorage.getItem("clutch_api_url");
   const flag = localStorage.getItem("clutch_ssh_connected");
-  if (s.active && s.url) {
-    if (override !== s.url) {
+  if (s.active) {
+    const target = s.url || (s.execBridge ? DEFAULT_BASE : null);
+    if (target && override !== target) {
       localStorage.setItem("clutch_ssh_connected", "1");
-      return s.url;
+      return target;
     }
     return null;
   }
@@ -1062,6 +1114,7 @@ if (window.clutchTunnel) {
   window.clutchTunnel.onEnd(() => {
     if (localStorage.getItem("clutch_ssh_connected")) {
       localStorage.removeItem("clutch_ssh_connected");
+      resetBackendLocal(); // end any SSH degradation on the local server
       switchBackend(DEFAULT_BASE);
       if (!fsModal.classList.contains("hidden")) refreshPicker();
     }

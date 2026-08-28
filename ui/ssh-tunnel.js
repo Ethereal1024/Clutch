@@ -609,8 +609,12 @@ async function connectTunnel({ host, user, port, password }, progress) {
     if (progress) progress("install");
     const boot = await installServer(probe, { progress });
     if (boot && boot.ok === false) {
-      // hard reject (e.g. unsupportable target): no staging, no assist
+      // hard reject (e.g. unsupportable target): no staging, no assist. The SSH
+      // session (and with it the exec bridge) stays open so the renderer can
+      // degrade to SSH-tools; mark the tunnel as live so an unexpected death
+      // fires onEnd and the renderer resets back to local.
       tunnelLog("[bootstrap] rejected: " + boot.error);
+      wasDisconnected = false;
       return { ok: false, error: boot.error };
     }
     if (boot.needsAssist) {
