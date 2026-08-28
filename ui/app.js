@@ -513,6 +513,8 @@ function renderEvent(ev) {
       const toolName = call.name || "";
       const isRead = isReadTool(toolName);
       const isWrite = toolName === "write_file";
+      // any tool that could change the filesystem (blacklist of read-only tools)
+      if (toolName && !isRead && toolName !== "load_skill") scheduleTreeRefresh();
 
       wrap.className = "event tool_result" + (ev.is_error ? " error" : "")
         + (isRead ? " read" : "") + (isWrite ? " write" : "");
@@ -1031,15 +1033,31 @@ permModal.addEventListener("click", (e) => {
 });
 
 // ---- workspace tree ----
+let lastTreeSig = "";
+let treeRefreshTimer = null;
+
+// File changes only happen through tool results (write_file / run_command, or any
+// future FS tool): schedule a debounced refresh instead of polling. Change
+// detection skips re-rendering when nothing changed, preserving expansion state.
+function scheduleTreeRefresh() {
+  clearTimeout(treeRefreshTimer);
+  treeRefreshTimer = setTimeout(refreshTree, 300);
+}
+
 async function refreshTree() {
   try {
     const r = await fetch(API_BASE + "/api/workspace/tree");
     const data = await r.json();
     if (data.root) els.workspace.textContent = data.root;
+    const sig = JSON.stringify(data.tree || []);
+    if (sig === lastTreeSig) return; // unchanged: keep expansion state
+    lastTreeSig = sig;
     els.tree.innerHTML = "";
     for (const node of data.tree || []) els.tree.appendChild(renderNode(node, 0));
   } catch (e) {}
 }
+
+const expandedDirs = new Set();
 
 function renderNode(node, depth) {
   const wrap = document.createElement("div");
@@ -1053,18 +1071,27 @@ function renderNode(node, depth) {
     `<span class="name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
   wrap.appendChild(row);
   if (node.dir) {
+    const isOpen = expandedDirs.has(node.path);
     const children = document.createElement("div");
     children.className = "tree-children";
-    children.style.display = "none";
+    children.style.display = isOpen ? "" : "none";
+    if (isOpen) row.querySelector(".icon").textContent = "▾";
+    if (isOpen) {
+      for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
+    }
     row.addEventListener("click", (e) => {
       e.stopPropagation(); // don't bubble to ancestor dirs (would collapse them)
-      const isOpen = children.style.display !== "none";
-      row.querySelector(".icon").textContent = isOpen ? "▸" : "▾";
-      if (!isOpen) {
-        children.innerHTML = "";
-        for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
+      const open = children.style.display !== "none";
+      row.querySelector(".icon").textContent = open ? "▸" : "▾";
+      if (open) {
+        expandedDirs.delete(node.path);
+      } else {
+        expandedDirs.add(node.path);
+        if (!children.children.length) {
+          for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
+        }
       }
-      children.style.display = isOpen ? "none" : "";
+      children.style.display = open ? "none" : "";
     });
     // children are siblings of the row, so the row's hover box never covers the subtree
     wrap.appendChild(children);
@@ -1086,6 +1113,8 @@ function connectSSE() {
     thinkingEl = null;
     thinkingContent = "";
     toolGroupEl = null;
+    // the backend (re)connected, possibly after a self-heal restart: resync the tree
+    refreshTree();
   };
   es.onerror = () => { /* auto-reconnect */ };
 }
