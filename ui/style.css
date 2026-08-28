@@ -124,6 +124,13 @@ button.primary:hover:not(:disabled) { background: #d8d8db; border-color: #d8d8db
 button.primary.stop-mode { color: var(--accent); border-color: var(--accent); }
 button.primary.stop-mode:hover:not(:disabled) { background: #fbe6e6; border-color: var(--accent); color: var(--accent); }
 
+/* run button doubles as Stop: keep the box stable so the text swap doesn't jump */
+#run-btn {
+  min-width: 90px;   /* "▶ Run" and "■ Stop" both fit → no width change on toggle */
+  line-height: 1;    /* the ■/▶ glyphs have large em-boxes; don't let them inflate height */
+  text-align: center;
+}
+
 select {
   background: var(--bg2);
   color: var(--text);

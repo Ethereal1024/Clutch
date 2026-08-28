@@ -98,6 +98,10 @@ class Agent:
 
         try:
             for ev in self.llm.stream(msgs, tools=self.registry.schemas()):
+                # Stop must abort mid-stream, not after the whole turn: check the
+                # cancel flag between chunks and give up the partial generation.
+                if self.cancel and self.cancel.is_set():
+                    break
                 t = ev["type"]
                 if t == "reasoning":
                     reasoning_parts.append(ev["delta"])
@@ -145,6 +149,10 @@ class Agent:
                 msgs = context.derive_messages(self.log, self.config, task)
 
                 content, tool_calls, finish_reason, reasoning = self._llm_call(msgs)
+                # Stop during streaming left a partial (empty) turn; never treat it
+                # as a done candidate or run the verify gate on it.
+                if self.cancel and self.cancel.is_set():
+                    return self._finish("aborted", render("cancelled.md"))
 
                 # max-tokens truncation: drop incomplete tool calls, ask to be concise
                 if finish_reason == "length":

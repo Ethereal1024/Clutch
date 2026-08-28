@@ -336,6 +336,45 @@ def main() -> None:
         check(finals and finals[-1].status == "error", "fatal LLM error emits error final")
         check(any(e.type == "state_update" and e.value == "error" for e in log.events()), "error state emitted")
 
+    # 12. Stop mid-stream: cancel set while the LLM is streaming aborts promptly —
+    # the partial turn is dropped (no verify gate, no phantom 'done'), and the
+    # stream is not consumed to the end.
+    import threading
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        cancel = threading.Event()
+
+        class InterruptingLLM:
+            def __init__(self) -> None:
+                self.consumed = 0
+
+            def stream(self, messages, tools):
+                self.consumed += 1
+                yield {"type": "text", "delta": "part1"}
+                cancel.set()  # Stop arrives between chunks
+                yield {"type": "text", "delta": "part2"}
+                yield {"type": "finish", "reason": "stop", "content": "part1part2", "tool_calls": []}
+
+        fake = InterruptingLLM()
+        gate_cfg = Config(verify_command="echo ok")
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(gate_cfg)),
+            workspace=sb,
+            config=gate_cfg,
+            cancel=cancel,
+        )
+        result = agent.run("t")
+        check(result == "ABORTED", "Stop mid-stream aborts the run")
+        check(fake.consumed == 1, "stream not consumed past the cancel point")
+        finals = [e for e in agent.log.events() if e.type == "final"]
+        check(finals and finals[-1].status == "aborted", "aborted final, not a phantom completed")
+        check(
+            not any(e.type == "tool_call" for e in agent.log.events()),
+            "no verify/tool path ran on the partial turn",
+        )
+
     print("\nall passed")
     return 0
 
