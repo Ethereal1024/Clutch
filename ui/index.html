@@ -68,18 +68,6 @@
           <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
         </div>
         <p id="conn-status" class="muted"></p>
-        <div id="conn-new-form" class="hidden">
-          <label for="conn-new-host">SSH host</label>
-          <input id="conn-new-host" type="text" placeholder="remote.example.com" autocomplete="off" />
-          <label for="conn-new-user">SSH user</label>
-          <input id="conn-new-user" type="text" placeholder="user" autocomplete="off" />
-          <label for="conn-new-port">SSH port</label>
-          <input id="conn-new-port" type="text" placeholder="22" autocomplete="off" />
-          <div class="modal-actions">
-            <button id="conn-new-cancel">Cancel</button>
-            <button id="conn-new-connect" class="primary">Connect</button>
-          </div>
-        </div>
       </div>
       <div class="fs-toolbar">
         <button id="fs-up" title="up one level">..</button>
@@ -94,6 +82,23 @@
       <div class="modal-actions">
         <button id="fs-cancel">Cancel</button>
         <button id="fs-create" class="primary hidden">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="conn-new-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>New SSH connection</h3>
+      <label for="conn-new-host">SSH host</label>
+      <input id="conn-new-host" type="text" placeholder="remote.example.com" autocomplete="off" />
+      <label for="conn-new-user">SSH user</label>
+      <input id="conn-new-user" type="text" placeholder="user" autocomplete="off" />
+      <label for="conn-new-port">SSH port</label>
+      <input id="conn-new-port" type="text" placeholder="22" autocomplete="off" />
+      <p id="conn-new-status" class="muted"></p>
+      <div class="modal-actions">
+        <button id="conn-new-cancel">Cancel</button>
+        <button id="conn-new-connect" class="primary">Connect</button>
       </div>
     </div>
   </div>

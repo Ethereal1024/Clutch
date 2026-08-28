@@ -708,7 +708,6 @@ modal.addEventListener("click", (e) => {
 // ---- SSH connection (in the project picker) ----
 const connSelect = $("#conn-select");
 const connStatus = $("#conn-status");
-const connNewForm = $("#conn-new-form");
 const connNewHost = $("#conn-new-host");
 const connNewUser = $("#conn-new-user");
 const connNewPort = $("#conn-new-port");
@@ -876,24 +875,38 @@ connSelect.addEventListener("change", async () => {
     }
     const [user, hostPort] = v.slice(4).split("@");
     const [host, port] = hostPort.split(":");
-    connNewForm.classList.add("hidden");
     await handleSshConnect(host, user, port || "22", connStatus);
   }
 });
 
-$("#conn-new").addEventListener("click", () => {
-  connNewForm.classList.toggle("hidden");
+// New-connection popup (only shown when the user asks to add an SSH host)
+const connNewModal = $("#conn-new-modal");
+const connNewStatus = $("#conn-new-status");
+
+function openConnNew() {
   connNewHost.value = localStorage.getItem("clutch_ssh_host") || "";
   connNewUser.value = localStorage.getItem("clutch_ssh_user") || "";
   connNewPort.value = localStorage.getItem("clutch_ssh_port") || "22";
-  if (!connNewForm.classList.contains("hidden")) connNewHost.focus();
-});
-$("#conn-new-cancel").addEventListener("click", () => connNewForm.classList.add("hidden"));
+  connNewStatus.textContent = "";
+  connNewModal.classList.remove("hidden");
+  connNewHost.focus();
+}
+function closeConnNew() {
+  connNewModal.classList.add("hidden");
+}
+$("#conn-new").addEventListener("click", openConnNew);
+$("#conn-new-cancel").addEventListener("click", closeConnNew);
 $("#conn-new-connect").addEventListener("click", () => {
   const host = connNewHost.value.trim();
   const user = connNewUser.value.trim();
   const port = connNewPort.value.trim() || "22";
-  handleSshConnect(host, user, port, connStatus);
+  handleSshConnect(host, user, port, connNewStatus);
+});
+connNewModal.addEventListener("click", (e) => {
+  if (e.target === connNewModal) closeConnNew();
+});
+connNewHost.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("#conn-new-connect").click();
 });
 $("#ssh-pass-ok").addEventListener("click", () => {
   const pw = passInput.value;
@@ -1199,7 +1212,6 @@ function openFsBrowser(mode) {
   $("#fs-new").classList.toggle("hidden", mode !== "new");
   $("#fs-create").classList.toggle("hidden", mode !== "new");
   $("#fs-name-input").value = "";
-  connNewForm.classList.add("hidden");
   renderConnSelector();
   fsModal.classList.remove("hidden");
   loadDir("");

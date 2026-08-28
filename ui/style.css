@@ -482,7 +482,6 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .fs-conn-row select:focus { outline: none; border-color: var(--accent); }
 .fs-conn-row button { white-space: nowrap; }
-#conn-new-form { margin-top: 10px; }
 #conn-status { margin: 8px 0 0; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
