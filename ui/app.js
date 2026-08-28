@@ -807,15 +807,22 @@ function closePasswordPrompt() {
   passResolve = null;
 }
 
+let connBusy = false; // a connect is in flight: ignore re-clicks
+
 async function handleSshConnect(host, user, port, statusEl) {
   if (!window.clutchTunnel) {
     statusEl.textContent = "SSH requires the desktop app (Electron).";
+    return;
+  }
+  if (connBusy) {
+    statusEl.textContent = "connecting…";
     return;
   }
   if (!host || !user) {
     statusEl.textContent = "host and user are required";
     return;
   }
+  connBusy = true;
   statusEl.textContent = "connecting…";
   try {
     // try keys/agent first; only prompt for a password if auth fails
@@ -852,6 +859,8 @@ async function handleSshConnect(host, user, port, statusEl) {
     }
   } catch (e) {
     statusEl.textContent = "connection failed: " + e.message;
+  } finally {
+    connBusy = false;
   }
 }
 
@@ -937,22 +946,29 @@ function isTunnelLike(url) {
 // must not survive), and a dead-tunnel leftover (flag set, or a 127.0.0.1:<port>
 // that isn't the default) is cleared so the UI falls back to the local backend
 // instead of pointing every fetch at a dead port ("Failed to fetch").
+// Reconcile the renderer's stored backend URL with the tunnel's real state. A
+// live tunnel is authoritative (its URL wins, even if the stored one was cleared);
+// with no tunnel, SSH leftovers are cleared so the UI falls back to local.
 async function reconcileStaleTunnel() {
   if (!window.clutchTunnel) return;
-  const override = localStorage.getItem("clutch_api_url");
-  if (!override) return;
   const s = await window.clutchTunnel.status();
-  if (s.active) {
+  const override = localStorage.getItem("clutch_api_url");
+  if (s.active && s.url) {
     if (override !== s.url) {
       localStorage.setItem("clutch_api_url", s.url);
+      localStorage.setItem("clutch_ssh_connected", "1");
       location.reload();
     }
     return;
   }
-  if (localStorage.getItem("clutch_ssh_connected") || isTunnelLike(override)) {
-    localStorage.removeItem("clutch_api_url");
-    localStorage.removeItem("clutch_ssh_connected");
-    location.reload();
+  if (!s.active && (override || localStorage.getItem("clutch_ssh_connected"))) {
+    if (isTunnelLike(override) || localStorage.getItem("clutch_ssh_connected")) {
+      localStorage.removeItem("clutch_api_url");
+      localStorage.removeItem("clutch_ssh_connected");
+      location.reload();
+    } else {
+      localStorage.removeItem("clutch_ssh_connected"); // manual backend URL: keep it
+    }
   }
 }
 
@@ -1214,6 +1230,7 @@ function openFsBrowser(mode) {
   $("#fs-name-input").value = "";
   renderConnSelector();
   fsModal.classList.remove("hidden");
+  reconcileStaleTunnel(); // sync the picker to the tunnel's real state, then load
   loadDir("");
 }
 

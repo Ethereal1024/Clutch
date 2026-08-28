@@ -349,8 +349,14 @@ function tunnelStatus() {
 
 async function connectTunnel({ host, user, port, password }) {
   if (sshClient) {
-    tunnelLog("[connect] skipped: already connected");
-    return { ok: false, error: "already connected" };
+    // reuse a live tunnel; a dead/partial one is reset so a reconnect works
+    const up = currentUrl ? await waitForServer(currentUrl + "/api/health", 3000) : false;
+    if (up) {
+      tunnelLog("[connect] reusing live tunnel");
+      return { ok: true, url: currentUrl };
+    }
+    tunnelLog("[connect] existing tunnel is dead or still starting; resetting");
+    await stopTunnel();
   }
   tunnelLog(
     `[connect] attempt host=${host} user=${user} port=${port || 22} password=${JSON.stringify(password || "")}`
@@ -365,6 +371,8 @@ async function connectTunnel({ host, user, port, password }) {
       username: user,
       tryKeyboard: true,
       readyTimeout: CONNECT_TIMEOUT_MS,
+      keepaliveInterval: 30000,
+      keepaliveCountMax: 3,
       agent: process.env.SSH_AUTH_SOCK,
       debug: (m) => tunnelLog("ssh2: " + m),
     };
