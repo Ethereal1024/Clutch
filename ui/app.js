@@ -828,6 +828,7 @@ function showPickerBody() {
   $("#fs-new").classList.toggle("hidden", fsMode !== "new");
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");
+  $("#conn-hint").classList.add("hidden");
   $("#conn-reset").classList.add("hidden");
 }
 
@@ -857,6 +858,7 @@ function setFsConnecting(host, statusEl) {
   connStatus.textContent = "Connecting to " + host + "…";
   hidePickerBody();
   $("#conn-reset").classList.add("hidden");
+  $("#conn-hint").classList.remove("hidden"); // what the collapsed area is for
   // animate the bar under the active modal (the new-connection popup has its own)
   const bar = statusEl && statusEl.id === "conn-new-status" ? $("#conn-new-progress") : $("#conn-progress");
   bar.classList.remove("hidden");
@@ -868,6 +870,7 @@ function setFsConnecting(host, statusEl) {
 function setFsConnectError(msg) {
   connStatus.textContent = "Connection failed: " + msg;
   hidePickerBody();
+  $("#conn-hint").classList.add("hidden");
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");
   $("#conn-reset").classList.remove("hidden"); // in-place recovery back to local
