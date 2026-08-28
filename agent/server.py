@@ -523,29 +523,42 @@ def _replace(config: Config, **kw: Any) -> Config:
 
 def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
     """Remote counterpart of _walk: same lazy partial walk (root + expanded dirs +
-    one-level lookahead), but leaf listing goes through the RemoteWorkspace's ls
-    exec. Entries are strings (dirs end with '/'), not Path objects."""
+    one-level lookahead), but every level lists all its directories in ONE exec
+    (RemoteWorkspace.list_many), so a tree costs ~depth round trips instead of one
+    per directory. Entries are strings (dirs end with '/'), not Path objects."""
     expanded = set(expanded)
+    children: dict[str, list[dict[str, Any]]] = {}
+    by_path: dict[str, dict[str, Any]] = {}
 
-    def build(rel: str) -> list:
-        out = []
-        try:
-            entries = ws.list(rel)
-        except NotADirectoryError:
-            return []
-        for e in entries:
-            is_dir = e.endswith("/")
-            name = e[:-1] if is_dir else e
-            if not show_hidden and name.startswith("."):
-                continue
-            node: dict[str, Any] = {"name": name, "path": str(Path(rel) / name), "dir": is_dir, "link": None}
-            child_rel = str(Path(rel) / name)
-            if is_dir and (rel == "" or child_rel in expanded or rel in expanded):
-                node["children"] = build(child_rel)
-            out.append(node)
-        return out
+    frontier: list[str] = [""]
+    while frontier:
+        listed = ws.list_many(frontier)  # one SSH round trip per tree level
+        next_frontier: list[str] = []
+        for rel in frontier:
+            out: list[dict[str, Any]] = []
+            for e in listed.get(rel, []):
+                is_dir = e.endswith("/")
+                name = e[:-1] if is_dir else e
+                if not show_hidden and name.startswith("."):
+                    continue
+                child_rel = name if rel == "" else f"{rel}/{name}"
+                node: dict[str, Any] = {"name": name, "path": child_rel, "dir": is_dir, "link": None}
+                out.append(node)
+                if is_dir:
+                    by_path[child_rel] = node
+                    if rel == "" or child_rel in expanded or rel in expanded:
+                        next_frontier.append(child_rel)
+            children[rel] = out
+        frontier = next_frontier
 
-    return build("")
+    # attach each listed level under its parent dir node
+    for rel, out in children.items():
+        if rel == "":
+            continue
+        parent = by_path.get(rel)
+        if parent is not None:
+            parent["children"] = out
+    return children[""]
 
 
 def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hidden: bool) -> list:

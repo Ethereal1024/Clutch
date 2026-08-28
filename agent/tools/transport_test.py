@@ -28,6 +28,8 @@ class MockBridge(BaseHTTPRequestHandler):
     # peak single exec-command length seen (asserts RemoteWorkspace chunking caps
     # the command under the sshd's limit even for large content)
     max_cmd_len = 0
+    # total /exec POSTs issued (asserts list_many batches a level into one exec)
+    post_count = 0
 
     def log_message(self, *a) -> None:  # silence request spam
         pass
@@ -40,6 +42,7 @@ class MockBridge(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         cmd = body.get("command", "")
         MockBridge.max_cmd_len = max(MockBridge.max_cmd_len, len(cmd.encode("utf-8")))
+        MockBridge.post_count += 1
         timeout_ms = body.get("timeout", 60000)
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_ms / 1000)
@@ -120,6 +123,27 @@ def main() -> int:
         ws.protect(Path(rtmp) / "sub" / "secret.txt")
         ws.write("sub/secret.txt", "x")
         check("secret.txt" not in ws.list("sub"), "remote list hides protected files")
+
+        # list_many: one exec lists a whole level; results match per-dir list();
+        # missing dirs come back empty. Also hidden entries are NOT pre-filtered by
+        # ls (the tree walk filters), so a dotfile dir appears here too.
+        (Path(rtmp) / "a").mkdir()
+        (Path(rtmp) / "a" / "inner").mkdir()
+        (Path(rtmp) / "b").mkdir()
+        (Path(rtmp) / "b" / "f.txt").write_text("x")
+        MockBridge.post_count = 0
+        many = ws.list_many([".", "a", "b", "missing"])
+        check(
+            MockBridge.post_count == 1,
+            f"list_many batches the whole level into one exec (got {MockBridge.post_count})",
+        )
+        check(
+            many["."] == ws.list(".") and many["a"] == ws.list("a") and many["b"] == ws.list("b"),
+            "list_many matches per-dir list()",
+        )
+        check(many["missing"] == [], "list_many maps a missing dir to []")
+        check("inner/" in many["a"] and "f.txt" in many["b"], "list_many parses dirs/files")
+        check(MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200, "list_many command stays under the exec cap")
 
         # append_line -> quoted heredoc >>, round trips special chars too
         ws.append_line("log.txt", '{"a": "$x"}')

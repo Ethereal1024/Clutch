@@ -67,6 +67,15 @@ body { display: flex; flex-direction: column; }
 }
 .brand .logo { color: var(--accent); }
 
+/* project name + status stacked under the title, centered against the brand */
+#topbar .meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.project-label:empty { display: none; }
+
 .spacer { flex: 1; }
 
 .badge {
@@ -421,6 +430,7 @@ main { display: flex; flex: 1; min-height: 0; }
   display: flex; align-items: center;
   padding: 3px 6px; cursor: pointer; border-radius: 0;
   max-width: 100%;
+  user-select: none; /* clicking rows to expand must not select the label text */
 }
 .tree-node:hover { background: rgba(255, 255, 255, 0.04); }
 .tree-node.dir { color: var(--text); font-weight: 600; }
@@ -556,7 +566,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   font-size: 13px;
   overflow-y: auto;
 }
-.fs-row { padding: 6px 10px; cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.fs-row { padding: 6px 10px; cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; user-select: none; }
 .fs-row:hover { background: var(--bg2); }
 .fs-row.dir::before { content: "▸"; color: var(--muted); }
 .fs-row.file::before { content: ""; width: 8px; }

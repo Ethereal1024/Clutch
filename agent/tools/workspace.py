@@ -15,6 +15,7 @@ so local and remote behave identically.
 from __future__ import annotations
 
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -209,8 +210,11 @@ class RemoteWorkspace(Workspace):
         r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", 60.0)
         if r.code != 0:
             raise NotADirectoryError(str(p))
+        return self._parse_list_output(p, r.stdout)
+
+    def _parse_list_output(self, p: Path, stdout: str) -> list[str]:
         out = []
-        for entry in r.stdout.splitlines():
+        for entry in stdout.splitlines():
             if not entry:
                 continue
             if entry.endswith("/"):  # ls -1AF marks dirs with a trailing /
@@ -221,6 +225,44 @@ class RemoteWorkspace(Workspace):
                 continue
             out.append(name)
         return sorted(out)
+
+    def list_many(self, paths: list[str]) -> dict[str, list[str]]:
+        """List several directories in ONE exec (one round trip); missing/non-dir
+        paths map to []. Used by the remote tree walk so a whole level costs a
+        single round trip instead of one exec per directory. Commands are grouped
+        so each exec stays under the sshd's command-size limit."""
+        keyed = [(p, self.resolve(p)) for p in paths]
+        marker = f"CLUTCH_LIST_{time.time_ns()}"
+        result: dict[str, list[str]] = {p: [] for p in paths}
+        groups: list[tuple[list[tuple[str, Path, str]], str]] = []
+        cur_cmd: list[str] = []
+        cur_group: list[tuple[str, Path, str]] = []
+        for i, (rel, p) in enumerate(keyed):
+            m = f"{marker}_{i}"
+            frag = f"if test -d {shq(str(p))}; then echo '{m}'; ls -1AF {shq(str(p))}; else echo '{m}:MISSING'; fi"
+            if cur_cmd and sum(len(f) + 2 for f in cur_cmd) + len(frag) > _EXEC_MAX_COMMAND_BYTES - 200:
+                groups.append((cur_group, "; ".join(cur_cmd)))
+                cur_cmd, cur_group = [], []
+            cur_cmd.append(frag)
+            cur_group.append((rel, p, m))
+        if cur_cmd:
+            groups.append((cur_group, "; ".join(cur_cmd)))
+        for group, cmd in groups:
+            r = self._transport.run(cmd, 60.0)
+            if r.code != 0:
+                raise OSError(f"list failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+            raw: dict[str, list[str]] = {}
+            current: str | None = None
+            for line in r.stdout.splitlines():
+                if line.startswith(marker):
+                    idx = int(line[len(marker) + 1 :].split(":", 1)[0])
+                    current = group[idx][0]
+                    continue
+                if current is not None:
+                    raw.setdefault(current, []).append(line)
+            for rel, p, _ in group:
+                result[rel] = self._parse_list_output(p, "\n".join(raw.get(rel, [])))
+        return result
 
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
