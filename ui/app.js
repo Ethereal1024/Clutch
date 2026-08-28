@@ -1238,9 +1238,13 @@ function renderNode(node, depth) {
         row.querySelector(".icon").textContent = "▸";
       } else {
         expandedDirs.add(node.path);
+        row.querySelector(".icon").textContent = "▾";
+        // clear the container first: rapid expand/collapse toggles reuse this
+        // element (the debounced refresh hasn't rebuilt it), so appending without
+        // clearing stacks another copy of the children on every expand
+        children.innerHTML = "";
         // reveal the pre-loaded lookahead level instantly, then fetch deeper
         if (node.children && node.children.length) {
-          row.querySelector(".icon").textContent = "▾";
           for (const c of node.children) children.appendChild(renderNode(c, depth + 1));
           children.style.display = "";
         }
