@@ -7,7 +7,7 @@
 
 ## 0. 现状代码地图（改动手册）
 
-仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交 `1524878`（本文档）。
+仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交 `2525e99`（P1 完成）。
 
 ### Python 后端（`agent/`，本地 server 默认 8890）
 
@@ -15,18 +15,18 @@
 |------|------|---------|
 | `server.py` | HTTP+SSE 服务器 | `Broadcaster`、`RunState`、`Handler`、`ClutchServer(ThreadingHTTPServer)`、`build()` 工厂、`_run/_sse/_fs_list/_workspace_tree/_walk` |
 | `loop.py` | agent 循环 | `Agent`、`_emit`、`run`、`_execute_tool` |
-| `tools/workspace.py` | 工作区抽象 | `Workspace`（root/protect/is_protected/visible_entries/resolve） |
-| `tools/filesystem.py` | 文件工具 | `read_file/write_file/list_dir/_unified_diff`（当前直接 Path 操作） |
-| `tools/shell.py` | 命令工具 | `run_command`（subprocess + path-guard + blocked + _syntax_check） |
+| `tools/workspace.py` | 工作区抽象 | `Workspace` ABC（root/protect/is_protected/visible_entries/resolve/run）+ `LocalWorkspace`（read/write/list，Path 实现） |
+| `tools/filesystem.py` | 文件工具 | `read_file/write_file/list_dir/_unified_diff`（经 `workspace.read/write/list`） |
+| `tools/shell.py` | 命令工具 | `run_command`（path-guard + blocked + `workspace.run` + _syntax_check） |
 | `tools/registry.py` | 工具注册 | `Tool`、`build_default_tools`、`ToolRegistry.execute` |
 | `project.py` | .clc 文件 | `open_project/_read_file/read_header/_rewrite_durable` |
 | `events.py` | 事件/日志 | `Event` 基类+10 子类、`EventLog.append`（`open(path,"a")` 落盘） |
 | `llm/client.py` | LLM | `LlmClient.stream`、`_classify`、`LlmError` |
-| `core/terminate.py` | 终止/验证 | `Terminator.verify`→`run_verify`（裸 `subprocess cwd=workspace.root`） |
+| `core/terminate.py` | 终止/验证 | `Terminator.verify`→`run_verify`（`workspace.run`） |
 | `core/permission.py` | 权限 | `PermissionEvaluator/Gate/Rule` |
 | `core/context.py` | 上下文派生 | `_to_messages`（只读 block 事件，不依赖 delta） |
 | `config.py` | 配置 | `Config`（含 `command_timeout/truncate/blocked_prefixes`） |
-| `tools/transport.py` | **（新）** | `Transport` ABC + `LocalTransport` + `SshTransport` |
+| `tools/transport.py` | 传输层 | `CommandResult`/`TransportError`（`timeout` 标志）/`Transport` ABC/`LocalTransport`（subprocess）；`SshTransport` 待 P2 |
 
 ### Node / Electron（`ui/`）
 
@@ -367,12 +367,12 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 
 ## 5. 实施顺序（每阶段一次提交，可回退）
 
-| 阶段 | 内容 | 验收命令 |
-|------|------|---------|
-| **P1 — A 层纯重构** | `transport.py`（Transport/LocalTransport）+ `Workspace` 基类/`LocalWorkspace` + 工具改道；本地行为逐字节不变 | `uv run python -m agent.selfcheck && uv run python -m agent.loop_test && uv run python -m agent.server_test && node --check ui/app.js ui/ssh-tunnel.js` |
-| **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 |
-| **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 |
-| **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 |
+| 阶段 | 内容 | 验收命令 | 状态 |
+|------|------|---------|------|
+| **P1 — A 层纯重构** | `transport.py`（Transport/LocalTransport）+ `Workspace` 基类/`LocalWorkspace` + 工具改道；本地行为逐字节不变 | `uv run python -m agent.selfcheck && uv run python -m agent.loop_test && uv run python -m agent.server_test && node --check ui/app.js ui/ssh-tunnel.js` | ✅ `2525e99` |
+| **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 | ⬜ |
+| **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 | ⬜ |
+| **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ⬜ |
 
 P1 子步骤：
 1. `agent/tools/transport.py`：`CommandResult`/`TransportError`/`Transport` ABC/`LocalTransport`。
@@ -431,12 +431,12 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 
 ## 8. 仓库现状与新会话入口
 
-- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD `1524878`（本计划文档）。
+- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD `2525e99`（P1 完成）。
 - 回滚分支：`pre-refactor-rollback` @ `6e52ca7`。
 - 测试：`uv run python -m agent.selfcheck` / `agent.loop_test` / `agent.server_test`；
   `uv run ruff check .` / `uv run ruff format --check .`；`node --check ui/*.js`；`bash -n ui/dev.sh`。
 - 隧道日志：`~/.clutch/tunnel.log`（dev-only，含明文密码，分享/提交前必须打码）。
 - 本地后端：`npm run dev`（dev.sh）起 `.venv/bin/python -m agent.server` @ 8890；dev.sh 会先清理
   8890 上的陈旧进程。
-- **新会话入口**：读本文件 → `git log --oneline -20` → 从 §5 P1 开始。每阶段一次提交，可用
+- **新会话入口**：读本文件 → `git log --oneline -20` → 从 §5 的**下一个未完成阶段**开始。每阶段一次提交，可用
   `git diff` 复核，异常回退到 `pre-refactor-rollback`。
