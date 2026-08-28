@@ -7,7 +7,10 @@ transport-agnostic.
 
 from __future__ import annotations
 
+import json
 import subprocess
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import NamedTuple
 
@@ -56,3 +59,39 @@ class LocalTransport(Transport):
         except OSError as e:
             raise TransportError(f"command could not start: {e}") from e
         return CommandResult(r.returncode, r.stdout or "", r.stderr or "")
+
+
+class SshTransport(Transport):
+    """Run commands on a remote host through the Electron exec bridge.
+
+    The remote only needs an sshd (no python, no SFTP, no base64): the client-side
+    bridge turns POST /exec into an ssh exec channel. timeout is sent in ms (the
+    bridge's remoteExec deadline); a timed-out remote exec comes back as code -1,
+    surfaced here as TransportError(timeout=True) like LocalTransport.
+    """
+
+    def __init__(self, bridge_url: str) -> None:
+        self.bridge_url = bridge_url.rstrip("/")
+
+    def run(self, command: str, timeout: float) -> CommandResult:
+        body = json.dumps({"command": command, "timeout": int(timeout * 1000)}).encode("utf-8")
+        req = urllib.request.Request(
+            self.bridge_url + "/exec",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout + 5) as r:
+                payload = json.loads(r.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            raise TransportError(f"bridge error {e.code}: {e.read().decode('utf-8', errors='replace')}") from e
+        except (urllib.error.URLError, OSError) as e:
+            raise TransportError(f"bridge unreachable: {e}") from e
+        if payload.get("code") == -1:
+            raise TransportError(f"command timed out ({timeout:.0f}s)", timeout=True)
+        return CommandResult(
+            int(payload.get("code", 1)),
+            payload.get("stdout", ""),
+            payload.get("stderr", ""),
+        )

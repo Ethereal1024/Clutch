@@ -15,10 +15,16 @@ so local and remote behave identically.
 from __future__ import annotations
 
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from .transport import CommandResult, LocalTransport, Transport
+from .transport import CommandResult, LocalTransport, SshTransport, Transport
+
+
+def shq(s: str) -> str:
+    """Single-quote a path for sh: `'` -> `'\\''` (works on any POSIX shell)."""
+    return "'" + s.replace("'", "'\\''") + "'"
 
 
 class Workspace(ABC):
@@ -71,6 +77,10 @@ class Workspace(ABC):
     def list(self, path: str) -> list[str]:
         """Directory entries (dirs end with '/'), protected files excluded; raise NotADirectoryError."""
 
+    @abstractmethod
+    def append_line(self, path: str, line: str) -> None:
+        """Append one line to a file (the remote .clc EventLog writer)."""
+
     def cleanup(self) -> None:
         if self._own_dir:
             import shutil
@@ -95,3 +105,70 @@ class LocalWorkspace(Workspace):
         if not p.is_dir():
             raise NotADirectoryError(path)
         return sorted(f.name + ("/" if f.is_dir() else "") for f in self.visible_entries(p))
+
+    def append_line(self, path: str, line: str) -> None:
+        p = self.resolve(path)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+
+class RemoteWorkspace(Workspace):
+    """Workspace whose files live on a remote host reached over the exec bridge.
+
+    Every exec starts a fresh shell, so read/write/list use absolute paths and
+    run() prefixes `cd '<root>' &&` for the same cwd semantics as LocalWorkspace.
+    File operations are plain POSIX sh — cat, a quoted heredoc (no base64, no
+    SFTP), ls — so any device that can run an sshd shell works.
+    """
+
+    def __init__(self, root: str | None, bridge_url: str) -> None:
+        super().__init__(root, transport=SshTransport(bridge_url))
+
+    def run(self, command: str, timeout: float) -> CommandResult:
+        return self._transport.run(f"cd {shq(str(self.root))} && {command}", timeout)
+
+    def read(self, path: str) -> str:
+        p = self.resolve(path)
+        r = self._transport.run(f"cat {shq(str(p))}", 60.0)
+        if r.code != 0:
+            raise FileNotFoundError(str(p))
+        return r.stdout
+
+    def write(self, path: str, content: str) -> None:
+        p = self.resolve(path)
+        # quoted heredoc: content is fully literal ($, backticks, quotes all safe);
+        # strips the file's own trailing newline so the heredoc's own one restores it
+        delim = f"CLUTCH_EOF_{time.time_ns()}"
+        body = content[:-1] if content.endswith("\n") else content
+        cmd = f"mkdir -p {shq(str(p.parent))} && cat > {shq(str(p))} <<'{delim}'\n{body}\n{delim}"
+        r = self._transport.run(cmd, 60.0)
+        if r.code != 0:
+            raise OSError(f"write failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+
+    def list(self, path: str) -> list[str]:
+        p = self.resolve(path)
+        # ls alone succeeds on a plain file; test -d first so a non-dir surfaces
+        # as NotADirectoryError like LocalWorkspace.list
+        r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", 60.0)
+        if r.code != 0:
+            raise NotADirectoryError(str(p))
+        out = []
+        for entry in r.stdout.splitlines():
+            if not entry:
+                continue
+            if entry.endswith("/"):  # ls -1AF marks dirs with a trailing /
+                out.append(entry)
+                continue
+            name = entry[:-1] if entry[-1] in ("*", "@") else entry
+            if self.is_protected(p / name):
+                continue
+            out.append(name)
+        return sorted(out)
+
+    def append_line(self, path: str, line: str) -> None:
+        p = self.resolve(path)
+        delim = f"CLUTCH_EOF_{time.time_ns()}"
+        cmd = f"cat >> {shq(str(p))} <<'{delim}'\n{line}\n{delim}"
+        r = self._transport.run(cmd, 30.0)
+        if r.code != 0:
+            raise OSError(f"append failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")

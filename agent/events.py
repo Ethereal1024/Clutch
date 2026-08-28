@@ -11,7 +11,7 @@ import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 def _new_id() -> str:
@@ -151,15 +151,22 @@ class EventLog:
     DURABLE_TYPES are written to the .clc file.
     """
 
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, writer: Callable[[str, str], None] | None = None) -> None:
+        """writer(path, line) persists one durable line instead of the local file
+        append — the SSH degradation layer routes .clc appends through the exec
+        bridge. Default None keeps the local open(path, "a") behavior."""
         self._events: list[Event] = []
         self._path = path
+        self._writer = writer
 
     def append(self, event: Event) -> Event:
         self._events.append(event)
         if self._path and event.type in DURABLE_TYPES:
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(event_to_json(event) + "\n")
+            if self._writer:
+                self._writer(self._path, event_to_json(event))
+            else:
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write(event_to_json(event) + "\n")
         return event
 
     def events(self) -> list[Event]:

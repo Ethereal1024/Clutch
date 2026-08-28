@@ -44,7 +44,8 @@ from .llm.client import LlmClient
 from .loop import Agent
 from .project import Project, create_project, open_project, read_header
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import LocalWorkspace, Workspace
+from .tools.transport import SshTransport
+from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace, shq
 
 
 def _settings_path() -> Path:
@@ -110,11 +111,23 @@ class RunState:
         self.workspace: Workspace | None = None
         self.api_key: str | None = None
         self.gate: PermissionGate | None = None
+        # SSH degradation layer: when set, tools/.clc/fs run through the exec bridge
+        self.backend_mode: str = "local"  # "local" | "ssh"
+        self.bridge_url: str | None = None
+        self.remote_root: str | None = None  # initial browse root on the remote
 
-    def set_project(self, project: Project) -> Workspace:
+    def build_workspace(self, root: str) -> Workspace:
+        """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
+        if self.backend_mode == "ssh" and self.bridge_url:
+            return RemoteWorkspace(root, self.bridge_url)
+        return LocalWorkspace(root)
+
+    def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
         with self.lock:
             self.project = project
-            self.workspace = LocalWorkspace(str(project.workdir))
+            if workspace is None:
+                workspace = self.build_workspace(str(project.workdir))
+            self.workspace = workspace
             self.workspace.protect(project.path)
             return self.workspace
 
@@ -194,6 +207,8 @@ class Handler(BaseHTTPRequestHandler):
             self._settings()
         elif parsed.path == "/api/permission/respond":
             self._permission_respond()
+        elif parsed.path == "/api/backend":
+            self._backend()
         else:
             self._json({"error": "not found"}, status=404)
 
@@ -221,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
         project = self._state.project
         if project is None:
             return self._json({"error": "no project open; create or open one first"}, status=400)
-        workspace = self._state.workspace or LocalWorkspace(str(project.workdir))
+        workspace = self._state.workspace or self._state.build_workspace(str(project.workdir))
         workspace.protect(project.path)
 
         try:
@@ -313,6 +328,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "request not found or already resolved"}, status=404)
         self._json({"status": "ok"})
 
+    def _backend(self) -> None:
+        """Switch between the local and the SSH-degradation backend. The renderer
+        posts {mode:"ssh", bridge, workspace} when bootstrap fails on a host that
+        has no Python, and {mode:"local"} when it disconnects/resets."""
+        body = self._read_body()
+        if body is None:
+            return self._json({"error": "bad json body"}, status=400)
+        mode = body.get("mode") or "local"
+        if mode == "ssh":
+            bridge = (body.get("bridge") or "").strip()
+            if not bridge:
+                return self._json({"error": "bridge is required for ssh mode"}, status=400)
+            root = (body.get("workspace") or "").strip() or str(Path.home())
+            with self._state.lock:
+                self._state.backend_mode = "ssh"
+                self._state.bridge_url = bridge
+                self._state.remote_root = root
+                # a mode switch invalidates any previously-opened project's workspace
+                self._state.project = None
+                self._state.workspace = None
+                self._state.gate = None
+        else:
+            with self._state.lock:
+                self._state.backend_mode = "local"
+                self._state.bridge_url = None
+                self._state.remote_root = None
+                self._state.project = None
+                self._state.workspace = None
+                self._state.gate = None
+        self._json({"status": "ok"})
+
     def _sse(self) -> None:
         self.send_response(200)
         self._cors()
@@ -356,17 +402,24 @@ class Handler(BaseHTTPRequestHandler):
         sb = self._state.workspace
         if sb is None:
             return self._json({"tree": [], "root": None})
-        self._json({"tree": _walk(sb.root, sb, expanded, show_hidden), "root": str(sb.root)})
+        if isinstance(sb, RemoteWorkspace):
+            tree = _walk_remote(sb, expanded, show_hidden)
+        else:
+            tree = _walk(sb.root, sb, expanded, show_hidden)
+        self._json({"tree": tree, "root": str(sb.root)})
 
     def _fs_list(self) -> None:
         """Server-side directory browser (the UI picks projects from here).
 
-        One level, starts at the server user's home. Reachable only via the
-        local bind or the SSH tunnel, so no auth is needed.
+        One level, starts at the server user's home (or the SSH remote's home in
+        degradation mode). Reachable only via the local bind or the SSH tunnel, so
+        no auth is needed.
         """
         qs = parse_qs(urlparse(self.path).query)
         raw = (qs.get("path") or [""])[0]
         show_hidden = qs.get("hidden", ["0"])[0] == "1"
+        if self._state.backend_mode == "ssh" and self._state.bridge_url:
+            return self._fs_list_remote(raw, show_hidden)
         if raw:
             p = Path(raw).expanduser()
             if not p.is_absolute():
@@ -400,6 +453,36 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
+    def _fs_list_remote(self, raw: str, show_hidden: bool) -> None:
+        """One-level remote directory listing via a single ls exec over the bridge."""
+        transport = SshTransport(self._state.bridge_url)
+        base = self._state.remote_root or "~"
+        if raw:
+            target = raw if raw.startswith("/") else base.rstrip("/") + "/" + raw
+        else:
+            target = base
+        if target == "~" or target.startswith("~/"):
+            home = transport.run("echo $HOME", 30.0).stdout.strip() or base
+            target = home if target == "~" else home + target[1:]
+        r = transport.run(f"ls -1AF {shq(target)}", 30.0)
+        if r.code != 0:
+            return self._json({"error": f"not a directory: {target}"})
+        entries = []
+        for entry in r.stdout.splitlines():
+            if not entry:
+                continue
+            if entry.endswith("/"):  # ls -1AF: dirs end with /
+                name = entry[:-1]
+                entries.append({"name": name, "path": target.rstrip("/") + "/" + name, "dir": True, "link": None})
+                continue
+            name = entry[:-1] if entry[-1] in ("*", "@") else entry
+            if not show_hidden and name.startswith("."):
+                continue
+            # link targets need an extra readlink exec per symlink; skip (P2 MVP)
+            entries.append({"name": name, "path": target.rstrip("/") + "/" + name, "dir": False, "link": None})
+        parent = target.rsplit("/", 1)[0] if target != "/" else None
+        self._json({"path": target, "parent": parent, "entries": entries, "error": None})
+
     def _project_new(self) -> None:
         if self._state.busy:
             return self._json({"error": "a run is active; wait for it to finish"}, status=409)
@@ -410,11 +493,16 @@ class Handler(BaseHTTPRequestHandler):
         name = (body.get("name") or "").strip()
         if not dirname or not name:
             return self._json({"error": "dir and name are required"}, status=400)
+        ws = None
         try:
-            project = create_project(Path(dirname) / name, name, model=self._cfg.model)
+            if self._state.backend_mode == "ssh" and self._state.bridge_url:
+                ws = self._state.build_workspace(str(Path(dirname)))
+                project = create_project(Path(dirname) / name, name, model=self._cfg.model, workspace=ws)
+            else:
+                project = create_project(Path(dirname) / name, name, model=self._cfg.model)
         except OSError as e:
             return self._json({"error": f"cannot create project: {e}"}, status=400)
-        self._state.set_project(project)
+        self._state.set_project(project, workspace=ws)
         self._json(
             {
                 "status": "ok",
@@ -434,8 +522,13 @@ class Handler(BaseHTTPRequestHandler):
         if not path:
             return self._json({"error": "path is required"}, status=400)
         full = Path(path).resolve()
-        if not full.is_file() or full.suffix != ".clc":
+        if full.suffix != ".clc":
             return self._json({"error": "not a .clc project file"}, status=400)
+        if self._state.backend_mode != "ssh":
+            # remote paths don't exist on the local filesystem; the open itself
+            # reports a missing remote file via workspace.read
+            if not full.is_file():
+                return self._json({"error": "not a .clc project file"}, status=400)
         self._open_stream_start(full)
 
     def _open_stream_start(self, full: Path) -> None:
@@ -454,9 +547,12 @@ class Handler(BaseHTTPRequestHandler):
         def on_progress(done: int, total: int) -> None:
             emit({"progress": {"done": done, "total": total}})
 
+        # build the workspace first (ssh mode -> RemoteWorkspace over the bridge),
+        # so header/open/rewrite all read and write the remote .clc
+        ws = self._state.build_workspace(str(full.parent))
         try:
-            meta = read_header(full)
-        except OSError as e:
+            meta = read_header(full, workspace=ws)
+        except (OSError, ValueError) as e:
             emit({"error": f"cannot open project: {e}"})
             return
         # meta first so the UI can leave the welcome screen and show the bar
@@ -470,11 +566,11 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
         try:
-            project = open_project(full, on_progress=on_progress)
+            project = open_project(full, on_progress=on_progress, workspace=ws)
         except (OSError, ValueError) as e:
             emit({"error": f"cannot open project: {e}"})
             return
-        self._state.set_project(project)
+        self._state.set_project(project, workspace=ws)
         # display projection: only durable final events, so old sessions stored
         # as full streaming logs still load fast (opencode loads parts, not deltas)
         display = [e for e in project.events() if e.type in DURABLE_TYPES]
@@ -498,6 +594,33 @@ class Handler(BaseHTTPRequestHandler):
 
 def _replace(config: Config, **kw: Any) -> Config:
     return dataclasses.replace(config, **kw)
+
+
+def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
+    """Remote counterpart of _walk: same lazy partial walk (root + expanded dirs +
+    one-level lookahead), but leaf listing goes through the RemoteWorkspace's ls
+    exec. Entries are strings (dirs end with '/'), not Path objects."""
+    expanded = set(expanded)
+
+    def build(rel: str) -> list:
+        out = []
+        try:
+            entries = ws.list(rel)
+        except NotADirectoryError:
+            return []
+        for e in entries:
+            is_dir = e.endswith("/")
+            name = e[:-1] if is_dir else e
+            if not show_hidden and name.startswith("."):
+                continue
+            node: dict[str, Any] = {"name": name, "path": str(Path(rel) / name), "dir": is_dir, "link": None}
+            child_rel = str(Path(rel) / name)
+            if is_dir and (rel == "" or child_rel in expanded or rel in expanded):
+                node["children"] = build(child_rel)
+            out.append(node)
+        return out
+
+    return build("")
 
 
 def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hidden: bool) -> list:

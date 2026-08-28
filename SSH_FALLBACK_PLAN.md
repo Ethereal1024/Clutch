@@ -7,32 +7,34 @@
 
 ## 0. 现状代码地图（改动手册）
 
-仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交 `2525e99`（P1 完成）。
+仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交（P2 完成）。
 
 ### Python 后端（`agent/`，本地 server 默认 8890）
 
 | 文件 | 角色 | 关键符号 |
 |------|------|---------|
-| `server.py` | HTTP+SSE 服务器 | `Broadcaster`、`RunState`、`Handler`、`ClutchServer(ThreadingHTTPServer)`、`build()` 工厂、`_run/_sse/_fs_list/_workspace_tree/_walk` |
+| `server.py` | HTTP+SSE 服务器 | `Broadcaster`、`RunState`（`backend_mode/bridge_url/remote_root` + `build_workspace`）、`Handler`、`ClutchServer(ThreadingHTTPServer)`、`build()` 工厂、`_run/_sse/_fs_list/_fs_list_remote/_workspace_tree/_walk/_walk_remote/_backend` |
 | `loop.py` | agent 循环 | `Agent`、`_emit`、`run`、`_execute_tool` |
-| `tools/workspace.py` | 工作区抽象 | `Workspace` ABC（root/protect/is_protected/visible_entries/resolve/run）+ `LocalWorkspace`（read/write/list，Path 实现） |
+| `tools/workspace.py` | 工作区抽象 | `Workspace` ABC（root/protect/is_protected/visible_entries/resolve/run/read/write/list/append_line）+ `LocalWorkspace` + `RemoteWorkspace`（tool→sh：cat/heredoc/ls）+ `shq` |
 | `tools/filesystem.py` | 文件工具 | `read_file/write_file/list_dir/_unified_diff`（经 `workspace.read/write/list`） |
 | `tools/shell.py` | 命令工具 | `run_command`（path-guard + blocked + `workspace.run` + _syntax_check） |
 | `tools/registry.py` | 工具注册 | `Tool`、`build_default_tools`、`ToolRegistry.execute` |
-| `project.py` | .clc 文件 | `open_project/_read_file/read_header/_rewrite_durable` |
-| `events.py` | 事件/日志 | `Event` 基类+10 子类、`EventLog.append`（`open(path,"a")` 落盘） |
+| `project.py` | .clc 文件 | `open_project/read_header/_read_file/_rewrite_durable/create_project`（可传 workspace → 远端读写/追加/压缩） |
+| `events.py` | 事件/日志 | `Event` 基类+10 子类、`EventLog.append`（可选 `writer(path,line)` → 远端追加） |
 | `llm/client.py` | LLM | `LlmClient.stream`、`_classify`、`LlmError` |
 | `core/terminate.py` | 终止/验证 | `Terminator.verify`→`run_verify`（`workspace.run`） |
 | `core/permission.py` | 权限 | `PermissionEvaluator/Gate/Rule` |
 | `core/context.py` | 上下文派生 | `_to_messages`（只读 block 事件，不依赖 delta） |
 | `config.py` | 配置 | `Config`（含 `command_timeout/truncate/blocked_prefixes`） |
-| `tools/transport.py` | 传输层 | `CommandResult`/`TransportError`（`timeout` 标志）/`Transport` ABC/`LocalTransport`（subprocess）；`SshTransport` 待 P2 |
+| `tools/transport.py` | 传输层 | `CommandResult`/`TransportError`（`timeout` 标志）/`Transport` ABC/`LocalTransport`/`SshTransport`（urllib→exec bridge） |
+| `tools/transport_test.py` | 传输自检 | inline mock bridge 走通 heredoc/ls/cd/timeout（无需 ssh2） |
 
 ### Node / Electron（`ui/`）
 
 | 文件 | 角色 | 关键符号 |
 |------|------|---------|
-| `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`、`stopTunnel`、`uploadFile/uploadFileViaExec/checkExec`、`getSftp`、`tunnelStatus`、`onTunnelEnd` |
+| `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`（顺带起 exec bridge）、`stopTunnel`、`uploadFile/uploadFileViaExec/checkExec`、`getSftp`、`tunnelStatus`（含 `execBridge`）、`onTunnelEnd` |
+| `exec-bridge.js` | **（新）** | `startExecBridge`/`stopExecBridge`；`POST /exec {command,timeout}` → `{code,stdout,stderr}`；无隧道 503 |
 | `main.js` | Electron 主进程 | ipcMain handle（tunnel:connect/assist/status/disconnect/ended） |
 | `preload.js` | 渲染桥 | `clutchTunnel`（connect/assist/status/disconnect/onEnd/onProgress） |
 | `app.js` | 渲染器 | `DEFAULT_BASE(8890)`、`API_BASE`、`switchBackend/refreshPicker`、`connectSSE`、`reconciledBackendUrl`、`handleSshConnect`、`setFsConnecting/Error`、`updateConnProgress`、`loadDir/openFsBrowser` |
@@ -370,7 +372,7 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 | 阶段 | 内容 | 验收命令 | 状态 |
 |------|------|---------|------|
 | **P1 — A 层纯重构** | `transport.py`（Transport/LocalTransport）+ `Workspace` 基类/`LocalWorkspace` + 工具改道；本地行为逐字节不变 | `uv run python -m agent.selfcheck && uv run python -m agent.loop_test && uv run python -m agent.server_test && node --check ui/app.js ui/ssh-tunnel.js` | ✅ `2525e99` |
-| **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 | ⬜ |
+| **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 | ✅ 见 P2 提交 |
 | **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 | ⬜ |
 | **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ⬜ |
 
@@ -431,7 +433,7 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 
 ## 8. 仓库现状与新会话入口
 
-- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD `2525e99`（P1 完成）。
+- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD（P2 完成）。
 - 回滚分支：`pre-refactor-rollback` @ `6e52ca7`。
 - 测试：`uv run python -m agent.selfcheck` / `agent.loop_test` / `agent.server_test`；
   `uv run ruff check .` / `uv run ruff format --check .`；`node --check ui/*.js`；`bash -n ui/dev.sh`。

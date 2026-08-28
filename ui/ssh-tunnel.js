@@ -29,6 +29,7 @@ const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
+const { startExecBridge, stopExecBridge } = require("./exec-bridge");
 const { getVersion, platformTag, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
 
 const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
@@ -39,6 +40,7 @@ const CONNECT_TIMEOUT_MS = 15000;
 let sshClient = null;
 let localSrv = null;
 let llmProxyPort = null;
+let execBridgePort = null;
 let sftpHandle = null;
 let sftpUnavailable = false; // the current host has no SFTP subsystem: use exec uploads
 let lastProbe = null;
@@ -428,6 +430,7 @@ async function stopTunnel() {
     sftpHandle = null;
   }
   stopLlmProxy();
+  stopExecBridge();
   // no notifyEnd(): stopTunnel runs on INTENTIONAL disconnects (renderer-driven
   // switches, connect resets) where the caller manages the transition; only a
   // genuine unexpected tunnel death (the ssh 'end' event on the current client)
@@ -452,7 +455,12 @@ function onTunnelEnd(cb) {
 }
 
 function tunnelStatus() {
-  return { active: Boolean(sshClient), url: currentUrl };
+  return {
+    active: Boolean(sshClient),
+    url: currentUrl,
+    // exec bridge URL for the local agent's SshTransport; null with no live tunnel
+    execBridge: sshClient && execBridgePort ? "http://127.0.0.1:" + execBridgePort : null,
+  };
 }
 
 // ---- dead-backend self-healing ----
@@ -526,6 +534,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
   try {
     const localPort = await freePort();
     llmProxyPort = await startLlmProxy();
+    execBridgePort = await startExecBridge();
 
     const opts = {
       host,
@@ -585,6 +594,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
           localSrv = null;
         }
         stopLlmProxy();
+        stopExecBridge();
         notifyEnd();
       }
     });
