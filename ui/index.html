@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Clutch — coding agent</title>
   <link rel="stylesheet" href="/style.css" />
-  <link rel="preload" href="/vendor/fonts/space-grotesk-600.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/vendor/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="preload" href="/vendor/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin />
 </head>
 <body>
@@ -14,10 +14,9 @@
     <div id="project-label" class="project-label muted" title="active project"></div>
     <div id="status" class="badge idle">idle</div>
     <div class="spacer"></div>
-    <button id="open-project-btn" title="open a project">📂 Open</button>
+    <button id="open-project-btn" title="open a project">▦ Open</button>
     <button id="new-project-btn" title="create a new project">＋ New</button>
     <button id="settings-btn" title="API settings">⚙</button>
-    <button id="stop-btn" disabled title="cancel the running agent">■ Stop</button>
   </header>
 
   <div id="welcome" class="welcome">
@@ -81,17 +80,22 @@
           <span id="workspace-path" class="muted" title="active working directory"></span>
         </div>
       </div>
+      <div id="open-progress" class="open-progress hidden">
+        <div class="open-progress-track"><div class="open-progress-fill"></div></div>
+        <span class="open-progress-label">0%</span>
+      </div>
       <div id="stream" class="scroll"></div>
     </section>
 
     <aside id="right">
-      <div class="panel-head">workspace <span id="tree-refresh" class="muted">⟳</span></div>
+      <div class="panel-head">workspace</div>
       <div id="tree" class="scroll"></div>
     </aside>
   </main>
 
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/purify.min.js"></script>
+  <script src="/vendor/highlight.min.js"></script>
   <script>
     // MathJax config: recognize $...$ (inline) and $$...$$ (display) math.
     // Must be set before mathjax loads.

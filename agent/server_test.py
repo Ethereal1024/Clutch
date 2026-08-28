@@ -120,11 +120,11 @@ def _run_server_test() -> int:
         check(clc.suffix == ".clc" and clc.exists(), ".clc file exists")
         check(pdata.get("workdir") == str(proj_dir), "workdir is project dir")
 
-        # 3b. reopen the project
+        # 3b. reopen the project (NDJSON stream: meta line carries the name)
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "project reopened")
-        rdata = json.loads(body)
-        check(rdata.get("name") == "demo", "reopened project name")
+        rdata = json.loads(body.splitlines()[0])
+        check(rdata.get("meta", {}).get("name") == "demo", "reopened project name")
 
         # 4. real run (only with key)
         key = os.environ.get("DEEPSEEK_API_KEY")
@@ -183,8 +183,12 @@ def _run_server_test() -> int:
         # 6. .clc persisted the conversation
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "project reopened after run")
-        rdata = json.loads(body)
-        ev_types = [e["type"] for e in rdata.get("events", [])]
+        # /api/project/open streams NDJSON: meta, progress, event lines, done
+        ev_types = [
+            json.loads(line)["event"]["type"]
+            for line in body.splitlines()
+            if line.strip() and "event" in json.loads(line)
+        ]
         check("user_message" in ev_types and "final" in ev_types, ".clc persisted conversation")
 
         # 7. stop is safe on idle

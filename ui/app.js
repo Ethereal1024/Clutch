@@ -5,7 +5,6 @@ const $ = (s) => document.querySelector(s);
 const els = {
   task: $("#task-input"),
   run: $("#run-btn"),
-  stop: $("#stop-btn"),
   status: $("#status"),
   stream: $("#stream"),
   tree: $("#tree"),
@@ -19,9 +18,11 @@ const stream = $("#stream");
 function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
   els.status.textContent = state || "idle";
-  busy = state === "running";
-  els.run.disabled = busy || !currentProject;
-  els.stop.disabled = !busy;
+  busy = state === "running" || state === "waiting";
+  // the run button doubles as Stop while a run is in progress
+  els.run.textContent = busy ? "■ Stop" : "▶ Run";
+  els.run.classList.toggle("stop-mode", busy);
+  els.run.disabled = busy ? false : !currentProject;
 }
 
 // tracks the most recent agent text block (created by streaming text_delta)
@@ -41,7 +42,7 @@ function isReadTool(name) {
 }
 
 // Render one tool_call row; consecutive calls append to the same group block.
-// Read tools (read_file/list_dir) keep their results in the same block too (A2).
+// Read tools (read_file/list_dir) keep their results in the same block too.
 function addToolCallRow(ev) {
   const readGroup = isReadTool(ev.name);
   if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
@@ -85,11 +86,20 @@ function addToolCallRow(ev) {
 // Append a read tool's result as a collapsible row inside the tool group.
 function addReadResultRow(ev) {
   const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
+  const { row, full } = buildReadRow(call, ev.content);
+  toolGroupEl.el.appendChild(row);
+  toolGroupEl.el.appendChild(full);
+  stream.scrollTop = stream.scrollHeight;
+}
+
+// Build one collapsible read row (toggle + summary + hidden code panel).
+// Shared by the tool-group path and the standalone renderEvent path.
+function buildReadRow(call, content) {
   const toolName = call.name || "";
-  const lines = ev.content ? ev.content.split("\n").length : 0;
+  const path = (call.args && call.args.path) || "";
   const summary = toolName === "list_dir"
-    ? `${ev.content ? ev.content.split("\n").length : 0} entries`
-    : `read ${call.args.path || "file"} (${lines} lines)`;
+    ? `${content ? content.split("\n").length : 0} entries`
+    : `read ${path || "file"} (${content ? content.split("\n").length : 0} lines)`;
   const row = document.createElement("div");
   row.className = "read-row";
   const toggle = document.createElement("span");
@@ -101,15 +111,13 @@ function addReadResultRow(ev) {
   row.appendChild(lbl);
   const full = document.createElement("pre");
   full.className = "read-detail hidden";
-  full.textContent = ev.content;
+  full.textContent = content;
+  highlightPreByPath(full, path);
   row.onclick = () => {
-    const expanded = full.classList.toggle("hidden");
-    toggle.textContent = expanded ? "▸" : "▾";
-    if (expanded) row.appendChild(full);
-    else full.remove();
+    const isHidden = full.classList.toggle("hidden");
+    toggle.textContent = isHidden ? "▸" : "▾";
   };
-  toolGroupEl.el.appendChild(row);
-  stream.scrollTop = stream.scrollHeight;
+  return { row, full };
 }
 
 function addEvent(ev) {
@@ -121,15 +129,11 @@ function addEvent(ev) {
   }
   if (ev.type === "assistant_message") {
     // Body is already streamed via text_delta; nothing to render here.
-    // lastTextEl still points at the streamed text block, so final's status
-    // badge lands on that block.
     return;
   }
   if (ev.type === "final") {
-    // merge the completion badge onto the last agent text line instead of a new block
-    if (lastTextEl) {
-      appendStatusBadge(lastTextEl, ev.status);
-    }
+    // completion divider; for non-completed runs the summary carries the reason
+    appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree
     return;
   }
@@ -159,6 +163,7 @@ function addEvent(ev) {
     }
     lastTextContent += ev.content;
     lastTextEl.querySelector(".body").innerHTML = renderMarkdown(lastTextContent);
+    highlightCode(lastTextEl);
     typesetMath(lastTextEl);
     stream.scrollTop = stream.scrollHeight;
     return;
@@ -183,20 +188,22 @@ function addEvent(ev) {
       thinkingEl.appendChild(row);
       const full = document.createElement("pre");
       full.className = "thinking-full hidden";
+      full._content = ""; // per-block copy; survives step_start resetting the globals
       thinkingEl.appendChild(full);
       // click toggles between the compact row and the full reasoning text
       row.onclick = () => {
-        const expanded = full.classList.toggle("hidden");
-        toggle.textContent = expanded ? "▸" : "▾";
-        if (expanded) full.textContent = thinkingContent;
+        const isHidden = full.classList.toggle("hidden");
+        toggle.textContent = isHidden ? "▸" : "▾";
+        if (!isHidden) full.textContent = full._content;
       };
       stream.appendChild(thinkingEl);
     }
     thinkingEl.querySelector(".thinking-label").textContent =
       "thinking… " + thinkingContent.length + " chars";
-    // if the full text is open, keep it live-updated
+    // keep the block's own copy in sync; if the full text is open, update it live
     const full = thinkingEl.querySelector(".thinking-full");
-    if (full && !full.classList.contains("hidden")) full.textContent = thinkingContent;
+    full._content = thinkingContent;
+    if (!full.classList.contains("hidden")) full.textContent = full._content;
     stream.scrollTop = stream.scrollHeight;
     return;
   }
@@ -212,9 +219,6 @@ function addEvent(ev) {
   if (el) {
     stream.appendChild(el);
     stream.scrollTop = stream.scrollHeight;
-    if (ev.type === "final") {
-      typesetMath(el);
-    }
   }
 }
 
@@ -234,11 +238,57 @@ function typesetMath(el) {
   MathJax.typesetPromise([el]).catch(() => {});
 }
 
-function appendStatusBadge(blockEl, status) {
-  const badge = document.createElement("span");
-  badge.className = "status-badge " + (status === "completed" ? "done" : "fail");
-  badge.textContent = status === "completed" ? "✓ completed" : `✗ ${status}`;
-  blockEl.appendChild(badge);
+// Syntax-highlight every <pre><code> inside a freshly rendered block.
+// Marked only emits a fenced <pre> once the closing ``` has arrived, so
+// streaming renders stay clean (no half-block flicker).
+function highlightCode(root) {
+  if (typeof hljs === "undefined" || !root) return;
+  root.querySelectorAll("pre code").forEach((el) => {
+    try { hljs.highlightElement(el); } catch (e) {}
+  });
+}
+
+// Map a file extension to a highlight.js language id and highlight a bare
+// <pre> (read results). Unknown extensions fall back to the code child path.
+const CODE_LANGS = {
+  py: "python", js: "javascript", mjs: "javascript", jsx: "javascript",
+  ts: "typescript", tsx: "typescript", html: "xml", htm: "xml", xml: "xml",
+  css: "css", scss: "scss", json: "json", md: "markdown", sh: "bash",
+  bash: "bash", yaml: "yaml", yml: "yaml", c: "c", h: "c", cpp: "cpp",
+  hpp: "cpp", go: "go", rs: "rust", java: "java", sql: "sql", rb: "ruby",
+  php: "php", r: "r", diff: "diff",
+};
+function highlightPreByPath(pre, path) {
+  if (typeof hljs === "undefined") return;
+  const ext = String(path || "").split(".").pop().toLowerCase();
+  const lang = CODE_LANGS[ext] || "";
+  if (lang) pre.classList.add("language-" + lang);
+  try {
+    if (pre.querySelector("code")) {
+      hljs.highlightElement(pre.querySelector("code"));
+    } else {
+      const code = document.createElement("code");
+      code.textContent = pre.textContent;
+      pre.textContent = "";
+      pre.appendChild(code);
+      hljs.highlightElement(code);
+    }
+  } catch (e) {}
+}
+
+function appendCompletion(status, summary) {
+  const div = document.createElement("div");
+  div.className = "completion";
+  div.textContent = status === "completed" ? "completed" : status;
+  stream.appendChild(div);
+  // completed summaries duplicate the streamed agent text; abort/error reasons
+  // are the only place the termination cause is shown
+  if (status !== "completed" && summary) {
+    const note = document.createElement("div");
+    note.className = "completion-note";
+    note.textContent = summary;
+    stream.appendChild(note);
+  }
   stream.scrollTop = stream.scrollHeight;
 }
 
@@ -246,6 +296,7 @@ function renderEvent(ev) {
   const wrap = document.createElement("div");
   const body = document.createElement("div");
   body.className = "body";
+  let appendedBody = false; // write+diff appends body itself; skip the trailing append
 
   switch (ev.type) {
     case "user_message": {
@@ -255,27 +306,10 @@ function renderEvent(ev) {
       body.textContent = ev.content;
       break;
     }
-    case "step_start": {
-      // internal loop step; reset state but don't show a divider line
-      return null;
-    }
-    case "text_delta": {
-      if (!ev.content) return null;
-      wrap.className = "event text";
-      wrap.innerHTML = '<div class="hdr">agent</div>';
-      body.innerHTML = renderMarkdown(ev.content);
-      break;
-    }
-    case "assistant_message": {
-      // The body is streamed via text_delta; assistant_message carries the full
-      // text only as the authoritative record (for context/logging), never for
-      // display — rendering it here would duplicate the streamed output.
-      return null;
-    }
     case "tool_result": {
       const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
       const toolName = call.name || "";
-      const isRead = toolName === "read_file" || toolName === "list_dir";
+      const isRead = isReadTool(toolName);
       const isWrite = toolName === "write_file";
 
       wrap.className = "event tool_result" + (ev.is_error ? " error" : "")
@@ -285,30 +319,10 @@ function renderEvent(ev) {
       body.className = "body md-plain";
 
       if (isRead) {
-        // exploration reads: a summary row with a ▸/▾ toggle; click to expand/collapse
-        const path = call.args.path || "";
-        const lines = ev.content ? ev.content.split("\n").length : 0;
-        const summary = toolName === "list_dir"
-          ? `${ev.content ? ev.content.split("\n").length : 0} entries`
-          : `read ${path || "file"} (${lines} lines)`;
-        const toggle = document.createElement("span");
-        toggle.className = "read-toggle";
-        toggle.textContent = "▸";
-        const row = document.createElement("div");
-        row.className = "read-row";
-        row.appendChild(toggle);
-        const lbl = document.createElement("span");
-        lbl.textContent = summary;
-        row.appendChild(lbl);
+        const { row, full } = buildReadRow(call, ev.content);
         wrap.appendChild(row);
-        const full = document.createElement("pre");
-        full.className = "read-detail hidden";
-        full.textContent = ev.content;
         wrap.appendChild(full);
-        row.onclick = () => {
-          const expanded = full.classList.toggle("hidden");
-          toggle.textContent = expanded ? "▸" : "▾";
-        };
+        appendedBody = true; // the read content lives in the panel, not body
         break;
       }
 
@@ -318,16 +332,20 @@ function renderEvent(ev) {
         wrap.innerHTML = `<div class="hdr">✓ wrote <span class="diff-file">${escapeHtml(path)}</span></div>`;
         body.textContent = ev.content; // summary line (e.g. OK: wrote /x (+5 -2 lines))
         wrap.appendChild(body);
+        appendedBody = true;
         const pre = renderDiff(ev.diff);
         wrap.appendChild(pre);
         if (ev.diff.split("\n").length > 60) {
           pre.classList.add("diff-collapsed");
           const expand = document.createElement("button");
           expand.className = "diff-expand";
-          expand.textContent = "Show full diff";
+          const setLabel = () => {
+            expand.textContent = pre.classList.contains("diff-collapsed") ? "Show full diff" : "Hide diff";
+          };
+          setLabel();
           expand.onclick = () => {
-            pre.classList.remove("diff-collapsed");
-            expand.remove();
+            pre.classList.toggle("diff-collapsed");
+            setLabel();
           };
           wrap.appendChild(expand);
         }
@@ -345,16 +363,10 @@ function renderEvent(ev) {
       openPerm(ev);
       return null;
     }
-    case "final": {
-      wrap.className = "event final" + (ev.status !== "completed" ? " aborted" : "");
-      wrap.innerHTML = `<div class="hdr">${escapeHtml(ev.status)}</div>`;
-      body.innerHTML = renderMarkdown(ev.summary);
-      break;
-    }
     default:
       return null;
   }
-  wrap.appendChild(body);
+  if (!appendedBody) wrap.appendChild(body);
   return wrap;
 }
 
@@ -405,6 +417,7 @@ async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
   if (!currentProject) return;
+  els.task.value = ""; // the task is now "in the stream"; keep the input clear
   // runs append to the active project's conversation
   const payload = { task };
   try {
@@ -426,8 +439,7 @@ async function stop() {
   await fetch("/api/stop", { method: "POST" });
 }
 
-els.run.addEventListener("click", run);
-els.stop.addEventListener("click", stop);
+els.run.addEventListener("click", () => (busy ? stop() : run()));
 els.task.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
 });
@@ -478,7 +490,20 @@ let pendingPerm = null;
 function openPerm(ev) {
   pendingPerm = ev;
   $("#perm-tool").textContent = `Tool: ${ev.tool} — ${ev.reason || ""}`;
-  $("#perm-args").textContent = ev.args_repr || "";
+  const argsEl = $("#perm-args");
+  let txt = ev.args_repr || "";
+  let isJson = false;
+  try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {}
+  argsEl.textContent = "";
+  if (typeof hljs !== "undefined" && isJson) {
+    const code = document.createElement("code");
+    code.className = "language-json";
+    code.textContent = txt;
+    argsEl.appendChild(code);
+    try { hljs.highlightElement(code); } catch (e) {}
+  } else {
+    argsEl.textContent = txt;
+  }
   permModal.classList.remove("hidden");
   setStatus("waiting");
 }
@@ -517,32 +542,33 @@ async function refreshTree() {
 }
 
 function renderNode(node, depth) {
-  const el = document.createElement("div");
-  el.className = "tree-node " + (node.dir ? "dir" : "file");
-  el.style.paddingLeft = (6 + depth * 14) + "px";
-  el.innerHTML = `<span class="icon">${node.dir ? "▸" : "·"}</span>${escapeHtml(node.name)}`;
+  const wrap = document.createElement("div");
+  wrap.className = "tree-branch";
+  const row = document.createElement("div");
+  row.className = "tree-node " + (node.dir ? "dir" : "file");
+  row.style.paddingLeft = (depth * 12) + "px";
+  row.innerHTML =
+    `<span class="icon">${node.dir ? "▸" : "·"}</span>` +
+    `<span class="name" title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</span>`;
+  wrap.appendChild(row);
   if (node.dir) {
     const children = document.createElement("div");
     children.className = "tree-children";
-    let open = false;
-    el.addEventListener("click", (e) => {
+    children.style.display = "none";
+    row.addEventListener("click", (e) => {
       e.stopPropagation(); // don't bubble to ancestor dirs (would collapse them)
-      open = !open;
-      el.querySelector(".icon").textContent = open ? "▾" : "▸";
-      if (open) {
+      const isOpen = children.style.display !== "none";
+      row.querySelector(".icon").textContent = isOpen ? "▸" : "▾";
+      if (!isOpen) {
         children.innerHTML = "";
         for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
       }
-      children.style.display = open ? "" : "none";
+      children.style.display = isOpen ? "none" : "";
     });
-    children.style.display = "none";
-    el.appendChild(children);
-  } else {
-    // files have no action, but still stop propagation so clicking a file
-    // inside a nested dir never bubbles to collapse its parent
-    el.addEventListener("click", (e) => e.stopPropagation());
+    // children are siblings of the row, so the row's hover box never covers the subtree
+    wrap.appendChild(children);
   }
-  return el;
+  return wrap;
 }
 
 // ---- SSE live stream + session list ----
@@ -570,17 +596,8 @@ function setProjectInfo(info) {
   els.projectLabel.title = currentProject;
   if (info.workdir) els.workspace.textContent = info.workdir;
   setStatus("idle");
-  markCurrentProject();
 }
 
-function markCurrentProject() {
-  // no dropdown; the label already shows the project name
-}
-
-function showWelcome() {
-  document.getElementById("welcome").classList.remove("hidden");
-  els.run.disabled = true;
-}
 function hideWelcome() {
   document.getElementById("welcome").classList.add("hidden");
   els.run.disabled = busy || !currentProject;
@@ -588,20 +605,63 @@ function hideWelcome() {
 
 async function openProject(path) {
   if (busy) return;
+  const prog = document.getElementById("open-progress");
+  const fill = prog.querySelector(".open-progress-fill");
+  const label = prog.querySelector(".open-progress-label");
+  const setPct = (pct) => {
+    fill.style.width = pct + "%";
+    label.textContent = Math.round(pct) + "%";
+  };
   try {
     const r = await fetch("/api/project/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || r.status);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || r.status);
+    }
     clearStream();
-    setProjectInfo(data);
-    hideWelcome();
-    for (const ev of data.events || []) addEvent(ev);
+    prog.classList.remove("hidden");
+    setPct(0);
+    // /api/project/open streams NDJSON: meta, progress, event, done
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let started = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch (e) { continue; }
+        if (msg.error) throw new Error(msg.error);
+        if (msg.meta) {
+          setProjectInfo({
+            project: msg.meta.project,
+            name: msg.meta.name,
+            workdir: msg.meta.workdir,
+          });
+          hideWelcome();
+          started = true;
+        } else if (msg.progress && msg.progress.total) {
+          setPct(100 * msg.progress.done / msg.progress.total);
+        } else if (msg.event) {
+          addEvent(msg.event);
+        }
+      }
+    }
+    if (started) setPct(100);
+    prog.classList.add("hidden");
     refreshTree();
   } catch (e) {
+    prog.classList.add("hidden");
     alert("Failed to open project: " + e.message);
   }
 }

@@ -11,8 +11,10 @@ Workflow:
      Read files only if the task explicitly requires using existing content.
 2. Write code with write_file (whole-file rewrite).
 3. Run and verify with run_command, preferring a program-provided --test self-test mode.
-4. Read the output. On failure, analyze the error, fix the code, and rerun until it passes.
-5. When done, reply with a final explanation and NO tool calls.
+4. Network is available: fetch remote content with `curl` or `wget`. Save downloads
+   inside the workspace with a relative `-o` path (absolute paths are blocked).
+5. Read the output. On failure, analyze the error, fix the code, and rerun until it passes.
+6. When done, reply with a final explanation and NO tool calls.
 
 Tool conventions:
 - Paths are relative to the workspace root.

@@ -99,6 +99,8 @@ def build_default_tools(config: Config) -> List[Tool]:
             description=(
                 "Run a shell command in the workspace and return its output. cwd is fixed to "
                 "the workspace root. Run Python with `python3 file.py` (syntax-checked first). "
+                "Network is available: fetch remote content with curl or wget (save with a "
+                "relative -o path; absolute output paths are blocked). "
                 "Interactive commands are blocked (bare python, vi, vim, less). When a program "
                 "needs input, use scripted input (stdin pipe or CLI args), or add a `--test` "
                 "self-test mode that verifies behavior without interaction."

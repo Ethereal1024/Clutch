@@ -73,10 +73,11 @@ def create_project(path: Path, name: str, model: str = "") -> Project:
     return Project(path=path, meta=meta, log=ProjectLog(path))
 
 
-def open_project(path: Path) -> Project:
-    """Load an existing .clc file."""
+def open_project(path: Path, on_progress=None) -> Project:
+    """Load an existing .clc file. on_progress(done, total) is called as the
+    file is parsed (byte-based, single pass)."""
     path = path.with_suffix(".clc")
-    meta, loaded = _read_file(path)
+    meta, loaded = _read_file(path, on_progress)
     log = ProjectLog(path)
     log._events.extend(loaded.events())
     return Project(path=path, meta=meta, log=log)
@@ -92,12 +93,17 @@ def _write_header(path: Path, meta: ProjectMeta) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _read_file(path: Path) -> tuple[ProjectMeta, EventLog]:
+def _read_file(path: Path, on_progress=None) -> tuple[ProjectMeta, EventLog]:
     meta = ProjectMeta()
     log = EventLog()
     in_events = False
+    total = path.stat().st_size or 1
+    consumed = 0
     with open(path, encoding="utf-8") as f:
         for line in f:
+            consumed += len(line)
+            if on_progress:
+                on_progress(consumed, total)
             line = line.rstrip("\n")
             if not in_events:
                 if line.strip() == SEPARATOR:
@@ -123,7 +129,27 @@ def _read_file(path: Path) -> tuple[ProjectMeta, EventLog]:
     return meta, log
 
 
+def read_header(path: Path) -> ProjectMeta:
+    """Read only the header of a .clc file (up to the --- separator), fast."""
+    path = path.with_suffix(".clc")
+    meta = ProjectMeta()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if line.strip() == SEPARATOR:
+                break
+            if line.startswith("#") or ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            if k == "name":
+                meta.name = v
+            elif k == "model":
+                meta.model = v
+    return meta
+
+
 def project_meta(path: Path) -> ProjectMeta:
     """Read only the header of a .clc file."""
-    meta, _ = _read_file(path)
-    return meta
+    return read_header(path)

@@ -37,7 +37,7 @@ from .events import (
 )
 from .llm.client import LlmClient
 from .loop import Agent
-from .project import Project, create_project, open_project
+from .project import Project, create_project, open_project, read_header
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import Workspace
 
@@ -381,17 +381,42 @@ class Handler(SimpleHTTPRequestHandler):
         if not full.is_file() or full.suffix != ".clc":
             return self._json({"error": "not a .clc project file"}, status=400)
         try:
-            project = open_project(full)
-        except (OSError, ValueError) as e:
-            return self._json({"error": f"cannot open project: {e}"}, status=400)
-        self._state.set_project(project)
-        self._json({
-            "status": "ok",
-            "project": str(project.path),
-            "name": project.meta.name,
-            "workdir": str(project.workdir),
-            "events": [json.loads(event_to_json(e)) for e in project.events()],
+            self._open_stream_start(full)
+        except Exception as e:  # noqa: BLE001 -- stream already started; report inline
+            return
+
+    def _open_stream_start(self, full: Path) -> None:
+        # stream the open as NDJSON so the UI can show real file-parse progress
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+
+        def emit(obj) -> None:
+            self.wfile.write((json.dumps(obj) + "\n").encode("utf-8"))
+            self.wfile.flush()
+
+        def on_progress(done: int, total: int) -> None:
+            emit({"progress": {"done": done, "total": total}})
+
+        # meta first so the UI can leave the welcome screen and show the bar
+        meta = read_header(full)
+        emit({
+            "meta": {
+                "project": str(full),
+                "name": meta.name,
+                "workdir": str(full.parent),
+            }
         })
+        try:
+            project = open_project(full, on_progress=on_progress)
+        except (OSError, ValueError) as e:
+            emit({"error": f"cannot open project: {e}"})
+            return
+        self._state.set_project(project)
+        for ev in project.events():
+            emit({"event": json.loads(event_to_json(ev))})
+        emit({"done": True})
 
     def _static(self, path: str) -> None:
         # delegate to SimpleHTTPRequestHandler against ui_dir
