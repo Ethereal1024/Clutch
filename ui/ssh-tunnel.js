@@ -196,32 +196,65 @@ function checkExec(r) {
   }
 }
 
+// A minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a single
+// exec request over ~8KB (measured on the test router: 7,929B ok / 9,636B died).
+// Every upload exec command stays well under that.
+const EXEC_CHUNK_BYTES = 3500;
+
+function shq(s) {
+  // single-quote for sh: ' -> '\'' (works on any POSIX shell)
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function chunkText(s, cap) {
+  // Split into pieces whose on-wire size after shq stays under cap. A single
+  // quote inflates to the 4-char sequence '\'', so budget it at 4; multibyte
+  // characters are never split.
+  const chunks = [];
+  let cur = "";
+  let size = 0;
+  for (const ch of s) {
+    const b = ch === "'" ? 4 : Buffer.byteLength(ch);
+    if (cur && size + b > cap) {
+      chunks.push(cur);
+      cur = "";
+      size = 0;
+    }
+    cur += ch;
+    size += b;
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 // Fallback upload for remotes whose sshd has no SFTP subsystem (e.g. minimal
-// embedded devices). Text files go through a quoted heredoc (no base64 needed,
-// which minimal devices often lack); binary files fall back to chunked base64.
-// Every exec's exit code is checked so a missing tool fails loudly instead of
-// silently writing nothing.
-function uploadFileViaExec(localPath, remotePath, timeoutMs = 120000) {
+// embedded devices). Text files go through byte-exact `printf '%s'` chunks (no
+// base64 needed, which minimal devices often lack); binary files fall back to
+// chunked base64. Chunking keeps every exec command under the sshd's limit, and
+// every exit code is checked so a missing tool fails loudly instead of silently
+// writing nothing. `exec` is injectable for tests.
+function uploadFileViaExec(localPath, remotePath, timeoutMs = 120000, exec = remoteExec) {
   const buf = fs.readFileSync(localPath);
   if (!buf.includes(0)) {
     const content = buf.toString("utf8");
-    // a quoted heredoc always appends one newline; strip the file's own trailing
-    // newline so newline-terminated files are written back byte-for-byte (a file
-    // with no trailing newline gets one appended — harmless for source files)
-    const body = content.endsWith("\n") ? content.slice(0, -1) : content;
-    const delim = "CLUTCH_EOF_" + Date.now().toString(36);
-    const cmd = `cat > '${remotePath}' <<'${delim}'\n${body}\n${delim}`;
-    return remoteExec(cmd, timeoutMs).then(checkExec);
+    const chunks = chunkText(content, EXEC_CHUNK_BYTES);
+    if (!chunks.length) chunks.push(""); // empty file still gets created
+    let p = Promise.resolve();
+    chunks.forEach((chunk, i) => {
+      const op = i === 0 ? ">" : ">>";
+      p = p.then(() => exec(`printf '%s' ${shq(chunk)} ${op} ${shq(remotePath)}`, timeoutMs).then(checkExec));
+    });
+    return p;
   }
   const data = buf.toString("base64");
   let first = true;
   let p = Promise.resolve();
-  for (let i = 0; i < data.length; i += 30000) {
-    const part = data.slice(i, i + 30000);
+  for (let i = 0; i < data.length; i += EXEC_CHUNK_BYTES) {
+    const part = data.slice(i, i + EXEC_CHUNK_BYTES);
     const op = first ? ">" : ">>";
     first = false;
     p = p.then(() =>
-      remoteExec(`echo '${part}' | base64 -d ${op} '${remotePath}'`, timeoutMs).then(checkExec)
+      exec(`echo '${part}' | base64 -d ${op} ${shq(remotePath)}`, timeoutMs).then(checkExec)
     );
   }
   return p;
@@ -722,4 +755,13 @@ async function uploadDir(localDir, remoteDir) {
   }
 }
 
-module.exports = { connectTunnel, stopTunnel, remoteExec, runAssist, tunnelLog, onTunnelEnd, tunnelStatus };
+module.exports = {
+  connectTunnel,
+  stopTunnel,
+  remoteExec,
+  runAssist,
+  tunnelLog,
+  onTunnelEnd,
+  tunnelStatus,
+  uploadFileViaExec,
+};

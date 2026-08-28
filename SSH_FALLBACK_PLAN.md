@@ -28,13 +28,14 @@
 | `core/context.py` | 上下文派生 | `_to_messages`（只读 block 事件，不依赖 delta） |
 | `config.py` | 配置 | `Config`（含 `command_timeout/truncate/blocked_prefixes`） |
 | `tools/transport.py` | 传输层 | `CommandResult`/`TransportError`（`timeout` 标志）/`Transport` ABC/`LocalTransport`/`SshTransport`（urllib→exec bridge） |
-| `tools/transport_test.py` | 传输自检 | inline mock bridge 走通 heredoc/ls/cd/timeout（无需 ssh2） |
+| `tools/transport_test.py` | 传输自检 | inline mock bridge 走通 printf 分块写/ls/cd/timeout（无需 ssh2） |
 
 ### Node / Electron（`ui/`）
 
 | 文件 | 角色 | 关键符号 |
 |------|------|---------|
-| `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`（顺带起 exec bridge；硬拒绝 `ok:false` 时隧道保持存活并置 `wasDisconnected=false` 供 onEnd 复位）、`stopTunnel`、`uploadFile/uploadFileViaExec/checkExec`、`getSftp`、`tunnelStatus`（含 `execBridge`）、`onTunnelEnd` |
+| `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`（顺带起 exec bridge；硬拒绝 `ok:false` 时隧道保持存活并置 `wasDisconnected=false` 供 onEnd 复位）、`stopTunnel`、`uploadFile/uploadFileViaExec`（printf/base64 分块，cap 3.5KB/exec）、`checkExec`、`getSftp`、`tunnelStatus`（含 `execBridge`）、`onTunnelEnd` |
+| `ssh-tunnel.test.js` | **（新）** 上传自检 | `node ui/ssh-tunnel.test.js`：注入 mock exec 验证文本/二进制逐字节上传 + 每条 exec ≤ cap |
 | `exec-bridge.js` | **（新）** | `startExecBridge`/`stopExecBridge`；`POST /exec {command,timeout}` → `{code,stdout,stderr}`；无隧道 503 |
 | `main.js` | Electron 主进程 | ipcMain handle（tunnel:connect/assist/status/disconnect/ended）；execBridge 经 `tunnelStatus` 自动带出，无需改动 |
 | `preload.js` | 渲染桥 | `clutchTunnel`（connect/assist/status/disconnect/onEnd/onProgress）；`status()` 已含 execBridge |
@@ -238,8 +239,8 @@ class RemoteWorkspace(Workspace):  # tool→sh 转译
   EventLog(path, writer=None)
   # writer: Callable[[str, str], None]  # (path, line) 追加一行
   # 默认 None → open(path,"a")（本地现状）
-  # 远端 → workspace.append_line(path, line)，实现为单条引号 heredoc：
-  #   cat >> '<clc>' <<'<uniq>'\n<json 行>\n<uniq>
+  # 远端 → workspace.append_line(path, line)，实现为 printf 分块追加（cap 3.5KB/exec）：
+  #   printf '%s\n' '<json 行>' >> '<clc>'（大行拆多条 exec）
   ```
   不用 `echo`（JSON 含单引号会炸）；不用 base64（极端设备没有）。
 - **project.py** 的 IO 全部经传入的 workspace：
@@ -401,7 +402,7 @@ P1 子步骤：
 P2 子步骤：
 1. `ui/exec-bridge.js`（start/stop/`/exec`）+ 接线 `connectTunnel/stopTunnel` + `tunnelStatus.execBridge`。
 2. `agent/tools/transport.py`：`SshTransport`（urllib）。
-3. `workspace.py`：`RemoteWorkspace`（tool→sh + heredoc）。
+3. `workspace.py`：`RemoteWorkspace`（tool→sh + printf 分块）。
 4. `server.py`：`/api/backend` + RunState 字段 + `_fs_list` transport 分支。
 5. `project.py`/`events.py`：EventLog writer + open_project workspace 参数 + 远端压缩。
 6. `core/terminate.py` run_verify、`_fs_list`、`_workspace_tree` transport 化。
