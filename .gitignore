@@ -4,3 +4,6 @@ __pycache__/
 .env
 node_modules/
 reports/
+build/
+dist/
+*.spec

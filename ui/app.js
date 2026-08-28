@@ -745,6 +745,19 @@ async function connectSsh() {
       port: Number(port),
       password: sshPassword.value,
     });
+    if (res.needsAssist) {
+      // exotic remote: ask before spending LLM tokens on the guided installer
+      sshStatus.textContent =
+        "Remote environment not recognized (" + (res.error || "?") + "). Running LLM-guided install…";
+      const a = await window.clutchTunnel.assist();
+      if (a.ok) {
+        localStorage.setItem("clutch_api_url", a.url);
+        location.reload();
+      } else {
+        sshStatus.textContent = "auto-install failed: " + (a.error || "unknown");
+      }
+      return;
+    }
     if (res.ok) {
       localStorage.setItem("clutch_ssh_host", host);
       localStorage.setItem("clutch_ssh_user", user);

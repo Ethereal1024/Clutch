@@ -28,12 +28,16 @@ tool-calling 接口。
 5. 在欢迎界面用**文件浏览器**新建/打开项目（.clc 文件）后开始对话
 
 **跨设备（两台机器）**
-1. 远端：uv run python -m agent.server
-   --base-url http://127.0.0.1:8892/v1
-   —— 绑定 127.0.0.1、无需外网、无需 key；LLM 走客户端反代（经 SSH 反向隧道）
+1. 远端：什么都不用装——客户端连接后会自动安装并启动服务器
 2. 本机：cd ui && npm start，在「⚙ 设置」→ SSH 填入 host/user/port（可选填密码，
    或留空用本机 ~/.ssh 密钥 / ssh-agent）点 Connect
    —— 程序化 ssh2 隧道：密码在 App 内输入，无需终端；也可用密钥免密
+   —— **自动安装**（对齐 VSCode Remote）：按远端环境自适应——
+      有 python3+外网 → venv+pip 装源码；有 python3 无外网且同架构 → 便携
+      site-packages；无 python3 且同架构 → 自包含二进制（PyInstaller 现构建）；
+      其余极端环境（异架构/异 libc）→ 客户端 LLM 引导安装（模型在远端执行命令，
+      装 python3/pip 并启动）
+   —— 启动命令固定带 --base-url http://127.0.0.1:8892/v1（LLM 走客户端反代）
    —— 每次连接会追加写入 ~/.clutch/tunnel.log（含 host/user/port/明文密码与 ssh2
       协议跟踪，用于复现连接失败；开发期功能，发布前删除）
 3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统

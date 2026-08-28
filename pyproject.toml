@@ -22,6 +22,7 @@ default = true
 [dependency-groups]
 dev = [
     "ruff>=0.16.5",
+    "pyinstaller>=6.0",
 ]
 
 [tool.ruff]

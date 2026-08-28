@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld("clutchApi", {
 
 contextBridge.exposeInMainWorld("clutchTunnel", {
   connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
+  assist: () => ipcRenderer.invoke("tunnel:assist"),
   disconnect: () => ipcRenderer.invoke("tunnel:disconnect"),
 });
