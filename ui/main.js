@@ -9,9 +9,18 @@
 
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
-const { connectTunnel, stopTunnel, runAssist } = require("./ssh-tunnel");
+const { connectTunnel, stopTunnel, runAssist, tunnelLog } = require("./ssh-tunnel");
 
 const API_BASE = process.env.CLUTCH_API_URL || "http://127.0.0.1:8890";
+
+// Dev-only: surface any main-process JS error into the tunnel log instead of the
+// opaque "A JavaScript error occurred" dialog, so remote failures are diagnosable.
+process.on("uncaughtException", (e) => {
+  tunnelLog("[fatal] uncaughtException: " + ((e && e.stack) || e));
+});
+process.on("unhandledRejection", (e) => {
+  tunnelLog("[fatal] unhandledRejection: " + ((e && e.stack) || e));
+});
 
 app.whenReady().then(() => {
   const win = new BrowserWindow({

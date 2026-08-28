@@ -179,7 +179,7 @@ const PROBE_CMD = [
   'echo "__ARCH__"; uname -m',
   'echo "__HOME__"; echo "$HOME"',
   'echo "__OSREL__"; (grep -E "^(NAME|VERSION)=" /etc/os-release 2>/dev/null || true) | head -2',
-  'echo "__PY__"; (command -v python3 && python3 --version 2>&1) || echo NONE',
+  'echo "__PY__"; (command -v python3 >/dev/null && python3 -c "import sys;print(\'%d.%d\'%sys.version_info[:2])") || echo NONE',
   'echo "__VER__"; (cat "$HOME/.clutch-server/VERSION" 2>/dev/null) || echo NONE',
   'echo "__STRATEGY__"; (cat "$HOME/.clutch-server/STRATEGY" 2>/dev/null) || echo NONE',
   'echo "__ART__"; (test -x "$HOME/.clutch-server/agent-server" && echo bundle || true); (test -x "$HOME/.clutch-server/venv/bin/python" && echo pip || true); (test -d "$HOME/.clutch-server/site-packages" && echo pylibs || true)',
@@ -198,7 +198,7 @@ function parseProbe(out) {
     arch: section("__ARCH__"),
     home: section("__HOME__"),
     osrel: section("__OSREL__"),
-    python: section("__PY__").replace(/^.*Python /, ""),
+    python: section("__PY__") === "NONE" ? "" : section("__PY__"),
     installedVersion: section("__VER__"),
     installedStrategy: section("__STRATEGY__"),
     artifacts: arts,
@@ -279,13 +279,13 @@ async function installServer(probe, { force } = {}) {
       await uploadDir(path.join(__dirname, "..", "agent"), `${dir}/src/agent`);
       await uploadFile(path.join(__dirname, "..", "pyproject.toml"), `${dir}/src/pyproject.toml`);
       const pi = await remoteExec(
-        `cd ${dir} && python3 -m venv venv && venv/bin/pip install --quiet src 2>&1 | tail -3`
+        `cd ${dir} && python3 -m venv venv && venv/bin/pip install --quiet src 2>&1 | tail -3`,
+        300000
       );
       if (pi.code !== 0) {
-        return {
-          needsAssist: true,
-          error: `remote pip install failed: ${(pi.stderr || pi.stdout).trim().slice(0, 400)}`,
-        };
+        const detail = (pi.stderr || pi.stdout || "exec timed out").trim().slice(0, 400);
+        tunnelLog(`[bootstrap] pip install failed (exit ${pi.code}): ${detail}`);
+        return { needsAssist: true, error: `remote pip install failed: ${detail}` };
       }
     }
     await remoteExec(`echo ${version} > ${dir}/VERSION && echo ${strategy} > ${dir}/STRATEGY`);
@@ -394,6 +394,7 @@ async function connectTunnel({ host, user, port, password }) {
     const boot = await installServer(probe);
     if (boot.needsAssist) {
       // keep the connection open for the LLM-guided installer; stage the source
+      tunnelLog("[bootstrap] needsAssist: " + boot.error);
       await stageSource(probe);
       lastProbe = probe;
       return { ok: false, needsAssist: true, error: boot.error };
@@ -486,4 +487,4 @@ async function uploadDir(localDir, remoteDir) {
   }
 }
 
-module.exports = { connectTunnel, stopTunnel, remoteExec, runAssist };
+module.exports = { connectTunnel, stopTunnel, remoteExec, runAssist, tunnelLog };
