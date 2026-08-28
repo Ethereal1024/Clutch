@@ -499,7 +499,9 @@ main { display: flex; flex: 1; min-height: 0; }
 #conn-reset { margin-top: 8px; padding: 2px 8px; font-size: 12px; }
 /* the file-browsing body collapses smoothly during SSH connect (height + fade).
    max-height clamps it deterministically so the hidden body can never leave a
-   dead height (the 260px file list) behind */
+   dead height (the 260px file list) behind. Ceiling: the body is bounded — 260px
+   list + path bar + (new-project area) + action buttons ≈ 420px in new mode, so
+   480px is a safe max that still lets the animation track the real height. */
 #fs-body {
   overflow: hidden;
   max-height: 480px;
