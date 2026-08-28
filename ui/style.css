@@ -504,17 +504,18 @@ main { display: flex; flex: 1; min-height: 0; }
 #fs-body > .fs-body-inner { overflow: hidden; min-height: 0; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
-.hidden-toggle {
+label.hidden-toggle {
   font-family: var(--font-mono); font-size: 11px; color: var(--muted);
   display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
   cursor: pointer; user-select: none;
+  margin-bottom: 0; letter-spacing: 0; text-transform: none; line-height: 1;
 }
-.hidden-toggle:hover { color: var(--text); }
-.hidden-toggle input {
-  margin: 0; padding: 0; flex: 0;
+label.hidden-toggle:hover { color: var(--text); }
+label.hidden-toggle input {
+  margin: 0; padding: 0; flex: none;
 }
 /* themed checkbox: graphite sharp-cornered box, red fill + dark check when on */
-.hidden-toggle input[type="checkbox"] {
+label.hidden-toggle input[type="checkbox"] {
   appearance: none; -webkit-appearance: none;
   width: 14px; height: 14px;
   border: 1px solid var(--border);
@@ -522,24 +523,25 @@ main { display: flex; flex: 1; min-height: 0; }
   border-radius: 0;
   cursor: pointer;
   position: relative;
+  transition: background-color .15s ease, border-color .15s ease;
 }
-.hidden-toggle input[type="checkbox"]:checked {
+label.hidden-toggle input[type="checkbox"]:checked {
   background: var(--accent);
   border-color: var(--accent);
 }
-.hidden-toggle input[type="checkbox"]:checked::after {
+label.hidden-toggle input[type="checkbox"]:checked::after {
   content: "✓";
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
   color: #0F0F10; font-size: 11px; font-weight: 700; line-height: 1;
 }
-.hidden-toggle input[type="checkbox"]:focus-visible {
+label.hidden-toggle input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-#fs-toolbar .hidden-toggle { align-self: center; }
+#fs-toolbar label.hidden-toggle { align-self: center; }
 /* beat #fs-toolbar input { flex: 1 } so the checkbox stays its natural size */
-#fs-toolbar .hidden-toggle input { flex: 0; }
+#fs-toolbar label.hidden-toggle input { flex: none; }
 #fs-list {
   height: 260px;
   border: 1px solid var(--border);
