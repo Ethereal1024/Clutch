@@ -811,6 +811,32 @@ function closePasswordPrompt() {
 
 let connBusy = false; // a connect is in flight: ignore re-clicks
 
+// Show connection progress in the file area instead of stale local files.
+function setFsConnecting(host) {
+  const listEl = $("#fs-list");
+  listEl.innerHTML = "";
+  listEl.appendChild(fsRow("Connecting to " + host + "…", "plain"));
+  $("#fs-up").disabled = true;
+  $("#fs-go").disabled = true;
+  $("#fs-path-input").disabled = true;
+}
+
+function setFsConnectError(msg) {
+  const listEl = $("#fs-list");
+  listEl.innerHTML = "";
+  listEl.appendChild(fsRow("Connection failed: " + msg, "error-row"));
+  listEl.appendChild(
+    fsRow("Reset to local backend", "action", () => {
+      localStorage.removeItem("clutch_api_url");
+      localStorage.removeItem("clutch_ssh_connected");
+      location.reload();
+    })
+  );
+  $("#fs-up").disabled = false;
+  $("#fs-go").disabled = false;
+  $("#fs-path-input").disabled = false;
+}
+
 async function handleSshConnect(host, user, port, statusEl) {
   if (!window.clutchTunnel) {
     statusEl.textContent = "SSH requires the desktop app (Electron).";
@@ -826,6 +852,7 @@ async function handleSshConnect(host, user, port, statusEl) {
   }
   connBusy = true;
   statusEl.textContent = "connecting…";
+  setFsConnecting(host);
   try {
     // try keys/agent first; only prompt for a password if auth fails
     let res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
@@ -833,6 +860,7 @@ async function handleSshConnect(host, user, port, statusEl) {
       const pw = await showPasswordPrompt("Password for " + user + "@" + host);
       if (!pw) {
         statusEl.textContent = "connection cancelled";
+        setFsConnectError("connection cancelled");
         return;
       }
       res = await window.clutchTunnel.connect({ host, user, port: Number(port), password: pw });
@@ -848,6 +876,7 @@ async function handleSshConnect(host, user, port, statusEl) {
         location.reload();
       } else {
         statusEl.textContent = "auto-install failed: " + (a.error || "unknown");
+        setFsConnectError("auto-install failed: " + (a.error || "unknown"));
       }
       return;
     }
@@ -858,9 +887,11 @@ async function handleSshConnect(host, user, port, statusEl) {
       location.reload();
     } else {
       statusEl.textContent = "connection failed: " + (res.error || "unknown");
+      setFsConnectError(res.error || "unknown");
     }
   } catch (e) {
     statusEl.textContent = "connection failed: " + e.message;
+    setFsConnectError(e.message);
   } finally {
     connBusy = false;
   }
