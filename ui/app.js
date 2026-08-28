@@ -1,11 +1,13 @@
 "use strict";
 
 // Where the agent API lives. Resolution order: in-app setting (localStorage) >
-// Electron preload env (window.clutchApi.baseUrl) > default localhost.
-const API_BASE =
-  ((localStorage.getItem("clutch_api_url") || "").replace(/\/+$/, "")) ||
+// Electron preload env (window.clutchApi.baseUrl) > default localhost. API_BASE is
+// reassigned in place by switchBackend() when the backend changes (SSH connect /
+// disconnect), so the UI never needs a full reload.
+const DEFAULT_BASE =
   (window.clutchApi && window.clutchApi.baseUrl) ||
   "http://127.0.0.1:8890";
+let API_BASE = (localStorage.getItem("clutch_api_url") || DEFAULT_BASE).replace(/\/+$/, "");
 
 const $ = (s) => document.querySelector(s);
 
@@ -766,31 +768,14 @@ function renderConnSelector() {
   connStatus.textContent = connected ? "Connected: " + override : "Using " + API_BASE;
 }
 
-async function connectToSsh({ host, user, port, password }) {
-  if (!window.clutchTunnel) return;
-  const res = await window.clutchTunnel.connect({ host, user, port: Number(port), password });
-  if (res.needsAssist) {
-    connStatus.textContent =
-      "Remote environment not recognized (" + (res.error || "?") + "). Running LLM-guided install…";
-    const a = await window.clutchTunnel.assist();
-    if (a.ok) {
-      upsertConn(host, user, port);
-      localStorage.setItem("clutch_api_url", a.url);
-      localStorage.setItem("clutch_ssh_connected", "1");
-      location.reload();
-    } else {
-      connStatus.textContent = "auto-install failed: " + (a.error || "unknown");
-    }
-    return;
-  }
-  if (res.ok) {
-    upsertConn(host, user, port);
-    localStorage.setItem("clutch_api_url", res.url);
-    localStorage.setItem("clutch_ssh_connected", "1");
-    location.reload();
-  } else {
-    connStatus.textContent = "connection failed: " + (res.error || "unknown");
-  }
+// Switch the active backend in place (SSH connect / disconnect / reset) without a
+// full page reload: repoint API_BASE + the SSE stream, then re-load the picker.
+function switchBackend(url) {
+  API_BASE = url.replace(/\/+$/, "");
+  localStorage.setItem("clutch_api_url", API_BASE);
+  reconnectSSE();
+  loadDir(""); // show the new backend's files right in the picker
+  renderConnSelector();
 }
 
 function showPasswordPrompt(label) {
@@ -816,6 +801,7 @@ function setFsConnecting(host) {
   const listEl = $("#fs-list");
   listEl.innerHTML = "";
   listEl.appendChild(fsRow("Connecting to " + host + "…", "plain"));
+  $("#fs-toolbar").classList.add("hidden");
   $("#fs-up").disabled = true;
   $("#fs-go").disabled = true;
   $("#fs-path-input").disabled = true;
@@ -827,14 +813,11 @@ function setFsConnectError(msg) {
   listEl.appendChild(fsRow("Connection failed: " + msg, "error-row"));
   listEl.appendChild(
     fsRow("Reset to local backend", "action", () => {
-      localStorage.removeItem("clutch_api_url");
       localStorage.removeItem("clutch_ssh_connected");
-      location.reload();
+      switchBackend(DEFAULT_BASE);
     })
   );
-  $("#fs-up").disabled = false;
-  $("#fs-go").disabled = false;
-  $("#fs-path-input").disabled = false;
+  $("#fs-toolbar").classList.add("hidden");
 }
 
 async function handleSshConnect(host, user, port, statusEl) {
@@ -871,9 +854,9 @@ async function handleSshConnect(host, user, port, statusEl) {
       const a = await window.clutchTunnel.assist();
       if (a.ok) {
         upsertConn(host, user, port);
-        localStorage.setItem("clutch_api_url", a.url);
         localStorage.setItem("clutch_ssh_connected", "1");
-        location.reload();
+        switchBackend(a.url); // stay in the picker, now against the remote
+        return true;
       } else {
         statusEl.textContent = "auto-install failed: " + (a.error || "unknown");
         setFsConnectError("auto-install failed: " + (a.error || "unknown"));
@@ -882,9 +865,9 @@ async function handleSshConnect(host, user, port, statusEl) {
     }
     if (res.ok) {
       upsertConn(host, user, port);
-      localStorage.setItem("clutch_api_url", res.url);
       localStorage.setItem("clutch_ssh_connected", "1");
-      location.reload();
+      switchBackend(res.url); // stay in the picker, now against the remote
+      return true;
     } else {
       statusEl.textContent = "connection failed: " + (res.error || "unknown");
       setFsConnectError(res.error || "unknown");
@@ -901,10 +884,9 @@ connSelect.addEventListener("change", async () => {
   const v = connSelect.value;
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {
-      localStorage.removeItem("clutch_api_url");
-      localStorage.removeItem("clutch_ssh_connected");
       await window.clutchTunnel.disconnect();
-      location.reload();
+      localStorage.removeItem("clutch_ssh_connected");
+      switchBackend(DEFAULT_BASE); // stay in the picker, back to the local backend
     }
     return;
   }
@@ -912,7 +894,6 @@ connSelect.addEventListener("change", async () => {
     // switching: drop any current tunnel first, then connect to the new host
     if (localStorage.getItem("clutch_ssh_connected")) {
       await window.clutchTunnel.disconnect();
-      localStorage.removeItem("clutch_api_url");
       localStorage.removeItem("clutch_ssh_connected");
     }
     const [user, hostPort] = v.slice(4).split("@");
@@ -938,11 +919,12 @@ function closeConnNew() {
 }
 $("#conn-new").addEventListener("click", openConnNew);
 $("#conn-new-cancel").addEventListener("click", closeConnNew);
-$("#conn-new-connect").addEventListener("click", () => {
+$("#conn-new-connect").addEventListener("click", async () => {
   const host = connNewHost.value.trim();
   const user = connNewUser.value.trim();
   const port = connNewPort.value.trim() || "22";
-  handleSshConnect(host, user, port, connNewStatus);
+  const ok = await handleSshConnect(host, user, port, connNewStatus);
+  if (ok) closeConnNew(); // stay in the picker
 });
 connNewModal.addEventListener("click", (e) => {
   if (e.target === connNewModal) closeConnNew();
@@ -988,31 +970,28 @@ async function reconcileStaleTunnel() {
   const override = localStorage.getItem("clutch_api_url");
   if (s.active && s.url) {
     if (override !== s.url) {
-      localStorage.setItem("clutch_api_url", s.url);
       localStorage.setItem("clutch_ssh_connected", "1");
-      location.reload();
+      switchBackend(s.url); // a live tunnel is authoritative
     }
     return;
   }
   if (!s.active && (override || localStorage.getItem("clutch_ssh_connected"))) {
     if (isTunnelLike(override) || localStorage.getItem("clutch_ssh_connected")) {
-      localStorage.removeItem("clutch_api_url");
       localStorage.removeItem("clutch_ssh_connected");
-      location.reload();
+      switchBackend(DEFAULT_BASE); // stale tunnel leftover: fall back to local
     } else {
       localStorage.removeItem("clutch_ssh_connected"); // manual backend URL: keep it
     }
   }
 }
 
-// When a live tunnel dies mid-session (not an intentional disconnect), clear the
-// stored URL and reload to the default backend so the UI stops failing.
+// When a live tunnel dies mid-session (not an intentional disconnect), fall back to
+// the local backend in place so the UI stops failing.
 if (window.clutchTunnel) {
   window.clutchTunnel.onEnd(() => {
     if (localStorage.getItem("clutch_ssh_connected")) {
-      localStorage.removeItem("clutch_api_url");
       localStorage.removeItem("clutch_ssh_connected");
-      location.reload();
+      switchBackend(DEFAULT_BASE);
     }
   });
 }
@@ -1131,8 +1110,10 @@ function renderNode(node, depth) {
 }
 
 // ---- SSE live stream + session list ----
+let es = null;
+
 function connectSSE() {
-  const es = new EventSource(API_BASE + "/api/events");
+  es = new EventSource(API_BASE + "/api/events");
   es.onmessage = (e) => {
     try { addEvent(JSON.parse(e.data)); } catch (err) {}
   };
@@ -1148,6 +1129,12 @@ function connectSSE() {
     refreshTree();
   };
   es.onerror = () => { /* auto-reconnect */ };
+}
+
+// Point the SSE stream at the (possibly new) API_BASE.
+function reconnectSSE() {
+  if (es) es.close();
+  connectSSE();
 }
 
 let currentProject = ""; // path of the active .clc project file
@@ -1288,6 +1275,11 @@ function openFsBrowser(mode) {
   $("#fs-new").classList.toggle("hidden", mode !== "new");
   $("#fs-create").classList.toggle("hidden", mode !== "new");
   $("#fs-name-input").value = "";
+  // normal browsing: show the path toolbar again (it is hidden during SSH connects)
+  $("#fs-toolbar").classList.remove("hidden");
+  $("#fs-up").disabled = false;
+  $("#fs-go").disabled = false;
+  $("#fs-path-input").disabled = false;
   renderConnSelector();
   fsModal.classList.remove("hidden");
   reconcileStaleTunnel(); // sync the picker to the tunnel's real state, then load
@@ -1346,9 +1338,8 @@ async function loadDir(path) {
     );
     listEl.appendChild(
       fsRow("Reset to local backend", "action", () => {
-        localStorage.removeItem("clutch_api_url");
         localStorage.removeItem("clutch_ssh_connected");
-        location.reload();
+        switchBackend(DEFAULT_BASE);
       })
     );
   }
@@ -1377,6 +1368,7 @@ $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
 $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
 $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
-// clear a stale SSH tunnel URL before anything else fires a fetch
-reconcileStaleTunnel();
+// connect SSE first, then reconcile: switchBackend() (used by the reconcile) needs
+// an existing stream to close/recreate against the corrected URL
 connectSSE();
+reconcileStaleTunnel();

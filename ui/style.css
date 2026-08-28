@@ -546,3 +546,5 @@ main { display: flex; flex: 1; min-height: 0; }
   color: var(--accent); border-radius: 0; padding: 6px 12px; font-size: 12px; cursor: pointer;
 }
 .diff-expand:hover { border-color: var(--accent); }
+
+.hidden { display: none !important; }
