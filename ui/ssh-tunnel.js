@@ -274,12 +274,32 @@ async function installServer(probe, { force } = {}) {
 
   let reinstalled = false;
   if (!installed) {
+    // a reinstall replaces files the running server may be using (the bundle is an
+    // executing binary the NAS refuses to truncate in place): stop the old server
+    // first, then install, then start the new one
     await remoteExec(`mkdir -p ${dir}`);
+    tunnelLog("[bootstrap] stopping old server before reinstall");
+    await remoteExec(stopServerCmd(strategy));
     if (strategy === "bundle") {
       const artifact = ensureBundle(version);
       tunnelLog(`[bootstrap] uploading bundle ${path.basename(artifact)}`);
-      await uploadFile(artifact, `${dir}/agent-server`);
-      await remoteExec(`chmod +x ${dir}/agent-server`);
+      try {
+        // atomic replace: rename over the old binary, safe even while a process
+        // still runs from the old inode
+        await uploadFile(artifact, `${dir}/agent-server.new`);
+      } catch (e) {
+        tunnelLog("[bootstrap] bundle upload failed: " + (e && e.message));
+        try {
+          const diag = await remoteExec(`ls -la ${dir} 2>&1; df -h ${dir} 2>&1 | tail -3`);
+          tunnelLog("[bootstrap] upload diagnostics:\n" + (diag.stdout || "").slice(0, 800));
+        } catch (e2) {
+          /* diagnostics are best-effort */
+        }
+        throw e;
+      }
+      await remoteExec(
+        `chmod +x ${dir}/agent-server.new && mv -f ${dir}/agent-server.new ${dir}/agent-server`
+      );
     } else {
       // pylibs: build the target-platform site-packages on the client, then upload
       let artifact;
@@ -305,14 +325,9 @@ async function installServer(probe, { force } = {}) {
     reinstalled = true;
   }
 
-  // ensure the server runs the CURRENT code: a reinstall must not leave a stale
-  // process running, so force a restart when the install changed
+  // ensure the server runs the freshly installed code
   const run = await remoteExec(remoteRunningCmd(probe));
   if (reinstalled || !run.stdout.includes("UP")) {
-    if (reinstalled) {
-      tunnelLog("[bootstrap] killing stale server before restart");
-      await remoteExec(stopServerCmd(strategy));
-    }
     tunnelLog("[bootstrap] starting server");
     // short timeout: the start command backgrounds the server; do not wait up to
     // the default 60s for its exec channel to close
@@ -344,9 +359,11 @@ async function stopTunnel() {
     localSrv.close();
     localSrv = null;
   }
-  if (sshClient) {
-    sshClient.end();
+  // null the global before end() so a stale 'end' event cannot clear a newer client
+  const cur = sshClient;
+  if (cur) {
     sshClient = null;
+    cur.end();
   }
   currentUrl = null;
   if (sftpHandle) {
@@ -467,8 +484,9 @@ async function connectTunnel({ host, user, port, password }) {
     const key = defaultKey();
     if (key) opts.privateKey = key;
 
+    let client;
     await new Promise((resolve, reject) => {
-      const client = new Client();
+      client = new Client();
       sshClient = client;
       client.on("ready", resolve);
       client.on("error", reject);
@@ -477,8 +495,10 @@ async function connectTunnel({ host, user, port, password }) {
     });
     tunnelLog("[phase] ssh ready");
 
-    // runtime handlers (registered once per connection)
-    sshClient.on("tcp connection", (info, accept, reject) => {
+    // runtime handlers (registered once per connection). Guard every handler that
+    // mutates the module-level sshClient: a STALE tunnel's 'end' event may fire
+    // after a reconnect already installed a newer client, and must not clobber it.
+    client.on("tcp connection", (info, accept, reject) => {
       if (info.destPort !== LLM_PROXY_REMOTE_PORT) {
         reject();
         return;
@@ -487,11 +507,13 @@ async function connectTunnel({ host, user, port, password }) {
       const proxy = net.connect(llmProxyPort, "127.0.0.1");
       stream.pipe(proxy).pipe(stream);
     });
-    sshClient.on("end", () => {
+    client.on("end", () => {
       tunnelLog("[disconnect] tunnel ended");
       stopHealing();
-      sshClient = null;
-      currentUrl = null;
+      if (sshClient === client) {
+        sshClient = null;
+        currentUrl = null;
+      }
       if (localSrv) {
         localSrv.close();
         localSrv = null;
@@ -499,7 +521,7 @@ async function connectTunnel({ host, user, port, password }) {
       stopLlmProxy();
       notifyEnd();
     });
-    sshClient.on("error", (e) => {
+    client.on("error", (e) => {
       tunnelLog("[error] runtime: " + e.message);
       console.error("[tunnel]", e.message);
     });
