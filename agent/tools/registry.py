@@ -190,18 +190,20 @@ class ToolRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return {
-                "content": render(
-                    "unknown_tool.md", tool=name, available=", ".join(self.names())
-                ),
+                "content": render("unknown_tool.md", tool=name, available=", ".join(self.names())),
                 "error": True,
             }
         try:
             args = self._coerce_types(tool, args)
-            return tool.func(workspace, config, **args)
+            result = tool.func(workspace, config, **args)
         except TypeError as e:
-            return {"content": f"ERROR: invalid arguments ({e}); check names and types", "error": True}
+            result = {"content": f"ERROR: invalid arguments ({e}); check names and types", "error": True}
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
-            return {"content": f"ERROR: tool exception: {e}", "error": True}
+            result = {"content": f"ERROR: tool exception: {e}", "error": True}
+        # normalize: every tool result carries error/diff so callers can index them
+        result.setdefault("error", False)
+        result.setdefault("diff", "")
+        return result
 
     @staticmethod
     def _coerce_types(tool: Tool, args: Dict[str, Any]) -> Dict[str, Any]:

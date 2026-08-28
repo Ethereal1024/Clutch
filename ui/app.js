@@ -14,6 +14,14 @@ const els = {
 
 let busy = false;
 const stream = $("#stream");
+const eventsEl = document.getElementById("events");
+
+// Follow the tail of the stream, but never during project-load: the content is
+// hidden then, so scrolling would only chase invisible events and drag the
+// pinned progress bar out of view.
+function autoScroll() {
+  if (!stream.classList.contains("loading")) stream.scrollTop = stream.scrollHeight;
+}
 
 function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
@@ -54,7 +62,7 @@ function addToolCallRow(ev) {
     };
     toolGroupEl.el.className = "event tool_group";
     toolGroupEl.el.innerHTML = '<div class="hdr">tools</div>';
-    stream.appendChild(toolGroupEl.el);
+    eventsEl.appendChild(toolGroupEl.el);
   }
   toolGroupEl.ids.add(ev.tool_call_id);
   const row = document.createElement("div");
@@ -67,20 +75,22 @@ function addToolCallRow(ev) {
   argsBtn.className = "tool-args-btn";
   argsBtn.textContent = "args ▸";
   argsBtn.onclick = () => {
-    if (argsBtn.textContent.includes("▾")) {
+    const existing = row.querySelector(".tool-args-detail");
+    if (existing) {
+      animateFold(existing, existing.offsetHeight, 0, () => existing.remove());
       argsBtn.textContent = "args ▸";
-      row.querySelector(".tool-args-detail")?.remove();
     } else {
       argsBtn.textContent = "args ▾";
       const pre = document.createElement("pre");
       pre.className = "tool-args-detail";
       pre.textContent = argsTxt;
       row.appendChild(pre);
+      expandFold(pre);
     }
   };
   row.appendChild(argsBtn);
   toolGroupEl.el.appendChild(row);
-  stream.scrollTop = stream.scrollHeight;
+  autoScroll();
 }
 
 // Append a read tool's result as a collapsible row inside the tool group.
@@ -89,7 +99,7 @@ function addReadResultRow(ev) {
   const { row, full } = buildReadRow(call, ev.content);
   toolGroupEl.el.appendChild(row);
   toolGroupEl.el.appendChild(full);
-  stream.scrollTop = stream.scrollHeight;
+  autoScroll();
 }
 
 // Build one collapsible read row (toggle + summary + hidden code panel).
@@ -114,13 +124,19 @@ function buildReadRow(call, content) {
   full.textContent = content;
   highlightPreByPath(full, path);
   row.onclick = () => {
-    const isHidden = full.classList.toggle("hidden");
-    toggle.textContent = isHidden ? "▸" : "▾";
+    const wasHidden = toggleFold(full);
+    toggle.textContent = wasHidden ? "▾" : "▸";
   };
   return { row, full };
 }
 
 function addEvent(ev) {
+  // history replay: stale live-control events (status, permission) must not
+  // drive the current UI — the badge/busy state belongs to the live run
+  if (stream.classList.contains("loading") &&
+      (ev.type === "state_update" || ev.type === "permission_request")) {
+    return;
+  }
   // events that break a tool group: new user turn, agent text, thinking, final.
   // assistant_message is just a record (not shown) and does NOT break the group,
   // because results follow the tool_calls they belong to.
@@ -128,7 +144,22 @@ function addEvent(ev) {
     toolGroupEl = null;
   }
   if (ev.type === "assistant_message") {
-    // Body is already streamed via text_delta; nothing to render here.
+    toolGroupEl = null;
+    // During a live stream the text was already rendered by text_delta; a stored
+    // session (no deltas) must render the final message once — opencode loads
+    // final parts, not the streaming tape.
+    if (lastTextEl && lastTextEl.isConnected) {
+      lastTextEl = null;
+      lastTextContent = "";
+      return;
+    }
+    if (ev.content) {
+      const wrap = createAgentTextBlock();
+      wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
+      highlightCode(wrap);
+      eventsEl.appendChild(wrap);
+    }
+    if (ev.reasoning) appendThinkingRow(ev.reasoning);
     return;
   }
   if (ev.type === "final") {
@@ -159,13 +190,13 @@ function addEvent(ev) {
   if (ev.type === "text_delta" && ev.content) {
     if (!lastTextEl) {
       lastTextEl = createAgentTextBlock();
-      stream.appendChild(lastTextEl);
+      eventsEl.appendChild(lastTextEl);
     }
     lastTextContent += ev.content;
     lastTextEl.querySelector(".body").innerHTML = renderMarkdown(lastTextContent);
     highlightCode(lastTextEl);
-    typesetMath(lastTextEl);
-    stream.scrollTop = stream.scrollHeight;
+    if (!stream.classList.contains("loading")) typesetMath(lastTextEl); // deferred during load
+    autoScroll();
     return;
   }
 
@@ -192,11 +223,10 @@ function addEvent(ev) {
       thinkingEl.appendChild(full);
       // click toggles between the compact row and the full reasoning text
       row.onclick = () => {
-        const isHidden = full.classList.toggle("hidden");
-        toggle.textContent = isHidden ? "▸" : "▾";
-        if (!isHidden) full.textContent = full._content;
+        const wasHidden = toggleFold(full, () => { full.textContent = full._content; });
+        toggle.textContent = wasHidden ? "▾" : "▸";
       };
-      stream.appendChild(thinkingEl);
+      eventsEl.appendChild(thinkingEl);
     }
     thinkingEl.querySelector(".thinking-label").textContent =
       "thinking… " + thinkingContent.length + " chars";
@@ -204,7 +234,7 @@ function addEvent(ev) {
     const full = thinkingEl.querySelector(".thinking-full");
     full._content = thinkingContent;
     if (!full.classList.contains("hidden")) full.textContent = full._content;
-    stream.scrollTop = stream.scrollHeight;
+    autoScroll();
     return;
   }
 
@@ -217,8 +247,8 @@ function addEvent(ev) {
 
   const el = renderEvent(ev);
   if (el) {
-    stream.appendChild(el);
-    stream.scrollTop = stream.scrollHeight;
+    eventsEl.appendChild(el);
+    autoScroll();
   }
 }
 
@@ -229,13 +259,138 @@ function createAgentTextBlock() {
   return wrap;
 }
 
+// Height animation shared by every foldable: expand and collapse both drive an
+// explicit height animation from -> to (px) via the Web Animations API, then run
+// onDone. Only overflow-y is suppressed while it runs, so a horizontal scrollbar
+// stays present through the whole motion instead of popping back at the end.
+const FOLD_EASE = "cubic-bezier(.23, 1, .32, 1)";
+
+function animateFold(el, from, to, onDone) {
+  if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
+  el._foldAnim = null;
+  el.style.overflowY = "hidden";
+  el.style.height = from + "px";
+  const settle = () => {
+    if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} } // release the fill effect
+    el._foldAnim = null;
+    onDone();
+  };
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    el.style.height = to + "px";
+    settle();
+    return;
+  }
+  const anim = el.animate(
+    [{ height: from + "px" }, { height: to + "px" }],
+    { duration: 200, easing: FOLD_EASE, fill: "forwards" } // hold the end height so collapse never flashes back open
+  );
+  el._foldAnim = anim;
+  anim.onfinish = settle;
+}
+
+function resetFold(el) {
+  el.style.height = "";
+  el.style.overflowY = "";
+}
+
+function expandFold(el) {
+  el.classList.remove("hidden");
+  const max = parseInt(getComputedStyle(el).maxHeight, 10) || Infinity;
+  const target = Math.min(el.scrollHeight, max);
+  animateFold(el, 0, target, () => resetFold(el));
+}
+
+function collapseFold(el) {
+  animateFold(el, el.offsetHeight, 0, () => {
+    el.classList.add("hidden");
+    resetFold(el);
+  });
+}
+
+function toggleFold(el, onExpand) {
+  const wasHidden = el.classList.contains("hidden");
+  if (wasHidden) {
+    if (onExpand) onExpand(); // fill content BEFORE the height is measured
+    expandFold(el);
+  } else {
+    collapseFold(el);
+  }
+  return wasHidden;
+}
+
+// Diff expand: grow from its collapsed 140px to the content height.
+function expandDiff(pre) {
+  const start = pre.offsetHeight; // 140 while .diff-collapsed
+  pre.classList.remove("diff-collapsed");
+  const target = Math.min(pre.scrollHeight, 320);
+  animateFold(pre, start, target, () => resetFold(pre));
+}
+
+function collapseDiff(pre) {
+  animateFold(pre, pre.offsetHeight, 140, () => {
+    pre.classList.add("diff-collapsed");
+    resetFold(pre);
+  });
+}
+
+// A collapsed thinking row rebuilt once from a stored assistant_message.reasoning
+// (used when a stored session replays without reasoning_delta stream).
+function appendThinkingRow(reasoning) {
+  const el = document.createElement("div");
+  el.className = "event thinking";
+  el.innerHTML = '<div class="hdr">thinking</div>';
+  const row = document.createElement("div");
+  row.className = "thinking-row";
+  const toggle = document.createElement("span");
+  toggle.className = "read-toggle";
+  toggle.textContent = "▸";
+  const lbl = document.createElement("span");
+  lbl.className = "thinking-label";
+  lbl.textContent = "thinking";
+  row.appendChild(toggle);
+  row.appendChild(lbl);
+  el.appendChild(row);
+  const full = document.createElement("pre");
+  full.className = "thinking-full hidden";
+  full.textContent = reasoning;
+  el.appendChild(full);
+  row.onclick = () => {
+    const wasHidden = toggleFold(full);
+    toggle.textContent = wasHidden ? "▾" : "▸";
+  };
+  eventsEl.appendChild(el);
+}
+
 // Render LaTeX ($...$, $$...$$) inside a freshly-inserted markdown block.
 // MathJax scans text nodes; pre/code are skipped via skipHtmlTags so code stays
 // literal. Content is already DOMPurify-sanitized before this runs.
+const MATH_RE = /\$\$[\s\S]*?\$\$|\$[^$\n]*\$/;
+
 function typesetMath(el) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
-  if (!el || !el.textContent || el.textContent.indexOf("$") === -1) return;
+  if (!el || !MATH_RE.test(el.textContent)) return;
   MathJax.typesetPromise([el]).catch(() => {});
+}
+
+// Strict gate for the replay pass: a block only needs MathJax when a $…$ or
+// $$…$$ pair survives in its non-code text — lone $ signs in shell/code/currency
+// (e.g. `$ echo`, `$PATH`, `$5`) never trigger a scan.
+function hasMathText(el) {
+  const clone = el.cloneNode(true);
+  clone.querySelectorAll("pre, code").forEach((n) => n.remove());
+  return MATH_RE.test(clone.textContent);
+}
+
+// Typeset replayed math block-by-block so the progress bar tracks the work.
+async function typesetProgressively(root, onPct) {
+  if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
+  const blocks = Array.from(root.querySelectorAll(".event.text .body")).filter(hasMathText);
+  if (!blocks.length) return;
+  for (let i = 0; i < blocks.length; i++) {
+    try { await MathJax.typesetPromise([blocks[i]]); } catch (e) {}
+    onPct((i + 1) / blocks.length);
+    await new Promise((r) => setTimeout(r, 0)); // let the bar repaint between blocks
+  }
 }
 
 // Syntax-highlight every <pre><code> inside a freshly rendered block.
@@ -280,16 +435,20 @@ function appendCompletion(status, summary) {
   const div = document.createElement("div");
   div.className = "completion";
   div.textContent = status === "completed" ? "completed" : status;
-  stream.appendChild(div);
+  eventsEl.appendChild(div);
   // completed summaries duplicate the streamed agent text; abort/error reasons
   // are the only place the termination cause is shown
   if (status !== "completed" && summary) {
     const note = document.createElement("div");
     note.className = "completion-note";
     note.textContent = summary;
-    stream.appendChild(note);
+    eventsEl.appendChild(note);
   }
-  stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+  // live runs glide to the completion divider; during replay the end-scroll
+  // at openProject already lands on the last record, so skip the smooth pass
+  if (!stream.classList.contains("loading")) {
+    stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+  }
 }
 
 function renderEvent(ev) {
@@ -344,7 +503,8 @@ function renderEvent(ev) {
           };
           setLabel();
           expand.onclick = () => {
-            pre.classList.toggle("diff-collapsed");
+            if (pre.classList.contains("diff-collapsed")) expandDiff(pre);
+            else collapseDiff(pre);
             setLabel();
           };
           wrap.appendChild(expand);
@@ -590,13 +750,22 @@ function connectSSE() {
   es.onmessage = (e) => {
     try { addEvent(JSON.parse(e.data)); } catch (err) {}
   };
+  // On (re)connect the server replays the stored history as durable final events;
+  // reset the streaming state so each replayed assistant_message renders once.
+  es.onopen = () => {
+    lastTextEl = null;
+    lastTextContent = "";
+    thinkingEl = null;
+    thinkingContent = "";
+    toolGroupEl = null;
+  };
   es.onerror = () => { /* auto-reconnect */ };
 }
 
 let currentProject = ""; // path of the active .clc project file
 
 function clearStream() {
-  stream.innerHTML = "";
+  eventsEl.innerHTML = ""; // clear session content; the overlay/events wrapper stay mounted
   lastTextEl = null;
   lastTextContent = "";
   thinkingEl = null;
@@ -636,7 +805,7 @@ async function openProject(path) {
       throw new Error(err.error || r.status);
     }
     clearStream();
-    stream.classList.add("replaying"); // history reconstruction: no entrance motion
+    stream.classList.add("loading"); // history reconstruction: no entrance motion
     prog.classList.remove("hidden");
     setPct(0);
     // /api/project/open streams NDJSON: meta, progress, event, done
@@ -644,6 +813,9 @@ async function openProject(path) {
     const decoder = new TextDecoder();
     let buf = "";
     let started = false;
+    let processed = 0;
+    let totalEvents = 0;
+    let rendered = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -664,21 +836,32 @@ async function openProject(path) {
           });
           hideWelcome();
           started = true;
+        } else if (msg.count) {
+          totalEvents = msg.count;
         } else if (msg.progress && msg.progress.total) {
-          setPct(100 * msg.progress.done / msg.progress.total);
+          // phase A: server file parse maps to the first 50% of the bar
+          setPct(50 * msg.progress.done / msg.progress.total);
         } else if (msg.event) {
           addEvent(msg.event);
+          // phase B: client rendering of the events maps to 50-90%
+          if (totalEvents) setPct(50 + 40 * (++rendered / totalEvents));
         }
+        // yield periodically so the browser can paint the progress bar and
+        // stream events progressively instead of one blocking burst
+        if (++processed % 25 === 0) await new Promise((r) => setTimeout(r, 0));
       }
     }
+    // phase C: typeset replayed math as the remaining 90-100%, so the bar stays
+    // alive through typesetting and there is no blank gap before reveal
+    await typesetProgressively(eventsEl, (f) => setPct(90 + 10 * f));
     if (started) setPct(100);
     prog.classList.add("hidden");
-    stream.classList.remove("replaying");
+    stream.classList.remove("loading"); // instant reveal — no fade, no replay
+    stream.scrollTop = stream.scrollHeight; // jump straight to the end of the record
     refreshTree();
-    stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
   } catch (e) {
     prog.classList.add("hidden");
-    stream.classList.remove("replaying");
+    stream.classList.remove("loading");
     alert("Failed to open project: " + e.message);
   }
 }

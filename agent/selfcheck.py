@@ -15,10 +15,10 @@ from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
 from .events import AssistantMessageEvent, EventLog, ToolResultEvent
+from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import Workspace
-from .skills import load_skill_library
 
 
 def main() -> None:
@@ -61,7 +61,7 @@ def main() -> None:
         # 4. tool execution + write/read roundtrip
         reg = ToolRegistry(build_default_tools(config))
         r = reg.execute(sb, config, "write_file", {"path": "a.txt", "content": "hello"})
-        check(not r.get("error"), "write_file ok")
+        check(not r["error"], "write_file ok")
         r = reg.execute(sb, config, "read_file", {"path": "a.txt"})
         check(r["content"].strip() == "hello", "read_file roundtrip")
         r = reg.execute(sb, config, "run_command", {"command": "echo hi"})
@@ -73,21 +73,21 @@ def main() -> None:
         r = reg.execute(sb, config, "run_command", {"command": "echo data > out.txt && cat out.txt"})
         check("data" in r["content"], "run_command supports redirects")
         r = reg.execute(sb, config, "run_command", {"command": "python3 -m json.tool --help 2>&1 || true"})
-        check(not r.get("error"), "run_command allows python3 -m module mode")
+        check(not r["error"], "run_command allows python3 -m module mode")
         r = reg.execute(sb, config, "run_command", {"command": "python3"})
-        check(r.get("error"), "run_command still blocks bare python")
+        check(r["error"], "run_command still blocks bare python")
         r = reg.execute(sb, config, "run_command", {"command": "nonexistent_cmd_xyz"})
-        check(r.get("error"), "run_command reports missing cmd")
+        check(r["error"], "run_command reports missing cmd")
         r = reg.execute(sb, config, "no_such_tool", {})
-        check(r.get("error"), "registry rejects unknown tool")
+        check(r["error"], "registry rejects unknown tool")
         r = reg.execute(sb, config, "write_file", {"path": "../../escape.txt", "content": "x"})
-        check(r.get("error"), "tool blocks path escape")
+        check(r["error"], "tool blocks path escape")
         r = reg.execute(sb, config, "run_command", {"command": "cat /home/user/secret.txt"})
-        check(r.get("error"), "run_command blocks absolute path escape")
+        check(r["error"], "run_command blocks absolute path escape")
         r = reg.execute(sb, config, "run_command", {"command": "cat ../../etc/passwd"})
-        check(r.get("error"), "run_command blocks .. path escape")
+        check(r["error"], "run_command blocks .. path escape")
         r = reg.execute(sb, config, "run_command", {"command": "ls -la"})
-        check(not r.get("error"), "run_command allows normal relative commands")
+        check(not r["error"], "run_command allows normal relative commands")
 
         # 5. doom-loop detection
         term = Terminator(config)
@@ -119,9 +119,6 @@ def main() -> None:
     catalog = lib.to_catalog_section()
     check(first in catalog and catalog.startswith("Available skills"), "catalog lists skill names")
 
-    from agent.core.context import derive_messages
-    from agent.events import EventLog
-
     disabled = Config(enable_skills=False)
     sys_off = derive_messages(EventLog(), disabled, "t")[0]["content"]
     check("Available skills (call load_skill" not in sys_off, "no catalog when skills disabled")
@@ -131,17 +128,20 @@ def main() -> None:
         sws = Workspace(stmp)
         reg = ToolRegistry(build_default_tools(config))
         r = reg.execute(sws, config, "load_skill", {"name": first})
-        check(not r.get("error") and bool(r.get("content")), "load_skill returns skill content")
+        check(not r["error"] and bool(r.get("content")), "load_skill returns skill content")
         r = reg.execute(sws, config, "load_skill", {"name": "no-such-skill"})
-        check(r.get("error"), "load_skill rejects unknown skill")
+        check(r["error"], "load_skill rejects unknown skill")
         r = reg.execute(sws, config, "load_skill", {"name": first, "file": "../escape.txt"})
-        check(r.get("error"), "load_skill blocks path escape from skill dir")
+        check(r["error"], "load_skill blocks path escape from skill dir")
 
     # 8. proxy: socks scheme must never crash the client (the user's environment bug)
     import os
+
     from agent.llm.proxy import get_proxy_for_url
 
-    saved = {k: os.environ.get(k) for k in ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY")}
+    saved = {
+        k: os.environ.get(k) for k in ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY")
+    }
     try:
         # environment with ALL_PROXY=socks:// must yield None (direct), not crash
         os.environ["ALL_PROXY"] = "socks://127.0.0.1:7890/"
@@ -202,8 +202,8 @@ def main() -> None:
         )
 
     # 10. project file: .clc round-trip + protected visibility
-    from agent.project import create_project, open_project
     from agent.events import UserMessageEvent
+    from agent.project import create_project, open_project
 
     with tempfile.TemporaryDirectory() as ptmp:
         proj = create_project(Path(ptmp) / "demo", "demo")
@@ -221,7 +221,7 @@ def main() -> None:
         check(ws.is_protected(proj.path), "workspace protects .clc")
         reg = ToolRegistry(build_default_tools(config))
         r = reg.execute(ws, config, "read_file", {"path": proj.path.name})
-        check(r.get("error"), "read_file refuses protected .clc")
+        check(r["error"], "read_file refuses protected .clc")
         r = reg.execute(ws, config, "list_dir", {"path": "."})
         check(proj.path.name not in r["content"], "list_dir hides .clc")
 

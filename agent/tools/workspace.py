@@ -32,13 +32,10 @@ class Workspace:
     def visible_entries(self, root: Path) -> list[Path]:
         """Directory entries excluding protected files."""
         out = []
-        try:
-            for e in sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-                if self.is_protected(e):
-                    continue
-                out.append(e)
-        except OSError:
-            pass
+        for ent in sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+            if self.is_protected(ent):
+                continue
+            out.append(ent)
         return out
 
     def resolve(self, rel_path: str) -> Path:

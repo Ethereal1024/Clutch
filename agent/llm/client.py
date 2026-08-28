@@ -92,7 +92,11 @@ class LlmClient:
                         for tc in delta.tool_calls:
                             idx = tc.index
                             if idx not in tool_args:
-                                tool_args[idx] = {"id": tc.id or "", "name": (tc.function.name if tc.function else "") or "", "args": ""}
+                                tool_args[idx] = {
+                                    "id": tc.id or "",
+                                    "name": (tc.function.name if tc.function else "") or "",
+                                    "args": "",
+                                }
                                 yield {
                                     "type": "tool_call_start",
                                     "index": idx,
@@ -138,7 +142,7 @@ class LlmClient:
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = _classify(e)
                 if not last_err.retryable or attempt == MAX_RETRIES - 1:
-                    raise last_err
+                    raise last_err from e
                 time.sleep((2**attempt) + attempt * 0.5)
 
 

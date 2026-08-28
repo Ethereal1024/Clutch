@@ -18,7 +18,6 @@ duration and the workspace path (so artifacts are inspectable).
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
 import time
@@ -86,9 +85,7 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
     try:
         result = agent.run(task)
         outcome["result"] = result
-        outcome["turns"] = len(
-            [e for e in log.events() if e.type == "step_start"]
-        )
+        outcome["turns"] = len([e for e in log.events() if e.type == "step_start"])
         outcome["pass"] = result != "ABORTED"
     except Exception as e:  # noqa: BLE001
         outcome["result"] = f"EXCEPTION: {e}"
@@ -124,13 +121,12 @@ def main() -> int:
     results = []
     for sd in scenarios:
         for i in range(args.repeat):
-            tag = "" if args.repeat == 1 else f"run{i+1}"
+            tag = "" if args.repeat == 1 else f"run{i + 1}"
             print(f"[harness] running {sd.name} {tag}", flush=True)
             o = run_scenario(sd, config, report_dir, tag)
             results.append(o)
             print(
-                f"  -> {'PASS' if o['pass'] else 'FAIL'} "
-                f"{o['result'][:60]} turns={o['turns']} {o['duration_s']}s",
+                f"  -> {'PASS' if o['pass'] else 'FAIL'} {o['result'][:60]} turns={o['turns']} {o['duration_s']}s",
                 flush=True,
             )
 

@@ -11,7 +11,7 @@ import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 def _new_id() -> str:
@@ -59,7 +59,7 @@ class ReasoningDeltaEvent(Event):
 class AssistantMessageEvent(Event):
     type: str = "assistant_message"
     content: str = ""
-    tool_calls: List[Dict[str, Any]] = field(default_factory=list)  # [{id,name,arguments}]
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)  # [{id,name,arguments}]
     reasoning: str = ""  # thinking content, must be passed back to DeepSeek
 
 
@@ -105,7 +105,7 @@ class PermissionRequestEvent(Event):
     reason: str = ""
 
 
-EVENT_TYPES: Dict[str, type] = {
+EVENT_TYPES: dict[str, type] = {
     cls.type: cls
     for cls in [
         UserMessageEvent,
@@ -126,12 +126,18 @@ def event_to_json(event: Event) -> str:
     return json.dumps(asdict(event), ensure_ascii=False)
 
 
-def event_from_dict(data: Dict[str, Any]) -> Event:
-    cls = EVENT_TYPES.get(data.get("type"))
+def event_from_dict(data: dict[str, str]) -> Event:
+    cls = EVENT_TYPES.get(data["type"])
     if cls is None:
         raise ValueError(f"unknown event type: {data.get('type')}")
     fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
     return cls(**fields)
+
+
+# Only final/durable events are persisted to .clc (opencode stores parts, not
+# streaming deltas): text_delta/reasoning_delta/step_start/state_update are
+# display-transient and never written to disk.
+DURABLE_TYPES = {"user_message", "assistant_message", "tool_call", "tool_result", "final"}
 
 
 class EventLog:
@@ -140,18 +146,21 @@ class EventLog:
     Context management = log management: model-visible messages are derived from the
     log (see core/context.py). Persistence supports replay/debug/resume; GUI history
     is rebuilt from it too.
+
+    Memory keeps every event (so context derivation and tests are unchanged); only
+    DURABLE_TYPES are written to the .clc file.
     """
 
-    def __init__(self, path: Optional[str] = None) -> None:
-        self._events: List[Event] = []
+    def __init__(self, path: str | None = None) -> None:
+        self._events: list[Event] = []
         self._path = path
 
     def append(self, event: Event) -> Event:
         self._events.append(event)
-        if self._path:
+        if self._path and event.type in DURABLE_TYPES:
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(event_to_json(event) + "\n")
         return event
 
-    def events(self) -> List[Event]:
+    def events(self) -> list[Event]:
         return list(self._events)

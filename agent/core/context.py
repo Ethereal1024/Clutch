@@ -56,9 +56,7 @@ def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, 
         cutoff = assistant_idx[-config.max_history_turns]
         kept = events[cutoff:]
         dropped = cutoff  # windowing evicts every event before the cutoff, not just tool results
-        msgs = [
-            {"role": "user", "content": render("context_omitted.md", count=dropped)}
-        ] + _to_messages(kept)
+        msgs = [{"role": "user", "content": render("context_omitted.md", count=dropped)}] + _to_messages(kept)
     else:
         kept = events
         msgs = _to_messages(events)
@@ -79,9 +77,9 @@ def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, 
                 replace(e, content="(output omitted by char budget)") if i in folded_idx else e
                 for i, e in enumerate(kept)
             ]
-            msgs = [
-                {"role": "user", "content": render("context_omitted.md", count=len(folded_idx))}
-            ] + _to_messages(kept)
+            msgs = [{"role": "user", "content": render("context_omitted.md", count=len(folded_idx))}] + _to_messages(
+                kept
+            )
 
     system = render("system.md")
     if config.enable_skills:

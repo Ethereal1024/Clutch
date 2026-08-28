@@ -1,7 +1,7 @@
 """todo: a minimal CLI todo manager (with a deliberate bug)."""
 
-import sys
 import json
+import sys
 from datetime import date
 
 
@@ -59,8 +59,8 @@ def main(argv):
 
 
 def run_tests():
-    import tempfile
     import os
+    import tempfile
 
     tmp = tempfile.mkdtemp()
     os.chdir(tmp)

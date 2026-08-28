@@ -44,8 +44,16 @@ class Config:
     # Commands that hang in a non-TTY pipe
     blocked_prefixes: list[str] = field(
         default_factory=lambda: [
-            "vim", "vi", "emacs", "nano",
-            "less", "more", "tail -f", "top", "htop", "make",
+            "vim",
+            "vi",
+            "emacs",
+            "nano",
+            "less",
+            "more",
+            "tail -f",
+            "top",
+            "htop",
+            "make",
         ]
     )
 
@@ -62,7 +70,4 @@ class Config:
         if len(text) <= self.output_limit:
             return text
         omitted = len(text) - self.output_head - self.output_tail
-        return (
-            f"{text[:self.output_head]}\n... [{omitted} chars omitted] ...\n"
-            f"{text[-self.output_tail:]}"
-        )
+        return f"{text[: self.output_head]}\n... [{omitted} chars omitted] ...\n{text[-self.output_tail :]}"

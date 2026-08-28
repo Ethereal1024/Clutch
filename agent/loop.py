@@ -85,9 +85,7 @@ class Agent:
         self._emit(StateUpdateEvent(value=state))
         return "ABORTED" if status != "completed" else summary
 
-    def _llm_call(
-        self, msgs: List[Dict[str, Any]]
-    ) -> tuple[str, List[Dict[str, Any]], str, str]:
+    def _llm_call(self, msgs: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]], str, str]:
         """Stream one LLM turn; emits incremental reasoning/text events.
 
         Returns (content, tool_calls, finish_reason, reasoning). tool_calls
@@ -117,16 +115,16 @@ class Agent:
                     finish_reason = ev["reason"]
                     content = "".join(content_parts)
                     tool_calls = [
-                        {"id": e["id"], "name": e["name"], "arguments": e["args"]}
-                        for e in tool_accum.values()
+                        {"id": e["id"], "name": e["name"], "arguments": e["args"]} for e in tool_accum.values()
                     ]
                     return content, tool_calls, finish_reason, "".join(reasoning_parts)
         except LlmError as e:
             if e.code == "context_window_exceeded":
-                raise agent_errors.context_window_error(e.message)
-            raise agent_errors.AgentError(code=e.code, message=e.message)
-        except Exception as e:  # noqa: BLE001 -- normalize unexpected errors
-            raise agent_errors.AgentError(code="llm_unknown", message=str(e))
+                raise agent_errors.context_window_error(e.message) from e
+            raise agent_errors.AgentError(code=e.code, message=e.message) from e
+        # any non-LlmError here is a genuine bug (openai SDK errors are all
+        # normalized by _classify); let it propagate as a traceback instead of
+        # masking it as llm_unknown
 
         return "".join(content_parts), [], finish_reason, "".join(reasoning_parts)
 
@@ -142,9 +140,7 @@ class Agent:
                 turn += 1
                 # budget is enforced at the top so every path terminates
                 if self.terminator.check_turn_budget(turn):
-                    return self._finish(
-                        "aborted", render("budget_exceeded.md", max_turns=self.config.max_turns)
-                    )
+                    return self._finish("aborted", render("budget_exceeded.md", max_turns=self.config.max_turns))
                 self._emit(StepStartEvent())
                 msgs = context.derive_messages(self.log, self.config, task)
 
@@ -157,28 +153,26 @@ class Agent:
 
                 # ---- tool calls: execute and feed results back ----
                 if tool_calls:
-                    # content was already streamed incrementally as text_delta;
-                    # emit the tool calls now
                     tc_events: List[ToolCallEvent] = []
                     for tc in tool_calls:
-                        ev = ToolCallEvent(
-                            name=tc["name"], arguments=tc["arguments"], tool_call_id=tc["id"]
+                        tc_events.append(
+                            ToolCallEvent(name=tc["name"], arguments=tc["arguments"], tool_call_id=tc["id"])
                         )
-                        self._emit(ev)
-                        tc_events.append(ev)
 
-                    # record the assistant turn with tool_calls before executing;
-                    # reasoning is stored so it can be passed back to DeepSeek
+                    # record the assistant turn (text + tool_calls) BEFORE the tool
+                    # call events, so a stored session replays as text → tools →
+                    # results (opencode's message/part ordering)
                     self._emit(
                         AssistantMessageEvent(
                             content=content,
                             tool_calls=[
-                                {"id": ev.tool_call_id, "name": ev.name, "arguments": ev.arguments}
-                                for ev in tc_events
+                                {"id": ev.tool_call_id, "name": ev.name, "arguments": ev.arguments} for ev in tc_events
                             ],
                             reasoning=reasoning,
                         )
                     )
+                    for ev in tc_events:
+                        self._emit(ev)
 
                     for ev in tc_events:
                         if self.terminator.record_call(ev.name, ev.arguments):

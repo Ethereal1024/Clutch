@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
 
 
 @dataclass
@@ -25,12 +24,12 @@ class Skill:
 
 @dataclass
 class SkillLibrary:
-    skills: List[Skill] = field(default_factory=list)
+    skills: list[Skill] = field(default_factory=list)
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return [s.name for s in self.skills]
 
-    def get(self, name: str) -> Optional[Skill]:
+    def get(self, name: str) -> Skill | None:
         for s in self.skills:
             if s.name == name:
                 return s
@@ -91,6 +90,6 @@ def _parse_frontmatter(text: str) -> dict:
     for line in lines[1:end]:
         if ":" in line:
             k, v = line.split(":", 1)
-            meta[k.strip()] = v.strip().strip('"\'')
+            meta[k.strip()] = v.strip().strip("\"'")
     meta["content"] = "\n".join(lines[end + 1 :]).strip()
     return meta

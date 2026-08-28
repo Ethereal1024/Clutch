@@ -62,8 +62,9 @@ def main() -> int:
         def fake_save(data: dict) -> None:
             fake_settings.write_text(json.dumps(data))
 
-        with mock.patch.object(server_mod, "load_settings", fake_load), mock.patch.object(
-            server_mod, "save_settings", fake_save
+        with (
+            mock.patch.object(server_mod, "load_settings", fake_load),
+            mock.patch.object(server_mod, "save_settings", fake_save),
         ):
             _run_server_test()
 
@@ -127,10 +128,16 @@ def _run_server_test() -> int:
             print("\nall passed (network-free)")
             return 0
 
-        st, body = http_post(f"{base_url}/api/run", {
-            "task": "write a file hello.txt containing the word hi using write_file, then read it with run_command cat hello.txt",
-            "verify": "echo ok",
-        })
+        st, body = http_post(
+            f"{base_url}/api/run",
+            {
+                "task": (
+                    "write a file hello.txt containing the word hi using write_file, "
+                    "then read it with run_command cat hello.txt"
+                ),
+                "verify": "echo ok",
+            },
+        )
         check(st == 200 and body != "", "run accepted")
 
         # 4b. duplicate run rejected (busy)

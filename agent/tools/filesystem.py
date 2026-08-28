@@ -60,9 +60,7 @@ def _unified_diff(old: str, new: str, rel: str) -> str:
     """Return a unified diff string between old and new file contents."""
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
-    diff_lines = list(
-        difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{rel}", tofile=f"b/{rel}", n=3)
-    )
+    diff_lines = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{rel}", tofile=f"b/{rel}", n=3))
     # unified_diff returns [] when files are identical; treat identical as "no changes"
     return "".join(diff_lines)
 

@@ -1,6 +1,6 @@
 """Project file (.clc) handling.
 
-A clutch project is a single .clc file (like a PSD) that holds the conversation
+A clutch project is a single .clc file that holds the conversation
 history. The working directory is the directory containing the .clc file.
 
 Format:
@@ -108,10 +108,15 @@ def _read_file(path: Path, on_progress=None) -> tuple[ProjectMeta, EventLog]:
     in_events = False
     total = path.stat().st_size or 1
     consumed = 0
+    last_pct = -1
     with open(path, encoding="utf-8") as f:
         for line in f:
             consumed += len(line)
-            if on_progress:
+            # throttle: at most one progress line per whole percent — a per-line
+            # callback on a 10k-line log would flood the UI with setPct updates
+            pct = consumed * 100 // total
+            if on_progress and pct != last_pct:
+                last_pct = pct
                 on_progress(consumed, total)
             line = line.rstrip("\n")
             if not in_events:

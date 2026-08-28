@@ -40,7 +40,7 @@ class FakeLLM:
         content = resp.get("content") or ""
         finish = resp.get("finish_reason") or "stop"
         for i in range(0, len(content), 4):  # small chunks to exercise accumulation
-            yield {"type": "text", "delta": content[i:i + 4]}
+            yield {"type": "text", "delta": content[i : i + 4]}
         tool_calls = resp.get("tool_calls") or []
         for idx, tc in enumerate(tool_calls):
             fn = tc.get("function", {})
@@ -52,13 +52,17 @@ class FakeLLM:
             }
             args = fn.get("arguments", "{}")
             for i in range(0, len(args), 4):
-                yield {"type": "tool_call_delta", "index": idx, "delta": args[i:i + 4]}
+                yield {"type": "tool_call_delta", "index": idx, "delta": args[i : i + 4]}
         yield {
             "type": "finish",
             "reason": finish,
             "content": content,
             "tool_calls": [
-                {"id": tc.get("id", f"call_{idx}"), "name": tc.get("function", {}).get("name", ""), "arguments": tc.get("function", {}).get("arguments", "{}")}
+                {
+                    "id": tc.get("id", f"call_{idx}"),
+                    "name": tc.get("function", {}).get("name", ""),
+                    "arguments": tc.get("function", {}).get("arguments", "{}"),
+                }
                 for idx, tc in enumerate(tool_calls)
             ],
         }
@@ -232,7 +236,10 @@ def main() -> None:
         always_allow = PermissionEvaluator(rules=[Rule("allow", "*", "")])
         gate = PermissionGate(evaluator=always_allow)
         fake = FakeLLM(
-            responses=[_resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]), _resp(content="done")],
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
+                _resp(content="done"),
+            ],
             fallback=_resp(content="done"),
         )
         agent = Agent(

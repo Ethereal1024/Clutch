@@ -138,23 +138,25 @@ main { display: flex; flex: 1; min-height: 0; }
   font-size: 14px;
   line-height: 1.5;
   overflow-y: auto;
+  resize: none; /* height is owned by the auto-grow JS, not the user */
   transition: height .18s ease;
 }
 #task-input:focus { outline: none; border-color: var(--accent); }
 .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .muted { color: var(--muted); font-size: 13px; }
 
-/* project-open progress: thin red fill on a hairline track, mono % label */
+/* project-open progress: a thin overlay strip pinned over the top of the
+   stream — no layout shift, transient, driven by the real byte progress */
 .open-progress {
+  position: sticky; top: 0; /* pinned to the visible top of the stream; never scrolls away */
+  z-index: 5;
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 16px 0;
+  padding: 6px 16px;
+  background: linear-gradient(to bottom, var(--bg) 55%, rgba(15, 15, 16, 0));
 }
 .open-progress.hidden { display: none; }
 .open-progress-track { flex: 1; height: 3px; background: var(--border); }
 .open-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .18s linear; }
-.open-progress {
-  animation: fadeIn .2s ease-out;
-}
 .open-progress-label {
   font-family: var(--font-mono); font-size: 12px; color: var(--muted);
   min-width: 3.5ch; text-align: right;
@@ -165,6 +167,9 @@ main { display: flex; flex: 1; min-height: 0; }
   flex: 1; overflow-y: auto; padding: 16px 16px 24px 16px;
   counter-reset: step;
 }
+/* the session content wrapper: hidden while the project-open progress runs,
+   then shown in full the moment the progress completes (no fade) */
+#stream.loading .events { opacity: 0; }
 #stream::before {
   /* full-height connector rail, threaded through the marker centres */
   content: "";
@@ -177,7 +182,6 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 #stream { position: relative; }
 
-#stream.replaying .event { animation: none; }
 .event {
   position: relative;
   margin: 0 0 12px;
@@ -280,7 +284,6 @@ main { display: flex; flex: 1; min-height: 0; }
   border: 1px solid var(--border);
   font-family: var(--font-mono); font-size: 12px; overflow-x: auto;
   margin-top: 4px; flex-basis: 100%;
-  animation: fadeSlideUp .2s var(--arrival);
 }
 .event.tool_result::before { background: var(--accent); }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
@@ -305,7 +308,6 @@ main { display: flex; flex: 1; min-height: 0; }
   margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; color: var(--muted); white-space: pre-wrap;
   line-height: 1.5;
-  animation: fadeSlideUp .2s var(--arrival);
 }
 .thinking-full.hidden { display: none; }
 
@@ -338,7 +340,6 @@ main { display: flex; flex: 1; min-height: 0; }
   border: 1px solid var(--border);
   overflow-x: auto; margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; flex-basis: 100%;
-  animation: fadeSlideUp .2s var(--arrival);
 }
 
 .read-row {

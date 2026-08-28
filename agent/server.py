@@ -24,15 +24,14 @@ import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from .config import Config
-from .core.terminate import Terminator
 from .core.permission import PermissionEvaluator, PermissionGate
 from .events import (
+    DURABLE_TYPES,
     Event,
-    FinalEvent,
     PermissionRequestEvent,
     StateUpdateEvent,
     event_to_json,
@@ -63,8 +62,8 @@ def save_settings(data: dict) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         p.chmod(0o600)  # owner-only, the file holds a credential
-    except OSError:
-        pass
+    except OSError as e:
+        print(f"[clutch-server] cannot persist settings: {e}", file=sys.stderr)
 
 
 class Broadcaster:
@@ -102,11 +101,11 @@ class RunState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.busy = False
-        self.cancel: Optional[threading.Event] = None
-        self.project: Optional[Project] = None
-        self.workspace: Optional[Workspace] = None
-        self.api_key: Optional[str] = None
-        self.gate: Optional[PermissionGate] = None
+        self.cancel: threading.Event | None = None
+        self.project: Project | None = None
+        self.workspace: Workspace | None = None
+        self.api_key: str | None = None
+        self.gate: PermissionGate | None = None
 
     def set_project(self, project: Project) -> Workspace:
         with self.lock:
@@ -131,7 +130,7 @@ class RunState:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    server: "ClutchServer"
+    server: ClutchServer  # type: ignore
 
     # config/broadcaster/state/ui_dir are set on the server instance;
     # this property exposes them uniformly to the handler.
@@ -152,54 +151,44 @@ class Handler(SimpleHTTPRequestHandler):
         return self.server.ui_dir
 
     # ---- routing ----
-    def _on_error(self, e: Exception) -> None:
-        # never let a handler crash the server; a response may already be started
-        print(f"[clutch-server] handler error: {e}", file=sys.stderr)
-        try:
-            self._json({"error": f"internal error: {e}"}, status=500)
-        except Exception:  # noqa: BLE001 -- response already started
-            pass
+    # Handlers raise on unexpected errors: ThreadingHTTPServer prints the full
+    # traceback (handle_error) and closes the connection, exposing bugs loudly.
 
-    def do_GET(self) -> None:  # noqa: N802
-        try:
-            parsed = urlparse(self.path)
-            path = parsed.path
-            if path == "/api/health":
-                self._json({"ok": True})
-            elif path == "/api/events":
-                self._sse()
-            elif path == "/api/workspace/tree":
-                self._workspace_tree()
-            else:
-                self._static(path)
-        except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
-            self._on_error(e)
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/health":
+            self._json({"ok": True})
+        elif path == "/api/events":
+            self._sse()
+        elif path == "/api/workspace/tree":
+            self._workspace_tree()
+        else:
+            self._static(path)
 
-    def do_POST(self) -> None:  # noqa: N802
-        try:
-            parsed = urlparse(self.path)
-            if parsed.path == "/api/project/new":
-                self._project_new()
-            elif parsed.path == "/api/project/open":
-                self._project_open()
-            elif parsed.path == "/api/run":
-                self._run()
-            elif parsed.path == "/api/stop":
-                self._stop()
-            elif parsed.path == "/api/settings":
-                self._settings()
-            elif parsed.path == "/api/permission/respond":
-                self._permission_respond()
-            else:
-                self._json({"error": "not found"}, status=404)
-        except Exception as e:  # noqa: BLE001 -- never let a handler crash the server
-            self._on_error(e)
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/project/new":
+            self._project_new()
+        elif parsed.path == "/api/project/open":
+            self._project_open()
+        elif parsed.path == "/api/run":
+            self._run()
+        elif parsed.path == "/api/stop":
+            self._stop()
+        elif parsed.path == "/api/settings":
+            self._settings()
+        elif parsed.path == "/api/permission/respond":
+            self._permission_respond()
+        else:
+            self._json({"error": "not found"}, status=404)
 
     # ---- API implementations ----
-    def _read_body(self) -> Optional[dict]:
+    def _read_body(self) -> dict | None:
         try:
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except Exception:  # noqa: BLE001 -- malformed body/headers are user errors
+        except ValueError:
+            # malformed JSON body or Content-Length header: user error -> 400
             return None
         return data if isinstance(data, dict) else None
 
@@ -227,10 +216,10 @@ class Handler(SimpleHTTPRequestHandler):
                 model=config.model,
                 base_url=config.base_url,
             )
-        except Exception as e:  # noqa: BLE001 -- key/proxy/config failures are user-facing
+        except RuntimeError as e:
+            # missing API key: an anticipated, user-facing condition
             return self._json({"error": f"LLM init failed: {e}"}, status=500)
 
-        terminator = Terminator(config)
         cancel = threading.Event()
 
         # start() claims the slot
@@ -241,9 +230,7 @@ class Handler(SimpleHTTPRequestHandler):
             # publish the permission request to the UI; the agent blocks until
             # the UI replies via /api/permission/respond
             self._broadcaster.publish(
-                PermissionRequestEvent(
-                    request_id=request_id, tool=tool, args_repr=args_repr, reason=reason
-                )
+                PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason)
             )
 
         gate = PermissionGate(
@@ -265,22 +252,22 @@ class Handler(SimpleHTTPRequestHandler):
         )
 
         def _worker() -> None:
+            # an unexpected error here propagates: Python prints the thread
+            # traceback, and finally resets the busy flag. run() already emits a
+            # graceful error final for anticipated AgentError failures.
             try:
                 agent.run(task)
-            except Exception as e:  # noqa: BLE001 -- last line of defense: never die silently
-                print(f"[clutch-server] run failed: {e}", file=sys.stderr)
-                self._broadcaster.publish(
-                    FinalEvent(status="error", summary=f"internal error: {e}")
-                )
             finally:
                 self._state.finish()
 
         threading.Thread(target=_worker, daemon=True).start()
-        self._json({
-            "status": "started",
-            "workspace": str(workspace.root),
-            "project": str(project.path),
-        })
+        self._json(
+            {
+                "status": "started",
+                "workspace": str(workspace.root),
+                "project": str(project.path),
+            }
+        )
 
     def _stop(self) -> None:
         if self._state.cancel:
@@ -323,11 +310,13 @@ class Handler(SimpleHTTPRequestHandler):
             # always reset the UI status first so a stale "running" never locks the
             # taskbar after a project switch or an interrupted run
             self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
-            # replay the active project history first
+            # replay the active project history first (only durable display
+            # events — streaming deltas are transient and never replayed)
             project = self._state.project
             if project is not None:
                 for ev in project.events():
-                    self._write_sse(ev)
+                    if ev.type in DURABLE_TYPES:
+                        self._write_sse(ev)
             # then live events
             while True:
                 try:
@@ -342,7 +331,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._broadcaster.unsubscribe(q)
 
     def _write_sse(self, ev: Event) -> None:
-        self.wfile.write(f"data: {event_to_json(ev)}\n\n".encode("utf-8"))
+        self.wfile.write(f"data: {event_to_json(ev)}\n\n".encode())
         self.wfile.flush()
 
     def _workspace_tree(self) -> None:
@@ -366,12 +355,14 @@ class Handler(SimpleHTTPRequestHandler):
         except OSError as e:
             return self._json({"error": f"cannot create project: {e}"}, status=400)
         self._state.set_project(project)
-        self._json({
-            "status": "ok",
-            "project": str(project.path),
-            "name": project.meta.name,
-            "workdir": str(project.workdir),
-        })
+        self._json(
+            {
+                "status": "ok",
+                "project": str(project.path),
+                "name": project.meta.name,
+                "workdir": str(project.workdir),
+            }
+        )
 
     def _project_open(self) -> None:
         if self._state.busy:
@@ -408,20 +399,26 @@ class Handler(SimpleHTTPRequestHandler):
             emit({"error": f"cannot open project: {e}"})
             return
         # meta first so the UI can leave the welcome screen and show the bar
-        emit({
-            "meta": {
-                "project": str(full),
-                "name": meta.name,
-                "workdir": str(full.parent),
+        emit(
+            {
+                "meta": {
+                    "project": str(full),
+                    "name": meta.name,
+                    "workdir": str(full.parent),
+                }
             }
-        })
+        )
         try:
             project = open_project(full, on_progress=on_progress)
         except (OSError, ValueError) as e:
             emit({"error": f"cannot open project: {e}"})
             return
         self._state.set_project(project)
-        for ev in project.events():
+        # display projection: only durable final events, so old sessions stored
+        # as full streaming logs still load fast (opencode loads parts, not deltas)
+        display = [e for e in project.events() if e.type in DURABLE_TYPES]
+        emit({"count": len(display)})
+        for ev in display:
             emit({"event": json.loads(event_to_json(ev))})
         emit({"done": True})
 
@@ -436,7 +433,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
-    def _json(self, obj: Dict[str, Any], status: int = 200) -> None:
+    def _json(self, obj: dict[str, Any], status: int = 200) -> None:
         data = json.dumps(obj).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -444,15 +441,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def log_message(self, fmt: str, *args: Any) -> None:  # silence request spam
-        print(f"[http] {self.address_string()} {fmt % args}")
+    def log_message(self, format: str, *args: Any) -> None:  # silence request spam
+        print(f"[http] {self.address_string()} {format % args}")
 
 
 def _replace(config: Config, **kw: Any) -> Config:
     return dataclasses.replace(config, **kw)
 
 
-def _walk(root: Path, workspace: Optional[Workspace] = None) -> list:
+def _walk(root: Path, workspace: Workspace | None = None) -> list:
     """Build a simple file tree [{name, path, dir, children}], skipping protected files."""
     if workspace is not None:
         entries = workspace.visible_entries(root)
@@ -464,7 +461,7 @@ def _walk(root: Path, workspace: Optional[Workspace] = None) -> list:
     out = []
     for e in entries:
         rel = str(e.relative_to(root))
-        node: Dict[str, Any] = {"name": e.name, "path": rel, "dir": e.is_dir()}
+        node: dict[str, Any] = {"name": e.name, "path": rel, "dir": e.is_dir()}
         if e.is_dir():
             node["children"] = _walk(e, workspace)
         out.append(node)
@@ -474,8 +471,8 @@ def _walk(root: Path, workspace: Optional[Workspace] = None) -> list:
 class ClutchServer(ThreadingHTTPServer):
     # shared runtime state, injected by build(); the Handler reaches them via self.server
     config: Config
-    state: "RunState"
-    broadcaster: "Broadcaster"
+    state: RunState
+    broadcaster: Broadcaster
     ui_dir: Path
 
 
