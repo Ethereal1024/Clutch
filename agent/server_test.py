@@ -139,6 +139,25 @@ def _run_server_test() -> int:
         data = json.loads(body)
         check(data.get("error"), "fs list reports a bad path")
 
+        # 3d. symlinks are marked with their resolved target in the browser + tree
+        symf = proj_dir / "demo_link"
+        symf.symlink_to(clc)
+        st, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
+        data = json.loads(body)
+        link_ent = next((e for e in data["entries"] if e["name"] == "demo_link"), None)
+        check(link_ent is not None and link_ent.get("link") == str(clc.resolve()), "fs list marks symlink target")
+
+        linked = proj_dir / "linked"
+        linked.mkdir()
+        (linked / "inner.txt").write_text("x")
+        symd = proj_dir / "linkdir"
+        symd.symlink_to(linked, target_is_directory=True)
+        st, body = http_get(f"{base_url}/api/workspace/tree")
+        data = json.loads(body)
+        lnode = next((n for n in data.get("tree", []) if n["name"] == "linkdir"), None)
+        check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
+        check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
+
         # 4. real run (only with key)
         key = os.environ.get("DEEPSEEK_API_KEY")
         if not key:

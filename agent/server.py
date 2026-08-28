@@ -369,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
                 p = Path.home() / p
             root = p.resolve()
         else:
-            root = Path.home()
+            root = Path.home().resolve()
         if not root.is_dir():
             return self._json({"error": f"not a directory: {root}"})
         try:
@@ -381,7 +381,15 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "path": str(root),
                 "parent": parent,
-                "entries": [{"name": e.name, "path": str(e), "dir": e.is_dir()} for e in entries],
+                "entries": [
+                    {
+                        "name": e.name,
+                        "path": str(e),
+                        "dir": e.is_dir(),
+                        "link": str(e.resolve()) if e.is_symlink() else None,
+                    }
+                    for e in entries
+                ],
                 "error": None,
             }
         )
@@ -498,8 +506,16 @@ def _walk(root: Path, workspace: Workspace | None = None) -> list:
     out = []
     for e in entries:
         rel = str(e.relative_to(root))
-        node: dict[str, Any] = {"name": e.name, "path": rel, "dir": e.is_dir()}
-        if e.is_dir():
+        node: dict[str, Any] = {
+            "name": e.name,
+            "path": rel,
+            "dir": e.is_dir(),
+            "link": str(e.resolve()) if e.is_symlink() else None,
+        }
+        # don't recurse into symlinked dirs (display-only): prevents escaping into
+        # system trees (/opt, /usr) and infinite symlink cycles; the agent's tools
+        # still follow symlinks, so only the UI is affected
+        if e.is_dir() and not e.is_symlink():
             node["children"] = _walk(e, workspace)
         out.append(node)
     return out

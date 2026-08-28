@@ -844,9 +844,10 @@ function renderNode(node, depth) {
   const row = document.createElement("div");
   row.className = "tree-node " + (node.dir ? "dir" : "file");
   row.style.paddingLeft = (depth * 12) + "px";
+  const label = node.link ? `${node.name} → ${node.link}` : node.name;
   row.innerHTML =
     `<span class="icon">${node.dir ? "▸" : "·"}</span>` +
-    `<span class="name" title="${escapeHtml(node.name)}">${escapeHtml(node.name)}</span>`;
+    `<span class="name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
   wrap.appendChild(row);
   if (node.dir) {
     const children = document.createElement("div");
@@ -1055,17 +1056,18 @@ async function loadDir(path) {
       listEl.appendChild(fsRow(".. (up)", "dir", () => loadDir(data.parent)));
     }
     for (const e of data.entries) {
+      const label = e.link ? e.name + " → " + e.link : e.name;
       if (e.dir) {
-        listEl.appendChild(fsRow(e.name, "dir", () => loadDir(e.path)));
+        listEl.appendChild(fsRow(label, "dir", () => loadDir(e.path)));
       } else if (e.name.endsWith(".clc") && fsMode === "open") {
         listEl.appendChild(
-          fsRow(e.name, "file clc", () => {
+          fsRow(label, "file clc", () => {
             closeFsBrowser();
             openProject(e.path);
           })
         );
       } else {
-        listEl.appendChild(fsRow(e.name, "file plain"));
+        listEl.appendChild(fsRow(label, "file plain"));
       }
     }
     if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
