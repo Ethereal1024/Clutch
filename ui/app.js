@@ -784,14 +784,34 @@ async function disconnectSsh() {
 $("#ssh-connect").addEventListener("click", connectSsh);
 $("#ssh-disconnect").addEventListener("click", disconnectSsh);
 
-// Drop a stale tunnel URL: on startup, if we last connected over SSH but no tunnel
-// is alive (restart / dropped), fall back to the default backend instead of
-// pointing every fetch at a dead port ("Failed to fetch").
+// True for URLs that look like SSH-tunnel leftovers (127.0.0.1 on a non-default
+// port); manual LAN/domain backend URLs are not affected.
+function isTunnelLike(url) {
+  try {
+    const u = new URL(url);
+    return (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port !== "8890";
+  } catch (e) {
+    return false;
+  }
+}
+
+// Drop a stale backend URL: a live tunnel is authoritative (a stale stored URL
+// must not survive), and a dead-tunnel leftover (flag set, or a 127.0.0.1:<port>
+// that isn't the default) is cleared so the UI falls back to the local backend
+// instead of pointing every fetch at a dead port ("Failed to fetch").
 async function reconcileStaleTunnel() {
   if (!window.clutchTunnel) return;
-  if (!localStorage.getItem("clutch_ssh_connected")) return;
+  const override = localStorage.getItem("clutch_api_url");
+  if (!override) return;
   const s = await window.clutchTunnel.status();
-  if (!s.active) {
+  if (s.active) {
+    if (override !== s.url) {
+      localStorage.setItem("clutch_api_url", s.url);
+      location.reload();
+    }
+    return;
+  }
+  if (localStorage.getItem("clutch_ssh_connected") || isTunnelLike(override)) {
     localStorage.removeItem("clutch_api_url");
     localStorage.removeItem("clutch_ssh_connected");
     location.reload();
@@ -1103,7 +1123,17 @@ async function loadDir(path) {
   } catch (e) {
     listEl.innerHTML = "";
     listEl.appendChild(
-      fsRow("Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Reconnect SSH or check the backend URL.", "error-row")
+      fsRow(
+        "Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Reconnect SSH or check the backend URL.",
+        "error-row"
+      )
+    );
+    listEl.appendChild(
+      fsRow("Reset to local backend", "action", () => {
+        localStorage.removeItem("clutch_api_url");
+        localStorage.removeItem("clutch_ssh_connected");
+        location.reload();
+      })
     );
   }
 }

@@ -485,6 +485,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .fs-row.clc { color: var(--accent); }
 .fs-row.plain { color: var(--muted); cursor: default; }
 .fs-row.error-row { color: var(--accent); cursor: default; }
+.fs-row.action { color: var(--accent); cursor: pointer; }
+.fs-row.action:hover { background: var(--bg2); }
 #fs-new { margin-top: 14px; }
 
 /* project label */
