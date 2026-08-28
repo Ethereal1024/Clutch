@@ -770,10 +770,13 @@ function renderConnSelector() {
     if (connectedValue) {
       connSelect.value = connectedValue;
     } else {
-      // connected to a manually-set URL with no matching saved host
+      // connected via a path that didn't save the host (rare: e.g. manual URL):
+      // still show the host we're on (user@host:port), not the raw tunnel URL
       const opt = document.createElement("option");
       opt.value = "ssh:__connected__";
-      opt.textContent = "SSH: " + override + " ✓";
+      opt.textContent = cHost
+        ? cUser + "@" + cHost + (cPort ? ":" + cPort : "") + " ✓"
+        : "SSH: " + override + " ✓";
       connSelect.appendChild(opt);
       connSelect.value = "ssh:__connected__";
     }
