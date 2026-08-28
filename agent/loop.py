@@ -65,7 +65,7 @@ class Agent:
         self.workspace = workspace
         self.config = config
         self.terminator = Terminator(config)
-        self.log = log or EventLog(path=config.log_path)
+        self.log = log or EventLog()
         self.sink = sink
         self.cancel = cancel
         self.gate = gate

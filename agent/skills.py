@@ -28,11 +28,10 @@ class SkillLibrary:
     def match(self, task: str) -> List[Skill]:
         """Return skills whose description keywords appear in the task (case-insensitive)."""
         task_l = task.lower()
-        words = re.split(r"[^a-z0-9]+", task_l)
         matched: List[Skill] = []
         for s in self.skills:
             desc_words = [w for w in re.split(r"[^a-z0-9]+", s.description.lower()) if len(w) > 2]
-            if any(w in task_l or w in words for w in desc_words):
+            if any(w in task_l for w in desc_words):
                 matched.append(s)
         return matched
 

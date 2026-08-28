@@ -17,6 +17,7 @@ gets a private queue. One run at a time; Stop sets a cancel flag checked by the 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import queue
 import sys
@@ -448,8 +449,6 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def _replace(config: Config, **kw: Any) -> Config:
-    import dataclasses
-
     return dataclasses.replace(config, **kw)
 
 

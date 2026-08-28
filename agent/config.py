@@ -15,7 +15,6 @@ class Config:
     # LLM
     model: str = "deepseek-v4-flash"
     base_url: str = "https://api.deepseek.com"
-    max_tokens: int = 4096
     # API key from the GUI settings (persisted outside the repo); env still applies
     api_key: str | None = None
 
@@ -52,7 +51,6 @@ class Config:
 
     # Runtime
     port: int = 8890
-    log_path: str | None = None
     # Skills: on-demand domain knowledge injected into the system prompt
     enable_skills: bool = True
     skills_dir: Path = Path(__file__).resolve().parent / "skills"

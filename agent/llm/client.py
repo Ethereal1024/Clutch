@@ -52,35 +52,6 @@ class LlmClient:
         self.client = OpenAI(api_key=self.api_key, base_url=base_url, http_client=http_client)
         self.model = model
 
-    def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        """Single non-streaming chat completion.
-
-        Returns a message dict with finish_reason attached; reasoning_content
-        (DeepSeek thinking) is returned separately and never fed back to the model.
-        """
-        for attempt in range(MAX_RETRIES):
-            try:
-                kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
-                if tools:
-                    kwargs["tools"] = tools
-                resp = self.client.chat.completions.create(**kwargs)
-                choice = resp.choices[0]
-                msg = choice.message.model_dump(exclude_none=True)
-                reasoning = msg.pop("reasoning_content", None)
-                msg["finish_reason"] = choice.finish_reason
-                msg["_reasoning"] = reasoning
-                return msg
-            except Exception as e:  # noqa: BLE001 -- classify then decide to retry
-                last_err = _classify(e)
-                if not last_err.retryable or attempt == MAX_RETRIES - 1:
-                    raise last_err
-                time.sleep((2**attempt) + attempt * 0.5)
-
-
     def stream(
         self,
         messages: List[Dict[str, Any]],
