@@ -21,9 +21,10 @@ tool-calling 接口。
 2. 设置密钥：export DEEPSEEK_API_KEY=你的key
 3. 启动后端：uv run python -m agent.server   （绑定 127.0.0.1:8890）
 4. 启动前端：cd ui && npm start   （或用 npm run dev 同时起前后端）
-   - 注意：electron 包没有 postinstall，二进制在首次运行/`npm install` 后缺失时
-     会自动下载（dev.sh 会提示 "Electron binary missing … downloading"）；下载走
-     ~/.npmrc 里的代理
+   - 注意：本机 electron 包为无 postinstall 的重打包版，首次运行会惰性下载二进制
+     （走 ~/.npmrc 代理）；若因某种原因每次都触发 "Downloading Electron binary..."，
+     是 path.txt 带了尾随换行——npm install 后 ui/ 的 postinstall 已自动修剪，
+     可手动执行 node -e "require('fs').writeFileSync('node_modules/electron/path.txt','electron')"
 5. 在欢迎界面用**文件浏览器**新建/打开项目（.clc 文件）后开始对话
 
 **跨设备（两台机器）**
