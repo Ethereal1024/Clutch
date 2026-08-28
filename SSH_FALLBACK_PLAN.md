@@ -7,13 +7,14 @@
 
 ## 0. 现状代码地图（改动手册）
 
-仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交 `c59e744`（P2 完成）。
+仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交（P3 完成）。
 
 ### Python 后端（`agent/`，本地 server 默认 8890）
 
 | 文件 | 角色 | 关键符号 |
 |------|------|---------|
-| `server.py` | HTTP+SSE 服务器 | `Broadcaster`、`RunState`（`backend_mode/bridge_url/remote_root` + `build_workspace`）、`Handler`、`ClutchServer(ThreadingHTTPServer)`、`build()` 工厂、`_run/_sse/_fs_list/_fs_list_remote/_workspace_tree/_walk/_walk_remote/_backend` |
+| `base.py` | **（新）** 服务器基类 | `Broadcaster`、`RunState`（`backend_mode/bridge_url/remote_root` + `build_workspace`）、`BaseServer`（`build_llm/build_tools/build_workspace(abstract)/start_task`） |
+| `server.py` | HTTP+SSE 服务器 | `HttpAgentServer(BaseServer)`、`Handler`（经 `self.server.app`）、`ClutchServer`、`build()` 工厂、`_run/_sse/_fs_list/_fs_list_remote/_workspace_tree/_walk/_walk_remote/_backend` |
 | `loop.py` | agent 循环 | `Agent`、`_emit`、`run`、`_execute_tool` |
 | `tools/workspace.py` | 工作区抽象 | `Workspace` ABC（root/protect/is_protected/visible_entries/resolve/run/read/write/list/append_line）+ `LocalWorkspace` + `RemoteWorkspace`（tool→sh：cat/heredoc/ls）+ `shq` |
 | `tools/filesystem.py` | 文件工具 | `read_file/write_file/list_dir/_unified_diff`（经 `workspace.read/write/list`） |
@@ -21,7 +22,7 @@
 | `tools/registry.py` | 工具注册 | `Tool`、`build_default_tools`、`ToolRegistry.execute` |
 | `project.py` | .clc 文件 | `open_project/read_header/_read_file/_rewrite_durable/create_project`（可传 workspace → 远端读写/追加/压缩） |
 | `events.py` | 事件/日志 | `Event` 基类+10 子类、`EventLog.append`（可选 `writer(path,line)` → 远端追加） |
-| `llm/client.py` | LLM | `LlmClient.stream`、`_classify`、`LlmError` |
+| `llm/client.py` | LLM | `LlmClient` ABC（`stream` 协议）+ `DeepSeekLlmClient`、`LlmError` |
 | `core/terminate.py` | 终止/验证 | `Terminator.verify`→`run_verify`（`workspace.run`） |
 | `core/permission.py` | 权限 | `PermissionEvaluator/Gate/Rule` |
 | `core/context.py` | 上下文派生 | `_to_messages`（只读 block 事件，不依赖 delta） |
@@ -300,37 +301,38 @@ POST /api/backend {mode:"local"} → {status:"ok"}
 见 §3.2/§3.3 的类图。要点：工具无 `if remote` 分支；tool→sh 集中在 `RemoteWorkspace`；
 path-guard/blocked/truncate/diff 留在工具层。
 
-### 4.2 B 层：服务器基类 `BaseServer`（统一 LLM 访问 + 工具接口 + run 编排）
+### 4.2 B 层：服务器基类 `BaseServer`（统一 LLM 访问 + 工具接口 + run 编排）✅
 
 ```python
-# agent/base.py（新）
+# agent/base.py（已实现）
 class BaseServer(ABC):
     def __init__(self, config: Config, broadcaster: Broadcaster, state: RunState): ...
-    def build_llm(self) -> LlmClient: ...
+    def build_llm(self) -> LlmClient: ...        # DeepSeekLlmClient；无 key 抛 RuntimeError
     def build_tools(self) -> ToolRegistry: ...
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace: ...
-    def start_task(self, task, project, on_ask, cancel) -> Agent | None: ...
-        # 收编现 Handler._run 的业务：LlmClient 构造、ToolRegistry、
-        # build_workspace、gate、Agent(...)、线程编排、state.start/finish
-
-# agent/server.py（改造）
-class HttpAgentServer(BaseServer):  # do_GET/do_POST/SSE/路由留在本层
-    # Handler 经 self.server 拿 build_*/start_task；build() 工厂 → HttpAgentServer 构造
+    def start_task(self, task, project, on_ask, cancel=None, config=None) -> Agent | None: ...
+        # build_workspace + protect + build_llm（在 state.start 之前，坏 key 不粘 busy）
+        # + state.start（busy → None）+ gate + Agent(...)，返回 Agent 由调用方运行
 ```
 
-- 现状 `_run`（server.py:209）里的 `LlmClient(...)`/`ToolRegistry(build_default_tools)/
-  `Workspace(str(project.workdir))`/`Agent(...)+gate+thread` 全部收进 `start_task`。
-- `build()` 工厂（server.py:554）→ `HttpAgentServer`；`server_test.py` 的 `build(config,...)` 调用不变。
-- **吸收 eval/loop_test**：`eval/harness.py`（直接构造 `Workspace()/LlmClient/Agent/
-  ToolRegistry`）改为经 `BaseServer.build_llm/build_tools/build_workspace/start_task`，
-  与 HTTP server 共享同一契约。注意 `harness.py` 用 `Workspace()`（无参 → 临时目录）：
-  基类需保留"无参 → 临时目录"的语义（或 LocalWorkspace 显式传根）。
+- `Broadcaster`/`RunState` 也移入 `base.py`（避免 base↔server 循环导入）。
+- **线程编排留在 server 侧**：`Handler._run` 调 `start_task` 后起 worker 线程（finally
+  `state.finish`）并组 JSON 响应；`start_task` 本身同步返回 Agent —— 这样 harness 也能
+  同步 `agent.run(task)`，一个方法服务两个调用方。
+- `build()` 工厂（server.py）→ 构造 `HttpAgentServer` 挂到 `ClutchServer.app`；
+  `Handler._cfg/_state/_broadcaster` 经 `self.server.app` 取；`server_test.py` 的
+  `build(config,...)` 调用不变。
+- **吸收 eval/harness**：`eval/harness.py` 新增 `HarnessServer(BaseServer)`，`build_workspace`
+  返回 `LocalWorkspace(str(project.workdir))`；场景在临时目录 seed 后用
+  `Project(path=root/"harness.clc")` + `start_task(task, project, on_ask=None)` 装配，
+  同步 `agent.run(task)`，事件从 `project.log` 取。无参→临时目录语义改为 harness 侧
+  `tempfile.TemporaryDirectory()` + 显式根（`LocalWorkspace` 仍保留无参回退）。
 
-### 4.3 C 层：`LlmClient` ABC
+### 4.3 C 层：`LlmClient` ABC ✅
 
 ```python
-# agent/llm/client.py（改造）
+# agent/llm/client.py（已实现）
 class LlmClient(ABC):
     @abstractmethod
     def stream(self, messages, tools=None) -> Iterator[dict]:
@@ -338,7 +340,7 @@ class LlmClient(ABC):
 class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 ```
 
-`loop.py` 与 `_run` 只依赖 `stream()`，协议用 ABC + docstring 固化。
+`loop.py` 与 `BaseServer` 只依赖 `stream()`，协议用 ABC + docstring 固化。
 
 ### 4.4 全项目继承审计
 
@@ -373,7 +375,7 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 |------|------|---------|------|
 | **P1 — A 层纯重构** | `transport.py`（Transport/LocalTransport）+ `Workspace` 基类/`LocalWorkspace` + 工具改道；本地行为逐字节不变 | `uv run python -m agent.selfcheck && uv run python -m agent.loop_test && uv run python -m agent.server_test && node --check ui/app.js ui/ssh-tunnel.js` | ✅ `2525e99` |
 | **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 | ✅ `c59e744` |
-| **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 | ⬜ |
+| **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 | ✅ 见 P3 提交 |
 | **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ⬜ |
 
 P1 子步骤：
@@ -433,7 +435,7 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 
 ## 8. 仓库现状与新会话入口
 
-- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD `c59e744`（P2 完成）。
+- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD（P3 完成）。
 - 回滚分支：`pre-refactor-rollback` @ `6e52ca7`。
 - 测试：`uv run python -m agent.selfcheck` / `agent.loop_test` / `agent.server_test`；
   `uv run ruff check .` / `uv run ruff format --check .`；`node --check ui/*.js`；`bash -n ui/dev.sh`。

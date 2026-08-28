@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -34,7 +35,19 @@ class LlmError(Exception):
     message: str = ""
 
 
-class LlmClient:
+class LlmClient(ABC):
+    """Streaming chat client contract. ``stream`` emits the event protocol
+    reasoning/text/tool_call_start/tool_call_delta/finish (see DeepSeekLlmClient)."""
+
+    @abstractmethod
+    def stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Iterator[Dict[str, Any]]: ...
+
+
+class DeepSeekLlmClient(LlmClient):
     def __init__(
         self,
         api_key: str | None = None,

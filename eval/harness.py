@@ -8,6 +8,10 @@ An eval scenario dir contains:
   seed/        - files copied into a fresh workspace before the run
   verify.sh    - verification gate command (run inside the workspace)
 
+The harness drives the agent through the same BaseServer contract as the HTTP
+server (build_llm/build_tools/build_workspace/start_task), so eval and product
+share one run-assembly path.
+
 Usage:
   uv run python -m eval.harness [--scenario s2_landing] [--repeat N]
 
@@ -20,6 +24,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -27,25 +32,25 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
+from agent.base import BaseServer, Broadcaster, RunState  # noqa: E402
 from agent.config import Config  # noqa: E402
 from agent.events import EventLog, event_to_json  # noqa: E402
-from agent.llm.client import LlmClient  # noqa: E402
-from agent.loop import Agent  # noqa: E402
-from agent.tools.registry import ToolRegistry, build_default_tools  # noqa: E402
-from agent.tools.workspace import LocalWorkspace  # noqa: E402
+from agent.project import Project  # noqa: E402
+from agent.tools.workspace import LocalWorkspace, Workspace  # noqa: E402
 
 SCENARIOS_DIR = Path(__file__).resolve().parent
+
+
+class HarnessServer(BaseServer):
+    """Eval host: each scenario runs in a fresh temp workspace."""
+
+    def build_workspace(self, project: Project) -> Workspace:
+        return LocalWorkspace(str(project.workdir))
 
 
 def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str = "") -> dict:
     task = (scenario_dir / "task.md").read_text(encoding="utf-8").strip()
     verify_cmd = (scenario_dir / "verify.sh").read_text(encoding="utf-8").strip().splitlines()[0]
-
-    workspace = LocalWorkspace()
-    # seed -> fresh workspace
-    seed = scenario_dir / "seed"
-    if seed.exists():
-        shutil.copytree(seed, workspace.root, dirs_exist_ok=True)
 
     run_cfg = Config(
         verify_command=verify_cmd,
@@ -53,24 +58,6 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
         model=config.model,
         non_interactive=True,
     )
-    llm = LlmClient(model=config.model)
-    log = EventLog()
-    # unattended eval: auto-allow everything (no permission prompts in CI)
-    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
-
-    gate = PermissionGate(
-        evaluator=PermissionEvaluator(rules=[Rule("allow", "*", "")]),
-        auto_allow=True,
-    )
-    agent = Agent(
-        llm=llm,
-        registry=ToolRegistry(build_default_tools(run_cfg)),
-        workspace=workspace,
-        config=run_cfg,
-        log=log,
-        gate=gate,
-    )
-
     started = time.time()
     outcome = {
         "scenario": scenario_dir.name,
@@ -80,25 +67,40 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
         "result": "",
         "turns": 0,
         "duration_s": 0.0,
-        "workspace": str(workspace.root),
+        "workspace": "",
     }
     try:
-        result = agent.run(task)
-        outcome["result"] = result
-        outcome["turns"] = len([e for e in log.events() if e.type == "step_start"])
-        outcome["pass"] = result != "ABORTED"
-    except Exception as e:  # noqa: BLE001
+        with tempfile.TemporaryDirectory() as root:
+            # seed -> fresh workspace, then assemble the run through BaseServer
+            seed = scenario_dir / "seed"
+            if seed.exists():
+                shutil.copytree(seed, Path(root), dirs_exist_ok=True)
+            project = Project(path=Path(root) / "harness.clc")
+            server = HarnessServer(run_cfg, Broadcaster(), RunState())
+            agent = server.start_task(task, project, on_ask=None)
+            log: EventLog = project.log
+            outcome["workspace"] = str(root)
+
+            try:
+                result = agent.run(task)
+                outcome["result"] = result
+                outcome["turns"] = len([e for e in log.events() if e.type == "step_start"])
+                outcome["pass"] = result != "ABORTED"
+            except Exception as e:  # noqa: BLE001
+                outcome["result"] = f"EXCEPTION: {e}"
+                traceback.print_exc()
+            finally:
+                outcome["duration_s"] = round(time.time() - started, 1)
+                # persist the event log alongside the report for replay/debug
+                report_dir.mkdir(parents=True, exist_ok=True)
+                log_path = report_dir / f"{outcome['scenario']}-{outcome['tag'] or outcome['ts']}.jsonl"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    for ev in log.events():
+                        f.write(event_to_json(ev) + "\n")
+    except Exception as e:  # noqa: BLE001 -- assembly failure still records a report
         outcome["result"] = f"EXCEPTION: {e}"
-        traceback.print_exc()
-    finally:
         outcome["duration_s"] = round(time.time() - started, 1)
-        # persist the event log alongside the report for replay/debug
-        report_dir.mkdir(parents=True, exist_ok=True)
-        log_path = report_dir / f"{outcome['scenario']}-{outcome['tag'] or outcome['ts']}.jsonl"
-        with open(log_path, "a", encoding="utf-8") as f:
-            for ev in log.events():
-                f.write(event_to_json(ev) + "\n")
-        workspace.cleanup()
+        traceback.print_exc()
     return outcome
 
 

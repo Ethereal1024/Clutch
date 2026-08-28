@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .base import BaseServer, Broadcaster, RunState
 from .config import Config
-from .core.permission import PermissionEvaluator, PermissionGate
 from .events import (
     DURABLE_TYPES,
     Event,
@@ -40,12 +40,9 @@ from .events import (
     StateUpdateEvent,
     event_to_json,
 )
-from .llm.client import LlmClient
-from .loop import Agent
 from .project import Project, create_project, open_project, read_header
-from .tools.registry import ToolRegistry, build_default_tools
 from .tools.transport import SshTransport
-from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace, shq
+from .tools.workspace import RemoteWorkspace, Workspace, shq
 
 
 def _settings_path() -> Path:
@@ -71,97 +68,33 @@ def save_settings(data: dict) -> None:
         print(f"[clutch-server] cannot persist settings: {e}", file=sys.stderr)
 
 
-class Broadcaster:
-    """Fan events out to subscribers. Each subscriber owns a queue.Queue."""
+class HttpAgentServer(BaseServer):
+    """The run-assembly contract for the HTTP host; routing lives in Handler."""
 
-    def __init__(self) -> None:
-        self._subs: set[queue.Queue] = set()
-        self._lock = threading.Lock()
-
-    def subscribe(self) -> queue.Queue:
-        q: queue.Queue = queue.Queue()
-        with self._lock:
-            self._subs.add(q)
-        return q
-
-    def unsubscribe(self, q: queue.Queue) -> None:
-        with self._lock:
-            self._subs.discard(q)
-
-    def publish(self, event: Event) -> None:
-        with self._lock:
-            subs = list(self._subs)
-        for q in subs:
-            q.put(event)
-
-
-class RunState:
-    """Holds the live agent, cancel flag, and the active project.
-
-    A project is a single .clc file; its working directory is the directory that
-    contains it. Runs within the same project share the project's event log so
-    the conversation continues across runs.
-    """
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.busy = False
-        self.cancel: threading.Event | None = None
-        self.project: Project | None = None
-        self.workspace: Workspace | None = None
-        self.api_key: str | None = None
-        self.gate: PermissionGate | None = None
-        # SSH degradation layer: when set, tools/.clc/fs run through the exec bridge
-        self.backend_mode: str = "local"  # "local" | "ssh"
-        self.bridge_url: str | None = None
-        self.remote_root: str | None = None  # initial browse root on the remote
-
-    def build_workspace(self, root: str) -> Workspace:
-        """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
-        if self.backend_mode == "ssh" and self.bridge_url:
-            return RemoteWorkspace(root, self.bridge_url)
-        return LocalWorkspace(root)
-
-    def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
-        with self.lock:
-            self.project = project
-            if workspace is None:
-                workspace = self.build_workspace(str(project.workdir))
-            self.workspace = workspace
-            self.workspace.protect(project.path)
-            return self.workspace
-
-    def start(self, task: str, workspace: Workspace, cancel: threading.Event) -> bool:
-        with self.lock:
-            if self.busy:
-                return False
-            self.busy = True
-            self.cancel = cancel
-            self.workspace = workspace
-        return True
-
-    def finish(self) -> None:
-        # keep the project + workspace so a follow-up run can continue
-        with self.lock:
-            self.busy = False
+    def build_workspace(self, project: Project) -> Workspace:
+        return self.state.build_workspace(str(project.workdir))
 
 
 class Handler(BaseHTTPRequestHandler):
     server: ClutchServer  # type: ignore
 
-    # config/broadcaster/state are set on the server instance;
-    # this property exposes them uniformly to the handler.
+    # the app (HttpAgentServer) holds config/broadcaster/state; expose them to the
+    # handler uniformly.
+    @property
+    def _app(self) -> HttpAgentServer:
+        return self.server.app
+
     @property
     def _cfg(self) -> Config:
-        return self.server.config
+        return self._app.config
 
     @property
     def _state(self) -> RunState:
-        return self.server.state
+        return self._app.state
 
     @property
     def _broadcaster(self) -> Broadcaster:
-        return self.server.broadcaster
+        return self._app.broadcaster
 
     # ---- routing ----
     # Handlers raise on unexpected errors: ThreadingHTTPServer prints the full
@@ -236,24 +169,6 @@ class Handler(BaseHTTPRequestHandler):
         project = self._state.project
         if project is None:
             return self._json({"error": "no project open; create or open one first"}, status=400)
-        workspace = self._state.workspace or self._state.build_workspace(str(project.workdir))
-        workspace.protect(project.path)
-
-        try:
-            llm = LlmClient(
-                api_key=self._state.api_key or config.api_key,
-                model=config.model,
-                base_url=config.base_url,
-            )
-        except RuntimeError as e:
-            # missing API key: an anticipated, user-facing condition
-            return self._json({"error": f"LLM init failed: {e}"}, status=500)
-
-        cancel = threading.Event()
-
-        # start() claims the slot
-        if not self._state.start(task, workspace, cancel):
-            return self._json({"error": "a run is already active"}, status=409)
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> None:
             # publish the permission request to the UI; the agent blocks until
@@ -262,23 +177,14 @@ class Handler(BaseHTTPRequestHandler):
                 PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason)
             )
 
-        gate = PermissionGate(
-            evaluator=PermissionEvaluator(),
-            on_ask=_on_ask,
-            auto_allow=config.non_interactive,
-        )
-        self._state.gate = gate
-
-        agent = Agent(
-            llm=llm,
-            registry=ToolRegistry(build_default_tools(config)),
-            workspace=workspace,
-            config=config,
-            log=project.log,
-            sink=self._broadcaster.publish,
-            cancel=cancel,
-            gate=gate,
-        )
+        try:
+            agent = self._app.start_task(task, project, on_ask=_on_ask, cancel=None, config=config)
+        except RuntimeError as e:
+            # missing API key: an anticipated, user-facing condition
+            return self._json({"error": f"LLM init failed: {e}"}, status=500)
+        if agent is None:
+            return self._json({"error": "a run is already active"}, status=409)
+        self._state.gate = agent.gate
 
         def _worker() -> None:
             # an unexpected error here propagates: Python prints the thread
@@ -293,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(
             {
                 "status": "started",
-                "workspace": str(workspace.root),
+                "workspace": str(agent.workspace.root),
                 "project": str(project.path),
             }
         )
@@ -668,10 +574,8 @@ def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hid
 
 
 class ClutchServer(ThreadingHTTPServer):
-    # shared runtime state, injected by build(); the Handler reaches them via self.server
-    config: Config
-    state: RunState
-    broadcaster: Broadcaster
+    # the app (HttpAgentServer) holds config/broadcaster/state; injected by build()
+    app: HttpAgentServer
 
 
 def build(
@@ -679,10 +583,9 @@ def build(
     broadcaster: Broadcaster,
     state: RunState,
 ) -> ClutchServer:
+    app = HttpAgentServer(config, broadcaster, state)
     srv = ClutchServer((config.host, config.port), Handler)
-    srv.broadcaster = broadcaster
-    srv.config = config
-    srv.state = state
+    srv.app = app
     return srv
 
 
