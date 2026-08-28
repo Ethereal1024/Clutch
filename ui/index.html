@@ -81,6 +81,9 @@
             <button id="fs-up" title="up one level">..</button>
             <input id="fs-path-input" type="text" placeholder="/home/user" autocomplete="off" />
             <button id="fs-go">Go</button>
+            <label class="hidden-toggle" title="show hidden (dot) files">
+              <input type="checkbox" id="fs-hidden-toggle" /> .hidden
+            </label>
           </div>
           <div id="fs-list" class="scroll"></div>
           <div id="fs-new" class="hidden">
@@ -149,7 +152,12 @@
     </section>
 
     <aside id="right">
-      <div class="panel-head">workspace</div>
+      <div class="panel-head">
+        <span>workspace</span>
+        <label class="hidden-toggle" title="show hidden (dot) files">
+          <input type="checkbox" id="tree-hidden-toggle" /> .hidden
+        </label>
+      </div>
       <div id="tree" class="scroll"></div>
     </aside>
   </main>

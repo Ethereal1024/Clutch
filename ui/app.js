@@ -1104,6 +1104,28 @@ permModal.addEventListener("click", (e) => {
 let lastTreeSig = "";
 let treeRefreshTimer = null;
 
+// Hidden files (dotfiles) are hidden everywhere — picker (open/new) and workspace
+// tree — until the shared toggle turns them on.
+let showHidden = localStorage.getItem("clutch_show_hidden") === "1";
+
+function updateHiddenToggles() {
+  $("#fs-hidden-toggle").checked = showHidden;
+  $("#tree-hidden-toggle").checked = showHidden;
+}
+
+function toggleHidden() {
+  showHidden = !showHidden;
+  localStorage.setItem("clutch_show_hidden", showHidden ? "1" : "0");
+  updateHiddenToggles();
+  // re-list the picker's current dir and the tree with the new visibility
+  if (!fsModal.classList.contains("hidden")) loadDir(fsPath);
+  refreshTree();
+}
+
+$("#fs-hidden-toggle").addEventListener("change", toggleHidden);
+$("#tree-hidden-toggle").addEventListener("change", toggleHidden);
+updateHiddenToggles();
+
 // File changes only happen through tool results (write_file / run_command, or any
 // future FS tool): schedule a debounced refresh instead of polling. Change
 // detection skips re-rendering when nothing changed, preserving expansion state.
@@ -1114,10 +1136,16 @@ function scheduleTreeRefresh() {
 
 async function refreshTree() {
   try {
-    const r = await fetch(API_BASE + "/api/workspace/tree");
+    const params = new URLSearchParams();
+    if (showHidden) params.set("hidden", "1");
+    for (const p of expandedDirs) params.append("expanded", p);
+    const qs = params.toString() ? "?" + params : "";
+    const r = await fetch(API_BASE + "/api/workspace/tree" + qs);
     const data = await r.json();
     if (data.root) els.workspace.textContent = data.root;
-    const sig = JSON.stringify(data.tree || []);
+    // the payload depends on expansion state too: include it so a toggle always
+    // re-renders (e.g. expanding an empty dir changes nothing in the payload)
+    const sig = JSON.stringify([...expandedDirs]) + "|" + JSON.stringify(data.tree || []);
     if (sig === lastTreeSig) return; // unchanged: keep expansion state
     lastTreeSig = sig;
     els.tree.innerHTML = "";
@@ -1150,16 +1178,20 @@ function renderNode(node, depth) {
     row.addEventListener("click", (e) => {
       e.stopPropagation(); // don't bubble to ancestor dirs (would collapse them)
       const open = children.style.display !== "none";
-      row.querySelector(".icon").textContent = open ? "▸" : "▾";
       if (open) {
         expandedDirs.delete(node.path);
+        children.style.display = "none"; // instant collapse; refresh prunes deep data
+        row.querySelector(".icon").textContent = "▸";
       } else {
         expandedDirs.add(node.path);
-        if (!children.children.length) {
-          for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
+        // reveal the pre-loaded lookahead level instantly, then fetch deeper
+        if (node.children && node.children.length) {
+          row.querySelector(".icon").textContent = "▾";
+          for (const c of node.children) children.appendChild(renderNode(c, depth + 1));
+          children.style.display = "";
         }
       }
-      children.style.display = open ? "none" : "";
+      refreshTree(); // payload depends on expandedDirs; the re-render keeps expansion
     });
     // children are siblings of the row, so the row's hover box never covers the subtree
     wrap.appendChild(children);
@@ -1358,7 +1390,9 @@ async function loadDir(path) {
   const listEl = $("#fs-list");
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
   try {
-    const r = await fetch(API_BASE + "/api/fs/list?path=" + encodeURIComponent(path));
+    const r = await fetch(
+      API_BASE + "/api/fs/list?path=" + encodeURIComponent(path) + (showHidden ? "&hidden=1" : "")
+    );
     const data = await r.json();
     if (!r.ok || data.error) throw new Error(data.error || r.status);
     fsPath = data.path;

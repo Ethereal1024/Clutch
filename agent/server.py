@@ -350,10 +350,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _workspace_tree(self) -> None:
+        qs = parse_qs(urlparse(self.path).query)
+        expanded = qs.get("expanded", [])
+        show_hidden = qs.get("hidden", ["0"])[0] == "1"
         sb = self._state.workspace
         if sb is None:
             return self._json({"tree": [], "root": None})
-        self._json({"tree": _walk(sb.root, sb), "root": str(sb.root)})
+        self._json({"tree": _walk(sb.root, sb, expanded, show_hidden), "root": str(sb.root)})
 
     def _fs_list(self) -> None:
         """Server-side directory browser (the UI picks projects from here).
@@ -363,6 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         qs = parse_qs(urlparse(self.path).query)
         raw = (qs.get("path") or [""])[0]
+        show_hidden = qs.get("hidden", ["0"])[0] == "1"
         if raw:
             p = Path(raw).expanduser()
             if not p.is_absolute():
@@ -376,6 +380,8 @@ class Handler(BaseHTTPRequestHandler):
             entries = sorted(root.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
         except OSError as e:
             return self._json({"error": f"cannot list directory: {e}"})
+        if not show_hidden:
+            entries = [e for e in entries if not e.name.startswith(".")]
         parent = str(root.parent) if root.parent != root else None
         self._json(
             {
@@ -494,31 +500,48 @@ def _replace(config: Config, **kw: Any) -> Config:
     return dataclasses.replace(config, **kw)
 
 
-def _walk(root: Path, workspace: Workspace | None = None) -> list:
-    """Build a simple file tree [{name, path, dir, children}], skipping protected files."""
-    if workspace is not None:
-        entries = workspace.visible_entries(root)
-    else:
-        try:
-            entries = sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-        except OSError:
-            return []
-    out = []
-    for e in entries:
-        rel = str(e.relative_to(root))
-        node: dict[str, Any] = {
-            "name": e.name,
-            "path": rel,
-            "dir": e.is_dir(),
-            "link": str(e.resolve()) if e.is_symlink() else None,
-        }
-        # don't recurse into symlinked dirs (display-only): prevents escaping into
-        # system trees (/opt, /usr) and infinite symlink cycles; the agent's tools
-        # still follow symlinks, so only the UI is affected
-        if e.is_dir() and not e.is_symlink():
-            node["children"] = _walk(e, workspace)
-        out.append(node)
-    return out
+def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hidden: bool) -> list:
+    """Lazy partial tree walk: list children only for the root, the currently
+    expanded dirs, and their direct children (one level of lookahead). Deeper
+    levels are fetched as they get expanded, so opening a big project never walks
+    the whole tree up front. show_hidden keeps dotfiles out of every level."""
+    expanded = set(expanded)
+
+    def list_entries(p: Path) -> list[Path]:
+        if workspace is not None:
+            entries = workspace.visible_entries(p)
+        else:
+            try:
+                entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
+            except OSError:
+                return []
+        if not show_hidden:
+            entries = [e for e in entries if not e.name.startswith(".")]
+        return entries
+
+    def build(p: Path, rel: str) -> list:
+        out = []
+        for e in list_entries(p):
+            node: dict[str, Any] = {
+                "name": e.name,
+                "path": str(e.relative_to(root)),
+                "dir": e.is_dir(),
+                "link": str(e.resolve()) if e.is_symlink() else None,
+            }
+            # don't recurse into symlinked dirs (display-only): prevents escaping
+            # into system trees and symlink cycles; the agent's tools still follow
+            # links, so only the UI is affected
+            if e.is_dir() and not e.is_symlink():
+                child_rel = str(e.relative_to(root))
+                # list this dir if it is the root, expanded, or directly under an
+                # expanded dir (the one-level lookahead); otherwise stop
+                listed = rel == "" or child_rel in expanded or rel in expanded
+                if listed:
+                    node["children"] = build(e, child_rel)
+            out.append(node)
+        return out
+
+    return build(root, "")
 
 
 class ClutchServer(ThreadingHTTPServer):

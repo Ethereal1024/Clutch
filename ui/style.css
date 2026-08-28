@@ -410,6 +410,7 @@ main { display: flex; flex: 1; min-height: 0; }
   font-family: var(--font-display); font-weight: 600;
   font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--muted);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
 #tree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 12px; }
 .tree-node {
@@ -497,6 +498,14 @@ main { display: flex; flex: 1; min-height: 0; }
 #fs-body > .fs-body-inner { overflow: hidden; min-height: 0; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
+.hidden-toggle {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  cursor: pointer;
+}
+.hidden-toggle input { margin: 0; }
+#fs-toolbar .hidden-toggle { align-self: center; }
+#fs-toolbar .hidden-toggle input { flex: 0; }
 #fs-list {
   height: 260px;
   border: 1px solid var(--border);
