@@ -17,10 +17,11 @@ after is one JSON event per line.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .events import EventLog, event_from_dict
+from .events import DURABLE_TYPES, EventLog, event_from_dict, event_to_json
 
 HEADER_PREFIX = "# clutch project v1"
 SEPARATOR = "---"
@@ -61,8 +62,14 @@ def open_project(path: Path, on_progress=None) -> Project:
     file is parsed (byte-based, single pass)."""
     path = path.with_suffix(".clc")
     meta, loaded = _read_file(path, on_progress)
+    # older files stored streaming deltas (text/reasoning) that are redundant for
+    # replay and context — assistant_message carries the final text + reasoning.
+    # Compact them away so the .clc stays small and future loads stay fast.
+    durable = [e for e in loaded.events() if e.type in DURABLE_TYPES]
+    if len(durable) != len(loaded.events()):
+        _rewrite_durable(path, meta, durable)
     log = EventLog(path=str(path))
-    log._events.extend(loaded.events())
+    log._events.extend(durable)
     return Project(path=path, meta=meta, log=log)
 
 
@@ -79,14 +86,30 @@ def read_header(path: Path) -> ProjectMeta:
     return meta
 
 
+def _header_text(meta: ProjectMeta) -> str:
+    return "\n".join(
+        [
+            HEADER_PREFIX,
+            f"name: {meta.name}",
+            f"model: {meta.model or ''}",
+            SEPARATOR,
+        ]
+    ) + "\n"
+
+
 def _write_header(path: Path, meta: ProjectMeta) -> None:
-    lines = [
-        HEADER_PREFIX,
-        f"name: {meta.name}",
-        f"model: {meta.model or ''}",
-        SEPARATOR,
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(_header_text(meta), encoding="utf-8")
+
+
+def _rewrite_durable(path: Path, meta: ProjectMeta, events: list) -> None:
+    """Atomically rewrite the .clc keeping only durable block events. A crash
+    mid-write must not leave a truncated file, so write a tmp then swap it in."""
+    tmp = path.with_suffix(".clc.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(_header_text(meta))
+        for ev in events:
+            f.write(event_to_json(ev) + "\n")
+    os.replace(tmp, path)
 
 
 def _apply_meta(meta: ProjectMeta, line: str) -> None:

@@ -164,13 +164,15 @@ function addEvent(ev) {
       lastTextContent = "";
       return;
     }
+    // thinking renders above the agent text, matching the live stream (reasoning
+    // deltas arrive before text deltas)
+    if (ev.reasoning) appendThinkingRow(ev.reasoning);
     if (ev.content) {
       const wrap = createAgentTextBlock();
       wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
       highlightCode(wrap);
       eventsEl.appendChild(wrap);
     }
-    if (ev.reasoning) appendThinkingRow(ev.reasoning);
     return;
   }
   if (ev.type === "final") {
