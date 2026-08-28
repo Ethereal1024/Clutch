@@ -79,6 +79,24 @@ def main() -> None:
         "dangling block keeps text, drops tool_calls",
     )
 
+    # 2d. dangling block with empty content + only reasoning must NOT leak a
+    # reasoning-only assistant (API rejects: "content or tool_calls must be set")
+    log = EventLog()
+    log.append(
+        AssistantMessageEvent(
+            content="",
+            reasoning="thinking that never led anywhere",
+            tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}],
+        )
+    )
+    msgs = derive_messages(log, config, "test")
+    check(
+        not any(m["role"] == "assistant" for m in msgs),
+        "reasoning-only dangling assistant dropped entirely",
+    )
+    valid_assistants = all(m["role"] != "assistant" or m.get("content") or "tool_calls" in m for m in msgs)
+    check(valid_assistants, "every surviving assistant has content or tool_calls")
+
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)

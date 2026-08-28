@@ -54,9 +54,12 @@ def _repair_dangling(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     tool result (the .clc is appended one durable event at a time). The API
     rejects an assistant message whose tool_calls are not each followed by a
     tool message, so such incomplete blocks are stripped here: the assistant
-    loses its tool_calls (kept if it has real text/reasoning, dropped
-    otherwise) and the partial tool messages that belonged to the block are
-    discarded, along with any orphan tool message. Healthy logs are untouched.
+    loses its tool_calls (kept only if it has real text; a message that had
+    nothing but calls/reasoning is dropped entirely) and the partial tool
+    messages that belonged to the block are discarded, along with any orphan
+    tool message. Every assistant that survives carries content or tool_calls,
+    so the derived messages are always acceptable to the API. Healthy logs are
+    untouched.
     """
     out: List[Dict[str, Any]] = []
     i = 0
@@ -72,13 +75,20 @@ def _repair_dangling(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if all(tid in responded for tid in ids):
                 out.extend(msgs[i:j])  # complete block: keep as-is
             else:
-                # interrupted block: drop tool_calls (and the partial tool msgs)
+                # interrupted block: drop tool_calls (and the partial tool msgs).
+                # reasoning_content alone cannot stand as an assistant message
+                # ("content or tool_calls must be set"), so only real text keeps it.
                 cleaned = {k: v for k, v in m.items() if k != "tool_calls"}
-                if cleaned.get("content") or cleaned.get("reasoning_content"):
+                if cleaned.get("content"):
                     out.append(cleaned)
             i = j
         elif m["role"] == "tool":
             i += 1  # orphan tool message (no owning assistant block): drop
+        elif m["role"] == "assistant":
+            # no tool_calls: only a message with real text can stand alone
+            if m.get("content"):
+                out.append(m)
+            i += 1
         else:
             out.append(m)
             i += 1
