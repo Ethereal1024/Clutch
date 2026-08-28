@@ -234,8 +234,9 @@ function remoteRunningCmd(probe) {
   return `(command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ':${REMOTE_API_PORT} ' && echo UP) || echo DOWN`;
 }
 
-// force is for tests; auto-decides when omitted.
-async function installServer(probe, { force } = {}) {
+// force is for tests; auto-decides when omitted. progress(stage) reports coarse
+// bootstrap stages so the renderer can drive a connection progress bar.
+async function installServer(probe, { force, progress } = {}) {
   const version = getVersion();
   const sameArch = probe.arch === platformTag().split("-")[1];
   tunnelLog(
@@ -283,6 +284,7 @@ async function installServer(probe, { force } = {}) {
     if (strategy === "bundle") {
       const artifact = ensureBundle(version);
       tunnelLog(`[bootstrap] uploading bundle ${path.basename(artifact)}`);
+      if (progress) progress("install:upload");
       try {
         // atomic replace: rename over the old binary, safe even while a process
         // still runs from the old inode
@@ -315,6 +317,7 @@ async function installServer(probe, { force } = {}) {
         return { needsAssist: true, error: "cannot obtain wheels for target: " + e.message };
       }
       tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
+      if (progress) progress("install:upload");
       await uploadFile(artifact, `${dir}/pylibs.tar.gz`);
       await remoteExec(
         `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${dir}')" && rm -f ${dir}/pylibs.tar.gz`
@@ -329,6 +332,7 @@ async function installServer(probe, { force } = {}) {
   const run = await remoteExec(remoteRunningCmd(probe));
   if (reinstalled || !run.stdout.includes("UP")) {
     tunnelLog("[bootstrap] starting server");
+    if (progress) progress("install:start");
     // short timeout: the start command backgrounds the server; do not wait up to
     // the default 60s for its exec channel to close
     await remoteExec(startCommand(strategy, home), 10000);
@@ -447,7 +451,7 @@ function stopHealing() {
   }
 }
 
-async function connectTunnel({ host, user, port, password }) {
+async function connectTunnel({ host, user, port, password }, progress) {
   if (sshClient) {
     // reuse a live tunnel; a dead/partial one is reset so a reconnect works
     const up = currentUrl ? await waitForServer(currentUrl + "/api/health", 3000) : false;
@@ -485,6 +489,7 @@ async function connectTunnel({ host, user, port, password }) {
     if (key) opts.privateKey = key;
 
     let client;
+    if (progress) progress("auth");
     await new Promise((resolve, reject) => {
       client = new Client();
       sshClient = client;
@@ -494,6 +499,7 @@ async function connectTunnel({ host, user, port, password }) {
       client.connect(opts);
     });
     tunnelLog("[phase] ssh ready");
+    if (progress) progress("probe");
 
     // runtime handlers (registered once per connection). Guard every handler that
     // mutates the module-level sshClient: a STALE tunnel's 'end' event may fire
@@ -529,7 +535,8 @@ async function connectTunnel({ host, user, port, password }) {
     // bootstrap: make sure the server exists and is running on the remote
     const probeOut = await remoteExec(PROBE_CMD);
     const probe = parseProbe(probeOut.stdout);
-    const boot = await installServer(probe);
+    if (progress) progress("install");
+    const boot = await installServer(probe, { progress });
     if (boot.needsAssist) {
       // keep the connection open for the LLM-guided installer; stage the source
       tunnelLog("[bootstrap] needsAssist: " + boot.error);
@@ -537,6 +544,7 @@ async function connectTunnel({ host, user, port, password }) {
       lastProbe = probe;
       return { ok: false, needsAssist: true, error: boot.error };
     }
+    if (progress) progress("forward");
 
     return await establishForwardAndHealth(localPort);
   } catch (e) {
@@ -592,10 +600,11 @@ async function establishForwardAndHealth(localPort) {
 }
 
 // LLM-guided install (remote-install-assist.js) on the still-open connection.
-async function runAssist() {
+async function runAssist(progress) {
   if (!sshClient || !lastProbe) return { ok: false, error: "no pending assist session" };
   const { runInstallAssist } = require("./remote-install-assist");
   tunnelLog("[assist] starting LLM-guided install");
+  if (progress) progress("assist");
   const r = await runInstallAssist({
     remoteExec,
     llmUrl: "http://127.0.0.1:" + llmProxyPort + "/v1",
@@ -610,6 +619,7 @@ async function runAssist() {
   try {
     lastProbe = null;
     const localPort = await freePort();
+    if (progress) progress("forward");
     return await establishForwardAndHealth(localPort);
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };

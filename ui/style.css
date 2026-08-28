@@ -483,6 +483,12 @@ main { display: flex; flex: 1; min-height: 0; }
 .fs-conn-row select:focus { outline: none; border-color: var(--accent); }
 .fs-conn-row button { white-space: nowrap; }
 #conn-status { margin: 8px 0 0; }
+.conn-progress { margin-top: 8px; }
+.conn-progress-track { height: 3px; background: var(--border); overflow: hidden; border-radius: 2px; }
+.conn-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .18s linear; }
+.conn-progress-fill.indeterminate { width: 35%; animation: conn-slide 1.1s ease-in-out infinite; }
+@keyframes conn-slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+#conn-reset { margin-top: 8px; padding: 2px 8px; font-size: 12px; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
 #fs-list {

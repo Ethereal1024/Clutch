@@ -14,4 +14,9 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
     ipcRenderer.on("tunnel:ended", cb);
     return () => ipcRenderer.removeListener("tunnel:ended", cb);
   },
+  onProgress: (cb) => {
+    const wrap = (_e, stage) => cb(stage);
+    ipcRenderer.on("tunnel:progress", wrap);
+    return () => ipcRenderer.removeListener("tunnel:progress", wrap);
+  },
 });

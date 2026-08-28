@@ -68,6 +68,12 @@
           <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
         </div>
         <p id="conn-status" class="muted"></p>
+        <div id="conn-progress" class="conn-progress hidden">
+          <div class="conn-progress-track"><div id="conn-progress-fill" class="conn-progress-fill"></div></div>
+        </div>
+        <button id="conn-reset" class="hidden" title="switch the picker back to the local backend">
+          Reset to local backend
+        </button>
       </div>
       <div id="fs-toolbar" class="fs-toolbar">
         <button id="fs-up" title="up one level">..</button>
@@ -79,7 +85,7 @@
         <label for="fs-name-input">Project name</label>
         <input id="fs-name-input" type="text" placeholder="my-project" autocomplete="off" />
       </div>
-      <div class="modal-actions">
+      <div id="fs-actions" class="modal-actions">
         <button id="fs-cancel">Cancel</button>
         <button id="fs-create" class="primary hidden">Create</button>
       </div>
@@ -96,6 +102,9 @@
       <label for="conn-new-port">SSH port</label>
       <input id="conn-new-port" type="text" placeholder="22" autocomplete="off" />
       <p id="conn-new-status" class="muted"></p>
+      <div id="conn-new-progress" class="conn-progress hidden">
+        <div class="conn-progress-track"><div id="conn-new-progress-fill" class="conn-progress-fill"></div></div>
+      </div>
       <div class="modal-actions">
         <button id="conn-new-cancel">Cancel</button>
         <button id="conn-new-connect" class="primary">Connect</button>

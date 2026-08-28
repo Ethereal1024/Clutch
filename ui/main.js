@@ -37,8 +37,12 @@ app.whenReady().then(() => {
 
   win.loadFile(path.join(__dirname, "index.html"));
 
-  ipcMain.handle("tunnel:connect", async (_e, cfg) => connectTunnel(cfg));
-  ipcMain.handle("tunnel:assist", async () => runAssist());
+  ipcMain.handle("tunnel:connect", async (e, cfg) =>
+    connectTunnel(cfg, (stage) => e.sender.send("tunnel:progress", stage))
+  );
+  ipcMain.handle("tunnel:assist", async (e) =>
+    runAssist((stage) => e.sender.send("tunnel:progress", stage))
+  );
   ipcMain.handle("tunnel:status", async () => tunnelStatus());
   ipcMain.handle("tunnel:disconnect", async () => {
     await stopTunnel();

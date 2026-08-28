@@ -773,6 +773,7 @@ function renderConnSelector() {
 function switchBackend(url) {
   API_BASE = url.replace(/\/+$/, "");
   localStorage.setItem("clutch_api_url", API_BASE);
+  showPickerBody(); // a connect is over: bring the path bar + file list back
   reconnectSSE();
   loadDir(""); // show the new backend's files right in the picker
   renderConnSelector();
@@ -796,28 +797,65 @@ function closePasswordPrompt() {
 
 let connBusy = false; // a connect is in flight: ignore re-clicks
 
-// Show connection progress in the file area instead of stale local files.
-function setFsConnecting(host) {
-  const listEl = $("#fs-list");
-  listEl.innerHTML = "";
-  listEl.appendChild(fsRow("Connecting to " + host + "…", "plain"));
+// Collapse the whole picker body (path bar, file list, new-project area, action
+// buttons) during an SSH connect or after a failure — only the conn bar with its
+// single status line + progress bar remains, no duplicate message, no dead space.
+function hidePickerBody() {
   $("#fs-toolbar").classList.add("hidden");
-  $("#fs-up").disabled = true;
-  $("#fs-go").disabled = true;
-  $("#fs-path-input").disabled = true;
+  $("#fs-list").classList.add("hidden");
+  $("#fs-new").classList.add("hidden");
+  $("#fs-actions").classList.add("hidden");
+}
+function showPickerBody() {
+  $("#fs-toolbar").classList.remove("hidden");
+  $("#fs-list").classList.remove("hidden");
+  $("#fs-actions").classList.remove("hidden");
+  $("#fs-new").classList.toggle("hidden", fsMode !== "new");
+  $("#conn-progress").classList.add("hidden");
+  $("#conn-new-progress").classList.add("hidden");
+  $("#conn-reset").classList.add("hidden");
+}
+
+// Connection progress bar: the tunnel reports coarse stages over IPC.
+const CONN_STAGES = {
+  auth: { pct: 10, label: "Connecting…" },
+  probe: { pct: 22, label: "Inspecting remote…" },
+  install: { pct: 35, label: "Installing remote server…" },
+  "install:upload": { pct: 45, label: "Uploading server…" },
+  "install:start": { pct: 70, label: "Starting server…" },
+  assist: { pct: 45, label: "Guided install in progress…" },
+  forward: { pct: 90, label: "Starting tunnel…" },
+};
+function updateConnProgress(stage) {
+  const s = CONN_STAGES[stage];
+  if (!s) return;
+  connStatus.textContent = s.label;
+  for (const bar of [$("#conn-progress"), $("#conn-new-progress")]) {
+    if (bar.classList.contains("hidden")) continue;
+    const fill = bar.querySelector(".conn-progress-fill");
+    fill.classList.remove("indeterminate");
+    fill.style.width = s.pct + "%";
+  }
+}
+
+function setFsConnecting(host, statusEl) {
+  connStatus.textContent = "Connecting to " + host + "…";
+  hidePickerBody();
+  $("#conn-reset").classList.add("hidden");
+  // animate the bar under the active modal (the new-connection popup has its own)
+  const bar = statusEl && statusEl.id === "conn-new-status" ? $("#conn-new-progress") : $("#conn-progress");
+  bar.classList.remove("hidden");
+  const fill = bar.querySelector(".conn-progress-fill");
+  fill.classList.add("indeterminate");
+  fill.style.width = "";
 }
 
 function setFsConnectError(msg) {
-  const listEl = $("#fs-list");
-  listEl.innerHTML = "";
-  listEl.appendChild(fsRow("Connection failed: " + msg, "error-row"));
-  listEl.appendChild(
-    fsRow("Reset to local backend", "action", () => {
-      localStorage.removeItem("clutch_ssh_connected");
-      switchBackend(DEFAULT_BASE);
-    })
-  );
-  $("#fs-toolbar").classList.add("hidden");
+  connStatus.textContent = "Connection failed: " + msg;
+  hidePickerBody();
+  $("#conn-progress").classList.add("hidden");
+  $("#conn-new-progress").classList.add("hidden");
+  $("#conn-reset").classList.remove("hidden"); // in-place recovery back to local
 }
 
 async function handleSshConnect(host, user, port, statusEl) {
@@ -835,7 +873,7 @@ async function handleSshConnect(host, user, port, statusEl) {
   }
   connBusy = true;
   statusEl.textContent = "connecting…";
-  setFsConnecting(host);
+  setFsConnecting(host, statusEl);
   try {
     // try keys/agent first; only prompt for a password if auth fails
     let res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
@@ -932,6 +970,13 @@ connNewModal.addEventListener("click", (e) => {
 connNewHost.addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#conn-new-connect").click();
 });
+$("#conn-reset").addEventListener("click", () => {
+  localStorage.removeItem("clutch_ssh_connected");
+  switchBackend(DEFAULT_BASE); // in-place fallback to the local backend
+});
+if (window.clutchTunnel && window.clutchTunnel.onProgress) {
+  window.clutchTunnel.onProgress(updateConnProgress); // drive the connect progress bar
+}
 $("#ssh-pass-ok").addEventListener("click", () => {
   const pw = passInput.value;
   passModal.classList.add("hidden");
@@ -1272,11 +1317,9 @@ function openFsBrowser(mode) {
   fsPath = "";
   fsParent = null;
   $("#fs-title").textContent = mode === "new" ? "New project" : "Open project";
-  $("#fs-new").classList.toggle("hidden", mode !== "new");
   $("#fs-create").classList.toggle("hidden", mode !== "new");
   $("#fs-name-input").value = "";
-  // normal browsing: show the path toolbar again (it is hidden during SSH connects)
-  $("#fs-toolbar").classList.remove("hidden");
+  showPickerBody(); // normal browsing: path bar + file list + (new-project area)
   $("#fs-up").disabled = false;
   $("#fs-go").disabled = false;
   $("#fs-path-input").disabled = false;
