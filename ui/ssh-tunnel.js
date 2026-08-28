@@ -177,7 +177,24 @@ function uploadFile(localPath, remotePath) {
       (sftp) => sftp.fastPut(localPath, remotePath, (e) => (e ? reject(e) : resolve())),
       reject
     );
-  });
+  }).catch(() => uploadFileViaExec(localPath, remotePath)); // no SFTP subsystem? exec it
+}
+
+// Fallback upload for remotes whose sshd has no SFTP subsystem (e.g. minimal
+// embedded devices): transfer the file as chunked base64 through exec. base64's
+// alphabet has no quotes, and the remote paths here are internal, so the command
+// is safe to build inline.
+function uploadFileViaExec(localPath, remotePath, timeoutMs = 120000) {
+  const data = fs.readFileSync(localPath).toString("base64");
+  let first = true;
+  let p = Promise.resolve();
+  for (let i = 0; i < data.length; i += 30000) {
+    const part = data.slice(i, i + 30000);
+    const op = first ? ">" : ">>";
+    first = false;
+    p = p.then(() => remoteExec(`echo '${part}' | base64 -d ${op} '${remotePath}'`, timeoutMs));
+  }
+  return p;
 }
 
 // ---- bootstrap ----
@@ -374,7 +391,10 @@ async function stopTunnel() {
     sftpHandle = null;
   }
   stopLlmProxy();
-  notifyEnd();
+  // no notifyEnd(): stopTunnel runs on INTENTIONAL disconnects (renderer-driven
+  // switches, connect resets) where the caller manages the transition; only a
+  // genuine unexpected tunnel death (the ssh 'end' event on the current client)
+  // should fire the end notification.
 }
 
 function notifyEnd() {
@@ -516,16 +536,19 @@ async function connectTunnel({ host, user, port, password }, progress) {
     client.on("end", () => {
       tunnelLog("[disconnect] tunnel ended");
       stopHealing();
+      // only the CURRENT client may tear down shared state: a STALE tunnel's
+      // delayed 'end' event must not close the new connection's forward/proxy or
+      // fire the end notification (which would reset the renderer to local)
       if (sshClient === client) {
         sshClient = null;
         currentUrl = null;
+        if (localSrv) {
+          localSrv.close();
+          localSrv = null;
+        }
+        stopLlmProxy();
+        notifyEnd();
       }
-      if (localSrv) {
-        localSrv.close();
-        localSrv = null;
-      }
-      stopLlmProxy();
-      notifyEnd();
     });
     client.on("error", (e) => {
       tunnelLog("[error] runtime: " + e.message);
