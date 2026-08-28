@@ -64,6 +64,7 @@ body { display: flex; flex-direction: column; }
   font-weight: 600;
   font-size: 15px;
   letter-spacing: 0.02em;
+  line-height: 1; /* tight boxes so the flex row's align-items:center lines them up */
 }
 .brand .logo { color: var(--accent); }
 
@@ -71,33 +72,23 @@ body { display: flex; flex-direction: column; }
 
 .spacer { flex: 1; }
 
-/* status: light indicator — state-colored dot + small uppercase text (no box) */
+/* status: rectangle badge (kept as a box, not a dot), vertically centered with
+   the title via the topbar's align-items:center + matching line-height */
 .badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 0;
+  font-size: 12px;
+  line-height: 1;
+  border: 1px solid var(--border);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--muted);
-  border: none;
-  background: none;
-  padding: 0;
-}
-.badge::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-  flex: none;
 }
 .badge.idle { color: var(--muted); }
-.badge.running { color: var(--accent); }
-.badge.waiting { color: var(--accent); }
-.badge.running::before, .badge.waiting::before { animation: pulse 1.2s infinite; }
-.badge.finished { color: var(--accent); }
-.badge.error { color: #e05555; }
+.badge.running { color: #0F0F10; background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
+.badge.waiting { color: #0F0F10; background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
+.badge.finished { color: var(--text); border-color: var(--accent); }
+.badge.error { color: #e05555; border-color: #e05555; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 @keyframes fadeSlideUp {
   from { opacity: 0; transform: translateY(4px); }
@@ -586,7 +577,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 #fs-new { margin-top: 14px; }
 
 /* project label */
-.project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }
 
 /* welcome screen (kept as-is per user) */
 .welcome.hidden { display: none; }
