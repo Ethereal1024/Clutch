@@ -9,7 +9,7 @@
 
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
-const { connectTunnel, stopTunnel, runAssist, tunnelLog, tunnelStatus, onTunnelEnd } = require("./ssh-tunnel");
+const { connectTunnel, stopTunnel, tunnelLog, tunnelStatus, onTunnelEnd } = require("./ssh-tunnel");
 
 const API_BASE = process.env.CLUTCH_API_URL || "http://127.0.0.1:8890";
 
@@ -39,9 +39,6 @@ app.whenReady().then(() => {
 
   ipcMain.handle("tunnel:connect", async (e, cfg) =>
     connectTunnel(cfg, (stage) => e.sender.send("tunnel:progress", stage))
-  );
-  ipcMain.handle("tunnel:assist", async (e) =>
-    runAssist((stage) => e.sender.send("tunnel:progress", stage))
   );
   ipcMain.handle("tunnel:status", async () => tunnelStatus());
   ipcMain.handle("tunnel:disconnect", async () => {

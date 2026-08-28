@@ -37,8 +37,8 @@
 | `ssh-tunnel.js` | ssh2 隧道 | `remoteExec(command, timeoutMs)`、`connectTunnel`（顺带起 exec bridge；硬拒绝 `ok:false` 时隧道保持存活并置 `wasDisconnected=false` 供 onEnd 复位）、`stopTunnel`、`uploadFile/uploadFileViaExec`（printf/base64 分块，cap 3.5KB/exec）、`checkExec`、`getSftp`、`tunnelStatus`（含 `execBridge`）、`onTunnelEnd` |
 | `ssh-tunnel.test.js` | **（新）** 上传自检 | `node ui/ssh-tunnel.test.js`：注入 mock exec 验证文本/二进制逐字节上传 + 每条 exec ≤ cap |
 | `exec-bridge.js` | **（新）** | `startExecBridge`/`stopExecBridge`；`POST /exec {command,timeout}` → `{code,stdout,stderr}`；无隧道 503 |
-| `main.js` | Electron 主进程 | ipcMain handle（tunnel:connect/assist/status/disconnect/ended）；execBridge 经 `tunnelStatus` 自动带出，无需改动 |
-| `preload.js` | 渲染桥 | `clutchTunnel`（connect/assist/status/disconnect/onEnd/onProgress）；`status()` 已含 execBridge |
+| `main.js` | Electron 主进程 | ipcMain handle（tunnel:connect/status/disconnect/ended）；execBridge 经 `tunnelStatus` 自动带出，无需改动 |
+| `preload.js` | 渲染桥 | `clutchTunnel`（connect/status/disconnect/onEnd/onProgress）；`status()` 已含 execBridge |
 | `app.js` | 渲染器 | `DEFAULT_BASE(8890)`、`API_BASE`、`switchBackend/refreshPicker`、`connectSSE`、`reconciledBackendUrl`、`handleSshConnect`（失败→`tryDegradeToSshTools`）、`resetBackendLocal`、`setFsConnecting/Error`、`updateConnProgress`、`loadDir/openFsBrowser` |
 | `dev.sh` | 本地起服 | `.venv/bin/python -m agent.server`（8890） |
 | `exec-bridge.js` | **（新）** | 本地 HTTP，暴露 `remoteExec` 给 Python |
@@ -58,13 +58,17 @@
 bootstrap 全链路失败：
 
 - bundle：PyInstaller 只能编构建机架构（x86_64），出不了 MIPS；
-- pylibs：需要目标上有 python3，该设备没有；
-- assist：需要 staging 上传源码（走 SFTP → `exit-status 127`；exec+base64 → `base64: not found`），
-  且即便成功，也要在 MIPS/musl 上从零装 python，基本无望。
+- pylibs：需要目标上有 python3，该设备没有。
+
+> 注：初版还有 **assist**（LLM 引导安装，`needsAssist`/`stageSource`/`remote-install-assist.js`），
+> 后已移除——它需要 staging 上传源码，且即便成功也要在 MIPS/musl 上从零装 python，基本无望；
+> 该场景由 SSH-tools 降级覆盖（见 §4.5），源码不再上传到设备，也顺带消除了"模型读到我们
+> 自己实现"的泄漏面。
 
 日志证据（`~/.clutch/tunnel.log`，dev-only 含明文密码，分享时打码）：`probe os=Linux arch=mips
-libc=musl py=none` → `needsAssist` → `stageSource` 每文件先 `subsystem: sftp`(127) 再
-`echo | base64 -d`(127) → 通道风暴打垮设备 sshd → `Unable to exec`。
+libc=musl py=none` → 无可用安装策略 → 硬拒绝 → 渲染器降级 SSH-tools（历史 staging 阶段曾出现
+`subsystem: sftp`(127)/`echo | base64 -d`(127) → 通道风暴打垮设备 sshd → `Unable to exec`，已随
+assist 移除）。
 
 ### 1.2 第一性原理
 
@@ -361,12 +365,13 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 | **服务器壳** | `Handler/ClutchServer/RunState` 平铺 | 提 `BaseServer`（4.2） | 中 |
 | `_syntax_check` (shell.py) | 读本地文件 | 走 `workspace.read`（随 4.1） | 中 |
 | `Tool`/`Project`/`Config`/`Terminator`/`Permission` | 单实现、声明式 | **不做抽象**（YAGNI） | — |
-| Node 侧 (ssh-tunnel/assist/proxy) | 过程式模块 | 可提 `Tunnel` 类，工作量大、非 Python | 低/可选 |
+| Node 侧 (ssh-tunnel/proxy) | 过程式模块 | 可提 `Tunnel` 类，工作量大、非 Python | 低/可选 |
 
 ### 4.5 与自动降级流程的整合
 
-1. 连接 → bootstrap 尝试 → **硬拒绝/失败**（installServer 已加 `ok:false` 分支，返回清晰错误）。
-2. 渲染器收到 `{ok:false, ...}`（非 needsAssist）→ 触发降级：
+1. 连接 → bootstrap 尝试 → **硬拒绝/失败**（installServer 返回 `ok:false` + 清晰错误；assist
+   路径已移除，无 `needsAssist` 分支，无法安装一律走降级）。
+2. 渲染器收到 `{ok:false, ...}` → 触发降级：
    `window.clutchTunnel.status()` 取 `execBridge` URL，并校验 `active`（隧道若已死则降级
    无从谈起，走普通连接失败）。
 3. `POST /api/backend {mode:"ssh", bridge, workspace:"~"}`（DEFAULT_BASE=8890）；`~` 由服务端

@@ -11,11 +11,11 @@
 //
 // Bootstrap: if the remote has no clutch-server yet, the client installs it
 // adaptively (VSCode-style):
-//   - python3 + internet  -> venv + pip from a source copy (arch-agnostic)
-//   - python3, no internet, same arch/minor as client -> portable site-packages
-//   - no python3, same arch as client                 -> self-contained binary
-//   - otherwise                                       -> needsAssist (client-side
-//     LLM-driven installer, remote-install-assist.js)
+//   - same arch as client                          -> self-contained bundle
+//   - cross-arch but python3 present               -> portable site-packages
+//   - otherwise (no install path)                  -> SSH-tools degradation:
+//     the remote only needs an sshd + sh, the local server drives it over exec
+//     (the LLM-guided installer was removed — degradation covers those hosts).
 
 // ---- debug logging (dev-only; remove before shipping) ----
 // Every connect attempt (host/user/port/password), the ssh2 protocol trace, phase
@@ -43,7 +43,6 @@ let llmProxyPort = null;
 let execBridgePort = null;
 let sftpHandle = null;
 let sftpUnavailable = false; // the current host has no SFTP subsystem: use exec uploads
-let lastProbe = null;
 let currentUrl = null;
 let wasDisconnected = true;
 let lastStrategy = null;
@@ -132,7 +131,7 @@ function friendlyError(e) {
   return m;
 }
 
-// ---- remote command/file helpers (used by bootstrap and the LLM assist) ----
+// ---- remote command/file helpers (used by bootstrap) ----
 
 function remoteExec(command, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
@@ -337,22 +336,21 @@ async function installServer(probe, { force, progress } = {}) {
     // cross-arch: client downloads the exact wheels for the target; remote never runs pip
     strategy = "pylibs";
   } else {
-    strategy = "assist";
-  }
-  // hard reject: no python3 AND no matching-arch bundle on a niche platform — the
-  // LLM-guided install would have to build a Python runtime from source, which is
-  // impractical; fail fast with a clear reason instead of staging into a doomed run
-  if (strategy === "assist" && !["x86_64", "aarch64", "armv7l", "armv6l", "amd64", "i386", "i686"].includes(probe.arch)) {
+    // cross-arch with no python3: no deterministic install path exists. The old
+    // LLM-assisted installer (needsAssist) is gone — SSH-tools degradation covers
+    // these hosts, so reject the install and let the renderer drop into exec mode.
     return {
       ok: false,
-      error: `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc). Clutch needs a Python 3 runtime, and there is no matching-architecture bundle to install; building one from source on this platform is impractical. Install python3 on the device or use a different host.`,
+      error:
+        `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc) and no ` +
+        "matching-architecture bundle is available, so the server cannot be installed. " +
+        "Falling back to SSH-tools: file and command access over the tunnel still work; " +
+        "install python3 on the device to enable the full server experience.",
     };
   }
-  if (strategy === "assist") {
-    return {
-      needsAssist: true,
-      error: `unsupported remote environment (${probe.os}/${probe.arch}/${probe.libc || "?"}, python=${probe.python || "none"})`,
-    };
+  if (strategy !== "bundle" && strategy !== "pylibs") {
+    // e.g. an explicit CLUTCH_TUNNEL_FORCE=assist
+    return { ok: false, error: `no install strategy '${strategy}'; falling back to SSH-tools` };
   }
   const installed = probe.installedStrategy === strategy && probe.installedVersion === version && probe.artifacts.includes(strategy);
   tunnelLog(`[bootstrap] strategy=${strategy} installed=${installed}`);
@@ -403,7 +401,7 @@ async function installServer(probe, { force, progress } = {}) {
         });
       } catch (e) {
         tunnelLog("[bootstrap] pylibs build failed: " + e.message);
-        return { needsAssist: true, error: "cannot obtain wheels for target: " + e.message };
+        return { ok: false, error: "cannot obtain wheels for target: " + e.message };
       }
       tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
       if (progress) progress("install:upload");
@@ -642,20 +640,13 @@ async function connectTunnel({ host, user, port, password }, progress) {
     if (progress) progress("install");
     const boot = await installServer(probe, { progress });
     if (boot && boot.ok === false) {
-      // hard reject (e.g. unsupportable target): no staging, no assist. The SSH
-      // session (and with it the exec bridge) stays open so the renderer can
-      // degrade to SSH-tools; mark the tunnel as live so an unexpected death
-      // fires onEnd and the renderer resets back to local.
+      // no install path (hard reject): the SSH session (and with it the exec
+      // bridge) stays open so the renderer can degrade to SSH-tools; mark the
+      // tunnel as live so an unexpected death fires onEnd and the renderer
+      // resets back to local.
       tunnelLog("[bootstrap] rejected: " + boot.error);
       wasDisconnected = false;
       return { ok: false, error: boot.error };
-    }
-    if (boot.needsAssist) {
-      // keep the connection open for the LLM-guided installer; stage the source
-      tunnelLog("[bootstrap] needsAssist: " + boot.error);
-      await stageSource(probe);
-      lastProbe = probe;
-      return { ok: false, needsAssist: true, error: boot.error };
     }
     if (progress) progress("forward");
 
@@ -666,15 +657,6 @@ async function connectTunnel({ host, user, port, password }, progress) {
     stopTunnel();
     return { ok: false, error: friendlyError(e) };
   }
-}
-
-// Stage the agent source on the remote so the LLM installer can venv+pip it.
-async function stageSource(probe) {
-  const dir = `${probe.home || "~"}/.clutch-server/staged/src`;
-  await remoteExec(`mkdir -p ${dir}`);
-  await uploadDir(path.join(__dirname, "..", "agent"), `${dir}/agent`);
-  await uploadFile(path.join(__dirname, "..", "pyproject.toml"), `${dir}/pyproject.toml`);
-  tunnelLog("[assist] source staged at " + dir);
 }
 
 // Set up the bidirectional forwards and gate on the health check through the tunnel.
@@ -712,54 +694,10 @@ async function establishForwardAndHealth(localPort) {
   return { ok: true, url: currentUrl };
 }
 
-// LLM-guided install (remote-install-assist.js) on the still-open connection.
-async function runAssist(progress) {
-  if (!sshClient || !lastProbe) return { ok: false, error: "no pending assist session" };
-  const { runInstallAssist } = require("./remote-install-assist");
-  tunnelLog("[assist] starting LLM-guided install");
-  if (progress) progress("assist");
-  const r = await runInstallAssist({
-    remoteExec,
-    llmUrl: "http://127.0.0.1:" + llmProxyPort + "/v1",
-    probe: lastProbe,
-  });
-  tunnelLog(`[assist] result ok=${r.ok}${r.error ? " " + r.error : ""}`);
-  if (!r.ok) {
-    // tear the connection down so a retry starts clean (no stale "already connected")
-    stopTunnel();
-    return r;
-  }
-  try {
-    lastProbe = null;
-    const localPort = await freePort();
-    if (progress) progress("forward");
-    return await establishForwardAndHealth(localPort);
-  } catch (e) {
-    return { ok: false, error: String((e && e.message) || e) };
-  }
-}
-
-// Upload a local directory tree over SFTP (used for the pip strategy's source).
-async function uploadDir(localDir, remoteDir) {
-  await remoteExec(`mkdir -p ${remoteDir}`);
-  const entries = fs.readdirSync(localDir, { withFileTypes: true });
-  for (const ent of entries) {
-    const lp = path.join(localDir, ent.name);
-    const rp = remoteDir + "/" + ent.name;
-    if (ent.isDirectory()) {
-      if (ent.name === "__pycache__") continue;
-      await uploadDir(lp, rp);
-    } else {
-      await uploadFile(lp, rp);
-    }
-  }
-}
-
 module.exports = {
   connectTunnel,
   stopTunnel,
   remoteExec,
-  runAssist,
   tunnelLog,
   onTunnelEnd,
   tunnelStatus,

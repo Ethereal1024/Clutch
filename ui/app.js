@@ -884,7 +884,6 @@ const CONN_STAGES = {
   install: { pct: 35, label: "Installing remote server…" },
   "install:upload": { pct: 45, label: "Uploading server…" },
   "install:start": { pct: 70, label: "Starting server…" },
-  assist: { pct: 45, label: "Guided install in progress…" },
   forward: { pct: 90, label: "Starting tunnel…" },
 };
 function updateConnProgress(stage) {
@@ -943,28 +942,13 @@ async function handleSshConnect(host, user, port, statusEl) {
   try {
     // try keys/agent first; only prompt for a password if auth fails
     let res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
-    if (!res.ok && res.error && /authentication/i.test(res.error) && !res.needsAssist) {
+    if (!res.ok && res.error && /authentication/i.test(res.error)) {
       const pw = await showPasswordPrompt("Password for " + user + "@" + host);
       if (!pw) {
         setFsConnectError("connection cancelled", statusEl);
         return;
       }
       res = await window.clutchTunnel.connect({ host, user, port: Number(port), password: pw });
-    }
-    if (res.needsAssist) {
-      statusEl.textContent =
-        "Remote environment not recognized (" + (res.error || "?") + "). Running LLM-guided install…";
-      const a = await window.clutchTunnel.assist();
-      if (a.ok) {
-        upsertConn(host, user, port);
-        localStorage.setItem("clutch_ssh_connected", "1");
-        switchBackend(a.url); // stay in the picker, now against the remote
-        refreshPicker();
-        return true;
-      } else {
-        setFsConnectError("auto-install failed: " + (a.error || "unknown"), statusEl);
-      }
-      return;
     }
     if (res.ok) {
       upsertConn(host, user, port);
