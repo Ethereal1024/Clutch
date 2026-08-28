@@ -745,23 +745,38 @@ function connLabel(c) {
 function renderConnSelector() {
   const override = localStorage.getItem("clutch_api_url");
   const connected = override && localStorage.getItem("clutch_ssh_connected");
+  const cHost = localStorage.getItem("clutch_ssh_host");
+  const cUser = localStorage.getItem("clutch_ssh_user");
+  const cPort = localStorage.getItem("clutch_ssh_port");
   connSelect.innerHTML = "";
   const localOpt = document.createElement("option");
   localOpt.value = "local";
   localOpt.textContent = "Local backend (127.0.0.1:8890)";
   connSelect.appendChild(localOpt);
+  // select the actual host entry we're connected to (marked ✓) instead of adding a
+  // synthetic URL option — picking qianli must leave qianli selected
+  let connectedValue = null;
   for (const c of sshConns()) {
+    const label = connLabel(c);
+    const isConnected =
+      connected && c.host === cHost && c.user === cUser && String(c.port) === String(cPort);
     const opt = document.createElement("option");
-    opt.value = "ssh:" + connLabel(c);
-    opt.textContent = connLabel(c);
+    opt.value = "ssh:" + label;
+    opt.textContent = isConnected ? label + " ✓" : label;
     connSelect.appendChild(opt);
+    if (isConnected) connectedValue = opt.value;
   }
   if (connected) {
-    const opt = document.createElement("option");
-    opt.value = "ssh:__connected__";
-    opt.textContent = "SSH: " + override + " ✓";
-    connSelect.appendChild(opt);
-    connSelect.value = "ssh:__connected__";
+    if (connectedValue) {
+      connSelect.value = connectedValue;
+    } else {
+      // connected to a manually-set URL with no matching saved host
+      const opt = document.createElement("option");
+      opt.value = "ssh:__connected__";
+      opt.textContent = "SSH: " + override + " ✓";
+      connSelect.appendChild(opt);
+      connSelect.value = "ssh:__connected__";
+    }
   } else {
     connSelect.value = "local";
   }
@@ -801,15 +816,10 @@ let connBusy = false; // a connect is in flight: ignore re-clicks
 // buttons) during an SSH connect or after a failure — only the conn bar with its
 // single status line + progress bar remains, no duplicate message, no dead space.
 function hidePickerBody() {
-  $("#fs-toolbar").classList.add("hidden");
-  $("#fs-list").classList.add("hidden");
-  $("#fs-new").classList.add("hidden");
-  $("#fs-actions").classList.add("hidden");
+  $("#fs-body").classList.add("collapsed");
 }
 function showPickerBody() {
-  $("#fs-toolbar").classList.remove("hidden");
-  $("#fs-list").classList.remove("hidden");
-  $("#fs-actions").classList.remove("hidden");
+  $("#fs-body").classList.remove("collapsed");
   $("#fs-new").classList.toggle("hidden", fsMode !== "new");
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");

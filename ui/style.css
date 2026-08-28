@@ -489,6 +489,12 @@ main { display: flex; flex: 1; min-height: 0; }
 .conn-progress-fill.indeterminate { width: 35%; animation: conn-slide 1.1s ease-in-out infinite; }
 @keyframes conn-slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
 #conn-reset { margin-top: 8px; padding: 2px 8px; font-size: 12px; }
+/* the file-browsing body collapses smoothly during SSH connect (height + fade).
+   grid-template-rows animates the real content height without a max-height guess */
+#fs-body { display: grid; grid-template-rows: 1fr; opacity: 1;
+           transition: grid-template-rows .3s ease, opacity .25s ease; }
+#fs-body.collapsed { grid-template-rows: 0fr; opacity: 0; }
+#fs-body > .fs-body-inner { overflow: hidden; min-height: 0; }
 .fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
 .fs-toolbar input { flex: 1; }
 #fs-list {
