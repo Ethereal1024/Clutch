@@ -7,7 +7,7 @@
 
 ## 0. 现状代码地图（改动手册）
 
-仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交（P4 完成）。
+仓库根：`/home/fanshu/Workplace/Clutch/clutch`。HEAD 提交 `1762c8e`（P4 完成，全部阶段 ✅）。
 
 ### Python 后端（`agent/`，本地 server 默认 8890）
 
@@ -382,7 +382,7 @@ class DeepSeekLlmClient(LlmClient):   # 现实现；_classify/重试保留
 | **P1 — A 层纯重构** | `transport.py`（Transport/LocalTransport）+ `Workspace` 基类/`LocalWorkspace` + 工具改道；本地行为逐字节不变 | `uv run python -m agent.selfcheck && uv run python -m agent.loop_test && uv run python -m agent.server_test && node --check ui/app.js ui/ssh-tunnel.js` | ✅ `2525e99` |
 | **P2 — 退化层集成** | `ui/exec-bridge.js` + `SshTransport` + `RemoteWorkspace`(tool→sh) + `/api/backend` + 远端 .clc（EventLog writer/project.py）+ `run_verify`/`_syntax_check`/`_fs_list` transport 化 | 用 mock bridge 或真实无 python 主机走通：浏览远端、打开远端 .clc、跑一个任务 | ✅ `c59e744` |
 | **P3 — B/C 层重构** | `agent/base.py`（BaseServer/HttpAgentServer）+ `LlmClient` ABC + 吸收 `eval/harness.py`；纯重构 | 同上测试全绿；eval 结果与重构前一致 | ✅ `6f117f7` |
-| **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ✅ 见 P4 提交 |
+| **P4 — 自动降级接线** | `main.js/preload.js` 暴露 `execBridge`；app.js 失败→降级→复位 | 主流主机行为不变；极端主机自动降级可走通 | ✅ `1762c8e` |
 
 P1 子步骤：
 1. `agent/tools/transport.py`：`CommandResult`/`TransportError`/`Transport` ABC/`LocalTransport`。
@@ -441,7 +441,7 @@ P4 子步骤：`main.js/preload.js`（execBridge）+ `app.js`（降级/复位流
 
 ## 8. 仓库现状与新会话入口
 
-- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD（P4 完成，全部阶段 ✅）。
+- git root：`/home/fanshu/Workplace/Clutch/clutch`；HEAD `1762c8e`（P4 完成，全部阶段 ✅）。
 - 回滚分支：`pre-refactor-rollback` @ `6e52ca7`。
 - 测试：`uv run python -m agent.selfcheck` / `agent.loop_test` / `agent.server_test`；
   `uv run ruff check .` / `uv run ruff format --check .`；`node --check ui/*.js`；`bash -n ui/dev.sh`。
