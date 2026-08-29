@@ -15,6 +15,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["agent"]
 
+# ship the cross-language transport defaults (workspace.py and ui/ssh-tunnel.js
+# both read this single source for the remote wire limits)
+[tool.hatch.build.targets.wheel.force-include]
+"agent/transport_defaults.json" = "agent/transport_defaults.json"
+
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true

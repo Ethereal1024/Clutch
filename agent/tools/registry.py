@@ -52,7 +52,7 @@ def build_default_tools(config: Config) -> List[Tool]:
             name="read_file",
             description=(
                 "Read a file in the workspace. path is relative to the workspace root. "
-                "Large files are truncated; use max_chars to control the size. "
+                f"Large files are truncated; use max_chars to control the size (default {config.read_max_chars}). "
                 "Only read files relevant to the task; content-creation tasks do not "
                 "need to explore the workspace."
             ),
@@ -155,7 +155,7 @@ def _build_load_skill(config: Config) -> Optional[Tool]:
     )
 
 
-def _load_skill(workspace: Workspace, config: Config, name: str, file: str = "SKILL.md") -> dict:
+def _load_skill(_workspace: Workspace, config: Config, name: str, file: str = "SKILL.md") -> dict:
     """Serve SKILL.md (or a sub-file) from the skill's directory; error-as-data."""
     lib = cached_library(config.skills_dir)
     skill = lib.get(name)

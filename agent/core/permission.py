@@ -65,12 +65,16 @@ DEFAULT_RULES: List[Rule] = [
     Rule("ask", "run_command", r"(\.\./|^/)"),
 ]
 
+# how much of the args JSON to surface in an ask reason
+_ARGS_REPR_MAX = 120
+
 
 @dataclass
 class PermissionEvaluator:
     rules: List[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
-    def evaluate(self, tool: str, args_repr: str, workspace: Workspace) -> Action:
+    # how much of the args JSON to surface in an ask reason
+    def evaluate(self, tool: str, args_repr: str, _workspace: Workspace) -> Action:
         # Rules match the ACTUAL argument they guard, not the whole JSON envelope:
         # run_command matches the command; write_file matches the target path.
         # Matching against the full args would flag e.g. a report whose CONTENT
@@ -141,7 +145,7 @@ class PermissionGate:
             ev = threading.Event()
             self._pending[request_id] = ev
             self._decisions[request_id] = False
-        reason = f"permission {action}: {tool} with args {args_repr[:120]}"
+        reason = f"permission {action}: {tool} with args {args_repr[:_ARGS_REPR_MAX]}"
         if self.on_ask and self.on_ask(request_id, tool, args_repr, reason) is False:
             # nobody can see/answer the prompt (renderer disconnected): deny rather
             # than wait forever on an invisible request

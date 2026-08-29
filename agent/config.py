@@ -17,6 +17,10 @@ class Config:
     base_url: str = "https://api.deepseek.com"
     # API key from the GUI settings (persisted outside the repo); env still applies
     api_key: str | None = None
+    # LLM request tuning
+    llm_request_timeout: float = 60.0
+    llm_max_retries: int = 3
+    llm_retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
     # Loop budget
     max_turns: int = 20

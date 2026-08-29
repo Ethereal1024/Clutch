@@ -14,6 +14,7 @@ so local and remote behave identically.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -27,9 +28,13 @@ def shq(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+# Single source for the remote-wire limits, shared with the Node exec upload path
+# (ui/ssh-tunnel.js) so the two languages can never drift apart.
+_DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defaults.json").read_text(encoding="utf-8"))
+
+
 class Workspace(ABC):
     def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
-        self._own_dir = root is None
         self.root: Path = Path(root) if root else Path(tempfile.mkdtemp(prefix="clutch-"))
         self.root.mkdir(parents=True, exist_ok=True)
         self._transport = transport or LocalTransport(str(self.root))
@@ -81,12 +86,6 @@ class Workspace(ABC):
     def append_line(self, path: str, line: str) -> None:
         """Append one line to a file (the remote .clc EventLog writer)."""
 
-    def cleanup(self) -> None:
-        if self._own_dir:
-            import shutil
-
-            shutil.rmtree(self.root, ignore_errors=True)
-
 
 class LocalWorkspace(Workspace):
     def read(self, path: str) -> str:
@@ -116,9 +115,15 @@ class LocalWorkspace(Workspace):
 # single exec request over ~8KB (measured on the test router: 7929 B ok, 9636 B
 # died). Every remote write/append is chunked well below that, and run_command
 # commands are capped so an oversized inline command fails cleanly instead of
-# killing the tunnel (which would teach the model a hard limit).
-_EXEC_CHUNK_BYTES = 3500
-_EXEC_MAX_COMMAND_BYTES = 6000
+# killing the tunnel (which would teach the model a hard limit). The limits come
+# from transport_defaults.json — the same file ui/ssh-tunnel.js reads.
+_EXEC_CHUNK_BYTES = int(_DEFAULTS["exec_chunk_bytes"])
+_EXEC_MAX_COMMAND_BYTES = int(_DEFAULTS["exec_max_command_bytes"])
+
+# generous per-op timeout for internal remote file ops (read/write/list/append)
+_REMOTE_IO_TIMEOUT = 60.0
+# how much of a failed exec's stderr/stdout to show in the raised error
+_ERR_SNIPPET = 300
 
 
 class RemoteWorkspace(Workspace):
@@ -149,7 +154,7 @@ class RemoteWorkspace(Workspace):
 
     def read(self, path: str) -> str:
         p = self.resolve(path)
-        r = self._transport.run(f"cat {shq(str(p))}", 60.0)
+        r = self._transport.run(f"cat {shq(str(p))}", _REMOTE_IO_TIMEOUT)
         if r.code != 0:
             raise FileNotFoundError(str(p))
         return r.stdout
@@ -195,9 +200,9 @@ class RemoteWorkspace(Workspace):
             op = first_op if i == 0 else ">>"
             prefix = f"mkdir -p {shq(str(p.parent))} && " if (ensure_dir and i == 0) else ""
             cmd = f"{prefix}printf '{fmt}' {shq(chunk)} {op} {shq(str(p))}"
-            r = self._transport.run(cmd, 60.0)
+            r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
             if r.code != 0:
-                raise OSError(f"write failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+                raise OSError(f"write failed (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
 
     def write(self, path: str, content: str) -> None:
         p = self.resolve(path)
@@ -207,7 +212,7 @@ class RemoteWorkspace(Workspace):
         p = self.resolve(path)
         # ls alone succeeds on a plain file; test -d first so a non-dir surfaces
         # as NotADirectoryError like LocalWorkspace.list
-        r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", 60.0)
+        r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", _REMOTE_IO_TIMEOUT)
         if r.code != 0:
             raise NotADirectoryError(str(p))
         return self._parse_list_output(p, r.stdout)
@@ -248,9 +253,9 @@ class RemoteWorkspace(Workspace):
         if cur_cmd:
             groups.append((cur_group, "; ".join(cur_cmd)))
         for group, cmd in groups:
-            r = self._transport.run(cmd, 60.0)
+            r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
             if r.code != 0:
-                raise OSError(f"list failed (exit {r.code}): {(r.stderr or r.stdout)[:300]}")
+                raise OSError(f"list failed (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
             raw: dict[str, list[str]] = {}
             current: str | None = None
             for line in r.stdout.splitlines():

@@ -109,7 +109,7 @@ def main() -> int:
     parser.add_argument("--scenario", default=None, help="run only this scenario dir name")
     parser.add_argument("--repeat", type=int, default=1, help="times to repeat each scenario")
     parser.add_argument("--max-turns", type=int, default=25)
-    parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument("--model", default=Config().model)
     args = parser.parse_args()
 
     config = Config(model=args.model, max_turns=args.max_turns)

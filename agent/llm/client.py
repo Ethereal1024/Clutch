@@ -13,18 +13,12 @@ import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Collection, Dict, Iterator, List, Optional
 
 import httpx2
 from openai import OpenAI
 
 from .proxy import get_proxy_for_url
-
-DEFAULT_MODEL = "deepseek-v4-flash"
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-MAX_RETRIES = 3
-RETRYABLE_STATUS = {429, 500, 502, 503, 504}
-REQUEST_TIMEOUT = 60.0
 
 
 @dataclass
@@ -51,17 +45,23 @@ class DeepSeekLlmClient(LlmClient):
     def __init__(
         self,
         api_key: str | None = None,
-        base_url: str = DEFAULT_BASE_URL,
-        model: str = DEFAULT_MODEL,
+        base_url: str = "https://api.deepseek.com",
+        model: str = "deepseek-v4-flash",
+        request_timeout: float = 60.0,
+        max_retries: int = 3,
+        retryable_status: Collection[int] = frozenset({429, 500, 502, 503, 504}),
     ) -> None:
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         if not self.api_key:
             raise RuntimeError("missing DEEPSEEK_API_KEY (env or argument)")
+        self.request_timeout = request_timeout
+        self.max_retries = max_retries
+        self.retryable_status = retryable_status
         # Build our own httpx transport: trust_env=False so httpx never reads the
         # ambient *proxy vars (socks:// would crash it); instead we feed it a single
         # proxy URL resolved through proxy.py, which skips unsupported schemes.
         proxy = get_proxy_for_url(base_url)
-        http_client = httpx2.Client(proxy=proxy, trust_env=False, timeout=REQUEST_TIMEOUT)
+        http_client = httpx2.Client(proxy=proxy, trust_env=False, timeout=self.request_timeout)
         self.client = OpenAI(api_key=self.api_key, base_url=base_url, http_client=http_client)
         self.model = model
 
@@ -79,7 +79,7 @@ class DeepSeekLlmClient(LlmClient):
           {"type":"tool_call_delta","index":..,"delta":str}
           {"type":"finish","reason":str,"content":str,"tool_calls":[{id,name,arguments}]}
         """
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(self.max_retries):
             try:
                 kwargs: Dict[str, Any] = {"model": self.model, "messages": messages}
                 if tools:
@@ -153,13 +153,13 @@ class DeepSeekLlmClient(LlmClient):
                 }
                 return
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
-                last_err = _classify(e)
-                if not last_err.retryable or attempt == MAX_RETRIES - 1:
+                last_err = _classify(e, self.retryable_status)
+                if not last_err.retryable or attempt == self.max_retries - 1:
                     raise last_err from e
                 time.sleep((2**attempt) + attempt * 0.5)
 
 
-def _classify(e: Exception) -> LlmError:
+def _classify(e: Exception, retryable_status: Collection[int]) -> LlmError:
     """Normalize openai SDK exceptions into a structured LlmError."""
     import openai
 
@@ -176,7 +176,7 @@ def _classify(e: Exception) -> LlmError:
         return LlmError(
             code="api_error",
             status=status,
-            retryable=status in RETRYABLE_STATUS,
+            retryable=status in retryable_status,
             message=str(e),
         )
     return LlmError(code="unknown", retryable=False, message=str(e))

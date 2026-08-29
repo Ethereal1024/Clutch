@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .events import DURABLE_TYPES, EventLog, event_from_dict, event_to_json
-from .tools.workspace import shq
+from .tools.workspace import _REMOTE_IO_TIMEOUT, shq
 
 HEADER_PREFIX = "# clutch project v1"
 SEPARATOR = "---"
@@ -124,7 +124,7 @@ def _rewrite_durable(path: Path, meta: ProjectMeta, events: list, workspace=None
     if workspace is not None:
         tmp = str(path) + ".tmp"
         workspace.write(tmp, content)
-        workspace.run(f"mv -f {shq(tmp)} {shq(str(path))}", 60.0)
+        workspace.run(f"mv -f {shq(tmp)} {shq(str(path))}", _REMOTE_IO_TIMEOUT)
         return
     tmp = path.with_suffix(".clc.tmp")
     with open(tmp, "w", encoding="utf-8") as f:

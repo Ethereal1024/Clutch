@@ -121,6 +121,9 @@ class BaseServer(ABC):
             api_key=self.state.api_key or self.config.api_key,
             model=self.config.model,
             base_url=self.config.base_url,
+            request_timeout=self.config.llm_request_timeout,
+            max_retries=self.config.llm_max_retries,
+            retryable_status=self.config.llm_retryable_status,
         )
 
     def build_tools(self) -> ToolRegistry:

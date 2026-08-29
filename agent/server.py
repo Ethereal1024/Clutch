@@ -387,9 +387,9 @@ class Handler(BaseHTTPRequestHandler):
         else:
             target = base
         if target == "~" or target.startswith("~/"):
-            home = transport.run("echo $HOME", 30.0).stdout.strip() or base
+            home = transport.run("echo $HOME", _FS_LIST_TIMEOUT).stdout.strip() or base
             target = home if target == "~" else home + target[1:]
-        r = transport.run(f"ls -1AF {shq(target)}", 30.0)
+        r = transport.run(f"ls -1AF {shq(target)}", _FS_LIST_TIMEOUT)
         if r.code != 0:
             return self._json({"error": f"not a directory: {target}"})
         entries = []
@@ -521,6 +521,10 @@ def _replace(config: Config, **kw: Any) -> Config:
     return dataclasses.replace(config, **kw)
 
 
+# per-exec timeout for remote directory browsing (one ls / echo $HOME over the bridge)
+_FS_LIST_TIMEOUT = 30.0
+
+
 def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
     """Remote counterpart of _walk: same lazy partial walk (root + expanded dirs +
     one-level lookahead), but every level lists all its directories in ONE exec
@@ -622,10 +626,11 @@ def build(
 
 
 def main() -> int:
+    defaults = Config()
     parser = argparse.ArgumentParser(prog="clutch-server")
-    parser.add_argument("--host", default="127.0.0.1", help="bind address (0.0.0.0 to expose to other devices)")
-    parser.add_argument("--port", type=int, default=8890)
-    parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument("--host", default=defaults.host, help="bind address (0.0.0.0 to expose to other devices)")
+    parser.add_argument("--port", type=int, default=defaults.port)
+    parser.add_argument("--model", default=defaults.model)
     parser.add_argument(
         "--base-url",
         default=None,

@@ -197,8 +197,10 @@ function checkExec(r) {
 
 // A minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a single
 // exec request over ~8KB (measured on the test router: 7,929B ok / 9,636B died).
-// Every upload exec command stays well under that.
-const EXEC_CHUNK_BYTES = 3500;
+// Every upload exec command stays well under that. The limit is the single
+// source in agent/transport_defaults.json — the same file the Python side reads,
+// so the two languages can never drift apart.
+const { exec_chunk_bytes: EXEC_CHUNK_BYTES } = require("../agent/transport_defaults.json");
 
 function shq(s) {
   // single-quote for sh: ' -> '\'' (works on any POSIX shell)
