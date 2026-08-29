@@ -136,7 +136,10 @@
         <textarea id="task-input" rows="3"
           placeholder="Describe a coding task for the agent, e.g.: build a landing page for our product from content.md"></textarea>
         <div class="actions">
-          <button id="run-btn" class="primary">▶ Run</button>
+          <div class="run-actions">
+            <button id="run-btn" class="primary">▶ Run</button>
+            <button id="mode-btn" title="chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.">work</button>
+          </div>
           <span id="workspace-path" class="muted" title="active working directory"></span>
         </div>
       </div>
@@ -146,6 +149,7 @@
           <span class="open-progress-label">0%</span>
         </div>
         <div id="events" class="events"></div>
+        <button id="jump-bottom" class="jump-bottom hidden" type="button" title="scroll to bottom">↓</button>
       </div>
     </section>
 

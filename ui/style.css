@@ -131,6 +131,19 @@ button.primary.stop-mode:hover:not(:disabled) { background: #fbe6e6; border-colo
   text-align: center;
 }
 
+/* mode toggle sits next to Run and matches its size/spec (same padding stack,
+   same line-height) so the taskbar row stays aligned */
+.run-actions { display: flex; align-items: center; gap: 8px; }
+#mode-btn {
+  min-width: 56px;
+  line-height: 1;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#mode-btn.chat-mode { border-color: var(--accent); color: var(--accent); }
+#mode-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
 select {
   background: var(--bg2);
   color: var(--text);
@@ -303,11 +316,22 @@ main { display: flex; flex: 1; min-height: 0; }
   font-family: var(--font-mono); font-size: 12px; overflow-x: auto;
   margin-top: 4px; flex-basis: 100%;
 }
-/* live streamed args: wrap instead of growing one line horizontally */
+/* live streamed args: wrap instead of growing one line horizontally; font metrics
+   match the completed .diff-view so the preview -> diff transition doesn't jump */
 .tool-args-detail.stream-pre {
   white-space: pre-wrap; overflow-wrap: anywhere;
-  overflow-x: hidden; overflow-y: auto; max-height: 200px;
+  overflow-x: hidden; overflow-y: auto;
+  font-size: 13px; line-height: 1.45; max-height: 320px;
 }
+/* floating 'jump to bottom' button, shown only while the user has scrolled up */
+.jump-bottom {
+  position: absolute; bottom: 16px; right: 20px; z-index: 10;
+  width: 34px; height: 34px; border-radius: 50%;
+  background: var(--bg2); border: 1px solid var(--border);
+  color: var(--accent); font-size: 18px; line-height: 1; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.jump-bottom:hover { border-color: var(--accent); }
 .event.tool_result::before { background: var(--accent); }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
 .event.tool_result.error::before { background: var(--accent); }

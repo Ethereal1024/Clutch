@@ -14,6 +14,7 @@ const $ = (s) => document.querySelector(s);
 const els = {
   task: $("#task-input"),
   run: $("#run-btn"),
+  mode: $("#mode-btn"),
   status: $("#status"),
   stream: $("#stream"),
   tree: $("#tree"),
@@ -21,16 +22,50 @@ const els = {
   projectLabel: $("#project-label"),
 };
 
+// agent mode for the next run: "work" (full tools) | "chat" (read-only).
+// Sticky per session (localStorage); applied in the /api/run payload, so a
+// switch only affects the NEXT run, never a running one.
+let agentMode = localStorage.getItem("clutch_mode") || "work";
+
+function setMode(mode) {
+  agentMode = mode === "chat" ? "chat" : "work";
+  localStorage.setItem("clutch_mode", agentMode);
+  els.mode.textContent = agentMode;
+  els.mode.classList.toggle("chat-mode", agentMode === "chat");
+  els.mode.title = agentMode === "chat"
+    ? "chat: read-only analysis · click for work mode (full access). Applies to the next run."
+    : "work: full access · click for chat mode (read-only analysis). Applies to the next run.";
+}
+
 let busy = false;
 const stream = $("#stream");
 const eventsEl = document.getElementById("events");
+const jumpBottom = $("#jump-bottom");
 
-// Follow the tail of the stream, but never during project-load: the content is
-// hidden then, so scrolling would only chase invisible events and drag the
-// pinned progress bar out of view.
-function autoScroll() {
-  if (!stream.classList.contains("loading")) stream.scrollTop = stream.scrollHeight;
+// how far from the bottom the view counts as "following the stream"
+const JUMP_BOTTOM_GAP = 80;
+
+function nearBottom() {
+  return stream.scrollHeight - stream.scrollTop - stream.clientHeight < JUMP_BOTTOM_GAP;
 }
+
+// Follow the tail of the stream, but never during project-load (content is hidden
+// then), and never yank the view back down if the user has scrolled up to read —
+// a floating '↓' button appears instead so they can return to the live tail.
+function autoScroll(force) {
+  if (stream.classList.contains("loading")) return;
+  if (force || nearBottom()) {
+    stream.scrollTop = stream.scrollHeight;
+    jumpBottom.classList.add("hidden");
+  } else {
+    jumpBottom.classList.remove("hidden");
+  }
+}
+
+jumpBottom.addEventListener("click", () => autoScroll(true));
+stream.addEventListener("scroll", () => {
+  jumpBottom.classList.toggle("hidden", nearBottom());
+}, { passive: true });
 
 function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
@@ -595,9 +630,11 @@ function appendCompletion(status, summary) {
     eventsEl.appendChild(note);
   }
   // live runs glide to the completion divider; during replay the end-scroll
-  // at openProject already lands on the last record, so skip the smooth pass
+  // at openProject already lands on the last record, so skip the smooth pass.
+  // If the user has scrolled up, don't yank them — the ↓ button is already shown.
   if (!stream.classList.contains("loading")) {
-    stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+    if (nearBottom()) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+    else jumpBottom.classList.remove("hidden");
   }
 }
 
@@ -757,8 +794,9 @@ async function run() {
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
-  // runs append to the active project's conversation
-  const payload = { task };
+  // runs append to the active project's conversation; the mode travels with the
+  // request so a switch only affects this run
+  const payload = { task, mode: agentMode };
   try {
     const r = await fetch(API_BASE + "/api/run", {
       method: "POST",
@@ -779,6 +817,8 @@ async function stop() {
 }
 
 els.run.addEventListener("click", () => (busy ? stop() : run()));
+els.mode.addEventListener("click", () => setMode(agentMode === "chat" ? "work" : "chat"));
+setMode(agentMode); // paint the stored mode on startup
 els.task.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
 });
