@@ -14,7 +14,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..config import Config
-from ..events import AssistantMessageEvent, EventLog, ToolResultEvent, UserMessageEvent
+from ..events import AssistantMessageEvent, CompactionEvent, EventLog, ToolResultEvent, UserMessageEvent
 from ..prompts import render
 from ..skills import cached_library
 
@@ -96,8 +96,18 @@ def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, Any]]:
-    """Derive model messages from the event log, applying windowing + char budget."""
+    """Derive model messages from the event log, applying compaction head +
+    windowing + char budget."""
     events = log.events()
+    head_msgs: list[dict[str, Any]] = []
+    # if the log was compacted, the newest CompactionEvent's summary is the head
+    # (it replaces everything before its tail_start), and only the recent tail is
+    # projected below.
+    compaction = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
+    if compaction is not None:
+        head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]
+        events = [e for e in events[compaction.tail_start :] if not isinstance(e, CompactionEvent)]
+
     assistant_idx = [i for i, e in enumerate(events) if isinstance(e, AssistantMessageEvent)]
 
     if len(assistant_idx) > config.max_history_turns:
@@ -140,7 +150,11 @@ def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, 
         if catalog:
             system += "\n\n" + catalog
 
-    return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": render("task.md", task=task)},
-    ] + msgs
+    return (
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": render("task.md", task=task)},
+        ]
+        + head_msgs
+        + msgs
+    )

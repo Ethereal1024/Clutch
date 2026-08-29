@@ -42,7 +42,8 @@ class Terminator:
         return False
 
     def check_turn_budget(self, turn: int) -> bool:
-        return turn > self.config.max_turns
+        # max_turns=0 means no limit (compaction keeps long runs going)
+        return self.config.max_turns > 0 and turn > self.config.max_turns
 
     def verify(self, workspace: Workspace) -> TerminateResult:
         """Run the verification gate. No command configured => pass-through."""

@@ -21,9 +21,11 @@ class Config:
     llm_request_timeout: float = 60.0
     llm_max_retries: int = 3
     llm_retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+    # model context window (used for compaction overflow detection); tune per model
+    llm_context_window: int = 128_000
 
     # Loop budget
-    max_turns: int = 20
+    max_turns: int = 0  # 0 = no turn limit (compaction keeps long runs going); >0 caps turns
     doom_loop_limit: int = 4
     abort_on_doom_loop: bool = True
 
@@ -31,6 +33,14 @@ class Config:
     max_history_turns: int = 24
     # soft char budget for tool outputs fed to the model; older results fold below it
     context_char_budget: int = 60000
+
+    # Compaction: when the conversation approaches the context window, the old turns
+    # are rolled into a summary and the run continues (opencode-style), instead of
+    # dropping them or aborting.
+    compaction_enabled: bool = True
+    compaction_reserved: int = 20_000  # headroom left for the completion output
+    compaction_tail_tokens: int | None = None  # recent tail to preserve; None = auto (~25% usable, cap 15k)
+    compaction_model: str | None = None  # model used to write summaries; None = the main model
 
     # Tool execution
     command_timeout: float = 30.0

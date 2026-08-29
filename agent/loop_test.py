@@ -12,7 +12,7 @@ import tempfile
 from typing import Any
 
 from .config import Config
-from .events import EventLog, FinalEvent, StateUpdateEvent
+from .events import CompactionEvent, EventLog, FinalEvent, StateUpdateEvent
 from .loop import Agent
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -22,9 +22,12 @@ from .tools.workspace import LocalWorkspace, Workspace
 class FakeLLM:
     """Yields canned responses in order, then always the final one."""
 
-    def __init__(self, responses: list[dict[str, Any]], fallback: dict[str, Any]) -> None:
+    def __init__(
+        self, responses: list[dict[str, Any]], fallback: dict[str, Any], usage: dict[str, Any] | None = None
+    ) -> None:
         self._responses = list(responses)
         self._fallback = fallback
+        self.usage = usage  # attached to every finish event (overflow probe)
         self.calls: list[list[dict[str, Any]]] = []
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -65,6 +68,7 @@ class FakeLLM:
                 }
                 for idx, tc in enumerate(tool_calls)
             ],
+            "usage": self.usage,
         }
 
 
@@ -377,6 +381,32 @@ def main() -> int:
             not any(e.type == "tool_call" for e in agent.log.events()),
             "no verify/tool path ran on the partial turn",
         )
+
+    # 13. compaction: context overflow rolls the older turns into a summary and the
+    # run continues (no abort); the summary is persisted as a CompactionEvent.
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        cfg = Config(
+            verify_command="echo ok",
+            llm_context_window=1000,
+            compaction_reserved=200,
+            compaction_tail_tokens=1,
+        )
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("list_dir", "{}")]),
+                _resp(content="SUMMARY"),
+                _resp(content="final answer"),
+            ],
+            fallback=_resp(content="fallback"),
+            usage={"prompt_tokens": 900, "completion_tokens": 100, "total_tokens": 1000},
+        )
+        agent = Agent(llm=fake, registry=ToolRegistry(build_default_tools(cfg)), workspace=sb, config=cfg)
+        result = agent.run("t")
+        check(result == "final answer", "run completes after compaction")
+        comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
+        check(len(comps) == 1, "context overflow triggered one compaction")
+        check(comps[0].summary == "SUMMARY", "compaction summary recorded")
 
     print("\nall passed")
     return 0

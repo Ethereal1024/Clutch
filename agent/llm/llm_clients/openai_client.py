@@ -36,37 +36,54 @@ class OpenaiLlmClient(LlmClient):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        # Streamed chat completion.
+        # Streamed chat completion. finish carries the provider-reported token
+        # usage (when available) so the loop can detect context overflow.
         for attempt in range(self.max_retries):
             try:
-                kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream_options": {"include_usage": True},
+                }
                 if tools:
                     kwargs["tools"] = tools
                 resp = self.client.chat.completions.create(**kwargs, stream=True)
                 state = StreamState()
+                pending_finish: dict[str, Any] | None = None
 
                 for chunk in resp:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        state.usage = {
+                            "prompt_tokens": usage.prompt_tokens,
+                            "completion_tokens": usage.completion_tokens,
+                            "total_tokens": usage.total_tokens,
+                        }
+                    if state.finished:
+                        continue  # keep draining until the usage chunk arrives
                     if not getattr(chunk, "choices", None):
                         continue
-                    events = []
                     for handler in self.handlers:
-                        events.extend(handler.handle(chunk, state))
-                    for event in events:
-                        yield event
+                        for event in handler.handle(chunk, state):
+                            if event["type"] == "finish":
+                                pending_finish = event
+                            else:
+                                yield event
                     if state.finished:
-                        return
-                # stream ended without finish (defensive)
-                if not state.finished:
-                    tool_calls = [
-                        {"id": entry["id"], "name": entry["name"], "arguments": entry["args"]}
-                        for entry in state.tool_args.values()
-                    ]
-                    yield {
+                        break
+
+                finish = pending_finish
+                if finish is None:  # stream ended without a finish chunk (defensive)
+                    finish = {
                         "type": "finish",
                         "reason": "stop",
                         "content": "".join(state.content_parts),
-                        "tool_calls": tool_calls,
+                        "tool_calls": [
+                            {"id": e["id"], "name": e["name"], "arguments": e["args"]} for e in state.tool_args.values()
+                        ],
                     }
+                finish["usage"] = state.usage
+                yield finish
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = LlmError.classify(e, self.retryable_status)
                 if not last_err.retryable or attempt == self.max_retries - 1:

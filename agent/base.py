@@ -151,6 +151,18 @@ class BaseServer(ABC):
         workspace = self.build_workspace(project)
         workspace.protect(project.path)
         llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
+        # separate summarizer for compaction when a dedicated model is configured
+        compactor_llm = None
+        if cfg.compaction_model and cfg.compaction_model != cfg.model:
+            compactor_llm = create_llm_client(
+                provider="openai",
+                api_key=self.state.api_key or cfg.api_key,
+                model=cfg.compaction_model,
+                base_url=cfg.base_url,
+                request_timeout=cfg.llm_request_timeout,
+                max_retries=cfg.llm_max_retries,
+                retryable_status=cfg.llm_retryable_status,
+            )
         cancel = cancel or threading.Event()
         if not self.state.start(task, workspace, cancel):
             return None
@@ -168,4 +180,5 @@ class BaseServer(ABC):
             sink=self.broadcaster.publish,
             cancel=cancel,
             gate=gate,
+            compactor_llm=compactor_llm,
         )

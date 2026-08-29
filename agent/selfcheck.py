@@ -14,7 +14,7 @@ from .config import Config
 from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
-from .events import AssistantMessageEvent, EventLog, ToolResultEvent, UserMessageEvent
+from .events import AssistantMessageEvent, CompactionEvent, EventLog, ToolResultEvent, UserMessageEvent
 from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -96,6 +96,24 @@ def main() -> None:
     )
     valid_assistants = all(m["role"] != "assistant" or m.get("content") or "tool_calls" in m for m in msgs)
     check(valid_assistants, "every surviving assistant has content or tool_calls")
+
+    # 2e. compaction: the newest CompactionEvent's summary becomes the head; only
+    # the recent tail (from tail_start) is projected, old turns are omitted
+    log = EventLog()
+    log.append(UserMessageEvent(content="old task"))
+    log.append(AssistantMessageEvent(content="old turn done"))
+    tail_start = len(log.events())
+    log.append(UserMessageEvent(content="recent task"))
+    log.append(AssistantMessageEvent(content="recent answer"))
+    log.append(CompactionEvent(summary="old work summarized", tail_start=tail_start))
+    msgs = derive_messages(log, config, "test")
+    head = [m for m in msgs if m["role"] == "user" and "Previous conversation summary" in m.get("content", "")]
+    check(len(head) == 1 and "old work summarized" in head[0]["content"], "compaction summary injected as head")
+    check(msgs[-1] == {"role": "assistant", "content": "recent answer"}, "tail kept after the compaction head")
+    check(
+        not any(m["role"] == "assistant" and m.get("content") == "old turn done" for m in msgs),
+        "pre-tail turns omitted by compaction",
+    )
 
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:

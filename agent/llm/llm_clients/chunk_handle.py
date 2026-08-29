@@ -10,6 +10,8 @@ class StreamState:
         self.tool_args: dict[int, dict[str, Any]] = {}
         self.finished: bool = False
         self.finish_reason: str | None = None
+        # provider-reported token usage from the final chunk (with include_usage)
+        self.usage: dict[str, Any] | None = None
 
 
 class ChunkHandler(ABC):

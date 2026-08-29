@@ -51,6 +51,15 @@ class LlmError(Exception):
 
 
 class LlmClient(ABC):
+    """Streaming chat client contract.
+
+    ``stream`` emits the event protocol reasoning/text/tool_call_start/
+    tool_call_delta/finish. The final ``finish`` event optionally carries a
+    ``usage`` dict ({prompt_tokens, completion_tokens, total_tokens}) so the
+    loop can detect context overflow; it is None when the provider does not
+    report usage.
+    """
+
     @abstractmethod
     def stream(
         self,

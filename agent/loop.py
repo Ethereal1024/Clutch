@@ -28,6 +28,7 @@ from .core.permission import PermissionGate, PermissionRequired
 from .core.terminate import Terminator
 from .events import (
     AssistantMessageEvent,
+    CompactionEvent,
     Event,
     EventLog,
     FinalEvent,
@@ -59,6 +60,7 @@ class Agent:
         sink: EventSink | None = None,
         cancel: threading.Event | None = None,
         gate: PermissionGate | None = None,
+        compactor_llm: LlmClient | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -69,6 +71,11 @@ class Agent:
         self.sink = sink
         self.cancel = cancel
         self.gate = gate
+        # summarizer used by compaction; defaults to the main llm when the user
+        # hasn't configured a separate compaction_model
+        self.compactor_llm = compactor_llm or llm
+        # provider-reported usage of the most recent LLM call (context size probe)
+        self._last_usage: dict[str, Any] | None = None
 
     def _emit(self, event: Event) -> None:
         self.log.append(event)
@@ -85,11 +92,14 @@ class Agent:
         self._emit(StateUpdateEvent(value=state))
         return "ABORTED" if status != "completed" else summary
 
-    def _llm_call(self, msgs: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], str, str]:
+    def _llm_call(
+        self, msgs: list[dict[str, Any]]
+    ) -> tuple[str, list[dict[str, Any]], str, str, dict[str, Any] | None]:
         """Stream one LLM turn; emits incremental reasoning/text events.
 
-        Returns (content, tool_calls, finish_reason, reasoning). tool_calls
-        entries are [{id, name, arguments(raw json string)}].
+        Returns (content, tool_calls, finish_reason, reasoning, usage). tool_calls
+        entries are [{id, name, arguments(raw json string)}]; usage is the
+        provider-reported token usage of this call (None when unavailable).
         """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -121,7 +131,7 @@ class Agent:
                     tool_calls = [
                         {"id": e["id"], "name": e["name"], "arguments": e["args"]} for e in tool_accum.values()
                     ]
-                    return content, tool_calls, finish_reason, "".join(reasoning_parts)
+                    return content, tool_calls, finish_reason, "".join(reasoning_parts), ev.get("usage")
         except LlmError as e:
             if e.code == "context_window_exceeded":
                 raise agent_errors.context_window_error(e.message) from e
@@ -130,7 +140,7 @@ class Agent:
         # normalized by _classify); let it propagate as a traceback instead of
         # masking it as llm_unknown
 
-        return "".join(content_parts), [], finish_reason, "".join(reasoning_parts)
+        return "".join(content_parts), [], finish_reason, "".join(reasoning_parts), None
 
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
@@ -142,16 +152,25 @@ class Agent:
                 if self.cancel and self.cancel.is_set():
                     return self._finish("aborted", render("cancelled.md"))
                 turn += 1
-                # budget is enforced at the top so every path terminates
+                # optional safety net; off by default (max_turns=0 means no limit)
                 if self.terminator.check_turn_budget(turn):
                     return self._finish(
                         "aborted",
                         render("budget_exceeded.md", max_turns=self.config.max_turns),
                     )
+                # context near the window: roll the older turns into a summary and
+                # continue with a fresh (compacted) context instead of dropping or
+                # aborting. Uses the previous turn's usage, so the first turn never
+                # triggers it.
+                if self._should_compact():
+                    self._compact()
+                    self._last_usage = None  # don't re-trigger on the stale usage
+                    continue
                 self._emit(StepStartEvent())
                 msgs = context.derive_messages(self.log, self.config, task)
 
-                content, tool_calls, finish_reason, reasoning = self._llm_call(msgs)
+                content, tool_calls, finish_reason, reasoning, usage = self._llm_call(msgs)
+                self._last_usage = usage
                 # Stop during streaming left a partial (empty) turn; never treat it
                 # as a done candidate or run the verify gate on it.
                 if self.cancel and self.cancel.is_set():
@@ -224,6 +243,93 @@ class Agent:
             # fatal LLM/context failures terminate gracefully instead of dying
             # silently in the worker thread
             return self._finish("error", str(e))
+
+    def _should_compact(self) -> bool:
+        """True when the last LLM call pushed the context near the model window."""
+        if not self.config.compaction_enabled or not self._last_usage:
+            return False
+        used = self._last_usage.get("total_tokens")
+        if not used:
+            return False
+        return used >= self.config.llm_context_window - self.config.compaction_reserved
+
+    def _compact(self) -> None:
+        """Roll the older conversation into a summary (opencode-style). Best-effort:
+        any failure falls back to the existing windowing and the run continues."""
+        try:
+            events = self.log.events()
+            tail_start = self._tail_start_index(events)
+            if tail_start <= 1:
+                return  # nothing meaningful to compact
+            head = events[:tail_start]
+            summary = self._summarize(self._serialize(head), self._previous_summary(events))
+            if not summary:
+                return
+            self.log.append(CompactionEvent(summary=summary, tail_start=tail_start))
+        except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
+            print(f"[clutch] compaction failed: {e}", file=sys.stderr)
+
+    def _tail_start_index(self, events: list[Any]) -> int:
+        """Index where the preserved recent tail begins, sized to the tail budget
+        (~4 chars per token). Clutch turns share the task user message, so the tail
+        is split at an assistant-turn boundary; everything before it is summarized
+        away."""
+        budget = self.config.compaction_tail_tokens
+        if budget is None:
+            usable = self.config.llm_context_window - self.config.compaction_reserved
+            budget = min(15_000, max(2_000, usable // 4))
+        total = 0
+        tail_start = 0
+        for i in range(len(events) - 1, -1, -1):
+            ev = events[i]
+            size = len(ev.content) if isinstance(ev, (UserMessageEvent, ToolResultEvent)) else 0
+            if isinstance(ev, AssistantMessageEvent):
+                size = len(ev.content) + len(ev.reasoning)
+            total += size // 4
+            if total >= budget:
+                j = i
+                while j > 0 and not isinstance(events[j], AssistantMessageEvent):
+                    j -= 1
+                tail_start = j
+                break
+        return tail_start
+
+    def _previous_summary(self, events: list[Any]) -> str:
+        comp = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
+        return comp.summary if comp else ""
+
+    def _serialize(self, events: list[Any]) -> str:
+        """Compact transcript of the old portion, for the summary prompt."""
+        lines = []
+        for ev in events:
+            if isinstance(ev, UserMessageEvent):
+                lines.append(f"[User]: {ev.content}")
+            elif isinstance(ev, AssistantMessageEvent):
+                if ev.content:
+                    lines.append(f"[Assistant]: {ev.content}")
+                if ev.reasoning:
+                    lines.append(f"[Assistant reasoning]: {ev.reasoning}")
+                for tc in ev.tool_calls:
+                    lines.append(f"[Assistant tool call]: {tc['name']}({tc['arguments']})")
+            elif isinstance(ev, ToolResultEvent):
+                out = ev.content
+                if len(out) > 500:
+                    out = out[:500] + "\n[truncated]"
+                lines.append(f"[Tool result]: {out}")
+        text = "\n".join(lines)
+        cap = max(8_000, (self.config.llm_context_window - self.config.compaction_reserved) // 3)
+        return text[-cap:] if len(text) > cap else text
+
+    def _summarize(self, history: str, previous: str) -> str:
+        llm = self.compactor_llm or self.llm
+        prompt = render("compaction.md", history=history, previous_summary=previous or "(none)")
+        parts: list[str] = []
+        for ev in llm.stream([{"role": "user", "content": prompt}], tools=None):
+            if ev["type"] == "text":
+                parts.append(ev["delta"])
+            elif ev["type"] == "finish":
+                break
+        return "".join(parts).strip()
 
     def _execute_tool(self, ev: ToolCallEvent) -> dict[str, Any]:
         """Parse arguments, check permission, then run the tool.

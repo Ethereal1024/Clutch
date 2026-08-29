@@ -105,6 +105,18 @@ class PermissionRequestEvent(Event):
     reason: str = ""
 
 
+@dataclass
+class CompactionEvent(Event):
+    """Rolling summary produced when the conversation nears the context limit.
+    tail_start is the event-log index where the preserved recent tail begins;
+    everything before it is summarized into ``summary`` and omitted from the
+    derived context (derive_messages injects the summary as the head)."""
+
+    type: str = "compaction"
+    summary: str = ""
+    tail_start: int = 0
+
+
 EVENT_TYPES: dict[str, type] = {
     cls.type: cls
     for cls in [
@@ -118,6 +130,7 @@ EVENT_TYPES: dict[str, type] = {
         StateUpdateEvent,
         FinalEvent,
         PermissionRequestEvent,
+        CompactionEvent,
     ]
 }
 
@@ -137,7 +150,7 @@ def event_from_dict(data: dict[str, str]) -> Event:
 # Only final/durable events are persisted to .clc (opencode stores parts, not
 # streaming deltas): text_delta/reasoning_delta/step_start/state_update are
 # display-transient and never written to disk.
-DURABLE_TYPES = {"user_message", "assistant_message", "tool_call", "tool_result", "final"}
+DURABLE_TYPES = {"user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"}
 
 
 class EventLog:
