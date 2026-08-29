@@ -7,11 +7,13 @@ doom-loop detection, verification gate.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import tempfile
 
 from .config import Config
+from .core.compaction import Compactor
 from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
@@ -28,16 +30,28 @@ from .events import (
     event_from_dict,
     event_to_json,
 )
-from .loop import Agent
 from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import LocalWorkspace
 
 
+@contextlib.contextmanager
+def _lazy_forced():
+    """Force the lazy open path in tests: the synthetic .clc is far below the
+    real 512-durable-event threshold."""
+    from .core import lazy as lazy_mod
+
+    old = lazy_mod._LAZY_MIN_DURABLE
+    lazy_mod._LAZY_MIN_DURABLE = 32
+    try:
+        yield
+    finally:
+        lazy_mod._LAZY_MIN_DURABLE = old
+
+
 def main() -> None:
     config = Config()
-
     # 1. argument parsing
     d = parse_arguments('{"path": "a.py", "content": "x"}')
     check(d == {"path": "a.py", "content": "x"}, "parse_arguments valid json")
@@ -163,9 +177,7 @@ def main() -> None:
     live.append(StepStartEvent())
     live.append(UserMessageEvent(content="recent"))
     live.append(AssistantMessageEvent(content="recent work"))
-    tail = Agent(llm=None, registry=None, workspace=None, config=Config(compaction_tail_tokens=1))._tail_start_index(
-        live.events()
-    )
+    tail = Compactor(Config(compaction_tail_tokens=1), live, None).tail_start_index(live.events())
     durable = [e for e in live.events() if e.type in DURABLE_TYPES]
     check(tail < len(durable), "tail_start indexes the durable sequence, not the full log")
     check(
@@ -616,6 +628,117 @@ def main() -> None:
         check(
             "save_memory" not in ToolRegistry(build_default_tools(config)).names(),
             "no memory tools without a MemoryStore",
+        )
+
+    # 11. lazy .clc loading: a compaction file opens with only seq 0 + the
+    # preserved tail materialized; earlier records stay on disk (older_count)
+    # and are paged on demand; a stale stored tail_start clamps to the last
+    # compaction's durable position and derives the same context as a full load.
+    with tempfile.TemporaryDirectory() as ptmp, _lazy_forced():
+        from .core import lazy as lazy_mod
+        from .core.lazy import LazyEventLog, _make_reader, _stored_tail_start, index_file, parse_durable
+        from .project import open_project_lazy
+
+        p = Path(ptmp) / "big.clc"
+        lines = [
+            "# clutch project v1", "name: lazy", "model: fake-model", "---",
+            event_to_json(UserMessageEvent(content="task")),
+        ]
+        for i in range(1, 100):
+            lines.append(event_to_json(
+                AssistantMessageEvent(content=f"old work {i}") if i % 2 == 0 else UserMessageEvent(content=f"old ask {i}")
+            ))
+        lines.append(event_to_json(CompactionEvent(summary="old work summarized", tail_start=90)))
+        for i in range(101, 121):
+            lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        proj = open_project_lazy(p, workspace=None)
+        log = proj.log
+        check(isinstance(log, LazyEventLog), "compaction file opens lazily")
+        check([s for s, _ in log.items()] == [0] + list(range(90, 121)),
+              "lazy open materializes only seq 0 + the preserved tail")
+        check(log.older_count() == 89, "older_count counts the on-disk middle")
+        read, total = _make_reader(p, None)
+        idx = index_file(read, total, None)
+        check(_stored_tail_start(read, idx) == 90,
+              "stored tail_start read from the single compaction line")
+
+        # paging: materialize the middle on demand, then derive == full load
+        page = log.materialize_range(1, 90)
+        check(len(page) == 89 and page[0][0] == 1 and page[-1][0] == 89,
+              "materialize_range pages the middle on demand")
+        full = EventLog()
+        for ev in parse_durable(p.read_text(encoding="utf-8")):
+            full.append(ev)
+        check(
+            derive_messages(log, config, "task") == derive_messages(full, config, "task"),
+            "lazy derive == full derive (paged middle)",
+        )
+        check(
+            not any(m["role"] == "assistant" and m.get("content") == "old work 42" for m in derive_messages(log, config, "task")),
+            "middle stays summarized away after paging",
+        )
+
+        # stale tail_start from an old .clc clamps to the compaction position
+        stale = p.read_text(encoding="utf-8").replace('"tail_start": 90', '"tail_start": 500')
+        p.write_text(stale, encoding="utf-8")
+        proj2 = open_project_lazy(p, workspace=None)
+        check(isinstance(proj2.log, LazyEventLog), "stale tail_start still opens lazily")
+        check(proj2.log._tail_start == 100, "stale tail_start clamped to the compaction position")
+        stale_full = EventLog()
+        for ev in parse_durable(p.read_text(encoding="utf-8")):
+            stale_full.append(ev)
+        check(
+            derive_messages(proj2.log, config, "task") == derive_messages(stale_full, config, "task"),
+            "stale-clamped lazy log derives the same context as the full log",
+        )
+        check(
+            any("old work summarized" in m.get("content", "") for m in derive_messages(proj2.log, config, "task")),
+            "compaction summary head survives the stale clamp",
+        )
+
+    # 12. lazy open handles a [memories] section: the index records the marker and
+    # parse_durable skips the memory lines (valid JSON with no `type`), so opening
+    # a .clc that has memories (even with events after them) neither crashes nor
+    # silently drops them.
+    with tempfile.TemporaryDirectory() as ptmp, _lazy_forced():
+        from .project import open_project_lazy
+
+        p = Path(ptmp) / "mem.clc"
+        lines = [
+            "# clutch project v1", "name: mem", "model: fake-model", "---",
+            event_to_json(UserMessageEvent(content="task")),
+        ]
+        for i in range(1, 40):
+            lines.append(
+                event_to_json(
+                    AssistantMessageEvent(content=f"work {i}")
+                    if i % 2 == 0
+                    else UserMessageEvent(content=f"ask {i}")
+                )
+            )
+        lines.append(event_to_json(CompactionEvent(summary="mid summarized", tail_start=20)))
+        for i in range(40, 50):
+            lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
+        lines.append("[memories]")
+        lines.append('{"title": "a durable fact", "content": "the detail", "updated": 0}')
+        lines.append(event_to_json(AssistantMessageEvent(content="after memory")))
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        proj = open_project_lazy(p, workspace=None)
+        check(
+            proj.memories is not None and len(proj.memories.items()) == 1,
+            "lazy open preserves the memory instead of crashing",
+        )
+        check(
+            proj.memories.get("a durable fact") is not None
+            and proj.memories.get("a durable fact").content == "the detail",
+            "memory content survives lazy open",
+        )
+        check(
+            any(m["role"] == "assistant" and m.get("content") == "after memory" for m in derive_messages(proj.log, config, "task")),
+            "events after the memory section still load",
         )
 
     print("\nall passed")
