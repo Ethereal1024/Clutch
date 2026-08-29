@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .core.persist import append_jsonl
+
 SECTION = "[memories]"
 MAX_TITLE_CHARS = 80
 MAX_CONTENT_CHARS = 4000
@@ -74,11 +76,7 @@ class MemoryStore:
         return SECTION + "\n" + "\n".join(_to_line(m) for m in self._items.values()) + "\n"
 
     def _append(self, line: str) -> None:
-        if self._writer:
-            self._writer(self._path, line)
-        else:
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+        append_jsonl(self._path, line, self._writer)
 
     @classmethod
     def parse(cls, raw_lines: list[str], path: str, writer: Callable[[str, str], None] | None = None) -> "MemoryStore":

@@ -83,13 +83,25 @@ class RunState:
             return RemoteWorkspace(root, self.bridge_url)
         return LocalWorkspace(root)
 
+    def set_backend(self, mode: str, bridge_url: str | None = None, remote_root: str | None = None) -> None:
+        """Switch the SSH-degradation backend (mode: "local" | "ssh"). A mode
+        switch invalidates any previously-opened project's workspace: paths and
+        transport differ per mode, so the UI must re-open the project after."""
+        with self.lock:
+            self.backend_mode = mode
+            self.bridge_url = bridge_url
+            self.remote_root = remote_root
+            # a mode switch invalidates any previously-opened project's workspace
+            self.project = None
+            self.workspace = None
+            self.gate = None
+
     def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
         with self.lock:
             self.project = project
             if workspace is None:
                 workspace = self.build_workspace(str(project.workdir))
             self.workspace = workspace
-            self.workspace.protect(project.path)
             return self.workspace
 
     def start(self, task: str, workspace: Workspace, cancel: threading.Event) -> bool:
@@ -115,20 +127,29 @@ class BaseServer(ABC):
         self.broadcaster = broadcaster
         self.state = state
 
-    def build_llm(self) -> LlmClient:
-        """LLM client for this server. Raises RuntimeError when no API key."""
+    def _build_llm(self, api_key: str, model: str, cfg: Config) -> LlmClient:
+        """Assemble one LLM client — the only construction site in the repo.
+        build_llm and the per-run compactor closure both go through here, so a
+        new client knob (timeout, retries, …) is added in exactly one place."""
         return create_llm_client(
             provider="openai",
-            api_key=self.state.api_key or self.config.api_key,
-            model=self.config.model,
-            base_url=self.config.base_url,
-            request_timeout=self.config.llm_request_timeout,
-            max_retries=self.config.llm_max_retries,
-            retryable_status=self.config.llm_retryable_status,
+            api_key=api_key,
+            model=model,
+            base_url=cfg.base_url,
+            request_timeout=cfg.llm_request_timeout,
+            max_retries=cfg.llm_max_retries,
+            retryable_status=cfg.llm_retryable_status,
         )
 
-    def build_tools(self, project: Project | None = None) -> ToolRegistry:
-        return ToolRegistry(build_default_tools(self.config, memories=project.memories if project else None))
+    def build_llm(self) -> LlmClient:
+        """LLM client for this server. Raises RuntimeError when no API key."""
+        return self._build_llm(self.state.api_key or self.config.api_key, self.config.model, self.config)
+
+    def build_tools(self, project: Project | None = None, config: Config | None = None) -> ToolRegistry:
+        """Tools for a run. ``config`` overrides self.config so a per-run mode
+        (chat read-only toolset) takes effect; work mode keeps the full set."""
+        cfg = config or self.config
+        return ToolRegistry(build_default_tools(cfg, memories=project.memories if project else None))
 
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:
@@ -148,7 +169,13 @@ class BaseServer(ABC):
         per-request verify command); build_llm/build_tools still use self.config.
         """
         cfg = config or self.config
-        workspace = self.build_workspace(project)
+        # reuse the workspace the UI already built for this project (set_project),
+        # so the file tree and the agent's run share ONE workspace instance;
+        # fall back to building a fresh one when none is open or its root is a
+        # different directory (eval harness calls start_task without set_project)
+        workspace = self.state.workspace
+        if workspace is None or workspace.root != project.workdir:
+            workspace = self.build_workspace(project)
         workspace.protect(project.path)
         llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
         # separate summarizer for compaction is built lazily (only on the first
@@ -160,15 +187,7 @@ class BaseServer(ABC):
             api_key = self.state.api_key or cfg.api_key
 
             def _make_compactor() -> LlmClient:
-                return create_llm_client(
-                    provider="openai",
-                    api_key=api_key,
-                    model=cfg.compaction_model,
-                    base_url=cfg.base_url,
-                    request_timeout=cfg.llm_request_timeout,
-                    max_retries=cfg.llm_max_retries,
-                    retryable_status=cfg.llm_retryable_status,
-                )
+                return self._build_llm(api_key, cfg.compaction_model, cfg)
 
             compactor_factory = _make_compactor
         cancel = cancel or threading.Event()
@@ -181,7 +200,7 @@ class BaseServer(ABC):
         )
         return Agent(
             llm=llm,
-            registry=self.build_tools(project),
+            registry=self.build_tools(project, cfg),
             workspace=workspace,
             config=cfg,
             log=project.log,

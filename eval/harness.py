@@ -90,6 +90,8 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
             project = Project(path=Path(root) / "harness.clc")
             server = HarnessServer(run_cfg, Broadcaster(), RunState())
             agent = server.start_task(task, project, on_ask=None)
+            if agent is None:
+                raise RuntimeError("a run is already active (harness runs fresh servers; should not happen)")
             log: EventLog = project.log
             outcome["workspace"] = str(root)
 

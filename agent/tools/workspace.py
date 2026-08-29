@@ -30,6 +30,27 @@ def shq(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
+    """Parse `ls -1AF` output into [(name, is_dir)] in listing order.
+
+    ls -1AF marks dirs with a trailing '/', executables with '*', symlinks with
+    '@'; the '*'/'@' suffixes are stripped. Hidden filtering is deliberately NOT
+    done here: the three call sites disagree on it (the server's fs list shows
+    hidden dirs but not hidden files; the tree walk hides both), so each site
+    applies its own rule after this shared parse.
+    """
+    out: list[tuple[str, bool]] = []
+    for entry in stdout.splitlines():
+        if not entry:
+            continue
+        if entry.endswith("/"):  # ls -1AF marks dirs with a trailing /
+            out.append((entry[:-1], True))
+            continue
+        name = entry[:-1] if entry[-1] in ("*", "@") else entry
+        out.append((name, False))
+    return out
+
+
 # Single source for the remote-wire limits, shared with the Node exec upload path
 # (ui/ssh-tunnel.js) so the two languages can never drift apart.
 _DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defaults.json").read_text(encoding="utf-8"))
@@ -112,6 +133,11 @@ class Workspace(ABC):
         """Return file contents; raise FileNotFoundError if missing."""
 
     @abstractmethod
+    def read_range(self, path: str, lo: int, hi: int) -> str:
+        """Return the file's byte range [lo, hi) decoded as text (the lazy log's
+        indexed reads: exact byte offsets, so materialization matches the index)."""
+
+    @abstractmethod
     def write(self, path: str, content: str) -> None:
         """Create or overwrite a file (parents created as needed)."""
 
@@ -135,6 +161,12 @@ class LocalWorkspace(Workspace):
         if not p.is_file():
             raise FileNotFoundError(path)
         return p.read_text(encoding="utf-8", errors="replace")
+
+    def read_range(self, path: str, lo: int, hi: int) -> str:
+        p = self.resolve(path)
+        with open(p, "rb") as f:
+            f.seek(lo)
+            return f.read(hi - lo).decode("utf-8", "replace")
 
     def write(self, path: str, content: str) -> None:
         p = self.resolve(path)
@@ -246,6 +278,15 @@ class RemoteWorkspace(Workspace):
             raise FileNotFoundError(str(p))
         return r.stdout
 
+    def read_range(self, path: str, lo: int, hi: int) -> str:
+        p = self.resolve(path)
+        r = self._transport.run(
+            f"tail -c +{lo + 1} {shq(str(p))} | head -c {hi - lo}", _REMOTE_IO_TIMEOUT
+        )
+        if r.code != 0:
+            raise OSError(f"cannot read {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
+        return r.stdout
+
     def _chunk_content(self, content: str) -> list[str]:
         """Split into pieces whose ON-WIRE size (after shq quoting) stays under
         _EXEC_CHUNK_BYTES. A single quote inflates to the 4-char sequence '\''
@@ -305,17 +346,13 @@ class RemoteWorkspace(Workspace):
         return self._parse_list_output(p, r.stdout)
 
     def _parse_list_output(self, p: Path, stdout: str) -> list[str]:
+        """One shared ls parser + the protected-file filter (protected dirs stay
+        listed — the agent sees the dir but cannot read inside it)."""
         out = []
-        for entry in stdout.splitlines():
-            if not entry:
+        for name, is_dir in parse_ls_entries(stdout):
+            if not is_dir and self.is_protected(p / name):
                 continue
-            if entry.endswith("/"):  # ls -1AF marks dirs with a trailing /
-                out.append(entry)
-                continue
-            name = entry[:-1] if entry[-1] in ("*", "@") else entry
-            if self.is_protected(p / name):
-                continue
-            out.append(name)
+            out.append(name + ("/" if is_dir else ""))
         return sorted(out)
 
     def list_many(self, paths: list[str]) -> dict[str, list[str]]:

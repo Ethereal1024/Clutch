@@ -7,3 +7,4 @@ reports/
 build/
 dist/
 *.spec
+*.clc

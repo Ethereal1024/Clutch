@@ -161,7 +161,7 @@ def edit_file(workspace: Workspace, config: Config, path: str, old_string: str, 
         return _result(render("errors/write_failed.md", error=e), error=True)
 
 
-def _unified_diff(old: str, new: str, rel: str) -> str:
+def _unified_diff(old: str, new: str, rel: str | Path) -> str:
     """Return a unified diff string between old and new file contents."""
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)

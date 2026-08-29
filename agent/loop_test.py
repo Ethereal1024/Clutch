@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .core.compaction import Compactor
 from .events import AssistantMessageEvent, CompactionEvent, EventLog, FinalEvent, StateUpdateEvent, UserMessageEvent
 from .loop import Agent
 from .testsupport import check
@@ -509,6 +510,57 @@ def main() -> int:
         check(len(comps) == 1, "context overflow triggered one compaction")
         check(comps[0].summary == "SUMMARY", "compaction summary recorded")
 
+    # 13b. compaction live progress: the compactor streams compaction_delta events
+    # through its sink as the summary call writes (start marker, throttled char
+    # counts), so a long compression never looks frozen in the UI — and a failed
+    # summary call sends done=True so the live block closes instead of hanging.
+    with tempfile.TemporaryDirectory() as tmp:
+        log13 = EventLog()
+        log13.append(UserMessageEvent(content="original task"))
+        log13.append(AssistantMessageEvent(content="x" * 300))
+        log13.append(AssistantMessageEvent(content="z" * 300))
+        progress: list[object] = []
+        fake13 = FakeLLM(
+            responses=[_resp(content="S" * 600)],
+            fallback=_resp(content="x"),
+            usage={"prompt_tokens": 50, "completion_tokens": 150, "total_tokens": 200},
+        )
+        comp13 = Compactor(
+            Config(llm_context_window=1000, compaction_reserved=200, compaction_tail_tokens=1),
+            log13,
+            fake13,
+            sink=progress.append,
+        )
+        check(comp13.compact() is True, "compaction with progress sink succeeds")
+        deltas = [e for e in progress if e.type == "compaction_delta"]
+        check(len(deltas) >= 4, "progress events stream during compaction")
+        check(deltas[0].chars == 0 and not deltas[0].done, "a start marker broadcasts first")
+        check(deltas[-1].chars == 600, "final progress carries the total summary chars")
+        check(not any(e.done for e in deltas), "no done marker on success")
+
+        # failed summary call: the live block must be closed so the UI can't hang
+        class BoomLlm:
+            def stream(self, messages, tools=None):
+                yield {"type": "text", "delta": "partial"}
+                raise RuntimeError("boom")
+
+        log13b = EventLog()
+        log13b.append(UserMessageEvent(content="original task"))
+        log13b.append(AssistantMessageEvent(content="x" * 300))
+        log13b.append(AssistantMessageEvent(content="z" * 300))
+        failed: list[object] = []
+        comp13b = Compactor(
+            Config(llm_context_window=1000, compaction_reserved=200, compaction_tail_tokens=1),
+            log13b,
+            BoomLlm(),
+            sink=failed.append,
+        )
+        check(comp13b.compact() is False, "failed summary call returns False")
+        check(
+            any(e.type == "compaction_delta" and e.done for e in failed),
+            "done marker closes the live block on failure",
+        )
+
     # 14. resumed long session with NO reported usage: the token estimate of the
     # derived context triggers compaction on the first turn — the resume case that
     # turn-count windowing used to brutalise (no usage, so the old usage-only check
@@ -560,6 +612,109 @@ def main() -> int:
         check(streamed[0].name == "write_file", "the start delta carries the tool name")
         joined = "".join(e.delta for e in streamed)
         check(joined == '{"path": "a.txt", "content": "hi"}', "streamed deltas reassemble the arguments")
+
+    # 15b. chat-mode toolset: schema pruning + system-prompt mode note
+    from .core import context as _context
+
+    chat_cfg = Config(mode="chat", verify_command="echo ok")
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        chat_names = [t.name for t in build_default_tools(chat_cfg)]
+        check("write_file" not in chat_names and "edit_file" not in chat_names, "chat mode prunes write tools")
+        check("run_command" in chat_names and "read_file" in chat_names, "chat mode keeps read tools")
+        log = EventLog()
+        log.append(UserMessageEvent(content="hi"))
+        msgs = _context.derive_messages(log, chat_cfg, "t")
+        check("chat (read-only)" in msgs[0]["content"], "chat system prompt carries the read-only note")
+        check("work (full access)" not in msgs[0]["content"], "chat system prompt carries no work note")
+        msgs_work = _context.derive_messages(log, Config(mode="work"), "t")
+        check("work (full access)" in msgs_work[0]["content"], "work system prompt carries the work note")
+        check("chat (read-only)" not in msgs_work[0]["content"], "work system prompt has no chat note")
+
+    # 15d. project memory: all stored titles are listed with an active recall
+    # prompt, and the base prompt always carries the save guidance
+    from .memory import MemoryStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mem_path = str(Path(tmp) / "p.clc")
+        store = MemoryStore(mem_path)
+        store.save("user prefers utf-8", "always write files as utf-8")
+        store.save("branch naming", "use feature/ prefix")
+        msgs_mem = _context.derive_messages(log, chat_cfg, "t", memories=store)
+        sys_mem = msgs_mem[0]["content"]
+        check(
+            "Project memories from earlier sessions" in sys_mem,
+            "stored titles are listed under the active recall prompt",
+        )
+        check("user prefers utf-8" in sys_mem and "branch naming" in sys_mem, "all stored titles are listed")
+        check(
+            "save_memory whenever you learn a durable fact" in sys_mem,
+            "base prompt carries the save guidance",
+        )
+        msgs_empty = _context.derive_messages(log, chat_cfg, "t", memories=MemoryStore(mem_path))
+        check(
+            "Project memories from earlier sessions" not in msgs_empty[0]["content"],
+            "no title section when the store is empty",
+        )
+        check(
+            "save_memory whenever you learn a durable fact" in msgs_empty[0]["content"],
+            "save guidance is present even without stored memories",
+        )
+
+    # 15c. chat-mode run_command: read-only commands run, writes/unknowns are
+    # rejected and fed back as errors (default deny), nothing touches the disk
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("run_command", '{"command": "touch x.txt"}')]),
+                _resp(tool_calls=[_tool_call("run_command", '{"command": "ls"}')]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        agent = _agent(fake, chat_cfg, sb)
+        result = agent.run("t")
+        check(result == "done", "chat run completes")
+        check(not (sb.root / "x.txt").exists(), "chat mode rejected the write command")
+        first_result = [e for e in agent.log.events() if getattr(e, "type", "") == "tool_result"][0]
+        check(
+            "read-only" in first_result.content or "CHAT MODE" in first_result.content,
+            "rejection fed back as an error",
+        )
+
+    # 15d. chat mode cannot reach write_file even if the model tries (unknown tool)
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        agent = _agent(fake, chat_cfg, sb)
+        result = agent.run("t")
+        check(result == "done", "chat run with attempted write completes")
+        check(not (sb.root / "a.txt").exists(), "write_file unknown in chat mode: nothing written")
+
+    # 15e. classify_command unit checks (static read-only classifier)
+    from .tools.shell import classify_command
+
+    for cmd, exp in [
+        ("ls -la", "read"),
+        ("nvidia-smi", "read"),
+        ("git status", "read"),
+        ("git commit -m x", "write"),
+        ("echo hi > f", "write"),
+        ("echo hi | grep x", "read"),
+        ("find . -delete", "write"),
+        ("sed -i s/a/b/ f", "write"),
+        ("python3 foo.py", "unknown"),
+        ("echo hi && rm x", "write"),
+    ]:
+        got, _ = classify_command(cmd)
+        check(got == exp, f"classify {cmd!r} == {exp!r} (got {got!r})")
 
     print("\nall passed")
     return 0

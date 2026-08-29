@@ -23,13 +23,12 @@ from typing import Any, Callable
 from .config import Config
 from .core import context
 from .core import errors as agent_errors
+from .core.compaction import Compactor
 from .core.parse import ParseError, parse_arguments
 from .core.permission import PermissionGate, PermissionRequired
 from .core.terminate import Terminator
 from .events import (
-    DURABLE_TYPES,
     AssistantMessageEvent,
-    CompactionEvent,
     Event,
     EventLog,
     FinalEvent,
@@ -74,14 +73,15 @@ class Agent:
         self.sink = sink
         self.cancel = cancel
         self.gate = gate
-        # summarizer used by compaction; built lazily on first compaction when a
-        # dedicated compaction_model is configured, otherwise the main llm is used
-        self.compactor_factory = compactor_factory
-        self.compactor_llm: LlmClient | None = None
+        # context-window compaction: estimating, serializing, summarizing and the
+        # provider-usage probe all live in the Compactor; the loop only asks
+        # should_compact / compact. A dedicated compaction_model (when set) is
+        # built lazily via llm_factory on the first compaction.
+        self.compactor = Compactor(
+            config, self.log, llm, llm_factory=compactor_factory, sink=self.sink
+        )
         # project memory store (durable facts in the .clc), if any
         self.memories = memories
-        # provider-reported usage of the most recent LLM call (context size probe)
-        self._last_usage: dict[str, Any] | None = None
 
     def _emit(self, event: Event) -> None:
         self.log.append(event)
@@ -176,9 +176,9 @@ class Agent:
                 # aborting. Triggers on the previous call's reported usage OR a
                 # char-based estimate of what the NEXT call would send (covers the
                 # resume-first-turn / missing-usage cases and the one-turn race).
-                if self._should_compact(msgs):
-                    self._last_usage = None  # don't re-trigger on the stale usage
-                    if self._compact():
+                if self.compactor.should_compact(msgs):
+                    self.compactor.record_usage(None)  # don't re-trigger on the stale usage
+                    if self.compactor.compact():
                         continue  # log changed; the next iteration re-derives
                     # no-op / failed compaction: proceed with the messages already
                     # derived (the log is unchanged, so they are still valid)
@@ -190,11 +190,11 @@ class Agent:
                     if e.code == "context_window_exceeded":
                         # last resort: force a compaction and retry once; if nothing
                         # can be compacted, re-raise and end with a graceful error
-                        self._last_usage = None
-                        if self._compact():
+                        self.compactor.record_usage(None)
+                        if self.compactor.compact():
                             continue
                     raise
-                self._last_usage = usage
+                self.compactor.record_usage(usage)
                 # Stop during streaming left a partial (empty) turn; never treat it
                 # as a done candidate or run the verify gate on it.
                 if self.cancel and self.cancel.is_set():
@@ -267,138 +267,6 @@ class Agent:
             # fatal LLM/context failures terminate gracefully instead of dying
             # silently in the worker thread
             return self._finish("error", str(e))
-
-    def _should_compact(self, msgs: list[dict[str, Any]]) -> bool:
-        """True when the next LLM call would push the context near the model window.
-
-        Either trigger fires: the previous call's provider-reported usage crossing
-        the threshold (authoritative), or a char-based token estimate of the derived
-        context ``msgs`` doing so (covers resumed sessions, missing usage, and the
-        one-turn race — the last call's usage never includes the turn just added)."""
-        if not self.config.compaction_enabled:
-            return False
-        threshold = self.config.llm_context_window - self.config.compaction_reserved
-        if self._last_usage:
-            used = self._last_usage.get("total_tokens")
-            if used and used >= threshold:
-                return True
-        return self._estimate_tokens(msgs) >= threshold
-
-    @staticmethod
-    def _estimate_tokens(msgs: list[dict[str, Any]]) -> int:
-        """Cheap token estimate of the derived context. Uses ~3 chars/token (real
-        English/code ratio is ~3-4): deliberately conservative so compaction fires
-        before the window fills. Contrast the tail budget in _tail_start_index,
-        which is generous (4 chars/token) to keep as much recent work as possible."""
-        chars = 0
-        for m in msgs:
-            chars += len(m.get("content") or "")
-            chars += len(m.get("reasoning_content") or "")
-            for tc in m.get("tool_calls") or []:
-                chars += len(tc.get("function", {}).get("arguments", ""))
-        return chars // 3
-
-    def _compact(self) -> bool:
-        """Roll the older conversation into a summary (opencode-style). Best-effort:
-        returns False when nothing was compacted (too little to summarize, no NEW
-        head since the last compaction, or the summary call failed) so the loop
-        never spins on a failed or no-op compaction.
-
-        tail_start is an index into the DURABLE event sequence (what the .clc
-        persists). The in-memory log also holds transient streaming deltas; an
-        index over those would be stale after a reopen, silently dropping the
-        whole recent tail (see derive_messages)."""
-        try:
-            events = self.log.events()
-            durable = [e for e in events if e.type in DURABLE_TYPES]
-            tail_start = self._tail_start_index(events)
-            if tail_start <= 1:
-                return False  # nothing meaningful to compact
-            prev = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
-            # compare against the last compaction's durable POSITION, not its stored
-            # tail_start — a loaded .clc from before this fix carries a stale index
-            if prev is not None and tail_start <= durable.index(prev):
-                return False  # nothing new since the last compaction: don't re-summarize the same head
-            head = durable[:tail_start]
-            summary = self._summarize(self._serialize(head), self._previous_summary(events))
-            if not summary:
-                return False
-            self.log.append(CompactionEvent(summary=summary, tail_start=tail_start))
-            return True
-        except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
-            print(f"[clutch] compaction failed: {e}", file=sys.stderr)
-            return False
-
-    def _tail_start_index(self, events: list[Any]) -> int:
-        """Index (into the DURABLE event sequence) where the preserved recent tail
-        begins, sized to the tail budget (~4 chars per token, deliberately generous
-        vs the 3 chars/token in _estimate_tokens: the tail is what survives, so as
-        much of it as possible). Transient streaming deltas are skipped so the index
-        is stable when the log is persisted and reopened. Clutch turns share the
-        task user message, so the tail is split at an assistant-turn boundary;
-        everything before it is summarized away."""
-        durable = [e for e in events if e.type in DURABLE_TYPES]
-        budget = self.config.compaction_tail_tokens
-        if budget is None:
-            usable = self.config.llm_context_window - self.config.compaction_reserved
-            budget = min(15_000, max(2_000, usable // 4))
-        total = 0
-        tail_start = 0
-        for i in range(len(durable) - 1, -1, -1):
-            ev = durable[i]
-            size = len(ev.content) if isinstance(ev, (UserMessageEvent, ToolResultEvent)) else 0
-            if isinstance(ev, AssistantMessageEvent):
-                size = len(ev.content) + len(ev.reasoning)
-            total += size // 4
-            if total >= budget:
-                j = i
-                while j > 0 and not isinstance(durable[j], AssistantMessageEvent):
-                    j -= 1
-                tail_start = j
-                break
-        return tail_start
-
-    def _previous_summary(self, events: list[Any]) -> str:
-        comp = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
-        return comp.summary if comp else ""
-
-    def _serialize(self, events: list[Any]) -> str:
-        """Compact transcript of the old portion, for the summary prompt."""
-        lines = []
-        for ev in events:
-            if isinstance(ev, UserMessageEvent):
-                lines.append(f"[User]: {ev.content}")
-            elif isinstance(ev, AssistantMessageEvent):
-                if ev.content:
-                    lines.append(f"[Assistant]: {ev.content}")
-                if ev.reasoning:
-                    lines.append(f"[Assistant reasoning]: {ev.reasoning}")
-                for tc in ev.tool_calls:
-                    lines.append(f"[Assistant tool call]: {tc['name']}({tc['arguments']})")
-            elif isinstance(ev, ToolResultEvent):
-                out = ev.content
-                if len(out) > 500:
-                    out = out[:500] + "\n[truncated]"
-                lines.append(f"[Tool result]: {out}")
-        text = "\n".join(lines)
-        cap = max(8_000, (self.config.llm_context_window - self.config.compaction_reserved) // 3)
-        return text[-cap:] if len(text) > cap else text
-
-    def _summarize(self, history: str, previous: str) -> str:
-        llm = self.compactor_llm
-        if llm is None and self.compactor_factory is not None:
-            llm = self.compactor_factory()
-            self.compactor_llm = llm
-        if llm is None:
-            llm = self.llm
-        prompt = render("compaction.md", history=history, previous_summary=previous or "(none)")
-        parts: list[str] = []
-        for ev in llm.stream([{"role": "user", "content": prompt}], tools=None):
-            if ev["type"] == "text":
-                parts.append(ev["delta"])
-            elif ev["type"] == "finish":
-                break
-        return "".join(parts).strip()
 
     def _execute_tool(self, ev: ToolCallEvent) -> dict[str, Any]:
         """Parse arguments, check permission, then run the tool.

@@ -48,6 +48,7 @@ def _str_param(desc: str, required: bool = True) -> dict:
 
 
 def build_default_tools(config: Config, memories: MemoryStore | None = None) -> list[Tool]:
+    chat_mode = config.mode == "chat"
     tools = [
         Tool(
             name="read_file",
@@ -85,34 +86,47 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
             },
             func=lambda sb, cfg, **kw: filesystem.grep(sb, cfg, **kw),
         ),
-        Tool(
-            name="write_file",
-            description=render("tools/write_file.md"),
-            parameters={
-                "properties": {
-                    "path": _str_param("file path, relative to the workspace root"),
-                    "content": _str_param("full file content"),
+    ]
+
+    # chat mode: no write tools. The model never sees write_file/edit_file — the
+    # schema is the hard boundary, the system prompt the soft guide (prompts/).
+    if not chat_mode:
+        tools.append(
+            Tool(
+                name="write_file",
+                description=render("tools/write_file.md"),
+                parameters={
+                    "properties": {
+                        "path": _str_param("file path, relative to the workspace root"),
+                        "content": _str_param("full file content"),
+                    },
+                    "required": ["path", "content"],
                 },
-                "required": ["path", "content"],
-            },
-            func=lambda sb, cfg, **kw: filesystem.write_file(sb, cfg, **kw),
-        ),
-        Tool(
-            name="edit_file",
-            description=render("tools/edit_file.md"),
-            parameters={
-                "properties": {
-                    "path": _str_param("file path, relative to the workspace root"),
-                    "old_string": _str_param("exact text to replace (must appear exactly once)"),
-                    "new_string": _str_param("replacement text"),
+                func=lambda sb, cfg, **kw: filesystem.write_file(sb, cfg, **kw),
+            )
+        )
+        tools.append(
+            Tool(
+                name="edit_file",
+                description=render("tools/edit_file.md"),
+                parameters={
+                    "properties": {
+                        "path": _str_param("file path, relative to the workspace root"),
+                        "old_string": _str_param("exact text to replace (must appear exactly once)"),
+                        "new_string": _str_param("replacement text"),
+                    },
+                    "required": ["path", "old_string", "new_string"],
                 },
-                "required": ["path", "old_string", "new_string"],
-            },
-            func=lambda sb, cfg, **kw: filesystem.edit_file(sb, cfg, **kw),
-        ),
+                func=lambda sb, cfg, **kw: filesystem.edit_file(sb, cfg, **kw),
+            )
+        )
+
+    # run_command exists in both modes; in chat mode its description advertises the
+    # read-only restriction and the tool rejects anything not provably read-only.
+    tools.append(
         Tool(
             name="run_command",
-            description=render("tools/run_command.md"),
+            description=render("tools/run_command_chat.md" if chat_mode else "tools/run_command.md"),
             parameters={
                 "properties": {
                     "command": _str_param("shell command string to run"),
@@ -120,8 +134,8 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["command"],
             },
             func=lambda sb, cfg, **kw: shell.run_command(sb, cfg, **kw),
-        ),
-    ]
+        )
+    )
 
     if config.enable_skills:
         skill_tool = _build_load_skill(config)

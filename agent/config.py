@@ -50,6 +50,11 @@ class Config:
     output_tail: int = 2500
     read_max_chars: int = 20000
 
+    # Agent mode: "work" (full toolset) or "chat" (read-only: read_file/grep/
+    # run_command restricted to a provably-read-only whitelist, memory tools, and
+    # load_skill). Default work keeps existing behavior; the UI sets mode per run.
+    mode: str = "work"
+
     # Verification gate: an explicit command (e.g. a test suite) that the agent
     # must pass before the task counts as done. Empty = no verification (the
     # agent's own "done" reply is trusted, per the open-source norm that a

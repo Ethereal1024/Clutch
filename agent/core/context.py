@@ -5,7 +5,7 @@ Strategy (no turn-count windowing, no incremental tool-output folding — compac
 the only budget guard, matching opencode / Claude Code):
 - sticky: system prompt + the original task are never evicted
 - compaction: the newest CompactionEvent's summary is the head; only the recent
-  tail it designates is projected (token-driven, see loop._should_compact)
+  tail it designates is projected (token-driven, see Compactor.should_compact)
 - truncation: oversized tool output is head/tail trimmed at the tools layer
 """
 
@@ -15,7 +15,6 @@ from typing import Any
 
 from ..config import Config
 from ..events import (
-    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
     EventLog,
@@ -130,7 +129,7 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     """Derive model messages from the event log, applying compaction head.
     ``memories`` (a MemoryStore) contributes a resident title list to the system
     prompt so the model can recall long-term facts. Tool output is NOT folded
-    here — it accumulates until compaction (loop._should_compact) rolls the older
+    here — it accumulates until compaction (Compactor.compact) rolls the older
     turns into a summary, so the model's file-content working set is not silently
     starved and re-reads are not forced."""
     full_events = log.events()
@@ -147,17 +146,11 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     if compaction is not None:
         head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]
         # tail_start is an index into the DURABLE event sequence (what the .clc
-        # persists); the in-memory log also holds transient streaming deltas, so
-        # slice the durable list — otherwise a reopened log (durable-only) would
-        # make the index out of range and silently drop the whole recent tail.
-        durable = [e for e in events if e.type in DURABLE_TYPES]
-        ts = compaction.tail_start
-        if ts > len(durable):
-            # stale index from an older .clc (computed against the in-memory log
-            # that included transients): clamp to this compaction's own durable
-            # position so the post-compaction history is kept, not silently lost
-            ts = next((i for i, e in enumerate(durable) if e is compaction), len(durable))
-        tail_events = [e for e in durable[ts:] if not isinstance(e, CompactionEvent)]
+        # persists); log.tail_from slices the durable sequence from there and
+        # clamps a stale out-of-range index from an older .clc, so the recent
+        # tail is kept — never silently dropped. Works for a fully loaded log
+        # and a lazily reopened one alike.
+        tail_events = log.tail_from(compaction.tail_start, compaction)
         files = _recent_working_files(tail_events)
         if files:
             # the exact contents of these files were compacted away; the model must
@@ -172,6 +165,16 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     msgs = _to_messages(events)
 
     system = render("system.md")
+    if config.mode == "chat":
+        # read-only mode contract: tell the model what it can/cannot do so it
+        # never attempts a write in the first place (schema pruning is the hard
+        # boundary, this is the soft guide)
+        system += "\n\n" + render("mode_chat.md")
+    elif config.mode == "work":
+        # work mode contract: symmetric with chat — without this the model only
+        # infers its full access from the tool list, so a mode switch was only
+        # ever announced in one direction (chat announced, work stayed silent)
+        system += "\n\n" + render("mode_work.md")
     if config.enable_skills:
         # model-visible catalog: the model decides whether to load a skill
         catalog = cached_library(config.skills_dir).to_catalog_section()
@@ -180,9 +183,13 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     if memories is not None:
         items = memories.items()
         if items:
-            titles = [m.title for m in sorted(items.values(), key=lambda m: -m.updated)][:20]
-            system += "\n\nAvailable project memories (call load_memory to read one):\n" + "\n".join(
-                f"- {t}" for t in titles
+            # all titles up front: the model picks the exact one to load, so no
+            # fuzzy matching is needed on load_memory (titles are short)
+            titles = [m.title for m in sorted(items.values(), key=lambda m: -m.updated)]
+            system += (
+                "\n\nProject memories from earlier sessions — search_memory or load_memory "
+                "before acting if any relate to this task:\n"
+                + "\n".join(f"- {t}" for t in titles)
             )
 
     return (

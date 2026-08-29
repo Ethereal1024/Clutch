@@ -50,20 +50,25 @@ class Project:
         return self.log.events()
 
 
+def _writer_for(workspace) -> Callable[[str, str], None] | None:
+    """The .clc LineWriter for a workspace (remote bridge) or None (local open)."""
+    return workspace.append_line if workspace is not None else None
+
+
 def create_project(path: Path, name: str, model: str = "", workspace=None) -> Project:
     """Create a new .clc file and return the Project. With a workspace (SSH
     degradation layer) the file is written on the remote host."""
     path = path.with_suffix(".clc")
     meta = ProjectMeta(name=name, model=model)
+    writer = _writer_for(workspace)
     if workspace is not None:
         workspace.write(str(path), _header_text(meta))
-        log = EventLog(path=str(path), writer=workspace.append_line)
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_header(path, meta)
-        # EventLog(path=...) persists every append to the .clc file after the header
-        log = EventLog(path=str(path))
-    writer = workspace.append_line if workspace is not None else None
+    # EventLog(path=..., writer=None) persists every append to the .clc file
+    # after the header via the local open fallback
+    log = EventLog(path=str(path), writer=writer)
     return Project(path=path, meta=meta, log=log, memories=MemoryStore(str(path), writer=writer))
 
 
@@ -73,7 +78,7 @@ def open_project(path: Path, on_progress=None, workspace=None) -> Project:
     pulled from the remote host and the log persists back through it."""
     path = path.with_suffix(".clc")
     meta, loaded, memory_lines = _read_file(path, on_progress, workspace)
-    writer = workspace.append_line if workspace is not None else None
+    writer = _writer_for(workspace)
     memories = MemoryStore.parse(memory_lines, str(path), writer=writer)
     # older files stored streaming deltas (text/reasoning) that are redundant for
     # replay and context — assistant_message carries the final text + reasoning.
@@ -81,12 +86,80 @@ def open_project(path: Path, on_progress=None, workspace=None) -> Project:
     durable = [e for e in loaded.events() if e.type in DURABLE_TYPES]
     if len(durable) != len(loaded.events()):
         _rewrite_durable(path, meta, durable, workspace, memories)
-    if workspace is not None:
-        log = EventLog(path=str(path), writer=workspace.append_line)
-    else:
-        log = EventLog(path=str(path))
+    # EventLog(path=..., writer=None) persists every append to the .clc file
+    # after the header via the local open fallback
+    log = EventLog(path=str(path), writer=writer)
     log._events.extend(durable)
     return Project(path=path, meta=meta, log=log, memories=memories)
+
+
+def open_project_lazy(path: Path, on_progress=None, workspace=None) -> Project:
+    """Open an existing .clc lazily: index the durable event offsets in a single
+    pass (no JSON parsing), then materialize only seq 0 (the raw task) plus the
+    preserved recent tail the last compaction kept (``[tail_start, N)``). Earlier
+    records stay on disk and are pulled in on demand (UI paging via
+    /api/history, compaction head re-materialization).
+
+    Small histories and compaction-free files fall back to a plain fully-loaded
+    EventLog — byte-identical behavior to open_project, just routed through the
+    same index so the code path is single. on_progress(done, total) reports the
+    index scan, so the UI's open progress bar tracks real file parsing again."""
+    path = path.with_suffix(".clc")
+    from .core.lazy import (
+        LazyEventLog,
+        _LAZY_MIN_DURABLE,
+        _make_reader,
+        _stored_tail_start,
+        index_file,
+        parse_durable,
+    )
+
+    read, total = _make_reader(path, workspace)
+    index = index_file(read, total, on_progress)
+    writer = _writer_for(workspace)
+    # the header lives at the very start of the file: a tiny range read, no
+    # separate full pass (unlike read_header, which would double the remote cost)
+    meta = _parse_meta_lines(read(0, min(total, 1 << 16)).decode("utf-8", "replace").splitlines())
+    memories = _parse_memories(read, index, str(path), writer)
+
+    if index.newest_compaction < 0 or len(index) < _LAZY_MIN_DURABLE:
+        # nothing to be lazy about: plain read + durable parse, same as open_project
+        log = EventLog(path=str(path), writer=writer)
+        for ev in parse_durable(read(0, total).decode("utf-8", "replace")):
+            log.append(ev)
+        return Project(path=path, meta=meta, log=log, memories=memories)
+
+    log = LazyEventLog(
+        str(path),
+        index,
+        read,
+        writer=writer,
+        tail_start=_stored_tail_start(read, index),
+    )
+    log.materialize_range(0, 1)  # seq 0: the raw task
+    log.materialize_range(log._tail_start, len(index))  # the preserved tail
+    return Project(path=path, meta=meta, log=log, memories=memories)
+
+
+def _parse_meta_lines(lines: list[str]) -> ProjectMeta:
+    """Parse header lines (up to the --- separator) into ProjectMeta."""
+    meta = ProjectMeta()
+    for line in lines:
+        line = line.strip()
+        if line == SEPARATOR:
+            break
+        _apply_meta(meta, line)
+    return meta
+
+
+def _parse_memories(read, index, path: str, writer) -> MemoryStore:
+    """Read the [memories] section content (indexed during the scan) and parse
+    it into a MemoryStore; empty store when the file has no such section."""
+    if not index.memory_lines:
+        return MemoryStore(path, writer=writer)
+    start = index.memory_lines[-1]  # content begins right after the section line
+    text = read(start, index.total_bytes).decode("utf-8", "replace")
+    return MemoryStore.parse(text.splitlines(), path, writer=writer)
 
 
 def read_header(path: Path, workspace=None) -> ProjectMeta:

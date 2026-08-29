@@ -1,6 +1,8 @@
 """Shell tool: run_command inside the workspace.
 
 Poka-yoke (make it hard for the model to misuse):
+- chat-mode read-only gate: a static classifier proves a command cannot touch
+  the workspace; anything not provably read-only is rejected up front
 - syntax pre-check: py_compile Python files before running
 - blocked list: commands that hang in a non-TTY pipe (bare python, vim, less, ...)
 - timeout: kill long-running commands
@@ -19,10 +21,190 @@ from .transport import TransportError
 from .workspace import Workspace
 
 
+# ---- chat-mode read-only classification ----
+#
+# Static analysis cannot prove a command is *safe*; it can only prove a command
+# is *read-only*. The chat-mode gate therefore uses a whitelist: commands whose
+# every form is free of filesystem side effects pass, everything else is
+# rejected (default deny). Quoted metacharacters may be misjudged — always in
+# the safe direction (a read-only command rejected, never a write let through).
+
+# Commands with no form that writes the filesystem. Metacharacter checks below
+# (redirections, pipes, separators) handle `echo hi > f`, `ls | grep`, etc.
+_READ_ONLY_CMDS = frozenset(
+    {
+        "ls", "cat", "grep", "find", "pwd", "cd", "whoami", "id", "uname", "date",
+        "echo", "printf", "which", "type", "true", "false", "test", "[",
+        "df", "du", "free", "uptime", "ps", "lsusb", "lspci", "lscpu", "dmesg",
+        "nvidia-smi", "ip", "ss", "netstat", "ping", "hostname", "who", "w",
+        "sort", "uniq", "head", "tail", "wc", "diff", "stat", "file",
+        "basename", "dirname", "realpath", "readlink", "seq", "cut", "tr",
+        "getent", "history", "git", "sed", "curl",
+    }
+)
+
+# Commands whose common forms write files / change system state. Used only to
+# give a sharper error message; the gate rejects them either way.
+_WRITE_CMDS = frozenset(
+    {
+        "rm", "mv", "cp", "touch", "mkdir", "rmdir", "ln", "chmod", "chown",
+        "chgrp", "tee", "dd", "mkfs", "mount", "umount", "truncate", "install",
+        "unlink", "scp", "rsync", "wget", "make", "cmake", "ninja", "npm",
+        "npx", "yarn", "pnpm", "pip", "pip2", "pip3", "pipx", "apt", "apt-get",
+        "yum", "dnf", "brew", "gcc", "g++", "clang", "clang++", "go", "cargo",
+        "rustc", "javac", "tar", "zip", "unzip", "gzip", "gunzip", "xz",
+        "bzip2", "patch", "kill", "pkill", "killall", "systemctl", "service",
+        "docker", "podman", "git", "sed", "curl", "find",
+    }
+)
+
+# git subcommands that never touch the index/worktree/refs
+_GIT_READ = frozenset(
+    {
+        "status", "log", "diff", "show", "rev-parse", "ls-files", "describe",
+        "blame", "grep", "cat-file", "ls-tree", "count-objects", "help", "version",
+    }
+)
+
+# git subcommands that mutate the repo (index, worktree, refs, config); listed
+# explicitly because _WRITE_CMDS holds command names, not git subcommands.
+# Ambiguous ones (branch/tag/stash/config — read in some forms, write in others)
+# are conservatively treated as write.
+_GIT_WRITE = frozenset(
+    {
+        "add", "commit", "push", "pull", "fetch", "merge", "rebase", "reset",
+        "checkout", "switch", "restore", "clean", "init", "clone", "mv", "rm",
+        "stash", "tag", "branch", "config", "remote", "submodule", "apply",
+        "cherry-pick", "revert", "gc", "prune", "pack", "update-index",
+        "update-ref", "symbolic-ref", "write-tree", "commit-tree", "notes",
+        "am", "format-patch", "filter-branch", "reflog", "worktree", "archive",
+    }
+)
+
+# separator tokens: split the command into segments, each judged on its own
+_SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "&"})
+
+
+def _tokenize(command: str) -> list[str] | None:
+    """Split a command into shell tokens (quotes honored, separators split out).
+    Returns None when the command cannot be tokenized (unbalanced quotes)."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="|;&")
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def _segment(seg: list[str]) -> str:
+    """First command token of a segment, skipping VAR=value prefix assignments."""
+    for tok in seg:
+        if "=" in tok and not tok.startswith("-"):
+            continue
+        return tok
+    return ""
+
+
+def _classify_segment(seg: list[str]) -> str:
+    """Classify one command segment (no separators inside) as read/write/unknown."""
+    if not seg:
+        return "read"
+    # a token containing ">" is an output redirection (or a quoted ">", which we
+    # conservatively treat the same); "<" alone is a read-only input redirect
+    for tok in seg:
+        if ">" in tok:
+            return "write"
+    name = _segment(seg)
+    if not name:
+        return "read"  # pure VAR=val assignment: no side effects
+    if "/" in name:
+        return "unknown"  # path-invoked binary (./script.sh, /bin/...): unprovable
+    rest = seg[1:]
+
+    if name == "git":
+        subs = [t for t in rest if not t.startswith("-")]
+        if any(s in _GIT_WRITE for s in subs):
+            return "write"
+        if any(s in _GIT_READ for s in subs):
+            return "read"
+        return "read"  # bare `git` / `git -C dir` → default status, read-only
+    if name == "sed":
+        if any(t == "-i" or t.startswith("--in-place") for t in rest):
+            return "write"
+        return "read"
+    if name == "curl":
+        # -o/--output write a file; combined short flags (-so) contain "o"
+        if any(t.startswith("--output") or t.startswith("--remote-name") for t in rest):
+            return "write"
+        if any(t.startswith("-") and not t.startswith("--") and "o" in t for t in rest):
+            return "write"
+        return "read"
+    if name == "find":
+        if any(t in ("-delete", "-exec", "-execdir", "-ok") or t.startswith(("-fprint", "-fls")) for t in rest):
+            return "write"
+        return "read"
+
+    if name in _READ_ONLY_CMDS:
+        return "read"
+    if name in _WRITE_CMDS:
+        return "write"
+    return "unknown"
+
+
+def classify_command(command: str) -> tuple[str, str]:
+    """Static read-only check for chat mode.
+
+    Returns (verdict, detail) where verdict is "read", "write" or "unknown".
+    "read" means the command is provably free of workspace side effects;
+    anything else must be rejected in chat mode (default deny).
+    """
+    if not command.strip():
+        return "read", "empty command"
+    if "\n" in command:
+        # newline-separated commands run sequentially: every line must be read-only
+        for line in command.splitlines():
+            verdict, detail = classify_command(line)
+            if verdict != "read":
+                return verdict, f"{detail} (line: {line.strip()!r})"
+        return "read", "multi-line command"
+    if "$(" in command or "`" in command:
+        return "unknown", "command substitution ($(...) or backticks) cannot be statically analyzed"
+    tokens = _tokenize(command)
+    if tokens is None:
+        return "unknown", "command cannot be parsed (unbalanced quotes?)"
+    # command-separator segments: each one must be read-only
+    seg: list[str] = []
+    for tok in tokens:
+        if tok in _SEPARATORS:
+            verdict = _classify_segment(seg)
+            if verdict != "read":
+                detail = f"segment {_segment(seg) or '?'!r} is a {verdict} operation"
+                return verdict, detail
+            seg = []
+        else:
+            seg.append(tok)
+    verdict = _classify_segment(seg)
+    if verdict == "read":
+        return "read", "read-only command"
+    name = _segment(seg)
+    if verdict == "write":
+        return "write", f"'{name}' is a write operation"
+    return "unknown", f"'{name}' cannot be proven read-only"
+
+
 def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     reason = _blocked_reason(config, command)
     if reason:
         return {"content": f"ERROR: {reason}", "error": True}
+
+    # chat mode: only provably read-only commands may run (default deny)
+    if config.mode == "chat":
+        verdict, detail = classify_command(command)
+        if verdict != "read":
+            return {
+                "content": render("errors/read_only_command.md", verdict=verdict, detail=detail, command=command[:300]),
+                "error": True,
+            }
 
     if not command.strip():
         return {"content": render("errors/empty_command.md"), "error": True}

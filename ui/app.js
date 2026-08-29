@@ -52,19 +52,64 @@ function nearBottom() {
 // Follow the tail of the stream, but never during project-load (content is hidden
 // then), and never yank the view back down if the user has scrolled up to read —
 // a floating '↓' button appears instead so they can return to the live tail.
+// followTail is latched state, not a live distance check: reaching the bottom
+// (or clicking ↓) enters the tail, and fresh content keeps us pinned even though
+// the gap to the bottom then grows past JUMP_BOTTOM_GAP. Only the user's own
+// upward scroll breaks the latch — programmatic smooth glides stay latched.
+let followTail = true;
+let lastScrollTop = 0;
+
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
-  if (force || nearBottom()) {
-    stream.scrollTop = stream.scrollHeight;
+  if (force || followTail) {
+    // jump-to-bottom (user click) glides smoothly; live follow-pinning stays
+    // instant — an animated tail can never outrun a streaming preview, which
+    // is exactly the drift that made the old distance check fall off.
+    if (force) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+    else stream.scrollTop = stream.scrollHeight;
     jumpBottom.classList.add("hidden");
   } else {
     jumpBottom.classList.remove("hidden");
   }
 }
 
-jumpBottom.addEventListener("click", () => autoScroll(true));
-stream.addEventListener("scroll", () => {
-  jumpBottom.classList.toggle("hidden", nearBottom());
+// WebFont / image / any async layout growth can land AFTER the render path's own
+// autoScroll (font swap, image load, MathJax typeset, fold settle), leaving a
+// latched view hovering mid-air — and #stream disables native anchoring
+// (overflow-anchor: none), so the browser never compensates on its own. Watch
+// the CONTENT's height, not the viewport's: whenever the content grows while
+// latched, re-pin. The task input resizing the viewport never changes
+// eventsEl's height, so this observer can never re-trigger the resize jump it
+// exists to absorb.
+if (typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(() => {
+    if (followTail && !stream.classList.contains("loading")) autoScroll();
+  }).observe(eventsEl);
+}
+
+jumpBottom.addEventListener("click", () => {
+  followTail = true; // explicit re-latch: the resulting jump scrolls programmatically,
+  autoScroll(true);  // its scroll event is isTrusted=false and never touches the latch
+});
+let prevClientH = stream.clientHeight;
+stream.addEventListener("scroll", (e) => {
+  // Only the user's own gestures update the latch. Programmatic scrolls (smooth
+  // glides, force jumps) fire isTrusted=false and never touch it. A passive
+  // clamp is NOT isTrusted=false though: when the task input grows and shrinks
+  // the viewport, scrollTop gets clamped down and the browser fires a trusted
+  // scroll event — treating that as "the user scrolled up" would drop the latch
+  // and pop the ↓ button while typing. A shrunken viewport is the fingerprint
+  // of such a clamp, so ignore scrolls that coincide with it.
+  const cur = stream.scrollTop;
+  if (!e.isTrusted) { lastScrollTop = cur; return; }
+  const viewportShrank = stream.clientHeight < prevClientH;
+  prevClientH = stream.clientHeight;
+  if (viewportShrank) { lastScrollTop = cur; return; }
+  const up = cur < lastScrollTop;
+  lastScrollTop = cur;
+  if (up) followTail = false;
+  else if (nearBottom()) followTail = true;
+  jumpBottom.classList.toggle("hidden", followTail);
 }, { passive: true });
 
 function setStatus(state) {
@@ -83,6 +128,7 @@ let lastTextContent = "";
 // thinking (reasoning) block
 let thinkingEl = null;
 let thinkingContent = "";
+let compactionEl = null; // live "compressing context" block (compaction_delta)
 
 // map tool_call_id -> {name, args} so a tool_result knows which tool produced it
 const toolCalls = {};
@@ -105,7 +151,7 @@ function ensureToolGroup(readGroup) {
     };
     toolGroupEl.el.className = "event tool_group";
     toolGroupEl.el.innerHTML = '<div class="hdr">tools</div>';
-    eventsEl.appendChild(toolGroupEl.el);
+    (pageSink || eventsEl).appendChild(toolGroupEl.el);
   }
   return toolGroupEl;
 }
@@ -219,6 +265,9 @@ function handleToolCallDelta(ev) {
   }
   st.text += ev.delta;
   if (st.body) st.body.textContent = friendlyArgs(st.name, st.text);
+  // the preview grows in place: no scroll event fires, so re-pin explicitly
+  // while latched or the live write_file args drift out of view
+  autoScroll();
 }
 
 // Remove any stream previews left by an aborted turn (a tool call that streamed
@@ -260,6 +309,20 @@ function buildReadRow(call, content) {
 }
 
 function addEvent(ev) {
+  // lazy-open wire shape: {seq, event} wrappers (open stream + SSE replay of a
+  // lazily-opened project) carry each durable event's file seq so the UI can
+  // page the earlier records. seq 0 (the raw task) is excluded from the oldest
+  // loaded marker — the pill pages strictly before the preserved tail.
+  if (ev && typeof ev === "object" && ev.event && typeof ev.seq === "number") {
+    if (ev.seq > 0) oldestSeq = oldestSeq === null ? ev.seq : Math.min(oldestSeq, ev.seq);
+    ev = ev.event;
+  }
+  // SSE replay of a lazy project opens with a history line: restore the pill's
+  // honest on-disk older count (a reconnect may have lost server-side pages)
+  if (ev && ev.type === "history") {
+    setOlderPill(ev.older || 0);
+    return;
+  }
   // history replay: stale live-control events (status, permission) must not
   // drive the current UI — the badge/busy state belongs to the live run
   if (stream.classList.contains("loading") &&
@@ -271,6 +334,46 @@ function addEvent(ev) {
   // because results follow the tool_calls they belong to.
   if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
     toolGroupEl = null;
+  }
+  if (ev.type === "compaction_delta") {
+    // live progress of an in-flight compaction (transient, not stored): a
+    // counter that updates as the summary streams in, so a long compression
+    // never looks frozen. done=True means the compaction aborted/failed.
+    if (ev.done) {
+      if (compactionEl) { compactionEl.remove(); compactionEl = null; }
+      return;
+    }
+    if (!compactionEl) {
+      compactionEl = document.createElement("div");
+      compactionEl.className = "event compaction live";
+      compactionEl.innerHTML = '<div class="hdr">compressing context</div>';
+      const p = document.createElement("p");
+      p.className = "body muted";
+      compactionEl.appendChild(p);
+      (pageSink || eventsEl).appendChild(compactionEl);
+    }
+    compactionEl.querySelector("p").textContent = ev.chars > 0
+      ? `summarizing earlier turns… ${ev.chars} chars streamed`
+      : "compressing context — rolling earlier turns into a summary…";
+    autoScroll();
+    return;
+  }
+  if (ev.type === "compaction") {
+    // the durable compaction record: replace the live block with the final notice
+    if (compactionEl) { compactionEl.remove(); compactionEl = null; }
+    const el = document.createElement("div");
+    el.className = "event compaction";
+    el.innerHTML = '<div class="hdr">context compressed</div>';
+    const p = document.createElement("p");
+    p.className = "body muted";
+    const summary = (ev.summary || "").trim();
+    p.textContent = summary
+      ? "Earlier turns were rolled into a " + summary.length + "-char summary to fit the context window."
+      : "The conversation was compacted to fit the context window.";
+    el.appendChild(p);
+    (pageSink || eventsEl).appendChild(el);
+    autoScroll();
+    return;
   }
   if (ev.type === "assistant_message") {
     toolGroupEl = null;
@@ -289,7 +392,7 @@ function addEvent(ev) {
       const wrap = createAgentTextBlock();
       wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
       highlightCode(wrap);
-      eventsEl.appendChild(wrap);
+      (pageSink || eventsEl).appendChild(wrap);
     }
     return;
   }
@@ -341,7 +444,7 @@ function addEvent(ev) {
   if (ev.type === "text_delta" && ev.content) {
     if (!lastTextEl) {
       lastTextEl = createAgentTextBlock();
-      eventsEl.appendChild(lastTextEl);
+      (pageSink || eventsEl).appendChild(lastTextEl);
     }
     lastTextContent += ev.content;
     lastTextEl.querySelector(".body").innerHTML = renderMarkdown(lastTextContent);
@@ -378,7 +481,7 @@ function addEvent(ev) {
         const wasHidden = toggleFold(fold, () => { full.textContent = full._content; });
         toggle.textContent = wasHidden ? "▾" : "▸";
       };
-      eventsEl.appendChild(thinkingEl);
+      (pageSink || eventsEl).appendChild(thinkingEl);
     }
     thinkingEl.querySelector(".thinking-label").textContent =
       "thinking… " + thinkingContent.length + " chars";
@@ -400,7 +503,7 @@ function addEvent(ev) {
 
   const el = renderEvent(ev);
   if (el) {
-    eventsEl.appendChild(el);
+    (pageSink || eventsEl).appendChild(el);
     autoScroll();
   }
 }
@@ -425,6 +528,9 @@ function animateFold(el, from, to, onDone) {
     if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
     el._foldAnim = null;
     onDone();
+    // the fold's height just settled (or was cancelled): re-pin the tail if
+    // the user is latched, so the view never ends up hovering off the bottom
+    if (followTail && !stream.classList.contains("loading")) autoScroll();
   };
   if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     el.style.height = to + "px";
@@ -437,6 +543,7 @@ function animateFold(el, from, to, onDone) {
   );
   el._foldAnim = anim;
   anim.onfinish = settle;
+  followTailDuring(anim);
 }
 
 function resetFold(el) {
@@ -476,17 +583,31 @@ function reducedMotion() {
   return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
+// While a fold/diff expands, its height grows every frame; keep the view pinned
+// to the live tail each frame if the user is latched — a single post-animation
+// scroll would leave the view hovering mid-air for the whole 200ms.
+function followTailDuring(anim) {
+  let raf = requestAnimationFrame(function tick() {
+    if (followTail && !stream.classList.contains("loading")) autoScroll();
+    raf = requestAnimationFrame(tick);
+  });
+  const stop = () => cancelAnimationFrame(raf);
+  anim.addEventListener("finish", stop, { once: true });
+  anim.addEventListener("cancel", stop, { once: true });
+}
+
 function foldExpand(fold) {
   if (fold._foldAnim) { try { fold._foldAnim.cancel(); } catch (e) {} }
   fold._foldAnim = null;
   fold.classList.remove("hidden");
-  if (reducedMotion()) { fold.classList.add("open"); return; }
+  if (reducedMotion()) { fold.classList.add("open"); autoScroll(); return; }
   const anim = fold.animate(
     [{ gridTemplateRows: "0fr" }, { gridTemplateRows: "1fr" }],
     { duration: 200, easing: FOLD_EASE }
   );
   fold._foldAnim = anim;
   anim.onfinish = () => { fold._foldAnim = null; fold.classList.add("open"); };
+  followTailDuring(anim);
 }
 
 function foldCollapse(fold, onDone) {
@@ -543,7 +664,7 @@ function appendThinkingRow(reasoning) {
     const wasHidden = toggleFold(fold);
     toggle.textContent = wasHidden ? "▾" : "▸";
   };
-  eventsEl.appendChild(el);
+  (pageSink || eventsEl).appendChild(el);
 }
 
 // Render LaTeX ($...$, $$...$$) inside a freshly-inserted markdown block.
@@ -554,7 +675,10 @@ const MATH_RE = /\$\$[\s\S]*?\$\$|\$[^$\n]*\$/;
 function typesetMath(el) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
   if (!el || !MATH_RE.test(el.textContent)) return;
-  MathJax.typesetPromise([el]).catch(() => {});
+  // MathJax typesets asynchronously and can change the block's height after
+  // the delta that triggered it; re-pin the tail when it settles so a latched
+  // view never drifts off the bottom mid-render
+  MathJax.typesetPromise([el]).then(() => autoScroll()).catch(() => {});
 }
 
 // Strict gate for the replay pass: a block only needs MathJax when a $…$ or
@@ -620,20 +744,20 @@ function appendCompletion(status, summary) {
   const div = document.createElement("div");
   div.className = "completion";
   div.textContent = status === "completed" ? "completed" : status;
-  eventsEl.appendChild(div);
+  (pageSink || eventsEl).appendChild(div);
   // completed summaries duplicate the streamed agent text; abort/error reasons
   // are the only place the termination cause is shown
   if (status !== "completed" && summary) {
     const note = document.createElement("div");
     note.className = "completion-note";
     note.textContent = summary;
-    eventsEl.appendChild(note);
+    (pageSink || eventsEl).appendChild(note);
   }
   // live runs glide to the completion divider; during replay the end-scroll
   // at openProject already lands on the last record, so skip the smooth pass.
   // If the user has scrolled up, don't yank them — the ↓ button is already shown.
   if (!stream.classList.contains("loading")) {
-    if (nearBottom()) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+    if (followTail) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
     else jumpBottom.classList.remove("hidden");
   }
 }
@@ -794,6 +918,10 @@ async function run() {
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
+  // sending a message means "back to the live tail": re-latch and glide down
+  // exactly like pressing the ↓ button (the latch then keeps the reply pinned)
+  followTail = true;
+  autoScroll(true);
   // runs append to the active project's conversation; the mode travels with the
   // request so a switch only affects this run
   const payload = { task, mode: agentMode };
@@ -826,12 +954,19 @@ els.task.addEventListener("keydown", (e) => {
 // ---- task input auto-grow (grows as you type, shrinks back after sending) ----
 const TASK_BASE_H = els.task.offsetHeight; // default 3-row height
 function autoGrowTask() {
+  const was = els.task.style.height;
   if (!els.task.value.trim()) {
     els.task.style.height = TASK_BASE_H + "px";
-    return;
+  } else {
+    els.task.style.height = "auto";
+    els.task.style.height = Math.min(els.task.scrollHeight, Math.round(window.innerHeight * 0.3)) + "px";
   }
-  els.task.style.height = "auto";
-  els.task.style.height = Math.min(els.task.scrollHeight, Math.round(window.innerHeight * 0.3)) + "px";
+  // the input box resize resizes the stream viewport; a shrink can clamp
+  // scrollTop. The clamp fires a trusted scroll event that the listener above
+  // ignores (its fingerprint is the shrunken viewport), and the latch stays
+  // latched — so re-pin right here while the user is still typing, otherwise
+  // the view would hover just off the tail until the next content arrives.
+  if (was !== els.task.style.height && followTail && !nearBottom()) autoScroll();
 }
 els.task.addEventListener("input", autoGrowTask);
 
@@ -876,6 +1011,7 @@ async function saveSettings() {
 $("#settings-btn").addEventListener("click", openSettings);
 $("#settings-save").addEventListener("click", saveSettings);
 $("#settings-close").addEventListener("click", closeSettings);
+$("#older-pill").addEventListener("click", loadOlder);
 modal.addEventListener("click", (e) => {
   if (e.target === modal) closeSettings();
 });
@@ -1463,6 +1599,91 @@ function clearStream() {
   lastTextContent = "";
   thinkingEl = null;
   thinkingContent = "";
+  oldestSeq = null; // fresh project: no loaded events yet
+  setOlderPill(0);
+}
+
+// ---- scroll-up paging (lazily-opened projects) ----
+// A lazy .clc loads only seq 0 + the preserved tail; the pill at the top pages
+// the earlier records from /api/history. olderRemaining mirrors the server-side
+// count of durable records still on disk before the oldest loaded one — the
+// server's own number, so its LRU eviction never makes the pill lie (a page the
+// server dropped stays rendered in the DOM; only a reconnect re-fetches it).
+let olderRemaining = 0;
+let oldestSeq = null; // file seq of the oldest loaded (rendered) non-0 event
+let paging = false;   // one history fetch at a time
+// when non-null, addEvent appends into this off-DOM sink instead of #events:
+// loadOlder renders a history page through the full replay pipeline (agent text,
+// thinking, tool groups, completions), then prepends the sink in one pass.
+let pageSink = null;
+
+function setOlderPill(n) {
+  olderRemaining = Math.max(0, n | 0);
+  const pill = document.getElementById("older-pill");
+  if (olderRemaining > 0) {
+    pill.classList.remove("hidden");
+    document.getElementById("older-label").textContent =
+      olderRemaining === 1 ? "load 1 earlier record" : `load earlier records (${olderRemaining})`;
+  } else {
+    pill.classList.add("hidden");
+  }
+}
+
+async function loadOlder() {
+  if (paging || stream.classList.contains("loading") || !oldestSeq || olderRemaining <= 0) return;
+  paging = true;
+  try {
+    const anchor = eventsEl.firstElementChild; // identity survives the prepend
+    const res = await fetch(API_BASE + `/api/history?before=${oldestSeq}&limit=200`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || res.status);
+    const page = data.events || [];
+    if (!page.length) { setOlderPill(0); return; }
+    const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;
+    // Render the page chronologically through addEvent into an off-DOM sink so
+    // agent text, thinking, tool groups and completions build exactly as during
+    // the open replay — then prepend the sink in one pass. Live-stream state is
+    // saved/restored around the build: the page must not merge into (or clobber)
+    // an in-progress live turn, and the sink's own state dies with the sink.
+    const sink = document.createElement("div");
+    sink.style.display = "contents"; // transparent wrapper: children lay out in #events
+    const savedLastTextEl = lastTextEl, savedLastTextContent = lastTextContent;
+    const savedThinkingEl = thinkingEl, savedThinkingContent = thinkingContent;
+    const savedToolGroupEl = toolGroupEl;
+    lastTextEl = null; lastTextContent = "";
+    thinkingEl = null; thinkingContent = "";
+    toolGroupEl = null;
+    pageSink = sink;
+    try {
+      for (const item of page) addEvent(item); // unwrap tracks oldestSeq
+    } finally {
+      pageSink = null;
+      lastTextEl = savedLastTextEl; lastTextContent = savedLastTextContent;
+      thinkingEl = savedThinkingEl; thinkingContent = savedThinkingContent;
+      toolGroupEl = savedToolGroupEl;
+    }
+    // typeset AFTER insertion: MathJax needs real layout, and any height it adds
+    // must be accounted for before the anchor re-adjusts the scroll position
+    const mathBlocks = Array.from(sink.querySelectorAll(".event.text .body")).filter(hasMathText);
+    const frag = document.createDocumentFragment();
+    while (sink.firstChild) frag.appendChild(sink.firstChild);
+    eventsEl.insertBefore(frag, eventsEl.firstElementChild);
+    if (typeof MathJax !== "undefined" && typeof MathJax.typesetPromise === "function") {
+      for (const b of mathBlocks) {
+        try { await MathJax.typesetPromise([b]); } catch (e) {}
+        await new Promise((r) => setTimeout(r, 0)); // repaint between blocks
+      }
+    }
+    // prepending (and typesetting) shifted the content down: re-anchor the view
+    if (anchor && anchorTop !== null) {
+      stream.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+    }
+    setOlderPill(data.older);
+  } catch (e) {
+    alert("Failed to load earlier records: " + e.message);
+  } finally {
+    paging = false;
+  }
 }
 
 function setProjectInfo(info) {
@@ -1531,11 +1752,15 @@ async function openProject(path) {
           started = true;
         } else if (msg.count) {
           totalEvents = msg.count;
+          // lazy open: "older" is the count of durable records still on disk
+          // before the loaded tail — the pill's starting value
+          if (typeof msg.older === "number") setOlderPill(msg.older);
         } else if (msg.progress && msg.progress.total) {
           // phase A: server file parse maps to the first 50% of the bar
           setPct(50 * msg.progress.done / msg.progress.total);
         } else if (msg.event) {
-          addEvent(msg.event);
+          // {seq, event}: addEvent unwraps and tracks the oldest loaded seq
+          addEvent(msg);
           // phase B: client rendering of the events maps to 50-90%
           if (totalEvents) setPct(50 + 40 * (++rendered / totalEvents));
         }

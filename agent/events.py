@@ -7,11 +7,14 @@ and the kind/id/timestamp discriminated-union pattern from OpenHands.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+from .core.persist import append_jsonl
 
 
 def _new_id() -> str:
@@ -132,6 +135,18 @@ class CompactionEvent(Event):
     tail_start: int = 0
 
 
+@dataclass
+class CompactionDeltaEvent(Event):
+    """Live progress of an in-flight compaction summary (transient, not durable):
+    how many characters of the new summary have streamed in so far, and a final
+    done=True when the compaction aborts/fails so the UI never hangs on the
+    live progress block."""
+
+    type: str = "compaction_delta"
+    chars: int = 0
+    done: bool = False
+
+
 EVENT_TYPES: dict[str, type] = {
     cls.type: cls
     for cls in [
@@ -147,6 +162,7 @@ EVENT_TYPES: dict[str, type] = {
         FinalEvent,
         PermissionRequestEvent,
         CompactionEvent,
+        CompactionDeltaEvent,
     ]
 }
 
@@ -191,12 +207,75 @@ class EventLog:
     def append(self, event: Event) -> Event:
         self._events.append(event)
         if self._path and event.type in DURABLE_TYPES:
-            if self._writer:
-                self._writer(self._path, event_to_json(event))
-            else:
-                with open(self._path, "a", encoding="utf-8") as f:
-                    f.write(event_to_json(event) + "\n")
+            append_jsonl(self._path, event_to_json(event), self._writer)
         return event
 
     def events(self) -> list[Event]:
         return list(self._events)
+
+    # ------------------------------------------------------------------
+    # Durable-index operations (shared with the lazy log — see core/lazy.py).
+    # "Durable positions" index the DURABLE event sequence, which is exactly
+    # what the .clc persists, so a lazily reopened (durable-only) log resolves
+    # the same indices as the live one.
+    # ------------------------------------------------------------------
+
+    def _durable(self) -> list[Event]:
+        return [e for e in self._events if e.type in DURABLE_TYPES]
+
+    def tail_from(self, ts: int, compaction: CompactionEvent) -> list[Event]:
+        """Durable events at durable positions >= ts — the preserved recent
+        tail the model consumes, minus compaction events. A stale out-of-range
+        ts (an older .clc computed against a log that included transients) is
+        clamped to the compaction's own durable position."""
+        durable = self._durable()
+        if ts > len(durable):
+            ts = next((i for i, e in enumerate(durable) if e is compaction), len(durable))
+        return [e for e in durable[ts:] if not isinstance(e, CompactionEvent)]
+
+    def tail_start_index(self, budget: int) -> int:
+        """Durable index where the preserved recent tail begins, sized to
+        ``budget`` tokens (~4 chars each, walking from the end) and split at an
+        assistant-turn boundary so the tail never starts mid-turn. For a fully
+        loaded log durable positions ARE file seqs."""
+        durable = self._durable()
+        total = 0
+        tail_start = 0
+        for i in range(len(durable) - 1, -1, -1):
+            ev = durable[i]
+            if isinstance(ev, (UserMessageEvent, ToolResultEvent)):
+                size = len(ev.content)
+            elif isinstance(ev, AssistantMessageEvent):
+                size = len(ev.content) + len(ev.reasoning)
+            else:
+                continue
+            total += size // 4
+            if total >= budget:
+                j = i
+                while j > 0 and not isinstance(durable[j], AssistantMessageEvent):
+                    j -= 1
+                tail_start = j
+                break
+        return tail_start
+
+    def materialize_range(self, lo: int, hi: int) -> list[tuple[int, Event]]:
+        """Ensure durable positions [lo, hi) are materialized; return (position,
+        event) pairs in file order. The base log keeps everything resident, so
+        this is just a slice."""
+        durable = self._durable()
+        lo = max(0, lo)
+        hi = min(hi, len(durable))
+        return [(i, ev) for i, ev in enumerate(durable) if lo <= i < hi]
+
+    @contextlib.contextmanager
+    def materialize(self, lo: int, hi: int) -> Iterator[None]:
+        """Context: materialize + pin durable positions [lo, hi) against any
+        eviction for the block. The base log never evicts, so this is a no-op
+        (kept so the compactor works uniformly over both log kinds)."""
+        self.materialize_range(lo, hi)
+        yield
+
+    def durable_index_of(self, event: Event) -> int:
+        """Durable index of a loaded event (identity); the compactor's no-op
+        guard compares against it."""
+        return self._durable().index(event)

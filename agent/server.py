@@ -40,9 +40,10 @@ from .events import (
     StateUpdateEvent,
     event_to_json,
 )
-from .project import Project, create_project, open_project, read_header
+from .core.lazy import LazyEventLog
+from .project import Project, create_project, open_project_lazy
 from .tools.transport import SshTransport
-from .tools.workspace import RemoteWorkspace, Workspace, shq
+from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
 
 
 def _settings_path() -> Path:
@@ -119,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
         elif path == "/api/events":
             self._sse()
+        elif path == "/api/history":
+            self._history()
         elif path == "/api/workspace/tree":
             self._workspace_tree()
         elif path == "/api/fs/list":
@@ -164,6 +167,9 @@ class Handler(BaseHTTPRequestHandler):
         config = self._cfg
         if body.get("verify"):
             config = _replace(config, verify_command=body["verify"])
+        mode = body.get("mode")
+        if mode in ("chat", "work"):
+            config = _replace(config, mode=mode)
 
         if not task:
             return self._json({"error": "task is required"}, status=400)
@@ -267,22 +273,9 @@ class Handler(BaseHTTPRequestHandler):
             if not bridge:
                 return self._json({"error": "bridge is required for ssh mode"}, status=400)
             root = (body.get("workspace") or "").strip() or str(Path.home())
-            with self._state.lock:
-                self._state.backend_mode = "ssh"
-                self._state.bridge_url = bridge
-                self._state.remote_root = root
-                # a mode switch invalidates any previously-opened project's workspace
-                self._state.project = None
-                self._state.workspace = None
-                self._state.gate = None
+            self._state.set_backend("ssh", bridge, root)
         else:
-            with self._state.lock:
-                self._state.backend_mode = "local"
-                self._state.bridge_url = None
-                self._state.remote_root = None
-                self._state.project = None
-                self._state.workspace = None
-                self._state.gate = None
+            self._state.set_backend("local")
         self._json({"status": "ok"})
 
     def _sse(self) -> None:
@@ -298,12 +291,21 @@ class Handler(BaseHTTPRequestHandler):
             # taskbar after a project switch or an interrupted run
             self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
             # replay the active project history first (only durable display
-            # events — streaming deltas are transient and never replayed)
+            # events — streaming deltas are transient and never replayed).
+            # A lazy project replays its resident events with their file seqs so
+            # the UI can restore the scroll-up pill and keep paging; the
+            # "history" info line carries the honest on-disk older count.
             project = self._state.project
             if project is not None:
-                for ev in project.events():
-                    if ev.type in DURABLE_TYPES:
-                        self._write_sse(ev)
+                log = project.log
+                if isinstance(log, LazyEventLog):
+                    self._write_sse_raw({"type": "history", "older": log.older_count()})
+                    for seq, ev in log.items():
+                        self._write_sse(ev, seq=seq)
+                else:
+                    for ev in project.events():
+                        if ev.type in DURABLE_TYPES:
+                            self._write_sse(ev)
             # then live events
             while True:
                 try:
@@ -317,8 +319,20 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._broadcaster.unsubscribe(q)
 
-    def _write_sse(self, ev: Event) -> None:
-        self.wfile.write(f"data: {event_to_json(ev)}\n\n".encode())
+    def _write_sse(self, ev: Event, seq: int | None = None) -> None:
+        """Emit one SSE event; with ``seq`` the payload is {seq, event} (the lazy
+        replay/open wire shape), otherwise the bare event JSON. event_to_json
+        already returns a serialized string, so only the wrapped shape is
+        re-serialized (no double encoding)."""
+        if seq is not None:
+            payload = json.dumps({"seq": seq, "event": json.loads(event_to_json(ev))})
+        else:
+            payload = event_to_json(ev)
+        self.wfile.write(f"data: {payload}\n\n".encode())
+        self.wfile.flush()
+
+    def _write_sse_raw(self, obj: dict) -> None:
+        self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
         self.wfile.flush()
 
     def _workspace_tree(self) -> None:
@@ -415,18 +429,13 @@ class Handler(BaseHTTPRequestHandler):
         if r.code != 0:
             return self._json({"error": f"not a directory: {target}"})
         entries = []
-        for entry in r.stdout.splitlines():
-            if not entry:
-                continue
-            if entry.endswith("/"):  # ls -1AF: dirs end with /
-                name = entry[:-1]
-                entries.append({"name": name, "path": target.rstrip("/") + "/" + name, "dir": True, "link": None})
-                continue
-            name = entry[:-1] if entry[-1] in ("*", "@") else entry
-            if not show_hidden and name.startswith("."):
+        for name, is_dir in parse_ls_entries(r.stdout):
+            # dirs are always shown even when hidden (the browser needs a way
+            # into dot-directories); hidden files are filtered like _walk
+            if not is_dir and not show_hidden and name.startswith("."):
                 continue
             # link targets need an extra readlink exec per symlink; skip (P2 MVP)
-            entries.append({"name": name, "path": target.rstrip("/") + "/" + name, "dir": False, "link": None})
+            entries.append({"name": name, "path": target.rstrip("/") + "/" + name, "dir": is_dir, "link": None})
         parent = target.rsplit("/", 1)[0] if target != "/" else None
         self._json({"path": target, "parent": parent, "entries": entries, "error": None})
 
@@ -480,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _open_stream_start(self, full: Path) -> None:
         # stream the open as NDJSON so the UI can show real file-parse progress;
-        # errors after headers are reported inline as an {"error": ...} line
+        # errors are reported inline as an {"error": ...} line
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "application/x-ndjson")
@@ -495,36 +504,67 @@ class Handler(BaseHTTPRequestHandler):
             emit({"progress": {"done": done, "total": total}})
 
         # build the workspace first (ssh mode -> RemoteWorkspace over the bridge),
-        # so header/open/rewrite all read and write the remote .clc
+        # so index/load/append all read and write the remote .clc
         ws = self._state.build_workspace(str(full.parent))
         try:
-            meta = read_header(full, workspace=ws)
-        except (OSError, ValueError) as e:
-            emit({"error": f"cannot open project: {e}"})
-            return
-        # meta first so the UI can leave the welcome screen and show the bar
-        emit(
-            {
-                "meta": {
-                    "project": str(full),
-                    "name": meta.name,
-                    "workdir": str(full.parent),
-                }
-            }
-        )
-        try:
-            project = open_project(full, on_progress=on_progress, workspace=ws)
+            project = open_project_lazy(full, on_progress=on_progress, workspace=ws)
         except (OSError, ValueError) as e:
             emit({"error": f"cannot open project: {e}"})
             return
         self._state.set_project(project, workspace=ws)
-        # display projection: only durable final events, so old sessions stored
-        # as full streaming logs still load fast (opencode loads parts, not deltas)
+        # meta after the (single-pass, no-JSON) index scan: the header lives in the
+        # same indexed read, so emitting it afterwards costs no extra fetch
+        emit(
+            {
+                "meta": {
+                    "project": str(full),
+                    "name": project.meta.name,
+                    "workdir": str(full.parent),
+                }
+            }
+        )
+        # display projection: only durable final events (streaming deltas are
+        # transient and never replayed). A lazily-opened project has only seq 0 +
+        # the preserved tail resident; every line carries its file seq so the UI
+        # can page the rest via /api/history. "older" is the honest count of
+        # durable records still on disk before the loaded range.
         display = [e for e in project.events() if e.type in DURABLE_TYPES]
-        emit({"count": len(display)})
-        for ev in display:
-            emit({"event": json.loads(event_to_json(ev))})
+        log = project.log
+        if isinstance(log, LazyEventLog):
+            older = log.older_count()
+            pairs = log.items()
+        else:
+            older = 0
+            pairs = list(enumerate(display))
+        emit({"count": len(display), "older": older})
+        for seq, ev in pairs:
+            emit({"seq": seq, "event": json.loads(event_to_json(ev))})
         emit({"done": True})
+
+    def _history(self) -> None:
+        """Scroll-up paging for a lazily-opened project: materialize the durable
+        events before ``before`` (file seqs, exclusive, max ``limit``) and return
+        them with their seqs. The UI prepends the page and trusts the response's
+        server-side ``older`` count (honest even after LRU eviction dropped pages
+        the UI already rendered; a reconnect resets the pill to it)."""
+        qs = parse_qs(urlparse(self.path).query)
+        try:
+            before = int(qs.get("before", ["0"])[0])
+            limit = min(max(int(qs.get("limit", ["200"])[0]), 1), 500)
+        except ValueError:
+            return self._json({"error": "bad query"}, status=400)
+        project = self._state.project
+        log = project.log if project is not None else None
+        if log is None or not isinstance(log, LazyEventLog):
+            return self._json({"events": [], "older": 0})
+        lo = max(1, before - limit)
+        pairs = log.materialize_range(lo, before)
+        self._json(
+            {
+                "events": [{"seq": s, "event": json.loads(event_to_json(ev))} for s, ev in pairs],
+                "older": log.older_count(),
+            }
+        )
 
     def _json(self, obj: dict[str, Any], status: int = 200) -> None:
         data = json.dumps(obj).encode("utf-8")
@@ -547,11 +587,23 @@ def _replace(config: Config, **kw: Any) -> Config:
 _FS_LIST_TIMEOUT = 30.0
 
 
+def _tree_node(name: str, child_rel: str, is_dir: bool) -> dict[str, Any]:
+    """One workspace-tree node: {name, path, dir, link} (link resolved by the
+    local walk, which has the file system at hand)."""
+    return {"name": name, "path": child_rel, "dir": is_dir, "link": None}
+
+
+def _should_list(rel: str, child_rel: str, expanded: set[str]) -> bool:
+    """Whether a child dir gets listed now: the root, an explicitly expanded
+    dir, or a dir directly under an expanded one (the one-level lookahead)."""
+    return rel == "" or child_rel in expanded or rel in expanded
+
+
 def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
     """Remote counterpart of _walk: same lazy partial walk (root + expanded dirs +
     one-level lookahead), but every level lists all its directories in ONE exec
     (RemoteWorkspace.list_many), so a tree costs ~depth round trips instead of one
-    per directory. Entries are strings (dirs end with '/'), not Path objects."""
+    per directory. Entries come from the shared parse_ls_entries parser."""
     expanded = set(expanded)
     children: dict[str, list[dict[str, Any]]] = {}
     by_path: dict[str, dict[str, Any]] = {}
@@ -562,17 +614,15 @@ def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
         next_frontier: list[str] = []
         for rel in frontier:
             out: list[dict[str, Any]] = []
-            for e in listed.get(rel, []):
-                is_dir = e.endswith("/")
-                name = e[:-1] if is_dir else e
+            for name, is_dir in parse_ls_entries("\n".join(listed.get(rel, []))):
                 if not show_hidden and name.startswith("."):
                     continue
                 child_rel = name if rel == "" else f"{rel}/{name}"
-                node: dict[str, Any] = {"name": name, "path": child_rel, "dir": is_dir, "link": None}
+                node = _tree_node(name, child_rel, is_dir)
                 out.append(node)
                 if is_dir:
                     by_path[child_rel] = node
-                    if rel == "" or child_rel in expanded or rel in expanded:
+                    if _should_list(rel, child_rel, expanded):
                         next_frontier.append(child_rel)
             children[rel] = out
         frontier = next_frontier
@@ -591,7 +641,7 @@ def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hid
     """Lazy partial tree walk: list children only for the root, the currently
     expanded dirs, and their direct children (one level of lookahead). Deeper
     levels are fetched as they get expanded, so opening a big project never walks
-    the whole tree up front.     show_hidden keeps dotfiles out of every level."""
+    the whole tree up front. show_hidden keeps dotfiles out of every level."""
     expanded = set(expanded)
 
     def list_entries(p: Path) -> list[Path]:
@@ -609,21 +659,14 @@ def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hid
     def build(p: Path, rel: str) -> list:
         out = []
         for e in list_entries(p):
-            node: dict[str, Any] = {
-                "name": e.name,
-                "path": str(e.relative_to(root)),
-                "dir": e.is_dir(),
-                "link": str(e.resolve()) if e.is_symlink() else None,
-            }
-            # don't recurse into symlinked dirs (display-only): prevents escaping
-            # into system trees and symlink cycles; the agent's tools still follow
-            # links, so only the UI is affected
+            child_rel = str(e.relative_to(root))
+            node = _tree_node(e.name, child_rel, e.is_dir())
+            node["link"] = str(e.resolve()) if e.is_symlink() else None
+            # symlinked dirs are shown as leaves: prevents escaping into system
+            # trees and symlink cycles; the agent's tools still follow links, so
+            # only the UI is affected
             if e.is_dir() and not e.is_symlink():
-                child_rel = str(e.relative_to(root))
-                # list this dir if it is the root, expanded, or directly under an
-                # expanded dir (the one-level lookahead); otherwise stop
-                listed = rel == "" or child_rel in expanded or rel in expanded
-                if listed:
+                if _should_list(rel, child_rel, expanded):
                     node["children"] = build(e, child_rel)
             out.append(node)
         return out

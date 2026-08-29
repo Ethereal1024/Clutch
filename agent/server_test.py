@@ -128,11 +128,12 @@ def _run_server_test() -> int:
         check(clc.suffix == ".clc" and clc.exists(), ".clc file exists")
         check(pdata.get("workdir") == str(proj_dir), "workdir is project dir")
 
-        # 3b. reopen the project (NDJSON stream: meta line carries the name)
+        # 3b. reopen the project (NDJSON stream: progress, meta, count, events)
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "project reopened")
-        rdata = json.loads(body.splitlines()[0])
-        check(rdata.get("meta", {}).get("name") == "demo", "reopened project name")
+        lines = [json.loads(l) for l in body.splitlines() if l.strip()]
+        meta = next((m["meta"] for m in lines if m.get("meta")), None)
+        check(meta is not None and meta.get("name") == "demo", "reopened project name")
 
         # 3c. server file browser (/api/fs/list)
         st, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
@@ -166,6 +167,87 @@ def _run_server_test() -> int:
         lnode = next((n for n in data.get("tree", []) if n["name"] == "linkdir"), None)
         check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
         check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
+
+        # 3e. lazy .clc (compaction + enough durable events): the open stream
+        # reports the on-disk older count and wraps every event as {seq, event};
+        # /api/history pages the middle records; the SSE replay opens with a
+        # history info line before the seq-wrapped tail.
+        from .events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, event_to_json
+
+        lazy_dir = Path(sdir) / "lazywork"
+        lazy_dir.mkdir()
+        lclc = lazy_dir / "big.clc"
+        lazy_lines = [
+            "# clutch project v1", "name: lazybig", "model: fake-model", "---",
+            event_to_json(UserMessageEvent(content="task")),
+        ]
+        for i in range(1, 500):
+            lazy_lines.append(event_to_json(AssistantMessageEvent(content=f"old work {i}")))
+        lazy_lines.append(event_to_json(CompactionEvent(summary="old work summarized", tail_start=450)))
+        for i in range(501, 531):
+            lazy_lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
+        lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8")
+
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
+        check(st == 200, "lazy project reopened")
+        llines = [json.loads(l) for l in body.splitlines() if l.strip()]
+        lmeta = next((m["meta"] for m in llines if m.get("meta")), None)
+        check(lmeta is not None and lmeta.get("name") == "lazybig", "lazy project name")
+        lcount = next((m for m in llines if m.get("count") is not None), None)
+        check(lcount is not None and lcount.get("older") == 449, "lazy open reports the older count")
+        lsevs = [m for m in llines if m.get("event") and m.get("seq") is not None]
+        check([m["seq"] for m in lsevs] == [0] + list(range(450, 531)),
+              "lazy open streams seq 0 + the preserved tail")
+        check(all(isinstance(m.get("seq"), int) and "event" in m for m in lsevs),
+              "lazy open events are {seq, event} wrapped")
+
+        st, body = http_get(f"{base_url}/api/history?before=450&limit=500")
+        h = json.loads(body)
+        check(st == 200 and h.get("older") == 0, "history after the last page reports older=0")
+        check([e["seq"] for e in h["events"]] == list(range(1, 450)),
+              "history pages the on-disk middle")
+        st, body = http_get(f"{base_url}/api/history?before=450&limit=100")
+        h2 = json.loads(body)
+        check([e["seq"] for e in h2["events"]] == list(range(350, 450)),
+              "history respects the limit clamp")
+        st, body = http_get(f"{base_url}/api/history?before=1&limit=100")
+        h3 = json.loads(body)
+        check(h3.get("events") == [] and h3.get("older") == 0, "history before seq 1 is empty")
+
+        evs2: list[dict] = []
+        done2 = threading.Event()
+
+        def sse_reader2() -> None:
+            try:
+                with urllib.request.urlopen(f"{base_url}/api/events", timeout=30) as r:
+                    seen_hist = False
+                    for raw in r:
+                        line = raw.decode().strip()
+                        if line.startswith("data: "):
+                            ev = json.loads(line[6:])
+                            evs2.append(ev)
+                            if ev.get("type") == "history":
+                                seen_hist = True
+                            if seen_hist and "seq" in ev and "event" in ev:
+                                done2.set()
+                                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  [sse2] {e}")
+
+        rt2 = threading.Thread(target=sse_reader2, daemon=True)
+        rt2.start()
+        check(done2.wait(timeout=30), "SSE lazy replay opens with a history line")
+        hist_idx = next((i for i, e in enumerate(evs2) if e.get("type") == "history"), None)
+        first_seq = next((i for i, e in enumerate(evs2) if "seq" in e and "event" in e), None)
+        check(hist_idx is not None and isinstance(evs2[hist_idx].get("older"), int),
+              "history line carries the older count")
+        check(first_seq is not None and hist_idx is not None and hist_idx < first_seq,
+              "history line precedes the seq-wrapped replay")
+        check(evs2[first_seq]["seq"] == 0, "SSE replay starts at seq 0")
+
+        # switch back to the demo project so the real-run section stays untouched
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "switched back to the demo project")
 
         # 4. real run (only with a key saved in ~/.clutch/settings.json)
         key = _saved_api_key()

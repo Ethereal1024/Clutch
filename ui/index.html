@@ -143,13 +143,22 @@
           <span id="workspace-path" class="muted" title="active working directory"></span>
         </div>
       </div>
-      <div id="stream" class="scroll">
-        <div id="open-progress" class="open-progress hidden">
-          <div class="open-progress-track"><div class="open-progress-fill"></div></div>
-          <span class="open-progress-label">0%</span>
+      <div class="stream-wrap">
+        <div id="stream" class="scroll">
+          <div id="open-progress" class="open-progress hidden">
+            <div class="open-progress-track"><div class="open-progress-fill"></div></div>
+            <span class="open-progress-label">0%</span>
+          </div>
+          <button id="older-pill" class="older-pill hidden" type="button" title="load earlier records from this conversation">
+            <span id="older-label"></span>
+          </button>
+          <div id="events" class="events"></div>
         </div>
-        <div id="events" class="events"></div>
-        <button id="jump-bottom" class="jump-bottom hidden" type="button" title="scroll to bottom">↓</button>
+        <button id="jump-bottom" class="jump-bottom hidden" type="button" title="scroll to bottom">
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+            <path d="M6 11.33 L1.38 3.33 L10.62 3.33 Z" fill="currentColor"/>
+          </svg>
+        </button>
       </div>
     </section>
 
