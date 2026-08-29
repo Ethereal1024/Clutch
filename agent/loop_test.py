@@ -480,9 +480,12 @@ def main() -> int:
         )
 
     # 13. compaction: context overflow rolls the older turns into a summary and the
-    # run continues (no abort); the summary is persisted as a CompactionEvent.
+    # run continues (no abort); the summary is persisted as a CompactionEvent. Two
+    # real work turns give the head something to summarize (a compaction after only
+    # one turn would have nothing but the task, so the guard correctly skips it).
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
+        (sb.root / "a.txt").write_text("some content\n" * 30)
         cfg = Config(
             verify_command="echo ok",
             llm_context_window=1000,
@@ -491,7 +494,8 @@ def main() -> int:
         )
         fake = FakeLLM(
             responses=[
-                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "a.txt"}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "a.txt"}')]),
                 _resp(content="SUMMARY"),
                 _resp(content="final answer"),
             ],

@@ -7,6 +7,7 @@ doom-loop detection, verification gate.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 
@@ -15,13 +16,19 @@ from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
 from .events import (
+    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
     EventLog,
+    StepStartEvent,
+    TextDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
+    event_from_dict,
+    event_to_json,
 )
+from .loop import Agent
 from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -143,6 +150,54 @@ def main() -> None:
     check(
         len(notes) == 1 and "a.py" in notes[0]["content"] and "b.py" in notes[0]["content"],
         "compaction note lists the working files to re-read",
+    )
+
+    # 2h. tail_start is an index into the DURABLE sequence. Transient streaming
+    # deltas live only in the in-memory log; an index over them is stale after a
+    # reopen (durable-only load) and would silently drop the whole recent tail.
+    # 2h1: transients interleaved in a live log must not shift the durable index
+    live = EventLog()
+    live.append(UserMessageEvent(content="task"))
+    live.append(TextDeltaEvent(content="x"))
+    live.append(AssistantMessageEvent(content="work a"))
+    live.append(StepStartEvent())
+    live.append(UserMessageEvent(content="recent"))
+    live.append(AssistantMessageEvent(content="recent work"))
+    tail = Agent(llm=None, registry=None, workspace=None, config=Config(compaction_tail_tokens=1))._tail_start_index(
+        live.events()
+    )
+    durable = [e for e in live.events() if e.type in DURABLE_TYPES]
+    check(tail < len(durable), "tail_start indexes the durable sequence, not the full log")
+    check(
+        durable[tail].type == "assistant_message" and durable[tail].content == "recent work",
+        "durable tail starts at the preserved recent turn",
+    )
+    # 2h2: persist the durable events and reopen — the same tail index still works
+    reopened = EventLog()
+    for line in (event_to_json(e) for e in durable):
+        reopened.append(event_from_dict(json.loads(line)))
+    reopened.append(CompactionEvent(summary="s", tail_start=tail))
+    rmsgs = derive_messages(reopened, Config(), "t")
+    check(
+        any(m["role"] == "assistant" and m.get("content") == "recent work" for m in rmsgs),
+        "reopen keeps the recent tail (index stable across persistence)",
+    )
+    # 2h3: a stale out-of-range tail_start (older .clc) is clamped to the
+    # compaction's own durable position so post-compaction history is NOT lost
+    stale = EventLog()
+    stale.append(UserMessageEvent(content="task"))
+    stale.append(AssistantMessageEvent(content="old summarized work"))
+    stale.append(CompactionEvent(summary="old work", tail_start=999))
+    stale.append(UserMessageEvent(content="recent turn"))
+    stale.append(AssistantMessageEvent(content="recent answer"))
+    smsgs = derive_messages(stale, Config(), "t")
+    check(
+        any(m["role"] == "assistant" and m.get("content") == "recent answer" for m in smsgs),
+        "stale out-of-range tail_start clamped; recent history preserved",
+    )
+    check(
+        not any(m["role"] == "assistant" and m.get("content") == "old summarized work" for m in smsgs),
+        "pre-compaction work stays summarized away",
     )
 
     # 2f. no turn-count windowing: a long log projects EVERYTHING (compaction is the

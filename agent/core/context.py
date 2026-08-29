@@ -15,6 +15,7 @@ from typing import Any
 
 from ..config import Config
 from ..events import (
+    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
     EventLog,
@@ -145,7 +146,18 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     compaction = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
     if compaction is not None:
         head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]
-        tail_events = [e for e in events[compaction.tail_start :] if not isinstance(e, CompactionEvent)]
+        # tail_start is an index into the DURABLE event sequence (what the .clc
+        # persists); the in-memory log also holds transient streaming deltas, so
+        # slice the durable list — otherwise a reopened log (durable-only) would
+        # make the index out of range and silently drop the whole recent tail.
+        durable = [e for e in events if e.type in DURABLE_TYPES]
+        ts = compaction.tail_start
+        if ts > len(durable):
+            # stale index from an older .clc (computed against the in-memory log
+            # that included transients): clamp to this compaction's own durable
+            # position so the post-compaction history is kept, not silently lost
+            ts = next((i for i, e in enumerate(durable) if e is compaction), len(durable))
+        tail_events = [e for e in durable[ts:] if not isinstance(e, CompactionEvent)]
         files = _recent_working_files(tail_events)
         if files:
             # the exact contents of these files were compacted away; the model must

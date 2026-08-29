@@ -27,6 +27,7 @@ from .core.parse import ParseError, parse_arguments
 from .core.permission import PermissionGate, PermissionRequired
 from .core.terminate import Terminator
 from .events import (
+    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
     Event,
@@ -301,16 +302,24 @@ class Agent:
         """Roll the older conversation into a summary (opencode-style). Best-effort:
         returns False when nothing was compacted (too little to summarize, no NEW
         head since the last compaction, or the summary call failed) so the loop
-        never spins on a failed or no-op compaction."""
+        never spins on a failed or no-op compaction.
+
+        tail_start is an index into the DURABLE event sequence (what the .clc
+        persists). The in-memory log also holds transient streaming deltas; an
+        index over those would be stale after a reopen, silently dropping the
+        whole recent tail (see derive_messages)."""
         try:
             events = self.log.events()
+            durable = [e for e in events if e.type in DURABLE_TYPES]
             tail_start = self._tail_start_index(events)
             if tail_start <= 1:
                 return False  # nothing meaningful to compact
             prev = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
-            if prev is not None and tail_start <= prev.tail_start:
+            # compare against the last compaction's durable POSITION, not its stored
+            # tail_start — a loaded .clc from before this fix carries a stale index
+            if prev is not None and tail_start <= durable.index(prev):
                 return False  # nothing new since the last compaction: don't re-summarize the same head
-            head = events[:tail_start]
+            head = durable[:tail_start]
             summary = self._summarize(self._serialize(head), self._previous_summary(events))
             if not summary:
                 return False
@@ -321,26 +330,29 @@ class Agent:
             return False
 
     def _tail_start_index(self, events: list[Any]) -> int:
-        """Index where the preserved recent tail begins, sized to the tail budget
-        (~4 chars per token, deliberately generous vs the 3 chars/token in
-        _estimate_tokens: the tail is what survives, so as much of it as possible).
-        Clutch turns share the task user message, so the tail is split at an
-        assistant-turn boundary; everything before it is summarized away."""
+        """Index (into the DURABLE event sequence) where the preserved recent tail
+        begins, sized to the tail budget (~4 chars per token, deliberately generous
+        vs the 3 chars/token in _estimate_tokens: the tail is what survives, so as
+        much of it as possible). Transient streaming deltas are skipped so the index
+        is stable when the log is persisted and reopened. Clutch turns share the
+        task user message, so the tail is split at an assistant-turn boundary;
+        everything before it is summarized away."""
+        durable = [e for e in events if e.type in DURABLE_TYPES]
         budget = self.config.compaction_tail_tokens
         if budget is None:
             usable = self.config.llm_context_window - self.config.compaction_reserved
             budget = min(15_000, max(2_000, usable // 4))
         total = 0
         tail_start = 0
-        for i in range(len(events) - 1, -1, -1):
-            ev = events[i]
+        for i in range(len(durable) - 1, -1, -1):
+            ev = durable[i]
             size = len(ev.content) if isinstance(ev, (UserMessageEvent, ToolResultEvent)) else 0
             if isinstance(ev, AssistantMessageEvent):
                 size = len(ev.content) + len(ev.reasoning)
             total += size // 4
             if total >= budget:
                 j = i
-                while j > 0 and not isinstance(events[j], AssistantMessageEvent):
+                while j > 0 and not isinstance(durable[j], AssistantMessageEvent):
                     j -= 1
                 tail_start = j
                 break
