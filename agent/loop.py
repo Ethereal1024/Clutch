@@ -48,6 +48,10 @@ from .tools.workspace import Workspace
 # Callback for subscribers (GUI/SSE); the engine does not care who listens.
 EventSink = Callable[[Event], None]
 
+# a compaction summary shorter than this is useless as the sole record of the work;
+# _summarize retries once to get a fuller one
+_SUMMARY_MIN_CHARS = 300
+
 
 class Agent:
     def __init__(
@@ -374,13 +378,29 @@ class Agent:
         if llm is None:
             llm = self.llm
         prompt = render("compaction.md", history=history, previous_summary=previous or "(none)")
-        parts: list[str] = []
-        for ev in llm.stream([{"role": "user", "content": prompt}], tools=None):
-            if ev["type"] == "text":
-                parts.append(ev["delta"])
-            elif ev["type"] == "finish":
-                break
-        return "".join(parts).strip()
+
+        def _call(use_prompt: str) -> str:
+            parts: list[str] = []
+            for ev in llm.stream([{"role": "user", "content": use_prompt}], tools=None):
+                if ev["type"] == "text":
+                    parts.append(ev["delta"])
+                elif ev["type"] == "finish":
+                    break
+            return "".join(parts).strip()
+
+        summary = _call(prompt)
+        # a near-empty summary is useless as the sole record of the work (the 221-char
+        # case that left the refactor writing files from memory): retry once with a
+        # direct instruction before accepting it
+        if len(summary) < _SUMMARY_MIN_CHARS:
+            retry = _call(
+                prompt
+                + "\n\nYour previous summary was too short to continue from. Write a fuller one "
+                "(>=300 words), naming every file involved and the next steps."
+            )
+            if len(retry) > len(summary):
+                summary = retry
+        return summary
 
     def _execute_tool(self, ev: ToolCallEvent) -> dict[str, Any]:
         """Parse arguments, check permission, then run the tool.

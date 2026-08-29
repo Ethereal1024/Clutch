@@ -1,0 +1,1 @@
+Restore a file to its previous content, undoing the last write_file or edit_file on it (path relative to the workspace root). Use this when you corrupted a file or made a wrong edit — the last overwrite is undone in place. It errors if the file has no snapshot (it was never overwritten this session).

@@ -98,6 +98,30 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
             func=lambda sb, cfg, **kw: filesystem.write_file(sb, cfg, **kw),
         ),
         Tool(
+            name="edit_file",
+            description=render("tools/edit_file.md"),
+            parameters={
+                "properties": {
+                    "path": _str_param("file path, relative to the workspace root"),
+                    "old_string": _str_param("exact text to replace (must appear exactly once)"),
+                    "new_string": _str_param("replacement text"),
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+            func=lambda sb, cfg, **kw: filesystem.edit_file(sb, cfg, **kw),
+        ),
+        Tool(
+            name="revert_file",
+            description=render("tools/revert_file.md"),
+            parameters={
+                "properties": {
+                    "path": _str_param("file path, relative to the workspace root"),
+                },
+                "required": ["path"],
+            },
+            func=lambda sb, cfg, **kw: filesystem.revert_file(sb, cfg, **kw),
+        ),
+        Tool(
             name="list_dir",
             description=render("tools/list_dir.md"),
             parameters={

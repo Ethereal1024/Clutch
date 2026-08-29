@@ -85,6 +85,8 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
             old = workspace.read(str(p))
         except FileNotFoundError:
             pass
+        if old:
+            workspace.snapshot(p, old)
         workspace.write(str(p), content)
         # external paths (user-approved escapes) aren't under the root; show the
         # absolute path in the diff header then
@@ -101,6 +103,67 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
         return _result(f"ERROR: {e}", error=True)
     except Exception as e:  # noqa: BLE001
         return _result(render("errors/write_failed.md", error=e), error=True)
+
+
+def edit_file(workspace: Workspace, config: Config, path: str, old_string: str, new_string: str) -> dict:
+    """Targeted string replacement (Claude Code-style Edit): one occurrence of
+    old_string is replaced with new_string. Tiny diffs — a change costs hundreds of
+    tokens instead of re-emitting the whole file, so the context stays small and
+    mid-task compaction (which wiped whole-file rewrites) is avoided."""
+    try:
+        p: Path = workspace.resolve(path)
+        if workspace.is_protected(p):
+            return _result(render("errors/protected_write.md", path=path), error=True)
+        try:
+            text = workspace.read(str(p))
+        except FileNotFoundError:
+            return _result(f"ERROR: file not found: {path} — use write_file to create it", error=True)
+        if not old_string:
+            return _result("ERROR: old_string is required", error=True)
+        count = text.count(old_string)
+        if count == 0:
+            return _result(
+                f"ERROR: old_string not found in {path}. The file's current content is in an "
+                f"earlier read; re-read it if needed and provide a unique block of context.",
+                error=True,
+            )
+        if count > 1:
+            return _result(
+                f"ERROR: old_string appears {count} times in {path}. Include more surrounding "
+                "lines so it matches exactly once.",
+                error=True,
+            )
+        new = text.replace(old_string, new_string, 1)
+        workspace.snapshot(p, text)
+        workspace.write(str(p), new)
+        try:
+            rel = p.relative_to(workspace.root)
+        except ValueError:
+            rel = p
+        diff = _unified_diff(text, new, rel=rel)
+        adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+        dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+        return _result(f"OK: edited {p} (+{adds} -{dels} lines)", diff=diff)
+    except ValueError as e:
+        return _result(f"ERROR: {e}", error=True)
+    except Exception as e:  # noqa: BLE001
+        return _result(render("errors/write_failed.md", error=e), error=True)
+
+
+def revert_file(workspace: Workspace, config: Config, path: str) -> dict:
+    """Restore the previous content of a file (the last write/edit is undone)."""
+    try:
+        p: Path = workspace.resolve(path)
+        if workspace.is_protected(p):
+            return _result(render("errors/protected_write.md", path=path), error=True)
+        restored = workspace.restore(p)
+        if restored is None:
+            return _result(f"ERROR: no snapshot to restore for {path} — this file was never overwritten", error=True)
+        return _result(f"OK: restored {p} to the previous content (undo of the last write/edit)")
+    except ValueError as e:
+        return _result(f"ERROR: {e}", error=True)
+    except Exception as e:  # noqa: BLE001
+        return _result(f"ERROR: {e}", error=True)
 
 
 def _unified_diff(old: str, new: str, rel: str) -> str:

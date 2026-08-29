@@ -45,6 +45,9 @@ class Workspace(ABC):
         # granted by the permission gate after the user approves an escape and
         # cleared by the loop after every tool call (see loop._execute_tool).
         self._allowed_escapes: set[Path] = set()
+        # per-file undo stack: previous contents recorded before every overwrite,
+        # so the agent can recover a file it just wrote badly without git checkout
+        self._snapshots: dict[str, list[str]] = {}
 
     def allow(self, paths) -> None:
         """Record user-approved external paths for the current tool call."""
@@ -53,6 +56,25 @@ class Workspace(ABC):
     def clear_allowed(self) -> None:
         """Drop the per-call escape allowance (called after every tool call)."""
         self._allowed_escapes.clear()
+
+    def snapshot(self, path: Path, content: str) -> None:
+        """Record the previous content of a file before an overwrite (undo stack)."""
+        key = str(Path(path).resolve())
+        stack = self._snapshots.setdefault(key, [])
+        stack.append(content)
+        if len(stack) > _MAX_SNAPSHOTS_PER_FILE:
+            stack.pop(0)
+
+    def restore(self, path: Path) -> str | None:
+        """Pop the last snapshot and write it back; returns the restored content
+        (None when there is no snapshot for this file)."""
+        key = str(Path(path).resolve())
+        stack = self._snapshots.get(key)
+        if not stack:
+            return None
+        content = stack.pop()
+        self.write(str(path), content)
+        return content
 
     def protect(self, path: Path) -> None:
         """Mark a file as invisible/unusable to the agent (e.g. the .clc project file)."""
@@ -187,6 +209,8 @@ _EXEC_MAX_COMMAND_BYTES = int(_DEFAULTS["exec_max_command_bytes"])
 _REMOTE_IO_TIMEOUT = 60.0
 # how much of a failed exec's stderr/stdout to show in the raised error
 _ERR_SNIPPET = 300
+# undo stack depth per file (snapshots before each overwrite)
+_MAX_SNAPSHOTS_PER_FILE = 5
 
 
 class RemoteWorkspace(Workspace):

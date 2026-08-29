@@ -11,12 +11,19 @@ Workflow:
    - Content-creation tasks (writing documents, comparisons, summaries, new code
      from scratch): do NOT explore the workspace. Create the output directly.
      Read files only if the task explicitly requires using existing content.
-2. Write code with write_file (whole-file rewrite).
+2. Modify existing code with edit_file (targeted replacement of one exact block) —
+   it costs a few hundred tokens, keeps the context small, and never truncates the
+   file. Use write_file ONLY to create NEW files. If you corrupt a file, restore it
+   with revert_file; never use `git checkout` (it can wipe uncommitted work).
 3. Run and verify with run_command, preferring a program-provided --test self-test mode.
 4. Network is available: fetch remote content with `curl` or `wget`. Save downloads
    inside the workspace with a relative `-o` path (absolute paths are blocked).
 5. Read the output. On failure, analyze the error, fix the code, and rerun until it passes.
 6. When done, reply with a final explanation and NO tool calls.
+
+When a "(Conversation compacted...)" note lists files, the exact contents of those
+files are no longer in your context: re-read them BEFORE editing them. Never rewrite
+a file's content from memory after a compaction — a re-read first is mandatory.
 
 Available skills may apply to your task (they are listed at the end of this
 prompt). If the task falls in a skill's domain, call load_skill to read its

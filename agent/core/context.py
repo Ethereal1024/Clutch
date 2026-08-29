@@ -14,9 +14,39 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import Config
-from ..events import AssistantMessageEvent, CompactionEvent, EventLog, ToolResultEvent, UserMessageEvent
+from ..events import (
+    AssistantMessageEvent,
+    CompactionEvent,
+    EventLog,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserMessageEvent,
+)
 from ..prompts import render
 from ..skills import cached_library
+
+
+def _recent_working_files(tail_events: list[Any], cap: int = 6) -> list[str]:
+    """Distinct file paths the model was reading/writing in the preserved tail
+    (most recent first), so a post-compaction context can tell it to re-read them."""
+    import json as _json
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for ev in reversed(tail_events):
+        if not isinstance(ev, ToolCallEvent) or ev.name not in ("read_file", "write_file", "edit_file"):
+            continue
+        try:
+            args = _json.loads(ev.arguments or "{}")
+        except (ValueError, TypeError):
+            continue
+        path = args.get("path") if isinstance(args, dict) else None
+        if isinstance(path, str) and path and path not in seen:
+            seen.add(path)
+            out.append(path)
+            if len(out) >= cap:
+                break
+    return out
 
 
 def _to_messages(events: list[Any]) -> list[dict[str, Any]]:
@@ -115,7 +145,15 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     compaction = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
     if compaction is not None:
         head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]
-        events = [e for e in events[compaction.tail_start :] if not isinstance(e, CompactionEvent)]
+        tail_events = [e for e in events[compaction.tail_start :] if not isinstance(e, CompactionEvent)]
+        files = _recent_working_files(tail_events)
+        if files:
+            # the exact contents of these files were compacted away; the model must
+            # re-read them before editing (never rewrite from the summary's memory)
+            head_msgs.append(
+                {"role": "user", "content": render("compaction_files.md", files=", ".join(files))}
+            )
+        events = tail_events
     if raw_task is not None and events and events[0] is raw_task:
         events = events[1:]
 

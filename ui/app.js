@@ -521,13 +521,13 @@ function renderEvent(ev) {
       const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
       const toolName = call.name || "";
       const isRead = isReadTool(toolName);
-      const isWrite = toolName === "write_file";
+      const isWrite = toolName === "write_file" || toolName === "edit_file";
       // any tool that could change the filesystem (blacklist of read-only tools)
       if (toolName && !isRead && toolName !== "load_skill") scheduleTreeRefresh();
 
       wrap.className = "event tool_result" + (ev.is_error ? " error" : "")
         + (isRead ? " read" : "") + (isWrite ? " write" : "");
-      const hdr = isWrite ? "✓ wrote" : (ev.is_error ? "result ⚠" : "result");
+      const hdr = isWrite ? (toolName === "edit_file" ? "✎ edited" : "✓ wrote") : (ev.is_error ? "result ⚠" : "result");
       wrap.innerHTML = `<div class="hdr">${hdr}</div>`;
       body.className = "body md-plain";
 

@@ -14,7 +14,14 @@ from .config import Config
 from .core.context import derive_messages
 from .core.parse import ParseError, parse_arguments
 from .core.terminate import Terminator
-from .events import AssistantMessageEvent, CompactionEvent, EventLog, ToolResultEvent, UserMessageEvent
+from .events import (
+    AssistantMessageEvent,
+    CompactionEvent,
+    EventLog,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserMessageEvent,
+)
 from .skills import load_skill_library
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -115,6 +122,29 @@ def main() -> None:
         "pre-tail turns omitted by compaction",
     )
 
+    # 2e2. after compaction, the files the model was working on are listed so it
+    # re-reads them instead of writing their content from the summary's memory
+    log2 = EventLog()
+    log2.append(UserMessageEvent(content="task"))
+    log2.append(AssistantMessageEvent(content="old work"))
+    log2.append(ToolCallEvent(name="read_file", arguments='{"path": "a.py"}', tool_call_id="c0"))
+    tail_start2 = len(log2.events())
+    log2.append(ToolCallEvent(name="write_file", arguments='{"path": "a.py", "content": "x"}', tool_call_id="c1"))
+    log2.append(
+        ToolCallEvent(
+            name="edit_file",
+            arguments='{"path": "b.py", "old_string": "a", "new_string": "b"}',
+            tool_call_id="c2",
+        )
+    )
+    log2.append(CompactionEvent(summary="s", tail_start=tail_start2))
+    msgs2 = derive_messages(log2, config, "test")
+    notes = [m for m in msgs2 if m["role"] == "user" and "Conversation compacted" in m.get("content", "")]
+    check(
+        len(notes) == 1 and "a.py" in notes[0]["content"] and "b.py" in notes[0]["content"],
+        "compaction note lists the working files to re-read",
+    )
+
     # 2f. no turn-count windowing: a long log projects EVERYTHING (compaction is the
     # only turn-level budget guard), and the raw task copy (index 0) is not sent
     # twice — task.md re-injects it once
@@ -196,6 +226,28 @@ def main() -> None:
         check("no matches" in r["content"], "grep tool reports no matches")
         r = reg.execute(sb, config, "grep", {"pattern": "(", "path": "."})
         check(r["error"], "grep tool rejects invalid regex")
+        # edit_file: targeted replacement (one occurrence), diff, and error cases
+        reg.execute(sb, config, "write_file", {"path": "edit.txt", "content": "alpha\nbeta\ngamma\n"})
+        r = reg.execute(sb, config, "edit_file", {"path": "edit.txt", "old_string": "beta", "new_string": "BETA"})
+        check(not r["error"] and "+1 -1" in r["content"], "edit_file replaces one occurrence with a diff")
+        check((sb.root / "edit.txt").read_text() == "alpha\nBETA\ngamma\n", "edit_file applied the replacement")
+        r = reg.execute(sb, config, "edit_file", {"path": "edit.txt", "old_string": "nope", "new_string": "x"})
+        check(r["error"] and "not found" in r["content"], "edit_file reports a missing old_string")
+        reg.execute(sb, config, "write_file", {"path": "dup.txt", "content": "x\ny\nx\n"})
+        r = reg.execute(sb, config, "edit_file", {"path": "dup.txt", "old_string": "x", "new_string": "z"})
+        check(r["error"] and "appears 2 times" in r["content"], "edit_file rejects an ambiguous old_string")
+        r = reg.execute(sb, config, "edit_file", {"path": "missing.txt", "old_string": "a", "new_string": "b"})
+        check(r["error"] and "use write_file" in r["content"], "edit_file points to write_file for new files")
+        # revert_file: snapshot + undo restores the previous content (no git checkout)
+        r = reg.execute(sb, config, "edit_file", {"path": "edit.txt", "old_string": "BETA", "new_string": "corrupted"})
+        check(not r["error"] and (sb.root / "edit.txt").read_text() == "alpha\ncorrupted\ngamma\n", "edit applied")
+        r = reg.execute(sb, config, "revert_file", {"path": "edit.txt"})
+        check(
+            not r["error"] and (sb.root / "edit.txt").read_text() == "alpha\nBETA\ngamma\n",
+            "revert_file undoes the edit",
+        )
+        r = reg.execute(sb, config, "revert_file", {"path": "never-written.txt"})
+        check(r["error"] and "no snapshot" in r["content"], "revert_file errors without a snapshot")
         r = reg.execute(sb, config, "run_command", {"command": "echo hi"})
         check("hi" in r["content"], "run_command executes")
         r = reg.execute(sb, config, "run_command", {"command": "echo a && echo b"})

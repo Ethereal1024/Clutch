@@ -30,7 +30,7 @@ from ..tools.workspace import Workspace
 Action = str  # "allow" | "ask" | "deny"
 
 # tools whose path/command args can reference the filesystem
-_PATH_TOOLS = {"read_file", "write_file", "list_dir", "grep", "run_command"}
+_PATH_TOOLS = {"read_file", "write_file", "edit_file", "revert_file", "list_dir", "grep", "run_command"}
 
 
 @dataclass
