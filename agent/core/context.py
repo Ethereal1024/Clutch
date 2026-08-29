@@ -119,10 +119,13 @@ def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, 
             for i in tool_results:
                 if total <= config.context_char_budget:
                     break
-                total -= len(kept[i].content)
-                folded_idx.add(i)
+                if isinstance(kept[i], ToolResultEvent):
+                    total -= len(kept[i].content)
+                    folded_idx.add(i)
             kept = [
-                replace(e, content="(output omitted by char budget)") if i in folded_idx else e
+                replace(e, content="(output omitted by char budget)")
+                if (i in folded_idx and isinstance(e, ToolResultEvent))
+                else e
                 for i, e in enumerate(kept)
             ]
             msgs = [{"role": "user", "content": render("context_omitted.md", count=len(folded_idx))}] + _to_messages(
