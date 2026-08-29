@@ -29,9 +29,10 @@ class Config:
     doom_loop_limit: int = 4
     abort_on_doom_loop: bool = True
 
-    # Context management (token-threshold + compaction driven; no turn-count windowing)
-    # soft char cap on tool output fed to the model; older results fold below it
-    context_char_budget: int = 60000
+    # Context management (token-threshold + compaction driven; no turn-count
+    # windowing, no incremental tool-output folding — reads accumulate until
+    # compaction rolls the older turns into a summary, so the model's working set
+    # is not silently starved)
 
     # Compaction: when the conversation approaches the context window, the old turns
     # are rolled into a summary and the run continues (opencode-style), instead of

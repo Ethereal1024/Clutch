@@ -38,7 +38,12 @@ def read_file(
         if offset > 0 or limit > 0:
             return _read_range(text, offset, limit, limit_chars)
         if len(text) > limit_chars:
-            text = text[:limit_chars] + f"\n... [truncated, file is {len(text)} chars]"
+            # tell the model how to continue (offset = the first unread line)
+            # instead of silently re-serving the same truncated head, so it pages
+            # forward rather than re-reading the file
+            head = text[:limit_chars]
+            next_offset = head.count("\n") + 1
+            text = head + f"\n... [truncated, file is {len(text)} chars; use offset={next_offset} to continue]"
         return _result(text)
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
@@ -48,18 +53,24 @@ def read_file(
 
 def _read_range(text: str, offset: int, limit: int, limit_chars: int) -> dict:
     """Read lines [offset, offset+limit) (1-based) with line numbers, so the model
-    reads only the slice it needs and can continue with offset=end+1."""
+    reads only the slice it needs and can continue with offset=end+1. An explicit
+    range that cannot fit the char budget is an ERROR, not a silent truncation —
+    the model must narrow the limit or use grep (Claude Code's Read behavior)."""
     lines = text.splitlines()
     total = len(lines)
     start = max(0, offset - 1) if offset > 0 else 0
     end = start + limit if limit > 0 else total
     selected = lines[start:end]
     body = "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(selected, start=start))
+    if len(body) > limit_chars:
+        return _result(
+            f"ERROR: the requested range (lines {start + 1}-{end}) exceeds the read limit of "
+            f"{limit_chars} chars. Use a smaller limit, or search with grep instead.",
+            error=True,
+        )
     shown = start + len(selected)
     if shown < total:
         body += f"\n... (showing lines {start + 1}-{shown} of {total}; use offset={shown + 1} to continue)"
-    if len(body) > limit_chars:
-        body = body[:limit_chars] + "\n... [truncated]"
     return _result(body)
 
 

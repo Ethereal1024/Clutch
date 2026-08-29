@@ -135,19 +135,16 @@ def main() -> None:
         "raw task copy excluded from projection",
     )
 
-    # 2g. char budget folds the oldest tool results, never mutates the log
-    tight = Config(context_char_budget=50)
+    # 2g. no incremental tool-output folding: everything is preserved verbatim in the
+    # derived context (reads accumulate until compaction; only compaction trims)
     cblog = EventLog()
     cblog.append(UserMessageEvent(content="t"))
     cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "list_dir", "arguments": "{}"}]))
     cblog.append(ToolResultEvent(tool_call_id="c1", content="x" * 40))
-    cblog.append(AssistantMessageEvent(content="b", tool_calls=[{"id": "c2", "name": "list_dir", "arguments": "{}"}]))
     cblog.append(ToolResultEvent(tool_call_id="c2", content="y" * 40))
-    cmsgs = derive_messages(cblog, tight, "test")
-    folded = [m for m in cmsgs if m["role"] == "tool" and m["content"] == "(output omitted by char budget)"]
-    check(len(folded) == 1, "char budget folds oldest tool result")
-    check(any("folded" in (m.get("content") or "") for m in cmsgs), "char budget notes the fold")
-    check(cblog.events()[2].content == "x" * 40, "char budget folds on copies, log untouched")
+    cmsgs = derive_messages(cblog, Config(), "test")
+    tool_msgs = [m for m in cmsgs if m["role"] == "tool"]
+    check([m["content"] for m in tool_msgs] == ["x" * 40, "y" * 40], "no incremental tool-output folding")
 
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
@@ -179,6 +176,20 @@ def main() -> None:
         )
         r = reg.execute(sb, config, "read_file", {"path": "multi.txt", "offset": 4, "limit": 2})
         check(r["content"] == "4: line4\n5: line5", "read_file range covering the tail has no footer")
+        # whole-file truncation tells the model how to continue, so it pages
+        # forward instead of re-reading the same head
+        big_body = "".join(f"line {i}\n" for i in range(3000))
+        reg.execute(sb, config, "write_file", {"path": "big.txt", "content": big_body})
+        r = reg.execute(sb, config, "read_file", {"path": "big.txt", "max_chars": 2000})
+        check(
+            "[truncated" in r["content"] and "use offset=" in r["content"],
+            "whole-file truncation hints the next offset",
+        )
+        # an explicit range that cannot fit the budget is an error, not a silent cut
+        r = reg.execute(sb, config, "read_file", {"path": "big.txt", "offset": 1, "limit": 3000, "max_chars": 2000})
+        check(r["error"] and "smaller limit" in r["content"], "oversized explicit range errors instead of truncating")
+        r = reg.execute(sb, config, "read_file", {"path": "big.txt", "offset": 1, "limit": 100, "max_chars": 2000})
+        check(not r["error"], "range within budget still succeeds")
         r = reg.execute(sb, config, "grep", {"pattern": "line[23]"})
         check("multi.txt:" in r["content"] and "2: line2" in r["content"], "grep tool finds hits with line numbers")
         r = reg.execute(sb, config, "grep", {"pattern": "no_such_token_zzz"})

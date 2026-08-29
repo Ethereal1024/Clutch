@@ -1,17 +1,16 @@
 """Conversation history and context management.
 
 The event log is the single source of truth; model-visible messages are derived from it.
-Strategy (no turn-count windowing — compaction is the only turn-level budget guard):
+Strategy (no turn-count windowing, no incremental tool-output folding — compaction is
+the only budget guard, matching opencode / Claude Code):
 - sticky: system prompt + the original task are never evicted
 - compaction: the newest CompactionEvent's summary is the head; only the recent
   tail it designates is projected (token-driven, see loop._should_compact)
-- char budget: if kept tool output exceeds a soft budget, fold the oldest results
 - truncation: oversized tool output is head/tail trimmed at the tools layer
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from ..config import Config
@@ -97,9 +96,12 @@ def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def derive_messages(log: EventLog, config: Config, task: str, memories: Any | None = None) -> list[dict[str, Any]]:
-    """Derive model messages from the event log, applying compaction head +
-    char budget. ``memories`` (a MemoryStore) contributes a resident title list
-    to the system prompt so the model can recall long-term facts."""
+    """Derive model messages from the event log, applying compaction head.
+    ``memories`` (a MemoryStore) contributes a resident title list to the system
+    prompt so the model can recall long-term facts. Tool output is NOT folded
+    here — it accumulates until compaction (loop._should_compact) rolls the older
+    turns into a summary, so the model's file-content working set is not silently
+    starved and re-reads are not forced."""
     full_events = log.events()
     # the original task lives at index 0 (emitted at run start); task.md re-injects
     # it below, so exclude that raw copy here — otherwise every context carries the
@@ -117,30 +119,7 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     if raw_task is not None and events and events[0] is raw_task:
         events = events[1:]
 
-    kept = events
-    msgs = _to_messages(kept)
-
-    # char budget: fold the oldest tool results until the kept output fits.
-    # fold on copies so the source-of-truth event log is never mutated.
-    tool_results = [i for i, e in enumerate(kept) if isinstance(e, ToolResultEvent)]
-    if tool_results:
-        total = sum(len(e.content) for e in kept if isinstance(e, ToolResultEvent))
-        if total > config.context_char_budget:
-            folded_idx: set[int] = set()
-            for i in tool_results:
-                if total <= config.context_char_budget:
-                    break
-                ev = kept[i]
-                if isinstance(ev, ToolResultEvent):
-                    total -= len(ev.content)
-                    folded_idx.add(i)
-            kept = [
-                replace(e, content="(output omitted by char budget)")
-                if (i in folded_idx and isinstance(e, ToolResultEvent))
-                else e
-                for i, e in enumerate(kept)
-            ]
-            msgs = [{"role": "user", "content": render("context_folded.md")}] + _to_messages(kept)
+    msgs = _to_messages(events)
 
     system = render("system.md")
     if config.enable_skills:

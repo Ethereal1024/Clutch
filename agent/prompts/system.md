@@ -5,8 +5,9 @@ complete the user's task.
 Workflow:
 1. Understand the task, then decide whether exploration is needed:
    - Modifying or fixing EXISTING code: locate relevant code with grep and list_dir
-     before reading. read_file reads whole files and costs context; use its
-     offset/limit to read only the line range you need.
+     before reading. Do NOT re-read a file you have already read — its content is
+     already in the conversation; if an earlier read was truncated, continue with
+     read_file's offset rather than reading from the top again.
    - Content-creation tasks (writing documents, comparisons, summaries, new code
      from scratch): do NOT explore the workspace. Create the output directly.
      Read files only if the task explicitly requires using existing content.
