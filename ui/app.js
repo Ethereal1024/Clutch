@@ -94,6 +94,7 @@ jumpBottom.addEventListener("click", () => {
   autoScroll(true);  // its scroll event is isTrusted=false and never touches the latch
 });
 let prevClientH = stream.clientHeight;
+let prevScrollH = stream.scrollHeight;
 // armed by autoGrowTask for ~120ms after the input box resizes: the clamp scroll
 // event that resize triggers can fire BEFORE the shrunken viewport is observable
 // (clientHeight may not have settled yet), so blanket-ignore latch changes in
@@ -108,18 +109,27 @@ stream.addEventListener("scroll", (e) => {
   // and pop the ↓ button while typing. A shrunken viewport is the fingerprint
   // of such a clamp, so ignore scrolls that coincide with it; the time window
   // above catches the clamp even when the fingerprint is not yet visible.
+  // The same clamp happens when the CONTENT shrank — e.g. a streamed tool_call
+  // preview (full args, up to 320px) is swapped for its final collapsed row —
+  // and a shrunken scrollHeight is the fingerprint there.
   const cur = stream.scrollTop;
   if (!e.isTrusted) { lastScrollTop = cur; return; }
   const viewportShrank = stream.clientHeight < prevClientH;
   prevClientH = stream.clientHeight;
-  if (viewportShrank || performance.now() < suppressLatchUntil) {
+  const scrollShrank = stream.scrollHeight < prevScrollH;
+  prevScrollH = stream.scrollHeight;
+  if (viewportShrank || scrollShrank || performance.now() < suppressLatchUntil) {
     lastScrollTop = cur;
     return;
   }
   const up = cur < lastScrollTop;
+  if (up) {
+    if (followTail) {
+      console.warn("[latch-dropped]", JSON.stringify({ top: cur, prevTop: lastScrollTop, scrollH: stream.scrollHeight, clientH: stream.clientHeight, now: Math.round(performance.now()) }));
+    }
+    followTail = false;
+  } else if (nearBottom()) followTail = true;
   lastScrollTop = cur;
-  if (up) followTail = false;
-  else if (nearBottom()) followTail = true;
   jumpBottom.classList.toggle("hidden", followTail);
 }, { passive: true });
 
