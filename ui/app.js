@@ -62,11 +62,13 @@ let lastScrollTop = 0;
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
   if (force || followTail) {
-    // jump-to-bottom (user click) glides smoothly; live follow-pinning stays
-    // instant — an animated tail can never outrun a streaming preview, which
-    // is exactly the drift that made the old distance check fall off.
-    if (force) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
-    else stream.scrollTop = stream.scrollHeight;
+    // Always pin instantly — never smooth. A smooth glide targets the
+    // scrollHeight captured at call time, so when several events arrive in a
+    // burst (e.g. an edit_file tool_call right behind its tool_result), every
+    // instant re-pin gets overridden by the still-running animation frame and
+    // the view settles at the stale target: the classic "lost the tail" hang.
+    // An animated tail can never outrun a streaming preview.
+    stream.scrollTop = stream.scrollHeight;
     jumpBottom.classList.add("hidden");
   } else {
     jumpBottom.classList.remove("hidden");
@@ -762,11 +764,13 @@ function appendCompletion(status, summary) {
     note.textContent = summary;
     (pageSink || eventsEl).appendChild(note);
   }
-  // live runs glide to the completion divider; during replay the end-scroll
-  // at openProject already lands on the last record, so skip the smooth pass.
+  // live runs re-pin to the completion divider; during replay the end-scroll
+  // at openProject already lands on the last record, so skip the pass.
   // If the user has scrolled up, don't yank them — the ↓ button is already shown.
+  // Instant pin, not smooth: the completion divider often lands in the same
+  // burst as trailing tool results, and a glide animation would fight them.
   if (!stream.classList.contains("loading")) {
-    if (followTail) stream.scrollTo({ top: stream.scrollHeight, behavior: "smooth" });
+    if (followTail) stream.scrollTop = stream.scrollHeight;
     else jumpBottom.classList.remove("hidden");
   }
 }
