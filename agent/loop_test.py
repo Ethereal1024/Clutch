@@ -12,7 +12,7 @@ import tempfile
 from typing import Any
 
 from .config import Config
-from .events import EventLog
+from .events import EventLog, FinalEvent, StateUpdateEvent
 from .loop import Agent
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -25,7 +25,7 @@ class FakeLLM:
     def __init__(self, responses: list[dict[str, Any]], fallback: dict[str, Any]) -> None:
         self._responses = list(responses)
         self._fallback = fallback
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[list[dict[str, Any]]] = []
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         self.calls.append(messages)
@@ -68,7 +68,7 @@ class FakeLLM:
         }
 
 
-def _resp(content: str = "", tool_calls: list[dict[str, Any]] = None, finish: str = "stop") -> dict[str, Any]:
+def _resp(content: str = "", tool_calls: list[dict[str, Any]] | None = None, finish: str = "stop") -> dict[str, Any]:
     m: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls:
         m["tool_calls"] = tool_calls
@@ -90,7 +90,7 @@ def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: EventLog | 
     )
 
 
-def main() -> None:
+def main() -> int:
     config = Config(verify_command="echo ok")
 
     # 0. no verify command (default): a generic task completes directly, no gate runs
@@ -332,9 +332,12 @@ def main() -> None:
         )
         result = agent.run("t")
         check(result == "ABORTED", "fatal LLM error aborts run")
-        finals = [e for e in log.events() if e.type == "final"]
-        check(finals and finals[-1].status == "error", "fatal LLM error emits error final")
-        check(any(e.type == "state_update" and e.value == "error" for e in log.events()), "error state emitted")
+        finals = [e for e in log.events() if isinstance(e, FinalEvent)]
+        check(bool(finals) and finals[-1].status == "error", "fatal LLM error emits error final")
+        check(
+            any(isinstance(e, StateUpdateEvent) and e.value == "error" for e in log.events()),
+            "error state emitted",
+        )
 
     # 12. Stop mid-stream: cancel set while the LLM is streaming aborts promptly —
     # the partial turn is dropped (no verify gate, no phantom 'done'), and the
@@ -368,8 +371,8 @@ def main() -> None:
         result = agent.run("t")
         check(result == "ABORTED", "Stop mid-stream aborts the run")
         check(fake.consumed == 1, "stream not consumed past the cancel point")
-        finals = [e for e in agent.log.events() if e.type == "final"]
-        check(finals and finals[-1].status == "aborted", "aborted final, not a phantom completed")
+        finals = [e for e in agent.log.events() if isinstance(e, FinalEvent)]
+        check(bool(finals) and finals[-1].status == "aborted", "aborted final, not a phantom completed")
         check(
             not any(e.type == "tool_call" for e in agent.log.events()),
             "no verify/tool path ran on the partial turn",
