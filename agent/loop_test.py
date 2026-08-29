@@ -12,7 +12,7 @@ import tempfile
 from typing import Any
 
 from .config import Config
-from .events import CompactionEvent, EventLog, FinalEvent, StateUpdateEvent
+from .events import AssistantMessageEvent, CompactionEvent, EventLog, FinalEvent, StateUpdateEvent, UserMessageEvent
 from .loop import Agent
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
@@ -407,6 +407,29 @@ def main() -> int:
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
         check(len(comps) == 1, "context overflow triggered one compaction")
         check(comps[0].summary == "SUMMARY", "compaction summary recorded")
+
+    # 14. resumed long session with NO reported usage: the token estimate of the
+    # derived context triggers compaction on the first turn — the resume case that
+    # turn-count windowing used to brutalise (no usage, so the old usage-only check
+    # could never fire).
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        cfg = Config(llm_context_window=1000, compaction_reserved=200, compaction_tail_tokens=1)
+        log = EventLog()
+        log.append(UserMessageEvent(content="original task"))
+        for i in range(3):
+            log.append(AssistantMessageEvent(content=f"blah {i} " + "x" * 1200))
+        fake = FakeLLM(
+            responses=[_resp(content="SUMMARY"), _resp(content="resumed answer")],
+            fallback=_resp(content="fallback"),
+            usage=None,
+        )
+        agent = Agent(llm=fake, registry=ToolRegistry(build_default_tools(cfg)), workspace=sb, config=cfg, log=log)
+        result = agent.run("t")
+        check(result == "resumed answer", "resumed run completes")
+        comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
+        check(len(comps) == 1, "estimate-based trigger compacted on the first turn")
+        check(comps[0].summary == "SUMMARY", "resume compaction summary recorded")
 
     print("\nall passed")
     return 0

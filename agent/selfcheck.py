@@ -115,6 +115,40 @@ def main() -> None:
         "pre-tail turns omitted by compaction",
     )
 
+    # 2f. no turn-count windowing: a long log projects EVERYTHING (compaction is the
+    # only turn-level budget guard), and the raw task copy (index 0) is not sent
+    # twice — task.md re-injects it once
+    big = EventLog()
+    big.append(UserMessageEvent(content="original task"))
+    for i in range(30):
+        big.append(AssistantMessageEvent(content=f"turn {i}"))
+    msgs = derive_messages(big, config, "test")
+    assistants = [m for m in msgs if m["role"] == "assistant"]
+    check(len(assistants) == 30, "no windowing: all turns projected")
+    check(not any("omitted" in (m.get("content") or "") for m in msgs), "no omitted note without windowing")
+    check(
+        len([m for m in msgs if m["role"] == "user" and "Task: test" in m.get("content", "")]) == 1,
+        "task injected exactly once (raw copy dropped)",
+    )
+    check(
+        not any(m["role"] == "user" and m.get("content") == "original task" for m in msgs),
+        "raw task copy excluded from projection",
+    )
+
+    # 2g. char budget folds the oldest tool results, never mutates the log
+    tight = Config(context_char_budget=50)
+    cblog = EventLog()
+    cblog.append(UserMessageEvent(content="t"))
+    cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "list_dir", "arguments": "{}"}]))
+    cblog.append(ToolResultEvent(tool_call_id="c1", content="x" * 40))
+    cblog.append(AssistantMessageEvent(content="b", tool_calls=[{"id": "c2", "name": "list_dir", "arguments": "{}"}]))
+    cblog.append(ToolResultEvent(tool_call_id="c2", content="y" * 40))
+    cmsgs = derive_messages(cblog, tight, "test")
+    folded = [m for m in cmsgs if m["role"] == "tool" and m["content"] == "(output omitted by char budget)"]
+    check(len(folded) == 1, "char budget folds oldest tool result")
+    check(any("folded" in (m.get("content") or "") for m in cmsgs), "char budget notes the fold")
+    check(cblog.events()[2].content == "x" * 40, "char budget folds on copies, log untouched")
+
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)

@@ -1,9 +1,10 @@
 """Conversation history and context management.
 
 The event log is the single source of truth; model-visible messages are derived from it.
-Strategy:
+Strategy (no turn-count windowing — compaction is the only turn-level budget guard):
 - sticky: system prompt + the original task are never evicted
-- windowing: keep the last N turns; older tool results fold into one omitted line
+- compaction: the newest CompactionEvent's summary is the head; only the recent
+  tail it designates is projected (token-driven, see loop._should_compact)
 - char budget: if kept tool output exceeds a soft budget, fold the oldest results
 - truncation: oversized tool output is head/tail trimmed at the tools layer
 """
@@ -97,9 +98,14 @@ def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def derive_messages(log: EventLog, config: Config, task: str, memories: Any | None = None) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying compaction head +
-    windowing + char budget. ``memories`` (a MemoryStore) contributes a resident
-    title list to the system prompt so the model can recall long-term facts."""
-    events = log.events()
+    char budget. ``memories`` (a MemoryStore) contributes a resident title list
+    to the system prompt so the model can recall long-term facts."""
+    full_events = log.events()
+    # the original task lives at index 0 (emitted at run start); task.md re-injects
+    # it below, so exclude that raw copy here — otherwise every context carries the
+    # task twice.
+    raw_task = full_events[0] if full_events and isinstance(full_events[0], UserMessageEvent) else None
+    events = full_events
     head_msgs: list[dict[str, Any]] = []
     # if the log was compacted, the newest CompactionEvent's summary is the head
     # (it replaces everything before its tail_start), and only the recent tail is
@@ -108,17 +114,11 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     if compaction is not None:
         head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]
         events = [e for e in events[compaction.tail_start :] if not isinstance(e, CompactionEvent)]
+    if raw_task is not None and events and events[0] is raw_task:
+        events = events[1:]
 
-    assistant_idx = [i for i, e in enumerate(events) if isinstance(e, AssistantMessageEvent)]
-
-    if len(assistant_idx) > config.max_history_turns:
-        cutoff = assistant_idx[-config.max_history_turns]
-        kept = events[cutoff:]
-        dropped = cutoff  # windowing evicts every event before the cutoff, not just tool results
-        msgs = [{"role": "user", "content": render("context_omitted.md", count=dropped)}] + _to_messages(kept)
-    else:
-        kept = events
-        msgs = _to_messages(events)
+    kept = events
+    msgs = _to_messages(kept)
 
     # char budget: fold the oldest tool results until the kept output fits.
     # fold on copies so the source-of-truth event log is never mutated.
@@ -140,7 +140,7 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
                 else e
                 for i, e in enumerate(kept)
             ]
-            msgs = [{"role": "user", "content": render("context_omitted.md", count=len(folded_idx))}] + _to_messages(
+            msgs = [{"role": "user", "content": render("context_folded.md", count=len(folded_idx))}] + _to_messages(
                 kept
             )
 

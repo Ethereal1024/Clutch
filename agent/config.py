@@ -29,14 +29,14 @@ class Config:
     doom_loop_limit: int = 4
     abort_on_doom_loop: bool = True
 
-    # Context management
-    max_history_turns: int = 24
-    # soft char budget for tool outputs fed to the model; older results fold below it
+    # Context management (token-threshold + compaction driven; no turn-count windowing)
+    # soft char cap on tool output fed to the model; older results fold below it
     context_char_budget: int = 60000
 
     # Compaction: when the conversation approaches the context window, the old turns
     # are rolled into a summary and the run continues (opencode-style), instead of
-    # dropping them or aborting.
+    # dropping them or aborting. This is the ONLY turn-level budget guard — disable
+    # it and a long run overflows the window (the API errors out gracefully).
     compaction_enabled: bool = True
     compaction_reserved: int = 20_000  # headroom left for the completion output
     compaction_tail_tokens: int | None = None  # recent tail to preserve; None = auto (~25% usable, cap 15k)

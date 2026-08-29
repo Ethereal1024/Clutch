@@ -80,6 +80,8 @@ class Agent:
         self.memories = memories
         # provider-reported usage of the most recent LLM call (context size probe)
         self._last_usage: dict[str, Any] | None = None
+        # current task (set at run start); compaction's token estimate needs it
+        self._task: str = ""
 
     def _emit(self, event: Event) -> None:
         self.log.append(event)
@@ -149,6 +151,7 @@ class Agent:
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
         self._emit(UserMessageEvent(content=task))
+        self._task = task  # compaction's estimate needs the current task
 
         turn = 0
         try:
@@ -164,16 +167,28 @@ class Agent:
                     )
                 # context near the window: roll the older turns into a summary and
                 # continue with a fresh (compacted) context instead of dropping or
-                # aborting. Uses the previous turn's usage, so the first turn never
-                # triggers it.
+                # aborting. Triggers on the previous call's reported usage OR a
+                # char-based estimate of what the NEXT call would send (covers the
+                # resume-first-turn / missing-usage cases and the one-turn race).
                 if self._should_compact():
-                    self._compact()
                     self._last_usage = None  # don't re-trigger on the stale usage
-                    continue
+                    if self._compact():
+                        continue
+                    # nothing to compact / summary failed: fall through so a failed
+                    # compaction can never spin the loop
                 self._emit(StepStartEvent())
                 msgs = context.derive_messages(self.log, self.config, task, memories=self.memories)
 
-                content, tool_calls, finish_reason, reasoning, usage = self._llm_call(msgs)
+                try:
+                    content, tool_calls, finish_reason, reasoning, usage = self._llm_call(msgs)
+                except agent_errors.AgentError as e:
+                    if e.code == "context_window_exceeded":
+                        # last resort: force a compaction and retry once; if nothing
+                        # can be compacted, re-raise and end with a graceful error
+                        self._last_usage = None
+                        if self._compact():
+                            continue
+                    raise
                 self._last_usage = usage
                 # Stop during streaming left a partial (empty) turn; never treat it
                 # as a done candidate or run the verify gate on it.
@@ -249,29 +264,57 @@ class Agent:
             return self._finish("error", str(e))
 
     def _should_compact(self) -> bool:
-        """True when the last LLM call pushed the context near the model window."""
-        if not self.config.compaction_enabled or not self._last_usage:
-            return False
-        used = self._last_usage.get("total_tokens")
-        if not used:
-            return False
-        return used >= self.config.llm_context_window - self.config.compaction_reserved
+        """True when the next LLM call would push the context near the model window.
 
-    def _compact(self) -> None:
+        Either trigger fires: the previous call's provider-reported usage crossing
+        the threshold (authoritative), or a char-based token estimate of the CURRENT
+        derived context doing so (covers resumed sessions, missing usage, and the
+        one-turn race — the last call's usage never includes the turn just added)."""
+        if not self.config.compaction_enabled:
+            return False
+        threshold = self.config.llm_context_window - self.config.compaction_reserved
+        if self._last_usage:
+            used = self._last_usage.get("total_tokens")
+            if used and used >= threshold:
+                return True
+        msgs = context.derive_messages(self.log, self.config, self._task, memories=self.memories)
+        return self._estimate_tokens(msgs) >= threshold
+
+    @staticmethod
+    def _estimate_tokens(msgs: list[dict[str, Any]]) -> int:
+        """Cheap token estimate (~3 chars/token) of the derived context. Conservative
+        for English/code (real ratio ~3-4 chars/token); CJK is denser but the
+        usage-based trigger covers the normal path there."""
+        chars = 0
+        for m in msgs:
+            chars += len(m.get("content") or "")
+            chars += len(m.get("reasoning_content") or "")
+            for tc in m.get("tool_calls") or []:
+                chars += len(tc.get("function", {}).get("arguments", ""))
+        return chars // 3
+
+    def _compact(self) -> bool:
         """Roll the older conversation into a summary (opencode-style). Best-effort:
-        any failure falls back to the existing windowing and the run continues."""
+        returns False when nothing was compacted (too little to summarize, no NEW
+        head since the last compaction, or the summary call failed) so the loop
+        never spins on a failed or no-op compaction."""
         try:
             events = self.log.events()
             tail_start = self._tail_start_index(events)
             if tail_start <= 1:
-                return  # nothing meaningful to compact
+                return False  # nothing meaningful to compact
+            prev = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
+            if prev is not None and tail_start <= prev.tail_start:
+                return False  # nothing new since the last compaction: don't re-summarize the same head
             head = events[:tail_start]
             summary = self._summarize(self._serialize(head), self._previous_summary(events))
             if not summary:
-                return
+                return False
             self.log.append(CompactionEvent(summary=summary, tail_start=tail_start))
+            return True
         except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
             print(f"[clutch] compaction failed: {e}", file=sys.stderr)
+            return False
 
     def _tail_start_index(self, events: list[Any]) -> int:
         """Index where the preserved recent tail begins, sized to the tail budget
