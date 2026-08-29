@@ -137,6 +137,20 @@ def main() -> None:
         check(not r["error"], "write_file ok")
         r = reg.execute(sb, config, "read_file", {"path": "a.txt"})
         check(r["content"].strip() == "hello", "read_file roundtrip")
+        reg.execute(sb, config, "write_file", {"path": "multi.txt", "content": "line1\nline2\nline3\nline4\nline5\n"})
+        r = reg.execute(sb, config, "read_file", {"path": "multi.txt", "offset": 2, "limit": 2})
+        check(
+            r["content"].startswith("2: line2\n3: line3") and "use offset=4 to continue" in r["content"],
+            "read_file line-range returns numbered slice with continue hint",
+        )
+        r = reg.execute(sb, config, "read_file", {"path": "multi.txt", "offset": 4, "limit": 2})
+        check(r["content"] == "4: line4\n5: line5", "read_file range covering the tail has no footer")
+        r = reg.execute(sb, config, "grep", {"pattern": "line[23]"})
+        check("multi.txt:" in r["content"] and "2: line2" in r["content"], "grep tool finds hits with line numbers")
+        r = reg.execute(sb, config, "grep", {"pattern": "no_such_token_zzz"})
+        check("no matches" in r["content"], "grep tool reports no matches")
+        r = reg.execute(sb, config, "grep", {"pattern": "(", "path": "."})
+        check(r["error"], "grep tool rejects invalid regex")
         r = reg.execute(sb, config, "run_command", {"command": "echo hi"})
         check("hi" in r["content"], "run_command executes")
         r = reg.execute(sb, config, "run_command", {"command": "echo a && echo b"})

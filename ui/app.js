@@ -55,11 +55,11 @@ const toolCalls = {};
 let toolGroupEl = null;
 
 function isReadTool(name) {
-  return name === "read_file" || name === "list_dir";
+  return name === "read_file" || name === "list_dir" || name === "grep";
 }
 
 // Render one tool_call row; consecutive calls append to the same group block.
-// Read tools (read_file/list_dir) keep their results in the same block too.
+// Read tools (read_file/list_dir/grep) keep their results in the same block too.
 function addToolCallRow(ev) {
   const readGroup = isReadTool(ev.name);
   if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
@@ -119,7 +119,9 @@ function buildReadRow(call, content) {
   const path = (call.args && call.args.path) || "";
   const summary = toolName === "list_dir"
     ? `${content ? content.split("\n").length : 0} entries`
-    : `read ${path || "file"} (${content ? content.split("\n").length : 0} lines)`;
+    : toolName === "grep"
+      ? `grep '${(call.args && call.args.pattern) || ""}' (${content ? content.split("\n").length : 0} lines)`
+      : `read ${path || "file"} (${content ? content.split("\n").length : 0} lines)`;
   const row = document.createElement("div");
   row.className = "read-row";
   const toggle = document.createElement("span");

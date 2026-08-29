@@ -150,6 +150,15 @@ def main() -> int:
         ws.append_line("log.txt", "second")
         check(ws.read("log.txt") == '{"a": "$x"}\nsecond\n', "remote append_line")
 
+        # remote grep: shell grep on the far side, paths root-relative, include filter
+        hits = ws.grep("VAR", path="sub")
+        check(
+            any(f == "sub/deep/f.txt" for f, _, _ in hits) and all(f.startswith("sub/") for f, _, _ in hits),
+            "remote grep finds hits with root-relative paths",
+        )
+        check(ws.grep("VAR", path="sub", include="*.log") == [], "remote grep include filter excludes")
+        check(ws.grep("no_such_token_zzz") == [], "remote grep no matches -> []")
+
         # SshTransport surfaces a remote timeout as TransportError(timeout=True)
         try:
             SshTransport(bridge).run("sleep 5", 1.0)

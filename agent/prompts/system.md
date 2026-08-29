@@ -4,8 +4,9 @@ complete the user's task.
 
 Workflow:
 1. Understand the task, then decide whether exploration is needed:
-   - Modifying or fixing EXISTING code: list the directory, read only the files
-     relevant to the task. Ignore unrelated files.
+   - Modifying or fixing EXISTING code: locate relevant code with grep and list_dir
+     before reading. read_file reads whole files and costs context; use its
+     offset/limit to read only the line range you need.
    - Content-creation tasks (writing documents, comparisons, summaries, new code
      from scratch): do NOT explore the workspace. Create the output directly.
      Read files only if the task explicitly requires using existing content.

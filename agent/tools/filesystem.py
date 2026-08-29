@@ -6,6 +6,7 @@ Each tool returns a structured dict; the registry formats it for the model.
 from __future__ import annotations
 
 import difflib
+import re
 from pathlib import Path
 
 from ..config import Config
@@ -17,8 +18,15 @@ def _result(content: str, error: bool = False, diff: str = "") -> dict:
     return {"content": content, "error": error, "diff": diff}
 
 
-def read_file(workspace: Workspace, config: Config, path: str, max_chars: int = 0) -> dict:
-    limit = max_chars or config.read_max_chars
+def read_file(
+    workspace: Workspace,
+    config: Config,
+    path: str,
+    max_chars: int = 0,
+    offset: int = 0,
+    limit: int = 0,
+) -> dict:
+    limit_chars = max_chars or config.read_max_chars
     try:
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
@@ -27,13 +35,32 @@ def read_file(workspace: Workspace, config: Config, path: str, max_chars: int = 
             text = workspace.read(str(p))
         except FileNotFoundError:
             return _result(render("errors/file_missing.md", path=path), error=True)
-        if len(text) > limit:
-            text = text[:limit] + f"\n... [truncated, file is {len(text)} chars]"
+        if offset > 0 or limit > 0:
+            return _read_range(text, offset, limit, limit_chars)
+        if len(text) > limit_chars:
+            text = text[:limit_chars] + f"\n... [truncated, file is {len(text)} chars]"
         return _result(text)
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
         return _result(render("errors/read_failed.md", error=e), error=True)
+
+
+def _read_range(text: str, offset: int, limit: int, limit_chars: int) -> dict:
+    """Read lines [offset, offset+limit) (1-based) with line numbers, so the model
+    reads only the slice it needs and can continue with offset=end+1."""
+    lines = text.splitlines()
+    total = len(lines)
+    start = max(0, offset - 1) if offset > 0 else 0
+    end = start + limit if limit > 0 else total
+    selected = lines[start:end]
+    body = "\n".join(f"{i + 1}: {ln}" for i, ln in enumerate(selected, start=start))
+    shown = start + len(selected)
+    if shown < total:
+        body += f"\n... (showing lines {start + 1}-{shown} of {total}; use offset={shown + 1} to continue)"
+    if len(body) > limit_chars:
+        body = body[:limit_chars] + "\n... [truncated]"
+    return _result(body)
 
 
 def write_file(workspace: Workspace, config: Config, path: str, content: str) -> dict:
@@ -81,3 +108,29 @@ def list_dir(workspace: Workspace, config: Config, path: str = ".") -> dict:
         return _result(f"ERROR: {e}", error=True)
     except Exception as e:  # noqa: BLE001
         return _result(f"ERROR: {e}", error=True)
+
+
+def grep(workspace: Workspace, config: Config, pattern: str, path: str = ".", include: str = "") -> dict:
+    try:
+        hits = workspace.grep(pattern, path=path, include=include or None)
+    except re.error as e:
+        return _result(f"ERROR: invalid regex: {e}", error=True)
+    except ValueError as e:
+        return _result(f"ERROR: {e}", error=True)
+    except Exception as e:  # noqa: BLE001
+        return _result(f"ERROR: {e}", error=True)
+    if not hits:
+        return _result("(no matches)")
+    lines: list[str] = []
+    current: str | None = None
+    for fpath, lineno, text in hits:
+        if current != fpath:
+            if current is not None:
+                lines.append("")
+            current = fpath
+            lines.append(f"{fpath}:")
+        lines.append(f"  Line {lineno}: {text[:300]}")
+    content = "\n".join(lines)
+    if len(hits) >= 100:
+        content += "\n\n(Results capped at 100; use a more specific pattern or path.)"
+    return _result(content)

@@ -14,7 +14,9 @@ so local and remote behave identically.
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import re
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -86,6 +88,11 @@ class Workspace(ABC):
     def append_line(self, path: str, line: str) -> None:
         """Append one line to a file (the remote .clc EventLog writer)."""
 
+    @abstractmethod
+    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        """Regex search over workspace files (skips hidden/binary/protected).
+        Returns [(root-relative path, 1-based line, text)], capped at 100 hits."""
+
 
 class LocalWorkspace(Workspace):
     def read(self, path: str) -> str:
@@ -109,6 +116,49 @@ class LocalWorkspace(Workspace):
         p = self.resolve(path)
         with open(p, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        rx = re.compile(pattern)
+        root = self.resolve(path)
+        files = [root] if root.is_file() else self._grep_files(root)
+        out: list[tuple[str, int, str]] = []
+        for f in files:
+            if self.is_protected(f):
+                continue
+            rel = str(f.relative_to(self.root))
+            if include and not (fnmatch.fnmatch(f.name, include) or fnmatch.fnmatch(rel, include)):
+                continue
+            if self._is_binary(f):
+                continue
+            try:
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    for i, line in enumerate(fh, 1):
+                        if rx.search(line):
+                            out.append((rel, i, line.rstrip("\n")))
+                            if len(out) >= 100:
+                                return out
+            except OSError:
+                continue
+        return out
+
+    def _grep_files(self, dirpath: Path) -> list[Path]:
+        files: list[Path] = []
+        for ent in sorted(dirpath.iterdir()):
+            if ent.name.startswith(".") or ent.name == "__pycache__":
+                continue
+            if ent.is_dir():
+                files.extend(self._grep_files(ent))
+            elif ent.is_file():
+                files.append(ent)
+        return files
+
+    @staticmethod
+    def _is_binary(p: Path) -> bool:
+        try:
+            with open(p, "rb") as f:
+                return b"\x00" in f.read(1024)
+        except OSError:
+            return True
 
 
 # ponytail: minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a
@@ -272,3 +322,35 @@ class RemoteWorkspace(Workspace):
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
         self._exec_append(p, line, first_op=">>", add_trailing_nl=True, ensure_dir=False)
+
+    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        p = self.resolve(path)
+        cmd = f"grep -rnE {shq(pattern)} {shq(str(p))}"
+        if include:
+            cmd += f" --include={shq(include)}"
+        cmd += " | head -n 100"
+        r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
+        if r.code != 0 and not r.stdout:
+            return []
+        out: list[tuple[str, int, str]] = []
+        for line in r.stdout.splitlines():
+            first = line.find(":")
+            if first < 0:
+                continue
+            rest = line[first + 1 :]
+            second = rest.find(":")
+            if second < 0:
+                continue
+            try:
+                lineno = int(rest[:second])
+            except ValueError:
+                continue
+            fpath = line[:first]
+            try:
+                rel = str(Path(fpath).relative_to(self.root))
+            except ValueError:
+                rel = fpath
+            out.append((rel, lineno, rest[second + 1 :]))
+            if len(out) >= 100:
+                break
+        return out

@@ -59,10 +59,31 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                         "type": "integer",
                         "description": f"max chars to read (default {config.read_max_chars})",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based start line for a line-range read",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "max lines to read when offset is given",
+                    },
                 },
                 "required": ["path"],
             },
             func=lambda sb, cfg, **kw: filesystem.read_file(sb, cfg, **kw),
+        ),
+        Tool(
+            name="grep",
+            description=render("tools/grep.md"),
+            parameters={
+                "properties": {
+                    "pattern": _str_param("regex to search for"),
+                    "path": _str_param("subdirectory or file to search (default: whole workspace)", required=False),
+                    "include": _str_param("filename glob filter (e.g. '*.py')", required=False),
+                },
+                "required": ["pattern"],
+            },
+            func=lambda sb, cfg, **kw: filesystem.grep(sb, cfg, **kw),
         ),
         Tool(
             name="write_file",
