@@ -140,9 +140,7 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
                 else e
                 for i, e in enumerate(kept)
             ]
-            msgs = [{"role": "user", "content": render("context_folded.md", count=len(folded_idx))}] + _to_messages(
-                kept
-            )
+            msgs = [{"role": "user", "content": render("context_folded.md")}] + _to_messages(kept)
 
     system = render("system.md")
     if config.enable_skills:

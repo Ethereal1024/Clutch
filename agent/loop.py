@@ -80,8 +80,6 @@ class Agent:
         self.memories = memories
         # provider-reported usage of the most recent LLM call (context size probe)
         self._last_usage: dict[str, Any] | None = None
-        # current task (set at run start); compaction's token estimate needs it
-        self._task: str = ""
 
     def _emit(self, event: Event) -> None:
         self.log.append(event)
@@ -151,7 +149,6 @@ class Agent:
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
         self._emit(UserMessageEvent(content=task))
-        self._task = task  # compaction's estimate needs the current task
 
         turn = 0
         try:
@@ -165,19 +162,20 @@ class Agent:
                         "aborted",
                         render("budget_exceeded.md", max_turns=self.config.max_turns),
                     )
+                # derive once per turn; the compaction check and the LLM call share it
+                msgs = context.derive_messages(self.log, self.config, task, memories=self.memories)
                 # context near the window: roll the older turns into a summary and
                 # continue with a fresh (compacted) context instead of dropping or
                 # aborting. Triggers on the previous call's reported usage OR a
                 # char-based estimate of what the NEXT call would send (covers the
                 # resume-first-turn / missing-usage cases and the one-turn race).
-                if self._should_compact():
+                if self._should_compact(msgs):
                     self._last_usage = None  # don't re-trigger on the stale usage
                     if self._compact():
-                        continue
-                    # nothing to compact / summary failed: fall through so a failed
-                    # compaction can never spin the loop
+                        continue  # log changed; the next iteration re-derives
+                    # no-op / failed compaction: proceed with the messages already
+                    # derived (the log is unchanged, so they are still valid)
                 self._emit(StepStartEvent())
-                msgs = context.derive_messages(self.log, self.config, task, memories=self.memories)
 
                 try:
                     content, tool_calls, finish_reason, reasoning, usage = self._llm_call(msgs)
@@ -263,12 +261,12 @@ class Agent:
             # silently in the worker thread
             return self._finish("error", str(e))
 
-    def _should_compact(self) -> bool:
+    def _should_compact(self, msgs: list[dict[str, Any]]) -> bool:
         """True when the next LLM call would push the context near the model window.
 
         Either trigger fires: the previous call's provider-reported usage crossing
-        the threshold (authoritative), or a char-based token estimate of the CURRENT
-        derived context doing so (covers resumed sessions, missing usage, and the
+        the threshold (authoritative), or a char-based token estimate of the derived
+        context ``msgs`` doing so (covers resumed sessions, missing usage, and the
         one-turn race — the last call's usage never includes the turn just added)."""
         if not self.config.compaction_enabled:
             return False
@@ -277,14 +275,14 @@ class Agent:
             used = self._last_usage.get("total_tokens")
             if used and used >= threshold:
                 return True
-        msgs = context.derive_messages(self.log, self.config, self._task, memories=self.memories)
         return self._estimate_tokens(msgs) >= threshold
 
     @staticmethod
     def _estimate_tokens(msgs: list[dict[str, Any]]) -> int:
-        """Cheap token estimate (~3 chars/token) of the derived context. Conservative
-        for English/code (real ratio ~3-4 chars/token); CJK is denser but the
-        usage-based trigger covers the normal path there."""
+        """Cheap token estimate of the derived context. Uses ~3 chars/token (real
+        English/code ratio is ~3-4): deliberately conservative so compaction fires
+        before the window fills. Contrast the tail budget in _tail_start_index,
+        which is generous (4 chars/token) to keep as much recent work as possible."""
         chars = 0
         for m in msgs:
             chars += len(m.get("content") or "")
@@ -318,9 +316,10 @@ class Agent:
 
     def _tail_start_index(self, events: list[Any]) -> int:
         """Index where the preserved recent tail begins, sized to the tail budget
-        (~4 chars per token). Clutch turns share the task user message, so the tail
-        is split at an assistant-turn boundary; everything before it is summarized
-        away."""
+        (~4 chars per token, deliberately generous vs the 3 chars/token in
+        _estimate_tokens: the tail is what survives, so as much of it as possible).
+        Clutch turns share the task user message, so the tail is split at an
+        assistant-turn boundary; everything before it is summarized away."""
         budget = self.config.compaction_tail_tokens
         if budget is None:
             usable = self.config.llm_context_window - self.config.compaction_reserved
