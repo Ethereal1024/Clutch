@@ -27,7 +27,7 @@ let agent = null;
 // (~/.clutch/settings.json), so a key saved in the UI is honored too.
 function getApiKey() {
   const e = process.env;
-  if (e.DEEPSEEK_API_KEY || e.CLUTCH_API_KEY) return e.DEEPSEEK_API_KEY || e.CLUTCH_API_KEY;
+  if (e.CLUTCH_API_KEY) return e.CLUTCH_API_KEY;
   try {
     const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
     if (d.api_key) return d.api_key;

@@ -1,0 +1,1 @@
+Create or overwrite a file in the workspace. path is relative to the workspace root. This is the only way to create/modify code files: whole-file rewrite, do not edit files any other way.

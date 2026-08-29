@@ -8,7 +8,7 @@ error texts live in agent/prompts/.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable
 
 from ..config import Config
 from ..prompts import render
@@ -17,17 +17,17 @@ from . import filesystem, shell
 from .workspace import Workspace
 
 # (workspace, config, **args) -> dict{content, error?}
-ToolImpl = Callable[..., Dict[str, Any]]
+ToolImpl = Callable[..., dict[str, Any]]
 
 
 @dataclass
 class Tool:
     name: str
     description: str
-    parameters: Dict[str, Any]  # JSON Schema (properties + required)
+    parameters: dict[str, Any]  # JSON Schema (properties + required)
     func: ToolImpl
 
-    def to_openai_schema(self) -> Dict[str, Any]:
+    def to_openai_schema(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -46,22 +46,17 @@ def _str_param(desc: str, required: bool = True) -> dict:
     return {"type": "string", "description": desc}
 
 
-def build_default_tools(config: Config) -> List[Tool]:
+def build_default_tools(config: Config) -> list[Tool]:
     tools = [
         Tool(
             name="read_file",
-            description=(
-                "Read a file in the workspace. path is relative to the workspace root. "
-                f"Large files are truncated; use max_chars to control the size (default {config.read_max_chars}). "
-                "Only read files relevant to the task; content-creation tasks do not "
-                "need to explore the workspace."
-            ),
+            description=render("tools/read_file.md", read_max_chars=config.read_max_chars),
             parameters={
                 "properties": {
                     "path": _str_param("file path, relative to the workspace root"),
                     "max_chars": {
                         "type": "integer",
-                        "description": "max chars to read (default 20000)",
+                        "description": f"max chars to read (default {config.read_max_chars})",
                     },
                 },
                 "required": ["path"],
@@ -70,11 +65,7 @@ def build_default_tools(config: Config) -> List[Tool]:
         ),
         Tool(
             name="write_file",
-            description=(
-                "Create or overwrite a file in the workspace. path is relative to the "
-                "workspace root. This is the only way to create/modify code files: "
-                "whole-file rewrite, do not edit files any other way."
-            ),
+            description=render("tools/write_file.md"),
             parameters={
                 "properties": {
                     "path": _str_param("file path, relative to the workspace root"),
@@ -86,7 +77,7 @@ def build_default_tools(config: Config) -> List[Tool]:
         ),
         Tool(
             name="list_dir",
-            description="List the contents of a directory in the workspace. path defaults to '.'.",
+            description=render("tools/list_dir.md"),
             parameters={
                 "properties": {
                     "path": _str_param("directory path, relative to the workspace root", required=False),
@@ -97,15 +88,7 @@ def build_default_tools(config: Config) -> List[Tool]:
         ),
         Tool(
             name="run_command",
-            description=(
-                "Run a shell command in the workspace and return its output. cwd is fixed to "
-                "the workspace root. Run Python with `python3 file.py` (syntax-checked first). "
-                "Network is available: fetch remote content with curl or wget (save with a "
-                "relative -o path; absolute output paths are blocked). "
-                "Interactive commands are blocked (bare python, vi, vim, less). When a program "
-                "needs input, use scripted input (stdin pipe or CLI args), or add a `--test` "
-                "self-test mode that verifies behavior without interaction."
-            ),
+            description=render("tools/run_command.md"),
             parameters={
                 "properties": {
                     "command": _str_param("shell command string to run"),
@@ -123,7 +106,7 @@ def build_default_tools(config: Config) -> List[Tool]:
     return tools
 
 
-def _build_load_skill(config: Config) -> Optional[Tool]:
+def _build_load_skill(config: Config) -> Tool | None:
     """Model-chosen skill loader: enum of available skills; content pulled on demand."""
     lib = cached_library(config.skills_dir)
     if not lib.skills:
@@ -131,11 +114,7 @@ def _build_load_skill(config: Config) -> Optional[Tool]:
     names = lib.names()
     return Tool(
         name="load_skill",
-        description=(
-            "Load a skill's instructions into context. Available skills are listed in "
-            "the system prompt; call this ONLY when the task falls in a skill's domain, "
-            "otherwise ignore them. The loaded instructions then guide how you work."
-        ),
+        description=render("tools/load_skill.md"),
         parameters={
             "properties": {
                 "name": {
@@ -161,32 +140,35 @@ def _load_skill(_workspace: Workspace, config: Config, name: str, file: str = "S
     skill = lib.get(name)
     if skill is None:
         return {
-            "content": f"ERROR: unknown skill {name!r}; available: {', '.join(lib.names()) or 'none'}",
+            "content": render("errors/skill_unknown.md", skill=repr(name), available=", ".join(lib.names()) or "none"),
             "error": True,
         }
     root = skill.dir.resolve()
     path = (skill.dir / file).resolve()
     if not path.is_relative_to(root):
-        return {"content": f"ERROR: skill file escapes skill directory: {file!r}", "error": True}
+        return {"content": render("errors/skill_escape.md", file=repr(file)), "error": True}
     if not path.is_file():
-        return {"content": f"ERROR: no such file in skill {name!r}: {file!r}", "error": True}
+        return {
+            "content": render("errors/skill_missing.md", skill=repr(name), file=repr(file)),
+            "error": True,
+        }
     try:
         return {"content": path.read_text(encoding="utf-8", errors="replace")}
     except OSError as e:
-        return {"content": f"ERROR: cannot read skill file: {e}", "error": True}
+        return {"content": render("errors/skill_read_failed.md", error=e), "error": True}
 
 
 class ToolRegistry:
-    def __init__(self, tools: List[Tool]) -> None:
+    def __init__(self, tools: list[Tool]) -> None:
         self._tools = {t.name: t for t in tools}
 
-    def schemas(self) -> List[Dict[str, Any]]:
+    def schemas(self) -> list[dict[str, Any]]:
         return [t.to_openai_schema() for t in self._tools.values()]
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return list(self._tools)
 
-    def execute(self, workspace: Workspace, config: Config, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def execute(self, workspace: Workspace, config: Config, name: str, args: dict[str, Any]) -> dict[str, Any]:
         tool = self._tools.get(name)
         if tool is None:
             return {
@@ -197,16 +179,16 @@ class ToolRegistry:
             args = self._coerce_types(tool, args)
             result = tool.func(workspace, config, **args)
         except TypeError as e:
-            result = {"content": f"ERROR: invalid arguments ({e}); check names and types", "error": True}
+            result = {"content": render("errors/invalid_arguments.md", error=e), "error": True}
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
-            result = {"content": f"ERROR: tool exception: {e}", "error": True}
+            result = {"content": render("errors/tool_exception.md", error=e), "error": True}
         # normalize: every tool result carries error/diff so callers can index them
         result.setdefault("error", False)
         result.setdefault("diff", "")
         return result
 
     @staticmethod
-    def _coerce_types(tool: Tool, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _coerce_types(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
         """Coerce args to the declared JSON Schema types (models sometimes pass strings)."""
         props = tool.parameters.get("properties", {})
         for key, spec in props.items():

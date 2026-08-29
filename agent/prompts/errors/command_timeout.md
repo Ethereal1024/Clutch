@@ -1,0 +1,1 @@
+ERROR: command timed out ($seconds). $hint

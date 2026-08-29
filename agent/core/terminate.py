@@ -12,7 +12,6 @@ Layered termination:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
 
 from ..config import Config
 from ..tools.transport import TransportError
@@ -30,7 +29,7 @@ class TerminateResult:
 class Terminator:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self._last_calls: List[Tuple[str, str]] = []
+        self._last_calls: list[tuple[str, str]] = []
 
     def record_call(self, name: str, args_repr: str) -> bool:
         """Record a tool call; return True if a doom loop is detected."""
@@ -80,7 +79,7 @@ def run_verify(workspace: Workspace, config: Config, command: str) -> dict:
     return {"content": text}
 
 
-def _format_output(config: Config, r) -> List[str]:
+def _format_output(config: Config, r) -> list[str]:
     parts = []
     if r.stdout:
         parts.append("stdout:\n" + config.truncate(r.stdout))

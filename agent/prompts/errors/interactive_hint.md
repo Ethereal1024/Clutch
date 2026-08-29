@@ -1,0 +1,1 @@
+Interactive commands are blocked here. Write code with write_file and run it as `python3 file.py` with scripted input (stdin or a --test flag).

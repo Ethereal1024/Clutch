@@ -19,7 +19,7 @@ from typing import Any
 
 from .config import Config
 from .core.permission import PermissionEvaluator, PermissionGate
-from .llm.client import DeepSeekLlmClient, LlmClient
+from .llm import LlmClient, create_llm_client
 from .loop import Agent
 from .project import Project
 from .tools.registry import ToolRegistry, build_default_tools
@@ -117,7 +117,8 @@ class BaseServer(ABC):
 
     def build_llm(self) -> LlmClient:
         """LLM client for this server. Raises RuntimeError when no API key."""
-        return DeepSeekLlmClient(
+        return create_llm_client(
+            provider="openai",
             api_key=self.state.api_key or self.config.api_key,
             model=self.config.model,
             base_url=self.config.base_url,

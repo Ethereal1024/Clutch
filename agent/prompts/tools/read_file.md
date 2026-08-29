@@ -1,0 +1,1 @@
+Read a file in the workspace. path is relative to the workspace root. Large files are truncated; use max_chars to control the size (default $read_max_chars). Only read files relevant to the task; content-creation tasks do not need to explore the workspace.

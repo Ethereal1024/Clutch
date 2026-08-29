@@ -232,7 +232,7 @@ class RemoteWorkspace(Workspace):
         return sorted(out)
 
     def list_many(self, paths: list[str]) -> dict[str, list[str]]:
-        """List several directories in ONE exec (one round trip); missing/non-dir
+        """list several directories in ONE exec (one round trip); missing/non-dir
         paths map to []. Used by the remote tree walk so a whole level costs a
         single round trip instead of one exec per directory. Commands are grouped
         so each exec stays under the sshd's command-size limit."""

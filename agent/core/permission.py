@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable
 
 from ..tools.workspace import Workspace
 
@@ -54,7 +54,7 @@ class PermissionRequired(Exception):
         self.reason = reason
 
 
-DEFAULT_RULES: List[Rule] = [
+DEFAULT_RULES: list[Rule] = [
     # danger: destructive/irreversible commands always ask
     Rule("ask", "run_command", r"\brm\s+-rf\b|\bsudo\b|\bshutdown\b|\breboot\b|\bmkfs\b|\bdd\b\s"),
     # commands that delete anything ask
@@ -71,7 +71,7 @@ _ARGS_REPR_MAX = 120
 
 @dataclass
 class PermissionEvaluator:
-    rules: List[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
+    rules: list[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
     # how much of the args JSON to surface in an ask reason
     def evaluate(self, tool: str, args_repr: str, _workspace: Workspace) -> Action:
@@ -92,7 +92,7 @@ class PermissionEvaluator:
             except (ValueError, TypeError):
                 pass
         # last matching rule wins (opencode findLast semantics)
-        decision: Optional[Rule] = None
+        decision: Rule | None = None
         for rule in self.rules:
             if rule.matches(tool, match_text):
                 decision = rule
@@ -116,7 +116,7 @@ class PermissionGate:
     def __init__(
         self,
         evaluator: PermissionEvaluator,
-        on_ask: Optional[Callable[[str, str, str, str], Optional[bool]]] = None,
+        on_ask: Callable[[str, str, str, str], bool | None] | None = None,
         auto_allow: bool = False,
     ) -> None:
         self.evaluator = evaluator
@@ -171,6 +171,6 @@ class PermissionGate:
         ev.set()
         return True
 
-    def pending_ids(self) -> List[str]:
+    def pending_ids(self) -> list[str]:
         with self._lock:
             return list(self._pending)

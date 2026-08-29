@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
-from typing import Any, Dict, List
+from typing import Any
 
 from .config import Config
 from .events import EventLog
@@ -22,18 +22,18 @@ from .tools.workspace import LocalWorkspace, Workspace
 class FakeLLM:
     """Yields canned responses in order, then always the final one."""
 
-    def __init__(self, responses: List[Dict[str, Any]], fallback: Dict[str, Any]) -> None:
+    def __init__(self, responses: list[dict[str, Any]], fallback: dict[str, Any]) -> None:
         self._responses = list(responses)
         self._fallback = fallback
-        self.calls: List[Dict[str, Any]] = []
+        self.calls: list[dict[str, Any]] = []
 
-    def chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         self.calls.append(messages)
         if self._responses:
             return self._responses.pop(0)
         return dict(self._fallback)
 
-    def stream(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]):
+    def stream(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]):
         """Emit the canned response as stream events (text chunks, tool_calls, finish)."""
         self.calls.append(messages)
         resp = dict(self._responses.pop(0)) if self._responses else dict(self._fallback)
@@ -68,15 +68,15 @@ class FakeLLM:
         }
 
 
-def _resp(content: str = "", tool_calls: List[Dict[str, Any]] = None, finish: str = "stop") -> Dict[str, Any]:
-    m: Dict[str, Any] = {"role": "assistant", "content": content}
+def _resp(content: str = "", tool_calls: list[dict[str, Any]] = None, finish: str = "stop") -> dict[str, Any]:
+    m: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls:
         m["tool_calls"] = tool_calls
     m["finish_reason"] = finish
     return m
 
 
-def _tool_call(name: str, arguments: str, cid: str = "call_1") -> Dict[str, Any]:
+def _tool_call(name: str, arguments: str, cid: str = "call_1") -> dict[str, Any]:
     return {"id": cid, "type": "function", "function": {"name": name, "arguments": arguments}}
 
 

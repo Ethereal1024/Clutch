@@ -40,7 +40,7 @@ Everything runs inside a sandbox so experiments cannot touch your real files.
 ## Run it
 
     pip install uv && uv sync
-    export DEEPSEEK_API_KEY=your_key
+    export CLUTCH_API_KEY=your_key
     uv run python -m agent.server   # then open http://127.0.0.1:8890
 
 ## Status

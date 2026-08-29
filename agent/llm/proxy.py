@@ -12,7 +12,6 @@ for httpx, or None for "connect directly".
 from __future__ import annotations
 
 import os
-from typing import Optional
 from urllib.parse import urlparse
 
 SOCK_SCHEMES = ("socks://", "socks4://", "socks4a://", "socks5://", "socks5h://")
@@ -36,8 +35,10 @@ def _no_proxy_match(hostname: str) -> bool:
     return False
 
 
-def get_proxy_for_url(input_url: str) -> Optional[str]:
+def get_proxy_for_url(input_url: str | None) -> str | None:
     """Return an httpx-compatible proxy URL for the target, or None (direct)."""
+    if input_url is None:
+        return None
     parsed = urlparse(input_url)
     if parsed.scheme not in ("http", "https"):
         return None

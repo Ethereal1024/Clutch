@@ -14,13 +14,9 @@ import shlex
 from pathlib import Path
 
 from ..config import Config
+from ..prompts import render
 from .transport import TransportError
 from .workspace import Workspace
-
-INTERACTIVE_HINT = (
-    "Interactive commands are blocked here. Write code with write_file and run it as "
-    "`python3 file.py` with scripted input (stdin or a --test flag)."
-)
 
 
 def run_command(workspace: Workspace, config: Config, command: str) -> dict:
@@ -29,7 +25,7 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
         return {"content": f"ERROR: {reason}", "error": True}
 
     if not command.strip():
-        return {"content": "ERROR: empty command", "error": True}
+        return {"content": render("errors/empty_command.md"), "error": True}
 
     # Path escape guard: reject tokens that look like file paths resolving outside
     # the workspace. We check the tokenized command first, then run the raw string
@@ -38,10 +34,10 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
         try:
             p = workspace.resolve(tok)
         except ValueError:
-            return {"content": f"ERROR: path escapes workspace: {tok!r}", "error": True}
+            return {"content": render("errors/path_escape.md", token=repr(tok)), "error": True}
         # protected files (the .clc project file) are off-limits to commands too
         if workspace.is_protected(p):
-            return {"content": f"ERROR: cannot operate on protected file: {tok!r}", "error": True}
+            return {"content": render("errors/protected_command.md", token=repr(tok)), "error": True}
 
     args = shlex.split(command)
     if args and args[0] in ("python", "python3"):
@@ -60,12 +56,16 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     except TransportError as e:
         if e.timeout:
             return {
-                "content": f"ERROR: command timed out ({config.command_timeout:.0f}s). {INTERACTIVE_HINT}",
+                "content": render(
+                    "errors/command_timeout.md",
+                    seconds=f"{config.command_timeout:.0f}s",
+                    hint=render("errors/interactive_hint.md"),
+                ),
                 "error": True,
             }
-        return {"content": f"ERROR: execution failed: {e}", "error": True}
+        return {"content": render("errors/execution_failed.md", error=e), "error": True}
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
-        return {"content": f"ERROR: execution failed: {e}", "error": True}
+        return {"content": render("errors/execution_failed.md", error=e), "error": True}
 
     parts = []
     if r.stdout:
@@ -75,7 +75,7 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
 
     if r.code != 0:
         body = "\n".join(parts) if parts else "(no output)"
-        return {"content": f"ERROR: command failed (exit {r.code})\n{body}", "error": True}
+        return {"content": render("errors/command_failed.md", code=r.code, body=body), "error": True}
     if not parts:
         return {"content": "OK: command succeeded, no output."}
     return {"content": "OK: command succeeded\n" + "\n".join(parts)}
@@ -92,12 +92,12 @@ def _blocked_reason(config: Config, command: str) -> str | None:
         # safe non-interactive forms: `python3 file.py`, `python3 -m module`, `python3 -c code`
         has_file = any(a.endswith(".py") for a in rest if not a.startswith("-"))
         if not (has_file or "-m" in rest or "-c" in rest):
-            return INTERACTIVE_HINT
+            return render("errors/interactive_hint.md")
         return None
 
     for prefix in config.blocked_prefixes:
         if stripped.startswith(prefix + " "):
-            return INTERACTIVE_HINT
+            return render("errors/interactive_hint.md")
     return None
 
 

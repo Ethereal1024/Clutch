@@ -102,14 +102,17 @@ def read_header(path: Path, workspace=None) -> ProjectMeta:
 
 
 def _header_text(meta: ProjectMeta) -> str:
-    return "\n".join(
-        [
-            HEADER_PREFIX,
-            f"name: {meta.name}",
-            f"model: {meta.model or ''}",
-            SEPARATOR,
-        ]
-    ) + "\n"
+    return (
+        "\n".join(
+            [
+                HEADER_PREFIX,
+                f"name: {meta.name}",
+                f"model: {meta.model or ''}",
+                SEPARATOR,
+            ]
+        )
+        + "\n"
+    )
 
 
 def _write_header(path: Path, meta: ProjectMeta) -> None:

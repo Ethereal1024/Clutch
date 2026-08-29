@@ -10,7 +10,6 @@ Layer policy: recoverable errors always go back to the model as tool results
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -19,7 +18,7 @@ class AgentError(Exception):
 
     code: str = "agent_error"
     message: str = ""
-    detail: Optional[str] = None
+    detail: str | None = None
 
     def __str__(self) -> str:
         return f"[{self.code}] {self.message}"

@@ -1,0 +1,1 @@
+ERROR: cannot operate on protected file: $token

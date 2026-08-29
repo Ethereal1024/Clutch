@@ -1,7 +1,7 @@
 """Server end-to-end check: boots the HTTP server in a thread and exercises it.
 
 Run: uv run python -m agent.server_test
-API/health/project are always checked. If DEEPSEEK_API_KEY is set, also runs a
+API/health/project are always checked. If CLUTCH_API_KEY is set, also runs a
 real task through /api/run, collects SSE events, and checks the workspace tree and
 .clc persistence. Skips the real-run section when no key is present (network-free).
 """
@@ -159,9 +159,9 @@ def _run_server_test() -> int:
         check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
 
         # 4. real run (only with key)
-        key = os.environ.get("DEEPSEEK_API_KEY")
+        key = os.environ.get("CLUTCH_API_KEY")
         if not key:
-            print("\n(DEEPSEEK_API_KEY not set - real-run section skipped)")
+            print("\n(CLUTCH_API_KEY not set - real-run section skipped)")
             print("\nall passed (network-free)")
             return 0
 

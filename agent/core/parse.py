@@ -9,7 +9,7 @@ model so it can self-correct; never crash.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any
 
 
 class ParseError(Exception):
@@ -20,7 +20,7 @@ class ParseError(Exception):
         self.message = message
 
 
-def parse_arguments(raw: str) -> Dict[str, Any]:
+def parse_arguments(raw: str) -> dict[str, Any]:
     """Parse tool arguments JSON; raise ParseError on failure (error-as-data)."""
     try:
         data = json.loads(raw)

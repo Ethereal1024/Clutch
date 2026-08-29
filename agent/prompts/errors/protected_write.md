@@ -1,0 +1,1 @@
+ERROR: cannot write protected file: $path

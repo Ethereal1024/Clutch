@@ -11,7 +11,7 @@ Strategy:
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, List
+from typing import Any
 
 from ..config import Config
 from ..events import AssistantMessageEvent, EventLog, ToolResultEvent, UserMessageEvent
@@ -19,14 +19,14 @@ from ..prompts import render
 from ..skills import cached_library
 
 
-def _to_messages(events: List[Any]) -> List[Dict[str, Any]]:
+def _to_messages(events: list[Any]) -> list[dict[str, Any]]:
     """Project events to OpenAI messages; assistant and tool results must stay paired."""
-    msgs: List[Dict[str, Any]] = []
+    msgs: list[dict[str, Any]] = []
     for ev in events:
         if isinstance(ev, UserMessageEvent):
             msgs.append({"role": "user", "content": ev.content})
         elif isinstance(ev, AssistantMessageEvent):
-            msg: Dict[str, Any] = {"role": "assistant"}
+            msg: dict[str, Any] = {"role": "assistant"}
             if ev.content:
                 msg["content"] = ev.content
             if ev.reasoning:
@@ -47,7 +47,7 @@ def _to_messages(events: List[Any]) -> List[Dict[str, Any]]:
     return _repair_dangling(msgs)
 
 
-def _repair_dangling(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Enforce the OpenAI pairing contract when the log ends mid-batch.
 
     A crash / tunnel drop can persist an assistant's tool_calls without every
@@ -61,7 +61,7 @@ def _repair_dangling(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     so the derived messages are always acceptable to the API. Healthy logs are
     untouched.
     """
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     i = 0
     while i < len(msgs):
         m = msgs[i]
@@ -95,7 +95,7 @@ def _repair_dangling(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def derive_messages(log: EventLog, config: Config, task: str) -> List[Dict[str, Any]]:
+def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying windowing + char budget."""
     events = log.events()
     assistant_idx = [i for i, e in enumerate(events) if isinstance(e, AssistantMessageEvent)]

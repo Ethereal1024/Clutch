@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable
 
 from .config import Config
 from .core import context
@@ -55,10 +55,10 @@ class Agent:
         registry: ToolRegistry,
         workspace: Workspace,
         config: Config,
-        log: Optional[EventLog] = None,
-        sink: Optional[EventSink] = None,
-        cancel: Optional[threading.Event] = None,
-        gate: Optional[PermissionGate] = None,
+        log: EventLog | None = None,
+        sink: EventSink | None = None,
+        cancel: threading.Event | None = None,
+        gate: PermissionGate | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -85,15 +85,15 @@ class Agent:
         self._emit(StateUpdateEvent(value=state))
         return "ABORTED" if status != "completed" else summary
 
-    def _llm_call(self, msgs: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]], str, str]:
+    def _llm_call(self, msgs: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]], str, str]:
         """Stream one LLM turn; emits incremental reasoning/text events.
 
         Returns (content, tool_calls, finish_reason, reasoning). tool_calls
         entries are [{id, name, arguments(raw json string)}].
         """
-        content_parts: List[str] = []
-        reasoning_parts: List[str] = []
-        tool_accum: Dict[int, Dict[str, Any]] = {}
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_accum: dict[int, dict[str, Any]] = {}
         finish_reason = "stop"
 
         try:
@@ -144,7 +144,10 @@ class Agent:
                 turn += 1
                 # budget is enforced at the top so every path terminates
                 if self.terminator.check_turn_budget(turn):
-                    return self._finish("aborted", render("budget_exceeded.md", max_turns=self.config.max_turns))
+                    return self._finish(
+                        "aborted",
+                        render("budget_exceeded.md", max_turns=self.config.max_turns),
+                    )
                 self._emit(StepStartEvent())
                 msgs = context.derive_messages(self.log, self.config, task)
 
@@ -161,10 +164,14 @@ class Agent:
 
                 # ---- tool calls: execute and feed results back ----
                 if tool_calls:
-                    tc_events: List[ToolCallEvent] = []
+                    tc_events: list[ToolCallEvent] = []
                     for tc in tool_calls:
                         tc_events.append(
-                            ToolCallEvent(name=tc["name"], arguments=tc["arguments"], tool_call_id=tc["id"])
+                            ToolCallEvent(
+                                name=tc["name"],
+                                arguments=tc["arguments"],
+                                tool_call_id=tc["id"],
+                            )
                         )
 
                     # record the assistant turn (text + tool_calls) BEFORE the tool
@@ -174,7 +181,12 @@ class Agent:
                         AssistantMessageEvent(
                             content=content,
                             tool_calls=[
-                                {"id": ev.tool_call_id, "name": ev.name, "arguments": ev.arguments} for ev in tc_events
+                                {
+                                    "id": ev.tool_call_id,
+                                    "name": ev.name,
+                                    "arguments": ev.arguments,
+                                }
+                                for ev in tc_events
                             ],
                             reasoning=reasoning,
                         )
@@ -213,7 +225,7 @@ class Agent:
             # silently in the worker thread
             return self._finish("error", str(e))
 
-    def _execute_tool(self, ev: ToolCallEvent) -> Dict[str, Any]:
+    def _execute_tool(self, ev: ToolCallEvent) -> dict[str, Any]:
         """Parse arguments, check permission, then run the tool.
 
         A denied or user-rejected action feeds an error back to the model

@@ -9,6 +9,7 @@ import difflib
 from pathlib import Path
 
 from ..config import Config
+from ..prompts import render
 from .workspace import Workspace
 
 
@@ -21,25 +22,25 @@ def read_file(workspace: Workspace, config: Config, path: str, max_chars: int = 
     try:
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
-            return _result(f"ERROR: cannot read protected file: {path}", error=True)
+            return _result(render("errors/protected_read.md", path=path), error=True)
         try:
             text = workspace.read(str(p))
         except FileNotFoundError:
-            return _result(f"ERROR: not a file or missing: {path}", error=True)
+            return _result(render("errors/file_missing.md", path=path), error=True)
         if len(text) > limit:
             text = text[:limit] + f"\n... [truncated, file is {len(text)} chars]"
         return _result(text)
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
-        return _result(f"ERROR: read failed: {e}", error=True)
+        return _result(render("errors/read_failed.md", error=e), error=True)
 
 
 def write_file(workspace: Workspace, config: Config, path: str, content: str) -> dict:
     try:
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
-            return _result(f"ERROR: cannot write protected file: {path}", error=True)
+            return _result(render("errors/protected_write.md", path=path), error=True)
         # capture the previous content (if any) to build a unified diff
         old = ""
         try:
@@ -55,7 +56,7 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
     except Exception as e:  # noqa: BLE001
-        return _result(f"ERROR: write failed: {e}", error=True)
+        return _result(render("errors/write_failed.md", error=e), error=True)
 
 
 def _unified_diff(old: str, new: str, rel: str) -> str:
@@ -73,7 +74,7 @@ def list_dir(workspace: Workspace, config: Config, path: str = ".") -> dict:
         try:
             entries = workspace.list(str(p))
         except NotADirectoryError:
-            return _result(f"ERROR: not a directory: {path}", error=True)
+            return _result(render("errors/not_a_directory.md", path=path), error=True)
         lines = sorted(entries)
         return _result("\n".join(lines) if lines else "(empty directory)")
     except ValueError as e:

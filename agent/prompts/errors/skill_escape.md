@@ -1,0 +1,1 @@
+ERROR: skill file escapes skill directory: $file

@@ -1,0 +1,1 @@
+ERROR: not a directory: $path

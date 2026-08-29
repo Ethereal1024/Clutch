@@ -1,0 +1,1 @@
+ERROR: cannot read protected file: $path

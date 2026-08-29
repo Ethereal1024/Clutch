@@ -649,7 +649,7 @@ def main() -> int:
     if args.base_url:
         config.base_url = args.base_url
         # the client-side proxy injects the real key; server only needs a placeholder
-        if not (config.api_key or os.environ.get("DEEPSEEK_API_KEY")):
+        if not (config.api_key or os.environ.get("CLUTCH_API_KEY")):
             config.api_key = "proxy"
     if args.verify:
         config.verify_command = args.verify

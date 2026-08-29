@@ -18,7 +18,7 @@ tool-calling 接口。
 
 **本机模式**
 1. 安装依赖：pip install uv && uv sync  （前端另需：cd ui && npm install）
-2. 设置密钥：export DEEPSEEK_API_KEY=你的key
+2. 设置密钥：export CLUTCH_API_KEY=你的key
 3. 启动后端：uv run python -m agent.server   （绑定 127.0.0.1:8890）
 4. 启动前端：cd ui && npm start   （或用 npm run dev 同时起前后端）
    - 注意：本机 electron 包为无 postinstall 的重打包版，首次运行会惰性下载二进制
@@ -43,7 +43,7 @@ tool-calling 接口。
 3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统
 
 **直连局域网（可选，不推荐）**：--host 0.0.0.0 直接暴露 HTTP，无鉴权，仅可信
-局域网内使用；此时后端需自行连接 LLM（设 DEEPSEEK_API_KEY 或 --base-url）。
+局域网内使用；此时后端需自行连接 LLM（设 CLUTCH_API_KEY 或 --base-url）。
 
 独立评测工具（可选）：uv run python -m eval.harness，见 eval/
 
