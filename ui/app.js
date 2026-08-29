@@ -59,19 +59,21 @@ function nearBottom() {
 let followTail = true;
 let lastScrollTop = 0;
 
+let gliding = false;
+let glideRaf = 0;
+
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
   if (force) {
-    // User-initiated jumps (↓ button, Cmd/Ctrl+Down, sending a task) glide.
-    // glideToBottom re-reads scrollHeight every frame, so a mid-glide event
-    // burst stretches the curve instead of stranding the view at a stale
-    // snapshot — the bug that made us drop native smooth scroll entirely.
+    // User-initiated jump (message send, ↓ button, Cmd/Ctrl+Down): native smooth
+    // scroll to the tail. While gliding, every other height-affecting path
+    // (streaming events, ResizeObserver re-pins, fold animations, MathJax) is
+    // ignored so the animation can land instead of being overridden mid-flight.
     glideToBottom();
     jumpBottom.classList.add("hidden");
   } else if (followTail) {
-    // live follow-pinning stays instant; a running glide is superseded — the
-    // instantaneous pin has already reached the live tail, so cancel it
-    cancelAnimationFrame(glideRaf);
+    // live follow-pinning stays instant — but never during a user jump-glide
+    if (gliding) return;
     stream.scrollTop = stream.scrollHeight;
     jumpBottom.classList.add("hidden");
   } else {
@@ -79,26 +81,37 @@ function autoScroll(force) {
   }
 }
 
-// ---- jump-to-bottom glide ----
-// Unlike scrollTo({behavior:"smooth"}) — whose target is captured at call time
-// and therefore races bursts of events to a stale landing spot — this animation
-// reads the LIVE scrollHeight every frame. If content grows mid-glide the
-// easing curve just stretches toward the new tail; the final frame always
-// lands exactly on the current bottom, so "lost the tail" cannot happen.
-let glideRaf = 0;
+// ---- jump-to-bottom glide (user-initiated only) ----
+// The original native smooth animation, restored: scrollTo smooths to the tail
+// captured at call time. The gliding flag makes the animation exclusive — every
+// other scroll/heigh change is ignored until it lands, so nothing can fight it.
+// A rAF poll detects the landing (target reached, clamped to a new bottom, or
+// interrupted by a real user scroll) and then re-pins once to absorb any content
+// growth that arrived mid-glide.
 function glideToBottom() {
+  if (stream.classList.contains("loading")) return;
   cancelAnimationFrame(glideRaf);
-  const from = stream.scrollTop;
-  if (from >= stream.scrollHeight - 1) return; // already at the tail
-  const start = performance.now();
-  const DURATION = 240;
-  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
-  const tick = (now) => {
-    const t = Math.min(1, (now - start) / DURATION);
-    stream.scrollTop = from + (stream.scrollHeight - from) * easeOut(t);
-    if (t < 1) glideRaf = requestAnimationFrame(tick);
+  const target = stream.scrollHeight;
+  if (stream.scrollTop >= target - 1) { gliding = false; return; } // already at the tail
+  gliding = true;
+  if (reducedMotion()) {
+    stream.scrollTop = stream.scrollHeight;
+    gliding = false;
+    return;
+  }
+  stream.scrollTo({ top: target, behavior: "smooth" });
+  const finish = () => {
+    const bottom = stream.scrollHeight - stream.clientHeight;
+    if (!gliding || Math.abs(stream.scrollTop - target) < 2 || Math.abs(stream.scrollTop - bottom) < 2) {
+      gliding = false;
+      if (followTail && !stream.classList.contains("loading")) {
+        stream.scrollTop = stream.scrollHeight; // absorb growth that arrived mid-glide
+      }
+      return;
+    }
+    glideRaf = requestAnimationFrame(finish);
   };
-  glideRaf = requestAnimationFrame(tick);
+  glideRaf = requestAnimationFrame(finish);
 }
 
 // WebFont / image / any async layout growth can land AFTER the render path's own
@@ -157,6 +170,7 @@ stream.addEventListener("scroll", (e) => {
   }
   // a real user gesture takes over from any in-flight jump glide
   if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
+  gliding = false;
   const up = cur < lastScrollTop;
   if (up) {
     if (followTail) {
@@ -815,6 +829,8 @@ function appendCompletion(status, summary) {
   // Instant pin, not smooth: the completion divider often lands in the same
   // burst as trailing tool results, and a glide animation would fight them.
   if (!stream.classList.contains("loading")) {
+    // never yank mid-glide: the user's jump animation owns the scroll until it lands
+    if (gliding) return;
     if (followTail) stream.scrollTop = stream.scrollHeight;
     else jumpBottom.classList.remove("hidden");
   }
