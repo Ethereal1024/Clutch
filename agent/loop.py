@@ -398,4 +398,8 @@ class Agent:
                 self.gate.require(ev.name, args_repr, self.workspace)
             except PermissionRequired as e:
                 return {"content": f"ERROR: {e.reason}", "error": True}
-        return self.registry.execute(self.workspace, self.config, ev.name, args)
+        try:
+            return self.registry.execute(self.workspace, self.config, ev.name, args)
+        finally:
+            # a user-approved escape is scoped to the one call it was granted for
+            self.workspace.clear_allowed()

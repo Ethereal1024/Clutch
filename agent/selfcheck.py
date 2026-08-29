@@ -377,6 +377,70 @@ def main() -> None:
             )
         check(len(gate2.pending_ids()) == 0, "no-UI ask leaves no pending entry")
 
+        # 9d. sandbox escapes: real resolution (not regex) flags external paths for
+        # an ask; the approval is granted for that one path until cleared
+        check(
+            pe.escaped_paths("read_file", '{"path": "/etc/passwd"}', ws) == frozenset({Path("/etc/passwd").resolve()}),
+            "escaped_paths flags an external read",
+        )
+        check(
+            pe.escaped_paths("run_command", '{"command": "cat /etc/passwd"}', ws)
+            == frozenset({Path("/etc/passwd").resolve()}),
+            "escaped_paths flags external tokens in run_command",
+        )
+        check(pe.escaped_paths("read_file", '{"path": "a.txt"}', ws) == frozenset(), "in-sandbox path has no escapes")
+        check(
+            pe.escaped_paths("write_file", '{"content": "/etc/passwd ~ ../x", "path": "a.txt"}', ws) == frozenset(),
+            "content is not scanned for escapes",
+        )
+        ext = ws.root.parent / "approved.txt"
+        check(
+            pe.escaped_paths("write_file", f'{{"path": "{ext}"}}', ws) == frozenset({ext}),
+            "escaped_paths flags an external write target",
+        )
+
+        # 9e. a user-approved escape is resolvable during the call, then cleared
+        ws3 = LocalWorkspace(wtmp)
+        approving = PermissionGate(evaluator=pe, on_ask=lambda *a: True)
+        got: dict = {}
+
+        def _require_escape() -> None:
+            try:
+                approving.require("write_file", f'{{"path": "{ext}"}}', ws3)
+                got["ok"] = True
+            except PermissionRequired as e:
+                got["err"] = e.reason
+
+        t2 = _threading.Thread(target=_require_escape, daemon=True)
+        t2.start()
+        _time.sleep(0.15)
+        for rid in approving.pending_ids():
+            approving.resolve(rid, True)
+        t2.join(timeout=2)
+        check(got.get("ok"), "escape ask approved by the user")
+        check(ws3.resolve(str(ext)) == ext, "approved escape resolvable during the call")
+        ws3.clear_allowed()
+        try:
+            ws3.resolve(str(ext))
+            check(False, "cleared escape is refused again")
+        except ValueError:
+            check(True, "cleared escape is refused again")
+
+        # 9f. auto-allow (eval harness / unattended) fails CLOSED on escapes — no
+        # user is attached to approve, so the sandbox stays intact; rule asks are
+        # still auto-allowed as before
+        unattended = PermissionGate(evaluator=pe, auto_allow=True)
+        try:
+            unattended.require("read_file", '{"path": "/etc/passwd"}', ws)
+            check(False, "auto-allow refuses a sandbox escape")
+        except PermissionRequired as e:
+            check("user approval" in e.reason, f"auto-allow fails closed on escapes ({e.reason!r})")
+        try:
+            unattended.require("run_command", '{"command": "rm old.txt"}', ws)
+            check(True, "auto-allow still permits non-escape rule asks")
+        except PermissionRequired:
+            check(False, "auto-allow still permits non-escape rule asks")
+
     # 10. project file: .clc round-trip + protected visibility
     from agent.project import create_project, open_project
 

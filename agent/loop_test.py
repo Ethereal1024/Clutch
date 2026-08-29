@@ -7,8 +7,10 @@ doom-loop abort, max-tokens truncation, sink isolation.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
 from .config import Config
@@ -16,7 +18,7 @@ from .events import AssistantMessageEvent, CompactionEvent, EventLog, FinalEvent
 from .loop import Agent
 from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import LocalWorkspace, Workspace
+from .tools.workspace import LocalWorkspace, Workspace, shq
 
 
 class FakeLLM:
@@ -312,6 +314,101 @@ def main() -> int:
         result = agent.run("t")
         check(result == "done", "permission ask resolved by UI then executes")
         check((sb.root / "a.txt").read_text() == "hi", "asked-and-allowed tool wrote file")
+
+    # 10b. sandbox escape: a user-approved external write executes (the old flat
+    # denial is gone — the ask gate approves, the tool writes outside)
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        outside = Path(tmp).parent / f"{Path(tmp).name}.out.txt"
+        gate = PermissionGate(evaluator=PermissionEvaluator())
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", json.dumps({"path": str(outside), "content": "hi"}))]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            gate=gate,
+        )
+
+        def _auto_approve() -> None:
+            _threading.Event().wait(0.2)
+            for rid in gate.pending_ids():
+                gate.resolve(rid, True)
+
+        r = _threading.Thread(target=_auto_approve, daemon=True)
+        r.start()
+        result = agent.run("t")
+        check(result == "done", "approved external write completes the run")
+        check(outside.read_text() == "hi", "approved external write executed")
+
+    # 10c. sandbox escape denied: error fed back, nothing written outside
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        outside = Path(tmp).parent / f"{Path(tmp).name}.denied.txt"
+        gate = PermissionGate(evaluator=PermissionEvaluator())
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", json.dumps({"path": str(outside), "content": "hi"}))]),
+                _resp(content="gave up"),
+            ],
+            fallback=_resp(content="gave up"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            gate=gate,
+        )
+
+        def _auto_deny() -> None:
+            _threading.Event().wait(0.2)
+            for rid in gate.pending_ids():
+                gate.resolve(rid, False)
+
+        r = _threading.Thread(target=_auto_deny, daemon=True)
+        r.start()
+        result = agent.run("t")
+        check(result == "gave up", "denied external write: agent continues")
+        check(not outside.exists(), "denied external write did not execute")
+
+    # 10d. run_command escape: `echo > /outside` asks and an approved one runs
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        outside = Path(tmp).parent / f"{Path(tmp).name}.echo.txt"
+        gate = PermissionGate(evaluator=PermissionEvaluator())
+        cmd = f"echo hi > {shq(str(outside))}"
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("run_command", json.dumps({"command": cmd}))]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            gate=gate,
+        )
+
+        def _auto_approve2() -> None:
+            _threading.Event().wait(0.2)
+            for rid in gate.pending_ids():
+                gate.resolve(rid, True)
+
+        r = _threading.Thread(target=_auto_approve2, daemon=True)
+        r.start()
+        result = agent.run("t")
+        check(result == "done", "approved run_command escape completes the run")
+        check(outside.read_text().strip() == "hi", "approved run_command escape executed")
 
     # 11. fatal LLM error (context overflow) -> graceful error final, no crash
     from agent.core.errors import AgentError

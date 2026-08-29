@@ -41,6 +41,18 @@ class Workspace(ABC):
         self.root.mkdir(parents=True, exist_ok=True)
         self._transport = transport or LocalTransport(str(self.root))
         self._protected: set[Path] = set()
+        # absolute paths outside the root that the CURRENT tool call may touch;
+        # granted by the permission gate after the user approves an escape and
+        # cleared by the loop after every tool call (see loop._execute_tool).
+        self._allowed_escapes: set[Path] = set()
+
+    def allow(self, paths) -> None:
+        """Record user-approved external paths for the current tool call."""
+        self._allowed_escapes |= {Path(p).resolve() for p in paths}
+
+    def clear_allowed(self) -> None:
+        """Drop the per-call escape allowance (called after every tool call)."""
+        self._allowed_escapes.clear()
 
     def protect(self, path: Path) -> None:
         """Mark a file as invisible/unusable to the agent (e.g. the .clc project file)."""
@@ -62,11 +74,12 @@ class Workspace(ABC):
         return out
 
     def resolve(self, rel_path: str) -> Path:
-        """Resolve a path to inside the workspace; raise ValueError on escape."""
+        """Resolve a path to inside the workspace (or a user-approved external
+        path); raise ValueError on an unapproved escape."""
         p = (self.root / rel_path).resolve()
-        if not p.is_relative_to(self.root):
-            raise ValueError(f"path escapes workspace: {rel_path!r}")
-        return p
+        if p.is_relative_to(self.root) or p in self._allowed_escapes:
+            return p
+        raise ValueError(f"path escapes workspace: {rel_path!r}")
 
     def run(self, command: str, timeout: float) -> CommandResult:
         """Run a shell command in the workspace; transport-specific cwd handling."""

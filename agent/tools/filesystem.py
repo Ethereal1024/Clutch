@@ -75,7 +75,13 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
         except FileNotFoundError:
             pass
         workspace.write(str(p), content)
-        diff = _unified_diff(old, content, rel=p.relative_to(workspace.root))
+        # external paths (user-approved escapes) aren't under the root; show the
+        # absolute path in the diff header then
+        try:
+            rel = p.relative_to(workspace.root)
+        except ValueError:
+            rel = p
+        diff = _unified_diff(old, content, rel=rel)
         adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
         dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
         summary = f"OK: wrote {p} (+{adds} -{dels} lines)" if old else f"OK: wrote {p} ({len(content)} chars)"
