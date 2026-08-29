@@ -303,6 +303,11 @@ main { display: flex; flex: 1; min-height: 0; }
   font-family: var(--font-mono); font-size: 12px; overflow-x: auto;
   margin-top: 4px; flex-basis: 100%;
 }
+/* live streamed args: wrap instead of growing one line horizontally */
+.tool-args-detail.stream-pre {
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  overflow-x: hidden; overflow-y: auto; max-height: 200px;
+}
 .event.tool_result::before { background: var(--accent); }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
 .event.tool_result.error::before { background: var(--accent); }

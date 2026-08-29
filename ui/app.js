@@ -58,10 +58,9 @@ function isReadTool(name) {
   return name === "read_file" || name === "grep";
 }
 
-// Render one tool_call row; consecutive calls append to the same group block.
-// Read tools (read_file/grep) keep their results in the same block too.
-function addToolCallRow(ev) {
-  const readGroup = isReadTool(ev.name);
+// Ensure a tool_group container exists for read/non-read rows and return it.
+// Consecutive calls share the block; a new user turn / text / thinking closes it.
+function ensureToolGroup(readGroup) {
   if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
     toolGroupEl = {
       el: document.createElement("div"),
@@ -73,11 +72,14 @@ function addToolCallRow(ev) {
     toolGroupEl.el.innerHTML = '<div class="hdr">tools</div>';
     eventsEl.appendChild(toolGroupEl.el);
   }
-  toolGroupEl.ids.add(ev.tool_call_id);
+  return toolGroupEl;
+}
+
+// Build one tool_call row (name + expandable args). Does not touch the group.
+function makeToolRow(ev) {
   const row = document.createElement("div");
   row.className = "tool-row";
   row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
-  // args expandable per row
   let argsTxt = ev.arguments;
   try { argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1); } catch (e) {}
   const argsBtn = document.createElement("span");
@@ -99,7 +101,15 @@ function addToolCallRow(ev) {
     }
   };
   row.appendChild(argsBtn);
-  toolGroupEl.el.appendChild(row);
+  return row;
+}
+
+// Render one tool_call row; consecutive calls append to the same group block.
+// Read tools (read_file/grep) keep their results in the same block too.
+function addToolCallRow(ev) {
+  const group = ensureToolGroup(isReadTool(ev.name));
+  group.ids.add(ev.tool_call_id);
+  group.el.appendChild(makeToolRow(ev));
   autoScroll();
 }
 
@@ -112,46 +122,77 @@ function addReadResultRow(ev) {
   autoScroll();
 }
 
-// live-streamed tool-call previews: callId -> {name, text, row, body}. The model's
-// tool-call arguments arrive as tool_call_delta chunks; this shows the call being
-// generated (a file being written, a command being typed) instead of waiting for
-// the finished tool_result. Reads stay collapsed (their content is huge), and
-// run_command shows just the command, not the {"command": "..."} envelope.
+// live-streamed tool-call previews: callId -> {name, text, row, body, group}. The
+// model's tool-call arguments arrive as tool_call_delta chunks; this shows the call
+// being generated (a file being written, a command being typed) inside the SAME
+// 'tools' group the finished call will use, so the live view matches the final one.
+// Reads stay collapsed (their content is huge); run_command shows just the command
+// and write/edit show the content/strings, not the JSON envelope.
 const streamRows = {};
 
-function streamArgsText(name, raw) {
-  if (name !== "run_command") return raw;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.command === "string") return "$ " + parsed.command;
-  } catch (e) {}
-  let t = raw;
-  const prefix = '{"command": "';
-  if (t.startsWith(prefix)) t = t.slice(prefix.length);
-  return "$ " + t.replace(/\\"/g, '"').replace(/\\n/g, "\n");
+function friendlyArgs(name, raw) {
+  if (name === "run_command") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.command === "string") return "$ " + parsed.command;
+    } catch (e) {}
+    let t = raw;
+    const prefix = '{"command": "';
+    if (t.startsWith(prefix)) t = t.slice(prefix.length);
+    return "$ " + t.replace(/\\"/g, '"').replace(/\\n/g, "\n");
+  }
+  if (name === "write_file" || name === "edit_file") {
+    try {
+      const p = JSON.parse(raw);
+      if (p && typeof p === "object") {
+        const lines = [];
+        if (p.path) lines.push(`✎ ${p.path}`);
+        if (name === "write_file" && typeof p.content === "string") lines.push(p.content);
+        if (name === "edit_file") {
+          if (typeof p.old_string === "string") lines.push("- " + p.old_string);
+          if (typeof p.new_string === "string") lines.push("+ " + p.new_string);
+        }
+        if (lines.length) return lines.join("\n");
+      }
+    } catch (e) {}
+    // mid-stream: drop the JSON braces and unescape so it reads as text and wraps
+    return raw.replace(/^\{/, "").replace(/\}$/, "").replace(/\\n/g, "\n").replace(/\\"/g, '"');
+  }
+  return raw;
 }
 
 function handleToolCallDelta(ev) {
   let st = streamRows[ev.tool_call_id];
   if (!st) {
     if (!ev.name) return; // the start delta carries the name
-    st = streamRows[ev.tool_call_id] = { name: ev.name, text: "", row: null, body: null };
+    const group = ensureToolGroup(isReadTool(ev.name));
+    group.ids.add(ev.tool_call_id);
+    st = streamRows[ev.tool_call_id] = { name: ev.name, text: "", row: null, body: null, group };
     st.row = document.createElement("div");
     st.row.className = "tool-row stream";
+    st.row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
     if (isReadTool(ev.name)) {
       // reads are large; the preview stays collapsed to just the name
-      st.row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span> <span class="muted">…</span>`;
+      st.row.innerHTML += ` <span class="muted">…</span>`;
     } else {
-      st.row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
       st.body = document.createElement("pre");
       st.body.className = "tool-args-detail stream-pre";
       st.row.appendChild(st.body);
     }
-    eventsEl.appendChild(st.row);
+    group.el.appendChild(st.row);
     autoScroll();
   }
   st.text += ev.delta;
-  if (st.body) st.body.textContent = streamArgsText(st.name, st.text);
+  if (st.body) st.body.textContent = friendlyArgs(st.name, st.text);
+}
+
+// Remove any stream previews left by an aborted turn (a tool call that streamed
+// but never got its final tool_call event).
+function clearStreamPreviews() {
+  for (const id of Object.keys(streamRows)) {
+    if (streamRows[id]) streamRows[id].row.remove();
+    delete streamRows[id];
+  }
 }
 
 // Build one collapsible read row (toggle + summary + hidden code panel).
@@ -221,6 +262,7 @@ function addEvent(ev) {
     // the run is over: any open permission prompt is stale — dismiss it so a
     // late approve can't flip the UI back into a stuck "running" state
     if (pendingPerm) closePerm();
+    clearStreamPreviews(); // an aborted turn may have left half-streamed calls
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree
@@ -230,12 +272,19 @@ function addEvent(ev) {
     let args = {};
     try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
     toolCalls[ev.tool_call_id] = { name: ev.name, args };
-    // the call finished: drop the live streamed preview, the final row takes over
-    if (streamRows[ev.tool_call_id]) {
-      streamRows[ev.tool_call_id].row.remove();
+    const st = streamRows[ev.tool_call_id];
+    if (st) {
+      // the call finished: swap the live preview for the final row IN THE SAME
+      // group, so the 'tools' header stays put and no second group appears
+      st.row.remove();
       streamRows[ev.tool_call_id] = undefined;
+      toolGroupEl = st.group;
+      toolGroupEl.ids.add(ev.tool_call_id);
+      toolGroupEl.el.appendChild(makeToolRow(ev));
+      autoScroll();
+    } else {
+      addToolCallRow(ev); // replay (no deltas) renders the final row directly
     }
-    addToolCallRow(ev);
     return;
   }
   if (ev.type === "tool_call_delta" && ev.tool_call_id) {
