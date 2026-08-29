@@ -61,18 +61,44 @@ let lastScrollTop = 0;
 
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
-  if (force || followTail) {
-    // Always pin instantly — never smooth. A smooth glide targets the
-    // scrollHeight captured at call time, so when several events arrive in a
-    // burst (e.g. an edit_file tool_call right behind its tool_result), every
-    // instant re-pin gets overridden by the still-running animation frame and
-    // the view settles at the stale target: the classic "lost the tail" hang.
-    // An animated tail can never outrun a streaming preview.
+  if (force) {
+    // User-initiated jumps (↓ button, Cmd/Ctrl+Down, sending a task) glide.
+    // glideToBottom re-reads scrollHeight every frame, so a mid-glide event
+    // burst stretches the curve instead of stranding the view at a stale
+    // snapshot — the bug that made us drop native smooth scroll entirely.
+    glideToBottom();
+    jumpBottom.classList.add("hidden");
+  } else if (followTail) {
+    // live follow-pinning stays instant; a running glide is superseded — the
+    // instantaneous pin has already reached the live tail, so cancel it
+    cancelAnimationFrame(glideRaf);
     stream.scrollTop = stream.scrollHeight;
     jumpBottom.classList.add("hidden");
   } else {
     jumpBottom.classList.remove("hidden");
   }
+}
+
+// ---- jump-to-bottom glide ----
+// Unlike scrollTo({behavior:"smooth"}) — whose target is captured at call time
+// and therefore races bursts of events to a stale landing spot — this animation
+// reads the LIVE scrollHeight every frame. If content grows mid-glide the
+// easing curve just stretches toward the new tail; the final frame always
+// lands exactly on the current bottom, so "lost the tail" cannot happen.
+let glideRaf = 0;
+function glideToBottom() {
+  cancelAnimationFrame(glideRaf);
+  const from = stream.scrollTop;
+  if (from >= stream.scrollHeight - 1) return; // already at the tail
+  const start = performance.now();
+  const DURATION = 240;
+  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+  const tick = (now) => {
+    const t = Math.min(1, (now - start) / DURATION);
+    stream.scrollTop = from + (stream.scrollHeight - from) * easeOut(t);
+    if (t < 1) glideRaf = requestAnimationFrame(tick);
+  };
+  glideRaf = requestAnimationFrame(tick);
 }
 
 // WebFont / image / any async layout growth can land AFTER the render path's own
@@ -92,6 +118,13 @@ if (typeof ResizeObserver !== "undefined") {
 jumpBottom.addEventListener("click", () => {
   followTail = true; // explicit re-latch: the resulting jump scrolls programmatically,
   autoScroll(true);  // its scroll event is isTrusted=false and never touches the latch
+});
+// Cmd/Ctrl+Down anywhere: same jump-to-tail as the ↓ button (glides via autoScroll(true))
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "ArrowDown") {
+    followTail = true;
+    autoScroll(true);
+  }
 });
 let prevClientH = stream.clientHeight;
 let prevScrollH = stream.scrollHeight;
@@ -122,6 +155,8 @@ stream.addEventListener("scroll", (e) => {
     lastScrollTop = cur;
     return;
   }
+  // a real user gesture takes over from any in-flight jump glide
+  if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
   const up = cur < lastScrollTop;
   if (up) {
     if (followTail) {
