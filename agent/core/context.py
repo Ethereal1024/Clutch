@@ -119,8 +119,9 @@ def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, 
             for i in tool_results:
                 if total <= config.context_char_budget:
                     break
-                if isinstance(kept[i], ToolResultEvent):
-                    total -= len(kept[i].content)
+                ev = kept[i]
+                if isinstance(ev, ToolResultEvent):
+                    total -= len(ev.content)
                     folded_idx.add(i)
             kept = [
                 replace(e, content="(output omitted by char budget)")
