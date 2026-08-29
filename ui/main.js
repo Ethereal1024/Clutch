@@ -7,7 +7,7 @@
 //   - remote over SSH (ssh2, see ssh-tunnel.js): programmatic bidirectional
 //     tunnel with in-app password/key auth, no terminal prompt.
 
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, session } = require("electron");
 const path = require("path");
 const { connectTunnel, stopTunnel, tunnelLog, tunnelStatus, onTunnelEnd } = require("./ssh-tunnel");
 
@@ -22,7 +22,12 @@ process.on("unhandledRejection", (e) => {
   tunnelLog("[fatal] unhandledRejection: " + ((e && e.stack) || e));
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // The shell loads the UI from disk via file://; Chromium's file:// cache can
+  // keep serving a stale app.js after the bundle is updated, which reads as
+  // "I restarted the server and my fix is gone". Clear the session cache on
+  // every launch so the window always boots the on-disk UI.
+  try { await session.defaultSession.clearCache(); } catch (e) { /* best effort */ }
   const win = new BrowserWindow({
     width: 1280,
     height: 820,

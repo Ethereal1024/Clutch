@@ -92,6 +92,11 @@ jumpBottom.addEventListener("click", () => {
   autoScroll(true);  // its scroll event is isTrusted=false and never touches the latch
 });
 let prevClientH = stream.clientHeight;
+// armed by autoGrowTask for ~120ms after the input box resizes: the clamp scroll
+// event that resize triggers can fire BEFORE the shrunken viewport is observable
+// (clientHeight may not have settled yet), so blanket-ignore latch changes in
+// that window — the resize itself is never a user scroll gesture.
+let suppressLatchUntil = 0;
 stream.addEventListener("scroll", (e) => {
   // Only the user's own gestures update the latch. Programmatic scrolls (smooth
   // glides, force jumps) fire isTrusted=false and never touch it. A passive
@@ -99,12 +104,16 @@ stream.addEventListener("scroll", (e) => {
   // the viewport, scrollTop gets clamped down and the browser fires a trusted
   // scroll event — treating that as "the user scrolled up" would drop the latch
   // and pop the ↓ button while typing. A shrunken viewport is the fingerprint
-  // of such a clamp, so ignore scrolls that coincide with it.
+  // of such a clamp, so ignore scrolls that coincide with it; the time window
+  // above catches the clamp even when the fingerprint is not yet visible.
   const cur = stream.scrollTop;
   if (!e.isTrusted) { lastScrollTop = cur; return; }
   const viewportShrank = stream.clientHeight < prevClientH;
   prevClientH = stream.clientHeight;
-  if (viewportShrank) { lastScrollTop = cur; return; }
+  if (viewportShrank || performance.now() < suppressLatchUntil) {
+    lastScrollTop = cur;
+    return;
+  }
   const up = cur < lastScrollTop;
   lastScrollTop = cur;
   if (up) followTail = false;
@@ -963,10 +972,14 @@ function autoGrowTask() {
   }
   // the input box resize resizes the stream viewport; a shrink can clamp
   // scrollTop. The clamp fires a trusted scroll event that the listener above
-  // ignores (its fingerprint is the shrunken viewport), and the latch stays
-  // latched — so re-pin right here while the user is still typing, otherwise
-  // the view would hover just off the tail until the next content arrives.
-  if (was !== els.task.style.height && followTail && !nearBottom()) autoScroll();
+  // ignores (via the shrunken-viewport fingerprint AND the armed time window),
+  // so the latch stays latched — re-pin right here while the user is still
+  // typing, otherwise the view would hover just off the tail until the next
+  // content arrives.
+  if (was !== els.task.style.height) {
+    suppressLatchUntil = performance.now() + 120;
+    if (followTail && !nearBottom()) autoScroll();
+  }
 }
 els.task.addEventListener("input", autoGrowTask);
 
