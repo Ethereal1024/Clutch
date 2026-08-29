@@ -20,18 +20,6 @@ from .testsupport import check
 from .tools.registry import ToolRegistry, build_default_tools
 from .tools.workspace import LocalWorkspace, Workspace, shq
 
-# a compaction summary long enough to satisfy the min-length retry guard, so the
-# scripted fake LLM is never called an extra time
-_FAKE_SUMMARY = (
-    "Rolled summary: the task is to test compaction. Files read: agent/base.py "
-    "(server assembly), agent/loop.py (run loop). Files written: none yet. Key "
-    "decision: token-threshold compaction with an estimate fallback. Current "
-    "state: one compaction pending; tests for the trigger live in loop_test. "
-    "Next step: assert the CompactionEvent summary is persisted and the run "
-    "continues to the final answer. "
-) * 3
-_FAKE_SUMMARY = _FAKE_SUMMARY.strip()
-
 
 class FakeLLM:
     """Yields canned responses in order, then always the final one."""
@@ -504,7 +492,7 @@ def main() -> int:
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("list_dir", "{}")]),
-                _resp(content=_FAKE_SUMMARY),
+                _resp(content="SUMMARY"),
                 _resp(content="final answer"),
             ],
             fallback=_resp(content="fallback"),
@@ -515,7 +503,7 @@ def main() -> int:
         check(result == "final answer", "run completes after compaction")
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
         check(len(comps) == 1, "context overflow triggered one compaction")
-        check(comps[0].summary == _FAKE_SUMMARY, "compaction summary recorded")
+        check(comps[0].summary == "SUMMARY", "compaction summary recorded")
 
     # 14. resumed long session with NO reported usage: the token estimate of the
     # derived context triggers compaction on the first turn — the resume case that
@@ -529,7 +517,7 @@ def main() -> int:
         for i in range(3):
             log.append(AssistantMessageEvent(content=f"blah {i} " + "x" * 1200))
         fake = FakeLLM(
-            responses=[_resp(content=_FAKE_SUMMARY), _resp(content="resumed answer")],
+            responses=[_resp(content="SUMMARY"), _resp(content="resumed answer")],
             fallback=_resp(content="fallback"),
             usage=None,
         )
@@ -538,7 +526,36 @@ def main() -> int:
         check(result == "resumed answer", "resumed run completes")
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
         check(len(comps) == 1, "estimate-based trigger compacted on the first turn")
-        check(comps[0].summary == _FAKE_SUMMARY, "resume compaction summary recorded")
+        check(comps[0].summary == "SUMMARY", "resume compaction summary recorded")
+
+    # 15. tool-call argument streaming: the loop forwards the model's tool_call
+    # deltas as ToolCallDeltaEvent so the UI can render a write/edit as it happens;
+    # the concatenated deltas equal the final arguments.
+    from .events import ToolCallDeltaEvent
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        streamed: list[ToolCallDeltaEvent] = []
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "a.txt", "content": "hi"}')]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        agent = Agent(
+            llm=fake,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            sink=lambda ev: streamed.append(ev) if isinstance(ev, ToolCallDeltaEvent) else None,
+        )
+        result = agent.run("t")
+        check(result == "done", "streaming run completes")
+        check(len(streamed) >= 2, "tool-call deltas streamed to the sink")
+        check(streamed[0].name == "write_file", "the start delta carries the tool name")
+        joined = "".join(e.delta for e in streamed)
+        check(joined == '{"path": "a.txt", "content": "hi"}', "streamed deltas reassemble the arguments")
 
     print("\nall passed")
     return 0

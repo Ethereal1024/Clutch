@@ -72,6 +72,21 @@ class ToolCallEvent(Event):
 
 
 @dataclass
+class ToolCallDeltaEvent(Event):
+    """Streamed tool-call argument chunks (live display only, never persisted).
+
+    Mirrors text_delta: the model's tool-call arguments arrive as a stream of
+    deltas while it generates them; the final ToolCallEvent carries the complete
+    arguments. The UI renders these live so the user watches e.g. a write_file
+    content being produced instead of waiting for the finished result."""
+
+    type: str = "tool_call_delta"
+    tool_call_id: str = ""
+    name: str = ""  # set on the first (start) delta only
+    delta: str = ""
+
+
+@dataclass
 class ToolResultEvent(Event):
     type: str = "tool_result"
     tool_call_id: str = ""
@@ -126,6 +141,7 @@ EVENT_TYPES: dict[str, type] = {
         ReasoningDeltaEvent,
         AssistantMessageEvent,
         ToolCallEvent,
+        ToolCallDeltaEvent,
         ToolResultEvent,
         StateUpdateEvent,
         FinalEvent,

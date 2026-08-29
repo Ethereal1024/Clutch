@@ -112,6 +112,48 @@ function addReadResultRow(ev) {
   autoScroll();
 }
 
+// live-streamed tool-call previews: callId -> {name, text, row, body}. The model's
+// tool-call arguments arrive as tool_call_delta chunks; this shows the call being
+// generated (a file being written, a command being typed) instead of waiting for
+// the finished tool_result. Reads stay collapsed (their content is huge), and
+// run_command shows just the command, not the {"command": "..."} envelope.
+const streamRows = {};
+
+function streamArgsText(name, raw) {
+  if (name !== "run_command") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.command === "string") return "$ " + parsed.command;
+  } catch (e) {}
+  let t = raw;
+  const prefix = '{"command": "';
+  if (t.startsWith(prefix)) t = t.slice(prefix.length);
+  return "$ " + t.replace(/\\"/g, '"').replace(/\\n/g, "\n");
+}
+
+function handleToolCallDelta(ev) {
+  let st = streamRows[ev.tool_call_id];
+  if (!st) {
+    if (!ev.name) return; // the start delta carries the name
+    st = streamRows[ev.tool_call_id] = { name: ev.name, text: "", row: null, body: null };
+    st.row = document.createElement("div");
+    st.row.className = "tool-row stream";
+    if (isReadTool(ev.name)) {
+      // reads are large; the preview stays collapsed to just the name
+      st.row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span> <span class="muted">…</span>`;
+    } else {
+      st.row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
+      st.body = document.createElement("pre");
+      st.body.className = "tool-args-detail stream-pre";
+      st.row.appendChild(st.body);
+    }
+    eventsEl.appendChild(st.row);
+    autoScroll();
+  }
+  st.text += ev.delta;
+  if (st.body) st.body.textContent = streamArgsText(st.name, st.text);
+}
+
 // Build one collapsible read row (toggle + summary + hidden code panel).
 // Shared by the tool-group path and the standalone renderEvent path.
 function buildReadRow(call, content) {
@@ -190,7 +232,16 @@ function addEvent(ev) {
     let args = {};
     try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
     toolCalls[ev.tool_call_id] = { name: ev.name, args };
+    // the call finished: drop the live streamed preview, the final row takes over
+    if (streamRows[ev.tool_call_id]) {
+      streamRows[ev.tool_call_id].row.remove();
+      streamRows[ev.tool_call_id] = undefined;
+    }
     addToolCallRow(ev);
+    return;
+  }
+  if (ev.type === "tool_call_delta" && ev.tool_call_id) {
+    handleToolCallDelta(ev);
     return;
   }
 
