@@ -7,7 +7,7 @@ def create_llm_client(provider: str, **kwargs) -> LlmClient:
     responsible for providing it; no env fallback). Raises RuntimeError when a
     required argument is missing, matching the caller's contract."""
     for required in ("api_key", "base_url", "model"):
-        if required not in kwargs:
+        if required not in kwargs or not kwargs[required]:
             raise RuntimeError(f"missing LLM argument: {required}")
 
     api_key = kwargs.pop("api_key")

@@ -41,6 +41,17 @@ from agent.tools.workspace import LocalWorkspace, Workspace  # noqa: E402
 SCENARIOS_DIR = Path(__file__).resolve().parent
 
 
+def _settings_api_key() -> str:
+    """The API key persisted by the GUI settings; the Python side never reads env."""
+    try:
+        import json as _json
+
+        d = _json.loads(Path.home().joinpath(".clutch", "settings.json").read_text(encoding="utf-8"))
+        return d.get("api_key") or ""
+    except (OSError, ValueError):
+        return ""
+
+
 class HarnessServer(BaseServer):
     """Eval host: each scenario runs in a fresh temp workspace."""
 
@@ -57,6 +68,7 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
         max_turns=config.max_turns,
         model=config.model,
         non_interactive=True,
+        api_key=config.api_key,
     )
     started = time.time()
     outcome = {
@@ -112,7 +124,7 @@ def main() -> int:
     parser.add_argument("--model", default=Config().model)
     args = parser.parse_args()
 
-    config = Config(model=args.model, max_turns=args.max_turns)
+    config = Config(model=args.model, max_turns=args.max_turns, api_key=_settings_api_key())
     report_dir = BASE / "reports"
     report_dir.mkdir(exist_ok=True)
 

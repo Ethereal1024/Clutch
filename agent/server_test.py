@@ -1,7 +1,8 @@
 """Server end-to-end check: boots the HTTP server in a thread and exercises it.
 
 Run: uv run python -m agent.server_test
-API/health/project are always checked. If CLUTCH_API_KEY is set, also runs a
+API/health/project are always checked. If a key is saved in ~/.clutch/settings.json
+(the GUI settings; the Python side never reads env), also runs a
 real task through /api/run, collects SSE events, and checks the workspace tree and
 .clc persistence. Skips the real-run section when no key is present (network-free).
 """
@@ -9,7 +10,6 @@ real task through /api/run, collects SSE events, and checks the workspace tree a
 from __future__ import annotations
 
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -21,6 +21,15 @@ from urllib.parse import quote
 from .config import Config
 from .server import Broadcaster, RunState, build
 from .testsupport import check
+
+
+def _saved_api_key() -> str:
+    """The API key persisted by the GUI settings; the Python side never reads env."""
+    try:
+        d = json.loads(Path.home().joinpath(".clutch", "settings.json").read_text(encoding="utf-8"))
+        return d.get("api_key") or ""
+    except (OSError, json.JSONDecodeError):
+        return ""
 
 
 def http_get(url: str) -> tuple[int, str]:
@@ -158,12 +167,13 @@ def _run_server_test() -> int:
         check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
         check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
 
-        # 4. real run (only with key)
-        key = os.environ.get("CLUTCH_API_KEY")
+        # 4. real run (only with a key saved in ~/.clutch/settings.json)
+        key = _saved_api_key()
         if not key:
-            print("\n(CLUTCH_API_KEY not set - real-run section skipped)")
+            print("\n(no API key in ~/.clutch/settings.json - real-run section skipped)")
             print("\nall passed (network-free)")
             return 0
+        state.api_key = key  # the server uses the UI-saved key (no env fallback)
 
         st, body = http_post(
             f"{base_url}/api/run",

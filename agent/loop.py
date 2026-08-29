@@ -60,7 +60,7 @@ class Agent:
         sink: EventSink | None = None,
         cancel: threading.Event | None = None,
         gate: PermissionGate | None = None,
-        compactor_llm: LlmClient | None = None,
+        compactor_factory: Callable[[], LlmClient] | None = None,
         memories: Any | None = None,
     ) -> None:
         self.llm = llm
@@ -72,9 +72,10 @@ class Agent:
         self.sink = sink
         self.cancel = cancel
         self.gate = gate
-        # summarizer used by compaction; defaults to the main llm when the user
-        # hasn't configured a separate compaction_model
-        self.compactor_llm = compactor_llm or llm
+        # summarizer used by compaction; built lazily on first compaction when a
+        # dedicated compaction_model is configured, otherwise the main llm is used
+        self.compactor_factory = compactor_factory
+        self.compactor_llm: LlmClient | None = None
         # project memory store (durable facts in the .clc), if any
         self.memories = memories
         # provider-reported usage of the most recent LLM call (context size probe)
@@ -324,7 +325,12 @@ class Agent:
         return text[-cap:] if len(text) > cap else text
 
     def _summarize(self, history: str, previous: str) -> str:
-        llm = self.compactor_llm or self.llm
+        llm = self.compactor_llm
+        if llm is None and self.compactor_factory is not None:
+            llm = self.compactor_factory()
+            self.compactor_llm = llm
+        if llm is None:
+            llm = self.llm
         prompt = render("compaction.md", history=history, previous_summary=previous or "(none)")
         parts: list[str] = []
         for ev in llm.stream([{"role": "user", "content": prompt}], tools=None):

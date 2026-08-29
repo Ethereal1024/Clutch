@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
-import os
 import queue
 import sys
 import threading
@@ -648,8 +647,10 @@ def main() -> int:
     config.model = args.model
     if args.base_url:
         config.base_url = args.base_url
-        # the client-side proxy injects the real key; server only needs a placeholder
-        if not (config.api_key or os.environ.get("CLUTCH_API_KEY")):
+        # the client-side proxy injects the real key; the server only needs a
+        # placeholder. No env fallback: the key comes from the UI settings
+        # (state.api_key) or an explicit config.api_key.
+        if not config.api_key:
             config.api_key = "proxy"
     if args.verify:
         config.verify_command = args.verify

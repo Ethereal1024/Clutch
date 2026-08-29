@@ -151,18 +151,26 @@ class BaseServer(ABC):
         workspace = self.build_workspace(project)
         workspace.protect(project.path)
         llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
-        # separate summarizer for compaction when a dedicated model is configured
-        compactor_llm = None
+        # separate summarizer for compaction is built lazily (only on the first
+        # compaction) via a factory that captures the resolved key — no per-run
+        # client construction, and a missing key only surfaces inside the
+        # best-effort compaction fallback.
+        compactor_factory = None
         if cfg.compaction_model and cfg.compaction_model != cfg.model:
-            compactor_llm = create_llm_client(
-                provider="openai",
-                api_key=self.state.api_key or cfg.api_key,
-                model=cfg.compaction_model,
-                base_url=cfg.base_url,
-                request_timeout=cfg.llm_request_timeout,
-                max_retries=cfg.llm_max_retries,
-                retryable_status=cfg.llm_retryable_status,
-            )
+            api_key = self.state.api_key or cfg.api_key
+
+            def _make_compactor() -> LlmClient:
+                return create_llm_client(
+                    provider="openai",
+                    api_key=api_key,
+                    model=cfg.compaction_model,
+                    base_url=cfg.base_url,
+                    request_timeout=cfg.llm_request_timeout,
+                    max_retries=cfg.llm_max_retries,
+                    retryable_status=cfg.llm_retryable_status,
+                )
+
+            compactor_factory = _make_compactor
         cancel = cancel or threading.Event()
         if not self.state.start(task, workspace, cancel):
             return None
@@ -180,6 +188,6 @@ class BaseServer(ABC):
             sink=self.broadcaster.publish,
             cancel=cancel,
             gate=gate,
-            compactor_llm=compactor_llm,
+            compactor_factory=compactor_factory,
             memories=project.memories,
         )
