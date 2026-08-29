@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .events import DURABLE_TYPES, EventLog, event_from_dict, event_to_json
+from .memory import SECTION, MemoryStore
 from .tools.workspace import _REMOTE_IO_TIMEOUT, shq
 
 HEADER_PREFIX = "# clutch project v1"
@@ -39,6 +40,7 @@ class Project:
     path: Path
     meta: ProjectMeta = field(default_factory=ProjectMeta)
     log: EventLog = field(default_factory=EventLog)
+    memories: MemoryStore | None = None
 
     @property
     def workdir(self) -> Path:
@@ -61,7 +63,8 @@ def create_project(path: Path, name: str, model: str = "", workspace=None) -> Pr
         _write_header(path, meta)
         # EventLog(path=...) persists every append to the .clc file after the header
         log = EventLog(path=str(path))
-    return Project(path=path, meta=meta, log=log)
+    writer = workspace.append_line if workspace is not None else None
+    return Project(path=path, meta=meta, log=log, memories=MemoryStore(str(path), writer=writer))
 
 
 def open_project(path: Path, on_progress=None, workspace=None) -> Project:
@@ -69,19 +72,21 @@ def open_project(path: Path, on_progress=None, workspace=None) -> Project:
     file is parsed (byte-based, single pass). With a workspace the file is
     pulled from the remote host and the log persists back through it."""
     path = path.with_suffix(".clc")
-    meta, loaded = _read_file(path, on_progress, workspace)
+    meta, loaded, memory_lines = _read_file(path, on_progress, workspace)
+    writer = workspace.append_line if workspace is not None else None
+    memories = MemoryStore.parse(memory_lines, str(path), writer=writer)
     # older files stored streaming deltas (text/reasoning) that are redundant for
     # replay and context — assistant_message carries the final text + reasoning.
     # Compact them away so the .clc stays small and future loads stay fast.
     durable = [e for e in loaded.events() if e.type in DURABLE_TYPES]
     if len(durable) != len(loaded.events()):
-        _rewrite_durable(path, meta, durable, workspace)
+        _rewrite_durable(path, meta, durable, workspace, memories)
     if workspace is not None:
         log = EventLog(path=str(path), writer=workspace.append_line)
     else:
         log = EventLog(path=str(path))
     log._events.extend(durable)
-    return Project(path=path, meta=meta, log=log)
+    return Project(path=path, meta=meta, log=log, memories=memories)
 
 
 def read_header(path: Path, workspace=None) -> ProjectMeta:
@@ -119,11 +124,15 @@ def _write_header(path: Path, meta: ProjectMeta) -> None:
     path.write_text(_header_text(meta), encoding="utf-8")
 
 
-def _rewrite_durable(path: Path, meta: ProjectMeta, events: list, workspace=None) -> None:
-    """Atomically rewrite the .clc keeping only durable block events. A crash
-    mid-write must not leave a truncated file, so write a tmp then swap it in.
-    With a workspace the tmp+mv happen on the remote host."""
-    content = _header_text(meta) + "".join(event_to_json(ev) + "\n" for ev in events)
+def _rewrite_durable(
+    path: Path, meta: ProjectMeta, events: list, workspace=None, memories: MemoryStore | None = None
+) -> None:
+    """Atomically rewrite the .clc keeping only durable block events (and the
+    [memories] section). A crash mid-write must not leave a truncated file, so
+    write a tmp then swap it in. With a workspace the tmp+mv happen on the host."""
+    body = "".join(event_to_json(ev) + "\n" for ev in events)
+    memories_text = memories.serialize() if memories is not None else ""
+    content = _header_text(meta) + body + memories_text
     if workspace is not None:
         tmp = str(path) + ".tmp"
         workspace.write(tmp, content)
@@ -131,9 +140,7 @@ def _rewrite_durable(path: Path, meta: ProjectMeta, events: list, workspace=None
         return
     tmp = path.with_suffix(".clc.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write(_header_text(meta))
-        for ev in events:
-            f.write(event_to_json(ev) + "\n")
+        f.write(content)
     os.replace(tmp, path)
 
 
@@ -150,20 +157,29 @@ def _apply_meta(meta: ProjectMeta, line: str) -> None:
         meta.model = v
 
 
-def _read_file(path: Path, on_progress=None, workspace=None) -> tuple[ProjectMeta, EventLog]:
+def _read_file(path: Path, on_progress=None, workspace=None) -> tuple[ProjectMeta, EventLog, list[str]]:
     meta = ProjectMeta()
     log = EventLog()
+    memory_lines: list[str] = []
     in_events = False
+    in_memories = False
 
     def parse(line: str) -> None:
-        nonlocal in_events
+        nonlocal in_events, in_memories
+        stripped = line.strip()
+        if in_memories:
+            memory_lines.append(line)
+            return
         if not in_events:
-            if line.strip() == SEPARATOR:
+            if stripped == SEPARATOR:
                 in_events = True
                 return
             _apply_meta(meta, line)
             return
-        if line.strip():
+        if stripped == SECTION:
+            in_memories = True
+            return
+        if stripped:
             try:
                 log._events.append(event_from_dict(json.loads(line)))
             except ValueError:
@@ -183,7 +199,7 @@ def _read_file(path: Path, on_progress=None, workspace=None) -> tuple[ProjectMet
                 last_pct = pct
                 on_progress(consumed, total)
             parse(line)
-        return meta, log
+        return meta, log, memory_lines
 
     total = path.stat().st_size or 1
     consumed = 0
@@ -198,4 +214,4 @@ def _read_file(path: Path, on_progress=None, workspace=None) -> tuple[ProjectMet
                 last_pct = pct
                 on_progress(consumed, total)
             parse(line.rstrip("\n"))
-    return meta, log
+    return meta, log, memory_lines

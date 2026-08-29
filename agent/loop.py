@@ -61,6 +61,7 @@ class Agent:
         cancel: threading.Event | None = None,
         gate: PermissionGate | None = None,
         compactor_llm: LlmClient | None = None,
+        memories: Any | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -74,6 +75,8 @@ class Agent:
         # summarizer used by compaction; defaults to the main llm when the user
         # hasn't configured a separate compaction_model
         self.compactor_llm = compactor_llm or llm
+        # project memory store (durable facts in the .clc), if any
+        self.memories = memories
         # provider-reported usage of the most recent LLM call (context size probe)
         self._last_usage: dict[str, Any] | None = None
 
@@ -167,7 +170,7 @@ class Agent:
                     self._last_usage = None  # don't re-trigger on the stale usage
                     continue
                 self._emit(StepStartEvent())
-                msgs = context.derive_messages(self.log, self.config, task)
+                msgs = context.derive_messages(self.log, self.config, task, memories=self.memories)
 
                 content, tool_calls, finish_reason, reasoning, usage = self._llm_call(msgs)
                 self._last_usage = usage

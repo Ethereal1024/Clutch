@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..config import Config
+from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
 from . import filesystem, shell
@@ -46,7 +47,7 @@ def _str_param(desc: str, required: bool = True) -> dict:
     return {"type": "string", "description": desc}
 
 
-def build_default_tools(config: Config) -> list[Tool]:
+def build_default_tools(config: Config, memories: MemoryStore | None = None) -> list[Tool]:
     tools = [
         Tool(
             name="read_file",
@@ -103,7 +104,79 @@ def build_default_tools(config: Config) -> list[Tool]:
         skill_tool = _build_load_skill(config)
         if skill_tool is not None:
             tools.append(skill_tool)
+    if memories is not None:
+        tools.extend(_build_memory_tools(memories))
     return tools
+
+
+def _build_memory_tools(memories: MemoryStore) -> list[Tool]:
+    """Project memory tools: save/load/search durable facts in the .clc."""
+
+    def save(ws, cfg, title: str, content: str) -> dict:
+        title = (title or "").strip()
+        content = (content or "").strip()
+        if not title:
+            return {"content": "ERROR: title is required", "error": True}
+        if not content:
+            return {"content": "ERROR: content is required", "error": True}
+        memories.save(title, content)
+        return {"content": f"OK: saved memory '{title}'"}
+
+    def load(ws, cfg, name: str) -> dict:
+        m = memories.get((name or "").strip())
+        if m is None:
+            return {"content": f"ERROR: no memory named {name!r}", "error": True}
+        return {"content": f"[{m.title}]\n{m.content}"}
+
+    def search(ws, cfg, query: str) -> dict:
+        q = (query or "").strip()
+        hits = memories.search(q) if q else sorted(memories.items().values(), key=lambda m: -m.updated)
+        if not hits:
+            return {"content": "(no memories found)"}
+        lines = [f"- {m.title}: {m.content[:200].replace(chr(10), ' ')}" for m in hits[:10]]
+        return {"content": "\n".join(lines)}
+
+    return [
+        Tool(
+            name="save_memory",
+            description=(
+                "Save a durable fact from this conversation to project memory — a key "
+                "decision, a user preference, or an important detail worth remembering "
+                "across sessions. title must be a very short one-line summary (<=80 chars); "
+                "content is the full detail. Saving the same title again overwrites it."
+            ),
+            parameters={
+                "properties": {
+                    "title": _str_param("very short one-line summary of the memory"),
+                    "content": _str_param("full detail to remember"),
+                },
+                "required": ["title", "content"],
+            },
+            func=save,
+        ),
+        Tool(
+            name="load_memory",
+            description="Read one stored memory's full content by its exact title.",
+            parameters={
+                "properties": {"name": _str_param("the memory title to load")},
+                "required": ["name"],
+            },
+            func=load,
+        ),
+        Tool(
+            name="search_memory",
+            description=(
+                "Search stored project memories by title or content; returns matching "
+                "titles with snippets. Call with a topic to recall relevant long-term "
+                "facts; an empty query lists the most recent memories."
+            ),
+            parameters={
+                "properties": {"query": _str_param("topic to search for; empty lists recent")},
+                "required": [],
+            },
+            func=search,
+        ),
+    ]
 
 
 def _build_load_skill(config: Config) -> Tool | None:

@@ -127,8 +127,8 @@ class BaseServer(ABC):
             retryable_status=self.config.llm_retryable_status,
         )
 
-    def build_tools(self) -> ToolRegistry:
-        return ToolRegistry(build_default_tools(self.config))
+    def build_tools(self, project: Project | None = None) -> ToolRegistry:
+        return ToolRegistry(build_default_tools(self.config, memories=project.memories if project else None))
 
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:
@@ -173,7 +173,7 @@ class BaseServer(ABC):
         )
         return Agent(
             llm=llm,
-            registry=self.build_tools(),
+            registry=self.build_tools(project),
             workspace=workspace,
             config=cfg,
             log=project.log,
@@ -181,4 +181,5 @@ class BaseServer(ABC):
             cancel=cancel,
             gate=gate,
             compactor_llm=compactor_llm,
+            memories=project.memories,
         )

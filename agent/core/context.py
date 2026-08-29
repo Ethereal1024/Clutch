@@ -95,9 +95,10 @@ def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, Any]]:
+def derive_messages(log: EventLog, config: Config, task: str, memories: Any | None = None) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying compaction head +
-    windowing + char budget."""
+    windowing + char budget. ``memories`` (a MemoryStore) contributes a resident
+    title list to the system prompt so the model can recall long-term facts."""
     events = log.events()
     head_msgs: list[dict[str, Any]] = []
     # if the log was compacted, the newest CompactionEvent's summary is the head
@@ -149,6 +150,13 @@ def derive_messages(log: EventLog, config: Config, task: str) -> list[dict[str, 
         catalog = cached_library(config.skills_dir).to_catalog_section()
         if catalog:
             system += "\n\n" + catalog
+    if memories is not None:
+        items = memories.items()
+        if items:
+            titles = [m.title for m in sorted(items.values(), key=lambda m: -m.updated)][:20]
+            system += "\n\nAvailable project memories (call load_memory to read one):\n" + "\n".join(
+                f"- {t}" for t in titles
+            )
 
     return (
         [

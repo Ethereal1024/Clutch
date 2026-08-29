@@ -352,6 +352,40 @@ def main() -> None:
         r = reg.execute(ws, config, "list_dir", {"path": "."})
         check(proj.path.name not in r["content"], "list_dir hides .clc")
 
+    # 10b. project memory: saved memories persist to the [memories] section of the
+    # .clc and survive a reopen; the memory tools read/write them.
+    with tempfile.TemporaryDirectory() as ptmp:
+        proj = create_project(Path(ptmp) / "mem", "mem")
+        check(proj.memories is not None, "create_project attaches a MemoryStore")
+        proj.memories.save("user prefers dark theme", "the user likes dark mode")
+        proj.memories.save("stack is flask", "the backend uses Flask + SQLite")
+        raw = proj.path.read_text(encoding="utf-8")
+        check("[memories]" in raw, "memories section written to the .clc")
+        check("dark theme" in raw and "flask" in raw, "memory lines persisted as JSONL")
+
+        reloaded = open_project(proj.path)
+        check(
+            reloaded.memories.get("stack is flask") is not None,
+            "memories loaded back on reopen",
+        )
+        check(len(reloaded.memories.search("flask")) == 1, "memory search matches content")
+
+        # memory tools (registered when a MemoryStore is provided)
+        ws = LocalWorkspace(str(ptmp))
+        mreg = ToolRegistry(build_default_tools(config, memories=reloaded.memories))
+        r = mreg.execute(ws, config, "load_memory", {"name": "stack is flask"})
+        check(not r["error"] and "Flask" in r["content"], "load_memory returns content")
+        r = mreg.execute(ws, config, "search_memory", {"query": "theme"})
+        check(not r["error"] and "dark theme" in r["content"], "search_memory finds by title")
+        r = mreg.execute(ws, config, "save_memory", {"title": "new fact", "content": "keep it"})
+        check(not r["error"], "save_memory tool works")
+        check(reloaded.memories.get("new fact") is not None, "save_memory updated the store")
+        # without a store there are no memory tools
+        check(
+            "save_memory" not in ToolRegistry(build_default_tools(config)).names(),
+            "no memory tools without a MemoryStore",
+        )
+
     print("\nall passed")
     return 0
 
