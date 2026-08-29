@@ -158,6 +158,18 @@ def main() -> int:
         )
         check(ws.grep("VAR", path="sub", include="*.log") == [], "remote grep include filter excludes")
         check(ws.grep("no_such_token_zzz") == [], "remote grep no matches -> []")
+        # find-based file list (busybox-safe) skips hidden files and the protected .clc
+        ws.write(".hidden.py", "SECRET_TOKEN hidden\n")
+        ws.write("open.txt", "SECRET_TOKEN open\n")
+        prot = Path(rtmp) / "secret.clc"
+        ws.protect(prot)
+        ws.write("secret.clc", "SECRET_TOKEN protected\n")
+        hit_names = {f for f, _, _ in ws.grep("SECRET_TOKEN")}
+        check("open.txt" in hit_names, "remote grep searches normal files")
+        check(
+            "secret.clc" not in hit_names and ".hidden.py" not in hit_names,
+            "remote grep skips hidden + protected files",
+        )
 
         # SshTransport surfaces a remote timeout as TransportError(timeout=True)
         try:

@@ -140,6 +140,8 @@ class Handler(BaseHTTPRequestHandler):
             self._settings()
         elif parsed.path == "/api/permission/respond":
             self._permission_respond()
+        elif parsed.path == "/api/workspace/revert":
+            self._workspace_revert()
         elif parsed.path == "/api/backend":
             self._backend()
         else:
@@ -331,6 +333,27 @@ class Handler(BaseHTTPRequestHandler):
         else:
             tree = _walk(sb.root, sb, expanded, show_hidden)
         self._json({"tree": tree, "root": str(sb.root)})
+
+    def _workspace_revert(self) -> None:
+        """User-side undo: restore the last snapshot of a file in the workspace
+        (the write_file/edit_file tools record a snapshot before every overwrite).
+        Backs the UI's "↶ undo" button on a change result."""
+        body = self._read_body()
+        if body is None:
+            return self._json({"error": "bad json body"}, status=400)
+        path = (body.get("path") or "").strip()
+        ws = self._state.workspace
+        if ws is None or not path:
+            return self._json({"error": "no workspace open"}, status=400)
+        try:
+            p = ws.resolve(path)
+        except ValueError as e:
+            return self._json({"error": str(e)}, status=400)
+        if ws.is_protected(p):
+            return self._json({"error": "protected file"}, status=400)
+        if ws.restore(p) is None:
+            return self._json({"error": "no snapshot to restore"}, status=404)
+        self._json({"status": "ok", "path": str(p)})
 
     def _fs_list(self) -> None:
         """Server-side directory browser (the UI picks projects from here).

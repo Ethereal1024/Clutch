@@ -55,11 +55,11 @@ const toolCalls = {};
 let toolGroupEl = null;
 
 function isReadTool(name) {
-  return name === "read_file" || name === "list_dir" || name === "grep";
+  return name === "read_file" || name === "grep";
 }
 
 // Render one tool_call row; consecutive calls append to the same group block.
-// Read tools (read_file/list_dir/grep) keep their results in the same block too.
+// Read tools (read_file/grep) keep their results in the same block too.
 function addToolCallRow(ev) {
   const readGroup = isReadTool(ev.name);
   if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
@@ -159,11 +159,9 @@ function handleToolCallDelta(ev) {
 function buildReadRow(call, content) {
   const toolName = call.name || "";
   const path = (call.args && call.args.path) || "";
-  const summary = toolName === "list_dir"
-    ? `${content ? content.split("\n").length : 0} entries`
-    : toolName === "grep"
-      ? `grep '${(call.args && call.args.pattern) || ""}' (${content ? content.split("\n").length : 0} lines)`
-      : `read ${path || "file"} (${content ? content.split("\n").length : 0} lines)`;
+  const summary = toolName === "grep"
+    ? `grep '${(call.args && call.args.pattern) || ""}' (${content ? content.split("\n").length : 0} lines)`
+    : `read ${path || "file"} (${content ? content.split("\n").length : 0} lines)`;
   const row = document.createElement("div");
   row.className = "read-row";
   const toggle = document.createElement("span");
@@ -614,6 +612,32 @@ function renderEvent(ev) {
           };
           wrap.appendChild(expand);
         }
+        // user-side undo: reverts the last snapshot of this file on the server
+        const undoBtn = document.createElement("button");
+        undoBtn.className = "diff-expand undo-btn";
+        undoBtn.textContent = "↶ undo";
+        undoBtn.onclick = async () => {
+          try {
+            const res = await fetch(API_BASE + "/api/workspace/revert", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: call.args.path }),
+            });
+            const data = await res.json();
+            if (res.ok && data && data.status === "ok") {
+              undoBtn.textContent = "↶ undone";
+              undoBtn.disabled = true;
+              refreshTree();
+            } else {
+              undoBtn.textContent = "↶ no snapshot";
+              undoBtn.disabled = true;
+            }
+          } catch (e) {
+            undoBtn.textContent = "↶ failed";
+            undoBtn.disabled = true;
+          }
+        };
+        wrap.appendChild(undoBtn);
         break;
       }
 

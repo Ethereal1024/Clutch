@@ -158,9 +158,9 @@ def main() -> int:
         budget = Config(verify_command="echo ok", max_turns=3)
         fake = FakeLLM(
             responses=[
-                _resp(tool_calls=[_tool_call("list_dir", "{}")]),
-                _resp(tool_calls=[_tool_call("list_dir", "{}")]),
-                _resp(tool_calls=[_tool_call("list_dir", "{}")]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
             ],
             fallback=_resp(content="never"),
         )
@@ -173,10 +173,10 @@ def main() -> int:
         sb = LocalWorkspace(tmp)
         fake = FakeLLM(
             responses=[
-                _resp(tool_calls=[_tool_call("list_dir", '{"path": "."}')]),
-                _resp(tool_calls=[_tool_call("list_dir", '{"path": "."}')]),
-                _resp(tool_calls=[_tool_call("list_dir", '{"path": "."}')]),
-                _resp(tool_calls=[_tool_call("list_dir", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
             ],
             fallback=_resp(content="never"),
         )
@@ -188,7 +188,7 @@ def main() -> int:
         sb = LocalWorkspace(tmp)
         fake = FakeLLM(
             responses=[
-                _resp(content="", tool_calls=[_tool_call("list_dir", "{}")], finish="length"),
+                _resp(content="", tool_calls=[_tool_call("read_file", '{"path": "."}')], finish="length"),
                 _resp(content="recovered"),
             ],
             fallback=_resp(content="recovered"),
@@ -491,7 +491,7 @@ def main() -> int:
         )
         fake = FakeLLM(
             responses=[
-                _resp(tool_calls=[_tool_call("list_dir", "{}")]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
                 _resp(content="SUMMARY"),
                 _resp(content="final answer"),
             ],

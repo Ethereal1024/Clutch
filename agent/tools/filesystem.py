@@ -1,4 +1,4 @@
-"""Filesystem tools: read_file / write_file / list_dir.
+"""Filesystem tools: read_file (file or directory) / write_file / edit_file / grep.
 
 Each tool returns a structured dict; the registry formats it for the model.
 """
@@ -31,6 +31,17 @@ def read_file(
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
             return _result(render("errors/protected_read.md", path=path), error=True)
+        # a directory reads as its entry listing (replaces the old list_dir tool);
+        # workspace.list raises NotADirectoryError for a file or missing path
+        try:
+            entries = workspace.list(str(p))
+        except NotADirectoryError:
+            entries = None
+        if entries is not None:
+            if offset > 0 or limit > 0:
+                msg = "ERROR: cannot read a line range of a directory; list it without offset/limit"
+                return _result(msg, error=True)
+            return _result("\n".join(sorted(entries)) if entries else "(empty directory)")
         try:
             text = workspace.read(str(p))
         except FileNotFoundError:
@@ -150,22 +161,6 @@ def edit_file(workspace: Workspace, config: Config, path: str, old_string: str, 
         return _result(render("errors/write_failed.md", error=e), error=True)
 
 
-def revert_file(workspace: Workspace, config: Config, path: str) -> dict:
-    """Restore the previous content of a file (the last write/edit is undone)."""
-    try:
-        p: Path = workspace.resolve(path)
-        if workspace.is_protected(p):
-            return _result(render("errors/protected_write.md", path=path), error=True)
-        restored = workspace.restore(p)
-        if restored is None:
-            return _result(f"ERROR: no snapshot to restore for {path} — this file was never overwritten", error=True)
-        return _result(f"OK: restored {p} to the previous content (undo of the last write/edit)")
-    except ValueError as e:
-        return _result(f"ERROR: {e}", error=True)
-    except Exception as e:  # noqa: BLE001
-        return _result(f"ERROR: {e}", error=True)
-
-
 def _unified_diff(old: str, new: str, rel: str) -> str:
     """Return a unified diff string between old and new file contents."""
     old_lines = old.splitlines(keepends=True)
@@ -173,21 +168,6 @@ def _unified_diff(old: str, new: str, rel: str) -> str:
     diff_lines = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{rel}", tofile=f"b/{rel}", n=3))
     # unified_diff returns [] when files are identical; treat identical as "no changes"
     return "".join(diff_lines)
-
-
-def list_dir(workspace: Workspace, config: Config, path: str = ".") -> dict:
-    try:
-        p: Path = workspace.resolve(path)
-        try:
-            entries = workspace.list(str(p))
-        except NotADirectoryError:
-            return _result(render("errors/not_a_directory.md", path=path), error=True)
-        lines = sorted(entries)
-        return _result("\n".join(lines) if lines else "(empty directory)")
-    except ValueError as e:
-        return _result(f"ERROR: {e}", error=True)
-    except Exception as e:  # noqa: BLE001
-        return _result(f"ERROR: {e}", error=True)
 
 
 def grep(workspace: Workspace, config: Config, pattern: str, path: str = ".", include: str = "") -> dict:

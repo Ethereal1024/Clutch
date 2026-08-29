@@ -30,7 +30,7 @@ from ..tools.workspace import Workspace
 Action = str  # "allow" | "ask" | "deny"
 
 # tools whose path/command args can reference the filesystem
-_PATH_TOOLS = {"read_file", "write_file", "edit_file", "revert_file", "list_dir", "grep", "run_command"}
+_PATH_TOOLS = {"read_file", "write_file", "edit_file", "grep", "run_command"}
 
 
 @dataclass
@@ -105,8 +105,8 @@ class PermissionEvaluator:
 
     def escaped_paths(self, tool: str, args_repr: str, workspace: Workspace) -> frozenset[Path]:
         """Absolute paths outside the workspace root this call references, resolved
-        for real (not regex-matched): read/write/list_dir/grep use their ``path``
-        arg, run_command every command token. Empty means the call stays in the
+        for real (not regex-matched): read/write/edit/grep use their ``path`` arg,
+        run_command every command token. Empty means the call stays in the
         sandbox. These are what the user approves when an escape is asked for."""
         if tool not in _PATH_TOOLS:
             return frozenset()

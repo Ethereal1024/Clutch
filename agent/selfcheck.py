@@ -169,7 +169,7 @@ def main() -> None:
     # derived context (reads accumulate until compaction; only compaction trims)
     cblog = EventLog()
     cblog.append(UserMessageEvent(content="t"))
-    cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "list_dir", "arguments": "{}"}]))
+    cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}]))
     cblog.append(ToolResultEvent(tool_call_id="c1", content="x" * 40))
     cblog.append(ToolResultEvent(tool_call_id="c2", content="y" * 40))
     cmsgs = derive_messages(cblog, Config(), "test")
@@ -238,16 +238,18 @@ def main() -> None:
         check(r["error"] and "appears 2 times" in r["content"], "edit_file rejects an ambiguous old_string")
         r = reg.execute(sb, config, "edit_file", {"path": "missing.txt", "old_string": "a", "new_string": "b"})
         check(r["error"] and "use write_file" in r["content"], "edit_file points to write_file for new files")
-        # revert_file: snapshot + undo restores the previous content (no git checkout)
+        # undo stack: write/edit snapshot the previous content; restore pops it back
         r = reg.execute(sb, config, "edit_file", {"path": "edit.txt", "old_string": "BETA", "new_string": "corrupted"})
         check(not r["error"] and (sb.root / "edit.txt").read_text() == "alpha\ncorrupted\ngamma\n", "edit applied")
-        r = reg.execute(sb, config, "revert_file", {"path": "edit.txt"})
-        check(
-            not r["error"] and (sb.root / "edit.txt").read_text() == "alpha\nBETA\ngamma\n",
-            "revert_file undoes the edit",
-        )
-        r = reg.execute(sb, config, "revert_file", {"path": "never-written.txt"})
-        check(r["error"] and "no snapshot" in r["content"], "revert_file errors without a snapshot")
+        check(sb.restore(sb.resolve("edit.txt")) == "alpha\nBETA\ngamma\n", "workspace.restore pops the snapshot")
+        check((sb.root / "edit.txt").read_text() == "alpha\nBETA\ngamma\n", "restore wrote the previous content back")
+        check(sb.restore(sb.resolve("edit.txt")) == "alpha\nbeta\ngamma\n", "second restore pops the next snapshot")
+        check(sb.restore(sb.resolve("edit.txt")) is None, "restore with no snapshot returns None")
+        # read_file on a directory lists its entries (the old list_dir tool)
+        r = reg.execute(sb, config, "read_file", {"path": "."})
+        check("edit.txt" in r["content"] and not r["error"], "read_file on a directory lists entries")
+        r = reg.execute(sb, config, "read_file", {"path": ".", "offset": 1, "limit": 5})
+        check(r["error"] and "directory" in r["content"], "directory read with a range errors")
         r = reg.execute(sb, config, "run_command", {"command": "echo hi"})
         check("hi" in r["content"], "run_command executes")
         r = reg.execute(sb, config, "run_command", {"command": "echo a && echo b"})
@@ -524,8 +526,8 @@ def main() -> None:
         reg = ToolRegistry(build_default_tools(config))
         r = reg.execute(ws, config, "read_file", {"path": proj.path.name})
         check(r["error"], "read_file refuses protected .clc")
-        r = reg.execute(ws, config, "list_dir", {"path": "."})
-        check(proj.path.name not in r["content"], "list_dir hides .clc")
+        r = reg.execute(ws, config, "read_file", {"path": "."})
+        check(proj.path.name not in r["content"], "read_file on a directory hides .clc")
 
     # 10b. project memory: saved memories persist to the [memories] section of the
     # .clc and survive a reopen; the memory tools read/write them.

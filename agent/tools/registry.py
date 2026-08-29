@@ -54,7 +54,7 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
             description=render("tools/read_file.md", read_max_chars=config.read_max_chars),
             parameters={
                 "properties": {
-                    "path": _str_param("file path, relative to the workspace root"),
+                    "path": _str_param("file path OR directory path, relative to the workspace root"),
                     "max_chars": {
                         "type": "integer",
                         "description": f"max chars to read (default {config.read_max_chars})",
@@ -109,28 +109,6 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["path", "old_string", "new_string"],
             },
             func=lambda sb, cfg, **kw: filesystem.edit_file(sb, cfg, **kw),
-        ),
-        Tool(
-            name="revert_file",
-            description=render("tools/revert_file.md"),
-            parameters={
-                "properties": {
-                    "path": _str_param("file path, relative to the workspace root"),
-                },
-                "required": ["path"],
-            },
-            func=lambda sb, cfg, **kw: filesystem.revert_file(sb, cfg, **kw),
-        ),
-        Tool(
-            name="list_dir",
-            description=render("tools/list_dir.md"),
-            parameters={
-                "properties": {
-                    "path": _str_param("directory path, relative to the workspace root", required=False),
-                },
-                "required": [],
-            },
-            func=lambda sb, cfg, **kw: filesystem.list_dir(sb, cfg, **kw),
         ),
         Tool(
             name="run_command",

@@ -1,1 +1,0 @@
-list the contents of a directory in the workspace. path defaults to '.'.

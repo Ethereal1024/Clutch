@@ -361,11 +361,17 @@ class RemoteWorkspace(Workspace):
         self._exec_append(p, line, first_op=">>", add_trailing_nl=True, ensure_dir=False)
 
     def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
+        # busybox grep has no --include and no dotfile awareness, so build the file
+        # list with find (portable: find/xargs/grep/head all exist on OpenWrt) and
+        # mirror the local implementation's skips: hidden files/dirs and the
+        # protected project .clc are never searched.
         p = self.resolve(path)
-        cmd = f"grep -rnE {shq(pattern)} {shq(str(p))}"
+        find_cmd = f"find {shq(str(p))} -type f ! -path '*/.*' ! -path '*/.*/*'"
+        for prot in self._protected:
+            find_cmd += f" ! -name {shq(prot.name)}"
         if include:
-            cmd += f" --include={shq(include)}"
-        cmd += " | head -n 100"
+            find_cmd += f" -name {shq(include)}"
+        cmd = f"{find_cmd} -print0 | xargs -0 grep -HnE {shq(pattern)} | head -n 100"
         r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
         if r.code != 0 and not r.stdout:
             return []

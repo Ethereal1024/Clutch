@@ -228,6 +228,17 @@ def _run_server_test() -> int:
         check("hello.txt" in names, "workspace shows created file")
         check(clc.name not in names, ".clc file hidden from workspace tree")
 
+        # 5b. user-side undo endpoint: routing + guards (restore logic is tested in
+        # selfcheck); the run created hello.txt, so it has no snapshot to revert
+        st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "hello.txt"})
+        check(st == 404, "revert on a never-snapshot file returns 404")
+        st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "../escape"})
+        check(st == 400, "revert rejects an escaping path")
+        st, body = http_post(f"{base_url}/api/workspace/revert", {"path": clc.name})
+        check(st == 400, "revert refuses the protected .clc")
+        st, body = http_post(f"{base_url}/api/workspace/revert", {})
+        check(st == 400, "revert requires a path")
+
         # 6. .clc persisted the conversation
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "project reopened after run")
