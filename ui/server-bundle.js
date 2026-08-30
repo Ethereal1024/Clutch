@@ -33,6 +33,22 @@ function ensureBundle(version = getVersion()) {
   const out = path.join(CACHE, `agent-server-${platformTag()}-${version}`);
   if (fs.existsSync(out)) return out;
   fs.mkdirSync(CACHE, { recursive: true });
+  // Packaged app: the deb already ships a same-platform onefile binary in
+  // resources/ — seed the cache with it instead of rebuilding from the repo
+  // (which a packaged app does not contain). Cache key uses the "dev" version
+  // tag, matching getVersion() when there is no git repo.
+  if (typeof process.resourcesPath === "string") {
+    const bundled = path.join(process.resourcesPath, "agent-server");
+    if (fs.existsSync(bundled)) {
+      fs.copyFileSync(bundled, out);
+      try {
+        fs.chmodSync(out, 0o755);
+      } catch (e) {
+        /* best effort */
+      }
+      return out;
+    }
+  }
   const r = spawnSync("bash", [path.join(REPO, "scripts", "build-server-bundle.sh"), version, out], {
     cwd: REPO,
     stdio: "inherit",

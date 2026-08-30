@@ -249,7 +249,10 @@ class EventLog:
                 size = len(ev.content) + len(ev.reasoning)
             else:
                 continue
-            total += size // 4
+            # ~3 chars/token, matching estimate_tokens in core/compaction.py (was
+            # 4: the tail over-shot its budget by ~30%, inflating the post-compaction
+            # footprint and shortening the run before the next compaction)
+            total += size // 3
             if total >= budget:
                 j = i
                 while j > 0 and not isinstance(durable[j], AssistantMessageEvent):

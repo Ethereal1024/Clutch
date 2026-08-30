@@ -8,3 +8,8 @@ build/
 dist/
 *.spec
 *.clc
+# the app icon lives in ui/build/ (electron-builder's default buildResources);
+# un-ignore the source files so they are versioned
+!ui/build/
+!ui/build/icon.svg
+!ui/build/icon.png

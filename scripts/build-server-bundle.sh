@@ -18,10 +18,17 @@ cd "$ROOT"
 "$ROOT/.venv/bin/python" -m PyInstaller --noconfirm --onefile --name agent-server \
   --add-data "agent/prompts:agent/prompts" \
   --add-data "agent/skills:agent/skills" \
+  --add-data "agent/transport_defaults.json:agent/" \
   scripts/server_entry.py
 
 mkdir -p "$(dirname "$OUT")"
-cp dist/agent-server "$OUT"
+if [ "$(realpath "$OUT")" != "$(realpath "$ROOT/dist/agent-server")" ]; then
+  cp dist/agent-server "$OUT"
+fi
 chmod +x "$OUT"
-rm -rf build dist agent-server.spec
+# remove PyInstaller scratch dirs, but never $OUT (it may live inside dist/)
+rm -rf build agent-server.spec
+if [ "$(realpath "$OUT")" != "$(realpath "$ROOT/dist/agent-server")" ]; then
+  rm -rf dist
+fi
 echo "bundle written: $OUT"

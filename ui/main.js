@@ -10,6 +10,7 @@
 const { app, BrowserWindow, ipcMain, session } = require("electron");
 const path = require("path");
 const { connectTunnel, stopTunnel, tunnelLog, tunnelStatus, onTunnelEnd } = require("./ssh-tunnel");
+const { start: startLocalServer, stop: stopLocalServer } = require("./local-server");
 
 const API_BASE = process.env.CLUTCH_API_URL || "http://127.0.0.1:8890";
 
@@ -33,12 +34,24 @@ app.whenReady().then(async () => {
     height: 820,
     title: "Clutch",
     autoHideMenuBar: true,
+    backgroundColor: "#0F0F10", // match the app theme: no white flash while booting
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       preload: path.join(__dirname, "preload.js"),
     },
   });
+
+  // Bring up the local backend (bundled agent-server in the packaged app, the
+  // venv/uv server in dev) before loading the UI, so the renderer's first
+  // requests don't race startup. A missing/too-slow backend still loads the UI:
+  // the renderer reports "cannot reach backend" and its SSE stream reconnects.
+  const srv = await startLocalServer();
+  if (srv.mode === "failed") {
+    tunnelLog(`[local-server] ${srv.reason}`);
+  } else {
+    tunnelLog(`[local-server] backend ${srv.mode} on port ${srv.port || 8890}`);
+  }
 
   win.loadFile(path.join(__dirname, "index.html"));
 
@@ -59,5 +72,9 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   stopTunnel();
+  stopLocalServer();
   app.quit();
 });
+
+// final safety net: the bundled backend must never outlive the app
+app.on("before-quit", () => stopLocalServer());

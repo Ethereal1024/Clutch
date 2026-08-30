@@ -49,6 +49,13 @@ function nearBottom() {
   return stream.scrollHeight - stream.scrollTop - stream.clientHeight < JUMP_BOTTOM_GAP;
 }
 
+// The floating ↓ button's visibility mirrors the latch, and is updated in exactly
+// this one place: autoScroll, the scroll latch and appendCompletion all report
+// through here, so no path can leave the button and the latch out of sync.
+function setJumpVisible(visible) {
+  jumpBottom.classList.toggle("hidden", !visible);
+}
+
 // Follow the tail of the stream, but never during project-load (content is hidden
 // then), and never yank the view back down if the user has scrolled up to read —
 // a floating '↓' button appears instead so they can return to the live tail.
@@ -65,19 +72,28 @@ let glideRaf = 0;
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
   if (force) {
-    // User-initiated jump (message send, ↓ button, Cmd/Ctrl+Down): native smooth
-    // scroll to the tail. While gliding, every other height-affecting path
-    // (streaming events, ResizeObserver re-pins, fold animations, MathJax) is
-    // ignored so the animation can land instead of being overridden mid-flight.
-    glideToBottom();
-    jumpBottom.classList.add("hidden");
-  } else if (followTail) {
-    // live follow-pinning stays instant — but never during a user jump-glide
+    // User-initiated jump (message send, ↓ button, Cmd/Ctrl+Down). The two
+    // states are decoupled: tracked = instant pin (streaming never animates);
+    // untracked = the one smooth glide, which owns the scroll until it lands
+    // and re-latches on arrival.
+    if (followTail) {
+      if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
+      gliding = false;
+      stream.scrollTop = stream.scrollHeight;
+      setJumpVisible(false);
+    } else {
+      glideToBottom();
+    }
+    return;
+  }
+  if (followTail) {
+    // tracked: instant pin — but never during a user jump-glide (untracked ↓)
     if (gliding) return;
     stream.scrollTop = stream.scrollHeight;
-    jumpBottom.classList.add("hidden");
+    setJumpVisible(false);
   } else {
-    jumpBottom.classList.remove("hidden");
+    // untracked: content growth never moves the view; only the ↓ glide may
+    setJumpVisible(true);
   }
 }
 
@@ -92,11 +108,19 @@ function glideToBottom() {
   if (stream.classList.contains("loading")) return;
   cancelAnimationFrame(glideRaf);
   const target = stream.scrollHeight;
-  if (stream.scrollTop >= target - 1) { gliding = false; return; } // already at the tail
+  if (stream.scrollTop >= target - 1) {
+    // already at the tail: nothing to travel — land straight into the latch
+    gliding = false;
+    followTail = true;
+    setJumpVisible(false);
+    return;
+  }
   gliding = true;
   if (reducedMotion()) {
     stream.scrollTop = stream.scrollHeight;
     gliding = false;
+    followTail = true;
+    setJumpVisible(false);
     return;
   }
   stream.scrollTo({ top: target, behavior: "smooth" });
@@ -104,7 +128,11 @@ function glideToBottom() {
     const bottom = stream.scrollHeight - stream.clientHeight;
     if (!gliding || Math.abs(stream.scrollTop - target) < 2 || Math.abs(stream.scrollTop - bottom) < 2) {
       gliding = false;
-      if (followTail && !stream.classList.contains("loading")) {
+      // landed (or clamped to a new bottom): re-latch — the smooth glide was the
+      // only animated moment, and fresh content pins instantly from here on
+      followTail = true;
+      setJumpVisible(false);
+      if (!stream.classList.contains("loading")) {
         stream.scrollTop = stream.scrollHeight; // absorb growth that arrived mid-glide
       }
       return;
@@ -129,13 +157,15 @@ if (typeof ResizeObserver !== "undefined") {
 }
 
 jumpBottom.addEventListener("click", () => {
-  followTail = true; // explicit re-latch: the resulting jump scrolls programmatically,
-  autoScroll(true);  // its scroll event is isTrusted=false and never touches the latch
+  // no pre-latch here: autoScroll(force) decides by state — instant pin when
+  // already tracked, the smooth ↓ glide when untracked (which re-latches on
+  // landing). The resulting scroll event is isTrusted=false and never touches
+  // the latch.
+  autoScroll(true);
 });
 // Cmd/Ctrl+Down anywhere: same jump-to-tail as the ↓ button (glides via autoScroll(true))
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "ArrowDown") {
-    followTail = true;
     autoScroll(true);
   }
 });
@@ -159,7 +189,17 @@ stream.addEventListener("scroll", (e) => {
   // preview (full args, up to 320px) is swapped for its final collapsed row —
   // and a shrunken scrollHeight is the fingerprint there.
   const cur = stream.scrollTop;
-  if (!e.isTrusted) { lastScrollTop = cur; return; }
+  if (!e.isTrusted) {
+    lastScrollTop = cur;
+    // Programmatic pins never fire a trusted event, so without this refresh the
+    // clamp fingerprints below compare against a stale baseline: a long pinned
+    // stream (thinking + grep results) freezes prevScrollH/prevClientH, and the
+    // next genuine clamp (fold collapse, preview swap, viewport resize) is then
+    // misread as a user scroll-up, dropping the latch mid-stream.
+    prevClientH = stream.clientHeight;
+    prevScrollH = stream.scrollHeight;
+    return;
+  }
   const viewportShrank = stream.clientHeight < prevClientH;
   prevClientH = stream.clientHeight;
   const scrollShrank = stream.scrollHeight < prevScrollH;
@@ -171,15 +211,17 @@ stream.addEventListener("scroll", (e) => {
   // a real user gesture takes over from any in-flight jump glide
   if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
   gliding = false;
-  const up = cur < lastScrollTop;
+  // A clamp can only land the view at the (new) bottom edge; only a scroll away
+  // from it is a user intent to leave the latch. Guarding `up` with nearBottom()
+  // is defense-in-depth: even if a fingerprint misses (racing a huge fold
+  // collapse), the clamp still reads as "at the bottom" and the latch survives.
+  const up = cur < lastScrollTop && !nearBottom();
   if (up) {
-    if (followTail) {
-      console.warn("[latch-dropped]", JSON.stringify({ top: cur, prevTop: lastScrollTop, scrollH: stream.scrollHeight, clientH: stream.clientHeight, now: Math.round(performance.now()) }));
-    }
     followTail = false;
   } else if (nearBottom()) followTail = true;
   lastScrollTop = cur;
-  jumpBottom.classList.toggle("hidden", followTail);
+  // the button is visible exactly when NOT latched: followTail=true must hide it
+  setJumpVisible(!followTail);
 }, { passive: true });
 
 function setStatus(state) {
@@ -204,6 +246,10 @@ let compactionEl = null; // live "compressing context" block (compaction_delta)
 const toolCalls = {};
 // the group block currently collecting consecutive tool_calls (for merging)
 let toolGroupEl = null;
+// tool_call_id -> owning group: a tool_result must land in ITS group even when a
+// later call (or an interleaved thinking block that reset toolGroupEl) moved the
+// collector elsewhere — otherwise the result renders orphaned outside the group.
+const toolCallGroups = new Map();
 
 function isReadTool(name) {
   return name === "read_file" || name === "grep";
@@ -226,13 +272,38 @@ function ensureToolGroup(readGroup) {
   return toolGroupEl;
 }
 
-// Build one tool_call row (name + expandable args). Does not touch the group.
-function makeToolRow(ev) {
+// Reserve a tool call in its read/non-read group and record its id — shared by
+// the finished-call path and the streaming preview path, so both land in the
+// same group.
+function toolGroupFor(id, name) {
+  const group = ensureToolGroup(isReadTool(name));
+  group.ids.add(id);
+  toolCallGroups.set(id, group);
+  return group;
+}
+
+// The shared tool-row skeleton: name chip + caller-specific tail. Finished calls
+// add the args toggle (makeToolRow); streaming previews add a live body instead.
+function makeToolRowBase(name) {
   const row = document.createElement("div");
   row.className = "tool-row";
-  row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
+  row.innerHTML = `<span class="tool-name">${escapeHtml(name)}</span>`;
+  return row;
+}
+
+// Build one tool_call row (name + expandable args). Does not touch the group.
+function makeToolRow(ev) {
+  const row = makeToolRowBase(ev.name);
   let argsTxt = ev.arguments;
-  try { argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1); } catch (e) {}
+  try {
+    if (ev.name === "run_command") {
+      // the command itself, not the JSON envelope / {comment: ...} wrapper
+      const parsed = JSON.parse(ev.arguments);
+      argsTxt = parsed && typeof parsed.command === "string" ? "$ " + parsed.command : ev.arguments;
+    } else {
+      argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1);
+    }
+  } catch (e) {}
   const argsBtn = document.createElement("span");
   argsBtn.className = "tool-args-btn";
   argsBtn.textContent = "args ▸";
@@ -258,8 +329,7 @@ function makeToolRow(ev) {
 // Render one tool_call row; consecutive calls append to the same group block.
 // Read tools (read_file/grep) keep their results in the same block too.
 function addToolCallRow(ev) {
-  const group = ensureToolGroup(isReadTool(ev.name));
-  group.ids.add(ev.tool_call_id);
+  const group = toolGroupFor(ev.tool_call_id, ev.name);
   group.el.appendChild(makeToolRow(ev));
   autoScroll();
 }
@@ -290,6 +360,13 @@ function friendlyArgs(name, raw) {
     let t = raw;
     const prefix = '{"command": "';
     if (t.startsWith(prefix)) t = t.slice(prefix.length);
+    // mid-stream: cut at the closing quote so trailing fields ("comment", ...)
+    // never leak into the preview; escaped quotes inside the command are kept
+    let end = -1;
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === '"' && t[i - 1] !== "\\") { end = i; break; }
+    }
+    if (end >= 0) t = t.slice(0, end);
     return "$ " + t.replace(/\\"/g, '"').replace(/\\n/g, "\n");
   }
   if (name === "write_file" || name === "edit_file") {
@@ -316,12 +393,10 @@ function handleToolCallDelta(ev) {
   let st = streamRows[ev.tool_call_id];
   if (!st) {
     if (!ev.name) return; // the start delta carries the name
-    const group = ensureToolGroup(isReadTool(ev.name));
-    group.ids.add(ev.tool_call_id);
+    const group = toolGroupFor(ev.tool_call_id, ev.name);
     st = streamRows[ev.tool_call_id] = { name: ev.name, text: "", row: null, body: null, group };
-    st.row = document.createElement("div");
-    st.row.className = "tool-row stream";
-    st.row.innerHTML = `<span class="tool-name">${escapeHtml(ev.name)}</span>`;
+    st.row = makeToolRowBase(ev.name);
+    st.row.classList.add("stream");
     if (isReadTool(ev.name)) {
       // reads are large; the preview stays collapsed to just the name
       st.row.innerHTML += ` <span class="muted">…</span>`;
@@ -456,8 +531,10 @@ function addEvent(ev) {
       return;
     }
     // thinking renders above the agent text, matching the live stream (reasoning
-    // deltas arrive before text deltas)
-    if (ev.reasoning) appendThinkingRow(ev.reasoning);
+    // deltas arrive before text deltas). Skip the stored record when a live
+    // reasoning_delta stream already rendered this turn's thinking — otherwise
+    // the replay block would duplicate it.
+    if (ev.reasoning && !(thinkingEl && thinkingEl.isConnected)) appendThinkingRow(ev.reasoning);
     if (ev.content) {
       const wrap = createAgentTextBlock();
       wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
@@ -500,12 +577,24 @@ function addEvent(ev) {
     return;
   }
 
-  // read tool results merge into the group block; other results render independently
-  if (ev.type === "tool_result" && toolGroupEl && toolGroupEl.ids.has(ev.tool_call_id)) {
-    const call = toolCalls[ev.tool_call_id] || { name: "" };
+  // read tool results merge into the group block; other results render independently.
+  // Look the group up by call id (not the current collector): interleaved thinking
+  // or a later call may have moved toolGroupEl to another group, and the result
+  // must still land next to its own call row.
+  if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
+    const call = toolCalls[ev.tool_call_id];
     if (isReadTool(call.name)) {
-      addReadResultRow(ev);
-      toolGroupEl.closed = true; // this group's calls have completed
+      const group = toolCallGroups.get(ev.tool_call_id);
+      if (group) {
+        const prev = toolGroupEl;
+        toolGroupEl = group; // addReadResultRow appends into the current collector
+        addReadResultRow(ev);
+        group.closed = true; // this group's calls have completed
+        toolGroupEl = prev;
+      } else {
+        const el = renderEvent(ev);
+        if (el) { (pageSink || eventsEl).appendChild(el); autoScroll(); }
+      }
       return;
     }
   }
@@ -528,29 +617,8 @@ function addEvent(ev) {
   if (ev.type === "reasoning_delta" && ev.content) {
     thinkingContent += ev.content;
     if (!thinkingEl) {
-      thinkingEl = document.createElement("div");
-      thinkingEl.className = "event thinking";
-      thinkingEl.innerHTML = '<div class="hdr">thinking</div>';
-      const row = document.createElement("div");
-      row.className = "thinking-row";
-      const toggle = document.createElement("span");
-      toggle.className = "read-toggle";
-      toggle.textContent = "▸";
-      const lbl = document.createElement("span");
-      lbl.className = "thinking-label";
-      row.appendChild(toggle);
-      row.appendChild(lbl);
-      thinkingEl.appendChild(row);
-      const full = document.createElement("pre");
-      full.className = "thinking-full";
-      full._content = ""; // per-block copy; survives step_start resetting the globals
-      const fold = wrapFold(full);
-      thinkingEl.appendChild(fold);
-      // click toggles between the compact row and the full reasoning text
-      row.onclick = () => {
-        const wasHidden = toggleFold(fold, () => { full.textContent = full._content; });
-        toggle.textContent = wasHidden ? "▾" : "▸";
-      };
+      const block = buildThinkingBlock("", "");
+      thinkingEl = block.el;
       (pageSink || eventsEl).appendChild(thinkingEl);
     }
     thinkingEl.querySelector(".thinking-label").textContent =
@@ -574,6 +642,9 @@ function addEvent(ev) {
   const el = renderEvent(ev);
   if (el) {
     (pageSink || eventsEl).appendChild(el);
+    // user tasks can carry LaTeX too; typeset on the live path only (replay
+    // batches it after insertion in openProject — MathJax needs real layout)
+    if (el.classList.contains("event.user") && !pageSink) typesetMath(el);
     autoScroll();
   }
 }
@@ -589,14 +660,19 @@ function createAgentTextBlock() {
 // an explicit height via WAAPI; overflow-y is suppressed so no scrollbar shifts.
 const FOLD_EASE = "cubic-bezier(.23, 1, .32, 1)";
 
-function animateFold(el, from, to, onDone) {
+// One fold/diff animation per element; cancel any in-flight one before starting
+// a new one (shared by animateFold, foldExpand, foldCollapse and the settle pass).
+function cancelFoldAnim(el) {
   if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
   el._foldAnim = null;
+}
+
+function animateFold(el, from, to, onDone) {
+  cancelFoldAnim(el);
   el.style.overflowY = "hidden";
   el.style.height = from + "px";
   const settle = () => {
-    if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
-    el._foldAnim = null;
+    cancelFoldAnim(el);
     onDone();
     // the fold's height just settled (or was cancelled): re-pin the tail if
     // the user is latched, so the view never ends up hovering off the bottom
@@ -667,8 +743,7 @@ function followTailDuring(anim) {
 }
 
 function foldExpand(fold) {
-  if (fold._foldAnim) { try { fold._foldAnim.cancel(); } catch (e) {} }
-  fold._foldAnim = null;
+  cancelFoldAnim(fold);
   fold.classList.remove("hidden");
   if (reducedMotion()) { fold.classList.add("open"); autoScroll(); return; }
   const anim = fold.animate(
@@ -681,8 +756,7 @@ function foldExpand(fold) {
 }
 
 function foldCollapse(fold, onDone) {
-  if (fold._foldAnim) { try { fold._foldAnim.cancel(); } catch (e) {} }
-  fold._foldAnim = null;
+  cancelFoldAnim(fold);
   fold.classList.remove("open");
   if (reducedMotion()) { fold.classList.add("hidden"); if (onDone) onDone(); return; }
   const anim = fold.animate(
@@ -708,9 +782,11 @@ function toggleFold(fold, onExpand) {
   return wasHidden;
 }
 
-// A collapsed thinking row rebuilt once from a stored assistant_message.reasoning
-// (used when a stored session replays without reasoning_delta stream).
-function appendThinkingRow(reasoning) {
+// One collapsible thinking row (event container + toggle + label + fold panel),
+// shared by the stored-replay path (appendThinkingRow) and the live
+// reasoning_delta stream. The live path updates label and _content incrementally;
+// the fold's expand callback renders _content so an open panel never goes stale.
+function buildThinkingBlock(initialLabel, initialContent) {
   const el = document.createElement("div");
   el.className = "event thinking";
   el.innerHTML = '<div class="hdr">thinking</div>';
@@ -721,20 +797,29 @@ function appendThinkingRow(reasoning) {
   toggle.textContent = "▸";
   const lbl = document.createElement("span");
   lbl.className = "thinking-label";
-  lbl.textContent = "thinking";
+  lbl.textContent = initialLabel;
   row.appendChild(toggle);
   row.appendChild(lbl);
   el.appendChild(row);
   const full = document.createElement("pre");
   full.className = "thinking-full";
-  full.textContent = reasoning;
+  full.textContent = initialContent;
+  full._content = initialContent; // per-block copy; survives step_start resets
   const fold = wrapFold(full);
   el.appendChild(fold);
+  // click toggles between the compact row and the full reasoning text
   row.onclick = () => {
-    const wasHidden = toggleFold(fold);
+    const wasHidden = toggleFold(fold, () => { full.textContent = full._content; });
     toggle.textContent = wasHidden ? "▾" : "▸";
   };
-  (pageSink || eventsEl).appendChild(el);
+  return { el, full, fold };
+}
+
+// A collapsed thinking row rebuilt once from a stored assistant_message.reasoning
+// (used when a stored session replays without reasoning_delta stream).
+function appendThinkingRow(reasoning) {
+  const block = buildThinkingBlock("thinking", reasoning);
+  (pageSink || eventsEl).appendChild(block.el);
 }
 
 // Render LaTeX ($...$, $$...$$) inside a freshly-inserted markdown block.
@@ -763,7 +848,7 @@ function hasMathText(el) {
 // Typeset replayed math block-by-block so the progress bar tracks the work.
 async function typesetProgressively(root, onPct) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
-  const blocks = Array.from(root.querySelectorAll(".event.text .body")).filter(hasMathText);
+  const blocks = Array.from(root.querySelectorAll(".event.text .body, .event.user .body")).filter(hasMathText);
   if (!blocks.length) return;
   for (let i = 0; i < blocks.length; i++) {
     try { await MathJax.typesetPromise([blocks[i]]); } catch (e) {}
@@ -832,7 +917,7 @@ function appendCompletion(status, summary) {
     // never yank mid-glide: the user's jump animation owns the scroll until it lands
     if (gliding) return;
     if (followTail) stream.scrollTop = stream.scrollHeight;
-    else jumpBottom.classList.remove("hidden");
+    else setJumpVisible(true);
   }
 }
 
@@ -846,8 +931,11 @@ function renderEvent(ev) {
     case "user_message": {
       wrap.className = "event user";
       wrap.innerHTML = '<div class="hdr">task</div>';
-      body.className = "body md-plain";
-      body.textContent = ev.content;
+      body.className = "body";
+      // hard-wrapped markdown (breaks: true): the task is WYSIWYG — every line
+      // break shows, LaTeX renders via typesetMath (gated by MATH_RE after the
+      // block is in the DOM; the replay pass batches it separately)
+      body.innerHTML = renderMarkdown(ev.content, true);
       break;
     }
     case "tool_result": {
@@ -949,15 +1037,18 @@ function escapeHtml(s) {
   })[c]);
 }
 
-// Render LLM output as markdown. LLM output is untrusted: DOMPurify strips any
-// raw HTML/script before it reaches the DOM. Falls back to plain text if the
-// vendor libs are unavailable (e.g. offline without the vendor files).
-function renderMarkdown(text) {
+// Render markdown with marked + DOMPurify. LLM output is untrusted: DOMPurify
+// strips any raw HTML/script before it reaches the DOM. Falls back to plain
+// text if the vendor libs are unavailable (e.g. offline without the vendor
+// files). breaks=true turns single newlines into <br> (hard wrap) — used for
+// user tasks so the input is WYSIWYG; assistant output keeps soft wrap.
+function renderMarkdown(text, breaks = false) {
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
     return escapeHtml(text);
   }
   try {
-    return DOMPurify.sanitize(marked.parse(String(text)));
+    const src = String(text);
+    return DOMPurify.sanitize(breaks ? marked.parse(src, { breaks: true }) : marked.parse(src));
   } catch (e) {
     return escapeHtml(text);
   }
@@ -992,9 +1083,8 @@ async function run() {
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
-  // sending a message means "back to the live tail": re-latch and glide down
-  // exactly like pressing the ↓ button (the latch then keeps the reply pinned)
-  followTail = true;
+  // sending a message means "back to the live tail": glide down when reading
+  // history, instant-pin when already tracked (the latch keeps the reply pinned)
   autoScroll(true);
   // runs append to the active project's conversation; the mode travels with the
   // request so a switch only affects this run
@@ -1222,7 +1312,7 @@ async function resetBackendLocal() {
 // the connection selector.
 function refreshPicker() {
   showPickerBody();
-  loadDir("");
+  loadDir("", false); // re-list the (new) backend from home; keep the remembered dir
   renderConnSelector();
 }
 
@@ -1497,7 +1587,15 @@ function openPerm(ev) {
   const argsEl = $("#perm-args");
   let txt = ev.args_repr || "";
   let isJson = false;
-  try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {}
+  if (ev.tool === "run_command") {
+    // permission prompts show the command itself, not the {comment: ...} envelope
+    try {
+      const parsed = JSON.parse(txt);
+      if (parsed && typeof parsed.command === "string") txt = "$ " + parsed.command;
+    } catch (e) {}
+  } else {
+    try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {}
+  }
   argsEl.textContent = "";
   if (typeof hljs !== "undefined" && isJson) {
     const code = document.createElement("code");
@@ -1742,7 +1840,7 @@ async function loadOlder() {
     }
     // typeset AFTER insertion: MathJax needs real layout, and any height it adds
     // must be accounted for before the anchor re-adjusts the scroll position
-    const mathBlocks = Array.from(sink.querySelectorAll(".event.text .body")).filter(hasMathText);
+    const mathBlocks = Array.from(sink.querySelectorAll(".event.text .body, .event.user .body")).filter(hasMathText);
     const frag = document.createDocumentFragment();
     while (sink.firstChild) frag.appendChild(sink.firstChild);
     eventsEl.insertBefore(frag, eventsEl.firstElementChild);
@@ -1904,7 +2002,8 @@ function openFsBrowser(mode) {
   // the selector once against the correct backend (no double loadDir)
   reconciledBackendUrl().then((url) => {
     if (url) switchBackend(url);
-    loadDir("");
+    // reopen where the user last left the browser instead of the home directory
+    loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
     renderConnSelector();
   });
 }
@@ -1921,7 +2020,7 @@ function fsRow(label, cls, onClick) {
   return row;
 }
 
-async function loadDir(path) {
+async function loadDir(path, remember = true) {
   const listEl = $("#fs-list");
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
   try {
@@ -1932,6 +2031,9 @@ async function loadDir(path) {
     if (!r.ok || data.error) throw new Error(data.error || r.status);
     fsPath = data.path;
     fsParent = data.parent;
+    // remember the last browsed directory so the browser reopens there next time
+    // (the picker's own re-lists pass remember=false and must not overwrite it)
+    if (remember) localStorage.setItem("clutch_fs_last_dir", fsPath);
     $("#fs-path-input").value = data.path;
     listEl.innerHTML = "";
     if (data.parent) {
@@ -1954,6 +2056,15 @@ async function loadDir(path) {
     }
     if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
   } catch (e) {
+    // a remembered last directory may be gone (backend switch, deleted dir):
+    // forget it and retry from the home directory once — only show the error
+    // UI for the retry (a retry that fails again has path=="" and no record)
+    const remembered = localStorage.getItem("clutch_fs_last_dir");
+    if (remembered && path === remembered) {
+      localStorage.removeItem("clutch_fs_last_dir");
+      loadDir("");
+      return;
+    }
     listEl.innerHTML = "";
     listEl.appendChild(
       fsRow(

@@ -39,7 +39,7 @@ class Config:
     # dropping them or aborting. This is the ONLY turn-level budget guard — disable
     # it and a long run overflows the window (the API errors out gracefully).
     compaction_enabled: bool = True
-    compaction_reserved: int = 20_000  # headroom left for the completion output
+    compaction_reserved: int = 10_000  # headroom for the completion output (DeepSeek caps output ~8k; 20k wasted 12k → later trigger, fewer compactions)
     compaction_tail_tokens: int | None = None  # recent tail to preserve; None = auto (~25% usable, cap 15k)
     compaction_model: str | None = None  # model used to write summaries; None = the main model
 

@@ -199,8 +199,9 @@ function checkExec(r) {
 // exec request over ~8KB (measured on the test router: 7,929B ok / 9,636B died).
 // Every upload exec command stays well under that. The limit is the single
 // source in agent/transport_defaults.json — the same file the Python side reads,
-// so the two languages can never drift apart.
-const { exec_chunk_bytes: EXEC_CHUNK_BYTES } = require("../agent/transport_defaults.json");
+// so the two languages can never drift apart. The file is copied into ui/ at
+// build time and checked for drift by the predist script.
+const { exec_chunk_bytes: EXEC_CHUNK_BYTES } = require("./transport_defaults.json");
 
 function shq(s) {
   // single-quote for sh: ' -> '\'' (works on any POSIX shell)

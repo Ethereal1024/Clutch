@@ -45,6 +45,35 @@ tool-calling 接口。
 **直连局域网（可选，不推荐）**：--host 0.0.0.0 直接暴露 HTTP，无鉴权，仅可信
 局域网内使用；此时后端需自行连接 LLM（设 CLUTCH_API_KEY 或 --base-url）。
 
+桌面版（Linux deb）
+------------------
+打包定位：自包含的 Linux 发行版桌面应用。deb 内含 Electron GUI + 打包好的后端
+二进制（PyInstaller onefile），安装后从应用菜单/命令行启动即用，目标机器**不需要
+python/pip/网络**。
+
+安装：
+  sudo dpkg -i clutch-ui_<ver>_amd64.deb     # 或 apt install ./clutch-ui_<ver>_amd64.deb
+  # 启动：应用菜单「Clutch」，或命令行 clutch
+  # 后端由应用自动拉起（127.0.0.1:8890），退出应用时自动停止
+
+行为细节：
+  · 启动时自动探测 127.0.0.1:8890 是否已有健康后端：有则复用（如手动起的
+    `uv run python -m agent.server`），没有则拉起 deb 内置的 agent-server
+  · 设 CLUTCH_API_URL=http://host:port 指向自定义/远程后端时，应用不再管理本地
+    后端（SSH 连接也走这条路径）
+  · deb 内后端绑定构建机的 OS/架构/glibc 族（本机打包 = 本机即用；跨平台远端由
+    SSH 自适应安装器处理）
+
+构建 deb：
+  一键：bash scripts/release.sh            # 图标 → 后端二进制 → deb
+  单步：.venv/bin/python scripts/make-icon.py          # ui/build/icon.png + .svg
+        bash scripts/build-server-bundle.sh <ver> dist/agent-server
+        cd ui && npm run dist              # predist 自动校验 transport_defaults 一致性
+  · 默认从 npmmirror 拉取 electron / electron-builder 工具（CN 网络友好），可用
+    ELECTRON_MIRROR / ELECTRON_BUILDER_BINARIES_MIRROR 覆盖
+  · CI：推送 vX.Y.Z tag 自动构建 deb 并附加到 GitHub Release（见
+    .github/workflows/release.yml）
+
 独立评测工具（可选）：uv run python -m eval.harness，见 eval/
 
 特色功能

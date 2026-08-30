@@ -224,6 +224,7 @@ main { display: flex; flex: 1; min-height: 0; }
   flex-direction: column; min-height: 0;
 }
 #stream {
+  position: relative; /* anchors the ::before rail and the absolute jump-bottom */
   flex: 1; overflow-y: auto; padding: 16px 16px 24px 16px;
   counter-reset: step;
   /* the task input above grows and shrinks while typing, resizing this viewport;
@@ -246,7 +247,6 @@ main { display: flex; flex: 1; min-height: 0; }
   opacity: 0.55;
   pointer-events: none;
 }
-#stream { position: relative; }
 
 .event {
   position: relative;
@@ -400,8 +400,8 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .event.tool_result::before { background: var(--accent); }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
-.event.tool_result.error::before { background: var(--accent); }
-.event.tool_result.error .hdr { color: var(--accent); }
+/* error results share the accent with success — the "⚠" in the hdr text is the
+   distinction, so no separate error rule is needed */
 .event.tool_result.read::before { background: var(--muted); }
 .event.tool_result.read .hdr { color: var(--muted); font-weight: 400; }
 
@@ -462,7 +462,6 @@ main { display: flex; flex: 1; min-height: 0; }
   min-width: 0;
 }
 .fold.open { grid-template-rows: 1fr; }
-.fold.hidden { display: none; }
 .fold-inner { overflow: hidden; min-height: 0; }
 
 .read-row {
@@ -682,7 +681,6 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }
 
 /* welcome screen (kept as-is per user) */
-.welcome.hidden { display: none; }
 .welcome {
   position: fixed; inset: 0; z-index: 90;
   background: var(--bg);
