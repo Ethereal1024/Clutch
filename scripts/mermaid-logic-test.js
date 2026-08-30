@@ -92,13 +92,13 @@ function renderMermaid(root, streaming = false) {
         taskTextColor: "#d4d4d8",
         taskTextLightColor: "#d4d4d8",
         activeTaskBorderColor: accent,
-        activeTaskBkgColor: "#2d2d33",
-        activeTaskBkg: "#2d2d33",
-        activeTaskTextColor: "#d4d4d8",
-        doneTaskBorderColor: accent,
-        doneTaskBkgColor: "#2d2d33",
-        doneTaskBkg: "#2d2d33",
-        doneTaskTextColor: "#d4d4d8",
+        activeTaskBkgColor: accent,
+        activeTaskBkg: accent,
+        activeTaskTextColor: "#0F0F10",
+        doneTaskBorderColor: "#52525b",
+        doneTaskBkgColor: "#1c1c1f",
+        doneTaskBkg: "#1c1c1f",
+        doneTaskTextColor: "#a1a1aa",
         todayLineColor: accent,
         clusterBorder: accent,
         noteBkgColor: "#1c1c1f",
@@ -240,8 +240,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok("sequence actor border is accent", tv.actorBorder === "#EF4444");
   ok("gantt task border is accent", tv.taskBorderColor === "#EF4444");
   ok("gantt task fill uses mermaid10 BkgColor key", tv.taskBkgColor === "#2d2d33" && tv.taskBkg === "#2d2d33");
-  ok("gantt active uses BkgColor key (mermaid9 name ignored)", tv.activeTaskBkgColor === "#2d2d33" && tv.activeTaskBkg === "#2d2d33" && tv.activeTaskBorderColor === "#EF4444");
-  ok("gantt done uses BkgColor key", tv.doneTaskBkgColor === "#2d2d33" && tv.doneTaskBkg === "#2d2d33");
+  ok("gantt active = red fill + dark text (running)", tv.activeTaskBkgColor === "#EF4444" && tv.activeTaskBkg === "#EF4444" && tv.activeTaskTextColor === "#0F0F10");
+  ok("gantt done = dark fill + grey border (archived)", tv.doneTaskBkgColor === "#1c1c1f" && tv.doneTaskBorderColor === "#52525b" && tv.doneTaskTextColor === "#a1a1aa");
   ok("gantt text is light grey not white", tv.taskTextColor === "#d4d4d8" && tv.taskTextLightColor === "#d4d4d8");
   ok("note fill is neutral dark (no yellow)", tv.noteBkgColor === "#1c1c1f");
   ok("pie first slice is the red accent", tv.pie1 === "#EF4444" && tv.pie2 === "#27272a" && tv.pie12 === "#ededf0");

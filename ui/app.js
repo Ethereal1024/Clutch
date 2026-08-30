@@ -936,23 +936,27 @@ function renderMermaid(root, streaming = false) {
           labelBoxBorderColor: accent,
           noteBorderColor: accent,
           activationBorderColor: accent,
-          // gantt — mermaid 10 reads the *BkgColor keys for fills (mermaid 9's
-          // plain *Bkg names are ignored by the renderer: active defaults to
-          // blue #81B1DB, done to lightgrey); borders keep no Color suffix and
-          // text is shared via taskTextColor/taskTextLightColor (default white)
+          // gantt — three states stay distinguishable within the theme:
+          //   active (running) = red fill + dark text, most prominent
+          //   normal (planned) = dark grey + red border
+          //   done (archived)  = darker grey + grey border, least prominent
+          // mermaid 10 reads the *BkgColor keys for fills (mermaid 9's plain
+          // *Bkg names are ignored: active would default to blue #81B1DB, done
+          // to lightgrey); borders keep no Color suffix; text is shared via
+          // taskTextColor/taskTextLightColor (default white)
           taskBorderColor: accent,
           taskBkgColor: "#2d2d33",
           taskBkg: "#2d2d33", // harmless alias for any theme that reads it
           taskTextColor: "#d4d4d8",
           taskTextLightColor: "#d4d4d8",
           activeTaskBorderColor: accent,
-          activeTaskBkgColor: "#2d2d33",
-          activeTaskBkg: "#2d2d33",
-          activeTaskTextColor: "#d4d4d8",
-          doneTaskBorderColor: accent,
-          doneTaskBkgColor: "#2d2d33",
-          doneTaskBkg: "#2d2d33",
-          doneTaskTextColor: "#d4d4d8",
+          activeTaskBkgColor: accent,
+          activeTaskBkg: accent,
+          activeTaskTextColor: "#0F0F10",
+          doneTaskBorderColor: "#52525b",
+          doneTaskBkgColor: "#1c1c1f",
+          doneTaskBkg: "#1c1c1f",
+          doneTaskTextColor: "#a1a1aa",
           todayLineColor: accent,
           // clusters / subgraphs
           clusterBorder: accent,
