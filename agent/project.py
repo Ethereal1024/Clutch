@@ -173,10 +173,12 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
         memories = MemoryStore(str(path), writer=writer)
 
     if comp is None or total - base < _LAZY_MIN_BYTES:
-        # nothing to be lazy about: plain read + durable parse, same as open_project
+        # nothing to be lazy about: plain read + durable parse, same as
+        # open_project. Load into the log's internal lists (NOT log.append —
+        # append would re-persist every parsed event, doubling the file on each
+        # open), tracking each durable event's real byte offset.
         log = EventLog(path=str(path), writer=writer)
-        for ev in parse_durable(read(0, total).decode("utf-8", "replace")):
-            log.append(ev)
+        _load_durable_into(log, read(0, total))
         return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
     comp_off_abs, comp_ev = comp
@@ -186,6 +188,30 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
         tail_rel = comp_rel  # stale/out-of-range: keep the compaction (its summary) visible
     log = LazyEventLog(str(path), read, total, base, writer=writer, tail_start=tail_rel)
     return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
+
+
+def _load_durable_into(log: EventLog, raw: bytes) -> None:
+    """Fill a log from raw .clc bytes WITHOUT persisting (internal lists only),
+    recording each durable event's byte offset relative to the event region
+    (every line inside the region occupies bytes, transients included)."""
+    running = 0
+    in_region = False
+    for seg in raw.split(b"\n"):
+        stripped = seg.strip()
+        if stripped:
+            try:
+                data = json.loads(seg.decode("utf-8", "replace"))
+            except (ValueError, TypeError, json.JSONDecodeError):
+                data = None
+            if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:
+                if not in_region:
+                    in_region = True
+                    log._offsets.append(0)  # the raw task: event region start
+                else:
+                    log._offsets.append(running)
+                log._events.append(event_from_dict(data))
+        if in_region:
+            running += len(seg) + 1  # BYTES of every line inside the region
 
 
 def _event_region_start(head: bytes) -> int | None:

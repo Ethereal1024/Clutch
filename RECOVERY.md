@@ -115,6 +115,9 @@ uv run python scripts/remote-read-verify.py    # 模拟 SSH：base64 往返 + �
    - `_make_reader` 远程分支用 `workspace.size()` + `read_range()`（base64 无损），**不要**退回 `workspace.read()` 整文件拉取。
    - `_LAZY_MIN_BYTES` 是懒加载阈值（默认 256KB）；`_TAIL_SCAN_MAX` 8MB 是尾部扫描上限——这两个是"打开行为"的调节阀，调试时优先看它们。
 
+- [ ] 升级预防清单见 §9.4；旧文件迁移用 `uv run python scripts/convert-clc-seq-to-byte.py [file.clc ...]`（把 seq 语义的 tail_start 重写为字节偏移，行字节不变），验证用 `uv run python scripts/verify-clc-byte.py`。
+- ⚠️ **已知历史 bug（已修，commit 待记录）**：`open_project_lazy` 全量路径曾用 `log.append(ev)` 加载——`EventLog(path=...)` 的 append 会把解析出的每个事件**重新写回文件**，导致无 compaction 的 .clc（如 chat-test）每次打开**翻倍膨胀**。修复为 `_load_durable_into`（内部列表加载 + 真实字节偏移，不持久化）。若发现某 .clc 行数异常翻倍，从备份恢复或手工去重即可。
+
 ## 8. 仍需真机验证（本环境无法自动化）
 
 1. 真实 SSH 端到端（两台机器：连远端 → 远端 supervisor 拉起 → 会话 → 跨机 .clc 409 → 心跳自愈 → 隧道断回本地）
