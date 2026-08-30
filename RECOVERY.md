@@ -116,7 +116,8 @@ uv run python scripts/remote-read-verify.py    # 模拟 SSH：base64 往返 + �
    - `_LAZY_MIN_BYTES` 是懒加载阈值（默认 256KB）；`_TAIL_SCAN_MAX` 8MB 是尾部扫描上限——这两个是"打开行为"的调节阀，调试时优先看它们。
 
 - [ ] 升级预防清单见 §9.4；旧文件迁移用 `uv run python scripts/convert-clc-seq-to-byte.py [file.clc ...]`（把 seq 语义的 tail_start 重写为字节偏移，行字节不变），验证用 `uv run python scripts/verify-clc-byte.py`。
-- ⚠️ **已知历史 bug（已修，commit 待记录）**：`open_project_lazy` 全量路径曾用 `log.append(ev)` 加载——`EventLog(path=...)` 的 append 会把解析出的每个事件**重新写回文件**，导致无 compaction 的 .clc（如 chat-test）每次打开**翻倍膨胀**。修复为 `_load_durable_into`（内部列表加载 + 真实字节偏移，不持久化）。若发现某 .clc 行数异常翻倍，从备份恢复或手工去重即可。
+- ⚠️ **已知历史 bug（已修，commit 待记录）**：`_tail_scan` 倒扫多区间时，更早扫描区间内的 compaction / `[memories]` 标记会**无条件覆盖**更靠后的 → 返回的不是「全文件最后一个 compaction」。当 `[memories]` 标记在文件较前位置时（如 clutch.clc 在 40% 处），倒扫扩展区间会碰到更早的 compaction 并覆盖掉正确的最后一个 → 打开物化数千事件（clutch 4243 个）、UI 打开慢。修复为「只在 `line_start` 更大时覆盖」；实测 clutch 打开物化 4243 → 137、api-fix 727 → 135、lazy-load 298 → 36、pack 672 → 250。排查法：`_tail_scan` 返回的 comp 的 abs 应与文件里最后一个 compaction 行偏移一致。
+- ⚠️ **已知历史 bug（已修，commit bd83869）**：`open_project_lazy` 全量路径曾用 `log.append(ev)` 加载——`EventLog(path=...)` 的 append 会把解析出的每个事件**重新写回文件**，导致无 compaction 的 .clc（如 chat-test）每次打开**翻倍膨胀**。修复为 `_load_durable_into`（内部列表加载 + 真实字节偏移，不持久化）。若发现某 .clc 行数异常翻倍，从备份恢复或手工去重即可。
 
 ## 8. 仍需真机验证（本环境无法自动化）
 

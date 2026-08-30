@@ -151,7 +151,8 @@ def _tail_scan(read: Callable[[int, int], bytes], total: int) -> tuple[tuple[int
             line = seg.decode("utf-8", "replace")
             stripped = line.strip()
             if stripped == _SECTION:
-                mem = line_start  # last occurrence wins (later in the scan = later in the file)
+                if mem is None or line_start > mem:
+                    mem = line_start  # keep the LATEST marker (largest offset)
                 continue
             if not stripped:
                 continue
@@ -160,7 +161,8 @@ def _tail_scan(read: Callable[[int, int], bytes], total: int) -> tuple[tuple[int
             except (ValueError, TypeError, json.JSONDecodeError):
                 continue
             if isinstance(data, dict) and data.get("type") == "compaction":
-                comp = (line_start, event_from_dict(data))
+                if comp is None or line_start > comp[0]:
+                    comp = (line_start, event_from_dict(data))  # keep the LATEST compaction
         scanned_to = lo
         if comp is not None and mem is not None:
             break
