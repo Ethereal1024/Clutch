@@ -936,8 +936,15 @@ function renderMermaid(root, streaming = false) {
           labelBoxBorderColor: accent,
           noteBorderColor: accent,
           activationBorderColor: accent,
-          // gantt
+          // gantt — task bars keep per-state keys (active/done), all themed
           taskBorderColor: accent,
+          taskBkg: "#2d2d33",
+          activeTaskBorderColor: accent,
+          activeTaskBkg: "#2d2d33",
+          activeTaskTextColor: "#d4d4d8",
+          doneTaskBorderColor: accent,
+          doneTaskBkg: "#2d2d33",
+          doneTaskTextColor: "#d4d4d8",
           todayLineColor: accent,
           // clusters / subgraphs
           clusterBorder: accent,
@@ -949,9 +956,9 @@ function renderMermaid(root, streaming = false) {
           taskBkg: "#2d2d33",
           taskTextOutsideColor: "#a1a1aa",
           activationBkgColor: "#27272a",
-          // --- pie: grayscale ramp + one red accent (pie0-pie12) ---
-          pie0: accent,
-          pie1: "#18181b",
+          // --- pie: first slice gets the red accent, rest a grayscale ramp
+          // (pie0 is an unused definition — pie rendering starts at pie1) ---
+          pie1: accent,
           pie2: "#27272a",
           pie3: "#3f3f46",
           pie4: "#52525b",

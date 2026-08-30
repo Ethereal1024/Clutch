@@ -87,6 +87,13 @@ function renderMermaid(root, streaming = false) {
         noteBorderColor: accent,
         activationBorderColor: accent,
         taskBorderColor: accent,
+        taskBkg: "#2d2d33",
+        activeTaskBorderColor: accent,
+        activeTaskBkg: "#2d2d33",
+        activeTaskTextColor: "#d4d4d8",
+        doneTaskBorderColor: accent,
+        doneTaskBkg: "#2d2d33",
+        doneTaskTextColor: "#d4d4d8",
         todayLineColor: accent,
         clusterBorder: accent,
         noteBkgColor: "#1c1c1f",
@@ -96,8 +103,7 @@ function renderMermaid(root, streaming = false) {
         taskBkg: "#2d2d33",
         taskTextOutsideColor: "#a1a1aa",
         activationBkgColor: "#27272a",
-        pie0: accent,
-        pie1: "#18181b",
+        pie1: accent,
         pie2: "#27272a",
         pie3: "#3f3f46",
         pie4: "#52525b",
@@ -228,8 +234,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok("theme uses accent for strokes", tv.lineColor === "#EF4444");
   ok("sequence actor border is accent", tv.actorBorder === "#EF4444");
   ok("gantt task border is accent", tv.taskBorderColor === "#EF4444");
+  ok("gantt active task border is accent", tv.activeTaskBorderColor === "#EF4444" && tv.activeTaskBkg === "#2d2d33");
+  ok("gantt done task border is accent", tv.doneTaskBorderColor === "#EF4444" && tv.doneTaskBkg === "#2d2d33");
   ok("note fill is neutral dark (no yellow)", tv.noteBkgColor === "#1c1c1f");
-  ok("pie palette grayscale + red", tv.pie0 === "#EF4444" && tv.pie12 === "#ededf0" && tv.pie6 === "#8b8b94");
+  ok("pie first slice is the red accent", tv.pie1 === "#EF4444" && tv.pie2 === "#27272a" && tv.pie12 === "#ededf0");
+  ok("pie has no unused pie0", tv.pie0 === undefined);
   ok("git palette grayscale + red", tv.git0 === "#EF4444" && tv.git3 === "#3f3f46");
 
   // 8. cache cap: overflow clears and re-renders (use a fresh uncached source)
