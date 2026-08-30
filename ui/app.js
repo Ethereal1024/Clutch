@@ -642,6 +642,9 @@ function addEvent(ev) {
   const el = renderEvent(ev);
   if (el) {
     (pageSink || eventsEl).appendChild(el);
+    // user tasks render markdown too: highlight code and draw mermaid diagrams
+    // (replay also hits this path — highlightCode is synchronous and layout-free)
+    if (el.classList.contains("event.user")) highlightCode(el);
     // user tasks can carry LaTeX too; typeset on the live path only (replay
     // batches it after insertion in openProject — MathJax needs real layout)
     if (el.classList.contains("event.user") && !pageSink) typesetMath(el);
@@ -865,6 +868,75 @@ function highlightCode(root) {
   root.querySelectorAll("pre code").forEach((el) => {
     try { hljs.highlightElement(el); } catch (e) {}
   });
+  renderMermaid(root);
+}
+
+let mermaidInitialized = false;
+// Rendered SVGs are cached by source text: streaming re-renders the whole body
+// on every delta (a fresh DOM replaces every pre), so a finished diagram must
+// be restored synchronously from the cache instead of redrawn — no flash, no
+// duplicate async renders. The cache is bounded; on overflow it resets and the
+// next pass simply re-renders.
+const mermaidCache = new Map();
+// Render mermaid diagrams: every <pre><code class="language-mermaid"> becomes a
+// rendered SVG (falling back to the literal source on parse errors). A diagram
+// only appears once its ``` fence closed (marked emits no pre before that), so
+// there is no half-source flash.
+function renderMermaid(root) {
+  if (typeof mermaid === "undefined" || !root) return;
+  if (!mermaidInitialized) {
+    mermaidInitialized = true;
+    try {
+      mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+    } catch (e) {
+      return;
+    }
+  }
+  const pending = [];
+  root.querySelectorAll("pre code.language-mermaid").forEach((code) => {
+    const pre = code.parentElement;
+    if (!pre) return;
+    const src = code.textContent;
+    if (pre.dataset.mermaidSrc === src) return; // this exact source already drawn
+    const cached = mermaidCache.get(src);
+    if (cached) {
+      // a streaming re-render rebuilt the DOM: restore the SVG synchronously
+      pre.classList.add("mermaid-rendered");
+      pre.textContent = "";
+      pre.insertAdjacentHTML("beforeend", cached);
+      pre.dataset.mermaidSrc = src;
+      return;
+    }
+    pre.dataset.mermaidSrc = src; // mark in-flight so deltas don't double-render
+    pending.push({ pre, src });
+  });
+  for (const { pre, src } of pending) {
+    mermaid
+      .render("mmd-" + Math.random().toString(36).slice(2), src)
+      .then(({ svg }) => {
+        if (mermaidCache.size > 100) mermaidCache.clear();
+        mermaidCache.set(src, svg);
+        // a later streaming delta may have rebuilt the DOM: re-locate a block
+        // with this exact source before swapping, so the SVG never lands orphaned
+        let target = null;
+        for (const el of root.querySelectorAll("pre code.language-mermaid")) {
+          if (el.textContent === src) { target = el.parentElement; break; }
+        }
+        if (target) {
+          // securityLevel "strict" already sanitizes the SVG; keep the block chrome
+          target.classList.add("mermaid-rendered");
+          target.textContent = "";
+          target.insertAdjacentHTML("beforeend", svg);
+          target.dataset.mermaidSrc = src;
+          if (followTail) autoScroll(); // a diagram can be taller than its source
+        }
+      })
+      .catch(() => {
+        // syntax error: keep the literal source; drop the marker so a later
+        // identical source can retry once its text changes
+        if (pre.isConnected) delete pre.dataset.mermaidSrc;
+      });
+  }
 }
 
 // Map a file extension to a highlight.js language id and highlight a bare

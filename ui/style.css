@@ -322,6 +322,17 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .event .body pre code { background: none; padding: 0; }
 
+/* rendered mermaid diagrams replace the source block; mermaid's dark theme
+   draws on a transparent backdrop, so the container provides the chrome */
+.event .body pre.mermaid-rendered {
+  background: var(--code-bg);
+  border-color: var(--border);
+  text-align: center;
+  overflow-x: auto;
+  padding: 12px 10px;
+}
+.event .body pre.mermaid-rendered svg { max-width: 100%; height: auto; }
+
 /* syntax highlighting (highlight.js) — tuned to the swiss dark palette */
 .hljs-comment, .hljs-quote { color: var(--muted); font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-subst { color: var(--text); font-weight: 600; }
