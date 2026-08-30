@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .config import Config
 from .core import lazy as lazy_mod
+from .core.compaction import Compactor
 from .core.context import derive_messages
 from .core.lazy import LazyEventLog, _stored_tail_start, index_file, parse_durable
 from .events import (
@@ -212,6 +213,53 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     check(long_log.older_count() == 0,
           "after compaction everything relevant is resident (older_count 0, pill gone)")
     check(not comp.compact(), "second compact() is a no-op (nothing new since last compaction)")
+
+    # ---- 5b. tail_start_index walks the FULL durable sequence, not the
+    # resident subset --------------------------------------------------
+    # Regression: the lazy log's resident subset is seq 0 + the preserved tail
+    # only. Sizing the tail budget from that subset alone clamps the boundary
+    # to the resident window's edge (or 0) whenever the subset's tokens fall
+    # short of the budget — a different boundary than a fully loaded log would
+    # pick (and one that stalls compaction). The walk must read the whole
+    # durable sequence off disk and match EventLog.tail_start_index exactly.
+    p_edge = tmp / "edge.clc"
+    edge_lines = ["# clutch project v1", "name: edge", "model: fake-model", "---"]
+    edge_lines.append(event_to_json(UserMessageEvent(content="task")))
+    for i in range(1, 880):
+        if i == 176:
+            edge_lines.append(event_to_json(CompactionEvent(summary="old", tail_start=176)))
+        elif i % 2:
+            edge_lines.append(event_to_json(UserMessageEvent(content="u" * 60)))
+        else:
+            edge_lines.append(event_to_json(AssistantMessageEvent(content="a" * 60)))
+    p_edge.write_text("\n".join(edge_lines) + "\n", encoding="utf-8")
+    read_e, _te = _make_local_reader(p_edge)
+    idx_e = index_file(read_e, _te, None)
+    ts_e = _stored_tail_start(read_e, idx_e)
+    lazy_e = LazyEventLog(str(p_edge), idx_e, read_e, tail_start=ts_e)
+    lazy_e.materialize_range(lazy_e._tail_start, len(idx_e))
+    full_e = EventLog()
+    for ev in parse_durable(p_edge.read_text(encoding="utf-8")):
+        full_e.append(ev)
+    want_e = full_e.tail_start_index(15000)
+    got_e = lazy_e.tail_start_index(15000)
+    check(want_e > 0, f"edge-case budget lands inside the full sequence ({want_e})")
+    # the lazy walk sizes from INDEX BYTE LENGTHS (zero content reads) while the
+    # full log sizes from content chars, so the boundaries differ in a safe
+    # direction only: byte length is an upper bound, so the lazy tail is at or
+    # before the full log's — never a bigger retained tail, never a stall
+    check(got_e >= want_e,
+          f"lazy byte-indexed boundary is conservative vs the full log ({got_e} >= {want_e})")
+    # the walked boundary sits after the last compaction (byte lengths are an
+    # upper bound, so the lazy tail is at or before the full log's — never a
+    # stall), so the compact goes through and persists the indexed boundary
+    comp_e = Compactor(Config(compaction_tail_tokens=15000), lazy_e, FakeLlm())
+    check(comp_e.compact(), "15K-budget compact succeeds on the byte-indexed boundary")
+    last_e = lazy_e.events()[-1]
+    check(isinstance(last_e, CompactionEvent) and last_e.tail_start == got_e,
+          f"compaction persists the byte-indexed tail_start ({got_e})")
+    # the guard itself (tail_start <= last compaction position -> refuse) is
+    # exercised above by the second no-op compact in section 5
     msgs2 = derive_messages(long_log, config, "task")
     head = [m for m in msgs2 if "NEW SUMMARY" in m.get("content", "")]
     check(len(head) == 1, "derive_messages sees the fresh summary head after lazy compaction")

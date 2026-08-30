@@ -741,6 +741,78 @@ def main() -> None:
             "events after the memory section still load",
         )
 
+    # 13. LLM endpoint configurability: provider presets, env defaults,
+    # resolution precedence and the client factory must not be hard-locked to
+    # DeepSeek (the bug this section guards: URL locked to api.deepseek.com).
+    from agent.config import PROVIDER_PRESETS, provider_preset, resolve_llm_endpoint
+    from agent.llm import create_llm_client
+    from agent.llm.factory import OPENAI_COMPATIBLE_PROVIDERS
+
+    check(provider_preset("zhipu") == ("https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"), "zhipu preset (base_url, model)")
+    check("deepseek" in PROVIDER_PRESETS and "openai" in PROVIDER_PRESETS, "deepseek/openai presets present")
+    check(provider_preset("bogus") == ("", ""), "unknown provider preset is empty")
+    check({"deepseek", "zhipu", "openai", "moonshot", "ollama", "custom"} <= OPENAI_COMPATIBLE_PROVIDERS, "all presets are OpenAI-compatible")
+
+    saved_zhipu = {"provider": "zhipu"}
+    prov, url, model = resolve_llm_endpoint(cli={}, env={}, saved=saved_zhipu, defaults=Config())
+    check(prov == "zhipu" and url == "https://open.bigmodel.cn/api/paas/v4" and model == "glm-4-flash", "saved provider moves the whole endpoint")
+    prov, url, model = resolve_llm_endpoint(
+        cli={"provider": "zhipu", "base_url": "https://my-gateway.example/v1", "model": "glm-4-air"},
+        env={},
+        saved={},
+        defaults=Config(),
+    )
+    check(
+        prov == "zhipu" and url == "https://my-gateway.example/v1" and model == "glm-4-air",
+        "explicit CLI base_url/model override the preset",
+    )
+    prov, url, model = resolve_llm_endpoint(
+        cli={},
+        env={"CLUTCH_PROVIDER": "zhipu", "CLUTCH_BASE_URL": "", "CLUTCH_MODEL": ""},
+        saved={"provider": "openai"},
+        defaults=Config(),
+    )
+    check(
+        prov == "zhipu" and url == "https://open.bigmodel.cn/api/paas/v4",
+        "env provider beats saved settings; preset fills the URL",
+    )
+    try:
+        resolve_llm_endpoint(cli={"provider": "bogus"}, env={}, saved={}, defaults=Config())
+        check(False, "unknown provider rejected by resolver")
+    except ValueError:
+        check(True, "unknown provider rejected by resolver")
+
+    old_env = {
+        k: os.environ.get(k) for k in ("CLUTCH_PROVIDER", "CLUTCH_MODEL", "CLUTCH_BASE_URL", "CLUTCH_API_KEY")
+    }
+    try:
+        os.environ["CLUTCH_PROVIDER"] = "zhipu"
+        os.environ["CLUTCH_MODEL"] = "glm-4-flash"
+        os.environ["CLUTCH_BASE_URL"] = "https://open.bigmodel.cn/api/paas/v4"
+        os.environ["CLUTCH_API_KEY"] = "sk-env"
+        ecfg = Config()
+        check(ecfg.provider == "zhipu" and ecfg.model == "glm-4-flash", "Config reads CLUTCH_PROVIDER/CLUTCH_MODEL")
+        check(ecfg.base_url == "https://open.bigmodel.cn/api/paas/v4" and ecfg.api_key == "sk-env", "Config reads CLUTCH_BASE_URL/CLUTCH_API_KEY")
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    client = create_llm_client(
+        provider="zhipu",
+        api_key="sk-test",
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+        model="glm-4-flash",
+    )
+    check(client.model == "glm-4-flash" and client.api_key == "sk-test", "factory builds a zhipu (OpenAI-compatible) client")
+    try:
+        create_llm_client(provider="bogus", api_key="k", base_url="u", model="m")
+        check(False, "factory rejects unknown provider")
+    except ValueError:
+        check(True, "factory rejects unknown provider")
+
     print("\nall passed")
     return 0
 

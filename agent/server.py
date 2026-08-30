@@ -20,18 +20,29 @@ gets a private queue. One run at a time; Stop sets a cancel flag checked by the 
 from __future__ import annotations
 
 import argparse
+import atexit
 import dataclasses
 import json
+import os
 import queue
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .base import BaseServer, Broadcaster, RunState
-from .config import Config
+from .config import (
+    PROVIDER_PRESETS,
+    REASONING_EFFORT_LEVELS,
+    Config,
+    active_profile,
+    normalize_settings,
+    provider_preset,
+    resolve_llm_endpoint,
+)
 from .events import (
     DURABLE_TYPES,
     Event,
@@ -41,6 +52,7 @@ from .events import (
     event_to_json,
 )
 from .core.lazy import LazyEventLog
+from .core.project_lock import ProjectLock, ProjectOpenConflict
 from .project import Project, create_project, open_project_lazy
 from .tools.transport import SshTransport
 from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
@@ -119,13 +131,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._json({"ok": True})
         elif path == "/api/events":
-            self._sse()
+            params = parse_qs(parsed.query)
+            self._sse(
+                (params.get("project") or [None])[0],
+                (params.get("replay") or ["1"])[0] != "0",
+            )
         elif path == "/api/history":
             self._history()
         elif path == "/api/workspace/tree":
             self._workspace_tree()
         elif path == "/api/fs/list":
             self._fs_list()
+        elif path == "/api/settings":
+            self._settings_get()
         else:
             self._json({"error": "not found"}, status=404)
 
@@ -175,8 +193,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "task is required"}, status=400)
 
         project = self._state.project
+        req_project = (body.get("project") or "").strip()
+        if req_project and (project is None or str(project.path) != req_project):
+            # a different window's project: switch the active project to this
+            # window's file so each UI window's runs append to its own .clc
+            full = Path(req_project).resolve()
+            if full.suffix != ".clc" or not full.is_file():
+                return self._json({"error": f"cannot open project: {req_project}"}, status=400)
+            try:
+                ws = self._state.build_workspace(str(full.parent))
+                project = open_project_lazy(full, workspace=ws)
+                self._state.set_project(project, workspace=ws)
+            except ProjectOpenConflict:
+                return self._json(
+                    {"error": "project is open in another window", "code": "project_open_conflict"},
+                    status=409,
+                )
+            except (OSError, ValueError) as e:
+                return self._json({"error": f"cannot open project: {e}"}, status=500)
         if project is None:
             return self._json({"error": "no project open; create or open one first"}, status=400)
+        if project.read_only:
+            return self._json(
+                {"error": "project opened read-only; close the other window first"}, status=409
+            )
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
             # publish the permission request to the UI; the agent blocks until
@@ -198,6 +238,9 @@ class Handler(BaseHTTPRequestHandler):
         if agent is None:
             return self._json({"error": "a run is already active"}, status=409)
         self._state.gate = agent.gate
+        # tag the active run with its project so SSE subscribers on other
+        # projects can filter it out of their live stream
+        self._state.run_project = str(project.path)
 
         def _worker() -> None:
             # run() emits a graceful error final for anticipated AgentError
@@ -236,16 +279,133 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"status": "cancelling"})
 
     def _settings(self) -> None:
+        """Save/switch/delete named API profiles (multi-API settings).
+
+        Three verbs, all on ~/.clutch/settings.json via the profiles map:
+          * save:   {profile_name?, provider?, base_url?, model?, api_key?}
+                    updates that profile (default: the active one) and activates
+                    it — the endpoint the next LLM call uses.
+          * switch: {activate: name} changes the active profile only.
+          * delete: {delete: name} removes a saved profile.
+        Legacy flat files are migrated to a single "default" profile on read.
+        """
         body = self._read_body()
         if body is None:
             return self._json({"error": "bad json body"}, status=400)
+
+        delete_name = (body.get("delete") or "").strip()
+        if delete_name:
+            norm = normalize_settings(load_settings())
+            profs = norm.setdefault("profiles", {})
+            if delete_name in profs:
+                del profs[delete_name]
+                if norm.get("active") == delete_name:
+                    norm["active"] = next(iter(profs), "")
+            save_settings(norm)
+            return self._json({"status": "ok"})
+
+        activate_only = (body.get("activate") or "").strip()
+        saving = any(body.get(k) for k in ("api_key", "provider", "model", "base_url")) or (
+            "reasoning_effort" in body  # explicit empty value = clear the knob
+        )
+        if activate_only and not saving:
+            norm = normalize_settings(load_settings())
+            if activate_only not in (norm.get("profiles") or {}):
+                return self._json({"error": f"unknown profile: {activate_only}"}, status=400)
+            norm["active"] = activate_only
+            save_settings(norm)
+            self._apply_profile((norm["profiles"] or {}).get(activate_only) or {})
+            return self._json({"status": "ok"})
+        if not saving:
+            return self._json({"error": "nothing to save"}, status=400)
+
+        # The provider name selects the default endpoint; a provider without an
+        # explicit base_url/model inherits the provider's preset (e.g. zhipu ->
+        # https://open.bigmodel.cn/api/paas/v4 + glm-4-flash). This is what
+        # un-hardcodes the LLM URL: the endpoint is data, not a deepseek literal.
+        provider = (body.get("provider") or "").strip() or self._cfg.provider
+        if provider not in PROVIDER_PRESETS:
+            return self._json(
+                {
+                    "error": f"unsupported provider: {provider}; "
+                    f"choose from {', '.join(sorted(PROVIDER_PRESETS))}",
+                },
+                status=400,
+            )
+        reasoning_effort = (body.get("reasoning_effort") or "").strip()
+        if reasoning_effort and reasoning_effort not in REASONING_EFFORT_LEVELS:
+            return self._json(
+                {"error": f"reasoning_effort must be one of {', '.join(REASONING_EFFORT_LEVELS)}"},
+                status=400,
+            )
+        base_url = (body.get("base_url") or "").strip()
+        model = (body.get("model") or "").strip()
+        if not base_url or not model:
+            p_base, p_model = provider_preset(provider)
+            base_url = base_url or p_base or self._cfg.base_url
+            model = model or p_model or self._cfg.model
         api_key = (body.get("api_key") or "").strip()
-        if not api_key:
-            return self._json({"error": "api_key is required"}, status=400)
+        name = (body.get("profile_name") or "").strip() or "default"
+
         with self._state.lock:
-            self._state.api_key = api_key
-        save_settings({"api_key": api_key})
+            if api_key:
+                self._state.api_key = api_key
+            self._cfg.provider = provider
+            self._cfg.base_url = base_url
+            self._cfg.model = model
+            # empty value clears the knob (provider default); None = unset
+            self._cfg.llm_reasoning_effort = reasoning_effort or None
+        norm = normalize_settings(load_settings())
+        profs = norm.setdefault("profiles", {})
+        entry = dict(profs.get(name) or {})
+        entry.update({"provider": provider, "base_url": base_url, "model": model})
+        if reasoning_effort:
+            entry["reasoning_effort"] = reasoning_effort
+        else:
+            entry.pop("reasoning_effort", None)  # empty = clear the knob
+        if api_key:
+            entry["api_key"] = api_key
+        profs[name] = entry
+        norm["active"] = name  # saving a profile means "use it from now on"
+        save_settings(norm)
         self._json({"status": "ok"})
+
+    def _apply_profile(self, prof: dict) -> None:
+        """Point the live server config at a saved profile (switch verb)."""
+        with self._state.lock:
+            if prof.get("api_key"):
+                self._state.api_key = prof["api_key"]
+            self._cfg.provider = prof.get("provider") or self._cfg.provider
+            self._cfg.base_url = prof.get("base_url") or self._cfg.base_url
+            self._cfg.model = prof.get("model") or self._cfg.model
+            self._cfg.llm_reasoning_effort = prof.get("reasoning_effort") or None
+
+    def _settings_get(self) -> None:
+        """Current LLM endpoint config for the settings modal (no credentials)."""
+        norm = normalize_settings(load_settings())
+        profs = norm.get("profiles") or {}
+        active = norm.get("active") or ""
+        prof = profs.get(active) or {}
+        self._json(
+            {
+                "active": active,
+                "profiles": [
+                    {
+                        "name": n,
+                        "provider": p.get("provider", ""),
+                        "model": p.get("model", ""),
+                        "base_url": p.get("base_url", ""),
+                        "reasoning_effort": p.get("reasoning_effort", ""),
+                        "has_api_key": bool(p.get("api_key")),
+                    }
+                    for n, p in profs.items()
+                ],
+                "provider": self._cfg.provider,
+                "model": self._cfg.model,
+                "base_url": self._cfg.base_url,
+                "has_api_key": bool(self._state.api_key or self._cfg.api_key or prof.get("api_key")),
+            }
+        )
 
     def _permission_respond(self) -> None:
         body = self._read_body()
@@ -278,7 +438,27 @@ class Handler(BaseHTTPRequestHandler):
             self._state.set_backend("local")
         self._json({"status": "ok"})
 
-    def _sse(self) -> None:
+    def _project_for_sse(self, project_q: str | None) -> Project | None:
+        """Resolve the project an SSE subscriber asked to watch: the global
+        active one when no project is given (or it matches), otherwise open the
+        requested .clc fresh. Failures degrade to None (skip replay)."""
+        try:
+            if project_q:
+                global_proj = self._state.project
+                if global_proj is not None and str(global_proj.path) == project_q:
+                    return global_proj
+                full = Path(project_q).resolve()
+                if full.suffix == ".clc" and full.is_file():
+                    ws = self._state.build_workspace(str(full.parent))
+                    # SSE only replays/watchs: open read-only so a subscriber
+                    # never takes the write lock (or fights the real writer)
+                    return open_project_lazy(full, workspace=ws, read_only=True)
+                return None
+            return self._state.project
+        except (OSError, ValueError):
+            return None
+
+    def _sse(self, project_q: str | None = None, replay: bool = True) -> None:
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "text/event-stream")
@@ -290,26 +470,33 @@ class Handler(BaseHTTPRequestHandler):
             # always reset the UI status first so a stale "running" never locks the
             # taskbar after a project switch or an interrupted run
             self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
-            # replay the active project history first (only durable display
+            # replay the requested project's history first (only durable display
             # events — streaming deltas are transient and never replayed).
-            # A lazy project replays its resident events with their file seqs so
-            # the UI can restore the scroll-up pill and keep paging; the
-            # "history" info line carries the honest on-disk older count.
-            project = self._state.project
-            if project is not None:
-                log = project.log
-                if isinstance(log, LazyEventLog):
-                    self._write_sse_raw({"type": "history", "older": log.older_count()})
-                    for seq, ev in log.items():
-                        self._write_sse(ev, seq=seq)
-                else:
-                    for ev in project.events():
-                        if ev.type in DURABLE_TYPES:
-                            self._write_sse(ev)
+            # Each SSE subscriber asks for its own project (per-window isolation);
+            # replay=False skips it when the UI just rendered the history itself
+            # via the open NDJSON stream. A lazy project replays its resident
+            # events with their file seqs so the UI can restore the scroll-up
+            # pill and keep paging; the "history" info line carries the honest
+            # on-disk older count.
+            if replay:
+                project = self._project_for_sse(project_q)
+                if project is not None:
+                    log = project.log
+                    if isinstance(log, LazyEventLog):
+                        self._write_sse_raw({"type": "history", "older": log.older_count()})
+                        for seq, ev in log.items():
+                            self._write_sse(ev, seq=seq)
+                    else:
+                        for ev in project.events():
+                            if ev.type in DURABLE_TYPES:
+                                self._write_sse(ev)
             # then live events
             while True:
                 try:
                     ev = q.get(timeout=15)
+                    rp = self._state.run_project
+                    if rp and project_q and rp != project_q:
+                        continue  # another window's run: don't leak its events here
                     self._write_sse(ev)
                 except queue.Empty:
                     self.wfile.write(b": ping\n\n")
@@ -485,9 +672,24 @@ class Handler(BaseHTTPRequestHandler):
             # reports a missing remote file via workspace.read
             if not full.is_file():
                 return self._json({"error": "not a .clc project file"}, status=400)
-        self._open_stream_start(full)
+        read_only = bool(body.get("read_only")) or str(body.get("read_only", "")).lower() == "true"
+        self._open_stream_start(full, read_only=read_only)
 
-    def _open_stream_start(self, full: Path) -> None:
+    def _open_stream_start(self, full: Path, read_only: bool = False) -> None:
+        # build the workspace first (ssh mode -> RemoteWorkspace over the bridge),
+        # so the lock and index/load/append all hit the same remote host
+        ws = self._state.build_workspace(str(full.parent))
+        # write lock: the window that opens a project for write is its only
+        # writer. Conflict -> HTTP 409 + code so the UI can offer read-only
+        # without parsing the NDJSON stream for the error line.
+        lock = None
+        if not read_only:
+            lock = ProjectLock.acquire(str(full), ws)
+            if lock is None:
+                return self._json(
+                    {"error": "project is open in another window", "code": "project_open_conflict"},
+                    status=409,
+                )
         # stream the open as NDJSON so the UI can show real file-parse progress;
         # errors are reported inline as an {"error": ...} line
         self.send_response(200)
@@ -503,12 +705,16 @@ class Handler(BaseHTTPRequestHandler):
         def on_progress(done: int, total: int) -> None:
             emit({"progress": {"done": done, "total": total}})
 
-        # build the workspace first (ssh mode -> RemoteWorkspace over the bridge),
-        # so index/load/append all read and write the remote .clc
-        ws = self._state.build_workspace(str(full.parent))
         try:
-            project = open_project_lazy(full, on_progress=on_progress, workspace=ws)
+            project = open_project_lazy(full, on_progress=on_progress, workspace=ws, read_only=read_only)
+        except ProjectOpenConflict as e:
+            if lock is not None:
+                ProjectLock.release(lock)
+            emit({"error": str(e), "code": e.code})
+            return
         except (OSError, ValueError) as e:
+            if lock is not None:
+                ProjectLock.release(lock)
             emit({"error": f"cannot open project: {e}"})
             return
         self._state.set_project(project, workspace=ws)
@@ -520,6 +726,7 @@ class Handler(BaseHTTPRequestHandler):
                     "project": str(full),
                     "name": project.meta.name,
                     "workdir": str(full.parent),
+                    "read_only": project.read_only,
                 }
             }
         )
@@ -690,12 +897,40 @@ def build(
     return srv
 
 
+def _start_parent_watchdog() -> None:
+    """When spawned as a session child (CLUTCH_SUPERVISOR_PID set), never
+    outlive the supervisor: if our parent PID changes (the supervisor died,
+    e.g. SIGKILL/crash — a clean exit already kills us), commit suicide so a
+    session can never leak. Kernel releases our flock on exit, so no TTL."""
+    raw = os.environ.get("CLUTCH_SUPERVISOR_PID")
+    if not raw:
+        return  # plain/manual server: no supervisor to watch
+    try:
+        expected = int(raw)
+    except ValueError:
+        return
+
+    def watch() -> None:
+        while True:
+            time.sleep(5)
+            if os.getppid() != expected:
+                os._exit(0)  # noqa: PLR1722 - deliberate hard exit, no atexit
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def main() -> int:
     defaults = Config()
     parser = argparse.ArgumentParser(prog="clutch-server")
     parser.add_argument("--host", default=defaults.host, help="bind address (0.0.0.0 to expose to other devices)")
     parser.add_argument("--port", type=int, default=defaults.port)
-    parser.add_argument("--model", default=defaults.model)
+    parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help=f"LLM provider preset ({', '.join(sorted(PROVIDER_PRESETS))}); "
+        "fills the default base URL/model when those are not given",
+    )
     parser.add_argument(
         "--base-url",
         default=None,
@@ -710,24 +945,65 @@ def main() -> int:
     config = Config()
     config.host = args.host
     config.port = args.port
-    config.model = args.model
-    if args.base_url:
-        config.base_url = args.base_url
-        # the client-side proxy injects the real key; the server only needs a
-        # placeholder. No env fallback: the key comes from the UI settings
-        # (state.api_key) or an explicit config.api_key.
-        if not config.api_key:
-            config.api_key = "proxy"
     if args.verify:
         config.verify_command = args.verify
 
+    # LLM endpoint resolution — precedence: CLI args > env > GUI-saved settings
+    # > defaults, with the provider preset filling unset base_url/model (see
+    # resolve_llm_endpoint). This is what un-hardcodes the endpoint: switching
+    # provider (deepseek/zhipu/...) moves the whole URL+model, not just the
+    # model name.
+    saved = load_settings()
+    # Multi-API: only the currently active profile participates in resolution;
+    # the rest stay saved and can be switched back to via /api/settings.
+    prof = active_profile(saved)
+    try:
+        config.provider, config.base_url, config.model = resolve_llm_endpoint(
+            cli={"provider": args.provider, "base_url": args.base_url, "model": args.model},
+            env=os.environ,
+            saved=prof,
+            defaults=defaults,
+        )
+    except ValueError as e:
+        print(f"[clutch-server] {e}", file=sys.stderr)
+        return 2
+    # API key: env > active profile > config default
+    api_key = os.environ.get("CLUTCH_API_KEY") or prof.get("api_key") or config.api_key
+    if args.base_url:
+        # the client-side proxy injects the real key; the server only needs a
+        # placeholder. No env fallback: the key comes from the UI settings
+        # (state.api_key) or an explicit config.api_key.
+        if not api_key:
+            api_key = "proxy"
+    config.api_key = api_key
+    # reasoning_effort: active profile only (same precedence as the endpoint)
+    config.llm_reasoning_effort = prof.get("reasoning_effort") or None
+
     broadcaster = Broadcaster()
     state = RunState()
-    # restore the API key persisted by the GUI settings (outside the repo)
-    state.api_key = load_settings().get("api_key")
+    # restore the settings persisted by the GUI (api key + LLM endpoint)
+    state.api_key = api_key
+
+    _start_parent_watchdog()
 
     srv = build(config, broadcaster, state)
-    print(f"[clutch-server] http://{config.host}:{config.port}  (API only; start the UI separately)", flush=True)
+    # --port 0 makes the OS pick a free port; stdout is the only channel back to
+    # the spawning Electron shell, so print the REAL bound port — always as the
+    # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.
+    bound_port = srv.server_address[1]
+    # resolved LLM endpoint (provider/model/base_url), for diagnosing which
+    # provider a session actually targets; the label keeps the line from ever
+    # matching the port banner regex
+    print(
+        f"[clutch-server] LLM: provider={config.provider} model={config.model} "
+        f"base_url={config.base_url}",
+        flush=True,
+    )
+    print(f"[clutch-server] http://127.0.0.1:{bound_port}  (API only; start the UI separately)", flush=True)
+    # best effort: drop remote lock-files this process still holds on exit
+    # (only reachable while the ssh tunnel is alive; a dead bridge is fine —
+    # the remote TTL reclaims the lock later)
+    atexit.register(ProjectLock.release_all_remote)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

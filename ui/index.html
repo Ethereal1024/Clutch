@@ -12,6 +12,7 @@
   <header id="topbar">
     <div class="brand"><span class="logo">▣</span> Clutch</div>
     <div id="project-label" class="project-label muted" title="active project"></div>
+    <span id="readonly-badge" class="readonly-badge hidden" title="opened read-only: another window holds the write lock">read-only</span>
     <div id="status" class="badge idle">idle</div>
     <div class="spacer"></div>
     <button id="open-project-btn" title="open a project">▦ Open</button>
@@ -33,9 +34,35 @@
   <div id="settings-modal" class="modal hidden">
     <div class="modal-box">
       <h3>Settings</h3>
-      <label for="api-key-input">DeepSeek API key</label>
+      <label for="profile-select">API profile</label>
+      <select id="profile-select"></select>
+      <input id="profile-name-input" type="text" placeholder="or type a new profile name" autocomplete="off" />
+      <p class="muted">Multiple providers can be saved as named profiles and switched without overwriting each other. Selecting a profile activates it immediately; typing a name and Save stores a new one.</p>
+      <label for="api-key-input">API key</label>
       <input id="api-key-input" type="password" placeholder="sk-..." autocomplete="off" />
       <p class="muted">Stored on the backend (~/.clutch/settings.json). Only needed when the backend talks to the LLM itself.</p>
+      <label for="provider-input">LLM provider</label>
+      <select id="provider-input">
+        <option value="deepseek">DeepSeek</option>
+        <option value="zhipu">Zhipu (智谱 GLM)</option>
+        <option value="openai">OpenAI</option>
+        <option value="moonshot">Moonshot (Kimi)</option>
+        <option value="ollama">Ollama (local)</option>
+        <option value="custom">Custom (OpenAI-compatible)</option>
+      </select>
+      <p class="muted">Switching provider fills in its default model and API base URL below — override either freely.</p>
+      <label for="model-input">Model</label>
+      <input id="model-input" type="text" placeholder="glm-4-flash" autocomplete="off" />
+      <label for="reasoning-effort-input">Reasoning effort (thinking depth)</label>
+      <select id="reasoning-effort-input">
+        <option value="">default (provider default)</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="max">max</option>
+      </select>
+      <p class="muted">GLM-5.3 thinking depth (extra_body thinking.reasoning_effort); other providers ignore it.</p>
+      <label for="llm-url-input">LLM API base URL</label>
+      <input id="llm-url-input" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4" autocomplete="off" />
       <label for="backend-url-input">Backend URL</label>
       <input id="backend-url-input" type="text" placeholder="http://127.0.0.1:8890" autocomplete="off" />
       <p class="muted">Where the agent API runs. The SSH connection in the project picker sets this automatically.</p>
@@ -181,10 +208,45 @@
     // MathJax config: recognize $...$ (inline) and $$...$$ (display) math.
     // Must be set before mathjax loads.
     window.MathJax = {
+      // newcm font *data* modules (@mathjax/mathjax-newcm-font/chtml/...) are
+      // fetched via the loader's "fonts" path — default is jsdelivr, which
+      // hangs (SSL blackhole) on restricted networks and wedges typesetting.
+      // Point it at the vendored copy (see mathjax-newcm-font@4.1.3/).
+      loader: {
+        paths: { fonts: "vendor/mathjax-fonts" },
+      },
+      // a11y speech/braille spin up a WebWorker (sre/speech-worker.js) that is
+      // not part of the single-file build and cannot load under file:// — the
+      // worker's importScripts fails inside the worker, no message ever comes
+      // back, and MathJax waits forever (open-project bar sticks at 90%).
+      // The menu settings (enrich/speech/braille, all default true) drive
+      // these via enableEnrichment/enableSpeech/enableBraille on the document;
+      // their config merge path is not exposed, so flip them at startup.
+      // Visual rendering is unaffected.
+      startup: {
+        ready: () => {
+          MathJax.startup.defaultReady();
+          const doc = MathJax.startup.document;
+          if (doc && doc.options) {
+            doc.options.enableEnrichment = false;
+            doc.options.enableSpeech = false;
+            doc.options.enableBraille = false;
+          }
+        },
+      },
       tex: {
         inlineMath: [["$", "$"]],
         displayMath: [["$$", "$$"]],
         processEscapes: true,
+      },
+      // MathJax 4 renders CHTML with web fonts whose default fontURL points at
+      // jsdelivr — that breaks offline/restricted networks (formulas render as
+      // empty/garbled glyphs). Fonts are vendored under vendor/mathjax-fonts;
+      // adaptiveCSS is off so MathJax loads the full woff2 files instead of
+      // requesting dynamic per-character subsets from the CDN.
+      chtml: {
+        adaptiveCSS: false,
+        fontURL: "vendor/mathjax-fonts/chtml/woff2",
       },
       options: {
         skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"],

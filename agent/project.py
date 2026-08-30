@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .events import DURABLE_TYPES, EventLog, event_from_dict, event_to_json
+from .core.project_lock import LockHandle, ProjectLock, ProjectOpenConflict
 from .memory import SECTION, MemoryStore
 from .tools.workspace import _REMOTE_IO_TIMEOUT, shq
 
@@ -41,6 +42,10 @@ class Project:
     meta: ProjectMeta = field(default_factory=ProjectMeta)
     log: EventLog = field(default_factory=EventLog)
     memories: MemoryStore | None = None
+    read_only: bool = False
+    # the write lock held on this .clc (None for read-only opens): the window
+    # that opened the project for write is the only writer until it exits
+    lock: LockHandle | None = None
 
     @property
     def workdir(self) -> Path:
@@ -50,9 +55,26 @@ class Project:
         return self.log.events()
 
 
-def _writer_for(workspace) -> Callable[[str, str], None] | None:
-    """The .clc LineWriter for a workspace (remote bridge) or None (local open)."""
+def _writer_for(workspace, read_only: bool = False) -> Callable[[str, str], None] | None:
+    """The .clc LineWriter for a workspace (remote bridge) or None (local open).
+
+    read_only swaps in a no-op writer: appends are dropped silently, so a
+    read-only project can never rewrite the file (compaction rewrites included),
+    while reads behave exactly like a normal open."""
+    if read_only:
+        return lambda path, line: None
     return workspace.append_line if workspace is not None else None
+
+
+def _acquire_lock(path: Path, workspace, read_only: bool) -> LockHandle | None:
+    """Take the write lock unless read-only. Raises ProjectOpenConflict when
+    another window holds it."""
+    if read_only:
+        return None
+    lock = ProjectLock.acquire(str(path), workspace)
+    if lock is None:
+        raise ProjectOpenConflict(str(path))
+    return lock
 
 
 def create_project(path: Path, name: str, model: str = "", workspace=None) -> Project:
@@ -72,28 +94,35 @@ def create_project(path: Path, name: str, model: str = "", workspace=None) -> Pr
     return Project(path=path, meta=meta, log=log, memories=MemoryStore(str(path), writer=writer))
 
 
-def open_project(path: Path, on_progress=None, workspace=None) -> Project:
+def open_project(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
     """Load an existing .clc file. on_progress(done, total) is called as the
     file is parsed (byte-based, single pass). With a workspace the file is
-    pulled from the remote host and the log persists back through it."""
+    pulled from the remote host and the log persists back through it.
+    read_only opens without the write lock: the log keeps no-op appends and
+    legacy rewrites are skipped, so the file is never modified."""
     path = path.with_suffix(".clc")
-    meta, loaded, memory_lines = _read_file(path, on_progress, workspace)
-    writer = _writer_for(workspace)
+    lock = _acquire_lock(path, workspace, read_only)
+    try:
+        meta, loaded, memory_lines = _read_file(path, on_progress, workspace)
+    except Exception:
+        ProjectLock.release(lock)
+        raise
+    writer = _writer_for(workspace, read_only)
     memories = MemoryStore.parse(memory_lines, str(path), writer=writer)
     # older files stored streaming deltas (text/reasoning) that are redundant for
     # replay and context — assistant_message carries the final text + reasoning.
     # Compact them away so the .clc stays small and future loads stay fast.
     durable = [e for e in loaded.events() if e.type in DURABLE_TYPES]
-    if len(durable) != len(loaded.events()):
+    if not read_only and len(durable) != len(loaded.events()):
         _rewrite_durable(path, meta, durable, workspace, memories)
     # EventLog(path=..., writer=None) persists every append to the .clc file
     # after the header via the local open fallback
     log = EventLog(path=str(path), writer=writer)
     log._events.extend(durable)
-    return Project(path=path, meta=meta, log=log, memories=memories)
+    return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
 
-def open_project_lazy(path: Path, on_progress=None, workspace=None) -> Project:
+def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
     """Open an existing .clc lazily: index the durable event offsets in a single
     pass (no JSON parsing), then materialize only seq 0 (the raw task) plus the
     preserved recent tail the last compaction kept (``[tail_start, N)``). Earlier
@@ -105,6 +134,15 @@ def open_project_lazy(path: Path, on_progress=None, workspace=None) -> Project:
     same index so the code path is single. on_progress(done, total) reports the
     index scan, so the UI's open progress bar tracks real file parsing again."""
     path = path.with_suffix(".clc")
+    lock = _acquire_lock(path, workspace, read_only)
+    try:
+        return _open_project_lazy_locked(path, on_progress, workspace, read_only, lock)
+    except Exception:
+        ProjectLock.release(lock)
+        raise
+
+
+def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> Project:
     from .core.lazy import (
         LazyEventLog,
         _LAZY_MIN_DURABLE,
@@ -116,7 +154,7 @@ def open_project_lazy(path: Path, on_progress=None, workspace=None) -> Project:
 
     read, total = _make_reader(path, workspace)
     index = index_file(read, total, on_progress)
-    writer = _writer_for(workspace)
+    writer = _writer_for(workspace, read_only)
     # the header lives at the very start of the file: a tiny range read, no
     # separate full pass (unlike read_header, which would double the remote cost)
     meta = _parse_meta_lines(read(0, min(total, 1 << 16)).decode("utf-8", "replace").splitlines())
@@ -127,7 +165,7 @@ def open_project_lazy(path: Path, on_progress=None, workspace=None) -> Project:
         log = EventLog(path=str(path), writer=writer)
         for ev in parse_durable(read(0, total).decode("utf-8", "replace")):
             log.append(ev)
-        return Project(path=path, meta=meta, log=log, memories=memories)
+        return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
     log = LazyEventLog(
         str(path),
@@ -138,7 +176,7 @@ def open_project_lazy(path: Path, on_progress=None, workspace=None) -> Project:
     )
     log.materialize_range(0, 1)  # seq 0: the raw task
     log.materialize_range(log._tail_start, len(index))  # the preserved tail
-    return Project(path=path, meta=meta, log=log, memories=memories)
+    return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
 
 def _parse_meta_lines(lines: list[str]) -> ProjectMeta:

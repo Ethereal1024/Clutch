@@ -300,27 +300,42 @@ class LazyEventLog:
 
     # ----------------------------------------------------------- compaction
 
+    # Event types whose content is charged against the tail budget (matches
+    # EventLog.tail_start_index; compaction/step/state lines are free).
+    _SIZED_TYPES = frozenset(
+        {UserMessageEvent.type, AssistantMessageEvent.type, ToolResultEvent.type}
+    )
+
     def tail_start_index(self, budget: int) -> int:
-        """Durable file-seq where the preserved tail begins for ``budget``
-        tokens — the same walk as EventLog.tail_start_index over the materialized
-        durable sequence."""
-        durable = self._events
+        """Durable file-seq where the preserved recent tail begins for ``budget``
+        tokens — computed PURELY from the index (zero content reads; the whole
+        point of the offset table is that the full durable sequence is walkable
+        without loading or parsing any event).
+
+        Walking only the resident subset (the preserved tail + seq 0) would
+        clamp the boundary to the subset's edge and stall compaction, so this
+        walks the FULL index from the end. Sizes are the event lines' byte
+        lengths from consecutive offsets — an upper bound of each line's chars,
+        hence conservative vs EventLog.tail_start_index's ``len(content)//3``:
+        the lazy boundary lands at or before the fully loaded log's, so a lazy
+        compaction never under-shrinks (a few extra events roll into the
+        summary). The tail is split at an assistant-turn boundary via the
+        index's type table."""
+        n = len(self._index)
+        offsets = self._index.offsets
+        types = self._index.types
         total = 0
         tail_start = 0
-        for i in range(len(durable) - 1, -1, -1):
-            ev = durable[i]
-            if isinstance(ev, (UserMessageEvent, ToolResultEvent)):
-                size = len(ev.content)
-            elif isinstance(ev, AssistantMessageEvent):
-                size = len(ev.content) + len(ev.reasoning)
-            else:
+        for i in range(n - 1, -1, -1):
+            if types[i] not in self._SIZED_TYPES:
                 continue
-            total += size // 4
+            end = offsets[i + 1] if i + 1 < n else self._index.total_bytes
+            total += (end - offsets[i]) // 3
             if total >= budget:
                 j = i
-                while j > 0 and not isinstance(durable[j], AssistantMessageEvent):
+                while j > 0 and types[j] != AssistantMessageEvent.type:
                     j -= 1
-                tail_start = self._seqs[j]
+                tail_start = j
                 break
         return tail_start
 

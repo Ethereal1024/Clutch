@@ -19,12 +19,14 @@ class OpenaiLlmClient(LlmClient):
         request_timeout: float = 60.0,
         max_retries: int = 3,
         retryable_status: Collection[int] = frozenset({429, 500, 502, 503, 504}),
+        reasoning_effort: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.handlers = handlers if handlers else get_default_handlers()
         self.request_timeout = request_timeout
         self.max_retries = max_retries
         self.retryable_status = retryable_status
+        self.reasoning_effort = reasoning_effort
 
         proxy = get_proxy_for_url(base_url)
         http_client = httpx2.Client(proxy=proxy, trust_env=False, timeout=self.request_timeout)
@@ -47,6 +49,16 @@ class OpenaiLlmClient(LlmClient):
                 }
                 if tools:
                     kwargs["tools"] = tools
+                # GLM-5.3 thinking depth (zhipu). Only set when configured: an
+                # unset knob leaves the provider default (e.g. DeepSeek ignores
+                # the field entirely, so it must not be sent to them).
+                if self.reasoning_effort:
+                    kwargs["extra_body"] = {
+                        "thinking": {
+                            "type": "enabled",
+                            "reasoning_effort": self.reasoning_effort,
+                        }
+                    }
                 resp = self.client.chat.completions.create(**kwargs, stream=True)
                 state = StreamState()
                 pending_finish: dict[str, Any] | None = None

@@ -1,13 +1,33 @@
 "use strict";
 
-// Where the agent API lives. Resolution order: in-app setting (localStorage) >
-// Electron preload env (window.clutchApi.baseUrl) > default localhost. API_BASE is
-// reassigned in place by switchBackend() when the backend changes (SSH connect /
-// disconnect), so the UI never needs a full reload.
-const DEFAULT_BASE =
-  (window.clutchApi && window.clutchApi.baseUrl) ||
-  "http://127.0.0.1:8890";
-let API_BASE = (localStorage.getItem("clutch_api_url") || DEFAULT_BASE).replace(/\/+$/, "");
+// Where the agent API lives. Every window gets its own SESSION child from the
+// machine supervisor (see server-bootstrap.js): an agent.server spawned with
+// --port 0, its random port learned via preload IPC (window.clutchApi.baseUrl
+// is an async call into the main process). DEFAULT_BASE tracks the RESOLVED
+// session base so SSH fallbacks land back on THIS window's own session, never
+// on a guessed default port; localStorage is deliberately NOT used for the
+// initial base — a persisted random port would be dead by the next launch.
+// SSH connections / manual picker URLs still route through switchBackend().
+// The 8890 fallback only matters when the preload IPC is unavailable
+// (plain-browser debugging without Electron): no session exists, so it is an
+// unreachable placeholder, not a real backend address.
+let DEFAULT_BASE = "http://127.0.0.1:8890";
+let API_BASE = null; // resolved in resolveApiBase() before the app starts
+
+async function resolveApiBase() {
+  let base = "http://127.0.0.1:8890";
+  if (window.clutchApi && window.clutchApi.baseUrl) {
+    try {
+      const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
+      if (b) base = String(b).replace(/\/+$/, "");
+    } catch {
+      /* preload unavailable (plain-browser debugging) — keep the placeholder */
+    }
+  }
+  API_BASE = base;
+  DEFAULT_BASE = base;
+  return base;
+}
 
 const $ = (s) => document.querySelector(s);
 
@@ -232,6 +252,13 @@ function setStatus(state) {
   els.run.textContent = busy ? "■ Stop" : "▶ Run";
   els.run.classList.toggle("stop-mode", busy);
   els.run.disabled = busy ? false : !currentProject;
+  // a run is pinned to the mode it started with: switching mid-run would only
+  // relabel the button, not change the running agent — lock the toggle while
+  // busy (generic button:disabled styling greys it out)
+  els.mode.disabled = busy;
+  els.mode.title = busy
+    ? "任务运行中，不可切换；模式适用于下一次运行"
+    : "chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.";
 }
 
 // tracks the most recent agent text block (created by streaming text_delta)
@@ -874,7 +901,7 @@ function highlightCode(root, streaming = false) {
   root.querySelectorAll("pre code").forEach((el) => {
     try { hljs.highlightElement(el); } catch (e) {}
   });
-  renderMermaid(root, streaming);
+  renderMermaid(root, streaming).catch((e) => console.warn("[mermaid]", e));
 }
 
 let mermaidInitialized = false;
@@ -905,9 +932,11 @@ function isLastElement(pre) {
 //    fence (marked runs an unclosed fence to the end of the text) — wait for
 //    the final event instead of drawing a half-finished diagram;
 // 2) parse: mermaid.render resolves a huge error diagram on parse errors
-//    instead of rejecting; parse() is synchronous and throws, so a broken
-//    source stays literal and is not re-parsed while identical.
-function renderMermaid(root, streaming = false) {
+//    instead of rejecting; mermaid.parse (v10+) is ASYNC and rejects on bad
+//    syntax, so a broken source stays literal and is not re-parsed while
+//    identical. (The old synchronous parse contract throws — the same
+//    try/await/catch handles both shapes.)
+async function renderMermaid(root, streaming = false) {
   if (typeof mermaid === "undefined" || !root) return;
   if (!mermaidInitialized) {
     mermaidInitialized = true;
@@ -960,6 +989,13 @@ function renderMermaid(root, streaming = false) {
           todayLineColor: accent,
           // clusters / subgraphs
           clusterBorder: accent,
+          // state diagrams (stateDiagram-v2): state nodes read stateBorder, but
+          // the diagram's outer container (.stateGroup rect) is hard-coded to
+          // the legacy border1 key (dark default #81B1DB blue) — override it
+          // too; stateGroup label text also carries border1 but a later #ccc
+          // rule wins, so text stays grey
+          stateBorder: accent,
+          border1: accent,
           // --- fills & labels: neutral dark greys (no yellow/blue/light) ---
           noteBkgColor: "#1c1c1f",
           noteTextColor: "#d4d4d8",
@@ -992,16 +1028,20 @@ function renderMermaid(root, streaming = false) {
           git7: "#52525b",
         },
       });
+      // Never let the parser's default error path paint its giant
+      // "Syntax error in text" diagram: route parse errors to the console and
+      // let showMermaidError present a small inline notice instead.
+      mermaid.parseError = (err) => console.warn("[mermaid]", err);
     } catch (e) {
       return;
     }
   }
   const pending = [];
-  root.querySelectorAll("pre code.language-mermaid").forEach((code) => {
+  for (const code of root.querySelectorAll("pre code.language-mermaid")) {
     const pre = code.parentElement;
-    if (!pre) return;
+    if (!pre) continue;
     const src = code.textContent;
-    if (pre.dataset.mermaidSrc === src) return; // this exact source already drawn
+    if (pre.dataset.mermaidSrc === src) continue; // this exact source already drawn
     const cached = mermaidCache.get(src);
     if (cached) {
       // a streaming re-render rebuilt the DOM: restore the SVG synchronously
@@ -1009,47 +1049,89 @@ function renderMermaid(root, streaming = false) {
       pre.textContent = "";
       pre.insertAdjacentHTML("beforeend", cached);
       pre.dataset.mermaidSrc = src;
-      return;
+      continue;
     }
     // gate 1 — possible unclosed fence mid-stream: don't draw half a diagram
-    if (streaming && isLastElement(pre)) return;
+    if (streaming && isLastElement(pre)) continue;
     // gate 2 — syntax check before the async render (render() would resolve an
-    // error diagram instead of rejecting); broken source stays literal
-    let parsed = false;
-    try { mermaid.parse(src); parsed = true; } catch (e) {}
+    // error diagram instead of rejecting); broken source stays literal.
+    // mermaid.parse is ASYNC in the bundled v10+: a bare try/catch could never
+    // see its rejection, so the parse gate silently passed every broken source
+    // and the error diagram reached the DOM. Await inside a plain for...of
+    // (forEach callbacks can't await); a sync throw is caught the same way.
+    let parsed = true;
+    let parseErr = null;
+    try {
+      parsed = await mermaid.parse(src);
+    } catch (e) {
+      parsed = false;
+      parseErr = e;
+    }
     if (!parsed) {
+      showMermaidError(pre, parseErr);
       pre.dataset.mermaidSrc = src; // identical broken source: no re-parse loop
-      return;
+      continue;
     }
     pre.dataset.mermaidSrc = src; // mark in-flight so deltas don't double-render
     pending.push({ pre, src });
-  });
+  }
   for (const { pre, src } of pending) {
     mermaid
       .render("mmd-" + Math.random().toString(36).slice(2), src)
       .then(({ svg }) => {
-        if (mermaidCache.size > 100) mermaidCache.clear();
-        mermaidCache.set(src, svg);
         // a later streaming delta may have rebuilt the DOM: re-locate a block
         // with this exact source before swapping, so the SVG never lands orphaned
         let target = null;
         for (const el of root.querySelectorAll("pre code.language-mermaid")) {
           if (el.textContent === src) { target = el.parentElement; break; }
         }
-        if (target) {
-          // securityLevel "strict" already sanitizes the SVG; keep the block chrome
-          target.classList.add("mermaid-rendered");
-          target.textContent = "";
-          target.insertAdjacentHTML("beforeend", svg);
-          target.dataset.mermaidSrc = src;
-          if (followTail) autoScroll(); // a diagram can be taller than its source
+        if (!target) return;
+        // gate 3 — mermaid.render can resolve a giant error diagram instead of
+        // rejecting; never let that hit the DOM. The bundled v10+ jison parser
+        // emits "Parse error on line N: Unexpected ..." (syntax) and "Lexical
+        // error on line N. Unrecognized text." (lexer), older builds said
+        // "Syntax error in text" — match every phrasing (the previous
+        // exact-string check never matched v10 errors and let them through).
+        // Keep the literal source with a small inline notice.
+        if (/Parse error on line|Lexical error on line|Syntax error in text|Parse error[:\s]/.test(svg)) {
+          showMermaidError(target, null);
+          delete target.dataset.mermaidSrc; // a corrected source can retry
+          return;
         }
+        if (mermaidCache.size > 100) mermaidCache.clear();
+        mermaidCache.set(src, svg);
+        // securityLevel "strict" already sanitizes the SVG; keep the block chrome
+        target.classList.add("mermaid-rendered");
+        target.textContent = "";
+        target.insertAdjacentHTML("beforeend", svg);
+        target.dataset.mermaidSrc = src;
+        if (followTail) autoScroll(); // a diagram can be taller than its source
       })
-      .catch(() => {
-        // defensive: keep the literal source; drop the marker so a later
-        // identical source can retry once its text changes
-        if (pre.isConnected) delete pre.dataset.mermaidSrc;
+      .catch((e) => {
+        // defensive: keep the literal source with a small notice; drop the
+        // marker so a later identical source can retry once its text changes
+        if (pre.isConnected) {
+          showMermaidError(pre, e);
+          delete pre.dataset.mermaidSrc;
+        }
       });
+  }
+}
+
+// A broken diagram must never paint mermaid's giant error SVG: mark the block
+// as failed and attach one small inline notice while keeping the literal
+// source readable/copyable. The parser's message (if any) goes into the tip's
+// hover title so the on-screen text stays a short plain sentence.
+function showMermaidError(pre, detail) {
+  if (!pre || !pre.classList) return;
+  pre.classList.add("mermaid-failed");
+  if (!pre.querySelector(".mermaid-error")) {
+    const tip = document.createElement("div");
+    tip.className = "mermaid-error";
+    tip.textContent = "图示语法有误，已保留原始代码";
+    const msg = detail && (detail.message || String(detail));
+    if (msg) tip.title = "mermaid: " + msg;
+    pre.appendChild(tip);
   }
 }
 
@@ -1234,7 +1316,20 @@ function renderMarkdown(text, breaks = false) {
   }
   try {
     const src = String(text);
-    return DOMPurify.sanitize(breaks ? marked.parse(src, { breaks: true }) : marked.parse(src));
+    // Protect math ($...$, $$...$$) from marked's backslash escapes before
+    // parsing: marked treats `\` + ASCII punctuation as markdown escapes and
+    // would strip the backslash from LaTeX sequences like \! or \_ (turning
+    // `\text{softmax}\!\left(` into a literal "!" and `\text{seq\_len}` into a
+    // bare `_` that breaks \text). ⟦MATHn⟧ is plain Unicode: marked leaves it
+    // alone and DOMPurify keeps it, so we can restore the exact math after.
+    const math = [];
+    const protectedSrc = src.replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, (m) => {
+      math.push(m);
+      return `⟦MATH${math.length - 1}⟧`;
+    });
+    const html = breaks ? marked.parse(protectedSrc, { breaks: true }) : marked.parse(protectedSrc);
+    const restored = html.replace(/⟦MATH(\d+)⟧/g, (_, i) => math[+i]);
+    return DOMPurify.sanitize(restored);
   } catch (e) {
     return escapeHtml(text);
   }
@@ -1273,8 +1368,9 @@ async function run() {
   // history, instant-pin when already tracked (the latch keeps the reply pinned)
   autoScroll(true);
   // runs append to the active project's conversation; the mode travels with the
-  // request so a switch only affects this run
-  const payload = { task, mode: agentMode };
+  // request so a switch only affects this run. project pins the target .clc so
+  // the server never appends to another window's project.
+  const payload = { task, mode: agentMode, project: currentProject };
   try {
     const r = await fetch(API_BASE + "/api/run", {
       method: "POST",
@@ -1295,7 +1391,10 @@ async function stop() {
 }
 
 els.run.addEventListener("click", () => (busy ? stop() : run()));
-els.mode.addEventListener("click", () => setMode(agentMode === "chat" ? "work" : "chat"));
+els.mode.addEventListener("click", () => {
+  if (busy) return; // disabled + guard: the active run's mode is already fixed
+  setMode(agentMode === "chat" ? "work" : "chat");
+});
 setMode(agentMode); // paint the stored mode on startup
 els.task.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) run();
@@ -1325,37 +1424,156 @@ function autoGrowTask() {
 els.task.addEventListener("input", autoGrowTask);
 
 // ---- API settings modal ----
+// The modal carries two distinct "URLs": the LLM endpoint (provider/model/
+// base_url — what the agent talks to) and the Backend URL (where this agent
+// API runs; SSH sets it automatically). The LLM endpoint is what used to be
+// hard-locked to DeepSeek; it is now fully configurable and persisted both on
+// the backend (~/.clutch/settings.json via /api/settings) and, through the
+// preload bridge, in the client-side settings file the LLM reverse proxy reads
+// (so SSH-mode upstream changes apply without restarting the app).
 const modal = $("#settings-modal");
 const keyInput = $("#api-key-input");
 const urlInput = $("#backend-url-input");
+const providerSelect = $("#provider-input");
+const modelInput = $("#model-input");
+const reasoningEffortInput = $("#reasoning-effort-input");
+const llmUrlInput = $("#llm-url-input");
+const profileSelect = $("#profile-select");
+const profileNameInput = $("#profile-name-input");
 
-function openSettings() {
+// Provider presets mirror agent/config.py (PROVIDER_PRESETS). Picking a
+// provider auto-fills its default base URL + model; users can still override.
+const LLM_PRESETS = {
+  deepseek: { base_url: "https://api.deepseek.com", model: "deepseek-v4-flash" },
+  zhipu: { base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  moonshot: { base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  ollama: { base_url: "http://127.0.0.1:11434/v1", model: "llama3.1" },
+  custom: { base_url: "", model: "" },
+};
+
+function llmPreset(provider) {
+  return LLM_PRESETS[provider] || { base_url: "", model: "" };
+}
+
+function fillLlmForm(provider, model, baseUrl, reasoningEffort) {
+  const preset = llmPreset(provider);
+  providerSelect.value = provider;
+  modelInput.value = model || preset.model;
+  llmUrlInput.value = baseUrl || preset.base_url;
+  reasoningEffortInput.value = reasoningEffort || "";
+}
+
+async function openSettings() {
   modal.classList.remove("hidden");
-  keyInput.value = localStorage.getItem("clutch_api_key") || "";
+  // Keys live inside saved profiles and are never echoed back by the backend;
+  // a blank key input means "keep the profile's saved key".
+  keyInput.value = "";
+  keyInput.placeholder = "sk-... (blank keeps the saved key)";
   urlInput.value = localStorage.getItem("clutch_api_url") || "";
+  // Prefill the LLM endpoint from the backend's live config (another window /
+  // env / CLI may have changed it); fall back to a local cache or presets.
+  let cfg = null;
+  try {
+    const r = await fetch(API_BASE + "/api/settings");
+    if (r.ok) cfg = await r.json();
+  } catch (e) {
+    /* backend unreachable: fall back to cache/presets */
+  }
+  if (cfg && Array.isArray(cfg.profiles)) {
+    profileSelect.innerHTML = "";
+    for (const p of cfg.profiles) {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name + (p.name === cfg.active ? " (active)" : "");
+      profileSelect.appendChild(opt);
+    }
+    profileSelect.value = cfg.active || "";
+    profileNameInput.value = "";
+    // form shows the ACTIVE profile's saved config (another window may have
+    // switched since this one last saved)
+    const ap = cfg.profiles.find((p) => p.name === cfg.active) || {};
+    fillLlmForm(ap.provider || cfg.provider || "deepseek", ap.model || cfg.model, ap.base_url || cfg.base_url, ap.reasoning_effort);
+  } else {
+    // backend unreachable: fall back to cache/presets
+    const provider = (cfg && cfg.provider) || "deepseek";
+    fillLlmForm(provider, cfg && cfg.model, cfg && cfg.base_url);
+  }
   keyInput.focus();
 }
 function closeSettings() {
   modal.classList.add("hidden");
 }
-async function saveSettings() {
-  const key = keyInput.value.trim();
-  const url = urlInput.value.trim();
-  if (url) localStorage.setItem("clutch_api_url", url);
-  else localStorage.removeItem("clutch_api_url");
-  if (!key) {
-    closeSettings();
-    return;
-  }
+providerSelect.addEventListener("change", () => {
+  const p = llmPreset(providerSelect.value);
+  modelInput.value = p.model;
+  llmUrlInput.value = p.base_url;
+});
+// Selecting a saved profile switches the active endpoint immediately: the
+// backend + the client-side proxy both follow, and the form refills with that
+// profile's saved config.
+profileSelect.addEventListener("change", async () => {
+  const name = profileSelect.value;
+  if (!name) return;
+  profileNameInput.value = ""; // we're switching to an existing profile
   try {
     const r = await fetch(API_BASE + "/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: key }),
+      body: JSON.stringify({ activate: name }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || r.status);
+    }
+    if (window.clutchSettings && window.clutchSettings.save) {
+      await window.clutchSettings.save({ activate: name });
+    }
+    await openSettings(); // refetch: shows the switched profile as active
+  } catch (e) {
+    addEvent({ type: "final", status: "error", summary: "switch profile failed: " + e.message });
+    await openSettings();
+  }
+});
+async function saveSettings() {
+  const key = keyInput.value.trim();
+  const url = urlInput.value.trim();
+  const provider = providerSelect.value;
+  const preset = llmPreset(provider);
+  // concrete values, not empty strings: the backend and the client-side proxy
+  // both fill gaps from the provider preset, and an empty URL would silently
+  // fall back to the old default instead of the chosen provider.
+  const model = modelInput.value.trim() || preset.model;
+  const llmUrl = llmUrlInput.value.trim() || preset.base_url;
+  if (url) localStorage.setItem("clutch_api_url", url);
+  else localStorage.removeItem("clutch_api_url");
+  // Explicit "save as new profile" name wins; otherwise save into the
+  // currently selected profile (which is the active one after a switch).
+  const profileName = profileNameInput.value.trim() || profileSelect.value || "default";
+  const payload = {
+    profile_name: profileName,
+    provider,
+    model,
+    base_url: llmUrl,
+    // always sent: empty value clears the knob on the backend
+    reasoning_effort: reasoningEffortInput.value.trim(),
+  };
+  if (key) payload.api_key = key;
+  try {
+    const r = await fetch(API_BASE + "/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
-    localStorage.setItem("clutch_api_key", key);
+    if (key) localStorage.setItem("clutch_api_key", key);
+    localStorage.setItem("clutch_llm", JSON.stringify({ provider, model, base_url: llmUrl }));
+    // Keep the client-side LLM reverse proxy in sync (SSH mode: the backend
+    // above may be remote, but the proxy reads the LOCAL settings file).
+    if (window.clutchSettings && window.clutchSettings.save) {
+      await window.clutchSettings.save({ api_key: key, provider, model, base_url: llmUrl });
+    }
     closeSettings();
   } catch (e) {
     closeSettings();
@@ -1412,7 +1630,7 @@ function renderConnSelector() {
   connSelect.innerHTML = "";
   const localOpt = document.createElement("option");
   localOpt.value = "local";
-  localOpt.textContent = "Local backend (127.0.0.1:8890)";
+  localOpt.textContent = "Local (this machine)";
   connSelect.appendChild(localOpt);
   // select the actual host entry we're connected to (marked ✓) instead of adding a
   // synthetic URL option — picking qianli must leave qianli selected
@@ -1456,6 +1674,56 @@ function switchBackend(url) {
   reconnectSSE();
 }
 
+// Ask the main process for the current backend URL (it owns the per-window
+// session: local supervisor session, tunnel session, or direct) and switch to
+// it. The renderer never guesses session ports — a guessed port dies with the
+// session. A previously active SSH-degradation mode is re-applied to the new
+// session (the degrade state lives in the old session process and dies with it).
+async function switchBackendResolved() {
+  if (!window.clutchApi) return false;
+  const url = await window.clutchApi.baseUrl();
+  if (url) {
+    switchBackend(url);
+    await reapplyDegradeIfNeeded();
+  }
+  return Boolean(url);
+}
+
+// SSH-degradation mode ("local agent, remote exec bridge") is a per-process
+// setting on the agent server, so it dies with the session process. The marker
+// is persisted in localStorage; whenever the session is (re)claimed — the main
+// process falls back to a fresh local session when the tunnel has no
+// supervisor, and that fresh session must be told about the bridge again —
+// re-apply the mode to the CURRENT backend. Callers that intentionally exit
+// degrade mode (disconnect/reset/tunnel end) MUST clear the marker first, or
+// the next switchBackendResolved would resurrect it.
+async function reapplyDegradeIfNeeded() {
+  const raw = localStorage.getItem("clutch_degrade");
+  if (!raw || !window.clutchTunnel) return;
+  const s = await window.clutchTunnel.status();
+  if (!s.active || !s.execBridge) {
+    // the tunnel is gone: degrade mode is meaningless, drop the marker
+    localStorage.removeItem("clutch_degrade");
+    return;
+  }
+  let bridge = null;
+  try {
+    bridge = JSON.parse(raw).bridge;
+  } catch (e) {
+    localStorage.removeItem("clutch_degrade");
+    return;
+  }
+  try {
+    await fetch(API_BASE + "/api/backend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "ssh", bridge, workspace: "~" }),
+    });
+  } catch (e) {
+    /* best effort: the next re-apply retries */
+  }
+}
+
 // ---- SSH-tools degradation (host alive but unusable for bootstrap) ----
 // A host with no Python and no matching bundle is still fully usable through the
 // exec bridge: the local server runs the agent, and every file/command operation
@@ -1468,8 +1736,15 @@ async function tryDegradeToSshTools() {
   // degradable only while the tunnel itself is still alive: a dead tunnel has no
   // bridge to exec through (this also filters out genuine connection failures)
   if (!s.active || !s.execBridge) return false;
+  // Resolve the current backend first: the tunnel may be live WITHOUT a
+  // supervisor on the far end (that is exactly this host's situation), so the
+  // main process falls back to a fresh local session — that session is the one
+  // we must put into ssh mode (DEFAULT_BASE may be a dead URL from an earlier
+  // session).
+  const url = await window.clutchApi.baseUrl();
+  if (!url) return false;
   try {
-    const r = await fetch(DEFAULT_BASE + "/api/backend", {
+    const r = await fetch(url + "/api/backend", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: "ssh", bridge: s.execBridge, workspace: "~" }),
@@ -1478,6 +1753,9 @@ async function tryDegradeToSshTools() {
   } catch (e) {
     return false;
   }
+  // persist the mode: the session process may be re-created later (see
+  // reapplyDegradeIfNeeded), taking the setting down with it
+  localStorage.setItem("clutch_degrade", JSON.stringify({ bridge: s.execBridge }));
   return true;
 }
 
@@ -1612,7 +1890,9 @@ async function handleSshConnect(host, user, port, statusEl) {
     if (res.ok) {
       upsertConn(host, user, port);
       localStorage.setItem("clutch_ssh_connected", "1");
-      switchBackend(res.url); // stay in the picker, now against the remote
+      // the tunnel's own URL is the SUPERVISOR control channel; the window's
+      // API base is its per-window remote session, decided by the main process
+      await switchBackendResolved();
       refreshPicker();
       return true;
     } else {
@@ -1622,7 +1902,7 @@ async function handleSshConnect(host, user, port, statusEl) {
       if (degraded) {
         upsertConn(host, user, port);
         localStorage.setItem("clutch_ssh_connected", "1");
-        switchBackend(DEFAULT_BASE); // the local server is now remote-backed
+        await switchBackendResolved(); // the local server is now remote-backed
         refreshPicker();
         return true;
       }
@@ -1641,8 +1921,9 @@ connSelect.addEventListener("change", async () => {
     if (localStorage.getItem("clutch_ssh_connected")) {
       await window.clutchTunnel.disconnect();
       localStorage.removeItem("clutch_ssh_connected");
+      localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
       await resetBackendLocal(); // end any SSH degradation on the local server
-      switchBackend(DEFAULT_BASE); // stay in the picker, back to the local backend
+      await switchBackendResolved(); // stay in the picker, back to the local backend
       refreshPicker();
     }
     return;
@@ -1652,6 +1933,7 @@ connSelect.addEventListener("change", async () => {
     if (localStorage.getItem("clutch_ssh_connected")) {
       await window.clutchTunnel.disconnect();
       localStorage.removeItem("clutch_ssh_connected");
+      localStorage.removeItem("clutch_degrade");
     }
     const [user, hostPort] = v.slice(4).split("@");
     const [host, port] = hostPort.split(":");
@@ -1689,10 +1971,11 @@ connNewModal.addEventListener("click", (e) => {
 connNewHost.addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#conn-new-connect").click();
 });
-$("#conn-reset").addEventListener("click", () => {
+$("#conn-reset").addEventListener("click", async () => {
   localStorage.removeItem("clutch_ssh_connected");
+  localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
   resetBackendLocal(); // end any SSH degradation on the local server
-  switchBackend(DEFAULT_BASE); // in-place fallback to the local backend
+  await switchBackendResolved(); // in-place fallback to the local backend
   refreshPicker();
 });
 if (window.clutchTunnel && window.clutchTunnel.onProgress) {
@@ -1712,40 +1995,40 @@ passInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#ssh-pass-ok").click();
 });
 
-// True for URLs that look like SSH-tunnel leftovers (127.0.0.1 on a non-default
-// port); manual LAN/domain backend URLs are not affected.
-function isTunnelLike(url) {
-  try {
-    const u = new URL(url);
-    return (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port !== "8890";
-  } catch (e) {
-    return false;
-  }
-}
-
 // Reconcile the renderer's stored backend URL with the tunnel's real state and
 // return the URL it should point at (or null if already correct). No UI side
 // effects — the caller switches and refreshes. A live tunnel is authoritative; a
-// dead-tunnel leftover (flag set, or a tunnel-like stored URL) falls back to the
-// local backend instead of pointing every fetch at a dead port ("Failed to fetch").
+// dead-tunnel leftover (the connected flag is set) falls back to the local
+// backend instead of pointing every fetch at a dead port ("Failed to fetch").
 // Degraded mode counts as connected too: the tunnel has no forward URL, but its
-// exec bridge is live, so the local server (DEFAULT_BASE) is the right target.
+// exec bridge is live, so the local server is the right target.
+//
+// Note: URL shape can no longer distinguish "tunnel leftover" from "local
+// session" — since the machine-supervisor architecture, local sessions also
+// listen on 127.0.0.1:<random port>. The connected flag is the only
+// authoritative marker.
 async function reconciledBackendUrl() {
   if (!window.clutchTunnel) return null;
   const s = await window.clutchTunnel.status();
   const override = localStorage.getItem("clutch_api_url");
   const flag = localStorage.getItem("clutch_ssh_connected");
   if (s.active) {
-    const target = s.url || (s.execBridge ? DEFAULT_BASE : null);
+    // a live tunnel is authoritative: the main process owns this window's
+    // session URL (tunnel session) — ask it instead of guessing
+    const target = await window.clutchApi.baseUrl();
     if (target && override !== target) {
       localStorage.setItem("clutch_ssh_connected", "1");
       return target;
     }
     return null;
   }
-  if (flag) localStorage.removeItem("clutch_ssh_connected");
-  if ((flag || override) && (flag || isTunnelLike(override))) {
-    return DEFAULT_BASE; // stale SSH leftover: fall back to local
+  if (flag) {
+    // stale SSH leftover: fall back to the local backend — resolved via the
+    // main process (it owns the per-window session; DEFAULT_BASE may be a dead
+    // URL after a tunnel session was claimed over it)
+    localStorage.removeItem("clutch_ssh_connected");
+    await switchBackendResolved();
+    return null; // switchBackendResolved already switched
   }
   return null;
 }
@@ -1754,13 +2037,24 @@ async function reconciledBackendUrl() {
 // the local backend in place so the UI stops failing; refresh the picker only when
 // it is open (a closed picker must not fire background directory fetches).
 if (window.clutchTunnel) {
-  window.clutchTunnel.onEnd(() => {
+  window.clutchTunnel.onEnd(async () => {
+    // the tunnel (and its exec bridge) is gone: any degrade mode dies with it
+    localStorage.removeItem("clutch_degrade");
     if (localStorage.getItem("clutch_ssh_connected")) {
       localStorage.removeItem("clutch_ssh_connected");
       resetBackendLocal(); // end any SSH degradation on the local server
-      switchBackend(DEFAULT_BASE);
+      await switchBackendResolved(); // the main process re-claims a local session
       if (!fsModal.classList.contains("hidden")) refreshPicker();
     }
+  });
+}
+
+// The main process re-established this window's session (it died on the remote
+// or locally): point the app at the new URL. SSE reconnects through
+// switchBackend; a null URL means no backend is possible right now.
+if (window.clutchApi && window.clutchApi.onBaseChanged) {
+  window.clutchApi.onBaseChanged((url) => {
+    if (url) switchBackend(url);
   });
 }
 
@@ -1925,8 +2219,15 @@ function renderNode(node, depth) {
 // ---- SSE live stream + session list ----
 let es = null;
 
-function connectSSE() {
-  es = new EventSource(API_BASE + "/api/events");
+function connectSSE(replay = true) {
+  // ?project= scopes the stream to this window's .clc: the server replays that
+  // project's history and filters live events to its runs, so multiple windows
+  // on different projects never see each other. replay=0 is used right after
+  // openProject/createProject, which already rendered the history themselves.
+  const qs = new URLSearchParams();
+  if (currentProject) qs.set("project", currentProject);
+  qs.set("replay", replay ? "1" : "0");
+  es = new EventSource(API_BASE + "/api/events?" + qs.toString());
   es.onmessage = (e) => {
     try { addEvent(JSON.parse(e.data)); } catch (err) {}
   };
@@ -1947,10 +2248,10 @@ function connectSSE() {
 // Point the SSE stream at the (possibly new) API_BASE. Only re-create an existing
 // stream; when es is still null (startup reconcile runs before the first connect)
 // the caller's connectSSE() will create the single stream against the fixed URL.
-function reconnectSSE() {
+function reconnectSSE(replay = true) {
   if (!es) return;
   es.close();
-  connectSSE();
+  connectSSE(replay);
 }
 
 let currentProject = ""; // path of the active .clc project file
@@ -2053,6 +2354,9 @@ function setProjectInfo(info) {
   els.projectLabel.textContent = info.name || "";
   els.projectLabel.title = currentProject;
   if (info.workdir) els.workspace.textContent = info.workdir;
+  // read-only badge: visible only while the active project is read-only
+  const badge = document.getElementById("readonly-badge");
+  if (badge) badge.classList.toggle("hidden", !info.read_only);
   setStatus("idle");
 }
 
@@ -2061,7 +2365,7 @@ function hideWelcome() {
   els.run.disabled = busy || !currentProject;
 }
 
-async function openProject(path) {
+async function openProject(path, readOnly = false) {
   if (busy) return;
   const prog = document.getElementById("open-progress");
   const fill = prog.querySelector(".open-progress-fill");
@@ -2074,11 +2378,13 @@ async function openProject(path) {
     const r = await fetch(API_BASE + "/api/project/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, ...(readOnly ? { read_only: true } : {}) }),
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error(err.error || r.status);
+      const e = new Error(err.error || r.status);
+      e.code = err.code || null; // e.g. project_open_conflict (HTTP 409)
+      throw e;
     }
     clearStream();
     stream.classList.add("loading"); // history reconstruction: no entrance motion
@@ -2103,12 +2409,17 @@ async function openProject(path) {
         if (!line) continue;
         let msg;
         try { msg = JSON.parse(line); } catch (e) { continue; }
-        if (msg.error) throw new Error(msg.error);
+        if (msg.error) {
+          const e = new Error(msg.error);
+          e.code = msg.code || null;
+          throw e;
+        }
         if (msg.meta) {
           setProjectInfo({
             project: msg.meta.project,
             name: msg.meta.name,
             workdir: msg.meta.workdir,
+            read_only: !!msg.meta.read_only,
           });
           hideWelcome();
           started = true;
@@ -2138,10 +2449,26 @@ async function openProject(path) {
     prog.classList.add("hidden");
     stream.classList.remove("loading"); // instant reveal — no fade, no replay
     stream.scrollTop = stream.scrollHeight; // jump straight to the end of the record
+    // re-scope the live stream to the newly opened project; replay=0 because
+    // the NDJSON stream above just rendered the history
+    reconnectSSE(false);
     refreshTree();
   } catch (e) {
     prog.classList.add("hidden");
     stream.classList.remove("loading");
+    // the same project is open (for write) in another window: offer read-only
+    // instead of failing — reads are fully functional, runs are rejected by
+    // the server with a clear reason
+    if (e && e.code === "project_open_conflict") {
+      const wantReadOnly = confirm(
+        "该项目已在另一个窗口中打开。\n以只读方式打开吗？只读模式无法运行任务。"
+      );
+      if (wantReadOnly) {
+        await openProject(path, true); // retry without the write lock
+        return;
+      }
+      return; // cancelled: keep the previous project as-is
+    }
     alert("Failed to open project: " + e.message);
   }
 }
@@ -2159,6 +2486,7 @@ async function createProject(dir, name) {
     clearStream();
     setProjectInfo(data);
     hideWelcome();
+    reconnectSSE(false); // new empty project: nothing to replay, just live events
     refreshTree();
   } catch (e) {
     alert("Failed to create project: " + e.message);
@@ -2259,9 +2587,10 @@ async function loadDir(path, remember = true) {
       )
     );
     listEl.appendChild(
-      fsRow("Reset to local backend", "action", () => {
+      fsRow("Reset to local backend", "action", async () => {
         localStorage.removeItem("clutch_ssh_connected");
-        switchBackend(DEFAULT_BASE);
+        localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
+        await switchBackendResolved();
         refreshPicker();
       })
     );
@@ -2294,7 +2623,9 @@ $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 // settle the stored URL against the tunnel's real state before connecting SSE, so
 // the stream targets the right backend; reconnectSSE() no-ops while es is null, so
 // a switch here leaves connectSSE() below to create the single stream
-reconciledBackendUrl().then((url) => {
+(async () => {
+  await resolveApiBase(); // learn this window's session port (IPC) first
+  const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
-});
+})();

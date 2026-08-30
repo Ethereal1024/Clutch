@@ -1,9 +1,10 @@
 # Clutch — Linux desktop app packaging (deb).
 #
-# The deb is self-contained: the Python backend ships inside it as the
-# PyInstaller onefile binary (extraResources -> /opt/Clutch/resources/agent-server)
-# and the Electron main process spawns it on launch (ui/local-server.js), so the
-# user needs no python, no pip and no network after `dpkg -i`.
+# The deb is self-contained: the Python side ships inside it as the
+# PyInstaller onefile binaries (extraResources -> /opt/Clutch/resources/agent-server
+# and agent-supervisor) and the Electron main process pulls the supervisor up on
+# launch (ui/server-bootstrap.js), so the user needs no python, no pip and no
+# network after `dpkg -i`.
 #
 # Build (from repo root):  bash scripts/release.sh
 #   (builds dist/agent-server, copies ui/transport_defaults.json, runs
@@ -22,10 +23,13 @@ files:
   - "!dev.sh"
   - "!ssh-tunnel.test.js"
 
-# the bundled backend binary (built by scripts/build-server-bundle.sh)
+# the bundled backend binaries (built by scripts/build-server-bundle.sh;
+# both live in dist/ — agent-server and agent-supervisor)
 extraResources:
   - from: ../dist/agent-server
     to: agent-server
+  - from: ../dist/agent-supervisor
+    to: agent-supervisor
 
 linux:
   target:

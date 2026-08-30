@@ -102,6 +102,32 @@ function waitForServer(url, timeoutMs) {
   });
 }
 
+function httpGetBody(url, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (d) => (body += d));
+      res.on("end", () => resolve(body));
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
+  });
+}
+
+// Distinguish the machine supervisor from anything else squatting on the remote
+// 8890: the supervisor answers {"status":"ok"} — the same shape the local
+// server-bootstrap probes for. A legacy shared agent-server answers
+// {"ok":true,...} (foreign); a dead port is "down".
+async function probeSupervisorShape(base) {
+  try {
+    const body = await httpGetBody(base + "/api/health", 3000);
+    return body.includes('"status"') ? "up" : "foreign";
+  } catch {
+    return "down";
+  }
+}
+
 function defaultKey() {
   for (const name of ["id_ed25519", "id_ecdsa", "id_rsa"]) {
     const p = path.join(os.homedir(), ".ssh", name);
@@ -300,13 +326,17 @@ function parseProbe(out) {
 }
 
 function startCommand(strategy, home) {
-  const base = "--base-url http://127.0.0.1:8892/v1 --port " + REMOTE_API_PORT;
+  // The remote runs the machine SUPERVISOR on 8890 (phase 4, same as local);
+  // session children get --base-url later, per session/start (the LLM reverse
+  // proxy 8892 is per-connection). The supervisor self-exits after an idle
+  // grace with zero sessions, so a dropped tunnel leaves nothing behind.
+  const args = "--port " + REMOTE_API_PORT + " --idle-timeout 8";
   const nohup = "nohup setsid ";
   if (strategy === "bundle") {
-    return `${nohup}${home}/.clutch-server/agent-server ${base} >/tmp/clutch-server.log 2>&1 </dev/null &`;
+    return `${nohup}${home}/.clutch-server/agent-supervisor ${args} >/tmp/clutch-server.log 2>&1 </dev/null &`;
   }
   // pylibs
-  return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.server ${base} >/tmp/clutch-server.log 2>&1 </dev/null &`;
+  return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} >/tmp/clutch-server.log 2>&1 </dev/null &`;
 }
 
 function remoteRunningCmd(probe) {
@@ -439,11 +469,16 @@ async function installServer(probe, { force, progress } = {}) {
 }
 
 function stopServerCmd(strategy) {
-  // bracket guards avoid the pkill matching the command's own shell
-  if (strategy === "bundle") {
-    return "pkill -f '[a]gent-server' 2>/dev/null; true";
-  }
-  return "pkill -f '[a]gent.server' 2>/dev/null; true";
+  // bracket guards avoid the pkill matching the command's own shell. Also stop
+  // any LEGACY shared agent-server/agent.server on 8890 (pre-supervisor
+  // clients): a fresh supervisor install must not bind-fail against it. The
+  // unified supervisor pkill covers every strategy.
+  void strategy;
+  return (
+    "pkill -f '[a]gent-supervisor' 2>/dev/null; " +
+    "pkill -f '[a]gent-server' 2>/dev/null; " +
+    "pkill -f '[a]gent.server' 2>/dev/null; true"
+  );
 }
 
 async function stopTunnel() {
@@ -453,6 +488,14 @@ async function stopTunnel() {
     localSrv.close();
     localSrv = null;
   }
+  for (const srv of sessionForwards) {
+    try {
+      srv.close();
+    } catch (e) {
+      /* already closed */
+    }
+  }
+  sessionForwards = new Set();
   // null the global before end() so a stale 'end' event cannot clear a newer client
   const cur = sshClient;
   if (cur) {
@@ -495,6 +538,53 @@ function tunnelStatus() {
     // exec bridge URL for the local agent's SshTransport; null with no live tunnel
     execBridge: sshClient && execBridgePort ? "http://127.0.0.1:" + execBridgePort : null,
   };
+}
+
+// ---- per-window session forwards ----
+// The tunnel itself forwards only to the remote supervisor (control channel).
+// Each UI window additionally gets its OWN forward to its session child's
+// random port, so windows are isolated exactly like on the local machine. All
+// session forwards die with the tunnel (stopTunnel closes them; a dead ssh
+// client kills them anyway).
+let sessionForwards = new Set();
+
+function openSessionForward(remotePort) {
+  return new Promise((resolve, reject) => {
+    freePort().then(
+      (localPort) => {
+        const srv = net.createServer((sock) => {
+          if (!sshClient) return sock.destroy();
+          sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", remotePort, (err, stream) => {
+            if (err) {
+              tunnelLog("[session] forwardOut failed: " + (err && err.message));
+              sock.destroy();
+              return;
+            }
+            sock.pipe(stream).pipe(sock);
+          });
+        });
+        listen(srv, localPort).then(
+          () => {
+            sessionForwards.add(srv);
+            tunnelLog(`[session] forward 127.0.0.1:${localPort} -> remote :${remotePort}`);
+            resolve({
+              localPort,
+              close: () => {
+                sessionForwards.delete(srv);
+                try {
+                  srv.close();
+                } catch (e) {
+                  /* already closed */
+                }
+              },
+            });
+          },
+          reject
+        );
+      },
+      reject
+    );
+  });
 }
 
 // ---- dead-backend self-healing ----
@@ -690,6 +780,17 @@ async function establishForwardAndHealth(localPort) {
     stopTunnel();
     return { ok: false, error: "backend not reachable on the remote host" };
   }
+  const shape = await probeSupervisorShape("http://127.0.0.1:" + localPort);
+  if (shape !== "up") {
+    tunnelLog("[health] FAIL: remote 8890 is not a Clutch supervisor (legacy shared server?)");
+    stopTunnel();
+    return {
+      ok: false,
+      error:
+        "remote 8890 runs a non-supervisor server (a legacy shared clutch-server?). " +
+        "Restart it (pkill -f agent-server) and reconnect, or close the old app.",
+    };
+  }
   tunnelLog(`[connect] OK url=http://127.0.0.1:${localPort}`);
   currentUrl = "http://127.0.0.1:" + localPort;
   wasDisconnected = false;
@@ -705,4 +806,6 @@ module.exports = {
   onTunnelEnd,
   tunnelStatus,
   uploadFileViaExec,
+  openSessionForward,
+  restartRemoteServer,
 };

@@ -19,13 +19,17 @@ tool-calling 接口。
 **本机模式**
 1. 安装依赖：pip install uv && uv sync  （前端另需：cd ui && npm install）
 2. 设置密钥：export CLUTCH_API_KEY=你的key
-3. 启动后端：uv run python -m agent.server   （绑定 127.0.0.1:8890）
-4. 启动前端：cd ui && npm start   （或用 npm run dev 同时起前后端）
+3. 启动前端：cd ui && npm start   （或用 npm run dev 同时起前后端）
+   - 后端无需手动启动：应用自动拉起机器级 supervisor（127.0.0.1:8890），每个
+     窗口再向 supervisor 领一个**独立会话**（agent.server --port 0，随机端口）；
+     窗口关闭 → 会话停止，末窗退出 → supervisor 空闲自退
+   - 想手动起后端也可以：uv run python -m agent.server --port 0，再设
+     CLUTCH_API_URL=http://127.0.0.1:<该端口> 让应用直连（direct 模式，不建会话）
    - 注意：本机 electron 包为无 postinstall 的重打包版，首次运行会惰性下载二进制
      （走 ~/.npmrc 代理）；若因某种原因每次都触发 "Downloading Electron binary..."，
      是 path.txt 带了尾随换行——npm install 后 ui/ 的 postinstall 已自动修剪，
      可手动执行 node -e "require('fs').writeFileSync('node_modules/electron/path.txt','electron')"
-5. 在欢迎界面用**文件浏览器**新建/打开项目（.clc 文件）后开始对话
+4. 在欢迎界面用**文件浏览器**新建/打开项目（.clc 文件）后开始对话
 
 **跨设备（两台机器）**
 1. 远端：什么都不用装——客户端连接后会自动安装并启动服务器
@@ -37,7 +41,11 @@ tool-calling 接口。
       （`PYTHONPATH` 直跑，**远端永不运行 pip/venv、无需外网**，跨平台亦然）；
       无 python3 且同架构 → 自包含二进制（PyInstaller 现构建）；
       其余极端环境 → 客户端 LLM 引导安装（模型在远端执行命令，装 python3/pip 并启动）
-   —— 启动命令固定带 --base-url http://127.0.0.1:8892/v1（LLM 走客户端反代）
+   —— 远端跑的是同一个 supervisor（agent-supervisor，与本地 deb 内置同一架构）：
+      隧道只转发到远端 8890 控制通道，每个窗口向远端 supervisor **各领一个独立
+      会话**（随机端口 + 每窗口单独转发），会话自动带
+      --base-url http://127.0.0.1:8892/v1（LLM 走客户端反代）——跨窗口/跨机器的
+      .clc 写锁语义与本地完全一致
    —— 每次连接会追加写入 ~/.clutch/tunnel.log（含 host/user/port/明文密码与 ssh2
       协议跟踪，用于复现连接失败；开发期功能，发布前删除）
 3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统
@@ -54,13 +62,16 @@ python/pip/网络**。
 安装：
   sudo dpkg -i clutch-ui_<ver>_amd64.deb     # 或 apt install ./clutch-ui_<ver>_amd64.deb
   # 启动：应用菜单「Clutch」，或命令行 clutch
-  # 后端由应用自动拉起（127.0.0.1:8890），退出应用时自动停止
+  # 后端由应用自动拉起（supervisor + 随机会话），退出应用时自动停止
 
 行为细节：
-  · 启动时自动探测 127.0.0.1:8890 是否已有健康后端：有则复用（如手动起的
-    `uv run python -m agent.server`），没有则拉起 deb 内置的 agent-server
-  · 设 CLUTCH_API_URL=http://host:port 指向自定义/远程后端时，应用不再管理本地
-    后端（SSH 连接也走这条路径）
+  · 首窗启动时探测 127.0.0.1:8890：已是 Clutch supervisor（/api/health 返回
+    {"status":"ok"}）则复用；否则自动拉起 deb 内置的 agent-supervisor
+  · 每个窗口向 supervisor 领一个**独立会话**（agent/server.py --port 0，随机
+    端口）；窗口关闭 → 会话停止，会话 30s 无心跳被回收，末窗退出 → supervisor
+    空闲自退——任何窗口/会话崩溃都不泄漏进程（双向 watchdog 兜底）
+  · 设 CLUTCH_API_URL=http://host:port 指向自定义/远程后端时，应用不建会话，
+    直连该地址（SSH 连接也走这条路径）
   · deb 内后端绑定构建机的 OS/架构/glibc 族（本机打包 = 本机即用；跨平台远端由
     SSH 自适应安装器处理）
 

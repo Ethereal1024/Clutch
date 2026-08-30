@@ -17,23 +17,47 @@ const path = require("path");
 const fs = require("fs");
 const { ProxyAgent } = require("proxy-agent");
 
-const UPSTREAM = process.env.CLUTCH_LLM_UPSTREAM || "https://api.deepseek.com";
 const UPSTREAM_TIMEOUT_MS = 90000;
 
 let server = null;
 let agent = null;
+
+// Read ~/.clutch/settings.json, resolving to the active profile's config.
+// New format: {"profiles": {name: {provider, base_url, model, api_key}},
+// "active": name}. Legacy flat {"provider", "base_url", "model", "api_key"}
+// files are returned as-is (the whole object IS the one profile).
+function readSettingsFile() {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
+    if (d && d.profiles) {
+      return d.profiles[d.active] || {};
+    }
+    return d || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+// Upstream LLM endpoint: env first, then the local settings file the app
+// writes (~/.clutch/settings.json — base_url saved in the UI settings modal),
+// falling back to the DeepSeek default. This is what keeps the proxy from
+// being hard-locked to one provider: any OpenAI-compatible base URL (Zhipu,
+// Moonshot, Ollama, ...) works here.
+function getUpstream() {
+  const e = process.env;
+  if (e.CLUTCH_LLM_UPSTREAM) return e.CLUTCH_LLM_UPSTREAM;
+  const d = readSettingsFile();
+  if (d.base_url) return d.base_url;
+  return "https://api.deepseek.com";
+}
 
 // Client API key: env first, then the local settings file the app writes
 // (~/.clutch/settings.json), so a key saved in the UI is honored too.
 function getApiKey() {
   const e = process.env;
   if (e.CLUTCH_API_KEY) return e.CLUTCH_API_KEY;
-  try {
-    const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
-    if (d.api_key) return d.api_key;
-  } catch (e) {
-    /* no local settings */
-  }
+  const d = readSettingsFile();
+  if (d.api_key) return d.api_key;
   return "";
 }
 
@@ -65,7 +89,23 @@ function getAgent(target) {
   return agent;
 }
 
-function startLlmProxy() {
+// Build the upstream URL for a proxied request. Remote sessions target the
+// proxy with an OpenAI-style base URL (http://127.0.0.1:8892/v1), so reqUrl is
+// /v1/chat/completions. The configured upstream may itself carry a path
+// (Zhipu: /api/paas/v4, Ollama: /v1, ...): strip the SDK's /v1 segment and
+// append the remainder to the upstream's path instead of blind concatenation
+// (which would double the path: …/api/paas/v4/v1/chat/completions) — and NOT
+// via new URL(path, base), whose leading "/" would replace the upstream path.
+function joinUpstream(upstream, reqUrl) {
+  const [rawPath, search = ""] = reqUrl.split("?");
+  const rel = rawPath.replace(/^\/v1(?=\/|$)/, "").replace(/^\//, "");
+  const u = new URL(upstream);
+  u.pathname = (u.pathname.endsWith("/") ? u.pathname : u.pathname + "/") + rel;
+  u.search = search ? "?" + search : "";
+  return u.href;
+}
+
+function startLlmProxy(upstream) {
   server = http.createServer((req, res) => {
     if (req.method !== "POST" || !req.url.includes("/chat/completions")) {
       res.writeHead(404).end("not found");
@@ -76,7 +116,7 @@ function startLlmProxy() {
     req.on("end", () => {
       try {
         const body = Buffer.concat(chunks);
-        const target = new URL(UPSTREAM + req.url);
+        const target = new URL(joinUpstream(upstream || getUpstream(), req.url));
         const transport = target.protocol === "http:" ? http : https;
         const preq = transport.request(
           target,
@@ -128,4 +168,4 @@ function stopLlmProxy() {
   }
 }
 
-module.exports = { startLlmProxy, stopLlmProxy };
+module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, getUpstream, getApiKey };

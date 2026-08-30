@@ -72,6 +72,10 @@ class RunState:
         self.workspace: Workspace | None = None
         self.api_key: str | None = None
         self.gate: PermissionGate | None = None
+        # path of the project the currently-active run belongs to (None when
+        # idle). SSE subscribers filter live events against it so multiple UI
+        # windows, each on its own project, never see each other's runs.
+        self.run_project: str | None = None
         # SSH degradation layer: when set, tools/.clc/fs run through the exec bridge
         self.backend_mode: str = "local"  # "local" | "ssh"
         self.bridge_url: str | None = None
@@ -117,6 +121,7 @@ class RunState:
         # keep the project + workspace so a follow-up run can continue
         with self.lock:
             self.busy = False
+            self.run_project = None
 
 
 class BaseServer(ABC):
@@ -132,13 +137,14 @@ class BaseServer(ABC):
         build_llm and the per-run compactor closure both go through here, so a
         new client knob (timeout, retries, …) is added in exactly one place."""
         return create_llm_client(
-            provider="openai",
+            provider=cfg.provider,
             api_key=api_key,
             model=model,
             base_url=cfg.base_url,
             request_timeout=cfg.llm_request_timeout,
             max_retries=cfg.llm_max_retries,
             retryable_status=cfg.llm_retryable_status,
+            reasoning_effort=cfg.llm_reasoning_effort,
         )
 
     def build_llm(self) -> LlmClient:

@@ -322,6 +322,14 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .event .body pre code { background: none; padding: 0; }
 
+/* markdown --- horizontal rule inside message bodies: thin, theme-dark
+   (the UA default is a thick light-grey line that reads as white) */
+.event .body hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
 /* rendered mermaid diagrams replace the source block; mermaid's dark theme
    draws on a transparent backdrop, so the container provides the chrome */
 .event .body pre.mermaid-rendered {
@@ -332,6 +340,20 @@ main { display: flex; flex: 1; min-height: 0; }
   padding: 12px 10px;
 }
 .event .body pre.mermaid-rendered svg { max-width: 100%; height: auto; }
+
+/* a diagram that failed to parse keeps its literal source + one small notice
+   (never mermaid's giant error SVG): faint red border, unobtrusive text */
+.event .body pre.mermaid-failed {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.event .body pre .mermaid-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid rgba(239, 68, 68, 0.25);
+  color: var(--accent, #EF4444);
+  font-size: 12px;
+  line-height: 1.5;
+}
 
 /* syntax highlighting (highlight.js) — tuned to the swiss dark palette */
 .hljs-comment, .hljs-quote { color: var(--muted); font-style: italic; }
@@ -690,6 +712,24 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 
 /* project label */
 .project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }
+
+/* read-only badge: shown when the project was opened read-only because another
+   window holds the write lock (runs are rejected by the server) */
+.readonly-badge {
+  margin-left: 8px;
+  font-size: 10px;
+  font-family: var(--font-ui);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 2px 6px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
 
 /* welcome screen (kept as-is per user) */
 .welcome {

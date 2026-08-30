@@ -119,6 +119,107 @@ def _run_server_test() -> int:
         check(state.api_key == "sk-test-123", "settings stored in state")
         state.api_key = None
 
+        # 2d. settings: the LLM endpoint (provider/model/base_url) is
+        # configurable, not hard-locked to DeepSeek — switching provider moves
+        # the whole endpoint to that provider's preset
+        st, body = http_post(f"{base_url}/api/settings", {"provider": "zhipu", "api_key": "sk-test-123"})
+        check(st == 200, "provider switch accepted")
+        check(config.provider == "zhipu", "settings stores provider in live config")
+        check(
+            config.base_url == "https://open.bigmodel.cn/api/paas/v4",
+            "provider preset fills the base_url (zhipu)",
+        )
+        check(config.model == "glm-4-flash", "provider preset fills the model (zhipu)")
+        st, body = http_get(f"{base_url}/api/settings")
+        data = json.loads(body)
+        check(
+            data.get("provider") == "zhipu"
+            and data.get("base_url") == "https://open.bigmodel.cn/api/paas/v4"
+            and data.get("model") == "glm-4-flash",
+            "GET /api/settings returns the live LLM endpoint config",
+        )
+
+        # 2d2. multi-API profiles: save a named profile (doesn't clobber the
+        # migrated "default" one), switch active, list without leaking keys
+        st, body = http_post(
+            f"{base_url}/api/settings",
+            {"profile_name": "zhipu-53", "provider": "zhipu", "model": "glm-5.3", "api_key": "sk-zp-123"},
+        )
+        check(st == 200, "named profile save accepted")
+        st, body = http_get(f"{base_url}/api/settings")
+        data = json.loads(body)
+        check(data.get("active") == "zhipu-53", "saving a profile activates it")
+        names = [p["name"] for p in data.get("profiles", [])]
+        check("zhipu-53" in names and "default" in names, "profiles list keeps saved + migrated profiles")
+        zp = next(p for p in data["profiles"] if p["name"] == "zhipu-53")
+        check(zp["model"] == "glm-5.3" and zp["has_api_key"] is True, "profile carries model + key flag")
+        check('"api_key"' not in body, "GET /api/settings never leaks api keys")
+
+        # 2d3. reasoning_effort passthrough: saved per profile, applied live,
+        # validated, and clearable with an explicit empty value
+        st, body = http_post(
+            f"{base_url}/api/settings",
+            {"profile_name": "zhipu-53", "provider": "zhipu", "model": "glm-5.3", "reasoning_effort": "max"},
+        )
+        check(st == 200, "profile save with reasoning_effort accepted")
+        check(config.llm_reasoning_effort == "max", "reasoning_effort applied to live config")
+        st, body = http_get(f"{base_url}/api/settings")
+        data = json.loads(body)
+        zp = next(p for p in data["profiles"] if p["name"] == "zhipu-53")
+        check(zp.get("reasoning_effort") == "max", "GET reports the saved reasoning_effort")
+        st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "turbo"})
+        check(st == 400, "invalid reasoning_effort rejected")
+        st, body = http_post(
+            f"{base_url}/api/settings",
+            {"profile_name": "zhipu-53", "reasoning_effort": ""},
+        )
+        check(st == 200, "empty reasoning_effort accepted (clears the knob)")
+        check(config.llm_reasoning_effort is None, "empty reasoning_effort clears live config")
+        st, body = http_get(f"{base_url}/api/settings")
+        data = json.loads(body)
+        zp = next(p for p in data["profiles"] if p["name"] == "zhipu-53")
+        check(zp.get("reasoning_effort", "") == "", "cleared knob not echoed on GET")
+
+        # switching active applies the profile's config to the live server
+        st, body = http_post(f"{base_url}/api/settings", {"activate": "default"})
+        check(st == 200, "activate switch accepted")
+        check(config.provider == "zhipu", "switch applies the profile to live config")
+        st, body = http_get(f"{base_url}/api/settings")
+        data = json.loads(body)
+        check(data.get("active") == "default", "active reverted to default")
+        check(any(p["name"] == "zhipu-53" for p in data["profiles"]), "switched-away profile still saved")
+        # switching to an unknown profile is rejected
+        st, body = http_post(f"{base_url}/api/settings", {"activate": "nope"})
+        check(st == 400, "activate unknown profile rejected")
+        # delete a profile
+        st, body = http_post(f"{base_url}/api/settings", {"delete": "zhipu-53"})
+        check(st == 200, "profile delete accepted")
+        st, body = http_get(f"{base_url}/api/settings")
+        data = json.loads(body)
+        check(not any(p["name"] == "zhipu-53" for p in data["profiles"]), "deleted profile gone")
+        # saving without profile_name targets the active profile (legacy UI path)
+        st, body = http_post(
+            f"{base_url}/api/settings",
+            {"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
+        )
+        check(st == 200, "legacy-style save still works")
+
+        st, body = http_post(f"{base_url}/api/settings", {"provider": "no-such-provider"})
+        check(st == 400, "unknown provider rejected")
+        st, body = http_post(f"{base_url}/api/settings", {})
+        check(st == 400, "empty settings body rejected")
+        # restore DeepSeek defaults so later real-run sections still target DeepSeek
+        st, body = http_post(
+            f"{base_url}/api/settings",
+            {
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+            },
+        )
+        check(st == 200, "settings restored to deepseek")
+        check(config.provider == "deepseek", "restored provider in live config")
+
         # 3. create a project
         st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "demo"})
         check(st == 200, "project created")
@@ -248,6 +349,165 @@ def _run_server_test() -> int:
         # switch back to the demo project so the real-run section stays untouched
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "switched back to the demo project")
+
+        # ---- multi-window isolation: two SSE subscribers on different projects ----
+        from .events import FinalEvent
+
+        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "iso-b"})
+        check(st == 200, "second project created for isolation")
+        clc2 = Path(json.loads(body)["project"])
+        # reopen the demo project so the active project is A's file again
+        st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "active project is A again")
+
+        evs_a: list[dict] = []
+        evs_b: list[dict] = []
+        done_a = threading.Event()
+        done_b = threading.Event()
+
+        def iso_reader(evs: list[dict], done: threading.Event, url: str, want: str) -> None:
+            try:
+                with urllib.request.urlopen(url, timeout=30) as r:
+                    for raw in r:
+                        line = raw.decode().strip()
+                        if line.startswith("data: "):
+                            ev = json.loads(line[6:])
+                            evs.append(ev)
+                            if ev.get("type") == "final" and ev.get("summary") == want:
+                                done.set()
+                                break
+            except Exception as e:  # noqa: BLE001
+                print(f"  [iso] {e}")
+
+        threading.Thread(
+            target=iso_reader,
+            args=(evs_a, done_a, f"{base_url}/api/events?project={quote(str(clc))}&replay=1", "iso-a"),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=iso_reader,
+            args=(evs_b, done_b, f"{base_url}/api/events?project={quote(str(clc2))}&replay=1", "iso-b"),
+            daemon=True,
+        ).start()
+        deadline = time.time() + 10
+        while broadcaster.count() < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        check(broadcaster.count() >= 2, "both SSE subscribers connected")
+
+        # a run on project A must reach only A's subscriber
+        state.run_project = str(clc)
+        broadcaster.publish(FinalEvent(status="completed", summary="iso-a"))
+        check(done_a.wait(timeout=10), "A's subscriber received A's run final")
+        time.sleep(0.3)  # give B's loop a chance to (wrongly) deliver the same event
+        check(not any(e.get("summary") == "iso-a" for e in evs_b), "B's subscriber never saw A's run final")
+
+        # a run on project B reaches only B's subscriber
+        state.run_project = str(clc2)
+        broadcaster.publish(FinalEvent(status="completed", summary="iso-b"))
+        check(done_b.wait(timeout=10), "B's subscriber received B's run final")
+
+        # a run carrying project=<path> switches the active project before starting
+        state.run_project = None
+        state.api_key = "sk-fake"  # let start_task reach the busy check without LLM init
+        state.busy = True  # busy -> 409, but the switch already happened
+        st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
+        check(st == 409, "busy run rejected during switch test")
+        check(str(state.project.path) == str(clc2.resolve()), "run with project= switched the active project")
+        state.busy = False
+        state.api_key = None
+        # restore the demo project so the real-run section stays untouched
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "switched back to the demo project after isolation")
+
+        # ---- 3f. per-window write lock: one writer per .clc ----
+        # (the reopen above holds the demo lock in-process; simulate ANOTHER
+        # window by dropping our handle and flocking a fresh fd — flock is
+        # exclusive even between two fds of one process, so this models the
+        # other process exactly)
+        import fcntl
+
+        from .core.project_lock import ProjectLock, _local_lock_path
+
+        lock_path = _local_lock_path(str(clc))
+        handle = state.project.lock if state.project is not None else None
+        check(handle is not None and handle.kind == "local", "open project holds a local lock")
+        ProjectLock.release(handle)
+
+        with open(lock_path, "a+") as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+            check(st == 409, "second window open -> 409")
+            err = json.loads(body)
+            check(err.get("code") == "project_open_conflict", "409 carries project_open_conflict")
+
+            # read-only open succeeds despite the lock, carries the flag in meta
+            st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
+            check(st == 200, "read-only open succeeds while another window holds the lock")
+            ro_meta = next(
+                (m["meta"] for m in (json.loads(l) for l in body.splitlines() if l.strip()) if m.get("meta")),
+                None,
+            )
+            check(ro_meta is not None and ro_meta.get("read_only") is True, "meta carries read_only")
+            check(state.project is not None and state.project.read_only, "project is read-only")
+
+            # a run on the read-only project is refused
+            st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
+            check(st == 409, "run on a read-only project rejected")
+
+            # a different project opens fine (the lock is per-path)
+            st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
+            check(st == 200, "different project opens while another holds demo's lock")
+
+            fcntl.flock(other, fcntl.LOCK_UN)  # the "other window" closes
+
+        # the other window released -> the demo project opens normally again
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "open works after the other window released")
+        check(state.project is not None and not state.project.read_only, "reopen is writable again")
+
+        # ---- 3g. remote (ssh) lock over the exec bridge ----
+        from unittest import mock
+
+        from agent.tools.transport import LocalTransport
+        from agent.tools.workspace import RemoteWorkspace
+
+        with tempfile.TemporaryDirectory() as rdir:
+            root = Path(rdir)
+
+            def make_ws():
+                # RemoteWorkspace hard-codes SshTransport; swap in a local one so
+                # the noclobber/rm commands run for real on a local dir
+                with mock.patch("agent.tools.workspace.SshTransport", lambda url: LocalTransport(str(root))):
+                    return RemoteWorkspace(str(root), "http://bridge.invalid")
+
+            rclc = str(root / "remote.clc")
+            (root / "remote.clc").write_text("x\n")
+            ws1 = make_ws()
+            h1 = ProjectLock.acquire(rclc, ws1)
+            check(h1 is not None and h1.kind == "remote", "remote lock acquired")
+            check((root / ".clc.lock").exists(), "remote lock file created on the host")
+
+            # a second window (fresh process state) is refused
+            saved_held = dict(ProjectLock._held)
+            ProjectLock._held.clear()
+            try:
+                h2 = ProjectLock.acquire(rclc, make_ws())
+                check(h2 is None, "second window remote lock refused")
+
+                # stale TTL: an aged lock is reclaimed
+                (root / ".clc.lock").write_text(str(int(time.time()) - 7 * 3600))
+                h3 = ProjectLock.acquire(rclc, make_ws())
+                check(h3 is not None, "stale remote lock reclaimed after TTL")
+                ProjectLock.release(h3)
+                check(not (root / ".clc.lock").exists(), "remote lock file removed on release")
+
+                # fresh acquire after release works
+                h4 = ProjectLock.acquire(rclc, make_ws())
+                check(h4 is not None, "fresh remote acquire after release")
+                ProjectLock.release(h4)
+                check(not (root / ".clc.lock").exists(), "release cleans up the lock file")
+            finally:
+                ProjectLock._held.update(saved_held)  # restore the demo handle
 
         # 4. real run (only with a key saved in ~/.clutch/settings.json)
         key = _saved_api_key()
