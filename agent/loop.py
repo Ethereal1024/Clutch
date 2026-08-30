@@ -257,6 +257,13 @@ class Agent:
 
                 # ---- no tool call: candidate done -> verification gate ----
                 self._emit(AssistantMessageEvent(content=content, reasoning=reasoning))
+                if not content.strip():
+                    # an empty reply (GLM-5.3 often thinks without emitting
+                    # text) is NOT a completion: feeding it back as an error
+                    # forces a visible answer instead of a silent completed
+                    # with no agent output on screen
+                    self._emit(UserMessageEvent(content=render("empty_response.md")))
+                    continue
                 v = self.terminator.verify(self.workspace)
                 if v.done:
                     return self._finish("completed", content)

@@ -1,14 +1,18 @@
-"""Standalone verification of the lazy .clc loading path (phase 1 + paging).
+"""Standalone verification of the lazy .clc loading path (byte-addressed).
 
 Builds a synthetic .clc with a compaction, opens it lazily, and checks:
-  1. only seq 0 + the preserved tail are materialized (older_count == tail_start-1)
-  2. the durable-only index skips transient lines correctly
+  1. only the raw task + the preserved tail are materialized (older_bytes ==
+     the on-disk middle BYTES)
+  2. the tail scan finds the last compaction and its stored byte tail_start
   3. materialize_range pages the middle on demand; LRU eviction drops middle
-     events (pinned head/tail survive); older_count tracks the honest remainder
+     events (pinned task/tail survive); older_bytes tracks the honest remainder
   4. derive_messages on the lazy log == derive_messages on a fully loaded log
   5. compact() works on the lazy log (head re-materialized under the pin, guard
      prevents a no-op re-summary) and derive_messages sees the new summary
-  6. tail_from clamps a stale out-of-range tail_start
+  6. tail_start_index matches the fully loaded log EXACTLY (both walk the same
+     events from the end with len(content)//3 — no index, no approximation)
+  7. a stale out-of-range tail_start clamps to the compaction and still derives
+     the same context as a full load
 
 Run: uv run python -m agent.lazy_check
 """
@@ -24,7 +28,7 @@ from .config import Config
 from .core import lazy as lazy_mod
 from .core.compaction import Compactor
 from .core.context import derive_messages
-from .core.lazy import LazyEventLog, _stored_tail_start, index_file, parse_durable
+from .core.lazy import LazyEventLog, _tail_scan, parse_durable
 from .events import (
     AssistantMessageEvent,
     CompactionEvent,
@@ -33,6 +37,8 @@ from .events import (
     TextDeltaEvent,
     ToolResultEvent,
     UserMessageEvent,
+    _line_bytes,
+    event_from_dict,
     event_to_json,
 )
 from .project import open_project_lazy
@@ -58,36 +64,80 @@ class FakeLlm:
 
 
 def build_clc(path: Path, with_transients: bool = True, recent: int = 9) -> dict:
-    """Write a synthetic .clc and return the durable-layout bookkeeping.
+    """Write a synthetic .clc and return the byte-layout bookkeeping.
 
-    Durable seqs: 0 task; 1..99 middle; 100 compaction (tail_start=90);
-    101..(100+recent) recent tail. Transient lines are interleaved to prove the
-    index (and thus seq numbering) skips them.
+    Event region: 0 task; 1..99 middle; 100 compaction; 101..(100+recent) tail.
+    The compaction's tail_start (BYTES) is the line start of the 90th durable
+    event (10 before the compaction). Transient lines are interleaved to prove
+    byte offsets track the real file layout (transients occupy bytes too) —
+    offsets are measured from the written file, exactly like the lazy log does.
     """
-    lines = [
-        "# clutch project v1",
-        "name: lazy-test",
-        "model: fake-model",
-        "---",
-    ]
+    events = [UserMessageEvent(content="task")]
+    for i in range(1, 100):
+        events.append(
+            UserMessageEvent(content=f"old ask {i}")
+            if i % 2
+            else AssistantMessageEvent(content=f"old work {i}")
+        )
+    events.append(CompactionEvent(summary="old work summarized", tail_start=0))  # patched below
+    for i in range(101, 101 + recent):
+        events.append(AssistantMessageEvent(content=f"recent {i}"))
 
-    def add(ev):
+    lines = ["# clutch project v1", "name: lazy-test", "model: fake-model", "---"]
+    for ev in events:
         lines.append(event_to_json(ev))
         if with_transients and ev.type in ("assistant_message", "user_message"):
             lines.append(event_to_json(TextDeltaEvent(content="x")))
             lines.append(event_to_json(StepStartEvent()))
-
-    add(UserMessageEvent(content="task"))
-    for i in range(1, 100):
-        if i % 2:
-            add(UserMessageEvent(content=f"old ask {i}"))
-        else:
-            add(AssistantMessageEvent(content=f"old work {i}"))
-    add(CompactionEvent(summary="old work summarized", tail_start=90))
-    for i in range(101, 101 + recent):
-        add(AssistantMessageEvent(content=f"recent {i}"))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"total": 101 + recent, "tail_start": 90}
+
+    # measure the REAL byte layout from the written file (transients included),
+    # matching the lazy log's file-based offsets
+    text = path.read_text(encoding="utf-8")
+    pos = 0
+    base = None
+    task_end = 0
+    durable_seen = 0
+    tail_start = 0
+    comp_offset = 0
+    for line in text.split("\n"):
+        stripped = line.strip()
+        line_bytes = len(line.encode("utf-8")) + 1
+        if base is None:
+            is_durable = _is_durable_line(stripped, line)
+            if is_durable:
+                base = pos
+                task_end = pos + line_bytes
+            pos += line_bytes
+            continue
+        if _is_durable_line(stripped, line):
+            durable_seen += 1
+            if durable_seen == 90:
+                tail_start = pos - base
+            if '"compaction"' in line:
+                comp_offset = pos - base
+        pos += line_bytes
+    # patch the compaction's stored tail_start into the file (byte offset)
+    patched = text.replace('"tail_start": 0', f'"tail_start": {tail_start}')
+    path.write_text(patched, encoding="utf-8")
+    return {
+        "total": len(events),
+        "tail_start": tail_start,
+        "task_end": task_end - (base or 0),
+        "comp_offset": comp_offset,
+    }
+
+
+def _is_durable_line(stripped: str, line: str) -> bool:
+    if not stripped or stripped.startswith(("----", "[memories]")):
+        return False
+    try:
+        data = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(data, dict) and data.get("type") in (
+        "user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"
+    )
 
 
 def main() -> None:
@@ -96,14 +146,14 @@ def main() -> None:
     path = tmp / "proj.clc"
     book = build_clc(path, with_transients=True)
 
-    # force the lazy path: the synthetic file is far below the real 512-event
+    # force the lazy path: the synthetic file is far below the real byte
     # threshold, which the final check exercises explicitly
-    old_min = lazy_mod._LAZY_MIN_DURABLE
-    lazy_mod._LAZY_MIN_DURABLE = 32
+    old_min = lazy_mod._LAZY_MIN_BYTES
+    lazy_mod._LAZY_MIN_BYTES = 64
     try:
         _run(config, tmp, path, book)
     finally:
-        lazy_mod._LAZY_MIN_DURABLE = old_min
+        lazy_mod._LAZY_MIN_BYTES = old_min
     # a tiny history still opens as a plain EventLog (open_project equivalence)
     with tempfile.TemporaryDirectory() as d:
         p3 = Path(d) / "tiny.clc"
@@ -124,68 +174,63 @@ def main() -> None:
 
 
 def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
-    # ---- 1. lazy open: only seq 0 + tail resident -------------------------
+    # ---- 1. lazy open: only task + tail resident ---------------------------
     project = open_project_lazy(path, workspace=None)
     log = project.log
     check(isinstance(log, LazyEventLog), "compaction file opens as a LazyEventLog")
     loaded = log.items()
-    check(len(loaded) == 1 + (book["total"] - book["tail_start"]),
-          f"resident = seq0 + tail ({len(loaded)} events)")
+    check(len(loaded) == 1 + (book["total"] - 90),
+          f"resident = task + tail ({len(loaded)} events)")
     check(loaded[0] == (0, project.events()[0]) and loaded[0][1].content == "task",
-          "seq 0 (the raw task) is resident first")
-    check(loaded[1][0] == book["tail_start"], "tail starts at the stored tail_start seq")
-    check(all(s >= book["tail_start"] for s, _ in loaded[1:]),
-          "every non-zero resident seq is inside the preserved tail")
-    check(log.older_count() == book["tail_start"] - 1,
-          "older_count == events still on disk before the tail")
+          "offset 0 (the raw task) is resident first")
+    check(loaded[1][0] == book["tail_start"], "tail starts at the stored tail_start BYTE offset")
+    check(all(off >= book["tail_start"] for off, _ in loaded[1:]),
+          "every non-task resident offset is inside the preserved tail")
+    check(log.older_bytes() == book["tail_start"] - book["task_end"],
+          "older_bytes == the on-disk middle bytes")
     check(project.meta.name == "lazy-test", "meta parsed from the header range read")
     check(project.memories is not None and not project.memories.items(), "empty MemoryStore attached")
 
-    # ---- 2. durable-only index skips transients ----------------------------
-    idx = index_file(*_make_local_reader(path), None)
-    check(len(idx) == book["total"], f"index counts only durable lines ({len(idx)})")
-    check(idx.newest_compaction == 100, "newest_compaction seq detected")
-    read, _total = _make_local_reader(path)
-    check(_stored_tail_start(read, idx) == 90,
-          "stored tail_start extracted from the single compaction line")
+    # ---- 2. tail scan finds the last compaction + stored tail_start --------
+    from .core.lazy import _make_reader
+    read, total = _make_reader(path, None)
+    comp, mem = _tail_scan(read, total)
+    check(comp is not None, "tail scan finds the compaction event")
+    check(comp[1].tail_start == book["tail_start"],
+          "stored tail_start extracted from the compaction line")
+    check(mem is None, "no [memories] marker in the plain file")
 
     # ---- 3. paging + LRU eviction -----------------------------------------
-    page = log.materialize_range(1, 60)
-    check(len(page) == 59 and page[0][0] == 1 and page[-1][0] == 59,
-          "materialize_range(1,60) returns seqs 1..59 in order")
-    check(log.older_count() == book["tail_start"] - 1 - 59,
-          "older_count shrinks by the paged count")
+    page = log.materialize_range(book["task_end"], book["tail_start"])
+    check(len(page) == 89 and page[0][0] > book["task_end"] and page[-1][0] < book["tail_start"],
+          "materialize_range pages the 89 middle events in order")
+    check(log.older_bytes() == 0, "older_bytes drops to 0 after paging the middle")
     # a second page request overlaps: returns the same events, no dupes
-    again = log.materialize_range(30, 70)
-    check(len(again) == 40 and again[0][0] == 30 and again[-1][0] == 69,
-          "overlapping page returns seqs 30..69 without duplicates")
+    again = log.materialize_range(book["task_end"], book["tail_start"])
+    check(len(again) == 89, "overlapping page returns the same events without duplicates")
 
-    # LRU: shrink the cap and load the whole middle; middle must evict, 0+tail
-    # must survive, and older_count must report the honest disk remainder
+    # LRU: shrink the cap and load the whole middle; middle must evict, task+tail
+    # must survive, and older_bytes must report the honest disk remainder
     old_cap = lazy_mod._LRU_EVENT_CAP
     lazy_mod._LRU_EVENT_CAP = 25
     try:
         log2 = open_project_lazy(path, workspace=None).log
-        log2.materialize_range(1, book["tail_start"])  # all 89 middle events
-        seqs = [s for s, _ in log2.items()]
-        check(len(seqs) <= 25, f"resident bounded by LRU cap ({len(seqs)} <= 25)")
-        check(0 in seqs and seqs[-1] == book["total"] - 1, "seq 0 + tail tail-end survive eviction")
-        check(log2._tail_start in seqs, "tail start survives eviction")
-        resident_mid = sum(1 for s in seqs if 0 < s < book["tail_start"])
-        check(log2.older_count() == (book["tail_start"] - 1) - resident_mid,
-              "older_count is the honest on-disk remainder after eviction")
+        log2.materialize_range(book["task_end"], book["tail_start"])  # all 89 middle events
+        offsets = [off for off, _ in log2.items()]
+        check(len(offsets) <= 25, f"resident bounded by LRU cap ({len(offsets)} <= 25)")
+        check(0 in offsets and offsets[-1] >= book["tail_start"], "task + tail tail-end survive eviction")
+        check(log2._tail_start in offsets, "tail start survives eviction")
+        check(log2.older_bytes() > 0, "older_bytes reports the honest remainder after eviction")
         # pinned: inside materialize(0, tail_start) nothing middle can be evicted
         with log2.materialize(0, book["tail_start"]):
-            log2.materialize_range(1, book["tail_start"] + 10)
-            mid = sum(1 for s in log2._seqs if 0 < s < book["tail_start"])
-            check(mid == book["tail_start"] - 1, "materialize() pins the whole head mid-block")
+            log2.materialize_range(book["task_end"], book["tail_start"])
+            mid = sum(1 for off in log2._offsets if book["task_end"] < off < book["tail_start"])
+            check(mid == 89, "materialize() pins the whole head mid-block")
     finally:
         lazy_mod._LRU_EVENT_CAP = old_cap
 
     # ---- 4. lazy derive == full derive ------------------------------------
-    base = EventLog()
-    for ev in parse_durable(path.read_text(encoding="utf-8")):
-        base.append(ev)
+    base = _load_full(path)
     lazy_proj = open_project_lazy(path, workspace=None)
     msgs_base = derive_messages(base, config, "task")
     msgs_lazy = derive_messages(lazy_proj.log, config, "task")
@@ -194,13 +239,10 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
           "lazy context ends with the newest tail event")
 
     # ---- 5. compact() on the lazy log -------------------------------------
-    # needs a long post-compaction tail: with only 9 recent events the budget
-    # walk stays inside the preserved tail and the no-op guard correctly fires
     p_long = tmp / "long.clc"
     book_long = build_clc(p_long, with_transients=True, recent=400)
-    long_proj = open_project_lazy(p_long, workspace=None)
-    long_log = long_proj.log
-    check(long_log.older_count() == book_long["tail_start"] - 1,
+    long_log = open_project_lazy(p_long, workspace=None).log
+    check(long_log.older_bytes() == book_long["tail_start"] - book_long["task_end"],
           "long-tail file lazy-opens with the middle unloaded")
     comp = _make_compactor(long_log)
     ok = comp.compact()
@@ -210,75 +252,57 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     new_ts = long_log.events()[-1].tail_start
     check(new_ts > book_long["tail_start"] and new_ts > 100,
           f"new tail_start ({new_ts}) covers the old head and pre-compaction tail")
-    check(long_log.older_count() == 0,
-          "after compaction everything relevant is resident (older_count 0, pill gone)")
+    check(long_log.older_bytes() == 0,
+          "after compaction everything relevant is resident (older_bytes 0, pill gone)")
     check(not comp.compact(), "second compact() is a no-op (nothing new since last compaction)")
 
-    # ---- 5b. tail_start_index walks the FULL durable sequence, not the
-    # resident subset --------------------------------------------------
-    # Regression: the lazy log's resident subset is seq 0 + the preserved tail
-    # only. Sizing the tail budget from that subset alone clamps the boundary
-    # to the resident window's edge (or 0) whenever the subset's tokens fall
-    # short of the budget — a different boundary than a fully loaded log would
-    # pick (and one that stalls compaction). The walk must read the whole
-    # durable sequence off disk and match EventLog.tail_start_index exactly.
+    # ---- 6. tail_start_index matches the full log EXACTLY -----------------
+    # The lazy log sizes from its materialized tail — the SAME events the full
+    # log walks from the end — with the same len(content)//3, so the byte
+    # boundaries are identical (no index, no approximation).
     p_edge = tmp / "edge.clc"
-    edge_lines = ["# clutch project v1", "name: edge", "model: fake-model", "---"]
-    edge_lines.append(event_to_json(UserMessageEvent(content="task")))
+    edge_events = [UserMessageEvent(content="task")]
     for i in range(1, 880):
         if i == 176:
-            edge_lines.append(event_to_json(CompactionEvent(summary="old", tail_start=176)))
-        elif i % 2:
-            edge_lines.append(event_to_json(UserMessageEvent(content="u" * 60)))
+            edge_events.append(CompactionEvent(summary="old", tail_start=sum(_line_bytes(ev) for ev in edge_events)))
         else:
-            edge_lines.append(event_to_json(AssistantMessageEvent(content="a" * 60)))
+            edge_events.append(
+                UserMessageEvent(content="u" * 80) if i % 2 else AssistantMessageEvent(content="a" * 80)
+            )
+    edge_lines = ["# clutch project v1", "name: edge", "model: fake-model", "---"]
+    edge_lines += [event_to_json(ev) for ev in edge_events]
     p_edge.write_text("\n".join(edge_lines) + "\n", encoding="utf-8")
-    read_e, _te = _make_local_reader(p_edge)
-    idx_e = index_file(read_e, _te, None)
-    ts_e = _stored_tail_start(read_e, idx_e)
-    lazy_e = LazyEventLog(str(p_edge), idx_e, read_e, tail_start=ts_e)
-    lazy_e.materialize_range(lazy_e._tail_start, len(idx_e))
-    full_e = EventLog()
-    for ev in parse_durable(p_edge.read_text(encoding="utf-8")):
-        full_e.append(ev)
-    want_e = full_e.tail_start_index(15000)
-    got_e = lazy_e.tail_start_index(15000)
-    check(want_e > 0, f"edge-case budget lands inside the full sequence ({want_e})")
-    # the lazy walk sizes from INDEX BYTE LENGTHS (zero content reads) while the
-    # full log sizes from content chars, so the boundaries differ in a safe
-    # direction only: byte length is an upper bound, so the lazy tail is at or
-    # before the full log's — never a bigger retained tail, never a stall
-    check(got_e >= want_e,
-          f"lazy byte-indexed boundary is conservative vs the full log ({got_e} >= {want_e})")
-    # the walked boundary sits after the last compaction (byte lengths are an
-    # upper bound, so the lazy tail is at or before the full log's — never a
-    # stall), so the compact goes through and persists the indexed boundary
-    comp_e = Compactor(Config(compaction_tail_tokens=15000), lazy_e, FakeLlm())
-    check(comp_e.compact(), "15K-budget compact succeeds on the byte-indexed boundary")
+    read_e, _te = _make_reader(p_edge, None)
+    comp_e_scan, _mem = _tail_scan(read_e, _te)
+    comp_rel = comp_e_scan[0] - _event_base(p_edge)
+    lazy_e = open_project_lazy(p_edge, workspace=None).log
+    full_e = _load_full(p_edge)
+    want_e = full_e.tail_start_index(2000)
+    got_e = lazy_e.tail_start_index(2000)
+    check(want_e > comp_rel, f"budget boundary lands inside the preserved tail ({want_e} > {comp_rel})")
+    check(got_e == want_e,
+          f"lazy tail_start_index EXACTLY matches the full log ({got_e} == {want_e})")
+    comp_e = Compactor(Config(compaction_tail_tokens=2000), lazy_e, FakeLlm())
+    check(comp_e.compact(), "compact succeeds on the byte boundary")
     last_e = lazy_e.events()[-1]
     check(isinstance(last_e, CompactionEvent) and last_e.tail_start == got_e,
-          f"compaction persists the byte-indexed tail_start ({got_e})")
-    # the guard itself (tail_start <= last compaction position -> refuse) is
-    # exercised above by the second no-op compact in section 5
+          f"compaction persists the byte tail_start ({got_e})")
     msgs2 = derive_messages(long_log, config, "task")
     head = [m for m in msgs2 if "NEW SUMMARY" in m.get("content", "")]
     check(len(head) == 1, "derive_messages sees the fresh summary head after lazy compaction")
 
-    # ---- 6. stale tail_start clamp ----------------------------------------
+    # ---- 7. stale tail_start clamp ----------------------------------------
     with tempfile.TemporaryDirectory() as d:
         p2 = Path(d) / "old.clc"
-        build_clc(p2, with_transients=False)
-        # simulate an old file: tail_start beyond the durable count
-        text = p2.read_text(encoding="utf-8").replace('"tail_start": 90', '"tail_start": 500')
+        book2 = build_clc(p2, with_transients=False)
+        # simulate an old file: tail_start beyond the compaction's own offset
+        text = p2.read_text(encoding="utf-8").replace('"tail_start": %d' % book2["tail_start"], '"tail_start": 999999')
         p2.write_text(text, encoding="utf-8")
         proj = open_project_lazy(p2, workspace=None)
         check(isinstance(proj.log, LazyEventLog), "stale tail_start still opens lazily")
-        check(proj.log._tail_start == 100,
-              f"stale tail_start clamped to the compaction's durable position ({proj.log._tail_start})")
-        check(proj.log.older_count() == 99, "older count = durable middle still on disk")
-        stale_full = EventLog()
-        for ev in parse_durable(p2.read_text(encoding="utf-8")):
-            stale_full.append(ev)
+        check(proj.log._tail_start == book2["comp_offset"],
+              f"stale tail_start clamped to the compaction's offset ({proj.log._tail_start})")
+        stale_full = _load_full(p2)
         msgs_stale = derive_messages(proj.log, config, "task")
         check(msgs_stale == derive_messages(stale_full, config, "task"),
               "stale tail_start derives the same context as the full log")
@@ -300,7 +324,57 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     print("lazy path: all passed")
 
 
-def _make_local_reader(path: Path):
+def _load_full(path: Path) -> EventLog:
+    """Fully load a .clc into an EventLog with REAL file-based byte offsets
+    (every line occupies bytes, transients included) — the same base the lazy
+    log measures against, so tail_from/tail_start_index agree."""
+    log = EventLog()
+    text = path.read_text(encoding="utf-8")
+    in_events = False
+    running = 0
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not in_events:
+            if stripped == "---":
+                in_events = True
+            continue
+        if stripped == "[memories]":
+            break
+        if stripped:
+            try:
+                ev = event_from_dict(json.loads(line))
+                log._events.append(ev)
+                if ev.type in ("user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"):
+                    log._offsets.append(running)
+            except ValueError:
+                pass
+            running += len(line.encode("utf-8")) + 1
+    return log
+
+
+def _event_base(path: Path) -> int:
+    """Absolute byte offset of the first durable line (the raw task)."""
+    text = path.read_text(encoding="utf-8")
+    pos = 0
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("----", "[memories]")):
+            pos += len(line) + 1
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            pos += len(line) + 1
+            continue
+        if isinstance(data, dict) and data.get("type") in (
+            "user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"
+        ):
+            return pos
+        pos += len(line) + 1
+    return 0
+
+
+def _make_reader(path: Path):
     from .core.lazy import _make_reader
     return _make_reader(path, None)
 

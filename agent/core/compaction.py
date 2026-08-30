@@ -32,7 +32,7 @@ class Compactor:
     no NEW head since the last compaction, or the summary call failed) so the
     loop never spins on a failed or no-op compaction.
 
-    tail_start is an index into the DURABLE event sequence (what the .clc
+    tail_start is a BYTE OFFSET relative to the event region (what the .clc
     persists). The in-memory log also holds transient streaming deltas; an
     index over those would be stale after a reopen, silently dropping the
     whole recent tail (see derive_messages)."""
@@ -104,27 +104,28 @@ class Compactor:
     def compact(self) -> bool:
         """Roll the older durable events into a CompactionEvent; False on no-op.
 
-        Works uniformly over a fully-loaded EventLog and a lazy LazyEventLog: the
-        tail boundary comes from the log's durable sequence, and the head being
-        summarized is re-materialized under a pin so a lazy log can never drop it
-        mid-compaction (its summary input stays byte-identical to a full load).
+        Works uniformly over a fully-loaded EventLog and a lazy LazyEventLog:
+        the tail boundary comes from the log's byte-addressed durable sequence,
+        and the head being summarized is re-materialized under a pin so a lazy
+        log can never drop it mid-compaction (its summary input stays
+        byte-identical to a full load).
         """
         try:
             events = self.log.events()
             tail_start = self.log.tail_start_index(self._tail_budget())
-            if tail_start <= 1:
-                return False  # nothing meaningful to compact
+            if tail_start <= self.log.compact_min_tail():
+                return False  # nothing meaningful to compact (only the task + nothing)
             prev = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
-            # compare against the last compaction's durable POSITION, not its stored
-            # tail_start — a loaded .clc from before this fix carries a stale index
-            if prev is not None and tail_start <= self.log.durable_index_of(prev):
+            # compare against the last compaction's stored tail_start — both are
+            # byte offsets relative to the event region, so the comparison is a
+            # plain number compare (no index lookup needed)
+            if prev is not None and tail_start <= prev.tail_start:
                 return False  # nothing new since the last compaction: don't re-summarize the same head
             # the summary call can take a while (a long head, a slow model): tell
             # the UI it started before the first token lands, then stream progress
             self._report_progress(0)
             with self.log.materialize(0, tail_start):
-                durable = [e for e in self.log.events() if e.type in DURABLE_TYPES]
-                head = durable[:tail_start]
+                head = self.log.events_before(tail_start)
                 summary, chars = self._summarize(self._serialize(head), self._previous_summary(events))
             if not summary:
                 self._report_progress(chars, done=True)
@@ -147,13 +148,13 @@ class Compactor:
         return budget
 
     def tail_start_index(self, events: list[Any]) -> int:
-        """Index (into the DURABLE event sequence) where the preserved recent tail
-        begins for the tail budget. Delegates to the log's own durable sequence
-        (accepted for call-compat; identical to walking ``events`` for a fully
-        loaded log). Transient streaming deltas are skipped so the index is stable
-        when the log is persisted and reopened. Clutch turns share the task user
-        message, so the tail is split at an assistant-turn boundary; everything
-        before it is summarized away."""
+        """Byte offset (relative to the event region) where the preserved recent
+        tail begins for the tail budget. Delegates to the log's own byte-addressed
+        sequence (accepted for call-compat; identical to walking ``events`` for a
+        fully loaded log). Transient streaming deltas are skipped so the offset is
+        stable when the log is persisted and reopened. Clutch turns share the task
+        user message, so the tail is split at an assistant-turn boundary;
+        everything before it is summarized away."""
         return self.log.tail_start_index(self._tail_budget())
 
     def _previous_summary(self, events: list[Any]) -> str:

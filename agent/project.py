@@ -123,16 +123,16 @@ def open_project(path: Path, on_progress=None, workspace=None, read_only: bool =
 
 
 def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
-    """Open an existing .clc lazily: index the durable event offsets in a single
-    pass (no JSON parsing), then materialize only seq 0 (the raw task) plus the
-    preserved recent tail the last compaction kept (``[tail_start, N)``). Earlier
-    records stay on disk and are pulled in on demand (UI paging via
-    /api/history, compaction head re-materialization).
+    """Open an existing .clc lazily: read only the header, the raw task and the
+    preserved recent tail the last compaction kept (everything at or after its
+    stored byte ``tail_start``). Earlier records stay on disk and are pulled in
+    on demand (UI paging via /api/history, compaction head re-materialization).
 
     Small histories and compaction-free files fall back to a plain fully-loaded
-    EventLog — byte-identical behavior to open_project, just routed through the
-    same index so the code path is single. on_progress(done, total) reports the
-    index scan, so the UI's open progress bar tracks real file parsing again."""
+    EventLog — byte-identical behavior to open_project. No index scan anywhere:
+    the tail boundary comes straight from the last compaction's persisted byte
+    offset, found by a short backward read from the file tail.
+    """
     path = path.with_suffix(".clc")
     lock = _acquire_lock(path, workspace, read_only)
     try:
@@ -145,38 +145,67 @@ def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: b
 def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> Project:
     from .core.lazy import (
         LazyEventLog,
-        _LAZY_MIN_DURABLE,
+        _LAZY_MIN_BYTES,
         _make_reader,
-        _stored_tail_start,
-        index_file,
+        _tail_scan,
         parse_durable,
     )
 
     read, total = _make_reader(path, workspace)
-    index = index_file(read, total, on_progress)
-    writer = _writer_for(workspace, read_only)
     # the header lives at the very start of the file: a tiny range read, no
     # separate full pass (unlike read_header, which would double the remote cost)
-    meta = _parse_meta_lines(read(0, min(total, 1 << 16)).decode("utf-8", "replace").splitlines())
-    memories = _parse_memories(read, index, str(path), writer)
+    head = read(0, min(total, 1 << 16)).decode("utf-8", "replace")
+    meta = _parse_meta_lines(head.splitlines())
+    base = _event_region_start(head)  # raw task's line start (absolute); None = no events
+    writer = _writer_for(workspace, read_only)
+    if base is None:
+        memories = MemoryStore(str(path), writer=writer)
+        log = EventLog(path=str(path), writer=writer)
+        return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
-    if index.newest_compaction < 0 or len(index) < _LAZY_MIN_DURABLE:
+    # the last compaction's stored tail_start + the [memories] section: both
+    # found by scanning BACKWARD from the file tail (no index)
+    comp, mem_off = _tail_scan(read, total)
+    if mem_off is not None:
+        mem_text = read(mem_off, total).decode("utf-8", "replace")
+        memories = MemoryStore.parse(mem_text.splitlines(), str(path), writer=writer)
+    else:
+        memories = MemoryStore(str(path), writer=writer)
+
+    if comp is None or total - base < _LAZY_MIN_BYTES:
         # nothing to be lazy about: plain read + durable parse, same as open_project
         log = EventLog(path=str(path), writer=writer)
         for ev in parse_durable(read(0, total).decode("utf-8", "replace")):
             log.append(ev)
         return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
-    log = LazyEventLog(
-        str(path),
-        index,
-        read,
-        writer=writer,
-        tail_start=_stored_tail_start(read, index),
-    )
-    log.materialize_range(0, 1)  # seq 0: the raw task
-    log.materialize_range(log._tail_start, len(index))  # the preserved tail
+    comp_off_abs, comp_ev = comp
+    tail_rel = comp_ev.tail_start
+    comp_rel = comp_off_abs - base
+    if not 0 <= tail_rel <= comp_rel:
+        tail_rel = comp_rel  # stale/out-of-range: keep the compaction (its summary) visible
+    log = LazyEventLog(str(path), read, total, base, writer=writer, tail_start=tail_rel)
     return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
+
+
+def _event_region_start(head: str) -> int | None:
+    """Absolute byte offset of the first durable event line in the header read
+    (the event region start — the raw task). None when the file has no events."""
+    pos = 0
+    for line in head.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(SEPARATOR) or stripped.startswith(SECTION):
+            pos += len(line) + 1
+            continue
+        try:
+            data = json.loads(line)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pos += len(line) + 1
+            continue
+        if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:
+            return pos
+        pos += len(line) + 1
+    return None
 
 
 def _parse_meta_lines(lines: list[str]) -> ProjectMeta:
@@ -188,16 +217,6 @@ def _parse_meta_lines(lines: list[str]) -> ProjectMeta:
             break
         _apply_meta(meta, line)
     return meta
-
-
-def _parse_memories(read, index, path: str, writer) -> MemoryStore:
-    """Read the [memories] section content (indexed during the scan) and parse
-    it into a MemoryStore; empty store when the file has no such section."""
-    if not index.memory_lines:
-        return MemoryStore(path, writer=writer)
-    start = index.memory_lines[-1]  # content begins right after the section line
-    text = read(start, index.total_bytes).decode("utf-8", "replace")
-    return MemoryStore.parse(text.splitlines(), path, writer=writer)
 
 
 def read_header(path: Path, workspace=None) -> ProjectMeta:
@@ -291,11 +310,19 @@ def _read_file(path: Path, on_progress=None, workspace=None) -> tuple[ProjectMet
             in_memories = True
             return
         if stripped:
+            # every line occupies bytes in the file (transients included), so
+            # the running byte offset advances per line — a durable event's
+            # offset is its line start, matching the lazy log's file-based
+            # offsets (a .clc written today has no transients, so appends and
+            # loads agree; an older file with deltas stays consistent too)
             try:
-                log._events.append(event_from_dict(json.loads(line)))
+                ev = event_from_dict(json.loads(line))
+                log._events.append(ev)
+                if ev.type in DURABLE_TYPES:
+                    log._offsets.append(log._running)
             except ValueError:
-                # skip corrupt lines; keep the rest of the history
-                pass
+                pass  # skip corrupt lines; keep the rest of the history
+            log._running += len(line.encode("utf-8")) + 1
 
     if workspace is not None:
         # remote: one workspace.read round trip; progress counted in chars

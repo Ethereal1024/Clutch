@@ -39,15 +39,27 @@ from .tools.workspace import LocalWorkspace
 @contextlib.contextmanager
 def _lazy_forced():
     """Force the lazy open path in tests: the synthetic .clc is far below the
-    real 512-durable-event threshold."""
+    real byte threshold."""
     from .core import lazy as lazy_mod
 
-    old = lazy_mod._LAZY_MIN_DURABLE
-    lazy_mod._LAZY_MIN_DURABLE = 32
+    old = lazy_mod._LAZY_MIN_BYTES
+    lazy_mod._LAZY_MIN_BYTES = 64
     try:
         yield
     finally:
-        lazy_mod._LAZY_MIN_DURABLE = old
+        lazy_mod._LAZY_MIN_BYTES = old
+
+
+def _event_region_base(path: Path) -> int:
+    """Absolute byte offset of the first durable line (the raw task)."""
+    from .core.lazy import _make_reader
+
+    read, total = _make_reader(path, None)
+    head = read(0, min(total, 1 << 16)).decode("utf-8", "replace")
+    from .project import _event_region_start
+
+    base = _event_region_start(head)
+    return base or 0
 
 
 def main() -> None:
@@ -130,7 +142,7 @@ def main() -> None:
     log = EventLog()
     log.append(UserMessageEvent(content="old task"))
     log.append(AssistantMessageEvent(content="old turn done"))
-    tail_start = len(log.events())
+    tail_start = log._running  # byte offset of the next durable line (the recent tail's start)
     log.append(UserMessageEvent(content="recent task"))
     log.append(AssistantMessageEvent(content="recent answer"))
     log.append(CompactionEvent(summary="old work summarized", tail_start=tail_start))
@@ -166,10 +178,11 @@ def main() -> None:
         "compaction note lists the working files to re-read",
     )
 
-    # 2h. tail_start is an index into the DURABLE sequence. Transient streaming
-    # deltas live only in the in-memory log; an index over them is stale after a
-    # reopen (durable-only load) and would silently drop the whole recent tail.
-    # 2h1: transients interleaved in a live log must not shift the durable index
+    # 2h. tail_start is a BYTE offset into the DURABLE sequence. Transient
+    # streaming deltas live only in the in-memory log and are never persisted,
+    # so they never occupy byte offsets — a reopened (durable-only) log resolves
+    # the same boundary as the live one.
+    # 2h1: transients interleaved in a live log must not shift the durable bytes
     live = EventLog()
     live.append(UserMessageEvent(content="task"))
     live.append(TextDeltaEvent(content="x"))
@@ -179,12 +192,13 @@ def main() -> None:
     live.append(AssistantMessageEvent(content="recent work"))
     tail = Compactor(Config(compaction_tail_tokens=1), live, None).tail_start_index(live.events())
     durable = [e for e in live.events() if e.type in DURABLE_TYPES]
-    check(tail < len(durable), "tail_start indexes the durable sequence, not the full log")
+    check(tail == live._offsets[-1],
+          "tail_start is the last durable event's byte offset (transients never shift it)")
     check(
-        durable[tail].type == "assistant_message" and durable[tail].content == "recent work",
+        durable[-1].type == "assistant_message" and durable[-1].content == "recent work",
         "durable tail starts at the preserved recent turn",
     )
-    # 2h2: persist the durable events and reopen — the same tail index still works
+    # 2h2: persist the durable events and reopen — the same byte tail still works
     reopened = EventLog()
     for line in (event_to_json(e) for e in durable):
         reopened.append(event_from_dict(json.loads(line)))
@@ -630,25 +644,29 @@ def main() -> None:
             "no memory tools without a MemoryStore",
         )
 
-    # 11. lazy .clc loading: a compaction file opens with only seq 0 + the
-    # preserved tail materialized; earlier records stay on disk (older_count)
+    # 11. lazy .clc loading: a compaction file opens with only the raw task +
+    # the preserved tail materialized; earlier records stay on disk (older_bytes)
     # and are paged on demand; a stale stored tail_start clamps to the last
-    # compaction's durable position and derives the same context as a full load.
+    # compaction's offset and derives the same context as a full load.
     with tempfile.TemporaryDirectory() as ptmp, _lazy_forced():
         from .core import lazy as lazy_mod
-        from .core.lazy import LazyEventLog, _make_reader, _stored_tail_start, index_file, parse_durable
-        from .project import open_project_lazy
+        from .core.lazy import LazyEventLog, _make_reader, _tail_scan, parse_durable
+        from .events import _line_bytes
+        from .project import _event_region_start, open_project_lazy
 
         p = Path(ptmp) / "big.clc"
-        lines = [
-            "# clutch project v1", "name: lazy", "model: fake-model", "---",
-            event_to_json(UserMessageEvent(content="task")),
-        ]
+        events = [UserMessageEvent(content="task")]
         for i in range(1, 100):
-            lines.append(event_to_json(
-                AssistantMessageEvent(content=f"old work {i}") if i % 2 == 0 else UserMessageEvent(content=f"old ask {i}")
-            ))
-        lines.append(event_to_json(CompactionEvent(summary="old work summarized", tail_start=90)))
+            events.append(
+                AssistantMessageEvent(content=f"old work {i}")
+                if i % 2 == 0
+                else UserMessageEvent(content=f"old ask {i}")
+            )
+        tail_start = sum(_line_bytes(ev) for ev in events[:90])
+        lines = ["# clutch project v1", "name: lazy", "model: fake-model", "---"]
+        for ev in events:
+            lines.append(event_to_json(ev))
+        lines.append(event_to_json(CompactionEvent(summary="old work summarized", tail_start=tail_start)))
         for i in range(101, 121):
             lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -656,18 +674,19 @@ def main() -> None:
         proj = open_project_lazy(p, workspace=None)
         log = proj.log
         check(isinstance(log, LazyEventLog), "compaction file opens lazily")
-        check([s for s, _ in log.items()] == [0] + list(range(90, 121)),
-              "lazy open materializes only seq 0 + the preserved tail")
-        check(log.older_count() == 89, "older_count counts the on-disk middle")
+        offs = [off for off, _ in log.items()]
+        check(offs[0] == 0 and all(o >= tail_start for o in offs[1:]),
+              "lazy open materializes only the task + the preserved tail (byte offsets)")
+        check(log.older_bytes() == tail_start - log._task_end,
+              "older_bytes counts the on-disk middle bytes")
         read, total = _make_reader(p, None)
-        idx = index_file(read, total, None)
-        check(_stored_tail_start(read, idx) == 90,
-              "stored tail_start read from the single compaction line")
+        comp, _mem = _tail_scan(read, total)
+        check(comp is not None and comp[1].tail_start == tail_start,
+              "stored tail_start read from the last compaction line")
 
         # paging: materialize the middle on demand, then derive == full load
-        page = log.materialize_range(1, 90)
-        check(len(page) == 89 and page[0][0] == 1 and page[-1][0] == 89,
-              "materialize_range pages the middle on demand")
+        page = log.materialize_range(log.task_end, tail_start)
+        check(len(page) == 89, "materialize_range pages the middle on demand")
         full = EventLog()
         for ev in parse_durable(p.read_text(encoding="utf-8")):
             full.append(ev)
@@ -680,12 +699,13 @@ def main() -> None:
             "middle stays summarized away after paging",
         )
 
-        # stale tail_start from an old .clc clamps to the compaction position
-        stale = p.read_text(encoding="utf-8").replace('"tail_start": 90', '"tail_start": 500')
+        # stale tail_start from an old .clc clamps to the compaction offset
+        stale = p.read_text(encoding="utf-8").replace('"tail_start": %d' % tail_start, '"tail_start": 999999')
         p.write_text(stale, encoding="utf-8")
         proj2 = open_project_lazy(p, workspace=None)
         check(isinstance(proj2.log, LazyEventLog), "stale tail_start still opens lazily")
-        check(proj2.log._tail_start == 100, "stale tail_start clamped to the compaction position")
+        check(proj2.log._tail_start == comp[0] - _event_region_base(p),
+              "stale tail_start clamped to the compaction offset")
         stale_full = EventLog()
         for ev in parse_durable(p.read_text(encoding="utf-8")):
             stale_full.append(ev)

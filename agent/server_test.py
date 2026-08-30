@@ -270,50 +270,63 @@ def _run_server_test() -> int:
         check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
 
         # 3e. lazy .clc (compaction + enough durable events): the open stream
-        # reports the on-disk older count and wraps every event as {seq, event};
-        # /api/history pages the middle records; the SSE replay opens with a
-        # history info line before the seq-wrapped tail.
-        from .events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, event_to_json
+        # reports the on-disk older BYTES and wraps every event as {offset,
+        # event}; /api/history pages the middle records by byte range; the SSE
+        # replay opens with a history info line before the offset-wrapped tail.
+        from .events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, event_to_json, _line_bytes
+
+        from .core import lazy as lazy_mod
 
         lazy_dir = Path(sdir) / "lazywork"
         lazy_dir.mkdir()
         lclc = lazy_dir / "big.clc"
-        lazy_lines = [
-            "# clutch project v1", "name: lazybig", "model: fake-model", "---",
-            event_to_json(UserMessageEvent(content="task")),
-        ]
+        levents = [UserMessageEvent(content="task")]
         for i in range(1, 500):
-            lazy_lines.append(event_to_json(AssistantMessageEvent(content=f"old work {i}")))
-        lazy_lines.append(event_to_json(CompactionEvent(summary="old work summarized", tail_start=450)))
+            levents.append(AssistantMessageEvent(content=f"old work {i}"))
+        tail_start = sum(_line_bytes(ev) for ev in levents[:450])
+        levents.append(CompactionEvent(summary="old work summarized", tail_start=tail_start))
         for i in range(501, 531):
-            lazy_lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
+            levents.append(AssistantMessageEvent(content=f"recent {i}"))
+        lazy_lines = ["# clutch project v1", "name: lazybig", "model: fake-model", "---"]
+        for ev in levents:
+            lazy_lines.append(event_to_json(ev))
         lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8")
 
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
+        # the synthetic file is far below the real 256KB threshold: force the
+        # lazy path for this server process
+        _old_min_bytes = lazy_mod._LAZY_MIN_BYTES
+        lazy_mod._LAZY_MIN_BYTES = 1024
+        try:
+            st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
+        finally:
+            lazy_mod._LAZY_MIN_BYTES = _old_min_bytes
         check(st == 200, "lazy project reopened")
         llines = [json.loads(l) for l in body.splitlines() if l.strip()]
         lmeta = next((m["meta"] for m in llines if m.get("meta")), None)
         check(lmeta is not None and lmeta.get("name") == "lazybig", "lazy project name")
         lcount = next((m for m in llines if m.get("count") is not None), None)
-        check(lcount is not None and lcount.get("older") == 449, "lazy open reports the older count")
-        lsevs = [m for m in llines if m.get("event") and m.get("seq") is not None]
-        check([m["seq"] for m in lsevs] == [0] + list(range(450, 531)),
-              "lazy open streams seq 0 + the preserved tail")
-        check(all(isinstance(m.get("seq"), int) and "event" in m for m in lsevs),
-              "lazy open events are {seq, event} wrapped")
+        check(lcount is not None and lcount.get("older") == tail_start - _line_bytes(levents[0]),
+              "lazy open reports the older bytes")
+        lsevs = [m for m in llines if m.get("event") and m.get("offset") is not None]
+        check(lsevs and lsevs[0]["offset"] == 0 and lsevs[0]["event"].get("type") == "user_message",
+              "lazy open streams offset 0 (the raw task) first")
+        check(all(m["offset"] >= tail_start for m in lsevs[1:]),
+              "tail events carry byte offsets inside the preserved tail")
+        check(all(isinstance(m.get("offset"), int) and "event" in m for m in lsevs),
+              "lazy open events are {offset, event} wrapped")
 
-        st, body = http_get(f"{base_url}/api/history?before=450&limit=500")
+        st, body = http_get(f"{base_url}/api/history?before={tail_start}&limit=1000000")
         h = json.loads(body)
         check(st == 200 and h.get("older") == 0, "history after the last page reports older=0")
-        check([e["seq"] for e in h["events"]] == list(range(1, 450)),
-              "history pages the on-disk middle")
-        st, body = http_get(f"{base_url}/api/history?before=450&limit=100")
+        check(len(h["events"]) == 449, "history pages the on-disk middle (449 events)")
+        check(h["events"][0]["offset"] > 0 and h["events"][-1]["offset"] < tail_start,
+              "history events carry byte offsets inside the middle")
+        st, body = http_get(f"{base_url}/api/history?before={tail_start}&limit=1000")
         h2 = json.loads(body)
-        check([e["seq"] for e in h2["events"]] == list(range(350, 450)),
-              "history respects the limit clamp")
-        st, body = http_get(f"{base_url}/api/history?before=1&limit=100")
+        check(len(h2["events"]) < len(h["events"]), "history respects the byte-window clamp")
+        st, body = http_get(f"{base_url}/api/history?before=1&limit=1000000")
         h3 = json.loads(body)
-        check(h3.get("events") == [] and h3.get("older") == 0, "history before seq 1 is empty")
+        check(h3.get("events") == [] and h3.get("older") == 0, "history before the task is empty")
 
         evs2: list[dict] = []
         done2 = threading.Event()

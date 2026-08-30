@@ -483,7 +483,7 @@ class Handler(BaseHTTPRequestHandler):
                 if project is not None:
                     log = project.log
                     if isinstance(log, LazyEventLog):
-                        self._write_sse_raw({"type": "history", "older": log.older_count()})
+                        self._write_sse_raw({"type": "history", "older": log.older_bytes()})
                         for seq, ev in log.items():
                             self._write_sse(ev, seq=seq)
                     else:
@@ -731,45 +731,48 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
         # display projection: only durable final events (streaming deltas are
-        # transient and never replayed). A lazily-opened project has only seq 0 +
-        # the preserved tail resident; every line carries its file seq so the UI
-        # can page the rest via /api/history. "older" is the honest count of
-        # durable records still on disk before the loaded range.
+        # transient and never replayed). A lazily-opened project has only the
+        # raw task + the preserved tail resident; every line carries its byte
+        # offset (relative to the event region) so the UI can page the rest via
+        # /api/history. "older" is the honest count of event-region BYTES still
+        # on disk before the loaded range.
         display = [e for e in project.events() if e.type in DURABLE_TYPES]
         log = project.log
         if isinstance(log, LazyEventLog):
-            older = log.older_count()
+            older = log.older_bytes()
             pairs = log.items()
         else:
             older = 0
             pairs = list(enumerate(display))
         emit({"count": len(display), "older": older})
-        for seq, ev in pairs:
-            emit({"seq": seq, "event": json.loads(event_to_json(ev))})
+        for off, ev in pairs:
+            emit({"offset": off, "event": json.loads(event_to_json(ev))})
         emit({"done": True})
 
     def _history(self) -> None:
         """Scroll-up paging for a lazily-opened project: materialize the durable
-        events before ``before`` (file seqs, exclusive, max ``limit``) and return
-        them with their seqs. The UI prepends the page and trusts the response's
-        server-side ``older`` count (honest even after LRU eviction dropped pages
-        the UI already rendered; a reconnect resets the pill to it)."""
+        events in the byte range before ``before`` (relative offsets, exclusive,
+        max ``limit`` bytes) and return them with their offsets. The UI prepends
+        the page and trusts the response's server-side ``older`` count (honest
+        even after LRU eviction dropped pages the UI already rendered; a
+        reconnect resets the pill to it)."""
         qs = parse_qs(urlparse(self.path).query)
         try:
             before = int(qs.get("before", ["0"])[0])
-            limit = min(max(int(qs.get("limit", ["200"])[0]), 1), 500)
+            limit = min(max(int(qs.get("limit", ["262144"])[0]), 4096), 4 * 1024 * 1024)
         except ValueError:
             return self._json({"error": "bad query"}, status=400)
         project = self._state.project
         log = project.log if project is not None else None
         if log is None or not isinstance(log, LazyEventLog):
             return self._json({"events": [], "older": 0})
-        lo = max(1, before - limit)
+        lo = max(0, before - limit)
+        lo = max(lo, log.task_end)  # never re-read the raw task
         pairs = log.materialize_range(lo, before)
         self._json(
             {
-                "events": [{"seq": s, "event": json.loads(event_to_json(ev))} for s, ev in pairs],
-                "older": log.older_count(),
+                "events": [{"offset": off, "event": json.loads(event_to_json(ev))} for off, ev in pairs],
+                "older": log.older_bytes(),
             }
         )
 

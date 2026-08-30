@@ -481,12 +481,13 @@ function buildReadRow(call, content) {
 }
 
 function addEvent(ev) {
-  // lazy-open wire shape: {seq, event} wrappers (open stream + SSE replay of a
-  // lazily-opened project) carry each durable event's file seq so the UI can
-  // page the earlier records. seq 0 (the raw task) is excluded from the oldest
-  // loaded marker — the pill pages strictly before the preserved tail.
-  if (ev && typeof ev === "object" && ev.event && typeof ev.seq === "number") {
-    if (ev.seq > 0) oldestSeq = oldestSeq === null ? ev.seq : Math.min(oldestSeq, ev.seq);
+  // lazy-open wire shape: {offset, event} wrappers (open stream + SSE replay of
+  // a lazily-opened project) carry each durable event's byte offset (relative to
+  // the event region) so the UI can page the earlier records. The raw task
+  // (offset 0) is excluded from the oldest loaded marker — the pill pages
+  // strictly before the preserved tail.
+  if (ev && typeof ev === "object" && ev.event && typeof ev.offset === "number") {
+    if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
     ev = ev.event;
   }
   // SSE replay of a lazy project opens with a history line: restore the pill's
@@ -2262,18 +2263,19 @@ function clearStream() {
   lastTextContent = "";
   thinkingEl = null;
   thinkingContent = "";
-  oldestSeq = null; // fresh project: no loaded events yet
+  oldestOffset = null; // fresh project: no loaded events yet
   setOlderPill(0);
 }
 
 // ---- scroll-up paging (lazily-opened projects) ----
-// A lazy .clc loads only seq 0 + the preserved tail; the pill at the top pages
-// the earlier records from /api/history. olderRemaining mirrors the server-side
-// count of durable records still on disk before the oldest loaded one — the
-// server's own number, so its LRU eviction never makes the pill lie (a page the
-// server dropped stays rendered in the DOM; only a reconnect re-fetches it).
+// A lazy .clc loads only the raw task + the preserved tail; the pill at the top
+// pages the earlier records from /api/history. olderRemaining mirrors the
+// server-side count of event-region BYTES still on disk before the oldest loaded
+// one — the server's own number, so its LRU eviction never makes the pill lie (a
+// page the server dropped stays rendered in the DOM; only a reconnect
+// re-fetches it).
 let olderRemaining = 0;
-let oldestSeq = null; // file seq of the oldest loaded (rendered) non-0 event
+let oldestOffset = null; // byte offset of the oldest loaded (rendered) non-task event
 let paging = false;   // one history fetch at a time
 // when non-null, addEvent appends into this off-DOM sink instead of #events:
 // loadOlder renders a history page through the full replay pipeline (agent text,
@@ -2285,19 +2287,21 @@ function setOlderPill(n) {
   const pill = document.getElementById("older-pill");
   if (olderRemaining > 0) {
     pill.classList.remove("hidden");
+    const kb = Math.max(1, Math.ceil(olderRemaining / 1024));
+    const label = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
     document.getElementById("older-label").textContent =
-      olderRemaining === 1 ? "load 1 earlier record" : `load earlier records (${olderRemaining})`;
+      `load earlier records (${label})`;
   } else {
     pill.classList.add("hidden");
   }
 }
 
 async function loadOlder() {
-  if (paging || stream.classList.contains("loading") || !oldestSeq || olderRemaining <= 0) return;
+  if (paging || stream.classList.contains("loading") || !oldestOffset || olderRemaining <= 0) return;
   paging = true;
   try {
     const anchor = eventsEl.firstElementChild; // identity survives the prepend
-    const res = await fetch(API_BASE + `/api/history?before=${oldestSeq}&limit=200`);
+    const res = await fetch(API_BASE + `/api/history?before=${oldestOffset}&limit=262144`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) throw new Error(data.error || res.status);
     const page = data.events || [];
@@ -2318,7 +2322,7 @@ async function loadOlder() {
     toolGroupEl = null;
     pageSink = sink;
     try {
-      for (const item of page) addEvent(item); // unwrap tracks oldestSeq
+      for (const item of page) addEvent(item); // unwrap tracks oldestOffset
     } finally {
       pageSink = null;
       lastTextEl = savedLastTextEl; lastTextContent = savedLastTextContent;

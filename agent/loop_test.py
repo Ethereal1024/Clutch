@@ -561,6 +561,28 @@ def main() -> int:
             "done marker closes the live block on failure",
         )
 
+    # 13c. an empty reply (no visible text) is NOT a completion: it is fed back
+    # as an error and retried, so the user never sees a silent "completed" with
+    # no agent output on screen
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        empty_gate = Config(verify_command="echo ok")
+        fake13c = FakeLLM(
+            responses=[_resp(content=""), _resp(content="real answer")],
+            fallback=_resp(content="done"),
+        )
+        agent13c = _agent(fake13c, empty_gate, sb)
+        result13c = agent13c.run("t")
+        check(result13c == "real answer", "empty reply is retried, not completed")
+        check(len(fake13c.calls) == 2, "empty reply costs exactly one retry")
+        check(
+            any(
+                isinstance(e, UserMessageEvent) and "no visible text" in e.content
+                for e in agent13c.log.events()
+            ),
+            "retry prompt mentions the empty reply",
+        )
+
     # 14. resumed long session with NO reported usage: the token estimate of the
     # derived context triggers compaction on the first turn — the resume case that
     # turn-count windowing used to brutalise (no usage, so the old usage-only check
