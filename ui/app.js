@@ -548,6 +548,9 @@ function addEvent(ev) {
     // late approve can't flip the UI back into a stuck "running" state
     if (pendingPerm) closePerm();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
+    // diagrams skipped mid-stream (their fence was still open at the last
+    // delta) are complete now — force one final render pass
+    if (lastTextEl && lastTextEl.isConnected) highlightCode(lastTextEl);
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree
@@ -607,7 +610,7 @@ function addEvent(ev) {
     }
     lastTextContent += ev.content;
     lastTextEl.querySelector(".body").innerHTML = renderMarkdown(lastTextContent);
-    highlightCode(lastTextEl);
+    highlightCode(lastTextEl, true);
     if (!stream.classList.contains("loading")) typesetMath(lastTextEl); // deferred during load
     autoScroll();
     return;
@@ -862,13 +865,16 @@ async function typesetProgressively(root, onPct) {
 
 // Syntax-highlight every <pre><code> inside a freshly rendered block.
 // Marked only emits a fenced <pre> once the closing ``` has arrived, so
-// streaming renders stay clean (no half-block flicker).
-function highlightCode(root) {
+// streaming renders stay clean (no half-block flicker). streaming=true tells
+// renderMermaid to skip a diagram that is still the LAST element of its body —
+// its fence may not be closed yet (marked runs an unclosed fence to the end of
+// the text), and drawing it would show a half-finished diagram.
+function highlightCode(root, streaming = false) {
   if (typeof hljs === "undefined" || !root) return;
   root.querySelectorAll("pre code").forEach((el) => {
     try { hljs.highlightElement(el); } catch (e) {}
   });
-  renderMermaid(root);
+  renderMermaid(root, streaming);
 }
 
 let mermaidInitialized = false;
@@ -878,16 +884,49 @@ let mermaidInitialized = false;
 // duplicate async renders. The cache is bounded; on overflow it resets and the
 // next pass simply re-renders.
 const mermaidCache = new Map();
+
+// Is `pre` the last meaningful child of its parent (ignoring whitespace-only
+// text nodes)? During streaming an unclosed mermaid fence is the last thing in
+// the body; a diagram only renders once content follows it (fence closed) or
+// the final event forces a pass.
+function isLastElement(pre) {
+  let n = pre.nextSibling;
+  while (n) {
+    if (n.nodeType === 1) return false;
+    if (n.nodeType === 3 && n.textContent.trim()) return false;
+    n = n.nextSibling;
+  }
+  return true;
+}
+
 // Render mermaid diagrams: every <pre><code class="language-mermaid"> becomes a
-// rendered SVG (falling back to the literal source on parse errors). A diagram
-// only appears once its ``` fence closed (marked emits no pre before that), so
-// there is no half-source flash.
-function renderMermaid(root) {
+// rendered SVG. Two gates keep half-finished or broken diagrams off screen:
+// 1) streaming: a block still at the END of its body may lack its closing
+//    fence (marked runs an unclosed fence to the end of the text) — wait for
+//    the final event instead of drawing a half-finished diagram;
+// 2) parse: mermaid.render resolves a huge error diagram on parse errors
+//    instead of rejecting; parse() is synchronous and throws, so a broken
+//    source stays literal and is not re-parsed while identical.
+function renderMermaid(root, streaming = false) {
   if (typeof mermaid === "undefined" || !root) return;
   if (!mermaidInitialized) {
     mermaidInitialized = true;
     try {
-      mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+      // stroke/border colours follow the UI accent (--accent) instead of
+      // mermaid's default grey, so diagrams match the theme's red
+      const accent =
+        (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#EF4444";
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: "dark",
+        securityLevel: "strict",
+        themeVariables: {
+          lineColor: accent,
+          primaryBorderColor: accent,
+          secondaryBorderColor: accent,
+          tertiaryBorderColor: accent,
+        },
+      });
     } catch (e) {
       return;
     }
@@ -905,6 +944,16 @@ function renderMermaid(root) {
       pre.textContent = "";
       pre.insertAdjacentHTML("beforeend", cached);
       pre.dataset.mermaidSrc = src;
+      return;
+    }
+    // gate 1 — possible unclosed fence mid-stream: don't draw half a diagram
+    if (streaming && isLastElement(pre)) return;
+    // gate 2 — syntax check before the async render (render() would resolve an
+    // error diagram instead of rejecting); broken source stays literal
+    let parsed = false;
+    try { mermaid.parse(src); parsed = true; } catch (e) {}
+    if (!parsed) {
+      pre.dataset.mermaidSrc = src; // identical broken source: no re-parse loop
       return;
     }
     pre.dataset.mermaidSrc = src; // mark in-flight so deltas don't double-render
@@ -932,7 +981,7 @@ function renderMermaid(root) {
         }
       })
       .catch(() => {
-        // syntax error: keep the literal source; drop the marker so a later
+        // defensive: keep the literal source; drop the marker so a later
         // identical source can retry once its text changes
         if (pre.isConnected) delete pre.dataset.mermaidSrc;
       });
