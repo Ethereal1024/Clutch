@@ -936,13 +936,21 @@ function renderMermaid(root, streaming = false) {
           labelBoxBorderColor: accent,
           noteBorderColor: accent,
           activationBorderColor: accent,
-          // gantt — task bars keep per-state keys (active/done), all themed
+          // gantt — mermaid 10 reads the *BkgColor keys for fills (mermaid 9's
+          // plain *Bkg names are ignored by the renderer: active defaults to
+          // blue #81B1DB, done to lightgrey); borders keep no Color suffix and
+          // text is shared via taskTextColor/taskTextLightColor (default white)
           taskBorderColor: accent,
-          taskBkg: "#2d2d33",
+          taskBkgColor: "#2d2d33",
+          taskBkg: "#2d2d33", // harmless alias for any theme that reads it
+          taskTextColor: "#d4d4d8",
+          taskTextLightColor: "#d4d4d8",
           activeTaskBorderColor: accent,
+          activeTaskBkgColor: "#2d2d33",
           activeTaskBkg: "#2d2d33",
           activeTaskTextColor: "#d4d4d8",
           doneTaskBorderColor: accent,
+          doneTaskBkgColor: "#2d2d33",
           doneTaskBkg: "#2d2d33",
           doneTaskTextColor: "#d4d4d8",
           todayLineColor: accent,
@@ -953,7 +961,6 @@ function renderMermaid(root, streaming = false) {
           noteTextColor: "#d4d4d8",
           edgeLabelBackground: "#1c1c1f",
           clusterBkg: "#1c1c1f",
-          taskBkg: "#2d2d33",
           taskTextOutsideColor: "#a1a1aa",
           activationBkgColor: "#27272a",
           // --- pie: first slice gets the red accent, rest a grayscale ramp
