@@ -912,8 +912,11 @@ function renderMermaid(root, streaming = false) {
   if (!mermaidInitialized) {
     mermaidInitialized = true;
     try {
-      // stroke/border colours follow the UI accent (--accent) instead of
-      // mermaid's default grey, so diagrams match the theme's red
+      // Palette follows the UI (near-monochrome + red accent): every diagram
+      // type has its own themeVariables keys, so all of them are overridden.
+      //   strokes/lines -> accent red; fills/labels -> neutral dark greys
+      //   (mermaid dark defaults to blue-grey #6b7b8f borders, a yellow note
+      //   fill, and multicolour pie/git palettes — none fit the theme)
       const accent =
         (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#EF4444";
       mermaid.initialize({
@@ -921,10 +924,54 @@ function renderMermaid(root, streaming = false) {
         theme: "dark",
         securityLevel: "strict",
         themeVariables: {
+          // --- strokes & lines: accent red ---
           lineColor: accent,
           primaryBorderColor: accent,
           secondaryBorderColor: accent,
           tertiaryBorderColor: accent,
+          // sequence diagram
+          actorBorder: accent,
+          actorLineColor: accent,
+          signalColor: accent,
+          labelBoxBorderColor: accent,
+          noteBorderColor: accent,
+          activationBorderColor: accent,
+          // gantt
+          taskBorderColor: accent,
+          todayLineColor: accent,
+          // clusters / subgraphs
+          clusterBorder: accent,
+          // --- fills & labels: neutral dark greys (no yellow/blue/light) ---
+          noteBkgColor: "#1c1c1f",
+          noteTextColor: "#d4d4d8",
+          edgeLabelBackground: "#1c1c1f",
+          clusterBkg: "#1c1c1f",
+          taskBkg: "#2d2d33",
+          taskTextOutsideColor: "#a1a1aa",
+          activationBkgColor: "#27272a",
+          // --- pie: grayscale ramp + one red accent (pie0-pie12) ---
+          pie0: accent,
+          pie1: "#18181b",
+          pie2: "#27272a",
+          pie3: "#3f3f46",
+          pie4: "#52525b",
+          pie5: "#71717a",
+          pie6: "#8b8b94",
+          pie7: "#a1a1aa",
+          pie8: "#b8b8c0",
+          pie9: "#c9c9d0",
+          pie10: "#d4d4d8",
+          pie11: "#e0e0e4",
+          pie12: "#ededf0",
+          // --- git graphs: grayscale + red (git0-git7) ---
+          git0: accent,
+          git1: "#71717a",
+          git2: "#d4d4d8",
+          git3: "#3f3f46",
+          git4: "#a1a1aa",
+          git5: "#27272a",
+          git6: "#b8b8c0",
+          git7: "#52525b",
         },
       });
     } catch (e) {

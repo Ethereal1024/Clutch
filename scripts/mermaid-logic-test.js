@@ -80,6 +80,43 @@ function renderMermaid(root, streaming = false) {
         primaryBorderColor: accent,
         secondaryBorderColor: accent,
         tertiaryBorderColor: accent,
+        actorBorder: accent,
+        actorLineColor: accent,
+        signalColor: accent,
+        labelBoxBorderColor: accent,
+        noteBorderColor: accent,
+        activationBorderColor: accent,
+        taskBorderColor: accent,
+        todayLineColor: accent,
+        clusterBorder: accent,
+        noteBkgColor: "#1c1c1f",
+        noteTextColor: "#d4d4d8",
+        edgeLabelBackground: "#1c1c1f",
+        clusterBkg: "#1c1c1f",
+        taskBkg: "#2d2d33",
+        taskTextOutsideColor: "#a1a1aa",
+        activationBkgColor: "#27272a",
+        pie0: accent,
+        pie1: "#18181b",
+        pie2: "#27272a",
+        pie3: "#3f3f46",
+        pie4: "#52525b",
+        pie5: "#71717a",
+        pie6: "#8b8b94",
+        pie7: "#a1a1aa",
+        pie8: "#b8b8c0",
+        pie9: "#c9c9d0",
+        pie10: "#d4d4d8",
+        pie11: "#e0e0e4",
+        pie12: "#ededf0",
+        git0: accent,
+        git1: "#71717a",
+        git2: "#d4d4d8",
+        git3: "#3f3f46",
+        git4: "#a1a1aa",
+        git5: "#27272a",
+        git6: "#b8b8c0",
+        git7: "#52525b",
       },
     });
   }
@@ -185,9 +222,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(10);
   ok("valid source after fix renders", renderCalls === 3);
 
-  // 7. theme init carries the accent colours
+  // 7. theme init carries the accent colours across every diagram type
   ok("theme initialized once", initOptions.length === 1);
-  ok("theme uses accent for strokes", initOptions[0].themeVariables.lineColor === "#EF4444");
+  const tv = initOptions[0].themeVariables;
+  ok("theme uses accent for strokes", tv.lineColor === "#EF4444");
+  ok("sequence actor border is accent", tv.actorBorder === "#EF4444");
+  ok("gantt task border is accent", tv.taskBorderColor === "#EF4444");
+  ok("note fill is neutral dark (no yellow)", tv.noteBkgColor === "#1c1c1f");
+  ok("pie palette grayscale + red", tv.pie0 === "#EF4444" && tv.pie12 === "#ededf0" && tv.pie6 === "#8b8b94");
+  ok("git palette grayscale + red", tv.git0 === "#EF4444" && tv.git3 === "#3f3f46");
 
   // 8. cache cap: overflow clears and re-renders (use a fresh uncached source)
   for (let i = 0; i < 110; i++) mermaidCache.set("k" + i, "v");
