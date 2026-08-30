@@ -55,7 +55,7 @@ def _event_region_base(path: Path) -> int:
     from .core.lazy import _make_reader
 
     read, total = _make_reader(path, None)
-    head = read(0, min(total, 1 << 16)).decode("utf-8", "replace")
+    head = read(0, min(total, 1 << 16))
     from .project import _event_region_start
 
     base = _event_region_start(head)

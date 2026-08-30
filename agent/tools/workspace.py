@@ -14,8 +14,10 @@ so local and remote behave identically.
 
 from __future__ import annotations
 
+import base64
 import fnmatch
 import json
+import os
 import re
 import tempfile
 import time
@@ -133,9 +135,15 @@ class Workspace(ABC):
         """Return file contents; raise FileNotFoundError if missing."""
 
     @abstractmethod
-    def read_range(self, path: str, lo: int, hi: int) -> str:
-        """Return the file's byte range [lo, hi) decoded as text (the lazy log's
-        indexed reads: exact byte offsets, so materialization matches the index)."""
+    def read_range(self, path: str, lo: int, hi: int) -> bytes:
+        """Return the file's byte range [lo, hi) as RAW BYTES (the lazy log's
+        indexed reads: exact byte offsets, so materialization matches the file).
+        The range may cut mid-multibyte-character — implementations must round
+        the bytes through losslessly (remote: base64 over the exec bridge)."""
+
+    @abstractmethod
+    def size(self, path: str) -> int:
+        """Total file size in bytes (O(1) metadata, no content transfer)."""
 
     @abstractmethod
     def write(self, path: str, content: str) -> None:
@@ -162,11 +170,14 @@ class LocalWorkspace(Workspace):
             raise FileNotFoundError(path)
         return p.read_text(encoding="utf-8", errors="replace")
 
-    def read_range(self, path: str, lo: int, hi: int) -> str:
+    def read_range(self, path: str, lo: int, hi: int) -> bytes:
         p = self.resolve(path)
         with open(p, "rb") as f:
             f.seek(lo)
-            return f.read(hi - lo).decode("utf-8", "replace")
+            return f.read(hi - lo)
+
+    def size(self, path: str) -> int:
+        return os.path.getsize(self.resolve(path))
 
     def write(self, path: str, content: str) -> None:
         p = self.resolve(path)
@@ -278,14 +289,27 @@ class RemoteWorkspace(Workspace):
             raise FileNotFoundError(str(p))
         return r.stdout
 
-    def read_range(self, path: str, lo: int, hi: int) -> str:
+    def read_range(self, path: str, lo: int, hi: int) -> bytes:
+        """Byte range [lo, hi) as RAW bytes. The exec bridge carries text, so
+        the remote side pipes the slice through base64: every byte round-trips
+        exactly even when the range cuts mid-multibyte-character (a plain tail
+        would mangle the cut byte in the text round trip and shift offsets)."""
         p = self.resolve(path)
         r = self._transport.run(
-            f"tail -c +{lo + 1} {shq(str(p))} | head -c {hi - lo}", _REMOTE_IO_TIMEOUT
+            f"tail -c +{lo + 1} {shq(str(p))} | head -c {hi - lo} | base64", _REMOTE_IO_TIMEOUT
         )
         if r.code != 0:
             raise OSError(f"cannot read {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-        return r.stdout
+        return base64.b64decode(r.stdout.strip())
+
+    def size(self, path: str) -> int:
+        """Total file size in bytes: wc -c on a regular file stats it (O(1)),
+        no content transfer."""
+        p = self.resolve(path)
+        r = self._transport.run(f"wc -c < {shq(str(p))}", _REMOTE_IO_TIMEOUT)
+        if r.code != 0:
+            raise FileNotFoundError(str(p))
+        return int(r.stdout.strip())
 
     def _chunk_content(self, content: str) -> list[str]:
         """Split into pieces whose ON-WIRE size (after shq quoting) stays under

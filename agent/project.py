@@ -154,8 +154,8 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
     read, total = _make_reader(path, workspace)
     # the header lives at the very start of the file: a tiny range read, no
     # separate full pass (unlike read_header, which would double the remote cost)
-    head = read(0, min(total, 1 << 16)).decode("utf-8", "replace")
-    meta = _parse_meta_lines(head.splitlines())
+    head = read(0, min(total, 1 << 16))
+    meta = _parse_meta_lines(head.decode("utf-8", "replace").splitlines())
     base = _event_region_start(head)  # raw task's line start (absolute); None = no events
     writer = _writer_for(workspace, read_only)
     if base is None:
@@ -188,23 +188,23 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
     return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
 
-def _event_region_start(head: str) -> int | None:
+def _event_region_start(head: bytes) -> int | None:
     """Absolute byte offset of the first durable event line in the header read
     (the event region start — the raw task). None when the file has no events."""
     pos = 0
-    for line in head.split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith(SEPARATOR) or stripped.startswith(SECTION):
-            pos += len(line) + 1
+    for seg in head.split(b"\n"):
+        stripped = seg.strip()
+        if not stripped or stripped.startswith(SEPARATOR.encode()) or stripped.startswith(SECTION.encode()):
+            pos += len(seg) + 1
             continue
         try:
-            data = json.loads(line)
+            data = json.loads(seg.decode("utf-8", "replace"))
         except (ValueError, TypeError, json.JSONDecodeError):
-            pos += len(line) + 1
+            pos += len(seg) + 1
             continue
         if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:
             return pos
-        pos += len(line) + 1
+        pos += len(seg) + 1
     return None
 
 

@@ -80,23 +80,29 @@ def parse_durable(text: str) -> list[Event]:
     return events
 
 
-def _parse_with_offsets(text: str, base_rel: int) -> list[tuple[int, Event]]:
+def _parse_with_offsets(raw: bytes, base_rel: int) -> list[tuple[int, Event]]:
     """Parse a byte range into (relative_offset, event) pairs.
 
     ``base_rel`` is the range's start offset relative to the event region. A
     range whose start/end cuts mid-line yields a mangled first/last line — both
     are dropped (JSON parse failure / missing trailing newline), so the returned
     offsets are always exact line starts (UTF-8 safe: a line starts at ``{``).
+    Splitting on raw BYTES keeps offsets exact even when a cut lands inside a
+    multibyte character (the mangled line decodes with a replacement char and
+    fails JSON; the byte counter never saw the replacement).
     """
-    if not text.endswith("\n"):
-        text = text.rsplit("\n", 1)[0]  # drop a trailing line cut by the range end
+    if not raw.endswith(b"\n"):
+        raw = raw.rsplit(b"\n", 1)[0]  # drop a trailing line cut by the range end
     out: list[tuple[int, Event]] = []
     pos = 0
-    for line in text.split("\n"):
+    for seg in raw.split(b"\n"):
         off = base_rel + pos
-        pos += len(line) + 1
+        pos += len(seg) + 1  # BYTES, exact
+        if not seg or seg.startswith(_SEPARATOR.encode()) or seg.startswith(_SECTION.encode()):
+            continue
+        line = seg.decode("utf-8", "replace")
         stripped = line.strip()
-        if not stripped or stripped.startswith(_SEPARATOR) or stripped.startswith(_SECTION):
+        if not stripped:
             continue
         try:
             data = json.loads(line)
@@ -130,21 +136,24 @@ def _tail_scan(read: Callable[[int, int], bytes], total: int) -> tuple[tuple[int
     mem: int | None = None
     while True:
         lo = max(0, scanned_to - chunk)
-        text = read(lo, scanned_to).decode("utf-8", "replace")
+        raw = read(lo, scanned_to)
         pos = 0
         first = True
-        for line in text.split("\n"):
+        for seg in raw.split(b"\n"):
             line_start = lo + pos
-            pos += len(line) + 1
+            pos += len(seg) + 1  # BYTES, exact (a mid-multibyte cut still counts)
             if first:
                 first = False
                 if lo > 0:
                     continue  # line mangled by the span start: parsed whole next pass
+            if not seg or seg.startswith(_SEPARATOR.encode()):
+                continue
+            line = seg.decode("utf-8", "replace")
             stripped = line.strip()
             if stripped == _SECTION:
                 mem = line_start  # last occurrence wins (later in the scan = later in the file)
                 continue
-            if not stripped or stripped.startswith(_SEPARATOR):
+            if not stripped:
                 continue
             try:
                 data = json.loads(line)
@@ -166,15 +175,18 @@ def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int]
 
     Returns ``(read(lo, hi) -> bytes, total_bytes)``. Local: binary streaming
     straight off the file (workspace is a pure path wrapper on the same host, so
-    its presence changes nothing). Remote: currently one whole-file fetch for
-    the open (safe round trip — any byte offset survives); the fetched bytes are
-    sliced for every range read. A per-range remote read (tail/head -c) lands in
-    a follow-up: it must round-trip UTF-8 safely at mid-line cuts.
+    its presence changes nothing). Remote: EVERY read is a byte-range exec
+    (``tail -c +A | head -c B | base64`` — base64 keeps the round trip exact even
+    when a range cuts mid-multibyte-character), so opening a big .clc over SSH
+    transfers only the header + the preserved tail, never the whole file.
     """
     if workspace is not None and not isinstance(workspace, LocalWorkspace):
-        text = workspace.read(str(path))
-        data = text.encode("utf-8")
-        return (lambda lo, hi: data[lo:hi]), len(data)
+        total = workspace.size(str(path))
+
+        def read(lo: int, hi: int) -> bytes:
+            return workspace.read_range(str(path), lo, hi)
+
+        return read, total
     f = open(path, "rb")
 
     def read(lo: int, hi: int) -> bytes:
@@ -244,13 +256,16 @@ class LazyEventLog:
         the preserved tail [tail_start, event region end). The middle stays on
         disk — that is the whole point of the lazy load."""
         # 1. task: the first durable line of the event region
-        head = self._read(self._base, min(self._base + (1 << 16), self._total)).decode("utf-8", "replace")
+        head = self._read(self._base, min(self._base + (1 << 16), self._total))
         pos = 0
-        for line in head.split("\n"):
+        for seg in head.split(b"\n"):
             rel = pos
-            pos += len(line) + 1
+            pos += len(seg) + 1  # BYTES, exact
+            if not seg or seg.startswith(_SEPARATOR.encode()) or seg.startswith(_SECTION.encode()):
+                continue
+            line = seg.decode("utf-8", "replace")
             stripped = line.strip()
-            if not stripped or stripped.startswith(_SEPARATOR) or stripped.startswith(_SECTION):
+            if not stripped:
                 continue
             try:
                 data = json.loads(line)
@@ -262,7 +277,7 @@ class LazyEventLog:
             if ev.type in DURABLE_TYPES:
                 self._events.append(ev)
                 self._offsets.append(0)
-                self._task_end = rel + len(line.encode("utf-8", "replace")) + 1
+                self._task_end = rel + len(seg) + 1
                 break
         # 2. clamp the stored tail_start to the event region (stale/out-of-range
         # values fall back to the tail of the region: everything loads, and a
@@ -270,7 +285,7 @@ class LazyEventLog:
         region_len = self._file_bytes - self._base
         self._tail_start = stored_tail_start if 0 <= stored_tail_start <= region_len else 0
         # 3. the preserved tail
-        tail = self._read(self._base + self._tail_start, self._file_bytes).decode("utf-8", "replace")
+        tail = self._read(self._base + self._tail_start, self._file_bytes)
         for off, ev in _parse_with_offsets(tail, self._tail_start):
             self._events.append(ev)
             self._offsets.append(off)
@@ -373,7 +388,7 @@ class LazyEventLog:
         hi = min(hi, self._file_bytes - self._base)
         if lo >= hi:
             return []
-        text = self._read(self._base + lo, self._base + hi).decode("utf-8", "replace")
+        text = self._read(self._base + lo, self._base + hi)
         for off, ev in _parse_with_offsets(text, lo):
             if not self._is_loaded(off):
                 self._insert(off, ev)

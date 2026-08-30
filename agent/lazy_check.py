@@ -274,7 +274,9 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     p_edge.write_text("\n".join(edge_lines) + "\n", encoding="utf-8")
     read_e, _te = _make_reader(p_edge, None)
     comp_e_scan, _mem = _tail_scan(read_e, _te)
-    comp_rel = comp_e_scan[0] - _event_base(p_edge)
+    from .project import _event_region_start
+    base_e = _event_region_start(read_e(0, min(_te, 1 << 16)))
+    comp_rel = comp_e_scan[0] - base_e
     lazy_e = open_project_lazy(p_edge, workspace=None).log
     full_e = _load_full(p_edge)
     want_e = full_e.tail_start_index(2000)
@@ -350,28 +352,6 @@ def _load_full(path: Path) -> EventLog:
                 pass
             running += len(line.encode("utf-8")) + 1
     return log
-
-
-def _event_base(path: Path) -> int:
-    """Absolute byte offset of the first durable line (the raw task)."""
-    text = path.read_text(encoding="utf-8")
-    pos = 0
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("----", "[memories]")):
-            pos += len(line) + 1
-            continue
-        try:
-            data = json.loads(line)
-        except ValueError:
-            pos += len(line) + 1
-            continue
-        if isinstance(data, dict) and data.get("type") in (
-            "user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"
-        ):
-            return pos
-        pos += len(line) + 1
-    return 0
 
 
 def _make_reader(path: Path):
