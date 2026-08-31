@@ -26,6 +26,7 @@ const os = require("os");
 const path = require("path");
 const tunnel = require("./ssh-tunnel");
 const {
+  SUPERVISOR_PORT,
   startLocalSession,
   supervisorSessionStart,
   supervisorSessionStop,
@@ -46,7 +47,7 @@ const REMOTE_LLM_BASE = "http://127.0.0.1:8892/v1";
 // the window's real session URL. 8890 is the machine supervisor (lifecycle
 // API only), so pointing a renderer at it yields "cannot reach backend" —
 // which is exactly the right symptom when no session could be started.
-const DEFAULT_API_BASE = process.env.CLUTCH_API_URL || "http://127.0.0.1:8890";
+const DEFAULT_API_BASE = "http://127.0.0.1:8890";
 
 // Per-window backend state: webContentsId -> { kind: "local"|"tunnel",
 // sessionId, url, stop() }. A window owns exactly one live session at a time;
@@ -94,9 +95,6 @@ async function registerTunnelBackend(wc, supBase, res) {
 // Decide (and, if needed, re-create) this window's backend URL. Returns null
 // when no backend is possible; the renderer then shows "cannot reach backend".
 async function ensureWindowBackend(wc, notify = false) {
-  const direct = process.env.CLUTCH_API_URL;
-  if (direct) return direct.replace(/\/+$/, "");
-
   const ts = tunnel.tunnelStatus();
   if (ts.active && ts.url) {
     const existing = windowBackends.get(wc.id);
@@ -130,7 +128,14 @@ async function ensureWindowBackend(wc, notify = false) {
   const existing = windowBackends.get(wc.id);
   if (existing && existing.kind === "local") return existing.url;
   await releaseWindowBackend(wc.id);
-  const s = await startLocalSession();
+  let s = await startLocalSession();
+  if (s.mode === "failed") {
+    // a window booting while the supervisor is mid-spawn (or the port is
+    // momentarily contended) can transiently fail; retry once before giving up
+    tunnelLog(`[backend] local session retry: ${s.reason}`);
+    await new Promise((r) => setTimeout(r, 600));
+    s = await startLocalSession();
+  }
   if (s.mode === "failed") {
     tunnelLog(`[backend] local session failed: ${s.reason}`);
     return null;
@@ -143,6 +148,28 @@ async function ensureWindowBackend(wc, notify = false) {
 async function stopAllBackends() {
   const ids = [...windowBackends.keys()];
   for (const id of ids) await releaseWindowBackend(id);
+  // Normal close: tell every supervisor (local + any tunnel) to exit once their
+  // sessions are gone — no orphan lingers. The shutdown flag only fires when
+  // n==0, so an in-use supervisor is never killed; abnormal death relies on the
+  // heartbeat stale-reap instead. Fire-and-forget: if the request races the app
+  // exit, the idle grace still cleans up.
+  requestSupervisorShutdown();
+}
+
+function requestSupervisorShutdown() {
+  const local = `http://127.0.0.1:${SUPERVISOR_PORT}/api/shutdown`;
+  const remote = (() => {
+    const ts = tunnel.tunnelStatus();
+    return ts.active && ts.url ? ts.url + "/api/shutdown" : null;
+  })();
+  for (const url of [local, remote]) {
+    if (!url) continue;
+    try {
+      fetch(url, { method: "POST" }).catch(() => {});
+    } catch (e) {
+      /* best effort */
+    }
+  }
 }
 
 // Dev-only: surface any main-process JS error into the tunnel log instead of the
@@ -176,20 +203,22 @@ app.whenReady().then(async () => {
       preload: path.join(__dirname, "preload.js"),
     },
   });
+  // A window's backend session exists only while the window does: release it as
+  // soon as the window closes (or its renderer crashes) so the session child
+  // dies and its project lock is freed — otherwise a closed window's session
+  // keeps heartbeating and holds the lock forever (a ghost process that blocks
+  // the same project in every other window).
+  const winId = win.webContents.id;
+  win.on("closed", () => releaseWindowBackend(winId));
+  win.webContents.on("destroyed", () => releaseWindowBackend(winId));
 
-  // Bring up this window's backend before loading the UI, so the renderer's
-  // first requests don't race startup. Direct (CLUTCH_API_URL), tunnel or
-  // local all resolve here; api:base re-resolves lazily afterwards (a session
-  // may be re-established after a death). A missing/too-slow backend still
-  // loads the UI: the renderer reports "cannot reach backend" and its SSE
-  // stream reconnects.
-  let apiBase = DEFAULT_API_BASE;
-  try {
-    apiBase = (await ensureWindowBackend(win.webContents)) || DEFAULT_API_BASE;
-  } catch (e) {
-    tunnelLog(`[server-bootstrap] startup backend failed: ${e && e.message}`);
-  }
-  tunnelLog(`[server-bootstrap] window ${win.webContents.id} api base ${apiBase}`);
+  // Load the UI immediately — a slow or hanging backend (e.g. an orphaned
+  // supervisor squatting 8890 makes session/start block for tens of seconds)
+  // must never leave the window blank. The renderer's api:base IPC resolves
+  // the backend lazily; a missing/too-slow backend still shows the UI, which
+  // reports "cannot reach backend" and reconnects SSE.
+  win.loadFile(path.join(__dirname, "index.html"));
+
   ipcMain.handle("api:base", async (e) => {
     try {
       const url = await ensureWindowBackend(e.sender);
@@ -208,11 +237,8 @@ app.whenReady().then(async () => {
   // locally and injects the key/upstream itself, so its own file must be kept
   // in sync for endpoint changes to take effect without restarting the app.
   //
-  // Multi-API: the file mirrors the backend's profiles map
-  // {"profiles": {name: {provider, base_url, model, api_key}}, "active": name}.
-  // Accepts a save payload {profile_name?, provider, base_url, model, api_key?}
-  // (updates that profile and activates it) or a switch payload {activate: name}
-  // (activate only); legacy flat files are migrated to a "default" profile.
+  // The file is flat: {"base_url", "model", "api_key", "reasoning_effort"}.
+  // Legacy {profiles, active} maps are collapsed to their active profile.
   ipcMain.handle("settings:save", async (_e, data) => {
     try {
       const p = path.join(os.homedir(), ".clutch", "settings.json");
@@ -222,35 +248,19 @@ app.whenReady().then(async () => {
       } catch (e) {
         /* first save: start from an empty file */
       }
-      let norm;
       if (cur && cur.profiles) {
-        norm = cur;
-      } else {
-        const entry = {};
-        for (const k of ["provider", "base_url", "model", "api_key", "reasoning_effort"]) {
-          if (cur[k]) entry[k] = cur[k];
-        }
-        norm = {
-          profiles: entry.provider ? { default: entry } : {},
-          active: entry.provider ? "default" : "",
-        };
+        cur = cur.profiles[cur.active] || {}; // legacy map: keep the active profile's values
       }
-      if (data && data.activate) {
-        norm.active = data.activate;
-      } else {
-        const name = (data && data.profile_name) || norm.active || "default";
-        const upd = {};
-        for (const k of ["provider", "base_url", "model"]) {
-          if (data && data[k]) upd[k] = data[k];
-        }
-        if (data && data.api_key) upd.api_key = data.api_key;
-        // empty string clears the knob (provider default), undefined keeps it
-        if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
-        norm.profiles[name] = Object.assign({}, norm.profiles[name], upd);
-        norm.active = name; // saving a profile means "use it from now on"
+      const upd = {};
+      for (const k of ["base_url", "model"]) {
+        if (data && data[k]) upd[k] = data[k];
       }
+      if (data && data.api_key) upd.api_key = data.api_key;
+      // empty string clears the knob (provider default), undefined keeps it
+      if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
+      const flat = Object.assign({}, cur, upd);
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, JSON.stringify(norm, null, 2), { mode: 0o600 });
+      fs.writeFileSync(p, JSON.stringify(flat, null, 2), { mode: 0o600 });
       return { ok: true };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
@@ -262,19 +272,14 @@ app.whenReady().then(async () => {
   );
   ipcMain.handle("tunnel:status", async () => tunnel.tunnelStatus());
   ipcMain.handle("tunnel:disconnect", async () => {
-    await tunnel.stopTunnel();
-    // session forwards die with the tunnel; drop the tunnel backends so the
-    // next api:base claims a fresh local session instead of a dead URL
-    for (const [id, wb] of windowBackends) {
-      if (wb.kind === "tunnel") {
-        try {
-          wb.stop();
-        } catch (e) {
-          /* best effort */
-        }
-        windowBackends.delete(id);
-      }
+    // stop every window backend FIRST (tunnel sessions AND degraded local
+    // sessions) while the tunnel/bridge is still alive, so remote session/stop
+    // and lock cleanup reach their targets; a degraded local session left
+    // running after disconnect would be a ghost process against a dead bridge.
+    for (const id of [...windowBackends.keys()]) {
+      await releaseWindowBackend(id);
     }
+    await tunnel.stopTunnel();
     return { ok: true };
   });
 
@@ -284,9 +289,12 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on("window-all-closed", () => {
+app.on("window-all-closed", async () => {
+  // stop sessions + ask the supervisors to exit FIRST: the tunnel must still be
+  // up so the remote supervisor's shutdown request can get through, and the
+  // session/stop calls must land before the supervisor checks its session count
+  await stopAllBackends();
   tunnel.stopTunnel();
-  stopAllBackends();
   app.quit();
 });
 

@@ -17,17 +17,31 @@ after is one JSON event per line.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
-from .events import DURABLE_TYPES, EventLog, event_from_dict, event_to_json
+from .core.lazy import LazyEventLog, _make_reader
 from .core.project_lock import LockHandle, ProjectLock, ProjectOpenConflict
-from .memory import SECTION, MemoryStore
-from .tools.workspace import _REMOTE_IO_TIMEOUT, shq
+from .events import DURABLE_TYPES
+from .memory import (
+    SECTION,
+    MemoryStore,
+    empty_index_line,
+    parse_index_line,
+)
 
 HEADER_PREFIX = "# clutch project v1"
 SEPARATOR = "---"
+
+# the window start (the newest compaction line's offset, relative to the event
+# region) lives in a fixed-width header line so a compaction can update it with
+# one in-place write (stable offsets for the file's lifetime). 10 digits = up
+# to ~10 GB of event region — far beyond any real .clc.
+_CPR_START_PREFIX = "cpr_start="
+_CPR_START_FIELD_W = 10
+_CPR_START_LINE_W = len(_CPR_START_PREFIX) + _CPR_START_FIELD_W  # 20 bytes
+_CPR_START_LINE_BYTES = _CPR_START_LINE_W + 1  # + newline = 21
 
 
 @dataclass
@@ -40,7 +54,7 @@ class ProjectMeta:
 class Project:
     path: Path
     meta: ProjectMeta = field(default_factory=ProjectMeta)
-    log: EventLog = field(default_factory=EventLog)
+    log: LazyEventLog = field(default_factory=LazyEventLog.in_memory)
     memories: MemoryStore | None = None
     read_only: bool = False
     # the write lock held on this .clc (None for read-only opens): the window
@@ -66,12 +80,12 @@ def _writer_for(workspace, read_only: bool = False) -> Callable[[str, str], None
     return workspace.append_line if workspace is not None else None
 
 
-def _acquire_lock(path: Path, workspace, read_only: bool) -> LockHandle | None:
+def _acquire_lock(path: Path, read_only: bool) -> LockHandle | None:
     """Take the write lock unless read-only. Raises ProjectOpenConflict when
     another window holds it."""
     if read_only:
         return None
-    lock = ProjectLock.acquire(str(path), workspace)
+    lock = ProjectLock.acquire(str(path))
     if lock is None:
         raise ProjectOpenConflict(str(path))
     return lock
@@ -88,53 +102,42 @@ def create_project(path: Path, name: str, model: str = "", workspace=None) -> Pr
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_header(path, meta)
-    # EventLog(path=..., writer=None) persists every append to the .clc file
-    # after the header via the local open fallback
-    log = EventLog(path=str(path), writer=writer)
-    return Project(path=path, meta=meta, log=log, memories=MemoryStore(str(path), writer=writer))
-
-
-def open_project(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
-    """Load an existing .clc file. on_progress(done, total) is called as the
-    file is parsed (byte-based, single pass). With a workspace the file is
-    pulled from the remote host and the log persists back through it.
-    read_only opens without the write lock: the log keeps no-op appends and
-    legacy rewrites are skipped, so the file is never modified."""
-    path = path.with_suffix(".clc")
-    lock = _acquire_lock(path, workspace, read_only)
-    try:
-        meta, loaded, memory_lines = _read_file(path, on_progress, workspace)
-    except Exception:
-        ProjectLock.release(lock)
-        raise
-    writer = _writer_for(workspace, read_only)
-    memories = MemoryStore.parse(memory_lines, str(path), writer=writer)
-    # older files stored streaming deltas (text/reasoning) that are redundant for
-    # replay and context — assistant_message carries the final text + reasoning.
-    # Compact them away so the .clc stays small and future loads stay fast.
-    durable = [e for e in loaded.events() if e.type in DURABLE_TYPES]
-    if not read_only and len(durable) != len(loaded.events()):
-        _rewrite_durable(path, meta, durable, workspace, memories)
-    # EventLog(path=..., writer=None) persists every append to the .clc file
-    # after the header via the local open fallback
-    log = EventLog(path=str(path), writer=writer)
-    log._events.extend(durable)
-    return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
+    index_off = _index_line_offset(meta)
+    # every project opens as a lazy log (one code path for every file size):
+    # a fresh file's event region is empty and starts right after the separator
+    read, total = _make_reader(path, workspace)
+    base = _event_region_start(_header_text(meta).encode("utf-8"))
+    log = LazyEventLog(
+        str(path),
+        read,
+        total,
+        base,
+        writer=writer,
+        cpr_start=0,
+        cpr_line_off=_cpr_line_offset(meta),
+        write_at=_make_write_at(path, workspace),
+    )
+    memories = MemoryStore(str(path), writer=writer, index_offset=index_off, workspace=workspace, log=log)
+    return Project(path=path, meta=meta, log=log, memories=memories)
 
 
 def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
-    """Open an existing .clc lazily: read only the header, the raw task and the
-    preserved recent tail the last compaction kept (everything at or after its
-    stored byte ``tail_start``). Earlier records stay on disk and are pulled in
-    on demand (UI paging via /api/history, compaction head re-materialization).
+    """Open an existing .clc lazily: read only the header and the model WINDOW —
+    everything at or after the newest compaction line (its start is persisted as
+    ``cpr_start`` in the header, so the boundary is one header read, no scan).
+    Nothing else is resident: earlier records (already-summarized history, the
+    raw task included) stay on disk and are pulled in ONLY by the UI's scroll-up
+    paging (/api/history), which never touches the resident log: history
+    browsing is fully decoupled from the model context.
 
-    Small histories and compaction-free files fall back to a plain fully-loaded
-    EventLog — byte-identical behavior to open_project. No index scan anywhere:
-    the tail boundary comes straight from the last compaction's persisted byte
-    offset, found by a short backward read from the file tail.
+    Every file goes through this one path: a compaction-free (or tiny) file
+    simply has cpr_start 0, so the whole event region materializes at open. A
+    file with no cpr_start header line behaves the same (cpr_start 0 — full
+    window): legacy .clc files are converted to the header format by the
+    migration script, never by the open itself.
     """
     path = path.with_suffix(".clc")
-    lock = _acquire_lock(path, workspace, read_only)
+    lock = _acquire_lock(path, read_only)
     try:
         return _open_project_lazy_locked(path, on_progress, workspace, read_only, lock)
     except Exception:
@@ -142,81 +145,74 @@ def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: b
         raise
 
 
-def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> Project:
-    from .core.lazy import (
-        LazyEventLog,
-        _LAZY_MIN_BYTES,
-        _make_reader,
-        _tail_scan,
-        parse_durable,
-    )
+def _wrap_progress(raw_read, total, on_progress):
+    """Progress-reporting reader wrapper: the open reads only a few ranges
+    (header, window), but on a compaction-free file the window IS the whole
+    file, so opening is not instant: report progress per percent of bytes
+    pulled (same throttle policy as the old per-line full parse)."""
+    if on_progress is None:
+        return raw_read
+    seen = [-1]
 
-    read, total = _make_reader(path, workspace)
-    # the header lives at the very start of the file: a tiny range read, no
-    # separate full pass (unlike read_header, which would double the remote cost)
+    def read(lo: int, hi: int) -> bytes:
+        data = raw_read(lo, hi)
+        pct = min(hi, total) * 100 // (total or 1)
+        if pct > seen[0]:
+            seen[0] = pct
+            on_progress(min(hi, total), total)
+        return data
+
+    return read
+
+
+def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> Project:
+    writer = _writer_for(workspace, read_only)
+    raw_read, total = _make_reader(path, workspace)
+    read = raw_read
+    if on_progress is not None:
+        read = _wrap_progress(raw_read, total, on_progress)
+    # nothing below rewrites the file (legacy conversion is the migration
+    # script's job), so one reader covers the memories load, the header and the
+    # log
+    memories = _load_memories(path, read, total, writer, workspace)
+    # the header lives at the very start of the file: a tiny range read
     head = read(0, min(total, 1 << 16))
     meta = _parse_meta_lines(head.decode("utf-8", "replace").splitlines())
-    base = _event_region_start(head)  # raw task's line start (absolute); None = no events
-    writer = _writer_for(workspace, read_only)
-    if base is None:
-        memories = MemoryStore(str(path), writer=writer)
-        log = EventLog(path=str(path), writer=writer)
-        return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
-
-    # the last compaction's stored tail_start + the [memories] section: both
-    # found by scanning BACKWARD from the file tail (no index)
-    comp, mem_off = _tail_scan(read, total)
-    if mem_off is not None:
-        mem_text = read(mem_off, total).decode("utf-8", "replace")
-        memories = MemoryStore.parse(mem_text.splitlines(), str(path), writer=writer)
-    else:
-        memories = MemoryStore(str(path), writer=writer)
-
-    if comp is None or total - base < _LAZY_MIN_BYTES:
-        # nothing to be lazy about: plain read + durable parse, same as
-        # open_project. Load into the log's internal lists (NOT log.append —
-        # append would re-persist every parsed event, doubling the file on each
-        # open), tracking each durable event's real byte offset.
-        log = EventLog(path=str(path), writer=writer)
-        _load_durable_into(log, read(0, total))
-        return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
-
-    comp_off_abs, comp_ev = comp
-    tail_rel = comp_ev.tail_start
-    comp_rel = comp_off_abs - base
-    if not 0 <= tail_rel <= comp_rel:
-        tail_rel = comp_rel  # stale/out-of-range: keep the compaction (its summary) visible
-    log = LazyEventLog(str(path), read, total, base, writer=writer, tail_start=tail_rel)
+    base = _event_region_start(head)  # first durable line; header-only files: right after the separator
+    # the window start (cpr_start) comes from the header's fixed-width line —
+    # no scan, no index. A stale/out-of-range value clamps to 0 (everything
+    # loads; a compaction's summary is never lost).
+    cpr_line_off = _find_cpr_line(head)
+    cpr_rel = (
+        _parse_cpr_start(_read_line_at(read, cpr_line_off, total, _CPR_START_LINE_W))
+        if cpr_line_off is not None
+        else 0
+    )
+    log = LazyEventLog(
+        str(path),
+        read,
+        total,
+        base,
+        writer=writer,
+        cpr_start=cpr_rel,
+        cpr_line_off=cpr_line_off or 0,
+        write_at=None if read_only else _make_write_at(path, workspace),
+    )
+    # the MemoryStore appends memory lines to the same file; count those bytes
+    # into the log so event offsets and the persisted window boundary stay exact
+    memories._log = log
+    if on_progress is not None:
+        on_progress(total, total)
+        # runtime paging reads must not fire the open-progress callbacks
+        log._read = raw_read
     return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
 
 
-def _load_durable_into(log: EventLog, raw: bytes) -> None:
-    """Fill a log from raw .clc bytes WITHOUT persisting (internal lists only),
-    recording each durable event's byte offset relative to the event region
-    (every line inside the region occupies bytes, transients included)."""
-    running = 0
-    in_region = False
-    for seg in raw.split(b"\n"):
-        stripped = seg.strip()
-        if stripped:
-            try:
-                data = json.loads(seg.decode("utf-8", "replace"))
-            except (ValueError, TypeError, json.JSONDecodeError):
-                data = None
-            if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:
-                if not in_region:
-                    in_region = True
-                    log._offsets.append(0)  # the raw task: event region start
-                else:
-                    log._offsets.append(running)
-                log._events.append(event_from_dict(data))
-        if in_region:
-            running += len(seg) + 1  # BYTES of every line inside the region
-
-
-def _event_region_start(head: bytes) -> int | None:
-    """Absolute byte offset of the first durable event line in the header read
-    (the event region start — the raw task). None when the file has no events."""
+def _event_region_start(head: bytes) -> int:
+    """Absolute byte offset of the event region start in a header read: the
+    first durable event line (the raw task in a never-compacted file), or —
+    for a header-only file — the byte position right after the separator where
+    the first event will land."""
     pos = 0
     for seg in head.split(b"\n"):
         stripped = seg.strip()
@@ -231,7 +227,121 @@ def _event_region_start(head: bytes) -> int | None:
         if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:
             return pos
         pos += len(seg) + 1
+    # header-only file (no durable line yet): the event region starts right
+    # after the separator — rfind keeps this exact even when the trailing
+    # newline split produced a phantom empty segment (pos would overcount +1)
+    sep = head.rfind(SEPARATOR.encode())
+    if sep >= 0:
+        return sep + len(SEPARATOR) + 1
+    return pos
+
+
+def _find_index_line(head: bytes) -> int | None:
+    """Absolute byte offset of the header's memory index line in a header read
+    (None = legacy .clc without one)."""
+    pos = 0
+    for seg in head.split(b"\n"):
+        if seg.startswith(b"memory_index="):
+            return pos
+        pos += len(seg) + 1
     return None
+
+
+def _find_cpr_line(head: bytes) -> int | None:
+    """Absolute byte offset of the header's cpr_start line in a header read
+    (None = a file without one; the open then treats the whole event region as
+    the window — the migration script converts such files)."""
+    pos = 0
+    for seg in head.split(b"\n"):
+        if seg.startswith(_CPR_START_PREFIX.encode()):
+            return pos
+        pos += len(seg) + 1
+    return None
+
+
+def _parse_cpr_start(line: str) -> int:
+    """Parse a cpr_start header line → the window-start byte offset (relative
+    to the event region). 0 for a missing/malformed value (full load)."""
+    if not line.startswith(_CPR_START_PREFIX):
+        return 0
+    v = line[len(_CPR_START_PREFIX) :].strip()
+    try:
+        return int(v)
+    except ValueError:
+        return 0
+
+
+def _last_compaction_rel(raw: bytes, base: int) -> int:
+    """Relative byte offset of the LAST compaction line in the event region
+    (0 when the file has never been compacted). Scans raw .clc bytes for
+    ``{"type": "compaction"`` line starts — the boundary a migrated file's
+    cpr_start must point at. Shared by the migration script and tests."""
+    last = 0
+    pos = 0
+    for seg in raw.split(b"\n"):
+        if seg.lstrip().startswith(b'{"type": "compaction"'):
+            off = pos - base
+            if off >= 0:
+                last = off
+        pos += len(seg) + 1
+    return last
+
+
+def _make_write_at(path, workspace):
+    """In-place writer for the header's fixed-width cpr_start line (the
+    compaction's window-start update): local seek+write, or the workspace's
+    write_at (local/remote exec). None only when the project is read-only."""
+    if workspace is not None:
+        return lambda off, data: workspace.write_at(str(path), off, data)
+
+    def write_at(off: int, data: bytes) -> None:
+        with open(path, "r+b") as f:
+            f.seek(off)
+            f.write(data)
+
+    return write_at
+
+
+def _read_line_at(read, off: int, total: int, width: int) -> str:
+    """Read the single line starting at byte offset ``off`` (a fixed-width
+    header line: at most ``width`` bytes, never past the file end)."""
+    raw = read(off, min(off + width + 4, total))
+    return raw.split(b"\n", 1)[0].decode("utf-8", "replace")
+
+
+def _load_memories(path, read, total, writer, workspace) -> MemoryStore:
+    """Build the MemoryStore for an open: read the header index line and
+    range-read exactly the indexed memory lines when present (O(1) in the file
+    size — the distance from the first memory to the tail no longer matters);
+    the [memories] section scan as the no-index / corrupt-index fallback. No
+    runtime migration: legacy .clc files are converted by the migration script,
+    so a file without an index line stays as-is (memories still load via scan)."""
+    from .memory import _MEMORY_INDEX_LINE_W
+
+    head = read(0, min(total, 1 << 16))
+    index_off = _find_index_line(head)
+    if index_off is not None:
+        parsed = parse_index_line(_read_line_at(read, index_off, total, _MEMORY_INDEX_LINE_W))
+        if parsed is not None:
+            count, h, offs = parsed
+            return MemoryStore.from_index(str(path), read, total, writer, index_off, count, h, offs, workspace)
+    # no usable index: fall back to scanning the [memories] section
+    mem_off = _find_memories_section(read, total)
+    if mem_off is not None:
+        mem_text = read(mem_off, total).decode("utf-8", "replace")
+        return MemoryStore.parse(mem_text.splitlines(), str(path), writer=writer, workspace=workspace)
+    return MemoryStore(str(path), writer=writer, workspace=workspace)
+
+
+def _find_memories_section(read, total) -> int | None:
+    """Absolute offset of the [memories] section marker, or None. Forward scan
+    of the raw bytes — the section sits after the event region, and the marker
+    never appears inside an event line (JSON escapes it). Only reached for
+    read-only opens of legacy files whose memory index is absent."""
+    if total <= 0:
+        return None
+    i = read(0, total).find(SECTION.encode())
+    return i if i >= 0 else None
 
 
 def _parse_meta_lines(lines: list[str]) -> ProjectMeta:
@@ -243,32 +353,22 @@ def _parse_meta_lines(lines: list[str]) -> ProjectMeta:
             break
         _apply_meta(meta, line)
     return meta
-
-
-def read_header(path: Path, workspace=None) -> ProjectMeta:
-    """Read only the header of a .clc file (up to the --- separator), fast."""
-    path = path.with_suffix(".clc")
-    meta = ProjectMeta()
-    if workspace is not None:
-        lines = workspace.read(str(path)).splitlines()
-    else:
-        with open(path, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    for line in lines:
-        line = line.rstrip("\n")
-        if line.strip() == SEPARATOR:
-            break
-        _apply_meta(meta, line)
-    return meta
-
-
-def _header_text(meta: ProjectMeta) -> str:
+def _header_text(meta: ProjectMeta, index_line: str | None = None, cpr_start: int = 0) -> str:
+    """Header for a NEW .clc: meta lines + the fixed-width cpr_start line
+    (window start; 0 = everything) + the fixed-width memory index line (empty
+    by default) + the event-region separator. Both index lines are always
+    present at a fixed width, so their absolute offsets are stable for the
+    file's lifetime (the event region's relative offsets never shift)."""
+    if index_line is None:
+        index_line = empty_index_line()
     return (
         "\n".join(
             [
                 HEADER_PREFIX,
                 f"name: {meta.name}",
                 f"model: {meta.model or ''}",
+                f"{_CPR_START_PREFIX}{cpr_start:0{_CPR_START_FIELD_W}d}",
+                index_line,
                 SEPARATOR,
             ]
         )
@@ -276,28 +376,24 @@ def _header_text(meta: ProjectMeta) -> str:
     )
 
 
+def _cpr_line_offset(meta: ProjectMeta) -> int:
+    """Absolute offset of the header's cpr_start line (fixed-width: 21 bytes
+    with newline) — the compaction's in-place window-start write target."""
+    return (
+        len((HEADER_PREFIX + "\n").encode("utf-8"))
+        + len((f"name: {meta.name}\n").encode("utf-8"))
+        + len((f"model: {meta.model or ''}\n").encode("utf-8"))
+    )
+
+
+def _index_line_offset(meta: ProjectMeta) -> int:
+    """Absolute byte offset of the memory index line in a freshly created .clc
+    (header layout: prefix / name / model / cpr_start / index / separator)."""
+    return _cpr_line_offset(meta) + _CPR_START_LINE_BYTES
+
+
 def _write_header(path: Path, meta: ProjectMeta) -> None:
     path.write_text(_header_text(meta), encoding="utf-8")
-
-
-def _rewrite_durable(
-    path: Path, meta: ProjectMeta, events: list, workspace=None, memories: MemoryStore | None = None
-) -> None:
-    """Atomically rewrite the .clc keeping only durable block events (and the
-    [memories] section). A crash mid-write must not leave a truncated file, so
-    write a tmp then swap it in. With a workspace the tmp+mv happen on the host."""
-    body = "".join(event_to_json(ev) + "\n" for ev in events)
-    memories_text = memories.serialize() if memories is not None else ""
-    content = _header_text(meta) + body + memories_text
-    if workspace is not None:
-        tmp = str(path) + ".tmp"
-        workspace.write(tmp, content)
-        workspace.run(f"mv -f {shq(tmp)} {shq(str(path))}", _REMOTE_IO_TIMEOUT)
-        return
-    tmp = path.with_suffix(".clc.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp, path)
 
 
 def _apply_meta(meta: ProjectMeta, line: str) -> None:
@@ -311,71 +407,3 @@ def _apply_meta(meta: ProjectMeta, line: str) -> None:
         meta.name = v
     elif k == "model":
         meta.model = v
-
-
-def _read_file(path: Path, on_progress=None, workspace=None) -> tuple[ProjectMeta, EventLog, list[str]]:
-    meta = ProjectMeta()
-    log = EventLog()
-    memory_lines: list[str] = []
-    in_events = False
-    in_memories = False
-
-    def parse(line: str) -> None:
-        nonlocal in_events, in_memories
-        stripped = line.strip()
-        if in_memories:
-            memory_lines.append(line)
-            return
-        if not in_events:
-            if stripped == SEPARATOR:
-                in_events = True
-                return
-            _apply_meta(meta, line)
-            return
-        if stripped == SECTION:
-            in_memories = True
-            return
-        if stripped:
-            # every line occupies bytes in the file (transients included), so
-            # the running byte offset advances per line — a durable event's
-            # offset is its line start, matching the lazy log's file-based
-            # offsets (a .clc written today has no transients, so appends and
-            # loads agree; an older file with deltas stays consistent too)
-            try:
-                ev = event_from_dict(json.loads(line))
-                log._events.append(ev)
-                if ev.type in DURABLE_TYPES:
-                    log._offsets.append(log._running)
-            except ValueError:
-                pass  # skip corrupt lines; keep the rest of the history
-            log._running += len(line.encode("utf-8")) + 1
-
-    if workspace is not None:
-        # remote: one workspace.read round trip; progress counted in chars
-        text = workspace.read(str(path))
-        total = len(text) or 1
-        consumed = 0
-        last_pct = -1
-        for line in text.splitlines():
-            consumed += len(line) + 1
-            pct = consumed * 100 // total
-            if on_progress and pct != last_pct:
-                last_pct = pct
-                on_progress(consumed, total)
-            parse(line)
-        return meta, log, memory_lines
-
-    total = path.stat().st_size or 1
-    consumed = 0
-    last_pct = -1
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            consumed += len(line)
-            # throttle: at most one progress line per whole percent — a per-line
-            # callback on a 10k-line log would flood the UI with setPct updates
-            pct = consumed * 100 // total
-            if on_progress and pct != last_pct:
-                last_pct = pct
-                on_progress(consumed, total)
-            parse(line.rstrip("\n"))
-    return meta, log, memory_lines

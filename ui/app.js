@@ -17,11 +17,22 @@ let API_BASE = null; // resolved in resolveApiBase() before the app starts
 async function resolveApiBase() {
   let base = "http://127.0.0.1:8890";
   if (window.clutchApi && window.clutchApi.baseUrl) {
-    try {
-      const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
-      if (b) base = String(b).replace(/\/+$/, "");
-    } catch {
-      /* preload unavailable (plain-browser debugging) — keep the placeholder */
+    // a session URL is the ONLY valid backend; 8890 is the supervisor
+    // (lifecycle-only), so a null/8890 answer means the session couldn't be
+    // claimed yet — a second window booting while the supervisor is mid-spawn
+    // can transiently fail, so retry a few times before accepting the fallback
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
+        const clean = b ? String(b).replace(/\/+$/, "") : "";
+        if (clean && clean !== "http://127.0.0.1:8890") {
+          base = clean;
+          break;
+        }
+      } catch {
+        /* preload unavailable (plain-browser debugging) — keep the placeholder */
+      }
+      await new Promise((r) => setTimeout(r, 800));
     }
   }
   API_BASE = base;
@@ -220,11 +231,16 @@ stream.addEventListener("scroll", (e) => {
     prevScrollH = stream.scrollHeight;
     return;
   }
-  const viewportShrank = stream.clientHeight < prevClientH;
+  // ANY viewport-size change (the task input grow/shrink resizes this flex
+  // scroller; browser window resize) or content shrink (fold collapse, preview
+  // swap) clamps scrollTop and fires a trusted scroll event — none of those is
+  // a user gesture, so they must neither cancel an in-flight jump glide nor
+  // drop the latch. The send-time input reset is exactly such a resize.
+  const viewportChanged = stream.clientHeight !== prevClientH;
   prevClientH = stream.clientHeight;
   const scrollShrank = stream.scrollHeight < prevScrollH;
   prevScrollH = stream.scrollHeight;
-  if (viewportShrank || scrollShrank || performance.now() < suppressLatchUntil) {
+  if (viewportChanged || scrollShrank || performance.now() < suppressLatchUntil) {
     lastScrollTop = cur;
     return;
   }
@@ -257,7 +273,7 @@ function setStatus(state) {
   // busy (generic button:disabled styling greys it out)
   els.mode.disabled = busy;
   els.mode.title = busy
-    ? "任务运行中，不可切换；模式适用于下一次运行"
+    ? "A run is in progress; the mode applies to the next run."
     : "chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.";
 }
 
@@ -481,11 +497,10 @@ function buildReadRow(call, content) {
 }
 
 function addEvent(ev) {
-  // lazy-open wire shape: {offset, event} wrappers (open stream + SSE replay of
+  // lazy wire shape: {offset, event} wrappers (open NDJSON stream + SSE replay of
   // a lazily-opened project) carry each durable event's byte offset (relative to
-  // the event region) so the UI can page the earlier records. The raw task
-  // (offset 0) is excluded from the oldest loaded marker — the pill pages
-  // strictly before the preserved tail.
+  // the event region) so the UI can page the earlier records. The oldest loaded
+  // offset seeds the pill; the raw task is paged like any other older record.
   if (ev && typeof ev === "object" && ev.event && typeof ev.offset === "number") {
     if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
     ev = ev.event;
@@ -502,6 +517,10 @@ function addEvent(ev) {
       (ev.type === "state_update" || ev.type === "permission_request")) {
     return;
   }
+  // finalize a coalesced streaming text block before any non-text event (tool
+  // call, next turn, final): the block must be fully rendered before it is
+  // superseded or collapsed
+  if (ev && ev.type !== "text_delta") flushTextRender();
   // events that break a tool group: new user turn, agent text, thinking, final.
   // assistant_message is just a record (not shown) and does NOT break the group,
   // because results follow the tool_calls they belong to.
@@ -630,17 +649,19 @@ function addEvent(ev) {
     }
   }
 
-  // streaming text: accumulate into the existing agent block and re-render
+  // streaming text: accumulate plain text and schedule ONE render per animation
+  // frame. Rendering the whole accumulated block per token re-parses markdown,
+  // re-highlights every code block and re-typesets all math on each one — an
+  // O(n²) main-thread stall that surfaced as "freeze, then a burst of output".
+  // Coalescing per frame bounds the work and lets the browser paint between
+  // frames; the next non-text event flushes whatever is still pending.
   if (ev.type === "text_delta" && ev.content) {
     if (!lastTextEl) {
       lastTextEl = createAgentTextBlock();
       (pageSink || eventsEl).appendChild(lastTextEl);
     }
     lastTextContent += ev.content;
-    lastTextEl.querySelector(".body").innerHTML = renderMarkdown(lastTextContent);
-    highlightCode(lastTextEl, true);
-    if (!stream.classList.contains("loading")) typesetMath(lastTextEl); // deferred during load
-    autoScroll();
+    scheduleTextRender();
     return;
   }
 
@@ -688,6 +709,30 @@ function createAgentTextBlock() {
   wrap.className = "event text";
   wrap.innerHTML = '<div class="hdr">agent</div><div class="body"></div>';
   return wrap;
+}
+
+// Coalesced streaming render (see the text_delta branch above): at most one
+// full-block render per animation frame, flushed synchronously by the next
+// non-text event so a superseded block is always complete.
+let textRenderRaf = 0;
+function renderTextBlock() {
+  textRenderRaf = 0;
+  if (!lastTextEl) return;
+  const bodyEl = lastTextEl.querySelector(".body");
+  bodyEl.innerHTML = renderMarkdown(lastTextContent);
+  highlightCode(lastTextEl, true);
+  if (!stream.classList.contains("loading")) typesetMath(lastTextEl); // deferred during load
+  autoScroll();
+}
+function scheduleTextRender() {
+  if (textRenderRaf) return;
+  textRenderRaf = requestAnimationFrame(renderTextBlock);
+}
+function flushTextRender() {
+  if (textRenderRaf) {
+    cancelAnimationFrame(textRenderRaf);
+    renderTextBlock();
+  }
 }
 
 // Height animation shared by the diff expand (partial collapse to 140px): animates
@@ -1129,7 +1174,7 @@ function showMermaidError(pre, detail) {
   if (!pre.querySelector(".mermaid-error")) {
     const tip = document.createElement("div");
     tip.className = "mermaid-error";
-    tip.textContent = "图示语法有误，已保留原始代码";
+    tip.textContent = "Invalid diagram syntax; the original code was kept.";
     const msg = detail && (detail.message || String(detail));
     if (msg) tip.title = "mermaid: " + msg;
     pre.appendChild(tip);
@@ -1365,8 +1410,10 @@ async function run() {
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
-  // sending a message means "back to the live tail": glide down when reading
-  // history, instant-pin when already tracked (the latch keeps the reply pinned)
+  // sending a message means "back to the live tail": commit to the tail
+  // unconditionally — a dropped latch or an in-flight glide (reading history)
+  // must not leave the fresh message below the fold
+  followTail = true;
   autoScroll(true);
   // runs append to the active project's conversation; the mode travels with the
   // request so a switch only affects this run. project pins the target .clc so
@@ -1425,137 +1472,275 @@ function autoGrowTask() {
 els.task.addEventListener("input", autoGrowTask);
 
 // ---- API settings modal ----
-// The modal carries two distinct "URLs": the LLM endpoint (provider/model/
-// base_url — what the agent talks to) and the Backend URL (where this agent
-// API runs; SSH sets it automatically). The LLM endpoint is what used to be
-// hard-locked to DeepSeek; it is now fully configurable and persisted both on
-// the backend (~/.clutch/settings.json via /api/settings) and, through the
-// preload bridge, in the client-side settings file the LLM reverse proxy reads
-// (so SSH-mode upstream changes apply without restarting the app).
+// The modal carries the LLM endpoint (base_url/model/reasoning_effort — what the
+// agent talks to), persisted on the backend (~/.clutch/settings.json via
+// /api/settings) and, through the preload bridge, in the client-side settings
+// file the LLM reverse proxy reads (so SSH-mode upstream changes apply without
+// restarting the app). There is no manual "Backend URL" field: the window's
+// backend is always a supervisor session (local or tunnel), chosen by the main
+// process.
+//
+// Named LLM profiles work like the saved SSH connections: stored in
+// localStorage, picked from a dropdown, applied to the backend on selection.
+// A profile stores the full form (base_url/model/api_key/reasoning_effort), so
+// switching providers is one click instead of retyping the key.
+// ---- custom dropdown ----
+// Native <select> popups can't be themed or animated (Linux renders them as an
+// HTML-default list), so the three pickers use this component: a button that
+// opens a themed popup with a fade/slide-in. It mimics just enough of the
+// <select> DOM API (innerHTML / appendChild / value / disabled /
+// addEventListener("change")) that the existing render functions (renderLlmProfiles,
+// renderConnSelector) work unchanged.
+function customSelect(root) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cselect-btn";
+  if (root.getAttribute("title")) btn.title = root.getAttribute("title");
+  const valueEl = document.createElement("span");
+  valueEl.className = "cselect-value";
+  const arrow = document.createElement("span");
+  arrow.className = "cselect-arrow";
+  btn.appendChild(valueEl);
+  btn.appendChild(arrow);
+  const pop = document.createElement("div");
+  pop.className = "cselect-pop";
+  root.classList.add("cselect");
+  root.appendChild(btn);
+  root.appendChild(pop);
+
+  const opts = []; // {value, text}
+  let selected = null;
+  const listeners = [];
+
+  function render() {
+    const o = opts.find((x) => x.value === selected);
+    valueEl.textContent = o ? o.text : "";
+    pop.innerHTML = "";
+    for (const opt of opts) {
+      const row = document.createElement("div");
+      row.className = "cselect-opt" + (opt.value === selected ? " active" : "");
+      row.textContent = opt.text;
+      row.addEventListener("click", () => {
+        const changed = opt.value !== selected;
+        selected = opt.value;
+        render();
+        root.classList.remove("open");
+        if (changed) for (const fn of listeners) fn();
+      });
+      pop.appendChild(row);
+    }
+  }
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    root.classList.toggle("open");
+  });
+  document.addEventListener("click", (e) => {
+    if (!root.contains(e.target)) root.classList.remove("open");
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") root.classList.remove("open");
+  });
+
+  return {
+    set innerHTML(_v) { opts.length = 0; selected = null; render(); }, // only ever cleared
+    appendChild(opt) { opts.push({ value: opt.value, text: opt.textContent }); render(); },
+    get value() { return selected || ""; },
+    set value(v) { selected = v; render(); },
+    get disabled() { return root.classList.contains("disabled"); },
+    set disabled(b) { root.classList.toggle("disabled", !!b); },
+    addEventListener(_ev, fn) { listeners.push(fn); },
+    focus() { btn.focus(); },
+  };
+}
+
 const modal = $("#settings-modal");
 const keyInput = $("#api-key-input");
-const urlInput = $("#backend-url-input");
-const providerSelect = $("#provider-input");
 const modelInput = $("#model-input");
-const reasoningEffortInput = $("#reasoning-effort-input");
+const reasoningEffortInput = customSelect($("#reasoning-effort-input"));
+// reasoning-effort options (was a static <select> in the markup)
+for (const [v, t] of [["", "default"], ["low", "low"], ["medium", "medium"], ["max", "max"]]) {
+  const o = document.createElement("option");
+  o.value = v;
+  o.textContent = t;
+  reasoningEffortInput.appendChild(o);
+}
+reasoningEffortInput.value = "";
 const llmUrlInput = $("#llm-url-input");
-const profileSelect = $("#profile-select");
-const profileNameInput = $("#profile-name-input");
+const profileSelect = customSelect($("#llm-profile-select"));
 
-// Provider presets mirror agent/config.py (PROVIDER_PRESETS). Picking a
-// provider auto-fills its default base URL + model; users can still override.
-const LLM_PRESETS = {
-  deepseek: { base_url: "https://api.deepseek.com", model: "deepseek-v4-flash" },
-  zhipu: { base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
-  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  moonshot: { base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
-  ollama: { base_url: "http://127.0.0.1:11434/v1", model: "llama3.1" },
-  custom: { base_url: "", model: "" },
-};
-
-function llmPreset(provider) {
-  return LLM_PRESETS[provider] || { base_url: "", model: "" };
-}
-
-function fillLlmForm(provider, model, baseUrl, reasoningEffort) {
-  const preset = llmPreset(provider);
-  providerSelect.value = provider;
-  modelInput.value = model || preset.model;
-  llmUrlInput.value = baseUrl || preset.base_url;
-  reasoningEffortInput.value = reasoningEffort || "";
-}
-
-async function openSettings() {
-  modal.classList.remove("hidden");
-  // Keys live inside saved profiles and are never echoed back by the backend;
-  // a blank key input means "keep the profile's saved key".
-  keyInput.value = "";
-  keyInput.placeholder = "sk-... (blank keeps the saved key)";
-  urlInput.value = localStorage.getItem("clutch_api_url") || "";
-  // Prefill the LLM endpoint from the backend's live config (another window /
-  // env / CLI may have changed it); fall back to a local cache or presets.
-  let cfg = null;
+function llmProfiles() {
   try {
-    const r = await fetch(API_BASE + "/api/settings");
-    if (r.ok) cfg = await r.json();
+    return JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
   } catch (e) {
-    /* backend unreachable: fall back to cache/presets */
+    return {};
   }
-  if (cfg && Array.isArray(cfg.profiles)) {
-    profileSelect.innerHTML = "";
-    for (const p of cfg.profiles) {
-      const opt = document.createElement("option");
-      opt.value = p.name;
-      opt.textContent = p.name + (p.name === cfg.active ? " (active)" : "");
-      profileSelect.appendChild(opt);
-    }
-    profileSelect.value = cfg.active || "";
-    profileNameInput.value = "";
-    // form shows the ACTIVE profile's saved config (another window may have
-    // switched since this one last saved)
-    const ap = cfg.profiles.find((p) => p.name === cfg.active) || {};
-    fillLlmForm(ap.provider || cfg.provider || "deepseek", ap.model || cfg.model, ap.base_url || cfg.base_url, ap.reasoning_effort);
-  } else {
-    // backend unreachable: fall back to cache/presets
-    const provider = (cfg && cfg.provider) || "deepseek";
-    fillLlmForm(provider, cfg && cfg.model, cfg && cfg.base_url);
+}
+
+function saveLlmProfiles(profiles) {
+  localStorage.setItem("clutch_llm_profiles", JSON.stringify(profiles));
+}
+
+function renderLlmProfiles(activeName) {
+  const profiles = llmProfiles();
+  profileSelect.innerHTML = "";
+  const names = Object.keys(profiles).sort();
+  for (const name of names) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name === activeName ? name + " ✓" : name;
+    profileSelect.appendChild(opt);
   }
-  keyInput.focus();
+  // no "— profiles —" placeholder: an empty list means no profiles — disable
+  // the picker (＋ New still works to create the first one)
+  profileSelect.disabled = names.length === 0;
+  profileSelect.value = names.includes(activeName) ? activeName : (names[0] || "");
+  // Delete/Edit act on the SELECTED profile: grey them out when nothing is
+  // selected so their purpose is obvious from the start.
+  $("#llm-profile-del").disabled = !profileSelect.value;
+  $("#llm-profile-edit").disabled = !profileSelect.value;
 }
-function closeSettings() {
-  modal.classList.add("hidden");
+
+// apply a saved profile: fill the form and push it to the backend immediately
+async function applyLlmProfile(name) {
+  const p = llmProfiles()[name];
+  if (!p) return;
+  keyInput.value = p.api_key || "";
+  llmUrlInput.value = p.base_url || "";
+  modelInput.value = p.model || "";
+  reasoningEffortInput.value = p.reasoning_effort || "";
+  localStorage.setItem("clutch_llm_active", name);
+  renderLlmProfiles(name);
+  await pushSettings();
 }
-providerSelect.addEventListener("change", () => {
-  const p = llmPreset(providerSelect.value);
-  modelInput.value = p.model;
-  llmUrlInput.value = p.base_url;
-});
-// Selecting a saved profile switches the active endpoint immediately: the
-// backend + the client-side proxy both follow, and the form refills with that
-// profile's saved config.
+
 profileSelect.addEventListener("change", async () => {
   const name = profileSelect.value;
-  if (!name) return;
-  profileNameInput.value = ""; // we're switching to an existing profile
-  try {
-    const r = await fetch(API_BASE + "/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ activate: name }),
-    });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      throw new Error(d.error || r.status);
-    }
-    if (window.clutchSettings && window.clutchSettings.save) {
-      await window.clutchSettings.save({ activate: name });
-    }
-    await openSettings(); // refetch: shows the switched profile as active
-  } catch (e) {
-    addEvent({ type: "final", status: "error", summary: "switch profile failed: " + e.message });
-    await openSettings();
+  if (name) await applyLlmProfile(name);
+  else renderLlmProfiles("");
+});
+
+const profileNameInput = $("#llm-profile-name");
+
+function saveProfileAs(name, oldName) {
+  const profiles = llmProfiles();
+  if (oldName && oldName !== name) delete profiles[oldName]; // rename: drop the old key
+  profiles[name] = {
+    base_url: llmUrlInput.value.trim(),
+    model: modelInput.value.trim(),
+    api_key: keyInput.value.trim(),
+    reasoning_effort: reasoningEffortInput.value.trim(),
+  };
+  saveLlmProfiles(profiles);
+  localStorage.setItem("clutch_llm_active", name);
+  renderLlmProfiles(name);
+}
+
+// ---- LLM profile editor (mirrors the SSH connection modal) ----
+// The settings modal is a profile manager: pick one to apply, ＋ New to create
+// a BLANK profile (never prefilled), Edit to change the selected one, Delete to
+// remove it. The url/key/model/reasoning fields live HERE.
+const llmProfileModal = $("#llm-profile-modal");
+const llmProfileTitle = $("#llm-profile-title");
+const llmProfileError = $("#llm-profile-error");
+let editingProfile = null; // the profile being edited, or null for a new one
+
+function showLlmProfileError(msg) {
+  llmProfileError.textContent = msg;
+  llmProfileError.classList.remove("hidden");
+  profileNameInput.classList.add("profile-name-error");
+}
+function clearLlmProfileError() {
+  llmProfileError.classList.add("hidden");
+  llmProfileError.textContent = "";
+  profileNameInput.classList.remove("profile-name-error");
+}
+
+function openLlmProfileEditor(name) {
+  // ＋ New (no name) opens a BLANK form; Edit prefills the selected profile
+  const p = name ? llmProfiles()[name] : null;
+  editingProfile = name && p ? name : null;
+  llmProfileTitle.textContent = editingProfile ? "Edit profile: " + editingProfile : "New LLM profile";
+  profileNameInput.value = editingProfile || "";
+  llmUrlInput.value = (p && p.base_url) || "";
+  keyInput.value = (p && p.api_key) || "";
+  modelInput.value = (p && p.model) || "";
+  reasoningEffortInput.value = (p && p.reasoning_effort) || "";
+  clearLlmProfileError();
+  llmProfileModal.classList.remove("hidden", "closing");
+  profileNameInput.focus();
+}
+function closeLlmProfileEditor() {
+  editingProfile = null;
+  closeModal(llmProfileModal);
+}
+
+$("#llm-profile-new").addEventListener("click", () => openLlmProfileEditor());
+$("#llm-profile-edit").addEventListener("click", () => openLlmProfileEditor(profileSelect.value));
+$("#llm-profile-cancel").addEventListener("click", closeLlmProfileEditor);
+dismissOnOverlayPress(llmProfileModal, closeLlmProfileEditor);
+
+$("#llm-profile-save").addEventListener("click", async () => {
+  const name = profileNameInput.value.trim();
+  if (!name) {
+    clearLlmProfileError();
+    showLlmProfileError("Give this profile a name.");
+    profileNameInput.focus();
+    return;
+  }
+  // a name is only a conflict when it belongs to a DIFFERENT profile (editing
+  // the same profile under its own name is fine, and rename is allowed)
+  const taken = llmProfiles()[name];
+  if (taken && name !== editingProfile) {
+    showLlmProfileError("A profile named \"" + name + "\" already exists — pick a different name.");
+    profileNameInput.focus();
+    return;
+  }
+  const oldName = editingProfile;
+  editingProfile = null;
+  saveProfileAs(name, oldName);
+  closeModal(llmProfileModal);
+  await pushSettings(); // apply the new/edited profile to the backend
+});
+
+profileNameInput.addEventListener("input", clearLlmProfileError);
+
+profileNameInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    $("#llm-profile-save").click();
   }
 });
-async function saveSettings() {
+
+$("#llm-profile-del").addEventListener("click", () => {
+  const name = profileSelect.value;
+  if (!name) return; // nothing selected: nothing to delete
+  if (!confirm("Delete profile \"" + name + "\"?")) return;
+  const profiles = llmProfiles();
+  delete profiles[name];
+  saveLlmProfiles(profiles);
+  if (localStorage.getItem("clutch_llm_active") === name) localStorage.removeItem("clutch_llm_active");
+  renderLlmProfiles("");
+});
+
+async function openSettings() {
+  modal.classList.remove("hidden", "closing");
+  // the settings modal is now a profile manager: the url/key/model fields live
+  // in the profile editor (llm-profile-modal), so there is nothing to prefill
+  renderLlmProfiles(localStorage.getItem("clutch_llm_active") || "");
+}
+function closeSettings() {
+  closeModal(modal);
+}
+// Push the CURRENT profile-editor form values to the backend (the LLM endpoint,
+// the proxy's local settings file). No modal close — callers decide.
+async function pushSettings() {
   const key = keyInput.value.trim();
-  const url = urlInput.value.trim();
-  const provider = providerSelect.value;
-  const preset = llmPreset(provider);
-  // concrete values, not empty strings: the backend and the client-side proxy
-  // both fill gaps from the provider preset, and an empty URL would silently
-  // fall back to the old default instead of the chosen provider.
-  const model = modelInput.value.trim() || preset.model;
-  const llmUrl = llmUrlInput.value.trim() || preset.base_url;
-  if (url) localStorage.setItem("clutch_api_url", url);
-  else localStorage.removeItem("clutch_api_url");
-  // Explicit "save as new profile" name wins; otherwise save into the
-  // currently selected profile (which is the active one after a switch).
-  const profileName = profileNameInput.value.trim() || profileSelect.value || "default";
+  const llmUrl = llmUrlInput.value.trim();
+  const model = modelInput.value.trim();
   const payload = {
-    profile_name: profileName,
-    provider,
-    model,
     base_url: llmUrl,
+    model,
     // always sent: empty value clears the knob on the backend
     reasoning_effort: reasoningEffortInput.value.trim(),
   };
@@ -1569,28 +1754,57 @@ async function saveSettings() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
     if (key) localStorage.setItem("clutch_api_key", key);
-    localStorage.setItem("clutch_llm", JSON.stringify({ provider, model, base_url: llmUrl }));
+    localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
     // Keep the client-side LLM reverse proxy in sync (SSH mode: the backend
     // above may be remote, but the proxy reads the LOCAL settings file).
     if (window.clutchSettings && window.clutchSettings.save) {
-      await window.clutchSettings.save({ api_key: key, provider, model, base_url: llmUrl });
+      await window.clutchSettings.save({ api_key: key, model, base_url: llmUrl });
     }
-    closeSettings();
+    return true;
   } catch (e) {
-    closeSettings();
     addEvent({ type: "final", status: "error", summary: "save settings failed: " + e.message });
+    return false;
   }
 }
 $("#settings-btn").addEventListener("click", openSettings);
-$("#settings-save").addEventListener("click", saveSettings);
 $("#settings-close").addEventListener("click", closeSettings);
 $("#older-pill").addEventListener("click", loadOlder);
-modal.addEventListener("click", (e) => {
-  if (e.target === modal) closeSettings();
-});
+dismissOnOverlayPress(modal, closeSettings);
+
+// Close a modal only when the press STARTS on the overlay itself. The click
+// event fires on the overlay even for a drag that begins inside the box and is
+// released outside (mouse slips off the modal while typing) — mousedown targets
+// the actual element under the button, so that slip can no longer close it.
+function dismissOnOverlayPress(overlayEl, onClose) {
+  overlayEl.addEventListener("mousedown", (e) => {
+    if (e.target === overlayEl) onClose();
+  });
+}
+
+const MODAL_CLOSE_MS = 180;
+
+// Animated modal close: add .closing (fade the overlay, slide the box down),
+// then land the .hidden display:none when the animation finishes. Opening
+// functions remove .closing alongside .hidden, so a reopen mid-animation is
+// clean (the pending close timer then becomes a no-op). Reduced motion closes
+// instantly; re-entrant calls are no-ops.
+function closeModal(overlayEl, onDone) {
+  if (!overlayEl || overlayEl.classList.contains("hidden") || overlayEl.classList.contains("closing")) return;
+  const finish = () => {
+    // the modal was reopened before the animation finished: the open removed
+    // .closing, so this stale timer must not hide it
+    if (!overlayEl.classList.contains("closing")) return;
+    overlayEl.classList.remove("closing");
+    overlayEl.classList.add("hidden");
+    if (onDone) onDone();
+  };
+  overlayEl.classList.add("closing");
+  if (reducedMotion()) finish();
+  else setTimeout(finish, MODAL_CLOSE_MS);
+}
 
 // ---- SSH connection (in the project picker) ----
-const connSelect = $("#conn-select");
+const connSelect = customSelect($("#conn-select"));
 const connStatus = $("#conn-status");
 const connNewHost = $("#conn-new-host");
 const connNewUser = $("#conn-new-user");
@@ -1730,6 +1944,13 @@ async function reapplyDegradeIfNeeded() {
 // exec bridge: the local server runs the agent, and every file/command operation
 // goes over the SSH tunnel. These two helpers toggle that mode on the local
 // server's /api/backend. Both are best-effort against the local backend.
+//
+// Returns:
+//   true     — degraded, ssh mode is active
+//   false    — the tunnel itself is dead (a genuine connection failure; the
+//              caller should show the SSH error, not a degrade message)
+//   string   — the tunnel is up but the local backend is not: the reason the
+//              SSH-tools fallback failed (this is the real failure to report)
 
 async function tryDegradeToSshTools() {
   if (!window.clutchTunnel) return false;
@@ -1743,16 +1964,16 @@ async function tryDegradeToSshTools() {
   // we must put into ssh mode (DEFAULT_BASE may be a dead URL from an earlier
   // session).
   const url = await window.clutchApi.baseUrl();
-  if (!url) return false;
+  if (!url) return "not running";
   try {
     const r = await fetch(url + "/api/backend", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: "ssh", bridge: s.execBridge, workspace: "~" }),
     });
-    if (!r.ok) return false;
+    if (!r.ok) return "not running";
   } catch (e) {
-    return false;
+    return "unreachable";
   }
   // persist the mode: the session process may be re-created later (see
   // reapplyDegradeIfNeeded), taking the setting down with it
@@ -1786,18 +2007,21 @@ function showPasswordPrompt(label) {
     passLabel.textContent = label;
     passInput.value = "";
     passResolve = resolve;
-    passModal.classList.remove("hidden");
+    passModal.classList.remove("hidden", "closing");
     passInput.focus();
   });
 }
 
 function closePasswordPrompt() {
-  passModal.classList.add("hidden");
+  // resolve immediately (the connect flow is waiting on it); only the visual
+  // close is animated
+  closeModal(passModal);
   if (passResolve) passResolve(null);
   passResolve = null;
 }
 
 let connBusy = false; // a connect is in flight: ignore re-clicks
+let lastConn = null;  // { host, user, port, statusEl } of the last attempt (Retry)
 
 // Collapse the whole picker body (path bar, file list, new-project area, action
 // buttons) during an SSH connect or after a failure — only the conn bar with its
@@ -1810,7 +2034,7 @@ function showPickerBody() {
   $("#fs-new").classList.toggle("hidden", fsMode !== "new");
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");
-  $("#conn-reset").classList.add("hidden");
+  $("#conn-actions").classList.add("hidden");
 }
 
 let activeConnStatus = null; // status element of the modal currently connecting
@@ -1844,7 +2068,7 @@ function setFsConnecting(host, statusEl) {
   activeConnStatus = statusEl;
   statusEl.textContent = "Connecting to " + host + "…";
   hidePickerBody();
-  $("#conn-reset").classList.add("hidden");
+  $("#conn-actions").classList.add("hidden");
   // animate the bar under the active modal (the new-connection popup has its own)
   const bar = statusEl && statusEl.id === "conn-new-status" ? $("#conn-new-progress") : $("#conn-progress");
   bar.classList.remove("hidden");
@@ -1859,7 +2083,7 @@ function setFsConnectError(msg, statusEl) {
   hidePickerBody();
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");
-  $("#conn-reset").classList.remove("hidden"); // in-place recovery back to local
+  $("#conn-actions").classList.remove("hidden"); // offer Retry / Cancel
 }
 
 async function handleSshConnect(host, user, port, statusEl) {
@@ -1875,6 +2099,7 @@ async function handleSshConnect(host, user, port, statusEl) {
     statusEl.textContent = "host and user are required";
     return;
   }
+  lastConn = { host, user, port, statusEl }; // Retry re-uses this on failure
   connBusy = true;
   setFsConnecting(host, statusEl); // sets the status text + shows the progress bar
   try {
@@ -1900,14 +2125,22 @@ async function handleSshConnect(host, user, port, statusEl) {
       // hard bootstrap reject (host alive, but no Python/bundle to install):
       // degrade to SSH-tools — local server runs the agent, tools go over the bridge
       const degraded = await tryDegradeToSshTools();
-      if (degraded) {
+      if (degraded === true) {
         upsertConn(host, user, port);
         localStorage.setItem("clutch_ssh_connected", "1");
         await switchBackendResolved(); // the local server is now remote-backed
         refreshPicker();
         return true;
       }
-      setFsConnectError("connection failed: " + (res.error || "unknown"), statusEl);
+      // false: the tunnel never came up — report the real SSH error.
+      // string: the tunnel is up but the local backend is down — that is the
+      // real failure here, not the device's bootstrap message.
+      setFsConnectError(
+        degraded === false
+          ? "connection failed: " + (res.error || "could not connect")
+          : "SSH connected, but the local agent server is " + degraded,
+        statusEl
+      );
     }
   } catch (e) {
     setFsConnectError("connection failed: " + e.message, statusEl);
@@ -1951,11 +2184,11 @@ function openConnNew() {
   connNewUser.value = localStorage.getItem("clutch_ssh_user") || "";
   connNewPort.value = localStorage.getItem("clutch_ssh_port") || "22";
   connNewStatus.textContent = "";
-  connNewModal.classList.remove("hidden");
+  connNewModal.classList.remove("hidden", "closing");
   connNewHost.focus();
 }
 function closeConnNew() {
-  connNewModal.classList.add("hidden");
+  closeModal(connNewModal);
 }
 $("#conn-new").addEventListener("click", openConnNew);
 $("#conn-new-cancel").addEventListener("click", closeConnNew);
@@ -1966,16 +2199,18 @@ $("#conn-new-connect").addEventListener("click", async () => {
   const ok = await handleSshConnect(host, user, port, connNewStatus);
   if (ok) closeConnNew(); // stay in the picker
 });
-connNewModal.addEventListener("click", (e) => {
-  if (e.target === connNewModal) closeConnNew();
-});
+dismissOnOverlayPress(connNewModal, closeConnNew);
 connNewHost.addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#conn-new-connect").click();
 });
-$("#conn-reset").addEventListener("click", async () => {
+$("#conn-retry").addEventListener("click", () => {
+  if (lastConn) handleSshConnect(lastConn.host, lastConn.user, lastConn.port, lastConn.statusEl);
+});
+$("#conn-cancel").addEventListener("click", async () => {
   localStorage.removeItem("clutch_ssh_connected");
   localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
   resetBackendLocal(); // end any SSH degradation on the local server
+  closeConnNew(); // a new-connection attempt may have failed with its modal open
   await switchBackendResolved(); // in-place fallback to the local backend
   refreshPicker();
 });
@@ -1984,14 +2219,12 @@ if (window.clutchTunnel && window.clutchTunnel.onProgress) {
 }
 $("#ssh-pass-ok").addEventListener("click", () => {
   const pw = passInput.value;
-  passModal.classList.add("hidden");
+  closeModal(passModal);
   if (passResolve) passResolve(pw);
   passResolve = null;
 });
 $("#ssh-pass-cancel").addEventListener("click", closePasswordPrompt);
-passModal.addEventListener("click", (e) => {
-  if (e.target === passModal) closePasswordPrompt();
-});
+dismissOnOverlayPress(passModal, closePasswordPrompt);
 passInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#ssh-pass-ok").click();
 });
@@ -2087,11 +2320,13 @@ function openPerm(ev) {
   } else {
     argsEl.textContent = txt;
   }
-  permModal.classList.remove("hidden");
+  permModal.classList.remove("hidden", "closing");
   setStatus("waiting");
 }
 function closePerm() {
-  permModal.classList.add("hidden");
+  // the response must fire immediately (the agent is blocked on it); only the
+  // visual close is animated — pendingPerm clears here to guard double-clicks
+  closeModal(permModal);
   pendingPerm = null;
 }
 async function respondPerm(allow) {
@@ -2109,9 +2344,7 @@ async function respondPerm(allow) {
 }
 $("#perm-allow").addEventListener("click", () => respondPerm(true));
 $("#perm-deny").addEventListener("click", () => respondPerm(false));
-permModal.addEventListener("click", (e) => {
-  if (e.target === permModal) respondPerm(false);
-});
+dismissOnOverlayPress(permModal, () => respondPerm(false));
 
 // ---- workspace tree ----
 let lastTreeSig = "";
@@ -2240,6 +2473,7 @@ function connectSSE(replay = true) {
     thinkingEl = null;
     thinkingContent = "";
     toolGroupEl = null;
+    if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
     // the backend (re)connected, possibly after a self-heal restart: resync the tree
     refreshTree();
   };
@@ -2263,16 +2497,17 @@ function clearStream() {
   lastTextContent = "";
   thinkingEl = null;
   thinkingContent = "";
+  if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
   oldestOffset = null; // fresh project: no loaded events yet
   setOlderPill(0);
 }
 
 // ---- scroll-up paging (lazily-opened projects) ----
-// A lazy .clc loads only the raw task + the preserved tail; the pill at the top
-// pages the earlier records from /api/history. olderRemaining mirrors the
-// server-side count of event-region BYTES still on disk before the oldest loaded
-// one — the server's own number, so its LRU eviction never makes the pill lie (a
-// page the server dropped stays rendered in the DOM; only a reconnect
+// A lazy .clc loads only the model window (since the newest compaction line); the
+// pill at the top pages the earlier records from /api/history. olderRemaining
+// mirrors the server-side count of event-region BYTES still on disk before the
+// oldest loaded one — the server's own number, so a dropped page never makes the
+// pill lie (a page the server dropped stays rendered in the DOM; only a reconnect
 // re-fetches it).
 let olderRemaining = 0;
 let oldestOffset = null; // byte offset of the oldest loaded (rendered) non-task event
@@ -2436,7 +2671,7 @@ async function openProject(path, readOnly = false) {
           // phase A: server file parse maps to the first 50% of the bar
           setPct(50 * msg.progress.done / msg.progress.total);
         } else if (msg.event) {
-          // {seq, event}: addEvent unwraps and tracks the oldest loaded seq
+          // {offset, event}: addEvent unwraps and tracks the oldest loaded offset
           addEvent(msg);
           // phase B: client rendering of the events maps to 50-90%
           if (totalEvents) setPct(50 + 40 * (++rendered / totalEvents));
@@ -2465,7 +2700,7 @@ async function openProject(path, readOnly = false) {
     // the server with a clear reason
     if (e && e.code === "project_open_conflict") {
       const wantReadOnly = confirm(
-        "该项目已在另一个窗口中打开。\n以只读方式打开吗？只读模式无法运行任务。"
+        "This project is already open in another window.\nOpen it read-only? Read-only mode cannot run tasks."
       );
       if (wantReadOnly) {
         await openProject(path, true); // retry without the write lock
@@ -2474,6 +2709,11 @@ async function openProject(path, readOnly = false) {
       return; // cancelled: keep the previous project as-is
     }
     alert("Failed to open project: " + e.message);
+    // the tunnel log (main process) is the place to look: a network-level
+    // "Failed to fetch" here usually means the remote session forward died —
+    // check ~/.clutch/tunnel.log for "[session] forwardOut failed" / the
+    // remote supervisor log for a reaped/crashed session child
+    console.error("[openProject] failed:", { api: API_BASE, path, error: e && e.message });
   }
 }
 
@@ -2515,7 +2755,7 @@ function openFsBrowser(mode) {
   $("#fs-up").disabled = false;
   $("#fs-go").disabled = false;
   $("#fs-path-input").disabled = false;
-  fsModal.classList.remove("hidden");
+  fsModal.classList.remove("hidden", "closing");
   // settle the stored URL against the tunnel's real state first, then list + draw
   // the selector once against the correct backend (no double loadDir)
   reconciledBackendUrl().then((url) => {
@@ -2527,7 +2767,7 @@ function openFsBrowser(mode) {
 }
 
 function closeFsBrowser() {
-  fsModal.classList.add("hidden");
+  closeModal(fsModal);
 }
 
 function fsRow(label, cls, onClick) {
@@ -2615,9 +2855,7 @@ $("#fs-create").addEventListener("click", () => {
   closeFsBrowser();
   createProject(fsPath, name);
 });
-fsModal.addEventListener("click", (e) => {
-  if (e.target === fsModal) closeFsBrowser();
-});
+dismissOnOverlayPress(fsModal, closeFsBrowser);
 
 $("#new-project-btn").addEventListener("click", () => openFsBrowser("new"));
 $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));

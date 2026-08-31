@@ -1,6 +1,6 @@
 """Server end-to-end check: boots the HTTP server in a thread and exercises it.
 
-Run: uv run python -m agent.server_test
+Run: uv run python -m tests.server_test
 API/health/project are always checked. If a key is saved in ~/.clutch/settings.json
 (the GUI settings; the Python side never reads env), also runs a
 real task through /api/run, collects SSE events, and checks the workspace tree and
@@ -18,9 +18,9 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
-from .config import Config
-from .server import Broadcaster, RunState, build
-from .testsupport import check
+from agent.config import Config
+from agent.server import Broadcaster, RunState, build
+from tests.testsupport import check
 
 
 def _saved_api_key() -> str:
@@ -30,6 +30,16 @@ def _saved_api_key() -> str:
         return d.get("api_key") or ""
     except (OSError, json.JSONDecodeError):
         return ""
+
+
+def _saved_endpoint() -> tuple[str, str]:
+    """The (base_url, model) persisted by the GUI settings — the endpoint the
+    saved key belongs to."""
+    try:
+        d = json.loads(Path.home().joinpath(".clutch", "settings.json").read_text(encoding="utf-8"))
+        return d.get("base_url") or "", d.get("model") or ""
+    except (OSError, json.JSONDecodeError):
+        return "", ""
 
 
 def http_get(url: str) -> tuple[int, str]:
@@ -119,106 +129,51 @@ def _run_server_test() -> int:
         check(state.api_key == "sk-test-123", "settings stored in state")
         state.api_key = None
 
-        # 2d. settings: the LLM endpoint (provider/model/base_url) is
-        # configurable, not hard-locked to DeepSeek — switching provider moves
-        # the whole endpoint to that provider's preset
-        st, body = http_post(f"{base_url}/api/settings", {"provider": "zhipu", "api_key": "sk-test-123"})
-        check(st == 200, "provider switch accepted")
-        check(config.provider == "zhipu", "settings stores provider in live config")
-        check(
-            config.base_url == "https://open.bigmodel.cn/api/paas/v4",
-            "provider preset fills the base_url (zhipu)",
+        # 2d. settings: one flat LLM endpoint (base_url/model/api_key) — no
+        # provider presets, no profiles
+        st, body = http_post(
+            f"{base_url}/api/settings",
+            {"base_url": "https://open.bigmodel.cn/api/coding/paas/v4", "model": "glm-5.3", "api_key": "sk-test-123"},
         )
-        check(config.model == "glm-4-flash", "provider preset fills the model (zhipu)")
+        check(st == 200, "settings save accepted")
+        check(
+            config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4" and config.model == "glm-5.3",
+            "settings applied to live config",
+        )
         st, body = http_get(f"{base_url}/api/settings")
         data = json.loads(body)
         check(
-            data.get("provider") == "zhipu"
-            and data.get("base_url") == "https://open.bigmodel.cn/api/paas/v4"
-            and data.get("model") == "glm-4-flash",
+            data.get("base_url") == "https://open.bigmodel.cn/api/coding/paas/v4"
+            and data.get("model") == "glm-5.3"
+            and data.get("has_api_key") is True,
             "GET /api/settings returns the live LLM endpoint config",
         )
+        check("api_key" not in data or not data["api_key"], "GET /api/settings never leaks api keys")
 
-        # 2d2. multi-API profiles: save a named profile (doesn't clobber the
-        # migrated "default" one), switch active, list without leaking keys
-        st, body = http_post(
-            f"{base_url}/api/settings",
-            {"profile_name": "zhipu-53", "provider": "zhipu", "model": "glm-5.3", "api_key": "sk-zp-123"},
-        )
-        check(st == 200, "named profile save accepted")
-        st, body = http_get(f"{base_url}/api/settings")
-        data = json.loads(body)
-        check(data.get("active") == "zhipu-53", "saving a profile activates it")
-        names = [p["name"] for p in data.get("profiles", [])]
-        check("zhipu-53" in names and "default" in names, "profiles list keeps saved + migrated profiles")
-        zp = next(p for p in data["profiles"] if p["name"] == "zhipu-53")
-        check(zp["model"] == "glm-5.3" and zp["has_api_key"] is True, "profile carries model + key flag")
-        check('"api_key"' not in body, "GET /api/settings never leaks api keys")
-
-        # 2d3. reasoning_effort passthrough: saved per profile, applied live,
-        # validated, and clearable with an explicit empty value
-        st, body = http_post(
-            f"{base_url}/api/settings",
-            {"profile_name": "zhipu-53", "provider": "zhipu", "model": "glm-5.3", "reasoning_effort": "max"},
-        )
-        check(st == 200, "profile save with reasoning_effort accepted")
+        # 2d2. reasoning_effort passthrough: applied live, validated, clearable
+        st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "max"})
+        check(st == 200, "reasoning_effort save accepted")
         check(config.llm_reasoning_effort == "max", "reasoning_effort applied to live config")
         st, body = http_get(f"{base_url}/api/settings")
-        data = json.loads(body)
-        zp = next(p for p in data["profiles"] if p["name"] == "zhipu-53")
-        check(zp.get("reasoning_effort") == "max", "GET reports the saved reasoning_effort")
+        check(json.loads(body).get("reasoning_effort") == "max", "GET reports the saved reasoning_effort")
         st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "turbo"})
         check(st == 400, "invalid reasoning_effort rejected")
-        st, body = http_post(
-            f"{base_url}/api/settings",
-            {"profile_name": "zhipu-53", "reasoning_effort": ""},
-        )
+        st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": ""})
         check(st == 200, "empty reasoning_effort accepted (clears the knob)")
         check(config.llm_reasoning_effort is None, "empty reasoning_effort clears live config")
-        st, body = http_get(f"{base_url}/api/settings")
-        data = json.loads(body)
-        zp = next(p for p in data["profiles"] if p["name"] == "zhipu-53")
-        check(zp.get("reasoning_effort", "") == "", "cleared knob not echoed on GET")
 
-        # switching active applies the profile's config to the live server
-        st, body = http_post(f"{base_url}/api/settings", {"activate": "default"})
-        check(st == 200, "activate switch accepted")
-        check(config.provider == "zhipu", "switch applies the profile to live config")
-        st, body = http_get(f"{base_url}/api/settings")
-        data = json.loads(body)
-        check(data.get("active") == "default", "active reverted to default")
-        check(any(p["name"] == "zhipu-53" for p in data["profiles"]), "switched-away profile still saved")
-        # switching to an unknown profile is rejected
-        st, body = http_post(f"{base_url}/api/settings", {"activate": "nope"})
-        check(st == 400, "activate unknown profile rejected")
-        # delete a profile
-        st, body = http_post(f"{base_url}/api/settings", {"delete": "zhipu-53"})
-        check(st == 200, "profile delete accepted")
-        st, body = http_get(f"{base_url}/api/settings")
-        data = json.loads(body)
-        check(not any(p["name"] == "zhipu-53" for p in data["profiles"]), "deleted profile gone")
-        # saving without profile_name targets the active profile (legacy UI path)
-        st, body = http_post(
-            f"{base_url}/api/settings",
-            {"provider": "deepseek", "base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
-        )
-        check(st == 200, "legacy-style save still works")
-
-        st, body = http_post(f"{base_url}/api/settings", {"provider": "no-such-provider"})
-        check(st == 400, "unknown provider rejected")
+        # partial save: sending only the model keeps the saved base_url
+        st, body = http_post(f"{base_url}/api/settings", {"model": "glm-5.3"})
+        check(st == 200, "partial save accepted")
+        check(config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4", "partial save keeps the saved base_url")
         st, body = http_post(f"{base_url}/api/settings", {})
         check(st == 400, "empty settings body rejected")
-        # restore DeepSeek defaults so later real-run sections still target DeepSeek
-        st, body = http_post(
-            f"{base_url}/api/settings",
-            {
-                "provider": "deepseek",
-                "base_url": "https://api.deepseek.com",
-                "model": "deepseek-v4-flash",
-            },
-        )
-        check(st == 200, "settings restored to deepseek")
-        check(config.provider == "deepseek", "restored provider in live config")
+        # restore the SAVED endpoint (the one the saved key belongs to) so the
+        # real-run section targets a working pairing
+        saved_url, saved_model = _saved_endpoint()
+        check(bool(saved_url and saved_model), "saved endpoint present for the real-run section")
+        st, body = http_post(f"{base_url}/api/settings", {"base_url": saved_url, "model": saved_model})
+        check(st == 200, "settings restored")
 
         # 3. create a project
         st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "demo"})
@@ -232,7 +187,7 @@ def _run_server_test() -> int:
         # 3b. reopen the project (NDJSON stream: progress, meta, count, events)
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "project reopened")
-        lines = [json.loads(l) for l in body.splitlines() if l.strip()]
+        lines = [json.loads(line) for line in body.splitlines() if line.strip()]
         meta = next((m["meta"] for m in lines if m.get("meta")), None)
         check(meta is not None and meta.get("name") == "demo", "reopened project name")
 
@@ -273,9 +228,7 @@ def _run_server_test() -> int:
         # reports the on-disk older BYTES and wraps every event as {offset,
         # event}; /api/history pages the middle records by byte range; the SSE
         # replay opens with a history info line before the offset-wrapped tail.
-        from .events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, event_to_json, _line_bytes
-
-        from .core import lazy as lazy_mod
+        from agent.events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, _line_bytes, event_to_json
 
         lazy_dir = Path(sdir) / "lazywork"
         lazy_dir.mkdir()
@@ -283,45 +236,46 @@ def _run_server_test() -> int:
         levents = [UserMessageEvent(content="task")]
         for i in range(1, 500):
             levents.append(AssistantMessageEvent(content=f"old work {i}"))
-        tail_start = sum(_line_bytes(ev) for ev in levents[:450])
-        levents.append(CompactionEvent(summary="old work summarized", tail_start=tail_start))
+        # the newest compaction line's offset is the WINDOW start (persisted in
+        # the header): everything at/after it materializes, the 449 middle
+        # events stay on disk for /api/history paging
+        comp_off = sum(_line_bytes(ev) for ev in levents[:450])
+        levents.append(CompactionEvent(summary="old work summarized"))
         for i in range(501, 531):
             levents.append(AssistantMessageEvent(content=f"recent {i}"))
-        lazy_lines = ["# clutch project v1", "name: lazybig", "model: fake-model", "---"]
+        lazy_lines = [
+            "# clutch project v1", "name: lazybig", "model: fake-model",
+            f"cpr_start={comp_off:010d}", "---",
+        ]
         for ev in levents:
             lazy_lines.append(event_to_json(ev))
         lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8")
 
-        # the synthetic file is far below the real 256KB threshold: force the
-        # lazy path for this server process
-        _old_min_bytes = lazy_mod._LAZY_MIN_BYTES
-        lazy_mod._LAZY_MIN_BYTES = 1024
-        try:
-            st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
-        finally:
-            lazy_mod._LAZY_MIN_BYTES = _old_min_bytes
+        # every open is lazy now (one code path): this synthetic file opens the
+        # same way a giant one does
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
         check(st == 200, "lazy project reopened")
-        llines = [json.loads(l) for l in body.splitlines() if l.strip()]
+        llines = [json.loads(line) for line in body.splitlines() if line.strip()]
         lmeta = next((m["meta"] for m in llines if m.get("meta")), None)
         check(lmeta is not None and lmeta.get("name") == "lazybig", "lazy project name")
         lcount = next((m for m in llines if m.get("count") is not None), None)
-        check(lcount is not None and lcount.get("older") == tail_start - _line_bytes(levents[0]),
-              "lazy open reports the older bytes")
+        check(lcount is not None and lcount.get("older") == comp_off,
+              "lazy open reports the older bytes (window start = cpr_start)")
         lsevs = [m for m in llines if m.get("event") and m.get("offset") is not None]
-        check(lsevs and lsevs[0]["offset"] == 0 and lsevs[0]["event"].get("type") == "user_message",
-              "lazy open streams offset 0 (the raw task) first")
-        check(all(m["offset"] >= tail_start for m in lsevs[1:]),
-              "tail events carry byte offsets inside the preserved tail")
+        check(lsevs and lsevs[0]["offset"] == comp_off,
+              "lazy open streams the window first (offset cpr_start)")
+        check(all(m["offset"] >= comp_off for m in lsevs),
+              "window events carry byte offsets at/after the compaction line")
         check(all(isinstance(m.get("offset"), int) and "event" in m for m in lsevs),
               "lazy open events are {offset, event} wrapped")
 
-        st, body = http_get(f"{base_url}/api/history?before={tail_start}&limit=1000000")
+        st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000000")
         h = json.loads(body)
         check(st == 200 and h.get("older") == 0, "history after the last page reports older=0")
-        check(len(h["events"]) == 449, "history pages the on-disk middle (449 events)")
-        check(h["events"][0]["offset"] > 0 and h["events"][-1]["offset"] < tail_start,
-              "history events carry byte offsets inside the middle")
-        st, body = http_get(f"{base_url}/api/history?before={tail_start}&limit=1000")
+        check(len(h["events"]) == 450, "history pages the task + the on-disk middle (450 events)")
+        check(h["events"][0]["offset"] == 0 and h["events"][-1]["offset"] < comp_off,
+              "history events carry byte offsets inside the paged region")
+        st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000")
         h2 = json.loads(body)
         check(len(h2["events"]) < len(h["events"]), "history respects the byte-window clamp")
         st, body = http_get(f"{base_url}/api/history?before=1&limit=1000000")
@@ -342,7 +296,7 @@ def _run_server_test() -> int:
                             evs2.append(ev)
                             if ev.get("type") == "history":
                                 seen_hist = True
-                            if seen_hist and "seq" in ev and "event" in ev:
+                            if seen_hist and "offset" in ev and "event" in ev:
                                 done2.set()
                                 break
             except Exception as e:  # noqa: BLE001
@@ -352,19 +306,19 @@ def _run_server_test() -> int:
         rt2.start()
         check(done2.wait(timeout=30), "SSE lazy replay opens with a history line")
         hist_idx = next((i for i, e in enumerate(evs2) if e.get("type") == "history"), None)
-        first_seq = next((i for i, e in enumerate(evs2) if "seq" in e and "event" in e), None)
+        first_off = next((i for i, e in enumerate(evs2) if "offset" in e and "event" in e), None)
         check(hist_idx is not None and isinstance(evs2[hist_idx].get("older"), int),
               "history line carries the older count")
-        check(first_seq is not None and hist_idx is not None and hist_idx < first_seq,
-              "history line precedes the seq-wrapped replay")
-        check(evs2[first_seq]["seq"] == 0, "SSE replay starts at seq 0")
+        check(first_off is not None and hist_idx is not None and hist_idx < first_off,
+              "history line precedes the offset-wrapped replay")
+        check(evs2[first_off]["offset"] == comp_off, "SSE replay starts at the window's byte offset")
 
         # switch back to the demo project so the real-run section stays untouched
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "switched back to the demo project")
 
         # ---- multi-window isolation: two SSE subscribers on different projects ----
-        from .events import FinalEvent
+        from agent.events import FinalEvent
 
         st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "iso-b"})
         check(st == 200, "second project created for isolation")
@@ -439,11 +393,11 @@ def _run_server_test() -> int:
         # other process exactly)
         import fcntl
 
-        from .core.project_lock import ProjectLock, _local_lock_path
+        from agent.core.project_lock import ProjectLock, _local_lock_path
 
         lock_path = _local_lock_path(str(clc))
         handle = state.project.lock if state.project is not None else None
-        check(handle is not None and handle.kind == "local", "open project holds a local lock")
+        check(handle is not None, "open project holds a local lock")
         ProjectLock.release(handle)
 
         with open(lock_path, "a+") as other:
@@ -457,7 +411,7 @@ def _run_server_test() -> int:
             st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
             check(st == 200, "read-only open succeeds while another window holds the lock")
             ro_meta = next(
-                (m["meta"] for m in (json.loads(l) for l in body.splitlines() if l.strip()) if m.get("meta")),
+                (m["meta"] for m in (json.loads(line) for line in body.splitlines() if line.strip()) if m.get("meta")),
                 None,
             )
             check(ro_meta is not None and ro_meta.get("read_only") is True, "meta carries read_only")
@@ -478,49 +432,94 @@ def _run_server_test() -> int:
         check(st == 200, "open works after the other window released")
         check(state.project is not None and not state.project.read_only, "reopen is writable again")
 
-        # ---- 3g. remote (ssh) lock over the exec bridge ----
-        from unittest import mock
-
-        from agent.tools.transport import LocalTransport
-        from agent.tools.workspace import RemoteWorkspace
+        # ---- 3g. remote (ssh) workspaces lock LOCALLY, keyed by remote path ----
+        # Every Clutch window is a process on the CLIENT, so even a remote
+        # workspace locks a local flock keyed by the .clc's absolute path. No
+        # write is ever needed on the remote project directory — regression for
+        # the old remote .clc.lock file, which required write access to the
+        # remote dir (a non-root ssh user on a root-owned dir could not open a
+        # project at all) and left phantom locks for 6h after a crash.
+        from agent.core.project_lock import ProjectLock, _local_lock_path
 
         with tempfile.TemporaryDirectory() as rdir:
             root = Path(rdir)
-
-            def make_ws():
-                # RemoteWorkspace hard-codes SshTransport; swap in a local one so
-                # the noclobber/rm commands run for real on a local dir
-                with mock.patch("agent.tools.workspace.SshTransport", lambda url: LocalTransport(str(root))):
-                    return RemoteWorkspace(str(root), "http://bridge.invalid")
-
             rclc = str(root / "remote.clc")
             (root / "remote.clc").write_text("x\n")
-            ws1 = make_ws()
-            h1 = ProjectLock.acquire(rclc, ws1)
-            check(h1 is not None and h1.kind == "remote", "remote lock acquired")
-            check((root / ".clc.lock").exists(), "remote lock file created on the host")
 
-            # a second window (fresh process state) is refused
+            h1 = ProjectLock.acquire(rclc)
+            check(h1 is not None, "remote-path lock acquired (local flock)")
+            check(not (root / ".clc.lock").exists(), "no lock file is written on the remote host")
+            check(Path(_local_lock_path(rclc)).exists(), "lock file lives in the local temp dir")
+
+            # a second window (fresh process state) is refused — the flock is held
             saved_held = dict(ProjectLock._held)
             ProjectLock._held.clear()
             try:
-                h2 = ProjectLock.acquire(rclc, make_ws())
-                check(h2 is None, "second window remote lock refused")
-
-                # stale TTL: an aged lock is reclaimed
-                (root / ".clc.lock").write_text(str(int(time.time()) - 7 * 3600))
-                h3 = ProjectLock.acquire(rclc, make_ws())
-                check(h3 is not None, "stale remote lock reclaimed after TTL")
-                ProjectLock.release(h3)
-                check(not (root / ".clc.lock").exists(), "remote lock file removed on release")
-
-                # fresh acquire after release works
-                h4 = ProjectLock.acquire(rclc, make_ws())
-                check(h4 is not None, "fresh remote acquire after release")
-                ProjectLock.release(h4)
-                check(not (root / ".clc.lock").exists(), "release cleans up the lock file")
+                h2 = ProjectLock.acquire(rclc)
+                check(h2 is None, "second window on the same remote project refused")
             finally:
                 ProjectLock._held.update(saved_held)  # restore the demo handle
+
+            ProjectLock.release(h1)
+            check(ProjectLock.acquire(rclc) is not None, "fresh acquire after release")
+            ProjectLock.release_all()
+
+            # regression: a read-only remote project dir must still open for write
+            # (the old lock file could not be created there)
+            ro = root / "ro-dir"
+            ro.mkdir()
+            (ro / "proj.clc").write_text("x\n")
+            ro.chmod(0o500)  # directory not writable by the ssh user
+            try:
+                h3 = ProjectLock.acquire(str(ro / "proj.clc"))
+                check(h3 is not None, "acquire works in a read-only remote dir (no remote write)")
+                ProjectLock.release(h3)
+            finally:
+                ro.chmod(0o700)  # restore so the temp dir cleans up
+
+        # ---- 3h. a dying holder frees the lock via the kernel ----
+        # No TTL, no cleanup call: when a window's session process dies, the
+        # kernel releases its flock, so the next window can open the project
+        # immediately (regression for the 6h stale remote lock).
+        import os
+        import signal
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as rdir:
+            root = Path(rdir)
+            rclc = str(root / "remote2.clc")
+            (root / "remote2.clc").write_text("x\n")
+            snippet = (
+                "import sys,time; sys.path.insert(0,sys.argv[1]);"
+                "from agent.core.project_lock import ProjectLock;"
+                "ProjectLock.acquire(sys.argv[2]);"
+                "print('LOCKED', flush=True);"
+                "time.sleep(120)"
+            )
+            holder = subprocess.Popen(
+                [sys.executable, "-c", snippet, str(Path(__file__).resolve().parents[1]), rclc],
+                stdout=subprocess.PIPE,
+            )
+            try:
+                deadline = time.time() + 15
+                locked = False
+                while time.time() < deadline:
+                    if holder.poll() is not None:
+                        break
+                    if holder.stdout.readline().decode("utf-8", "replace").strip() == "LOCKED":
+                        locked = True
+                        break
+                    time.sleep(0.1)
+                check(locked, "holder subprocess took the lock")
+                check(ProjectLock.acquire(rclc) is None, "lock held by the live holder")
+                os.kill(holder.pid, signal.SIGTERM)
+                holder.wait(timeout=15)
+                check(ProjectLock.acquire(rclc) is not None, "kernel released the flock on process death")
+                ProjectLock.release_all()
+            finally:
+                if holder.poll() is None:
+                    os.kill(holder.pid, signal.SIGTERM)
+                    holder.wait(timeout=15)
 
         # 4. real run (only with a key saved in ~/.clutch/settings.json)
         key = _saved_api_key()
@@ -557,8 +556,10 @@ def _run_server_test() -> int:
                         line = raw.decode().strip()
                         if line.startswith("data: "):
                             ev = json.loads(line[6:])
+                            if "event" in ev and isinstance(ev["event"], dict):
+                                continue  # replay row: wrapped history, not this run
                             events.append(ev)
-                            if ev["type"] == "final":
+                            if ev.get("type") == "final":
                                 done.set()
                                 break
             except Exception as e:  # noqa: BLE001

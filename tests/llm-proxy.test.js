@@ -1,5 +1,5 @@
 // Standalone check for llm-proxy.js's upstream URL joining.
-// Run: node ui/llm-proxy.test.js
+// Run: node tests/llm-proxy.test.js
 //
 // The proxy must forward the remote backend's /v1/... requests onto ANY
 // OpenAI-compatible upstream, including ones that carry their own path
@@ -11,7 +11,7 @@
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const { joinUpstream, getUpstream, getApiKey } = require("./llm-proxy");
+const { joinUpstream, getUpstream, getApiKey } = require("../ui/llm-proxy");
 
 let failures = 0;
 function check(ok, label) {
@@ -50,18 +50,19 @@ check(
 // 5. getUpstream(): env wins, then the settings file, then the deepseek default
 const origEnv = process.env.CLUTCH_LLM_UPSTREAM;
 delete process.env.CLUTCH_LLM_UPSTREAM;
+// isolate from the real ~/.clutch/settings.json for the whole section
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-proxy-"));
+const origHome = os.homedir;
+os.homedir = () => tmp; // llm-proxy reads os.homedir()/.clutch/settings.json
 try {
   check(getUpstream() === "https://api.deepseek.com", "no env/settings -> deepseek default (never hard-locked)");
 
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-proxy-"));
-  const origHome = os.homedir;
-  os.homedir = () => tmp; // llm-proxy reads os.homedir()/.clutch/settings.json
   try {
     fs.mkdirSync(path.join(tmp, ".clutch"), { recursive: true });
-    fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), JSON.stringify({ base_url: "https://open.bigmodel.cn/api/paas/v4" }));
-    check(getUpstream() === "https://open.bigmodel.cn/api/paas/v4", "legacy flat settings base_url overrides the deepseek default");
+    fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), JSON.stringify({ base_url: "https://open.bigmodel.cn/api/coding/paas/v4" }));
+    check(getUpstream() === "https://open.bigmodel.cn/api/coding/paas/v4", "flat settings base_url overrides the deepseek default");
 
-    // multi-API profiles: the ACTIVE profile decides the upstream (and key)
+    // legacy profile map: the ACTIVE profile decides the upstream (and key)
     fs.writeFileSync(
       path.join(tmp, ".clutch", "settings.json"),
       JSON.stringify({

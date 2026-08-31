@@ -15,8 +15,9 @@
 //   - a window that crashes stops heartbeating, and the supervisor reaps the
 //     stale session (heartbeat timeout) — no leaked children.
 //
-// CLUTCH_API_URL set -> direct connect, never spawn (compat: dev.sh, manual
-// start, an explicitly shared server). No sessions, no heartbeats.
+// The app ONLY ever runs through the supervisor (local or remote): there is no
+// direct-connect to a shared agent-server anymore. A non-supervisor squatting
+// on the supervisor port is rejected with an explicit message.
 
 const { app } = require("electron");
 const { spawn } = require("child_process");
@@ -28,6 +29,13 @@ const SUPERVISOR_PORT = parseInt(process.env.CLUTCH_SUPERVISOR_PORT || "8890", 1
 const HEALTH_TIMEOUT_MS = 20_000; // PyInstaller onefile extracts on first run
 const HEALTH_POLL_MS = 250;
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
+// session/start can take much longer than a health probe: the remote supervisor
+// blocks until its session child (a PyInstaller onefile) boots and prints its
+// port banner (up to SESSION_START_TIMEOUT_S on the supervisor). A 2s probe
+// timeout here aborts the request mid-boot and the connect falls back to a
+// LOCAL session — which is exactly "connected but the files are local". Cover
+// the supervisor's start timeout plus tunnel overhead.
+const SESSION_START_TIMEOUT_MS = 35_000;
 const HEARTBEAT_INTERVAL_MS = 8000; // < supervisor stale timeout (30s)
 
 let supervisorChild = null;
@@ -71,7 +79,10 @@ function spawnSupervisorCommand() {
     } catch (e) {
       console.error("[server-bootstrap] chmod failed:", e && e.message);
     }
-    return { cmd: bin, args: portArgs, cwd: os.homedir() };
+    // --agent-cmd is explicit: a PyInstaller onefile's sys.executable is not a
+    // reliable way to find the sibling agent-server, so never rely on it
+    const agent = path.join(process.resourcesPath, "agent-server");
+    return { cmd: bin, args: [...portArgs, "--agent-cmd", agent], cwd: os.homedir() };
   }
   const root = path.join(__dirname, "..");
   const isWin = process.platform === "win32";
@@ -90,7 +101,7 @@ async function ensureSupervisor() {
   if (probe === "foreign") {
     console.error(
       `[server-bootstrap] port ${SUPERVISOR_PORT} is held by a non-supervisor server ` +
-        "(an old shared agent-server?) — close it or set CLUTCH_API_URL"
+        "(an old shared agent-server?) — close it; the app only runs through the supervisor"
     );
     return false;
   }
@@ -126,7 +137,7 @@ async function ensureSupervisor() {
 async function supervisorSessionStart(base, baseUrl) {
   // POST {base}/api/session/start {base_url} -> {session_id, port}
   const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+  const t = setTimeout(() => ctl.abort(), SESSION_START_TIMEOUT_MS);
   try {
     const r = await fetch(`${base}/api/session/start`, {
       method: "POST",
@@ -210,6 +221,7 @@ async function startLocalSession() {
 }
 
 module.exports = {
+  SUPERVISOR_PORT,
   startLocalSession,
   supervisorSessionStart,
   supervisorSessionStop,

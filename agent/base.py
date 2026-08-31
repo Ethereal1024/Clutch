@@ -137,7 +137,6 @@ class BaseServer(ABC):
         build_llm and the per-run compactor closure both go through here, so a
         new client knob (timeout, retries, …) is added in exactly one place."""
         return create_llm_client(
-            provider=cfg.provider,
             api_key=api_key,
             model=model,
             base_url=cfg.base_url,

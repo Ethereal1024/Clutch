@@ -43,11 +43,67 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
-SESSION_START_TIMEOUT_S = 20.0  # wait for the child's port banner
-SESSION_STALE_S = 30.0  # no heartbeat for this long -> reap the session
+SESSION_START_TIMEOUT_S = 30.0  # wait for the child's port banner (onefile extraction on a slow remote can take a while)
+SESSION_STALE_S = 10.0  # no heartbeat for this long -> reap the session (heartbeat interval is 8s)
 REAP_INTERVAL_S = 2.0
 IDLE_TIMEOUT_S = 8.0  # no sessions for this long -> self-exit
 KILL_GRACE_S = 3.0
+
+
+def _log(msg: str) -> None:
+    """Log to stdout without EVER blocking or crashing the caller.
+
+    When the process that spawned us dies, our stdout is a dead socket; once its
+    buffer fills, a plain ``print`` blocks forever (the handler thread stuck in
+    the post-session ``print`` is exactly the orphaned-supervisor "Empty reply"
+    hang). _make_stdout_nonblocking marks the fd non-blocking so the write
+    raises BlockingIOError instead of blocking; we swallow it and drop the line.
+    """
+    try:
+        print(msg, flush=True)
+    except (OSError, ValueError):  # dead/full stdout: drop the log line
+        pass
+
+
+def _make_stdout_nonblocking() -> None:
+    """Turn a full write to stdout/stderr from a BLOCK into an exception, so the
+    supervisor's own logging (and the _wait_port forwarder) can never hang."""
+    try:
+        import fcntl
+    except ImportError:
+        return
+    for fd in (1, 2):
+        try:
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        except OSError:
+            pass
+
+
+class _SafeStdStream:
+    """stdout/stderr that keeps serving when the parent is gone. The supervisor
+    is often spawned by Electron and orphaned (re-parented to init/systemd) with
+    its stdio socketpair dangling; a print to that dead socket then raises
+    BrokenPipeError, which previously killed the request handler mid-response
+    AND the reaper loop (both die on their first print) — the port stays
+    squatted forever, leaking session children and blocking every later
+    session/start. Swallow stream errors so a dead parent can never take the
+    server down."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def write(self, data):
+        try:
+            return self._inner.write(data)
+        except (OSError, ValueError, TypeError):
+            return len(data)
+
+    def flush(self):
+        try:
+            self._inner.flush()
+        except (OSError, ValueError):
+            pass
 
 
 @dataclass
@@ -81,6 +137,10 @@ class Supervisor:
         self._lock = threading.Lock()
         self.last_activity = time.time()  # last moment a session existed
         self.exit_event = threading.Event()
+        # set by POST /api/shutdown (normal app close): once no sessions remain,
+        # exit immediately instead of waiting out the idle grace — a deliberately
+        # closed supervisor must never linger as an orphan
+        self.exit_when_idle = False
 
     # ---- session lifecycle ----
 
@@ -91,9 +151,14 @@ class Supervisor:
         base_url (e.g. the remote LLM reverse-proxy) is forwarded to the child
         as --base-url; the local supervisor omits it and the session uses the
         environment's CLUTCH_API_KEY instead."""
+        # refresh the idle timer BEFORE spawning: the session is only registered
+        # once the child prints its port (up to start_timeout_s), and a slow
+        # child (e.g. a PyInstaller onefile extracting on the remote) must not
+        # let the idle reaper self-exit mid-start
+        with self._lock:
+            self.last_activity = time.time()
         try:
             env = dict(os.environ)
-            env["CLUTCH_SUPERVISOR_PID"] = str(os.getpid())
             cmd = [*self.agent_cmd, "--port", "0"]
             if base_url:
                 cmd += ["--base-url", base_url]
@@ -106,18 +171,18 @@ class Supervisor:
                 env=env,
             )
         except OSError as e:  # pragma: no cover - venv/bundle missing
-            print(f"[supervisor] spawn failed: {e}", flush=True)
+            _log(f"[supervisor] spawn failed: {e}")
             return None
         port = self._wait_port(proc)
         if port is None:
-            print("[supervisor] session child never printed its port", flush=True)
+            _log("[supervisor] session child never printed its port")
             self._kill(proc)
             return None
         sess = Session(session_id=uuid.uuid4().hex[:12], proc=proc, port=port)
         with self._lock:
             self.sessions[sess.session_id] = sess
             self.last_activity = time.time()
-        print(f"[supervisor] session {sess.session_id} on port {port}", flush=True)
+        _log(f"[supervisor] session {sess.session_id} on port {port}")
         return sess
 
     def stop_session(self, session_id: str | None) -> bool:
@@ -129,7 +194,7 @@ class Supervisor:
         if sess is None:
             return False
         self._kill(sess.proc)
-        print(f"[supervisor] session {session_id} stopped", flush=True)
+        _log(f"[supervisor] session {session_id} stopped")
         return True
 
     def heartbeat(self, session_id: str | None) -> bool:
@@ -152,43 +217,71 @@ class Supervisor:
     # ---- reaper: stale sessions + idle self-exit ----
 
     def reap_loop(self) -> None:
+        # The reaper is the supervisor's only self-governance (stale-session
+        # reap + idle self-exit): one unhandled exception killing this thread
+        # would leave the supervisor squatted on its port forever, leaking
+        # session children. Never let that happen — log and keep going.
         while not self.exit_event.is_set():
-            now = time.time()
-            stale: list[str] = []
-            with self._lock:
-                for sid, sess in list(self.sessions.items()):
-                    if now - sess.last_beat > self.stale_s:
-                        stale.append(sid)
-                n = len(self.sessions)
-            for sid in stale:
-                print(f"[supervisor] reaping stale session {sid}", flush=True)
-                self.stop_session(sid)
-            if n == 0 and now - self.last_activity > self.idle_timeout_s:
-                print("[supervisor] idle, exiting", flush=True)
-                self.exit_event.set()
-                break
+            try:
+                now = time.time()
+                stale: list[str] = []
+                with self._lock:
+                    for sid, sess in list(self.sessions.items()):
+                        if now - sess.last_beat > self.stale_s:
+                            stale.append(sid)
+                    n = len(self.sessions)
+                    exit_when_idle = self.exit_when_idle
+                for sid in stale:
+                    _log(f"[supervisor] reaping stale session {sid}")
+                    self.stop_session(sid)
+                if n == 0 and (exit_when_idle or now - self.last_activity > self.idle_timeout_s):
+                    _log("[supervisor] idle, exiting")
+                    self.exit_event.set()
+                    break
+            except Exception as e:  # noqa: BLE001 - a broken pass must not kill the reaper
+                _log(f"[supervisor] reap_loop error: {e}")
             self.exit_event.wait(self.reap_interval_s)
 
     # ---- internals ----
 
     def _wait_port(self, proc: subprocess.Popen) -> int | None:
         """Read the child's stdout until the port banner appears (then keep
-        forwarding everything to our stdout so the pipe never fills)."""
-        q: "queue.Queue[int]" = queue.Queue()
+        forwarding everything to our stdout so the pipe never fills).
 
-        def forward() -> None:
+        Banner detection is DECOUPLED from the stdout forward: a reader thread
+        drains the child's pipe and queues every line, a separate forwarder
+        writes them to our stdout best-effort. The old single-thread design
+        blocked on ``sys.stdout.write`` (e.g. when the supervisor is orphaned
+        and its stdout is a dead socket) BEFORE reaching the banner line, so
+        session/start hung and the child was killed on a false timeout."""
+        q: "queue.Queue[int]" = queue.Queue()
+        sink: "queue.Queue[str]" = queue.Queue()
+
+        def reader() -> None:
             try:
                 for raw in proc.stdout:
                     line = raw.decode("utf-8", "replace")
                     m = PORT_BANNER_RE.search(line)
                     if m:
                         q.put(int(m.group(1)))
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
+                    sink.put(line)
             except Exception:  # noqa: BLE001 - pipe closed, child gone
                 pass
 
-        threading.Thread(target=forward, daemon=True).start()
+        def forwarder() -> None:
+            while True:
+                try:
+                    line = sink.get()
+                except Exception:  # noqa: BLE001
+                    return
+                try:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                except (OSError, ValueError):  # stdout gone: stop forwarding
+                    return
+
+        threading.Thread(target=reader, daemon=True).start()
+        threading.Thread(target=forwarder, daemon=True).start()
         try:
             return q.get(timeout=self.start_timeout_s)
         except queue.Empty:
@@ -262,6 +355,12 @@ class _Handler(BaseHTTPRequestHandler):
             sid = self._read_body().get("session_id")
             ok = sup.heartbeat(sid)
             self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
+        elif self.path == "/api/shutdown":
+            # normal client close: exit as soon as no sessions remain (skips the
+            # idle grace). Never kills an in-use supervisor (n must be 0 first).
+            with sup._lock:
+                sup.exit_when_idle = True
+            self._json({"status": "ok"})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -284,10 +383,24 @@ def _agent_cmd_default() -> list[str]:
 
 def build_server(port: int, sup: Supervisor) -> ThreadingHTTPServer:
     handler = type("ClutchSupervisorHandler", (_Handler,), {"supervisor": sup})
-    return ThreadingHTTPServer(("127.0.0.1", port), handler)
+    try:
+        return ThreadingHTTPServer(("127.0.0.1", port), handler)
+    except OSError as e:
+        # an occupied port is the classic silent killer: the supervisor dies and
+        # the caller only sees "backend not reachable". Say exactly what happened
+        # (and, for the remote, /tmp/clutch-server.log carries this line).
+        raise SystemExit(
+            f"[clutch-supervisor] ERROR: cannot bind 127.0.0.1:{port} — port in use "
+            f"({e}). Close the other Clutch/agent server on this port and retry."
+        ) from e
 
 
 def main() -> int:
+    # wrap before the first print: an orphaned supervisor writes to a dead
+    # socketpair (see _SafeStdStream) — a startup print must not crash it either
+    sys.stdout = _SafeStdStream(sys.stdout)
+    sys.stderr = _SafeStdStream(sys.stderr)
+
     ap = argparse.ArgumentParser(prog="agent.supervisor")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--idle-timeout", type=float, default=IDLE_TIMEOUT_S,
@@ -306,12 +419,15 @@ def main() -> int:
     else:
         cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sup = Supervisor(agent_cmd=agent_cmd, cwd=cwd, idle_timeout_s=args.idle_timeout)
+    # a dead/full stdout (orphaned supervisor) must never hang our logging or the
+    # session-start handler (see _log/_make_stdout_nonblocking)
+    _make_stdout_nonblocking()
     srv = build_server(args.port, sup)
     bound_port = srv.server_address[1]
-    print(f"[clutch-supervisor] http://127.0.0.1:{bound_port}  (session lifecycle API)", flush=True)
+    _log(f"[clutch-supervisor] http://127.0.0.1:{bound_port}  (session lifecycle API)")
 
     def _on_term(signum, frame):  # noqa: ARG001
-        print("[supervisor] SIGTERM, shutting sessions down", flush=True)
+        _log("[supervisor] SIGTERM, shutting sessions down")
         sup.shutdown_all()
         sup.exit_event.set()
         sys.exit(0)

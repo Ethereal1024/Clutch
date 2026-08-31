@@ -41,8 +41,9 @@ Tool conventions:
 - Tool calls in one response execute in order; wait for the result before the next step.
 
 Project memory persists durable facts across sessions (stored per-project):
-- Before exploring, search_memory for prior decisions or preferences that may
-  affect this task.
+- The memory titles at the end of this prompt are the complete set; load_memory
+  any that relate to your task. Only search_memory when no listed title matches
+  (search also covers memory content, which titles only summarize).
 - save_memory whenever you learn a durable fact: a user preference, a project
   convention, a key decision, or a constraint — anything a future session
   should know. When memories exist their titles are listed at the end of this

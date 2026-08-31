@@ -6,18 +6,26 @@ lock on each .clc it opens for write; a second server opening the same project
 gets a ProjectOpenConflict (HTTP 409 + code project_open_conflict) and the UI
 offers read-only instead.
 
-Local workspaces: flock on <tmp>/clutch-<sha1(abs path)[:16]>.lock. The lock
-lives in the OS temp dir — the workspace tree stays untouched — and the kernel
-releases it automatically when the holding process dies, so a crashed server
-leaves no stale lock behind.
+The lock is a flock on <tmp>/clutch-<sha1(path)[:16]>.lock, keyed by the .clc's
+absolute path. This covers BOTH local and SSH-degradation workspaces: every
+Clutch window (local or remote-backed) is a process on the CLIENT machine, so
+they all flock the same local file and arbitrate with each other through the
+kernel. Keying by the remote absolute path (e.g. /root/test.clc) means two
+windows pointing at the same remote project collide exactly like two windows on
+a local project.
 
-Remote (ssh) workspaces: flock cannot reach the remote host, so the lock is an
-atomic lock-file created over the exec bridge:
-    (set -C; date +%s > <dir>/.clc.lock)
-POSIX noclobber makes the redirect fail when the file already exists, so a
-successful creation means we hold the lock. A crashed window leaves the file
-behind; the timestamp + TTL (6h) reclaims it — PIDs are useless here because
-every exec is a fresh shell and the local server PID is meaningless remotely.
+The lock lives in the OS temp dir — the workspace tree (local or remote) stays
+untouched, so an SSH user needs NO write permission on the remote project
+directory (the old remote lock-file failed for non-root users on root-owned
+dirs). The kernel releases the flock when the holding process dies, so a crashed
+server leaves no stale lock and no TTL is needed (the old remote lock-file +
+6h TTL recovery is gone).
+
+Trade-off: the flock lives on the CLIENT, so two different clients (machines)
+SSH-ing to the same remote do NOT arbitrate with each other. Clutch is a
+single-user, single-client tool, so this is accepted — the old remote file only
+ever arbitrated Clutch-vs-Clutch anyway (never against external editors on the
+remote).
 
 The same process re-opening the same project (reopen within one window) must
 not conflict with itself: flock is exclusive even between two fds of one
@@ -29,22 +37,14 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
-import time
 from dataclasses import dataclass
-from pathlib import Path
 
-from ..tools.workspace import RemoteWorkspace, Workspace, _REMOTE_IO_TIMEOUT, shq
 from .errors import AgentError
 
 try:  # POSIX; Windows has no flock (see _acquire_local fallback)
     import fcntl
 except ImportError:  # pragma: no cover - Windows
     fcntl = None
-
-# How long a remote lock-file may outlive its holder before another window may
-# reclaim it (crash recovery). 6h covers any realistic run; only a window that
-# idled longer gets preempted, which is an acceptable edge case.
-_REMOTE_LOCK_TTL_S = 6 * 3600
 
 
 class ProjectOpenConflict(AgentError):
@@ -60,14 +60,11 @@ class ProjectOpenConflict(AgentError):
 
 @dataclass
 class LockHandle:
-    """A held lock. release() drops it; local fds are also freed by the kernel
-    when the process exits, remote lock-files by the TTL after a crash."""
+    """A held lock. release() drops it; a crashed holder frees it automatically
+    because the kernel releases the flock when the process exits."""
 
-    kind: str  # "local" | "remote"
     clc_path: str
-    fd: int | None = None  # local: the flock fd (POSIX) / O_EXCL fd (Windows)
-    lock_file: str | None = None  # remote: remote <dir>/.clc.lock
-    workspace: Workspace | None = None  # remote: to rm the lock on release
+    fd: int | None = None  # the flock fd (POSIX) / O_EXCL fd (Windows)
 
 
 def _local_lock_path(clc_path: str) -> str:
@@ -84,7 +81,7 @@ class ProjectLock:
     _held: dict[str, LockHandle] = {}
 
     @classmethod
-    def acquire(cls, clc_path: str, workspace: Workspace | None = None) -> LockHandle | None:
+    def acquire(cls, clc_path: str) -> LockHandle | None:
         """Take the exclusive write lock on a .clc.
 
         Returns the handle on success, None when another process holds it —
@@ -94,10 +91,7 @@ class ProjectLock:
         held = cls._held.get(key)
         if held is not None:
             return held  # same window re-open: reuse, never self-conflict
-        if isinstance(workspace, RemoteWorkspace):
-            handle = cls._acquire_remote(key, workspace)
-        else:
-            handle = cls._acquire_local(key)
+        handle = cls._acquire_local(key)
         if handle is not None:
             cls._held[key] = handle
         return handle
@@ -123,37 +117,16 @@ class ProjectLock:
                 return None
             os.close(fd)
             fd = fd2
-        return LockHandle(kind="local", clc_path=key, fd=fd)
-
-    @staticmethod
-    def _acquire_remote(key: str, workspace: RemoteWorkspace) -> LockHandle | None:
-        lock_file = str(Path(key).parent / ".clc.lock")
-        if not ProjectLock._remote_try_create(workspace, lock_file):
-            # the lock file exists: stale if its timestamp is older than the TTL
-            ts = workspace.run(f"cat {shq(lock_file)} 2>/dev/null", _REMOTE_IO_TIMEOUT).stdout.strip()
-            if ts.isdigit() and time.time() - int(ts) > _REMOTE_LOCK_TTL_S:
-                workspace.run(f"rm -f {shq(lock_file)}", _REMOTE_IO_TIMEOUT)
-                if not ProjectLock._remote_try_create(workspace, lock_file):
-                    return None
-            else:
-                return None
-        return LockHandle(kind="remote", clc_path=key, lock_file=lock_file, workspace=workspace)
-
-    @staticmethod
-    def _remote_try_create(workspace: RemoteWorkspace, lock_file: str) -> bool:
-        # (set -C; ...) scopes noclobber to the subshell; the redirect fails
-        # atomically when the lock file already exists -> someone else holds it
-        res = workspace.run(f"(set -C; date +%s > {shq(lock_file)}) 2>/dev/null", _REMOTE_IO_TIMEOUT)
-        return res.code == 0
+        return LockHandle(clc_path=key, fd=fd)
 
     @classmethod
     def release(cls, handle: LockHandle | None) -> None:
-        """Drop a lock: local fds unlock+close, remote lock-files are rm'd (best
-        effort — a dead bridge is fine, the TTL reclaims the lock later)."""
+        """Drop a lock: unlock+close the fd. The kernel also frees it if this
+        process dies while holding it — no stale lock survives a crash."""
         if handle is None:
             return
         cls._held.pop(handle.clc_path, None)
-        if handle.kind == "local" and handle.fd is not None:
+        if handle.fd is not None:
             if fcntl is not None:
                 try:
                     fcntl.flock(handle.fd, fcntl.LOCK_UN)
@@ -168,17 +141,10 @@ class ProjectLock:
                     os.unlink(_local_lock_path(handle.clc_path))
                 except OSError:
                     pass
-        elif handle.kind == "remote":
-            if handle.lock_file and handle.workspace is not None:
-                try:
-                    handle.workspace.run(f"rm -f {shq(handle.lock_file)}", _REMOTE_IO_TIMEOUT)
-                except Exception:
-                    pass  # bridge gone: TTL reclaims it later
 
     @classmethod
-    def release_all_remote(cls) -> None:
-        """atexit hook: best-effort rm of every remote lock this process holds
-        (only meaningful while the ssh tunnel is still alive)."""
+    def release_all(cls) -> None:
+        """Drop every lock this process holds (e.g. on a backend mode switch,
+        where the window's whole project context is invalidated)."""
         for handle in list(cls._held.values()):
-            if handle.kind == "remote":
-                cls.release(handle)
+            cls.release(handle)

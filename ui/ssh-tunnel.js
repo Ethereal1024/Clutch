@@ -30,7 +30,7 @@ const fs = require("fs");
 const { Client } = require("ssh2");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
-const { getVersion, platformTag, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
+const { platformTag, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
 
 const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
 const REMOTE_API_PORT = 8890;
@@ -159,25 +159,31 @@ function friendlyError(e) {
 
 // ---- remote command/file helpers (used by bootstrap) ----
 
-function remoteExec(command, timeoutMs = 60000) {
+function remoteExec(command, timeoutMs = 60000, binary = false) {
   return new Promise((resolve, reject) => {
     if (!sshClient) return reject(new Error("not connected"));
     sshClient.exec(command, (err, stream) => {
       if (err) return reject(err);
-      let stdout = "";
+      const out = [];
       let stderr = "";
       let done = false;
       const finish = (code) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        resolve({ code, stdout, stderr });
+        if (binary) {
+          // raw bytes: the bridge returns them base64-encoded CLIENT-side, so
+          // the remote never needs its own base64 (minimal hosts lack it)
+          resolve({ code, stdout_b64: Buffer.concat(out).toString("base64"), stderr });
+        } else {
+          resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr });
+        }
       };
       const timer = setTimeout(() => {
         stream.close();
         finish(-1);
       }, timeoutMs);
-      stream.on("data", (d) => (stdout += d));
+      stream.on("data", (d) => out.push(d));
       stream.stderr.on("data", (d) => (stderr += d));
       stream.on("close", (code) => finish(code));
       stream.on("error", (e) => {
@@ -299,7 +305,7 @@ const PROBE_CMD = [
   'echo "__LIBC__"; (ldd --version 2>&1 | head -1 | grep -qi musl && echo musl) || ([ -f /etc/alpine-release ] && echo musl) || (ldd --version 2>&1 | head -1 | grep -qE "GLIBC|glibc|GNU libc" && echo glibc) || echo unknown',
   'echo "__VER__"; (cat "$HOME/.clutch-server/VERSION" 2>/dev/null) || echo NONE',
   'echo "__STRATEGY__"; (cat "$HOME/.clutch-server/STRATEGY" 2>/dev/null) || echo NONE',
-  'echo "__ART__"; (test -x "$HOME/.clutch-server/agent-server" && echo bundle || true); (test -x "$HOME/.clutch-server/venv/bin/python" && echo pip || true); (test -d "$HOME/.clutch-server/site-packages" && echo pylibs || true)',
+  'echo "__ART__"; (test -x "$HOME/.clutch-server/agent-server" -a -x "$HOME/.clutch-server/agent-supervisor" && echo bundle || true); (test -x "$HOME/.clutch-server/venv/bin/python" && echo pip || true); (test -d "$HOME/.clutch-server/site-packages" && echo pylibs || true)',
   'echo "__NET__"; (python3 -c "import urllib.request;urllib.request.urlopen(\'https://pypi.org\',timeout=3);print(\'OK\')" 2>/dev/null) || echo NO',
   'echo "__TMP__"; (test -w /tmp && echo YES) || echo NO',
 ].join("; ");
@@ -333,7 +339,9 @@ function startCommand(strategy, home) {
   const args = "--port " + REMOTE_API_PORT + " --idle-timeout 8";
   const nohup = "nohup setsid ";
   if (strategy === "bundle") {
-    return `${nohup}${home}/.clutch-server/agent-supervisor ${args} >/tmp/clutch-server.log 2>&1 </dev/null &`;
+    // --agent-cmd is explicit: a PyInstaller onefile's sys.executable is not a
+    // reliable way to find the sibling agent-server, so never rely on it
+    return `${nohup}${home}/.clutch-server/agent-supervisor ${args} --agent-cmd ${home}/.clutch-server/agent-server >/tmp/clutch-server.log 2>&1 </dev/null &`;
   }
   // pylibs
   return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} >/tmp/clutch-server.log 2>&1 </dev/null &`;
@@ -349,7 +357,6 @@ function remoteRunningCmd(probe) {
 // force is for tests; auto-decides when omitted. progress(stage) reports coarse
 // bootstrap stages so the renderer can drive a connection progress bar.
 async function installServer(probe, { force, progress } = {}) {
-  const version = getVersion();
   const sameArch = probe.arch === platformTag().split("-")[1];
   tunnelLog(
     `[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} py=${probe.python || "none"} sameArch=${sameArch}`
@@ -385,8 +392,32 @@ async function installServer(probe, { force, progress } = {}) {
     // e.g. an explicit CLUTCH_TUNNEL_FORCE=assist
     return { ok: false, error: `no install strategy '${strategy}'; falling back to SSH-tools` };
   }
-  const installed = probe.installedStrategy === strategy && probe.installedVersion === version && probe.artifacts.includes(strategy);
-  tunnelLog(`[bootstrap] strategy=${strategy} installed=${installed}`);
+  // Resolve the artifact to install and its CONTENT-HASH version. The hash is
+  // the only install gate: `installed` is true iff the remote's VERSION equals
+  // our binaries' hash — exact content match, no git, no strategy/artifacts
+  // heuristics.
+  let artifact;
+  let version;
+  if (strategy === "bundle") {
+    artifact = ensureBundle();
+    version = artifact.version;
+  } else {
+    try {
+      const p = ensurePyLibsTar({
+        os: probe.os,
+        arch: probe.arch,
+        libc: probe.libc || "unknown",
+        pyver: probe.python,
+      });
+      artifact = p.path;
+      version = p.version;
+    } catch (e) {
+      tunnelLog("[bootstrap] pylibs build failed: " + e.message);
+      return { ok: false, error: "cannot obtain wheels for target: " + e.message };
+    }
+  }
+  const installed = probe.installedVersion === version;
+  tunnelLog(`[bootstrap] strategy=${strategy} version=${version.slice(0, 12)}… installed=${installed}`);
 
   const home = probe.home || "~";
   const dir = `${home}/.clutch-server`;
@@ -402,13 +433,14 @@ async function installServer(probe, { force, progress } = {}) {
     tunnelLog("[bootstrap] stopping old server before reinstall");
     await remoteExec(stopServerCmd(strategy));
     if (strategy === "bundle") {
-      const artifact = ensureBundle(version);
-      tunnelLog(`[bootstrap] uploading bundle ${path.basename(artifact)}`);
+      const { server, supervisor } = artifact;
+      tunnelLog(`[bootstrap] uploading bundle ${path.basename(server)} + supervisor`);
       if (progress) progress("install:upload");
       try {
         // atomic replace: rename over the old binary, safe even while a process
         // still runs from the old inode
-        await uploadFile(artifact, `${dir}/agent-server.new`);
+        await uploadFile(server, `${dir}/agent-server.new`);
+        await uploadFile(supervisor, `${dir}/agent-supervisor.new`);
       } catch (e) {
         tunnelLog("[bootstrap] bundle upload failed: " + (e && e.message));
         try {
@@ -420,22 +452,12 @@ async function installServer(probe, { force, progress } = {}) {
         throw e;
       }
       await remoteExec(
-        `chmod +x ${dir}/agent-server.new && mv -f ${dir}/agent-server.new ${dir}/agent-server`
+        `chmod +x ${dir}/agent-server.new ${dir}/agent-supervisor.new && ` +
+          `mv -f ${dir}/agent-server.new ${dir}/agent-server && ` +
+          `mv -f ${dir}/agent-supervisor.new ${dir}/agent-supervisor`
       );
     } else {
-      // pylibs: build the target-platform site-packages on the client, then upload
-      let artifact;
-      try {
-        artifact = ensurePyLibsTar(version, {
-          os: probe.os,
-          arch: probe.arch,
-          libc: probe.libc || "unknown",
-          pyver: probe.python,
-        });
-      } catch (e) {
-        tunnelLog("[bootstrap] pylibs build failed: " + e.message);
-        return { ok: false, error: "cannot obtain wheels for target: " + e.message };
-      }
+      // pylibs: the target-platform site-packages tar was already built above
       tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
       if (progress) progress("install:upload");
       await uploadFile(artifact, `${dir}/pylibs.tar.gz`);
@@ -456,11 +478,30 @@ async function installServer(probe, { force, progress } = {}) {
     // short timeout: the start command backgrounds the server; do not wait up to
     // the default 60s for its exec channel to close
     await remoteExec(startCommand(strategy, home), 10000);
-    // give it a moment to bind
+    // give it a moment to bind; if it never comes up, fail fast with the remote
+    // log (the earlier behavior silently proceeded to a doomed forward and the
+    // user only got the generic "backend not reachable" after 15s)
     for (let i = 0; i < 12; i++) {
       const chk = await remoteExec(remoteRunningCmd(probe));
       if (chk.stdout.includes("UP")) break;
       await new Promise((r) => setTimeout(r, 500));
+    }
+    const up = await remoteExec(remoteRunningCmd(probe));
+    if (!up.stdout.includes("UP")) {
+      let diag = "";
+      try {
+        const d = await remoteExec(`tail -n 40 /tmp/clutch-server.log 2>/dev/null; ls -la ${dir}/agent-supervisor ${dir}/agent-server 2>&1`);
+        diag = (d.stdout || "").slice(0, 800);
+      } catch (e) {
+        /* best effort */
+      }
+      tunnelLog("[bootstrap] remote supervisor did not come up; log:\n" + diag);
+      return {
+        ok: false,
+        error:
+          "the remote Clutch supervisor failed to start on port " + REMOTE_API_PORT +
+          (diag ? ` (remote log: ${diag.replace(/\n/g, " | ")})` : ""),
+      };
     }
   } else {
     tunnelLog("[bootstrap] server already running");

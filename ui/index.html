@@ -34,41 +34,36 @@
   <div id="settings-modal" class="modal hidden">
     <div class="modal-box">
       <h3>Settings</h3>
-      <label for="profile-select">API profile</label>
-      <select id="profile-select"></select>
-      <input id="profile-name-input" type="text" placeholder="or type a new profile name" autocomplete="off" />
-      <p class="muted">Multiple providers can be saved as named profiles and switched without overwriting each other. Selecting a profile activates it immediately; typing a name and Save stores a new one.</p>
-      <label for="api-key-input">API key</label>
-      <input id="api-key-input" type="password" placeholder="sk-..." autocomplete="off" />
-      <p class="muted">Stored on the backend (~/.clutch/settings.json). Only needed when the backend talks to the LLM itself.</p>
-      <label for="provider-input">LLM provider</label>
-      <select id="provider-input">
-        <option value="deepseek">DeepSeek</option>
-        <option value="zhipu">Zhipu (智谱 GLM)</option>
-        <option value="openai">OpenAI</option>
-        <option value="moonshot">Moonshot (Kimi)</option>
-        <option value="ollama">Ollama (local)</option>
-        <option value="custom">Custom (OpenAI-compatible)</option>
-      </select>
-      <p class="muted">Switching provider fills in its default model and API base URL below — override either freely.</p>
-      <label for="model-input">Model</label>
-      <input id="model-input" type="text" placeholder="glm-4-flash" autocomplete="off" />
-      <label for="reasoning-effort-input">Reasoning effort (thinking depth)</label>
-      <select id="reasoning-effort-input">
-        <option value="">default (provider default)</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="max">max</option>
-      </select>
-      <p class="muted">GLM-5.3 thinking depth (extra_body thinking.reasoning_effort); other providers ignore it.</p>
-      <label for="llm-url-input">LLM API base URL</label>
-      <input id="llm-url-input" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4" autocomplete="off" />
-      <label for="backend-url-input">Backend URL</label>
-      <input id="backend-url-input" type="text" placeholder="http://127.0.0.1:8890" autocomplete="off" />
-      <p class="muted">Where the agent API runs. The SSH connection in the project picker sets this automatically.</p>
+      <label for="llm-profile-select">Saved profiles</label>
+      <div class="fs-conn-row" style="margin-bottom: 16px">
+        <div id="llm-profile-select" class="cselect" title="pick a saved profile to apply it"></div>
+        <button id="llm-profile-new" title="add a new profile">＋ New</button>
+        <button id="llm-profile-edit" title="edit the selected profile">Edit</button>
+        <button id="llm-profile-del" title="delete the selected profile">Delete</button>
+      </div>
       <div class="modal-actions">
-        <button id="settings-save" class="primary">Save</button>
-        <button id="settings-close">Cancel</button>
+        <button id="settings-close" class="ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="llm-profile-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3 id="llm-profile-title">New LLM profile</h3>
+      <label for="llm-profile-name">Profile name</label>
+      <input id="llm-profile-name" type="text" autocomplete="off" />
+      <p id="llm-profile-error" class="llm-profile-error hidden"></p>
+      <label for="llm-url-input">LLM API base URL</label>
+      <input id="llm-url-input" type="text" autocomplete="off" />
+      <label for="api-key-input">API key</label>
+      <input id="api-key-input" type="password" autocomplete="off" />
+      <label for="model-input">Model</label>
+      <input id="model-input" type="text" autocomplete="off" />
+      <label for="reasoning-effort-input">Reasoning effort</label>
+      <div id="reasoning-effort-input" class="cselect"></div>
+      <div class="modal-actions">
+        <button id="llm-profile-cancel">Cancel</button>
+        <button id="llm-profile-save" class="primary">Save</button>
       </div>
     </div>
   </div>
@@ -91,16 +86,13 @@
       <p class="muted">Browse the backend's filesystem. Projects are single <code>.clc</code> files.</p>
       <div class="fs-conn">
         <div class="fs-conn-row">
-          <select id="conn-select"></select>
+          <div id="conn-select" class="cselect"></div>
           <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
         </div>
         <p id="conn-status" class="muted"></p>
         <div id="conn-progress" class="conn-progress hidden">
           <div class="conn-progress-track"><div id="conn-progress-fill" class="conn-progress-fill"></div></div>
         </div>
-        <button id="conn-reset" class="hidden" title="switch the picker back to the local backend">
-          Reset to local backend
-        </button>
       </div>
       <div id="fs-body">
         <div id="fs-toolbar" class="fs-toolbar">
@@ -120,6 +112,10 @@
           <button id="fs-cancel">Cancel</button>
           <button id="fs-create" class="primary hidden">Create</button>
         </div>
+      </div>
+      <div id="conn-actions" class="conn-actions hidden">
+        <button id="conn-cancel" title="abort the connection and go back to the local backend">Cancel</button>
+        <button id="conn-retry" class="primary" title="try the same connection again">Retry</button>
       </div>
     </div>
   </div>

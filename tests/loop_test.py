@@ -1,6 +1,6 @@
 """Loop self-check driven by a scripted fake LLM (no network, no cost).
 
-Run: uv run python -m agent.loop_test
+Run: uv run python -m tests.loop_test
 Covers: tool execution, verify-fail -> iterate -> pass, budget abort,
 doom-loop abort, max-tokens truncation, sink isolation.
 """
@@ -13,24 +13,22 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .config import Config
-from .core.compaction import Compactor
-from .events import AssistantMessageEvent, CompactionEvent, EventLog, FinalEvent, StateUpdateEvent, UserMessageEvent
-from .loop import Agent
-from .testsupport import check
-from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import LocalWorkspace, Workspace, shq
+from agent.config import Config
+from agent.core.compaction import Compactor
+from agent.core.lazy import LazyEventLog
+from agent.events import AssistantMessageEvent, CompactionEvent, FinalEvent, StateUpdateEvent, UserMessageEvent
+from agent.loop import Agent
+from agent.tools.registry import ToolRegistry, build_default_tools
+from agent.tools.workspace import LocalWorkspace, Workspace, shq
+from tests.testsupport import check
 
 
 class FakeLLM:
     """Yields canned responses in order, then always the final one."""
 
-    def __init__(
-        self, responses: list[dict[str, Any]], fallback: dict[str, Any], usage: dict[str, Any] | None = None
-    ) -> None:
+    def __init__(self, responses: list[dict[str, Any]], fallback: dict[str, Any]) -> None:
         self._responses = list(responses)
         self._fallback = fallback
-        self.usage = usage  # attached to every finish event (overflow probe)
         self.calls: list[list[dict[str, Any]]] = []
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -71,7 +69,6 @@ class FakeLLM:
                 }
                 for idx, tc in enumerate(tool_calls)
             ],
-            "usage": self.usage,
         }
 
 
@@ -87,13 +84,13 @@ def _tool_call(name: str, arguments: str, cid: str = "call_1") -> dict[str, Any]
     return {"id": cid, "type": "function", "function": {"name": name, "arguments": arguments}}
 
 
-def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: EventLog | None = None) -> Agent:
+def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: LazyEventLog | None = None) -> Agent:
     return Agent(
         llm=fake,  # type: ignore[arg-type] -- duck-typed chat()
         registry=ToolRegistry(build_default_tools(config)),
         workspace=workspace,
         config=config,
-        log=log or EventLog(),
+        log=log or LazyEventLog.in_memory(),
     )
 
 
@@ -424,20 +421,20 @@ def main() -> int:
                     message="Context window is full; cannot continue. Restart with a more focused task.",
                 )
 
-        log = EventLog()
+        seen: list[Any] = []
         agent = Agent(
             llm=BoomLLM(),  # type: ignore[arg-type]
             registry=ToolRegistry(build_default_tools(config)),
             workspace=sb,
             config=config,
-            log=log,
+            sink=seen.append,
         )
         result = agent.run("t")
         check(result == "ABORTED", "fatal LLM error aborts run")
-        finals = [e for e in log.events() if isinstance(e, FinalEvent)]
+        finals = [e for e in agent.log.events() if isinstance(e, FinalEvent)]
         check(bool(finals) and finals[-1].status == "error", "fatal LLM error emits error final")
         check(
-            any(isinstance(e, StateUpdateEvent) and e.value == "error" for e in log.events()),
+            any(isinstance(e, StateUpdateEvent) and e.value == "error" for e in seen),
             "error state emitted",
         )
 
@@ -481,17 +478,16 @@ def main() -> int:
         )
 
     # 13. compaction: context overflow rolls the older turns into a summary and the
-    # run continues (no abort); the summary is persisted as a CompactionEvent. Two
-    # real work turns give the head something to summarize (a compaction after only
-    # one turn would have nothing but the task, so the guard correctly skips it).
+    # run continues (no abort); the summary is persisted as a CompactionEvent. The
+    # window is sized so one real work turn (~1KB of events) stays under it while
+    # two overflow it — the byte trigger fires after the second tool round, leaving
+    # both rounds' events as the compaction head.
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         (sb.root / "a.txt").write_text("some content\n" * 30)
         cfg = Config(
             verify_command="echo ok",
-            llm_context_window=1000,
-            compaction_reserved=200,
-            compaction_tail_tokens=1,
+            llm_context_window_bytes=1200,
         )
         fake = FakeLLM(
             responses=[
@@ -501,7 +497,6 @@ def main() -> int:
                 _resp(content="final answer"),
             ],
             fallback=_resp(content="fallback"),
-            usage={"prompt_tokens": 900, "completion_tokens": 100, "total_tokens": 1000},
         )
         agent = Agent(llm=fake, registry=ToolRegistry(build_default_tools(cfg)), workspace=sb, config=cfg)
         result = agent.run("t")
@@ -515,7 +510,7 @@ def main() -> int:
     # counts), so a long compression never looks frozen in the UI — and a failed
     # summary call sends done=True so the live block closes instead of hanging.
     with tempfile.TemporaryDirectory() as tmp:
-        log13 = EventLog()
+        log13 = LazyEventLog.in_memory()
         log13.append(UserMessageEvent(content="original task"))
         log13.append(AssistantMessageEvent(content="x" * 300))
         log13.append(AssistantMessageEvent(content="z" * 300))
@@ -523,10 +518,9 @@ def main() -> int:
         fake13 = FakeLLM(
             responses=[_resp(content="S" * 600)],
             fallback=_resp(content="x"),
-            usage={"prompt_tokens": 50, "completion_tokens": 150, "total_tokens": 200},
         )
         comp13 = Compactor(
-            Config(llm_context_window=1000, compaction_reserved=200, compaction_tail_tokens=1),
+            Config(llm_context_window_bytes=1000),
             log13,
             fake13,
             sink=progress.append,
@@ -544,13 +538,13 @@ def main() -> int:
                 yield {"type": "text", "delta": "partial"}
                 raise RuntimeError("boom")
 
-        log13b = EventLog()
+        log13b = LazyEventLog.in_memory()
         log13b.append(UserMessageEvent(content="original task"))
         log13b.append(AssistantMessageEvent(content="x" * 300))
         log13b.append(AssistantMessageEvent(content="z" * 300))
         failed: list[object] = []
         comp13b = Compactor(
-            Config(llm_context_window=1000, compaction_reserved=200, compaction_tail_tokens=1),
+            Config(llm_context_window_bytes=1000),
             log13b,
             BoomLlm(),
             sink=failed.append,
@@ -560,6 +554,85 @@ def main() -> int:
             any(e.type == "compaction_delta" and e.done for e in failed),
             "done marker closes the live block on failure",
         )
+
+    # 13d. the summary prompt is CAPPED: a multi-MB head must not be serialized
+    # in full into the compaction call — the API would reject it, every
+    # compaction fails, and the UI flashes "compressing context" every turn.
+    log13d = LazyEventLog.in_memory()
+    log13d.append(UserMessageEvent(content="task"))
+    for i in range(1500):
+        log13d.append(AssistantMessageEvent(content=f"old work {i} " + "x" * 500))
+    prompt_len: dict[str, int] = {}
+
+    class CaptureLlm:
+        def stream(self, messages, tools=None):
+            prompt_len["n"] = len(messages[0]["content"].encode("utf-8"))
+            yield {"type": "text", "delta": "S" * 60}
+            yield {"type": "finish", "reason": "stop"}
+
+    comp13d = Compactor(Config(llm_context_window_bytes=200_000), log13d, CaptureLlm())
+    check(comp13d.compact() is True, "compaction with a multi-MB head succeeds")
+    check(
+        prompt_len["n"] <= 200_000 - 8_192 + 5_000,
+        f"summary prompt capped to window minus previous summary + template "
+        f"({prompt_len['n']} <= ~197000)",
+    )
+
+    # 13f. steady-state input is the WHOLE CURRENT WINDOW, not a capped slice:
+    # the second compaction's prompt carries every event appended since the
+    # first compaction verbatim (its first event included). A cap-slice
+    # approach would have dropped that first event; the window approach must
+    # not.
+    log13f = LazyEventLog.in_memory()
+    log13f.append(UserMessageEvent(content="task"))
+    for i in range(600):
+        log13f.append(AssistantMessageEvent(content=f"old work {i} " + "x" * 200))
+    prompt_n: dict[str, str] = {}
+
+    class CaptureLlm2:
+        def stream(self, messages, tools=None):
+            prompt_n["n"] = messages[0]["content"]
+            yield {"type": "text", "delta": "S" * 60}
+            yield {"type": "finish", "reason": "stop"}
+
+    comp13f = Compactor(Config(llm_context_window_bytes=200_000), log13f, CaptureLlm2())
+    check(comp13f.compact() is True, "first compaction succeeds")
+    check(log13f.window_bytes() < 200_000,
+          "window collapsed to just the new summary line after compaction")
+    marker = "new work 0 "
+    for i in range(600):
+        log13f.append(AssistantMessageEvent(content=f"new work {i} " + "y" * 200))
+    check(comp13f.compact() is True, "second compaction succeeds")
+    check(
+        marker in prompt_n["n"],
+        "second compaction input carries the whole post-compaction window "
+        "verbatim (first appended event included, not a capped slice)",
+    )
+    check(comp13f.compact() is False,
+          "third compaction is a no-op (the window holds only the summary line)")
+
+    # 13e. cancel aborts an in-flight compaction: the stop button must work
+    # while the summary call streams (compaction is synchronous otherwise)
+    import threading  # noqa: PLC0415 -- local import matches the file's test pattern
+
+    cancel = threading.Event()
+    log13e = LazyEventLog.in_memory()
+    log13e.append(UserMessageEvent(content="task"))
+    for i in range(400):
+        log13e.append(AssistantMessageEvent(content=f"work {i} " + "x" * 200))
+    calls: list[int] = []
+
+    class SlowLlm:
+        def stream(self, messages, tools=None):
+            calls.append(1)
+            yield {"type": "text", "delta": "partial"}
+            cancel.set()  # the user hits stop mid-summary
+            yield {"type": "text", "delta": "more"}
+            yield {"type": "finish", "reason": "stop"}
+
+    comp13e = Compactor(Config(llm_context_window_bytes=200_000), log13e, SlowLlm(), cancel=cancel)
+    check(comp13e.compact() is False, "cancel mid-summary aborts compaction")
+    check(len(calls) == 1, "summary stream interrupted once, not completed")
 
     # 13c. an empty reply (no visible text) is NOT a completion: it is fed back
     # as an error and retried, so the user never sees a silent "completed" with
@@ -583,33 +656,32 @@ def main() -> int:
             "retry prompt mentions the empty reply",
         )
 
-    # 14. resumed long session with NO reported usage: the token estimate of the
-    # derived context triggers compaction on the first turn — the resume case that
-    # turn-count windowing used to brutalise (no usage, so the old usage-only check
-    # could never fire).
+    # 14. resumed long session: the byte trigger (resident window vs the model
+    # window budget) fires on the first turn — the resume case that turn-count
+    # windowing used to brutalise (nothing to compare against on a resume, so the
+    # old estimate-based check was the only thing that could fire).
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
-        cfg = Config(llm_context_window=1000, compaction_reserved=200, compaction_tail_tokens=1)
-        log = EventLog()
+        cfg = Config(llm_context_window_bytes=1000)
+        log = LazyEventLog.in_memory()
         log.append(UserMessageEvent(content="original task"))
         for i in range(3):
             log.append(AssistantMessageEvent(content=f"blah {i} " + "x" * 1200))
         fake = FakeLLM(
             responses=[_resp(content="SUMMARY"), _resp(content="resumed answer")],
             fallback=_resp(content="fallback"),
-            usage=None,
         )
         agent = Agent(llm=fake, registry=ToolRegistry(build_default_tools(cfg)), workspace=sb, config=cfg, log=log)
         result = agent.run("t")
         check(result == "resumed answer", "resumed run completes")
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
-        check(len(comps) == 1, "estimate-based trigger compacted on the first turn")
+        check(len(comps) == 1, "byte trigger compacted on the first turn")
         check(comps[0].summary == "SUMMARY", "resume compaction summary recorded")
 
     # 15. tool-call argument streaming: the loop forwards the model's tool_call
     # deltas as ToolCallDeltaEvent so the UI can render a write/edit as it happens;
     # the concatenated deltas equal the final arguments.
-    from .events import ToolCallDeltaEvent
+    from agent.events import ToolCallDeltaEvent
 
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -636,7 +708,7 @@ def main() -> int:
         check(joined == '{"path": "a.txt", "content": "hi"}', "streamed deltas reassemble the arguments")
 
     # 15b. chat-mode toolset: schema pruning + system-prompt mode note
-    from .core import context as _context
+    from agent.core import context as _context
 
     chat_cfg = Config(mode="chat", verify_command="echo ok")
     with tempfile.TemporaryDirectory() as tmp:
@@ -644,7 +716,7 @@ def main() -> int:
         chat_names = [t.name for t in build_default_tools(chat_cfg)]
         check("write_file" not in chat_names and "edit_file" not in chat_names, "chat mode prunes write tools")
         check("run_command" in chat_names and "read_file" in chat_names, "chat mode keeps read tools")
-        log = EventLog()
+        log = LazyEventLog.in_memory()
         log.append(UserMessageEvent(content="hi"))
         msgs = _context.derive_messages(log, chat_cfg, "t")
         check("chat (read-only)" in msgs[0]["content"], "chat system prompt carries the read-only note")
@@ -655,7 +727,7 @@ def main() -> int:
 
     # 15d. project memory: all stored titles are listed with an active recall
     # prompt, and the base prompt always carries the save guidance
-    from .memory import MemoryStore
+    from agent.memory import MemoryStore
 
     with tempfile.TemporaryDirectory() as tmp:
         mem_path = str(Path(tmp) / "p.clc")
@@ -675,8 +747,12 @@ def main() -> int:
         )
         msgs_empty = _context.derive_messages(log, chat_cfg, "t", memories=MemoryStore(mem_path))
         check(
-            "Project memories from earlier sessions" not in msgs_empty[0]["content"],
-            "no title section when the store is empty",
+            "Project memories from earlier sessions: none stored yet" in msgs_empty[0]["content"],
+            "empty store states no memories so the model skips the probing search",
+        )
+        check(
+            "user prefers utf-8" not in msgs_empty[0]["content"],
+            "no titles when the store is empty",
         )
         check(
             "save_memory whenever you learn a durable fact" in msgs_empty[0]["content"],
@@ -721,7 +797,7 @@ def main() -> int:
         check(not (sb.root / "a.txt").exists(), "write_file unknown in chat mode: nothing written")
 
     # 15e. classify_command unit checks (static read-only classifier)
-    from .tools.shell import classify_command
+    from agent.tools.shell import classify_command
 
     for cmd, exp in [
         ("ls -la", "read"),

@@ -20,7 +20,6 @@ from ..prompts import render
 from .transport import TransportError
 from .workspace import Workspace
 
-
 # ---- chat-mode read-only classification ----
 #
 # Static analysis cannot prove a command is *safe*; it can only prove a command

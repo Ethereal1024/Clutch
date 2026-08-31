@@ -18,6 +18,7 @@ The default action is allow for anything inside the workspace.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import threading
@@ -38,6 +39,11 @@ class Rule:
     action: Action
     tool: str = "*"  # tool name or "*"
     pattern: str = ""  # regex on the args; empty = match any args
+    # True = a workspace-escape heuristic: the rule fires only when the paths it
+    # guards REALLY leave the workspace (resolved against the root in evaluate,
+    # `~` expanded) — an absolute/../~ path that stays inside the sandbox (the
+    # workdir itself or a subfolder) is allowed, never prompted
+    escape: bool = False
 
     def matches(self, tool: str, args_repr: str) -> bool:
         if self.tool != "*" and self.tool != tool:
@@ -65,10 +71,11 @@ DEFAULT_RULES: list[Rule] = [
     Rule("ask", "run_command", r"\brm\s+-rf\b|\bsudo\b|\bshutdown\b|\breboot\b|\bmkfs\b|\bdd\b\s"),
     # commands that delete anything ask
     Rule("ask", "run_command", r"^\s*rm\b"),
-    Rule("ask", "run_command", r"\bmv\s+.*\s/\s"),
-    # writing outside the workspace asks
-    Rule("ask", "write_file", r"(\.\./|^/|~)"),
-    Rule("ask", "run_command", r"(\.\./|^/)"),
+    # writing/running outside the workspace asks — but decided by REAL path
+    # resolution (escape=True): an absolute path INSIDE the sandbox never prompts
+    Rule("ask", "run_command", r"\bmv\s+.*\s/\s", escape=True),
+    Rule("ask", "write_file", r"(\.\./|^/|~)", escape=True),
+    Rule("ask", "run_command", r"(\.\./|^/)", escape=True),
 ]
 
 # how much of the args JSON to surface in an ask reason
@@ -79,7 +86,7 @@ _ARGS_REPR_MAX = 120
 class PermissionEvaluator:
     rules: list[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
-    def evaluate(self, tool: str, args_repr: str, _workspace: Workspace) -> Action:
+    def evaluate(self, tool: str, args_repr: str, workspace: Workspace) -> Action:
         # Rules match the ACTUAL argument they guard, not the whole JSON envelope:
         # run_command matches the command; write_file matches the target path.
         # Matching against the full args would flag e.g. a report whose CONTENT
@@ -100,6 +107,12 @@ class PermissionEvaluator:
             if rule.matches(tool, match_text):
                 decision = rule
         if decision is not None:
+            # a workspace-escape heuristic (absolute/../~ paths) fires only when
+            # the referenced paths REALLY leave the workspace — resolved against
+            # the root with `~` expanded. The workdir itself or a subfolder,
+            # spelled as an absolute path, is NOT an escape and must not prompt.
+            if decision.escape and not self.escaped_paths(tool, args_repr, workspace):
+                return "allow"
             return decision.action
         return "allow"
 
@@ -121,17 +134,34 @@ class PermissionEvaluator:
             if path is None:
                 return frozenset()
             tokens = [path]
-        root = workspace.root
         out: set[Path] = set()
-        for tok in tokens:
-            if not tok:
-                continue
-            try:
-                p = (root / tok).resolve()
-            except (OSError, ValueError):
-                continue  # un-resolvable token: not a filesystem path
-            if not p.is_relative_to(root):
-                out.add(p)
+        if tool == "run_command":
+            # track `cd <dir>` so a following `../` is judged against that
+            # subdir, not the workspace root: `cd agent && ../.venv/ruff` runs
+            # INSIDE the workspace, only `..` from the root would escape. The
+            # per-token verdict is delegated to workspace.escape_path — the one
+            # source of truth for root/scratch containment.
+            cwd: Path | None = None  # None => anchor at the workspace root
+            i = 0
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok == "cd" and i + 1 < len(tokens):
+                    nxt = tokens[i + 1]
+                    if nxt.startswith("~"):
+                        nxt = os.path.expanduser(nxt)
+                    base = cwd if cwd is not None else workspace.root.resolve()
+                    cwd = Path(os.path.normpath(os.path.join(str(base), nxt)))
+                    i += 2
+                    continue
+                p = workspace.escape_path(tok, cwd)
+                if p is not None:
+                    out.add(p)
+                i += 1
+        else:
+            for tok in tokens:
+                p = workspace.escape_path(tok)
+                if p is not None:
+                    out.add(p)
         return frozenset(out)
 
 

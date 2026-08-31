@@ -1,49 +1,55 @@
 """Context-window compaction: roll the older conversation into a summary.
 
-Compaction is pure context management — token estimation, tail budgeting,
-serialization, the summary call — so it lives here (next to core/context.py,
-which owns message derivation from the log) instead of inside the run loop.
-The loop only asks `should_compact` / `compact`; everything about how much to
-preserve, what to summarize and with which LLM is this class's business.
+Compaction is pure context management — byte budgeting, serialization, the
+summary call — so it lives here (next to core/context.py, which owns message
+derivation from the log) instead of inside the run loop. The loop only asks
+`should_compact` / `compact`; everything about when to fire and what to
+summarize is this class's business.
+
+Every budget is BYTES: the window and the window-usage comparison are exact
+byte arithmetic — no token estimation anywhere.
+
+The model window is [cpr_start, file_end): everything since the newest
+compaction line. compact() summarizes the WHOLE current window (already
+resident in the log — zero disk reads), appends the new CompactionEvent, and
+slides cpr_start to that line's start (persisted in the .clc header with one
+in-place write). The window collapses to just the new summary, so the
+summarized history can never re-enter the context.
 """
 
 from __future__ import annotations
 
 import sys
-from typing import Any, Callable
+import threading
+from typing import Callable
 
 from ..config import Config
 from ..events import (
-    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionDeltaEvent,
     CompactionEvent,
-    EventLog,
+    Event,
     ToolResultEvent,
     UserMessageEvent,
 )
 from ..llm.client import LlmClient
 from ..prompts import render
+from .lazy import LazyEventLog
 
 
 class Compactor:
-    """Roll the older conversation into a summary (opencode-style). Best-effort:
-    compact() returns False when nothing was compacted (too little to summarize,
-    no NEW head since the last compaction, or the summary call failed) so the
-    loop never spins on a failed or no-op compaction.
-
-    tail_start is a BYTE OFFSET relative to the event region (what the .clc
-    persists). The in-memory log also holds transient streaming deltas; an
-    index over those would be stale after a reopen, silently dropping the
-    whole recent tail (see derive_messages)."""
+    """Roll the current window into a summary. Best-effort: compact() returns
+    False when nothing was compacted (nothing new since the last compaction, or
+    the summary call failed) so the loop never spins on a no-op."""
 
     def __init__(
         self,
         config: Config,
-        log: EventLog,
+        log: LazyEventLog,
         llm: LlmClient,
         llm_factory: Callable[[], LlmClient] | None = None,
         sink: Callable[[object], None] | None = None,
+        cancel: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.log = log
@@ -52,11 +58,12 @@ class Compactor:
         # dedicated compaction_model is configured, otherwise the main llm is used
         self.llm_factory = llm_factory
         self.compactor_llm: LlmClient | None = None
-        # provider-reported usage of the most recent LLM call (context size probe)
-        self.last_usage: dict[str, Any] | None = None
         # live-progress sink (the run's event broadcaster): compaction can take a
         # while, so the UI gets compaction_delta events instead of looking frozen
         self.sink = sink
+        # run-cancel flag: compaction is synchronous, so it must check the stop
+        # signal itself or the UI's stop button freezes during a long summary
+        self.cancel = cancel
 
     def _report_progress(self, chars: int, done: bool = False) -> None:
         """Broadcast in-flight compaction progress; never fatal."""
@@ -67,102 +74,79 @@ class Compactor:
         except Exception:  # noqa: BLE001 -- subscriber failure is non-fatal
             pass
 
-    def record_usage(self, usage: dict[str, Any] | None) -> None:
-        """Provider-reported usage of the most recent LLM call (context probe)."""
-        self.last_usage = usage
+    def should_compact(self) -> bool:
+        """True when the current window (everything since the newest compaction
+        line) fills the model window.
 
-    def should_compact(self, msgs: list[dict[str, Any]]) -> bool:
-        """True when the next LLM call would push the context near the model window.
-
-        Either trigger fires: the previous call's provider-reported usage crossing
-        the threshold (authoritative), or a char-based token estimate of the derived
-        context ``msgs`` doing so (covers resumed sessions, missing usage, and the
-        one-turn race — the last call's usage never includes the turn just added)."""
+        Pure byte comparison, O(1): the window's exact on-disk bytes — no token
+        estimation, no per-event walk. The window itself is a conservative byte
+        estimate (≈128K tokens × 1.5 中文/token × 3 字节/汉字 ≈ 500K), so
+        firing at the full window still leaves real headroom for the completion
+        output."""
         if not self.config.compaction_enabled:
             return False
-        threshold = self.config.llm_context_window - self.config.compaction_reserved
-        if self.last_usage:
-            used = self.last_usage.get("total_tokens")
-            if used and used >= threshold:
-                return True
-        return self.estimate_tokens(msgs) >= threshold
-
-    @staticmethod
-    def estimate_tokens(msgs: list[dict[str, Any]]) -> int:
-        """Cheap token estimate of the derived context. Uses ~3 chars/token (real
-        English/code ratio is ~3-4): deliberately conservative so compaction fires
-        before the window fills. Contrast the tail budget in tail_start_index,
-        which is generous (4 chars/token) to keep as much recent work as possible."""
-        chars = 0
-        for m in msgs:
-            chars += len(m.get("content") or "")
-            chars += len(m.get("reasoning_content") or "")
-            for tc in m.get("tool_calls") or []:
-                chars += len(tc.get("function", {}).get("arguments", ""))
-        return chars // 3
+        return self.log.window_bytes() >= self.config.llm_context_window_bytes
 
     def compact(self) -> bool:
-        """Roll the older durable events into a CompactionEvent; False on no-op.
+        """Roll the whole current window into a CompactionEvent; False on no-op.
 
-        Works uniformly over a fully-loaded EventLog and a lazy LazyEventLog:
-        the tail boundary comes from the log's byte-addressed durable sequence,
-        and the head being summarized is re-materialized under a pin so a lazy
-        log can never drop it mid-compaction (its summary input stays
-        byte-identical to a full load).
-        """
+        Works uniformly over any LazyEventLog (in-memory included): the window
+        is already resident, so compaction reads NO disk. Input = the window's
+        durable events verbatim (the task included on the FIRST compaction,
+        when cpr_start is 0 and the task is still inside the window). After the
+        summary the new CompactionEvent is appended and cpr_start slides to its
+        line's start — the window is now just the new summary, so the
+        summarized history can never re-enter the context."""
         try:
-            events = self.log.events()
-            tail_start = self.log.tail_start_index(self._tail_budget())
-            if tail_start <= self.log.compact_min_tail():
-                return False  # nothing meaningful to compact (only the task + nothing)
-            prev = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
-            # compare against the last compaction's stored tail_start — both are
-            # byte offsets relative to the event region, so the comparison is a
-            # plain number compare (no index lookup needed)
-            if prev is not None and tail_start <= prev.tail_start:
-                return False  # nothing new since the last compaction: don't re-summarize the same head
-            # the summary call can take a while (a long head, a slow model): tell
-            # the UI it started before the first token lands, then stream progress
+            if self.cancel and self.cancel.is_set():
+                return False  # stop requested: don't start a long summary
+            # the input is the WINDOW — the resident events at/after cpr_start
+            # (the task joins on the FIRST compaction, when cpr_start is 0);
+            # resident events before cpr_start are already-summarized history
+            # and never enter a summary again
+            window = [ev for off, ev in self.log.items() if off >= self.log.cpr_start()]
+            # nothing new since the last compaction (the window holds only the
+            # summary line itself, or is empty): never re-summarize the same head
+            if len(window) <= 1:
+                return False
+            # the summary call can take a while (a long window, a slow model):
+            # tell the UI it started before the first token lands, then stream
+            # progress
             self._report_progress(0)
-            with self.log.materialize(0, tail_start):
-                head = self.log.events_before(tail_start)
-                summary, chars = self._summarize(self._serialize(head), self._previous_summary(events))
+            summary, chars = self._summarize(
+                self._serialize(window), self._previous_summary()
+            )
             if not summary:
                 self._report_progress(chars, done=True)
                 return False
-            self.log.append(CompactionEvent(summary=summary, tail_start=tail_start))
+            self.log.append(CompactionEvent(summary=summary))
+            # slide the window to the new summary line's start (header write)
+            self.log.set_cpr_start(self.log.items()[-1][0])
             return True
         except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
-            print(f"[clutch] compaction failed: {e}", file=sys.stderr)
+            # LlmError is a dataclass whose str() is empty (Exception args never
+            # set); log the .message field so failures are diagnosable
+            print(f"[clutch] compaction failed: {getattr(e, 'message', '') or e}", file=sys.stderr)
             self._report_progress(0, done=True)
             return False
 
-    def _tail_budget(self) -> int:
-        """Tail token budget: configured, else a fraction of the usable window
-        (deliberately generous vs the 3 chars/token in estimate_tokens: the tail
-        is what survives, so as much of it as possible)."""
-        budget = self.config.compaction_tail_tokens
-        if budget is None:
-            usable = self.config.llm_context_window - self.config.compaction_reserved
-            budget = min(15_000, max(2_000, usable // 4))
-        return budget
-
-    def tail_start_index(self, events: list[Any]) -> int:
-        """Byte offset (relative to the event region) where the preserved recent
-        tail begins for the tail budget. Delegates to the log's own byte-addressed
-        sequence (accepted for call-compat; identical to walking ``events`` for a
-        fully loaded log). Transient streaming deltas are skipped so the offset is
-        stable when the log is persisted and reopened. Clutch turns share the task
-        user message, so the tail is split at an assistant-turn boundary;
-        everything before it is summarized away."""
-        return self.log.tail_start_index(self._tail_budget())
-
-    def _previous_summary(self, events: list[Any]) -> str:
-        comp = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
+    def _previous_summary(self) -> str:
+        comp = self.log.last_compaction()
         return comp.summary if comp else ""
 
-    def _serialize(self, events: list[Any]) -> str:
-        """Compact transcript of the old portion, for the summary prompt."""
+    def _serialize(self, events: list[Event]) -> str:
+        """Compact transcript of the window, for the summary prompt.
+
+        Capped to fit the model's own window TOGETHER with the previous summary
+        and the template, keeping the MOST RECENT part of the window (cut at a
+        line boundary). The cap is dynamic: a big previous summary shrinks the
+        head budget automatically. In steady state the window is bounded by the
+        context window itself and the cap never bites — it only defends the
+        FIRST compaction, whose input is the whole (multi-MB) history.
+        An uncapped head is exactly what made every compaction fail before: the
+        API rejected the multi-MB prompt, the window never shrank, and the UI
+        flashed "compressing context" on every turn.
+        """
         lines = []
         for ev in events:
             if isinstance(ev, UserMessageEvent):
@@ -180,8 +164,13 @@ class Compactor:
                     out = out[:500] + "\n[truncated]"
                 lines.append(f"[Tool result]: {out}")
         text = "\n".join(lines)
-        cap = max(8_000, (self.config.llm_context_window - self.config.compaction_reserved) // 3)
-        return text[-cap:] if len(text) > cap else text
+        cap = self.config.llm_context_window_bytes - len(self._previous_summary().encode("utf-8")) - 8192
+        if len(text.encode("utf-8")) > cap:
+            text = text.encode("utf-8")[-cap:].decode("utf-8", "replace")
+            nl = text.find("\n")
+            if nl != -1:
+                text = text[nl + 1:]  # drop the partial first line
+        return text
 
     def _summarize(self, history: str, previous: str) -> tuple[str, int]:
         llm = self.compactor_llm
@@ -195,6 +184,9 @@ class Compactor:
         chars = 0
         reported = 0
         for ev in llm.stream([{"role": "user", "content": prompt}], tools=None):
+            # stop must interrupt the summary call, not just the main turn
+            if self.cancel and self.cancel.is_set():
+                return "", chars
             if ev["type"] == "text":
                 parts.append(ev["delta"])
                 chars += len(ev["delta"])

@@ -35,9 +35,16 @@ function startExecBridge() {
           return;
         }
         const timeoutMs = Number(body.timeout) || 60000;
+        const binary = !!body.binary;
         const { remoteExec } = require("./ssh-tunnel");
-        const r = await remoteExec(command, timeoutMs);
-        respond(200, { code: r.code, stdout: r.stdout || "", stderr: r.stderr || "" });
+        const r = await remoteExec(command, timeoutMs, binary);
+        if (binary) {
+          // raw-byte read: return base64 (encoded CLIENT-side) so the remote
+          // never needs its own base64 — only an sshd shell
+          respond(200, { code: r.code, stdout_b64: r.stdout_b64 || "", stderr: r.stderr || "" });
+        } else {
+          respond(200, { code: r.code, stdout: r.stdout || "", stderr: r.stderr || "" });
+        }
       } catch (e) {
         const msg = String((e && e.message) || e);
         respond(msg === "not connected" ? 503 : 500, { error: msg });

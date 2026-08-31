@@ -29,9 +29,15 @@ cd "$ROOT"
 mkdir -p "$(dirname "$OUT")"
 # dist/ holds both binaries (electron-builder's extraResources read from
 # ../dist/); OUT keeps its original meaning: the agent-server path (usually
-# dist/agent-server itself, or an external copy target).
+# dist/agent-server itself, or an external copy target). The tunnel uploads
+# BOTH binaries (supervisor + session child) to the remote, so when OUT is an
+# external copy target, deliver the supervisor next to it under a sibling
+# version-keyed name (agent-supervisor-<same-suffix>).
 if [ "$(realpath "$OUT")" != "$(realpath "$ROOT/dist/agent-server")" ]; then
+  SUPERVISOR_OUT="$(dirname "$OUT")/$(basename "$OUT" | sed 's/^agent-server/agent-supervisor/')"
   cp dist/agent-server "$OUT"
+  cp dist/agent-supervisor "$SUPERVISOR_OUT"
+  chmod +x "$SUPERVISOR_OUT"
 fi
 chmod +x "$OUT"
 # remove PyInstaller scratch dirs, but never $OUT (it may live inside dist/)
@@ -39,4 +45,4 @@ rm -rf build agent-server.spec agent-supervisor.spec
 if [ "$(realpath "$OUT")" != "$(realpath "$ROOT/dist/agent-server")" ]; then
   rm -rf dist
 fi
-echo "bundle written: $OUT"
+echo "bundle written: $OUT (+ supervisor sibling)"

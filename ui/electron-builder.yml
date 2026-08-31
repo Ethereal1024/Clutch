@@ -21,7 +21,6 @@ directories:
 # exclude dev-only files from the app bundle
 files:
   - "!dev.sh"
-  - "!ssh-tunnel.test.js"
 
 # the bundled backend binaries (built by scripts/build-server-bundle.sh;
 # both live in dist/ — agent-server and agent-supervisor)

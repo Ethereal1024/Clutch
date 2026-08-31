@@ -2,7 +2,7 @@
 
 "Append a JSONL line to the .clc, optionally routed through a writer callback
 (the SSH degradation layer's exec bridge)" is a single piece of knowledge shared
-by the event log (EventLog.append), the memory store (MemoryStore._append) and
+by the event log (LazyEventLog.append), the memory store (MemoryStore._append) and
 the project writers. Local callers pass writer=None and get a plain
 open(path, "a"); remote callers pass workspace.append_line so the append happens
 on the remote host.

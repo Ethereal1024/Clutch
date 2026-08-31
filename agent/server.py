@@ -20,42 +20,34 @@ gets a private queue. One run at a time; Stop sets a cancel flag checked by the 
 from __future__ import annotations
 
 import argparse
-import atexit
 import dataclasses
 import json
-import os
 import queue
 import sys
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .base import BaseServer, Broadcaster, RunState
-from .config import (
-    PROVIDER_PRESETS,
-    REASONING_EFFORT_LEVELS,
-    Config,
-    active_profile,
-    normalize_settings,
-    provider_preset,
-    resolve_llm_endpoint,
-)
+from .config import REASONING_EFFORT_LEVELS, Config, flatten_settings
+from .core.project_lock import ProjectLock, ProjectOpenConflict
 from .events import (
-    DURABLE_TYPES,
     Event,
     FinalEvent,
     PermissionRequestEvent,
     StateUpdateEvent,
     event_to_json,
 )
-from .core.lazy import LazyEventLog
-from .core.project_lock import ProjectLock, ProjectOpenConflict
 from .project import Project, create_project, open_project_lazy
 from .tools.transport import SshTransport
 from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
+
+# a client hanging up mid-SSE surfaces as one of these on the socket write; any
+# of them means "stream over" — end cleanly, never let socketserver print a
+# BrokenPipeError traceback
+_SSE_ERR = (BrokenPipeError, ConnectionResetError, ValueError)
 
 
 def _settings_path() -> Path:
@@ -158,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/stop":
             self._stop()
         elif parsed.path == "/api/settings":
-            self._settings()
+            self._settings_post()
         elif parsed.path == "/api/permission/respond":
             self._permission_respond()
         elif parsed.path == "/api/workspace/revert":
@@ -278,60 +270,13 @@ class Handler(BaseHTTPRequestHandler):
                 gate.resolve(rid, False)
         self._json({"status": "cancelling"})
 
-    def _settings(self) -> None:
-        """Save/switch/delete named API profiles (multi-API settings).
-
-        Three verbs, all on ~/.clutch/settings.json via the profiles map:
-          * save:   {profile_name?, provider?, base_url?, model?, api_key?}
-                    updates that profile (default: the active one) and activates
-                    it — the endpoint the next LLM call uses.
-          * switch: {activate: name} changes the active profile only.
-          * delete: {delete: name} removes a saved profile.
-        Legacy flat files are migrated to a single "default" profile on read.
-        """
+    def _settings_post(self) -> None:
+        """Save the flat LLM settings (base_url / model / api_key /
+        reasoning_effort) and apply them to the live server config."""
         body = self._read_body()
         if body is None:
             return self._json({"error": "bad json body"}, status=400)
 
-        delete_name = (body.get("delete") or "").strip()
-        if delete_name:
-            norm = normalize_settings(load_settings())
-            profs = norm.setdefault("profiles", {})
-            if delete_name in profs:
-                del profs[delete_name]
-                if norm.get("active") == delete_name:
-                    norm["active"] = next(iter(profs), "")
-            save_settings(norm)
-            return self._json({"status": "ok"})
-
-        activate_only = (body.get("activate") or "").strip()
-        saving = any(body.get(k) for k in ("api_key", "provider", "model", "base_url")) or (
-            "reasoning_effort" in body  # explicit empty value = clear the knob
-        )
-        if activate_only and not saving:
-            norm = normalize_settings(load_settings())
-            if activate_only not in (norm.get("profiles") or {}):
-                return self._json({"error": f"unknown profile: {activate_only}"}, status=400)
-            norm["active"] = activate_only
-            save_settings(norm)
-            self._apply_profile((norm["profiles"] or {}).get(activate_only) or {})
-            return self._json({"status": "ok"})
-        if not saving:
-            return self._json({"error": "nothing to save"}, status=400)
-
-        # The provider name selects the default endpoint; a provider without an
-        # explicit base_url/model inherits the provider's preset (e.g. zhipu ->
-        # https://open.bigmodel.cn/api/paas/v4 + glm-4-flash). This is what
-        # un-hardcodes the LLM URL: the endpoint is data, not a deepseek literal.
-        provider = (body.get("provider") or "").strip() or self._cfg.provider
-        if provider not in PROVIDER_PRESETS:
-            return self._json(
-                {
-                    "error": f"unsupported provider: {provider}; "
-                    f"choose from {', '.join(sorted(PROVIDER_PRESETS))}",
-                },
-                status=400,
-            )
         reasoning_effort = (body.get("reasoning_effort") or "").strip()
         if reasoning_effort and reasoning_effort not in REASONING_EFFORT_LEVELS:
             return self._json(
@@ -340,70 +285,44 @@ class Handler(BaseHTTPRequestHandler):
             )
         base_url = (body.get("base_url") or "").strip()
         model = (body.get("model") or "").strip()
-        if not base_url or not model:
-            p_base, p_model = provider_preset(provider)
-            base_url = base_url or p_base or self._cfg.base_url
-            model = model or p_model or self._cfg.model
         api_key = (body.get("api_key") or "").strip()
-        name = (body.get("profile_name") or "").strip() or "default"
+        if not any((base_url, model, api_key)) and "reasoning_effort" not in body:
+            return self._json({"error": "nothing to save"}, status=400)
 
         with self._state.lock:
             if api_key:
                 self._state.api_key = api_key
-            self._cfg.provider = provider
-            self._cfg.base_url = base_url
-            self._cfg.model = model
+            if base_url:
+                self._cfg.base_url = base_url
+            if model:
+                self._cfg.model = model
             # empty value clears the knob (provider default); None = unset
-            self._cfg.llm_reasoning_effort = reasoning_effort or None
-        norm = normalize_settings(load_settings())
-        profs = norm.setdefault("profiles", {})
-        entry = dict(profs.get(name) or {})
-        entry.update({"provider": provider, "base_url": base_url, "model": model})
-        if reasoning_effort:
-            entry["reasoning_effort"] = reasoning_effort
-        else:
-            entry.pop("reasoning_effort", None)  # empty = clear the knob
+            if "reasoning_effort" in body:
+                self._cfg.llm_reasoning_effort = reasoning_effort or None
+        saved = flatten_settings(load_settings())
+        if base_url:
+            saved["base_url"] = base_url
+        if model:
+            saved["model"] = model
         if api_key:
-            entry["api_key"] = api_key
-        profs[name] = entry
-        norm["active"] = name  # saving a profile means "use it from now on"
-        save_settings(norm)
+            saved["api_key"] = api_key
+        if "reasoning_effort" in body:
+            if reasoning_effort:
+                saved["reasoning_effort"] = reasoning_effort
+            else:
+                saved.pop("reasoning_effort", None)  # empty = clear the knob
+        save_settings(saved)
         self._json({"status": "ok"})
-
-    def _apply_profile(self, prof: dict) -> None:
-        """Point the live server config at a saved profile (switch verb)."""
-        with self._state.lock:
-            if prof.get("api_key"):
-                self._state.api_key = prof["api_key"]
-            self._cfg.provider = prof.get("provider") or self._cfg.provider
-            self._cfg.base_url = prof.get("base_url") or self._cfg.base_url
-            self._cfg.model = prof.get("model") or self._cfg.model
-            self._cfg.llm_reasoning_effort = prof.get("reasoning_effort") or None
 
     def _settings_get(self) -> None:
         """Current LLM endpoint config for the settings modal (no credentials)."""
-        norm = normalize_settings(load_settings())
-        profs = norm.get("profiles") or {}
-        active = norm.get("active") or ""
-        prof = profs.get(active) or {}
+        saved = flatten_settings(load_settings())
         self._json(
             {
-                "active": active,
-                "profiles": [
-                    {
-                        "name": n,
-                        "provider": p.get("provider", ""),
-                        "model": p.get("model", ""),
-                        "base_url": p.get("base_url", ""),
-                        "reasoning_effort": p.get("reasoning_effort", ""),
-                        "has_api_key": bool(p.get("api_key")),
-                    }
-                    for n, p in profs.items()
-                ],
-                "provider": self._cfg.provider,
-                "model": self._cfg.model,
-                "base_url": self._cfg.base_url,
-                "has_api_key": bool(self._state.api_key or self._cfg.api_key or prof.get("api_key")),
+                "base_url": self._cfg.base_url or saved.get("base_url", ""),
+                "model": self._cfg.model or saved.get("model", ""),
+                "reasoning_effort": self._cfg.llm_reasoning_effort or saved.get("reasoning_effort", ""),
+                "has_api_key": bool(self._state.api_key or self._cfg.api_key or saved.get("api_key")),
             }
         )
 
@@ -436,6 +355,9 @@ class Handler(BaseHTTPRequestHandler):
             self._state.set_backend("ssh", bridge, root)
         else:
             self._state.set_backend("local")
+        # a mode switch invalidates the window's project context (set_backend
+        # clears it): drop any locks it still holds so they never linger
+        ProjectLock.release_all()
         self._json({"status": "ok"})
 
     def _project_for_sse(self, project_q: str | None) -> Project | None:
@@ -469,27 +391,29 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # always reset the UI status first so a stale "running" never locks the
             # taskbar after a project switch or an interrupted run
-            self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
-            # replay the requested project's history first (only durable display
-            # events — streaming deltas are transient and never replayed).
-            # Each SSE subscriber asks for its own project (per-window isolation);
-            # replay=False skips it when the UI just rendered the history itself
-            # via the open NDJSON stream. A lazy project replays its resident
-            # events with their file seqs so the UI can restore the scroll-up
-            # pill and keep paging; the "history" info line carries the honest
-            # on-disk older count.
-            if replay:
-                project = self._project_for_sse(project_q)
-                if project is not None:
-                    log = project.log
-                    if isinstance(log, LazyEventLog):
-                        self._write_sse_raw({"type": "history", "older": log.older_bytes()})
-                        for seq, ev in log.items():
-                            self._write_sse(ev, seq=seq)
-                    else:
-                        for ev in project.events():
-                            if ev.type in DURABLE_TYPES:
-                                self._write_sse(ev)
+            try:
+                self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
+                # replay the requested project's history first (only durable display
+                # events — streaming deltas are transient and never replayed).
+                # Each SSE subscriber asks for its own project (per-window isolation);
+                # replay=False skips it when the UI just rendered the history itself
+                # via the open NDJSON stream. A lazy project replays its resident
+                # events with their byte offsets so the UI can restore the scroll-up
+                # pill and keep paging; the "history" info line carries the honest
+                # on-disk older count.
+                if replay:
+                    project = self._project_for_sse(project_q)
+                    if project is not None:
+                        log = project.log
+                        # every project is a lazy log: replay the resident events
+                        # with their byte offsets so the UI can restore the scroll-up
+                        # pill and keep paging; the history line carries the honest
+                        # on-disk older count
+                        self._write_sse_raw({"type": "history", "older": max(0, log.cpr_start())})
+                        for off, ev in log.items():
+                            self._write_sse(ev, offset=off)
+            except _SSE_ERR:
+                return  # client went away mid-status/replay: nothing left to stream
             # then live events
             while True:
                 try:
@@ -499,20 +423,23 @@ class Handler(BaseHTTPRequestHandler):
                         continue  # another window's run: don't leak its events here
                     self._write_sse(ev)
                 except queue.Empty:
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
-                except BrokenPipeError:
+                    try:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                    except _SSE_ERR:
+                        break
+                except _SSE_ERR:
                     break
         finally:
             self._broadcaster.unsubscribe(q)
 
-    def _write_sse(self, ev: Event, seq: int | None = None) -> None:
-        """Emit one SSE event; with ``seq`` the payload is {seq, event} (the lazy
-        replay/open wire shape), otherwise the bare event JSON. event_to_json
+    def _write_sse(self, ev: Event, offset: int | None = None) -> None:
+        """Emit one SSE event; with ``offset`` the payload is {offset, event} (the
+        lazy replay/open wire shape), otherwise the bare event JSON. event_to_json
         already returns a serialized string, so only the wrapped shape is
         re-serialized (no double encoding)."""
-        if seq is not None:
-            payload = json.dumps({"seq": seq, "event": json.loads(event_to_json(ev))})
+        if offset is not None:
+            payload = json.dumps({"offset": offset, "event": json.loads(event_to_json(ev))})
         else:
             payload = event_to_json(ev)
         self.wfile.write(f"data: {payload}\n\n".encode())
@@ -684,7 +611,14 @@ class Handler(BaseHTTPRequestHandler):
         # without parsing the NDJSON stream for the error line.
         lock = None
         if not read_only:
-            lock = ProjectLock.acquire(str(full), ws)
+            # one window holds the write lock on at most its CURRENTLY-open
+            # project: opening a different project releases the previous one so
+            # it never lingers behind a moved-away window
+            prev = self._state.project
+            if prev is not None and prev.lock is not None and str(prev.path) != str(full):
+                ProjectLock.release(prev.lock)
+                prev.lock = None
+            lock = ProjectLock.acquire(str(full))
             if lock is None:
                 return self._json(
                     {"error": "project is open in another window", "code": "project_open_conflict"},
@@ -730,32 +664,30 @@ class Handler(BaseHTTPRequestHandler):
                 }
             }
         )
-        # display projection: only durable final events (streaming deltas are
-        # transient and never replayed). A lazily-opened project has only the
-        # raw task + the preserved tail resident; every line carries its byte
-        # offset (relative to the event region) so the UI can page the rest via
-        # /api/history. "older" is the honest count of event-region BYTES still
-        # on disk before the loaded range.
-        display = [e for e in project.events() if e.type in DURABLE_TYPES]
+        # every project is a lazy log: ONLY the model WINDOW (everything since
+        # the newest compaction line) is resident at open; every line carries
+        # its byte offset (relative to the event region) so the UI can page the
+        # rest (the raw task included) via /api/history.
+        # "older" is the honest count of event-region BYTES still on disk
+        # before the loaded window (0 once everything is materialized). The
+        # paging channel is a pure disk read — it never touches the resident
+        # log, so history browsing is fully decoupled from the model context.
         log = project.log
-        if isinstance(log, LazyEventLog):
-            older = log.older_bytes()
-            pairs = log.items()
-        else:
-            older = 0
-            pairs = list(enumerate(display))
-        emit({"count": len(display), "older": older})
+        pairs = log.items()
+        emit({"count": len(pairs), "older": max(0, log.cpr_start())})
         for off, ev in pairs:
             emit({"offset": off, "event": json.loads(event_to_json(ev))})
         emit({"done": True})
 
     def _history(self) -> None:
-        """Scroll-up paging for a lazily-opened project: materialize the durable
-        events in the byte range before ``before`` (relative offsets, exclusive,
-        max ``limit`` bytes) and return them with their offsets. The UI prepends
-        the page and trusts the response's server-side ``older`` count (honest
-        even after LRU eviction dropped pages the UI already rendered; a
-        reconnect resets the pill to it)."""
+        """Scroll-up paging for a lazily-opened project: PURE DISK read of the
+        durable events in the byte range before ``before`` (relative offsets,
+        exclusive, max ``limit`` bytes) and return them with their offsets. The
+        UI prepends the page and trusts the response's server-side ``older``
+        count (honest even after a reconnect dropped pages the UI already
+        rendered). The page never enters the resident log: history browsing is
+        decoupled from the model context (which is only the window since the
+        newest compaction line)."""
         qs = parse_qs(urlparse(self.path).query)
         try:
             before = int(qs.get("before", ["0"])[0])
@@ -764,15 +696,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad query"}, status=400)
         project = self._state.project
         log = project.log if project is not None else None
-        if log is None or not isinstance(log, LazyEventLog):
+        if log is None:
             return self._json({"events": [], "older": 0})
         lo = max(0, before - limit)
-        lo = max(lo, log.task_end)  # never re-read the raw task
-        pairs = log.materialize_range(lo, before)
+        pairs = log.read_page(lo, before)
         self._json(
             {
                 "events": [{"offset": off, "event": json.loads(event_to_json(ev))} for off, ev in pairs],
-                "older": log.older_bytes(),
+                "older": max(0, lo),
             }
         )
 
@@ -900,40 +831,12 @@ def build(
     return srv
 
 
-def _start_parent_watchdog() -> None:
-    """When spawned as a session child (CLUTCH_SUPERVISOR_PID set), never
-    outlive the supervisor: if our parent PID changes (the supervisor died,
-    e.g. SIGKILL/crash — a clean exit already kills us), commit suicide so a
-    session can never leak. Kernel releases our flock on exit, so no TTL."""
-    raw = os.environ.get("CLUTCH_SUPERVISOR_PID")
-    if not raw:
-        return  # plain/manual server: no supervisor to watch
-    try:
-        expected = int(raw)
-    except ValueError:
-        return
-
-    def watch() -> None:
-        while True:
-            time.sleep(5)
-            if os.getppid() != expected:
-                os._exit(0)  # noqa: PLR1722 - deliberate hard exit, no atexit
-
-    threading.Thread(target=watch, daemon=True).start()
-
-
 def main() -> int:
     defaults = Config()
     parser = argparse.ArgumentParser(prog="clutch-server")
     parser.add_argument("--host", default=defaults.host, help="bind address (0.0.0.0 to expose to other devices)")
     parser.add_argument("--port", type=int, default=defaults.port)
     parser.add_argument("--model", default=None)
-    parser.add_argument(
-        "--provider",
-        default=None,
-        help=f"LLM provider preset ({', '.join(sorted(PROVIDER_PRESETS))}); "
-        "fills the default base URL/model when those are not given",
-    )
     parser.add_argument(
         "--base-url",
         default=None,
@@ -952,61 +855,47 @@ def main() -> int:
         config.verify_command = args.verify
 
     # LLM endpoint resolution — precedence: CLI args > env > GUI-saved settings
-    # > defaults, with the provider preset filling unset base_url/model (see
-    # resolve_llm_endpoint). This is what un-hardcodes the endpoint: switching
-    # provider (deepseek/zhipu/...) moves the whole URL+model, not just the
-    # model name.
-    saved = load_settings()
-    # Multi-API: only the currently active profile participates in resolution;
-    # the rest stay saved and can be switched back to via /api/settings.
-    prof = active_profile(saved)
-    try:
-        config.provider, config.base_url, config.model = resolve_llm_endpoint(
-            cli={"provider": args.provider, "base_url": args.base_url, "model": args.model},
-            env=os.environ,
-            saved=prof,
-            defaults=defaults,
-        )
-    except ValueError as e:
-        print(f"[clutch-server] {e}", file=sys.stderr)
-        return 2
-    # API key: env > active profile > config default
-    api_key = os.environ.get("CLUTCH_API_KEY") or prof.get("api_key") or config.api_key
+    # (flat ~/.clutch/settings.json; legacy profile-map files migrate on read)
+    saved = flatten_settings(load_settings())
     if args.base_url:
+        config.base_url = args.base_url
+    elif not config.base_url:
+        config.base_url = saved.get("base_url", "")
+    if args.model:
+        config.model = args.model
+    elif not config.model:
+        config.model = saved.get("model", "")
+    # API key: env > saved settings > config default
+    config.api_key = config.api_key or saved.get("api_key")
+    # reasoning_effort: env-less; saved settings only
+    if not config.llm_reasoning_effort:
+        config.llm_reasoning_effort = saved.get("reasoning_effort") or None
+    api_key = config.api_key
+    if args.base_url and not api_key:
         # the client-side proxy injects the real key; the server only needs a
         # placeholder. No env fallback: the key comes from the UI settings
         # (state.api_key) or an explicit config.api_key.
-        if not api_key:
-            api_key = "proxy"
-    config.api_key = api_key
-    # reasoning_effort: active profile only (same precedence as the endpoint)
-    config.llm_reasoning_effort = prof.get("reasoning_effort") or None
+        api_key = "proxy"
 
     broadcaster = Broadcaster()
     state = RunState()
     # restore the settings persisted by the GUI (api key + LLM endpoint)
     state.api_key = api_key
 
-    _start_parent_watchdog()
-
     srv = build(config, broadcaster, state)
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.
     bound_port = srv.server_address[1]
-    # resolved LLM endpoint (provider/model/base_url), for diagnosing which
-    # provider a session actually targets; the label keeps the line from ever
-    # matching the port banner regex
+    # resolved LLM endpoint, for diagnosing which endpoint a session targets;
+    # the label keeps the line from ever matching the port banner regex
     print(
-        f"[clutch-server] LLM: provider={config.provider} model={config.model} "
-        f"base_url={config.base_url}",
+        f"[clutch-server] LLM: model={config.model} base_url={config.base_url}",
         flush=True,
     )
     print(f"[clutch-server] http://127.0.0.1:{bound_port}  (API only; start the UI separately)", flush=True)
-    # best effort: drop remote lock-files this process still holds on exit
-    # (only reachable while the ssh tunnel is alive; a dead bridge is fine —
-    # the remote TTL reclaims the lock later)
-    atexit.register(ProjectLock.release_all_remote)
+    # No lock cleanup on exit is needed: every project lock is a flock in the
+    # local OS temp dir, and the kernel releases it when this process dies.
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

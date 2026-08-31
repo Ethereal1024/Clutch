@@ -22,10 +22,8 @@ const UPSTREAM_TIMEOUT_MS = 90000;
 let server = null;
 let agent = null;
 
-// Read ~/.clutch/settings.json, resolving to the active profile's config.
-// New format: {"profiles": {name: {provider, base_url, model, api_key}},
-// "active": name}. Legacy flat {"provider", "base_url", "model", "api_key"}
-// files are returned as-is (the whole object IS the one profile).
+// Read ~/.clutch/settings.json, resolving to the flat endpoint config.
+// Legacy {profiles, active} maps resolve to the active profile's values.
 function readSettingsFile() {
   try {
     const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));

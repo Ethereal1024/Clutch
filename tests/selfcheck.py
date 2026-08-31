@@ -1,27 +1,25 @@
 """Self-check: validates core logic without needing the LLM.
 
-Run: uv run python -m agent.selfcheck
+Run: uv run python -m tests.selfcheck
 Covers: parsing, message derivation, workspace path safety, tool execution,
 doom-loop detection, verification gate.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import sys
 import tempfile
 
-from .config import Config
-from .core.compaction import Compactor
-from .core.context import derive_messages
-from .core.parse import ParseError, parse_arguments
-from .core.terminate import Terminator
-from .events import (
+from agent.config import Config
+from agent.core.context import derive_messages
+from agent.core.lazy import LazyEventLog
+from agent.core.parse import ParseError, parse_arguments
+from agent.core.terminate import Terminator
+from agent.events import (
     DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
-    EventLog,
     StepStartEvent,
     TextDeltaEvent,
     ToolCallEvent,
@@ -30,36 +28,10 @@ from .events import (
     event_from_dict,
     event_to_json,
 )
-from .skills import load_skill_library
-from .testsupport import check
-from .tools.registry import ToolRegistry, build_default_tools
-from .tools.workspace import LocalWorkspace
-
-
-@contextlib.contextmanager
-def _lazy_forced():
-    """Force the lazy open path in tests: the synthetic .clc is far below the
-    real byte threshold."""
-    from .core import lazy as lazy_mod
-
-    old = lazy_mod._LAZY_MIN_BYTES
-    lazy_mod._LAZY_MIN_BYTES = 64
-    try:
-        yield
-    finally:
-        lazy_mod._LAZY_MIN_BYTES = old
-
-
-def _event_region_base(path: Path) -> int:
-    """Absolute byte offset of the first durable line (the raw task)."""
-    from .core.lazy import _make_reader
-
-    read, total = _make_reader(path, None)
-    head = read(0, min(total, 1 << 16))
-    from .project import _event_region_start
-
-    base = _event_region_start(head)
-    return base or 0
+from agent.skills import load_skill_library
+from agent.tools.registry import ToolRegistry, build_default_tools
+from agent.tools.workspace import LocalWorkspace
+from tests.testsupport import check
 
 
 def main() -> None:
@@ -74,7 +46,7 @@ def main() -> None:
         check(True, "parse_arguments rejects invalid json")
 
     # 2. message derivation: assistant(tool_calls) -> paired tool result
-    log = EventLog()
+    log = LazyEventLog.in_memory()
     log.append(AssistantMessageEvent(content="", tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}]))
     log.append(ToolResultEvent(tool_call_id="c1", content="file content"))
     msgs = derive_messages(log, config, "test")
@@ -84,7 +56,7 @@ def main() -> None:
 
     # 2b. dangling tool_calls (crash/connection drop left the .clc mid-batch) must not
     # reach the API: the incomplete assistant block is stripped, the user turn survives
-    log = EventLog()
+    log = LazyEventLog.in_memory()
     log.append(
         AssistantMessageEvent(
             content="",
@@ -105,7 +77,7 @@ def main() -> None:
     check(msgs[-1] == {"role": "user", "content": "continue"}, "user turn survives dangling block")
 
     # 2c. assistant with real text + dangling tool_calls keeps the text, drops the calls
-    log = EventLog()
+    log = LazyEventLog.in_memory()
     log.append(
         AssistantMessageEvent(
             content="I started exploring",
@@ -121,7 +93,7 @@ def main() -> None:
 
     # 2d. dangling block with empty content + only reasoning must NOT leak a
     # reasoning-only assistant (API rejects: "content or tool_calls must be set")
-    log = EventLog()
+    log = LazyEventLog.in_memory()
     log.append(
         AssistantMessageEvent(
             content="",
@@ -138,31 +110,36 @@ def main() -> None:
     check(valid_assistants, "every surviving assistant has content or tool_calls")
 
     # 2e. compaction: the newest CompactionEvent's summary becomes the head; only
-    # the recent tail (from tail_start) is projected, old turns are omitted
-    log = EventLog()
+    # the events AFTER it (the model window) are projected, old turns are omitted
+    log = LazyEventLog.in_memory()
     log.append(UserMessageEvent(content="old task"))
     log.append(AssistantMessageEvent(content="old turn done"))
-    tail_start = log._running  # byte offset of the next durable line (the recent tail's start)
+    log.append(CompactionEvent(summary="old work summarized"))
     log.append(UserMessageEvent(content="recent task"))
     log.append(AssistantMessageEvent(content="recent answer"))
-    log.append(CompactionEvent(summary="old work summarized", tail_start=tail_start))
     msgs = derive_messages(log, config, "test")
     head = [m for m in msgs if m["role"] == "user" and "Previous conversation summary" in m.get("content", "")]
     check(len(head) == 1 and "old work summarized" in head[0]["content"], "compaction summary injected as head")
-    check(msgs[-1] == {"role": "assistant", "content": "recent answer"}, "tail kept after the compaction head")
+    check(msgs[-1] == {"role": "assistant", "content": "recent answer"}, "window kept after the compaction head")
     check(
         not any(m["role"] == "assistant" and m.get("content") == "old turn done" for m in msgs),
-        "pre-tail turns omitted by compaction",
+        "pre-window turns omitted by compaction",
     )
 
-    # 2e2. after compaction, the files the model was working on are listed so it
-    # re-reads them instead of writing their content from the summary's memory
-    log2 = EventLog()
+    # 2e2. when the window (after the newest compaction line) contains files the
+    # model worked on, they are listed so it re-reads them instead of writing
+    # their content from the summary's memory
+    log2 = LazyEventLog.in_memory()
     log2.append(UserMessageEvent(content="task"))
     log2.append(AssistantMessageEvent(content="old work"))
-    log2.append(ToolCallEvent(name="read_file", arguments='{"path": "a.py"}', tool_call_id="c0"))
-    tail_start2 = len(log2.events())
-    log2.append(ToolCallEvent(name="write_file", arguments='{"path": "a.py", "content": "x"}', tool_call_id="c1"))
+    log2.append(CompactionEvent(summary="s"))
+    log2.append(
+        ToolCallEvent(
+            name="write_file",
+            arguments='{"path": "a.py", "content": "x"}',
+            tool_call_id="c1",
+        )
+    )
     log2.append(
         ToolCallEvent(
             name="edit_file",
@@ -170,7 +147,6 @@ def main() -> None:
             tool_call_id="c2",
         )
     )
-    log2.append(CompactionEvent(summary="s", tail_start=tail_start2))
     msgs2 = derive_messages(log2, config, "test")
     notes = [m for m in msgs2 if m["role"] == "user" and "Conversation compacted" in m.get("content", "")]
     check(
@@ -178,58 +154,38 @@ def main() -> None:
         "compaction note lists the working files to re-read",
     )
 
-    # 2h. tail_start is a BYTE offset into the DURABLE sequence. Transient
-    # streaming deltas live only in the in-memory log and are never persisted,
-    # so they never occupy byte offsets — a reopened (durable-only) log resolves
-    # the same boundary as the live one.
-    # 2h1: transients interleaved in a live log must not shift the durable bytes
-    live = EventLog()
+    # 2h. the model window is the events after the newest compaction line; a
+    # reopened (durable-only) log derives the same context as the live one —
+    # transient streaming deltas never enter the window.
+    live = LazyEventLog.in_memory()
     live.append(UserMessageEvent(content="task"))
     live.append(TextDeltaEvent(content="x"))
     live.append(AssistantMessageEvent(content="work a"))
+    live.append(CompactionEvent(summary="mid summary"))
     live.append(StepStartEvent())
     live.append(UserMessageEvent(content="recent"))
     live.append(AssistantMessageEvent(content="recent work"))
-    tail = Compactor(Config(compaction_tail_tokens=1), live, None).tail_start_index(live.events())
     durable = [e for e in live.events() if e.type in DURABLE_TYPES]
-    check(tail == live._offsets[-1],
-          "tail_start is the last durable event's byte offset (transients never shift it)")
+    msgs_live = derive_messages(live, config, "test")
+    check(msgs_live[-1] == {"role": "assistant", "content": "recent work"},
+          "window = the events after the newest summary line")
     check(
-        durable[-1].type == "assistant_message" and durable[-1].content == "recent work",
-        "durable tail starts at the preserved recent turn",
+        not any(m["role"] == "assistant" and m.get("content") == "work a" for m in msgs_live),
+        "pre-window work stays summarized away",
     )
-    # 2h2: persist the durable events and reopen — the same byte tail still works
-    reopened = EventLog()
+    # persist the durable events and reopen — the same window derives the same context
+    reopened = LazyEventLog.in_memory()
     for line in (event_to_json(e) for e in durable):
         reopened.append(event_from_dict(json.loads(line)))
-    reopened.append(CompactionEvent(summary="s", tail_start=tail))
-    rmsgs = derive_messages(reopened, Config(), "t")
     check(
-        any(m["role"] == "assistant" and m.get("content") == "recent work" for m in rmsgs),
-        "reopen keeps the recent tail (index stable across persistence)",
-    )
-    # 2h3: a stale out-of-range tail_start (older .clc) is clamped to the
-    # compaction's own durable position so post-compaction history is NOT lost
-    stale = EventLog()
-    stale.append(UserMessageEvent(content="task"))
-    stale.append(AssistantMessageEvent(content="old summarized work"))
-    stale.append(CompactionEvent(summary="old work", tail_start=999))
-    stale.append(UserMessageEvent(content="recent turn"))
-    stale.append(AssistantMessageEvent(content="recent answer"))
-    smsgs = derive_messages(stale, Config(), "t")
-    check(
-        any(m["role"] == "assistant" and m.get("content") == "recent answer" for m in smsgs),
-        "stale out-of-range tail_start clamped; recent history preserved",
-    )
-    check(
-        not any(m["role"] == "assistant" and m.get("content") == "old summarized work" for m in smsgs),
-        "pre-compaction work stays summarized away",
+        derive_messages(reopened, Config(), "test") == derive_messages(live, config, "test"),
+        "reopen keeps the same window (index stable across persistence)",
     )
 
     # 2f. no turn-count windowing: a long log projects EVERYTHING (compaction is the
     # only turn-level budget guard), and the raw task copy (index 0) is not sent
     # twice — task.md re-injects it once
-    big = EventLog()
+    big = LazyEventLog.in_memory()
     big.append(UserMessageEvent(content="original task"))
     for i in range(30):
         big.append(AssistantMessageEvent(content=f"turn {i}"))
@@ -248,7 +204,7 @@ def main() -> None:
 
     # 2g. no incremental tool-output folding: everything is preserved verbatim in the
     # derived context (reads accumulate until compaction; only compaction trims)
-    cblog = EventLog()
+    cblog = LazyEventLog.in_memory()
     cblog.append(UserMessageEvent(content="t"))
     cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}]))
     cblog.append(ToolResultEvent(tool_call_id="c1", content="x" * 40))
@@ -384,7 +340,7 @@ def main() -> None:
     # 7. skills: catalog + load_skill (model-chosen; no keyword matching, no hardcoded skill)
     from pathlib import Path
 
-    lib = load_skill_library(Path(__file__).resolve().parent / "skills")
+    lib = load_skill_library(Path(__file__).resolve().parents[1] / "agent" / "skills")
     check(len(lib.skills) >= 1, "skill library loads at least one skill")
     first = lib.names()[0]
     check(lib.get(first) is not None and bool(lib.get(first).content), "skill content retrievable by name")
@@ -393,7 +349,7 @@ def main() -> None:
     check(first in catalog and catalog.startswith("Available skills"), "catalog lists skill names")
 
     disabled = Config(enable_skills=False)
-    sys_off = derive_messages(EventLog(), disabled, "t")[0]["content"]
+    sys_off = derive_messages(LazyEventLog.in_memory(), disabled, "t")[0]["content"]
     check("Available skills (call load_skill" not in sys_off, "no catalog when skills disabled")
     check("load_skill" not in ToolRegistry(build_default_tools(disabled)).names(), "no load_skill tool when disabled")
 
@@ -485,6 +441,32 @@ def main() -> None:
             "write_file path with ~ still asks",
         )
 
+        # an absolute path INSIDE the workspace (the workdir or a subfolder) is
+        # not an escape: writes/runs against it must NOT prompt (regression: the
+        # `^/` heuristic used to ask on every absolute path)
+        sub = Path(wtmp) / "sub"
+        sub.mkdir()
+        check(
+            pe.evaluate("write_file", f'{{"path": "{sub}/new.py"}}', ws) == "allow",
+            "write_file on an absolute path inside the workspace does not prompt",
+        )
+        check(
+            pe.evaluate("run_command", f'{{"command": "cat {sub}/a.txt"}}', ws) == "allow",
+            "run_command on an inside absolute path does not prompt",
+        )
+        check(
+            pe.evaluate("run_command", f'{{"command": "cd {wtmp} && ls"}}', ws) == "allow",
+            "run_command with the workdir as cwd does not prompt",
+        )
+        check(
+            bool(pe.escaped_paths("run_command", '{"command": "cat /etc/passwd"}', ws)),
+            "external absolute path still surfaces an escape",
+        )
+        check(
+            pe.evaluate("write_file", '{"path": "/etc/x"}', ws) == "ask",
+            "write_file on an absolute path outside still asks",
+        )
+
         # 9b. gate: an ask blocks until resolved (no timeout — the model must never
         # see "permission request timed out"); resolve(False) unblocks as a deny
         import threading as _threading
@@ -535,6 +517,24 @@ def main() -> None:
             "escaped_paths flags external tokens in run_command",
         )
         check(pe.escaped_paths("read_file", '{"path": "a.txt"}', ws) == frozenset(), "in-sandbox path has no escapes")
+        # scratch exemption needs a workspace that is NOT itself inside /tmp
+        # (a /tmp workspace's own escapes must stay flagged, see 9c above)
+        with tempfile.TemporaryDirectory(dir=Path.home()) as home_tmp:
+            home_ws = LocalWorkspace(home_tmp)
+            check(
+                pe.escaped_paths(
+                    "run_command",
+                    '{"command": "uv run python -m x >/tmp/out.log 2>&1 && tail -25 /tmp/out.log"}',
+                    home_ws,
+                )
+                == frozenset(),
+                "scratch redirect targets (/tmp, /dev/null) are not escapes",
+            )
+            check(
+                pe.escaped_paths("run_command", '{"command": "echo hi > /tmp/../etc/hack"}', home_ws)
+                == frozenset({Path("/etc/hack")}),
+                "a '..' that walks out of a scratch dir is still an escape",
+            )
         check(
             pe.escaped_paths("write_file", '{"content": "/etc/passwd ~ ../x", "path": "a.txt"}', ws) == frozenset(),
             "content is not scanned for escapes",
@@ -588,15 +588,16 @@ def main() -> None:
             check(False, "auto-allow still permits non-escape rule asks")
 
     # 10. project file: .clc round-trip + protected visibility
-    from agent.project import create_project, open_project
+    from agent.project import create_project, open_project_lazy
 
     with tempfile.TemporaryDirectory() as ptmp:
         proj = create_project(Path(ptmp) / "demo", "demo")
+        check(isinstance(proj.log, LazyEventLog), "create_project opens the lazy log (one code path)")
         proj.log.append(UserMessageEvent(content="hi"))
         proj.log.append(UserMessageEvent(content="there"))
         check(proj.path.exists(), "project .clc created")
         check(proj.workdir == Path(ptmp), "project workdir is parent dir")
-        reloaded = open_project(proj.path)
+        reloaded = open_project_lazy(proj.path)
         check(
             [e.content for e in reloaded.events()] == ["hi", "there"],
             "project round-trips events",
@@ -621,7 +622,7 @@ def main() -> None:
         check("[memories]" in raw, "memories section written to the .clc")
         check("dark theme" in raw and "flask" in raw, "memory lines persisted as JSONL")
 
-        reloaded = open_project(proj.path)
+        reloaded = open_project_lazy(proj.path)
         check(
             reloaded.memories.get("stack is flask") is not None,
             "memories loaded back on reopen",
@@ -644,15 +645,111 @@ def main() -> None:
             "no memory tools without a MemoryStore",
         )
 
-    # 11. lazy .clc loading: a compaction file opens with only the raw task +
-    # the preserved tail materialized; earlier records stay on disk (older_bytes)
-    # and are paged on demand; a stale stored tail_start clamps to the last
-    # compaction's offset and derives the same context as a full load.
-    with tempfile.TemporaryDirectory() as ptmp, _lazy_forced():
-        from .core import lazy as lazy_mod
-        from .core.lazy import LazyEventLog, _make_reader, _tail_scan, parse_durable
-        from .events import _line_bytes
-        from .project import _event_region_start, open_project_lazy
+    # 10c. fixed-width header memory index: FIFO ring keeps the newest 10, the
+    # index line is updated IN PLACE (never appended) so event offsets stay
+    # stable; legacy files (no index) load memories via the section scan and
+    # are NEVER rewritten — conversion is the migration script's job.
+    from agent.events import _line_bytes
+    from agent.memory import _MEMORY_INDEX_PREFIX, parse_index_line
+
+    with tempfile.TemporaryDirectory() as ptmp:
+        proj = create_project(Path(ptmp) / "ring", "ring")
+        for i in range(12):
+            proj.memories.save(f"fact {i}", f"content {i}")
+        idx = [line for line in proj.path.read_text(encoding="utf-8").split("\n")
+               if line.startswith(_MEMORY_INDEX_PREFIX)][0]
+        check(len(idx.encode()) == 189, "index line fixed width 189 bytes")
+        parsed = parse_index_line(idx)
+        check(parsed is not None and parsed[0] == 10 and parsed[1] == 2, "ring full: count=10 head=2 after 12 saves")
+        reopened = open_project_lazy(proj.path)
+        items = reopened.memories.items()
+        check(
+            len(items) == 10 and "fact 0" not in items and "fact 11" in items,
+            "FIFO: oldest evicted, newest kept on reopen",
+        )
+        off_before = reopened.memories._index_offset
+        reopened.memories.save("fact 12", "c12")
+        reopened.memories.save("fact 13", "c13")
+        reopened2 = open_project_lazy(proj.path)
+        items2 = reopened2.memories.items()
+        check(
+            len(items2) == 10 and "fact 3" not in items2 and "fact 13" in items2,
+            "saves after reopen keep the FIFO ring",
+        )
+        check(reopened2.memories._index_offset == off_before, "index line never moves (absolute offset stable)")
+
+        # legacy file without an index: memories load via the [memories] section
+        # scan — the open NEVER migrates (that is the migration script's job),
+        # so the file is left byte-for-byte untouched
+        legacy = Path(ptmp) / "legacy.clc"
+        evs = [UserMessageEvent(content="task")]
+        for i in range(1, 60):
+            evs.append(AssistantMessageEvent(content=f"w{i}") if i % 2 else UserMessageEvent(content=f"a{i}"))
+        evs.append(CompactionEvent(summary="sum"))
+        for i in range(61, 70):
+            evs.append(AssistantMessageEvent(content=f"r{i}"))
+        legacy.write_text(
+            "\n".join(
+                ["# clutch project v1", "name: legacy", "model: fake-model", "---"]
+                + [event_to_json(e) for e in evs]
+                + ["[memories]", '{"title": "m1", "content": "one", "updated": 0}']
+                + [event_to_json(AssistantMessageEvent(content=f"after{i}")) for i in range(70, 75)]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        legacy_before = legacy.read_bytes()
+        mig = open_project_lazy(legacy)
+        check(mig.memories.get("m1") is not None, "legacy file memories load via section scan")
+        check(legacy.read_bytes() == legacy_before, "writable open never rewrites a legacy file")
+        # a legacy file cannot persist its compaction boundary, so the open
+        # DERIVES it from the newest compaction line (never re-summarizes the
+        # whole history); it is still never migrated/rewritten
+        check(mig.log.cpr_start() > 0, "legacy file with a compaction derives its window boundary")
+        check(
+            all(e.type != "user_message" or i == 0 for i, e in enumerate(mig.events())),
+            "legacy window materializes only from the last compaction onward",
+        )
+        mig.memories.save("m2", "two")
+        check(open_project_lazy(legacy).memories.get("m2") is not None, "post-open save persists (scan fallback)")
+
+        # corrupt index line: the parse fails and memories fall back to the
+        # section scan — the file is left untouched (the script rebuilds indexes)
+        corrupt = Path(ptmp) / "corrupt.clc"
+        cproj = create_project(corrupt, "c")
+        cproj.memories.save("a", "A")
+        cproj.memories.save("b", "B")
+        corrupt.write_text(
+            cproj.path.read_text(encoding="utf-8").replace(_MEMORY_INDEX_PREFIX, _MEMORY_INDEX_PREFIX + "ZZ", 1),
+            encoding="utf-8",
+        )
+        corrupt_before = corrupt.read_bytes()
+        creopened = open_project_lazy(corrupt)
+        check(len(creopened.memories.items()) == 2, "corrupt index falls back to the section scan (no memory loss)")
+        check(corrupt.read_bytes() == corrupt_before, "corrupt index not rewritten by the open")
+
+        # read-only open of a legacy file: legacy scan loads, file untouched
+        ro = Path(ptmp) / "ro.clc"
+        ro.write_text(
+            "# clutch project v1\nname: ro\nmodel: m\n---\n"
+            + event_to_json(UserMessageEvent(content="task")) + "\n"
+            + "[memories]\n" + '{"title": "ro1", "content": "readonly", "updated": 0}\n',
+            encoding="utf-8",
+        )
+        before = ro.read_bytes()
+        roproj = open_project_lazy(ro, read_only=True)
+        check(roproj.memories.get("ro1") is not None, "read_only: legacy scan loads memories")
+        check(ro.read_bytes() == before, "read_only: file untouched (no migration)")
+
+    # 11. windowed .clc loading: a compaction file opens with ONLY the model
+    # WINDOW (everything since the newest compaction line, from its
+    # header-persisted cpr_start) materialized; the raw task and the summarized
+    # middle stay on disk (older = cpr_start) and are paged via pure-disk
+    # read_page; deriving with the middle on disk == a full load.
+    with tempfile.TemporaryDirectory() as ptmp:
+        from agent.core.lazy import _make_reader, parse_durable
+        from agent.events import _line_bytes
+        from agent.project import open_project_lazy
 
         p = Path(ptmp) / "big.clc"
         events = [UserMessageEvent(content="task")]
@@ -662,11 +759,14 @@ def main() -> None:
                 if i % 2 == 0
                 else UserMessageEvent(content=f"old ask {i}")
             )
-        tail_start = sum(_line_bytes(ev) for ev in events[:90])
-        lines = ["# clutch project v1", "name: lazy", "model: fake-model", "---"]
+        comp_off = sum(_line_bytes(ev) for ev in events[:90])
+        lines = [
+            "# clutch project v1", "name: lazy", "model: fake-model",
+            f"cpr_start={comp_off:010d}", "---",
+        ]
         for ev in events:
             lines.append(event_to_json(ev))
-        lines.append(event_to_json(CompactionEvent(summary="old work summarized", tail_start=tail_start)))
+        lines.append(event_to_json(CompactionEvent(summary="old work summarized")))
         for i in range(101, 121):
             lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -675,55 +775,74 @@ def main() -> None:
         log = proj.log
         check(isinstance(log, LazyEventLog), "compaction file opens lazily")
         offs = [off for off, _ in log.items()]
-        check(offs[0] == 0 and all(o >= tail_start for o in offs[1:]),
-              "lazy open materializes only the task + the preserved tail (byte offsets)")
-        check(log.older_bytes() == tail_start - log._task_end,
-              "older_bytes counts the on-disk middle bytes")
+        check(all(o >= comp_off for o in offs),
+              "lazy open materializes only the model window (the task is not resident)")
+        check(log.cpr_start() == comp_off, "cpr_start read from the header line")
+        check(log.window_bytes() == (log._file_bytes - log._base) - comp_off,
+              "window_bytes = the file bytes past the cpr_start boundary")
+        check(max(0, log.cpr_start()) == comp_off,
+              "older counts the on-disk bytes before the window (cpr_start)")
         read, total = _make_reader(p, None)
-        comp, _mem = _tail_scan(read, total)
-        check(comp is not None and comp[1].tail_start == tail_start,
-              "stored tail_start read from the last compaction line")
+        check(total == log._file_bytes, "reader sees the full file bytes")
 
-        # paging: materialize the middle on demand, then derive == full load
-        page = log.materialize_range(log.task_end, tail_start)
-        check(len(page) == 89, "materialize_range pages the middle on demand")
-        full = EventLog()
+        # paging: pure-disk read of the history before the window — it NEVER
+        # enters the resident log (browsing is decoupled from the model context)
+        # — and the derived context with that history on disk == a full load
+        page = log.read_page(0, comp_off)
+        check(len(page) == 90, "read_page pages the task + the on-disk middle on demand (90 events)")
+        check(
+            all(off >= comp_off for off, _ in log.items()),
+            "read_page left the resident log untouched (history stays on disk)",
+        )
+        full = LazyEventLog.in_memory()
         for ev in parse_durable(p.read_text(encoding="utf-8")):
             full.append(ev)
         check(
             derive_messages(log, config, "task") == derive_messages(full, config, "task"),
-            "lazy derive == full derive (paged middle)",
+            "lazy derive == full derive (middle paged separately)",
         )
         check(
-            not any(m["role"] == "assistant" and m.get("content") == "old work 42" for m in derive_messages(log, config, "task")),
-            "middle stays summarized away after paging",
+            not any(
+                m["role"] == "assistant" and m.get("content") == "old work 42"
+                for m in derive_messages(log, config, "task")
+            ),
+            "middle stays summarized away (the window excludes it)",
         )
 
-        # stale tail_start from an old .clc clamps to the compaction offset
-        stale = p.read_text(encoding="utf-8").replace('"tail_start": %d' % tail_start, '"tail_start": 999999')
-        p.write_text(stale, encoding="utf-8")
-        proj2 = open_project_lazy(p, workspace=None)
-        check(isinstance(proj2.log, LazyEventLog), "stale tail_start still opens lazily")
-        check(proj2.log._tail_start == comp[0] - _event_region_base(p),
-              "stale tail_start clamped to the compaction offset")
-        stale_full = EventLog()
-        for ev in parse_durable(p.read_text(encoding="utf-8")):
-            stale_full.append(ev)
+        # a .clc with no cpr_start line: full window (everything materializes,
+        # older = 0); the open never migrates it (the script's job)
+        legacy = Path(ptmp) / "legacy.clc"
+        legacy.write_text(
+            "\n".join(
+                ["# clutch project v1", "name: old", "model: fake-model", "---"]
+                + [event_to_json(ev) for ev in events]
+                + [event_to_json(CompactionEvent(summary="old work summarized"))]
+                + [event_to_json(AssistantMessageEvent(content=f"recent {i}")) for i in range(101, 121)]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        legacy_before = legacy.read_bytes()
+        up = open_project_lazy(legacy, workspace=None)
+        check(isinstance(up.log, LazyEventLog) and up.log.cpr_start() > 0,
+              "legacy .clc derives its window boundary from the newest compaction")
+        check(len(up.log.items()) == 1 + 20,
+              "legacy window materializes only the compaction + the recent tail")
         check(
-            derive_messages(proj2.log, config, "task") == derive_messages(stale_full, config, "task"),
-            "stale-clamped lazy log derives the same context as the full log",
+            derive_messages(up.log, config, "task") == derive_messages(full, config, "task"),
+            "legacy derive == full derive",
         )
         check(
-            any("old work summarized" in m.get("content", "") for m in derive_messages(proj2.log, config, "task")),
-            "compaction summary head survives the stale clamp",
+            legacy.read_bytes() == legacy_before,
+            "open never rewrites a legacy file (no cpr_start inserted)",
         )
 
     # 12. lazy open handles a [memories] section: the index records the marker and
     # parse_durable skips the memory lines (valid JSON with no `type`), so opening
     # a .clc that has memories (even with events after them) neither crashes nor
     # silently drops them.
-    with tempfile.TemporaryDirectory() as ptmp, _lazy_forced():
-        from .project import open_project_lazy
+    with tempfile.TemporaryDirectory() as ptmp:
+        from agent.project import open_project_lazy
 
         p = Path(ptmp) / "mem.clc"
         lines = [
@@ -738,7 +857,7 @@ def main() -> None:
                     else UserMessageEvent(content=f"ask {i}")
                 )
             )
-        lines.append(event_to_json(CompactionEvent(summary="mid summarized", tail_start=20)))
+        lines.append(event_to_json(CompactionEvent(summary="mid summarized")))
         for i in range(40, 50):
             lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
         lines.append("[memories]")
@@ -757,62 +876,56 @@ def main() -> None:
             "memory content survives lazy open",
         )
         check(
-            any(m["role"] == "assistant" and m.get("content") == "after memory" for m in derive_messages(proj.log, config, "task")),
+            any(
+                m["role"] == "assistant" and m.get("content") == "after memory"
+                for m in derive_messages(proj.log, config, "task")
+            ),
             "events after the memory section still load",
         )
 
-    # 13. LLM endpoint configurability: provider presets, env defaults,
-    # resolution precedence and the client factory must not be hard-locked to
-    # DeepSeek (the bug this section guards: URL locked to api.deepseek.com).
-    from agent.config import PROVIDER_PRESETS, provider_preset, resolve_llm_endpoint
+    # 13. LLM endpoint configurability: one flat settings surface (base_url /
+    # model / api_key / reasoning_effort), legacy profile-map migration, and
+    # the client factory (no provider presets anywhere).
+    from agent.config import flatten_settings
     from agent.llm import create_llm_client
-    from agent.llm.factory import OPENAI_COMPATIBLE_PROVIDERS
 
-    check(provider_preset("zhipu") == ("https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"), "zhipu preset (base_url, model)")
-    check("deepseek" in PROVIDER_PRESETS and "openai" in PROVIDER_PRESETS, "deepseek/openai presets present")
-    check(provider_preset("bogus") == ("", ""), "unknown provider preset is empty")
-    check({"deepseek", "zhipu", "openai", "moonshot", "ollama", "custom"} <= OPENAI_COMPATIBLE_PROVIDERS, "all presets are OpenAI-compatible")
+    flat = {"base_url": "https://x.example/v1", "model": "m1", "api_key": "k1", "reasoning_effort": "low"}
+    check(flatten_settings(dict(flat)) == flat, "flat settings read through verbatim")
+    check(
+        flatten_settings(
+            {
+                "profiles": {"a": {"base_url": "u1"}, "zhipu-53": {"base_url": "u2", "model": "m2", "api_key": "k2"}},
+                "active": "zhipu-53",
+            }
+        )
+        == {"base_url": "u2", "model": "m2", "api_key": "k2"},
+        "legacy profile map migrates to the active profile",
+    )
+    check(flatten_settings({}) == {}, "empty settings flatten to empty")
 
-    saved_zhipu = {"provider": "zhipu"}
-    prov, url, model = resolve_llm_endpoint(cli={}, env={}, saved=saved_zhipu, defaults=Config())
-    check(prov == "zhipu" and url == "https://open.bigmodel.cn/api/paas/v4" and model == "glm-4-flash", "saved provider moves the whole endpoint")
-    prov, url, model = resolve_llm_endpoint(
-        cli={"provider": "zhipu", "base_url": "https://my-gateway.example/v1", "model": "glm-4-air"},
-        env={},
-        saved={},
-        defaults=Config(),
+    client = create_llm_client(
+        api_key="sk-test",
+        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+        model="glm-5.3",
     )
-    check(
-        prov == "zhipu" and url == "https://my-gateway.example/v1" and model == "glm-4-air",
-        "explicit CLI base_url/model override the preset",
-    )
-    prov, url, model = resolve_llm_endpoint(
-        cli={},
-        env={"CLUTCH_PROVIDER": "zhipu", "CLUTCH_BASE_URL": "", "CLUTCH_MODEL": ""},
-        saved={"provider": "openai"},
-        defaults=Config(),
-    )
-    check(
-        prov == "zhipu" and url == "https://open.bigmodel.cn/api/paas/v4",
-        "env provider beats saved settings; preset fills the URL",
-    )
+    check(client.model == "glm-5.3" and client.api_key == "sk-test", "factory builds a client from url+key+model")
     try:
-        resolve_llm_endpoint(cli={"provider": "bogus"}, env={}, saved={}, defaults=Config())
-        check(False, "unknown provider rejected by resolver")
-    except ValueError:
-        check(True, "unknown provider rejected by resolver")
+        create_llm_client(api_key="", base_url="u", model="m")
+        check(False, "factory rejects missing api_key")
+    except RuntimeError:
+        check(True, "factory rejects missing api_key")
 
     old_env = {
-        k: os.environ.get(k) for k in ("CLUTCH_PROVIDER", "CLUTCH_MODEL", "CLUTCH_BASE_URL", "CLUTCH_API_KEY")
+        k: os.environ.get(k) for k in ("CLUTCH_MODEL", "CLUTCH_BASE_URL", "CLUTCH_API_KEY")
     }
     try:
-        os.environ["CLUTCH_PROVIDER"] = "zhipu"
-        os.environ["CLUTCH_MODEL"] = "glm-4-flash"
-        os.environ["CLUTCH_BASE_URL"] = "https://open.bigmodel.cn/api/paas/v4"
+        os.environ["CLUTCH_MODEL"] = "glm-5.3"
+        os.environ["CLUTCH_BASE_URL"] = "https://open.bigmodel.cn/api/coding/paas/v4"
         os.environ["CLUTCH_API_KEY"] = "sk-env"
         ecfg = Config()
-        check(ecfg.provider == "zhipu" and ecfg.model == "glm-4-flash", "Config reads CLUTCH_PROVIDER/CLUTCH_MODEL")
-        check(ecfg.base_url == "https://open.bigmodel.cn/api/paas/v4" and ecfg.api_key == "sk-env", "Config reads CLUTCH_BASE_URL/CLUTCH_API_KEY")
+        check(ecfg.model == "glm-5.3" and ecfg.base_url == "https://open.bigmodel.cn/api/coding/paas/v4",
+              "Config reads CLUTCH_MODEL/CLUTCH_BASE_URL")
+        check(ecfg.api_key == "sk-env", "Config reads CLUTCH_API_KEY")
     finally:
         for k, v in old_env.items():
             if v is None:
@@ -820,18 +933,28 @@ def main() -> None:
             else:
                 os.environ[k] = v
 
-    client = create_llm_client(
-        provider="zhipu",
-        api_key="sk-test",
-        base_url="https://open.bigmodel.cn/api/paas/v4",
-        model="glm-4-flash",
+    # 13b. provider error strings are tidied: the SDK's 'Error code: N - {dict}'
+    # dump becomes the provider's own message (+ code / HTTP status)
+    from agent.llm.client import _clean_provider_message
+
+    m = _clean_provider_message(
+        "Error code: 429 - {'error': {'code': '1113', 'message': '余额不足或无可用资源包,请充值。'}}", 429
     )
-    check(client.model == "glm-4-flash" and client.api_key == "sk-test", "factory builds a zhipu (OpenAI-compatible) client")
-    try:
-        create_llm_client(provider="bogus", api_key="k", base_url="u", model="m")
-        check(False, "factory rejects unknown provider")
-    except ValueError:
-        check(True, "factory rejects unknown provider")
+    check(
+        m == "余额不足或无可用资源包,请充值。 (code 1113, HTTP 429)",
+        f"error envelope tidied to the provider message ({m!r})",
+    )
+    m = _clean_provider_message(
+        "Error code: 402 - {'error': {'message': 'Insufficient Balance', 'type': 'unknown_error', "
+        "'param': None, 'code': 'invalid_request_error'}}",
+        402,
+    )
+    check(m == "Insufficient Balance (code invalid_request_error, HTTP 402)", f"402 error tidied ({m!r})")
+    check(
+        _clean_provider_message("Connection error: connection reset by peer", None)
+        == "Connection error: connection reset by peer",
+        "non-dict error text passes through verbatim",
+    )
 
     print("\nall passed")
     return 0

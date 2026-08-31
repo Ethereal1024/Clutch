@@ -13,3 +13,7 @@ dist/
 !ui/build/
 !ui/build/icon.svg
 !ui/build/icon.png
+
+# one-time .clc migration tool — RECOVERY.md's escape hatch for old files on
+# this machine; keep it local, do not ship it in the repo
+scripts/convert-clc-to-cpr.py

@@ -9,9 +9,35 @@
 
 from __future__ import annotations
 
+import ast
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Collection, Iterator
+
+
+def _clean_provider_message(raw: str, status: int | None) -> str:
+    """Tidy an OpenAI-SDK error string. The SDK renders HTTP failures as
+    ``Error code: 429 - {'error': {'message': …, 'code': …}}`` (a Python repr
+    of the provider's JSON); surface the provider's own message instead of
+    that dump. Anything that does not parse stays verbatim."""
+    text = raw.strip()
+    _, sep, body = text.partition(" - ")
+    if not sep:
+        return text
+    try:
+        data = ast.literal_eval(body)
+    except (ValueError, SyntaxError):
+        return text
+    err = data.get("error") if isinstance(data, dict) else None
+    if not (isinstance(err, dict) and isinstance(err.get("message"), str) and err["message"].strip()):
+        return text
+    extra = []
+    if err.get("code"):
+        extra.append(f"code {err['code']}")
+    if status is not None:
+        extra.append(f"HTTP {status}")
+    tidied = err["message"].strip()
+    return f"{tidied} ({', '.join(extra)})" if extra else tidied
 
 
 @dataclass
@@ -27,7 +53,7 @@ class LlmError(Exception):
         import openai
 
         if isinstance(e, openai.RateLimitError):
-            return LlmError(code="rate_limit", status=429, retryable=True, message=str(e))
+            return LlmError(code="rate_limit", status=429, retryable=True, message=_clean_provider_message(str(e), 429))
         if isinstance(e, openai.APITimeoutError):
             return LlmError(code="timeout", retryable=True, message=str(e))
         if isinstance(e, openai.APIConnectionError):
@@ -39,13 +65,13 @@ class LlmError(Exception):
                     code="context_window_exceeded",
                     status=400,
                     retryable=False,
-                    message=str(e),
+                    message=_clean_provider_message(str(e), status),
                 )
             return LlmError(
                 code="api_error",
                 status=status,
                 retryable=status in retryable_status,
-                message=str(e),
+                message=_clean_provider_message(str(e), status),
             )
         return LlmError(code="unknown", retryable=False, message=str(e))
 
@@ -54,10 +80,7 @@ class LlmClient(ABC):
     """Streaming chat client contract.
 
     ``stream`` emits the event protocol reasoning/text/tool_call_start/
-    tool_call_delta/finish. The final ``finish`` event optionally carries a
-    ``usage`` dict ({prompt_tokens, completion_tokens, total_tokens}) so the
-    loop can detect context overflow; it is None when the provider does not
-    report usage.
+    tool_call_delta/finish.
     """
 
     @abstractmethod

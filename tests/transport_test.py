@@ -1,6 +1,6 @@
 """Transport + RemoteWorkspace round-trip check against an inline mock bridge.
 
-Run: uv run python -m agent.tools.transport_test
+Run: uv run python -m tests.transport_test
 
 The mock bridge speaks the exec-bridge /exec contract (POST -> sh) against a
 temp "remote" root, so the SSH degradation path is exercised without ssh2 or a
@@ -19,9 +19,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from ..testsupport import check
-from .transport import SshTransport, TransportError
-from .workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
+from agent.tools.transport import SshTransport, TransportError
+from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
+from tests.testsupport import check
 
 
 class MockBridge(BaseHTTPRequestHandler):

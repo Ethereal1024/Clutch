@@ -1,7 +1,8 @@
 """Shared assertion helper for the standalone test runners.
 
-Each runner (selfcheck / loop_test / server_test) is a plain `python -m agent.X`
-module; check() fails fast with a non-zero exit on the first broken assertion.
+Each runner (selfcheck / loop_test / server_test / supervisor_test / transport_test)
+is a plain `python -m tests.X` module; check() fails fast with a non-zero exit on
+the first broken assertion.
 """
 
 from __future__ import annotations

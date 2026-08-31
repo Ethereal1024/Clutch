@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from ..client import LlmClient, LlmError
 from ..proxy import get_proxy_for_url
-from .chunk_handle import ChunkHandler, StreamState, get_default_handlers
+from .chunk_handle import StreamState, get_default_handlers
 
 
 class OpenaiLlmClient(LlmClient):
@@ -15,14 +15,13 @@ class OpenaiLlmClient(LlmClient):
         api_key: str,
         base_url: str,
         model: str,
-        handlers: list[ChunkHandler] | None = None,
         request_timeout: float = 60.0,
         max_retries: int = 3,
         retryable_status: Collection[int] = frozenset({429, 500, 502, 503, 504}),
         reasoning_effort: str | None = None,
     ) -> None:
         self.api_key = api_key
-        self.handlers = handlers if handlers else get_default_handlers()
+        self.handlers = get_default_handlers()
         self.request_timeout = request_timeout
         self.max_retries = max_retries
         self.retryable_status = retryable_status
@@ -38,20 +37,18 @@ class OpenaiLlmClient(LlmClient):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        # Streamed chat completion. finish carries the provider-reported token
-        # usage (when available) so the loop can detect context overflow.
+        # Streamed chat completion.
         for attempt in range(self.max_retries):
             try:
                 kwargs: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
-                    "stream_options": {"include_usage": True},
                 }
                 if tools:
                     kwargs["tools"] = tools
-                # GLM-5.3 thinking depth (zhipu). Only set when configured: an
-                # unset knob leaves the provider default (e.g. DeepSeek ignores
-                # the field entirely, so it must not be sent to them).
+                # Reasoning effort (extra_body thinking.reasoning_effort). Only
+                # set when configured: an unset knob leaves the provider
+                # default, and endpoints that ignore the field must not see it.
                 if self.reasoning_effort:
                     kwargs["extra_body"] = {
                         "thinking": {
@@ -64,15 +61,8 @@ class OpenaiLlmClient(LlmClient):
                 pending_finish: dict[str, Any] | None = None
 
                 for chunk in resp:
-                    usage = getattr(chunk, "usage", None)
-                    if usage is not None:
-                        state.usage = {
-                            "prompt_tokens": usage.prompt_tokens,
-                            "completion_tokens": usage.completion_tokens,
-                            "total_tokens": usage.total_tokens,
-                        }
                     if state.finished:
-                        continue  # keep draining until the usage chunk arrives
+                        break  # finish chunk received; nothing left to drain
                     if not getattr(chunk, "choices", None):
                         continue
                     for handler in self.handlers:
@@ -94,7 +84,6 @@ class OpenaiLlmClient(LlmClient):
                             {"id": e["id"], "name": e["name"], "arguments": e["args"]} for e in state.tool_args.values()
                         ],
                     }
-                finish["usage"] = state.usage
                 yield finish
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = LlmError.classify(e, self.retryable_status)

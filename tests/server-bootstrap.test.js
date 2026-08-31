@@ -9,7 +9,7 @@
 //     window 1 closes (session killed), the lock is freed without TTL
 //   - last window closes -> supervisor self-exits (idle); the next window
 //     pulls it up again ("first window starts it, last window ends it")
-// Run: node ui/server-bootstrap.test.js
+// Run: node tests/server-bootstrap.test.js
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -32,8 +32,8 @@ Module._load = function (request, ...rest) {
 };
 
 function fresh() {
-  delete require.cache[require.resolve("./server-bootstrap")];
-  return require("./server-bootstrap");
+  delete require.cache[require.resolve("../ui/server-bootstrap")];
+  return require("../ui/server-bootstrap");
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

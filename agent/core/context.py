@@ -3,9 +3,10 @@
 The event log is the single source of truth; model-visible messages are derived from it.
 Strategy (no turn-count windowing, no incremental tool-output folding — compaction is
 the only budget guard, matching opencode / Claude Code):
-- sticky: system prompt + the original task are never evicted
-- compaction: the newest CompactionEvent's summary is the head; only the recent
-  tail it designates is projected (token-driven, see Compactor.should_compact)
+- window: only the events since the newest compaction line ([cpr_start, file_end))
+  are projected; everything before it is rolled into the summary head
+- compaction: the newest CompactionEvent's summary is the head (byte-driven, see
+  Compactor.should_compact)
 - truncation: oversized tool output is head/tail trimmed at the tools layer
 """
 
@@ -17,17 +18,17 @@ from ..config import Config
 from ..events import (
     AssistantMessageEvent,
     CompactionEvent,
-    EventLog,
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
 )
 from ..prompts import render
 from ..skills import cached_library
+from .lazy import LazyEventLog
 
 
 def _recent_working_files(tail_events: list[Any], cap: int = 6) -> list[str]:
-    """Distinct file paths the model was reading/writing in the preserved tail
+    """Distinct file paths the model was reading/writing in the window
     (most recent first), so a post-compaction context can tell it to re-read them."""
     import json as _json
 
@@ -125,7 +126,7 @@ def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def derive_messages(log: EventLog, config: Config, task: str, memories: Any | None = None) -> list[dict[str, Any]]:
+def derive_messages(log: LazyEventLog, config: Config, task: str, memories: Any | None = None) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying compaction head.
     ``memories`` (a MemoryStore) contributes a resident title list to the system
     prompt so the model can recall long-term facts. Tool output is NOT folded
@@ -133,24 +134,31 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     turns into a summary, so the model's file-content working set is not silently
     starved and re-reads are not forced."""
     full_events = log.events()
-    # the original task lives at index 0 (emitted at run start); task.md re-injects
-    # it below, so exclude that raw copy here — otherwise every context carries the
-    # task twice.
+    # a never-compacted file (cpr_start 0) makes the whole event region the
+    # window, so the raw task is index 0; task.md re-injects the CURRENT task
+    # below, so exclude that raw copy here — otherwise every context carries
+    # the task twice. A compacted file's window starts at the summary line, so
+    # full_events[0] is a CompactionEvent and nothing needs excluding.
     raw_task = full_events[0] if full_events and isinstance(full_events[0], UserMessageEvent) else None
     events = full_events
     head_msgs: list[dict[str, Any]] = []
     # if the log was compacted, the newest CompactionEvent's summary is the head
-    # (it replaces everything before its tail_start), and only the recent tail is
-    # projected below.
+    # (it replaces everything before it), and only the events after it — the
+    # model WINDOW — are projected below. The window is [cpr_start, file_end),
+    # already resident in the log; anything before it is summarized away and
+    # never re-enters the context.
     compaction = next((e for e in reversed(events) if isinstance(e, CompactionEvent)), None)
     if compaction is not None:
         head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]
-        # tail_start is an index into the DURABLE event sequence (what the .clc
-        # persists); log.tail_from slices the durable sequence from there and
-        # clamps a stale out-of-range index from an older .clc, so the recent
-        # tail is kept — never silently dropped. Works for a fully loaded log
-        # and a lazily reopened one alike.
-        tail_events = log.tail_from(compaction.tail_start, compaction)
+        # only the events AFTER the newest summary line form the model window.
+        # A cpr_start file's lazy log already holds exactly that (the window
+        # starts at the summary line); a never-compacted file (cpr_start 0,
+        # everything resident) holds more, so slice to the last summary — the
+        # summarized history never re-enters the context either way.
+        last_idx = len(events) - 1 - next(
+            i for i, e in enumerate(reversed(events)) if isinstance(e, CompactionEvent)
+        )
+        tail_events = events[last_idx + 1:]
         files = _recent_working_files(tail_events)
         if files:
             # the exact contents of these files were compacted away; the model must
@@ -183,14 +191,21 @@ def derive_messages(log: EventLog, config: Config, task: str, memories: Any | No
     if memories is not None:
         items = memories.items()
         if items:
-            # all titles up front: the model picks the exact one to load, so no
-            # fuzzy matching is needed on load_memory (titles are short)
+            # all titles up front — the COMPLETE set, newest first — so the model
+            # loads the exact title it needs instead of probing with search; the
+            # search tool stays as the content-recall fallback when no title
+            # matches (titles are short summaries, content can say more)
             titles = [m.title for m in sorted(items.values(), key=lambda m: -m.updated)]
             system += (
-                "\n\nProject memories from earlier sessions — search_memory or load_memory "
-                "before acting if any relate to this task:\n"
+                "\n\nProject memories from earlier sessions (complete set, newest first) — "
+                "load_memory with the exact title for its content; only search_memory "
+                "when no listed title matches:\n"
                 + "\n".join(f"- {t}" for t in titles)
             )
+        else:
+            # an empty store is stated explicitly: the model skips the probing
+            # search that a missing section would trigger
+            system += "\n\nProject memories from earlier sessions: none stored yet."
 
     return (
         [

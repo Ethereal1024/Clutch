@@ -116,10 +116,13 @@ python/pip/网络**。
 
 测试
 ----
-  uv run python -m agent.selfcheck     核心逻辑自检
-  uv run python -m agent.loop_test     循环路径测试（假模型驱动，零成本）
-  uv run python -m agent.server_test   HTTP+SSE 端到端测试
-  uv run python -m eval.harness        跑全部评测场景并记录结果
+  uv run python -m tests.selfcheck         核心逻辑自检
+  uv run python -m tests.loop_test         循环路径测试（假模型驱动，零成本）
+  uv run python -m tests.server_test       HTTP+SSE 端到端测试
+  uv run python -m tests.lazy_check        懒加载路径验证（窗口物化 + 历史分页）
+  uv run python -m tests.supervisor_test   监督进程端到端检查（生命周期 + 跨进程锁）
+  uv run python -m tests.transport_test    传输层 + 远程工作区往返检查（exec 桥）
+  uv run python -m eval.harness            跑全部评测场景并记录结果
 
 其它说明
 --------

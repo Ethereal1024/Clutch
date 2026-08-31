@@ -1,5 +1,5 @@
 // Standalone check for ssh-tunnel.js's exec upload path.
-// Run: node ui/ssh-tunnel.test.js
+// Run: node tests/ssh-tunnel.test.js
 //
 // uploadFileViaExec must write text byte-exactly (printf chunks, no added
 // newline) and binary via base64, and every exec command must stay under the
@@ -13,7 +13,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { exec: shExec } = require("child_process");
-const { uploadFileViaExec } = require("./ssh-tunnel");
+const { uploadFileViaExec } = require("../ui/ssh-tunnel");
 
 let failures = 0;
 function check(ok, label) {

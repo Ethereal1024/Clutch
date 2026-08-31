@@ -1,7 +1,7 @@
 """Supervisor end-to-end check: spawns real agent.server session children and
 exercises lifecycle + the cross-process lock semantics the architecture relies on.
 
-Run: uv run python -m agent.supervisor_test
+Run: uv run python -m tests.supervisor_test
 
 The lock test is the important one: two SESSION CHILDREN (separate processes,
 each with its own _held cache) flock the same .clc on this machine's tmp dir —
@@ -21,8 +21,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .supervisor import Supervisor, build_server
-from .testsupport import check
+from agent.supervisor import Supervisor, _SafeStdStream, build_server
+from tests.testsupport import check
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -169,13 +169,14 @@ def main() -> int:
     check(ok, "supervisor self-exits after last session stops")
     sup4.shutdown_all()
 
-    # ---- 6. parent watchdog: a session child never outlives its supervisor ----
-    # (covers the supervisor SIGKILL/crash edge: the child notices the parent
-    # PID changed and suicides; the kernel then frees its flock — no TTL)
+    # ---- 6. no parent watchdog: a session child ignores CLUTCH_SUPERVISOR_PID ----
+    # Lifecycle cleanup is heartbeat-based (the supervisor reaps stale sessions,
+    # kills children on its own exit): the child must NOT suicide when the env
+    # is bogus, or every session would die ~5s after spawn.
     import subprocess as _sp
 
     wd_env = dict(os.environ)
-    wd_env["CLUTCH_SUPERVISOR_PID"] = "999999"  # a parent that is already dead
+    wd_env["CLUTCH_SUPERVISOR_PID"] = "999999"  # would have killed the old watchdog
     wd = _sp.Popen(
         [sys.executable, "-m", "agent.server", "--port", "0"],
         cwd=str(ROOT),
@@ -183,8 +184,10 @@ def main() -> int:
         stdout=_sp.DEVNULL,
         stderr=_sp.DEVNULL,
     )
-    wd.wait(timeout=15)
-    check(wd.returncode == 0, "session child suicides when the supervisor is gone")
+    time.sleep(7)  # the old watchdog fired at ~5s; surviving past this proves it is gone
+    check(wd.poll() is None, "session child survives a bogus CLUTCH_SUPERVISOR_PID (no watchdog)")
+    wd.terminate()
+    wd.wait(timeout=10)
 
     # ---- 7. base_url forwarding (remote sessions point at the LLM proxy) ----
     sup5, port5, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
@@ -202,7 +205,7 @@ def main() -> int:
     # ---- 8. agent command resolution: dev vs PyInstaller (sys.frozen) ----
     import unittest.mock as _m
 
-    from .supervisor import _agent_cmd_default
+    from agent.supervisor import _agent_cmd_default
 
     with _m.patch.object(sys, "frozen", True, create=True):
         cmd_frozen = _agent_cmd_default()
@@ -216,6 +219,59 @@ def main() -> int:
         "-m" in cmd_dev and "agent.server" in cmd_dev,
         "dev build spawns python -m agent.server",
     )
+
+    # ---- 9. dead-parent resilience (orphaned supervisor: stdout is a dead socket) ----
+    # The supervisor is spawned by Electron and keeps running after the app exits
+    # (orphaned, stdio socketpair dangling). Prints on the dead stream must not
+    # kill the request handler / reaper. Regression for the session/start "empty
+    # reply" + leaked-children + squatted-8890 failure seen in the field.
+    import os as _os
+    import socket as _sock
+
+    a, _b = _sock.socketpair()
+    _b.close()  # peer gone: writes to `a` raise BrokenPipeError
+    dead_out = _os.fdopen(a.fileno(), "w")  # text stream over the dead socket
+    _orig_out, _orig_err = sys.stdout, sys.stderr
+    try:
+        sys.stdout = _SafeStdStream(dead_out)
+        sys.stderr = _SafeStdStream(dead_out)
+        sup6, port6, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
+        st, body = http_post(f"http://127.0.0.1:{port6}/api/session/start")
+        check(st == 200, "session/start still responds when stdout is a dead socket")
+        sid6 = json.loads(body)["session_id"]
+        st, _ = http_post(f"http://127.0.0.1:{port6}/api/session/stop", {"session_id": sid6})
+        check(st == 200, "session/stop still responds")
+        sup6.shutdown_all()
+    finally:
+        sys.stdout, sys.stderr = _orig_out, _orig_err
+        try:
+            dead_out.close()  # flush may hit the dead socket
+        except (OSError, ValueError, TypeError):
+            pass
+
+    # ---- 10. /api/shutdown (normal app close: exit when empty, never in-use) ----
+    sup7, port7, _ = start_supervisor(stale_s=60, idle_timeout_s=30)
+    base7 = f"http://127.0.0.1:{port7}"
+    st, body = http_post(f"{base7}/api/shutdown")
+    check(st == 200, "shutdown accepted")
+    time.sleep(2)
+    check(sup7.exit_event.is_set(), "shutdown with no sessions exits promptly (no idle grace)")
+    sup7.shutdown_all()
+
+    sup8, port8, _ = start_supervisor(stale_s=60, idle_timeout_s=30)
+    base8 = f"http://127.0.0.1:{port8}"
+    st, body = http_post(f"{base8}/api/session/start")
+    sid8 = json.loads(body)["session_id"]
+    st, _ = http_post(f"{base8}/api/shutdown")
+    check(st == 200, "shutdown accepted while a session is live")
+    time.sleep(2)
+    check(not sup8.exit_event.is_set(), "shutdown does NOT kill an in-use supervisor")
+    # once the session is gone, the exit_when_idle flag fires at the next reap tick
+    st, _ = http_post(f"{base8}/api/session/stop", {"session_id": sid8})
+    check(st == 200, "session stopped")
+    ok = wait_until(lambda: sup8.exit_event.is_set(), 6.0, "exit after last session (shutdown flag)")
+    check(ok, "shutdown supervisor exits as soon as its sessions are gone")
+    sup8.shutdown_all()
 
     print("\nSUPERVISOR TESTS PASSED")
     return 0

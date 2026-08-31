@@ -7,6 +7,7 @@ transport-agnostic.
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 import urllib.error
@@ -35,7 +36,7 @@ class TransportError(RuntimeError):
 
 class Transport(ABC):
     @abstractmethod
-    def run(self, command: str, timeout: float) -> CommandResult: ...
+    def run(self, command: str, timeout: float, *, binary: bool = False) -> CommandResult: ...
 
 
 class LocalTransport(Transport):
@@ -44,20 +45,27 @@ class LocalTransport(Transport):
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
 
-    def run(self, command: str, timeout: float) -> CommandResult:
+    def run(self, command: str, timeout: float, *, binary: bool = False) -> CommandResult:
         try:
             r = subprocess.run(
                 command,
                 shell=True,
                 cwd=self.cwd,
                 capture_output=True,
-                text=True,
+                text=not binary,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             raise TransportError(f"command timed out ({timeout:.0f}s)", timeout=True) from None
         except OSError as e:
             raise TransportError(f"command could not start: {e}") from e
+        if binary:
+            # raw bytes round-tripped through latin-1 (lossless byte <-> str)
+            return CommandResult(
+                r.returncode,
+                (r.stdout or b"").decode("latin-1"),
+                (r.stderr or b"").decode("latin-1"),
+            )
         return CommandResult(r.returncode, r.stdout or "", r.stderr or "")
 
 
@@ -65,7 +73,8 @@ class SshTransport(Transport):
     """Run commands on a remote host through the Electron exec bridge.
 
     The remote only needs an sshd (no python, no SFTP, no base64): the client-side
-    bridge turns POST /exec into an ssh exec channel. timeout is sent in ms (the
+    bridge turns POST /exec into an ssh exec channel, and for binary=True returns
+    the raw stdout base64-encoded CLIENT-side. timeout is sent in ms (the
     bridge's remoteExec deadline); a timed-out remote exec comes back as code -1,
     surfaced here as TransportError(timeout=True) like LocalTransport.
     """
@@ -73,8 +82,10 @@ class SshTransport(Transport):
     def __init__(self, bridge_url: str) -> None:
         self.bridge_url = bridge_url.rstrip("/")
 
-    def run(self, command: str, timeout: float) -> CommandResult:
-        body = json.dumps({"command": command, "timeout": int(timeout * 1000)}).encode("utf-8")
+    def run(self, command: str, timeout: float, *, binary: bool = False) -> CommandResult:
+        body = json.dumps({"command": command, "timeout": int(timeout * 1000), "binary": binary}).encode(
+            "utf-8"
+        )
         req = urllib.request.Request(
             self.bridge_url + "/exec",
             data=body,
@@ -90,6 +101,13 @@ class SshTransport(Transport):
             raise TransportError(f"bridge unreachable: {e}") from e
         if payload.get("code") == -1:
             raise TransportError(f"command timed out ({timeout:.0f}s)", timeout=True)
+        if binary:
+            raw = base64.b64decode(payload.get("stdout_b64") or "")
+            return CommandResult(
+                int(payload.get("code", 1)),
+                raw.decode("latin-1"),
+                payload.get("stderr", ""),
+            )
         return CommandResult(
             int(payload.get("code", 1)),
             payload.get("stdout", ""),

@@ -1,36 +1,30 @@
-"""Lazy .clc loading for large conversations.
+"""Window-based lazy .clc loading.
 
-Opening a .clc materializes only what the model needs: the raw task plus the
-preserved recent tail the last compaction kept (everything at or after the
-compaction's stored ``tail_start``). Earlier records stay on disk and are pulled
-in on demand — the UI pages them with GET /api/history, and a compaction
-re-materializes the head so its summary input is byte-identical to a fully
-loaded log.
+The model context is the WINDOW ``[cpr_start, file_end)``: everything from the
+newest compaction line's start to the file end, and ONLY that. ``cpr_start`` is
+a byte offset relative to the event region, persisted as a fixed-width line in
+the .clc header, so opening materializes the window with one range read — no
+tail scan, no index, O(1). Everything before cpr_start (already-summarized
+history) stays on disk and is NEVER loaded into the log; the UI pages it on
+demand via /api/history with a pure disk read that does not touch the resident
+log, so history browsing is fully decoupled from the model context.
 
 The whole design is BYTE-addressed — no index table, no event-sequence
-numbering. ``tail_start`` is a byte offset relative to the event region (the
-first durable line, the raw task), which is exactly what the .clc persists, so a
-lazily reopened log resolves the same boundary as the live one did. Every read is
-a byte range (local fd seek / remote exec tail) — O(1) positioned, never a full
-file scan — which is what makes the remote path cheap: opening a big .clc over
-SSH transfers only the header plus the preserved tail, not the whole file.
+numbering. Every read is a byte range (local fd seek / remote exec tail) —
+O(1) positioned, never a full file scan — which is what makes the remote path
+cheap: opening a big .clc over SSH transfers only the header plus the window.
 """
 
 from __future__ import annotations
 
-import bisect
-import contextlib
 import json
 import os
-from typing import Callable, Iterator
+from typing import Callable
 
 from ..events import (
     DURABLE_TYPES,
-    AssistantMessageEvent,
     CompactionEvent,
     Event,
-    ToolResultEvent,
-    UserMessageEvent,
     _line_bytes,
     event_from_dict,
     event_to_json,
@@ -38,28 +32,13 @@ from ..events import (
 from ..tools.workspace import LocalWorkspace, Workspace
 from .persist import append_jsonl
 
-# Never keep more materialized events than this in memory; the preserved tail,
-# the raw task and anything inside an active materialize() context are pinned
-# and can never be evicted.
-_LRU_EVENT_CAP = 20_000
-# minimum event-region size before lazy loading is worth it; tiny histories go
-# through the plain open_project path instead (bytes — with no index there is no
-# event count, so the file size is the natural threshold)
-_LAZY_MIN_BYTES = 256 * 1024
-# tail scan: start by reading the last 64KB of the .clc looking for the last
-# compaction event and the [memories] marker, doubling back until found. Capped
-# so a never-compacted giant file does not scan the whole thing to *confirm*
-# there is no compaction (it opens fully-loaded anyway).
-_TAIL_SCAN_INIT = 1 << 16
-_TAIL_SCAN_MAX = 8 * (1 << 20)
-
-_SEPARATOR = "----"
+_SEPARATOR = "---"  # the .clc header separator (project.SEPARATOR)
 _SECTION = "[memories]"  # the memory.py section marker written to every .clc
 
 
 def parse_durable(text: str) -> list[Event]:
-    """Parse a raw byte range back into durable events. Robust to the file's
-    formatting quirks (BOMs, empty lines), like open_project's plain read."""
+    """Parse raw .clc text back into durable events. Robust to the file's
+    formatting quirks (BOMs, empty lines), like the range reader's parse."""
     events: list[Event] = []
     for line in text.splitlines():
         line = line.strip().lstrip("\ufeff")
@@ -116,62 +95,6 @@ def _parse_with_offsets(raw: bytes, base_rel: int) -> list[tuple[int, Event]]:
     return out
 
 
-def _tail_scan(read: Callable[[int, int], bytes], total: int) -> tuple[tuple[int, Event] | None, int | None]:
-    """Scan BACKWARD from the file tail for the last compaction event and the
-    last ``[memories]`` marker — the two things a reopen needs before it can
-    materialize. No index: a backward doubling read (64KB up to 8MB) finds the
-    last compaction in the overwhelming case (a compaction is followed only by
-    the conversation since it), and the memories marker sits right after it.
-
-    Each pass reads ONLY the newly-added span [lo, scanned_to) (never the whole
-    file repeatedly); a line cut by a span edge is dropped here and parsed whole
-    by the next, earlier pass. A file with no memories marker scans to the span
-    cap — same open cost as the old index pass, but without JSON parsing.
-
-    Returns ``((abs_line_start, event) | None, memories_marker_abs | None)``.
-    """
-    chunk = _TAIL_SCAN_INIT
-    scanned_to = total
-    comp: tuple[int, Event] | None = None
-    mem: int | None = None
-    while True:
-        lo = max(0, scanned_to - chunk)
-        raw = read(lo, scanned_to)
-        pos = 0
-        first = True
-        for seg in raw.split(b"\n"):
-            line_start = lo + pos
-            pos += len(seg) + 1  # BYTES, exact (a mid-multibyte cut still counts)
-            if first:
-                first = False
-                if lo > 0:
-                    continue  # line mangled by the span start: parsed whole next pass
-            if not seg or seg.startswith(_SEPARATOR.encode()):
-                continue
-            line = seg.decode("utf-8", "replace")
-            stripped = line.strip()
-            if stripped == _SECTION:
-                if mem is None or line_start > mem:
-                    mem = line_start  # keep the LATEST marker (largest offset)
-                continue
-            if not stripped:
-                continue
-            try:
-                data = json.loads(line)
-            except (ValueError, TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(data, dict) and data.get("type") == "compaction":
-                if comp is None or line_start > comp[0]:
-                    comp = (line_start, event_from_dict(data))  # keep the LATEST compaction
-        scanned_to = lo
-        if comp is not None and mem is not None:
-            break
-        if lo == 0 or total - scanned_to >= _TAIL_SCAN_MAX:
-            break
-        chunk *= 2
-    return comp, mem
-
-
 def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int], bytes], int]:
     """Range reader for a .clc over local or remote (exec-bridge) storage.
 
@@ -180,7 +103,7 @@ def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int]
     its presence changes nothing). Remote: EVERY read is a byte-range exec
     (``tail -c +A | head -c B | base64`` — base64 keeps the round trip exact even
     when a range cuts mid-multibyte-character), so opening a big .clc over SSH
-    transfers only the header + the preserved tail, never the whole file.
+    transfers only the header + the window, never the whole file.
     """
     if workspace is not None and not isinstance(workspace, LocalWorkspace):
         total = workspace.size(str(path))
@@ -199,20 +122,20 @@ def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int]
 
 
 class LazyEventLog:
-    """EventLog facade over a byte-addressed .clc.
+    """The event log over a byte-addressed .clc.
 
-    Resident durable events are kept in one ordered list with their relative
-    byte offsets. A bounded LRU (cap ``_LRU_EVENT_CAP``) drops materialized
-    *middle* records (offsets strictly between the task end and the preserved
-    tail) when the log grows past it; the task, the preserved tail and anything
-    inside an active materialize() context are pinned. Eviction is invisible to
-    the UI: pages it rendered keep their DOM copies and are only re-fetched from
-    disk on a reconnect.
+    Resident durable events are the WINDOW ``[cpr_start, event region end)``:
+    the newest compaction line and everything after it. Older history (before
+    cpr_start) is never resident — the UI pages it with ``read_page``, a pure
+    disk read that does not touch this log (model context and history browsing
+    are fully decoupled).
 
-    The compaction contract is preserved: ``tail_start`` is a byte offset
-    relative to the event region, ``events()``/``items()`` return durable events
-    with their offsets, and compact() re-materializes the head under a pin so
-    its summary matches a fully loaded log.
+    The window contract is preserved across reopen: ``cpr_start`` is a byte
+    offset relative to the event region, persisted in the .clc header, so a
+    lazily reopened log resolves the same boundary as the live one did. A
+    compaction slides the window: it summarizes the whole current window, appends
+    the new CompactionEvent at the file end, and moves cpr_start to that line's
+    start (the window collapses to just the new summary).
     """
 
     def __init__(
@@ -222,24 +145,21 @@ class LazyEventLog:
         total: int,
         base: int,
         writer: Callable[[str, str], None] | None = None,
-        tail_start: int = 0,
+        cpr_start: int = 0,
+        cpr_line_off: int = 0,
+        write_at: Callable[[int, bytes], None] | None = None,
     ) -> None:
         self._path = path
         self._read = read
-        self._total = total  # file size at open (bytes, absolute)
-        self._base = base  # event region start (absolute): the raw task's line start
+        self._base = base  # event region start (absolute): the first durable line
         self._writer = writer
+        self._write_at = write_at  # in-place header write (None = read-only / in-memory)
+        self._cpr_line_off = cpr_line_off  # absolute offset of the header's cpr_start line
         self._file_bytes = total  # grows as events append
         self._events: list[Event] = []
         self._offsets: list[int] = []  # parallel: relative byte offsets (unique)
-        self._lru: list[int] = []  # evictable (middle) event offsets, load order
-        self._in_use: set[int] = set()  # pinned by an active materialize() context
-        self._pin_range: tuple[int, int] | None = None  # active materialize() [lo, hi)
-        self._tail_start = 0
-        self._task_end = 0  # byte offset just past the raw task line
-        self._mid_offsets: list[int] = []  # materialized middle offsets (older count)
-        self._mid_fully_loaded = False  # the whole middle [task_end, tail_start) is resident
-        self._materialize_open(tail_start)
+        self._cpr_start = 0  # window start (relative): the newest compaction line start
+        self._materialize_open(cpr_start)
 
     # ------------------------------------------------------------------ core
 
@@ -247,50 +167,40 @@ class LazyEventLog:
     def path(self) -> str:
         return self._path
 
-    @property
-    def task_end(self) -> int:
-        """Byte offset just past the raw task line (relative): paging never
-        reads at or before this — the task is always resident."""
-        return self._task_end
-
-    def _materialize_open(self, stored_tail_start: int) -> None:
-        """Open-time materialization: the raw task (from a tiny head read) plus
-        the preserved tail [tail_start, event region end). The middle stays on
-        disk — that is the whole point of the lazy load."""
-        # 1. task: the first durable line of the event region
-        head = self._read(self._base, min(self._base + (1 << 16), self._total))
-        pos = 0
-        for seg in head.split(b"\n"):
-            rel = pos
-            pos += len(seg) + 1  # BYTES, exact
-            if not seg or seg.startswith(_SEPARATOR.encode()) or seg.startswith(_SECTION.encode()):
-                continue
-            line = seg.decode("utf-8", "replace")
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                data = json.loads(line)
-            except (ValueError, TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(data, dict) or "type" not in data:
-                continue
-            ev = event_from_dict(data)
-            if ev.type in DURABLE_TYPES:
-                self._events.append(ev)
-                self._offsets.append(0)
-                self._task_end = rel + len(seg) + 1
-                break
-        # 2. clamp the stored tail_start to the event region (stale/out-of-range
-        # values fall back to the tail of the region: everything loads, and a
+    def _materialize_open(self, stored_cpr_start: int) -> None:
+        """Open-time materialization: ONLY the window ``[cpr_start, event
+        region end)`` is resident — nothing else. History before cpr_start
+        (the raw task included) stays on disk and is paged by the UI's
+        scroll-up channel, so opening a compacted file is one range read."""
+        # clamp a stale/out-of-range cpr_start to 0 (everything loads, and a
         # compaction's summary is never lost)
         region_len = self._file_bytes - self._base
-        self._tail_start = stored_tail_start if 0 <= stored_tail_start <= region_len else 0
-        # 3. the preserved tail
-        tail = self._read(self._base + self._tail_start, self._file_bytes)
-        for off, ev in _parse_with_offsets(tail, self._tail_start):
+        self._cpr_start = stored_cpr_start if 0 <= stored_cpr_start <= region_len else 0
+        # A legacy file (no cpr_start header line) cannot persist its compaction
+        # boundary, so the whole history (past summaries included) would be
+        # treated as the window and re-summarized on EVERY open — the UI flashes
+        # "compressing context" each session and the file grows with redundant
+        # full-history summaries. Derive the boundary from the newest compaction
+        # line instead (the same scan the migration script uses); a never-
+        # compacted file scans to 0 (whole region, as before).
+        if not self._cpr_line_off and region_len > 0:
+            from ..project import _last_compaction_rel  # project imports lazy at module load
+
+            # scan the event region for the newest compaction line: `whole`
+            # starts AT the region, so its byte positions are already relative
+            # to the region start (base=0) — exactly cpr_start's semantics
+            whole = self._read(self._base, self._file_bytes)
+            self._cpr_start = _last_compaction_rel(whole, 0)
+        window = self._read(self._base + self._cpr_start, self._file_bytes)
+        for off, ev in _parse_with_offsets(window, self._cpr_start):
             self._events.append(ev)
             self._offsets.append(off)
+
+    @classmethod
+    def in_memory(cls) -> LazyEventLog:
+        """An in-memory log: no file, no persistence. Serves as the scratch
+        log for tests and as the Agent's default when no project is open."""
+        return cls("", lambda lo, hi: b"", 0, 0)
 
     def append(self, event: Event) -> Event:
         if event.type in DURABLE_TYPES:
@@ -302,149 +212,59 @@ class LazyEventLog:
         return event
 
     def events(self) -> list[Event]:
-        """All materialized durable events, in file order."""
+        """All materialized durable events, in file order (the window)."""
         return list(self._events)
 
     def items(self) -> list[tuple[int, Event]]:
         """Materialized (relative_byte_offset, event) pairs, in file order."""
         return list(zip(self._offsets, self._events))
 
-    def __len__(self) -> int:
-        return len(self._events)
+    # ------------------------------------------------------------- the window
 
-    def __getitem__(self, idx: int) -> Event:
-        return self._events[idx]
+    def cpr_start(self) -> int:
+        """Window start (relative byte offset): the newest compaction line's
+        start, or 0 for a compaction-free file."""
+        return self._cpr_start
 
-    # ------------------------------------------------------- durable slicing
+    def window_bytes(self) -> int:
+        """Bytes of the model window [cpr_start, event region end)."""
+        return (self._file_bytes - self._base) - self._cpr_start
 
-    def tail_from(self, ts: int, compaction: CompactionEvent) -> list[Event]:
-        """Durable events at byte offsets >= ts (the preserved tail), minus
-        compaction events. Offsets are relative to the event region — exactly
-        what the .clc persists — so a reopened lazy log slices identically to
-        the live one. A stale out-of-range ts falls back to the tail boundary
-        itself."""
-        if ts > (self._offsets[-1] if self._offsets else 0):
-            ts = self._tail_start
-        i = bisect.bisect_left(self._offsets, ts)
-        return [e for e in self._events[i:] if not isinstance(e, CompactionEvent)]
+    def last_compaction(self) -> CompactionEvent | None:
+        """The most recent materialized CompactionEvent (or None)."""
+        return next((e for e in reversed(self._events) if isinstance(e, CompactionEvent)), None)
 
-    # ----------------------------------------------------------- compaction
+    def set_cpr_start(self, off: int) -> None:
+        """Slide the window start to a new boundary (a fresh compaction line):
+        persist it in the header's fixed-width line (in-place write, stable
+        offsets) and update the resident value."""
+        if not 0 <= off <= (self._file_bytes - self._base):
+            return  # defensive: never record a boundary outside the event region
+        if self._path and self._write_at is not None and self._cpr_line_off:
+            # the whole fixed-width line (prefix included — the line never
+            # shifts, so the in-place write keeps every other offset stable).
+            # _cpr_line_off 0/None = a file whose header has no cpr_start line:
+            # never write there (offset 0 is the header prefix) — migration is
+            # the script's job, so the boundary just stays in memory.
+            self._write_at(self._cpr_line_off, f"cpr_start={off:010d}".encode("ascii"))
+        self._cpr_start = off
 
-    def tail_start_index(self, budget: int) -> int:
-        """Byte offset (relative to the event region) where the preserved recent
-        tail begins, sized to ``budget`` tokens (~3 chars each) and split at an
-        assistant-turn boundary. Sizes come from the materialized tail — which
-        IS the full preserved tail [tail_start, N) — so the walk matches
-        EventLog.tail_start_index exactly (same events, same len(content)//3):
-        byte-addressing needs no index, no content reads, and no approximation.
-        """
-        tail_idx = bisect.bisect_left(self._offsets, self._tail_start)
-        total = 0
-        tail_start = 0
-        for i in range(len(self._events) - 1, tail_idx - 1, -1):
-            ev = self._events[i]
-            if isinstance(ev, (UserMessageEvent, ToolResultEvent)):
-                size = len(ev.content)
-            elif isinstance(ev, AssistantMessageEvent):
-                size = len(ev.content) + len(ev.reasoning)
-            else:
-                continue
-            total += size // 3
-            if total >= budget:
-                j = i
-                while j > tail_idx and not isinstance(self._events[j], AssistantMessageEvent):
-                    j -= 1
-                tail_start = self._offsets[j]
-                break
-        return tail_start
+    def note_bytes_written(self, n: int) -> None:
+        """Count bytes the MemoryStore appended to the same file (memory lines
+        and the [memories] marker): they grow the file but are not events, so
+        the log's own bookkeeping would otherwise undercount the on-disk size,
+        drifting every later event offset (and the persisted window boundary)."""
+        self._file_bytes += n
 
-    def events_before(self, byte_offset: int) -> list[Event]:
-        """Materialized durable events whose byte offset < ``byte_offset`` (the
-        compaction head: everything before the preserved tail boundary)."""
-        return [e for e, off in zip(self._events, self._offsets) if off < byte_offset]
+    # ------------------------------------------------- history paging (decoupled)
 
-    def compact_min_tail(self) -> int:
-        """Smallest tail_start that leaves a compactible head. The lazy boundary
-        never drops below the preserved tail (which sits past the task), so any
-        computed boundary has a real head; keep the task-end floor anyway."""
-        return self._task_end
-
-    # ------------------------------------------------------------ materialize
-
-    def older_bytes(self) -> int:
-        """Event-region bytes still on disk between the task end and the
-        preserved tail: pages not yet materialized, plus any that LRU eviction
-        dropped (evicted pages only matter on a reconnect, where this honest
-        count resets the UI's pill). 0 once the whole middle is resident."""
-        if self._mid_fully_loaded:
-            return 0
-        if not self._mid_offsets:
-            return max(0, self._tail_start - self._task_end)
-        return max(0, min(self._mid_offsets) - self._task_end)
-
-    def materialize_range(self, lo: int, hi: int) -> list[tuple[int, Event]]:
-        """Ensure the byte range [lo, hi) (relative offsets) is materialized
-        (reading the missing slices from disk in one pass) and return (offset,
-        event) pairs in file order. Drops LRU victims afterwards."""
+    def read_page(self, lo: int, hi: int) -> list[tuple[int, Event]]:
+        """Pure disk read of [lo, hi) (relative offsets): parse and return the
+        durable events WITHOUT touching the resident log. This is the UI's
+        scroll-up history channel — the bytes before cpr_start are read on
+        demand and never enter the model context."""
         lo = max(0, lo)
         hi = min(hi, self._file_bytes - self._base)
         if lo >= hi:
             return []
-        text = self._read(self._base + lo, self._base + hi)
-        for off, ev in _parse_with_offsets(text, lo):
-            if not self._is_loaded(off):
-                self._insert(off, ev)
-                if self._task_end < off < self._tail_start:
-                    self._lru.append(off)
-                    self._mid_offsets.append(off)
-        if lo <= self._task_end and hi >= self._tail_start:
-            self._mid_fully_loaded = True  # the whole middle is now resident
-        self._evict_lru()
-        return [(off, ev) for off, ev in zip(self._offsets, self._events) if lo <= off < hi]
-
-    @contextlib.contextmanager
-    def materialize(self, lo: int, hi: int) -> Iterator[None]:
-        """Pin byte offsets [lo, hi) against LRU eviction for the block and
-        materialize them. The compactor uses this so the summarized head can
-        never be dropped mid-compaction."""
-        prev = self._pin_range
-        self._pin_range = (lo, hi)
-        try:
-            self.materialize_range(lo, hi)
-            yield
-        finally:
-            self._pin_range = prev
-
-    # -------------------------------------------------------------- internals
-
-    def _is_loaded(self, off: int) -> bool:
-        i = bisect.bisect_left(self._offsets, off)
-        return i < len(self._offsets) and self._offsets[i] == off
-
-    def _insert(self, off: int, ev: Event) -> None:
-        i = bisect.bisect_left(self._offsets, off)
-        self._offsets.insert(i, off)
-        self._events.insert(i, ev)
-
-    def _evict_lru(self) -> None:
-        """Drop evictable materialized events beyond the LRU cap, oldest-loaded
-        first. Pinned offsets, the task, the preserved tail and the active
-        materialize() range are never dropped."""
-        while len(self._events) > _LRU_EVENT_CAP:
-            victim = None
-            for off in self._lru:
-                if off in self._in_use:
-                    continue
-                if self._pin_range is not None and self._pin_range[0] <= off < self._pin_range[1]:
-                    continue
-                victim = off
-                break
-            if victim is None:
-                break  # everything evictable is pinned right now
-            i = bisect.bisect_left(self._offsets, victim)
-            del self._offsets[i]
-            del self._events[i]
-            self._lru.remove(victim)
-            if victim in self._mid_offsets:
-                self._mid_offsets.remove(victim)
-            self._mid_fully_loaded = False  # eviction reopened the middle
+        return _parse_with_offsets(self._read(self._base + lo, self._base + hi), lo)

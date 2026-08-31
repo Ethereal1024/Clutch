@@ -14,7 +14,6 @@ so local and remote behave identically.
 
 from __future__ import annotations
 
-import base64
 import fnmatch
 import json
 import os
@@ -56,6 +55,24 @@ def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
 # Single source for the remote-wire limits, shared with the Node exec upload path
 # (ui/ssh-tunnel.js) so the two languages can never drift apart.
 _DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defaults.json").read_text(encoding="utf-8"))
+
+# Scratch dirs that are harmless to write to (test logs, /dev/null redirects).
+SCRATCH_DIRS = (Path("/tmp"), Path("/var/tmp"), Path("/dev"))
+
+
+def _inside_or_scratch(p: Path, root: Path) -> bool:
+    """SINGLE containment verdict: ``p`` is inside the workspace ``root``, or
+    inside a harmless scratch dir (test logs, /dev/null) — provided the root
+    itself is not inside that scratch dir (a /tmp-hosted workspace must still
+    flag its own escapes). Shared by ``Workspace.resolve`` (real-path guard)
+    and ``Workspace.escape_path`` (permission gate), so the two can never
+    disagree."""
+    if p.is_relative_to(root):
+        return True
+    for scratch in SCRATCH_DIRS:
+        if p.is_relative_to(scratch) and not root.is_relative_to(scratch):
+            return True
+    return False
 
 
 class Workspace(ABC):
@@ -120,11 +137,46 @@ class Workspace(ABC):
 
     def resolve(self, rel_path: str) -> Path:
         """Resolve a path to inside the workspace (or a user-approved external
-        path); raise ValueError on an unapproved escape."""
-        p = (self.root / rel_path).resolve()
-        if p.is_relative_to(self.root) or p in self._allowed_escapes:
+        path); raise ValueError on an unapproved escape. The root is resolved
+        too, so a symlinked spelling of the workdir (or a subfolder) still
+        counts as inside. The FINAL component's symlink is not followed for the
+        containment check: a project-local symlink such as .venv/bin/python
+        (-> /usr/bin/python3.10) must read as inside the workspace, not as an
+        escape. The OS follows it when the path is actually opened."""
+        root = self.root.resolve()
+        base = root / rel_path
+        try:
+            if base.name:
+                p = base.parent.resolve() / base.name
+            else:
+                p = base.resolve()
+        except (OSError, ValueError):
+            p = base.resolve()
+        if p in self._allowed_escapes or _inside_or_scratch(p, root):
             return p
         raise ValueError(f"path escapes workspace: {rel_path!r}")
+
+    def escape_path(self, token: str, anchor: Path | None = None) -> Path | None:
+        """Lexical escape verdict for one path token: the absolute path it
+        refers to OUTSIDE the workspace, or None when it stays inside (or in a
+        harmless scratch dir). ``anchor`` is the directory the token is
+        relative to — the workspace root by default, or the ``cd``'d dir for a
+        run_command (``cd sub && ../x`` is judged from sub, not the root).
+        This is the single source of truth behind the permission gate's escape
+        list AND the shell guard's token rejection."""
+        if not token:
+            return None
+        if token.startswith("~"):
+            token = os.path.expanduser(token)
+        base = anchor if anchor is not None else self.root
+        root = self.root.resolve()
+        try:
+            p = Path(os.path.normpath(os.path.join(str(base), token)))
+        except (OSError, ValueError):
+            return None
+        if _inside_or_scratch(p, root):
+            return None
+        return p
 
     def run(self, command: str, timeout: float) -> CommandResult:
         """Run a shell command in the workspace; transport-specific cwd handling."""
@@ -139,7 +191,8 @@ class Workspace(ABC):
         """Return the file's byte range [lo, hi) as RAW BYTES (the lazy log's
         indexed reads: exact byte offsets, so materialization matches the file).
         The range may cut mid-multibyte-character — implementations must round
-        the bytes through losslessly (remote: base64 over the exec bridge)."""
+        the bytes through losslessly (remote: the transport's binary mode base64-encodes
+        client-side, so the remote needs no base64)."""
 
     @abstractmethod
     def size(self, path: str) -> int:
@@ -155,7 +208,15 @@ class Workspace(ABC):
 
     @abstractmethod
     def append_line(self, path: str, line: str) -> None:
-        """Append one line to a file (the remote .clc EventLog writer)."""
+        """Append one line to a file (the remote .clc writer)."""
+
+    @abstractmethod
+    def write_at(self, path: str, offset: int, data: bytes) -> None:
+        """Overwrite bytes [offset, offset + len(data)) IN PLACE (the .clc
+        header's fixed-width memory index line). Never changes the file size
+        and never touches bytes outside the range; implementations must
+        round the raw bytes losslessly (remote: the transport's binary mode keeps bytes
+        exact without a remote base64)."""
 
     @abstractmethod
     def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
@@ -194,6 +255,12 @@ class LocalWorkspace(Workspace):
         p = self.resolve(path)
         with open(p, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+    def write_at(self, path: str, offset: int, data: bytes) -> None:
+        p = self.resolve(path)
+        with open(p, "r+b") as f:
+            f.seek(offset)
+            f.write(data)
 
     def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
         rx = re.compile(pattern)
@@ -290,17 +357,17 @@ class RemoteWorkspace(Workspace):
         return r.stdout
 
     def read_range(self, path: str, lo: int, hi: int) -> bytes:
-        """Byte range [lo, hi) as RAW bytes. The exec bridge carries text, so
-        the remote side pipes the slice through base64: every byte round-trips
-        exactly even when the range cuts mid-multibyte-character (a plain tail
-        would mangle the cut byte in the text round trip and shift offsets)."""
+        """Byte range [lo, hi) as RAW bytes. The exec bridge carries text, so the
+        transport's binary mode base64-encodes the slice CLIENT-side: every byte
+        round-trips exactly even when the range cuts mid-multibyte-character, and
+        the remote needs no base64 binary (just tail/head — minimal hosts lack it)."""
         p = self.resolve(path)
         r = self._transport.run(
-            f"tail -c +{lo + 1} {shq(str(p))} | head -c {hi - lo} | base64", _REMOTE_IO_TIMEOUT
+            f"tail -c +{lo + 1} {shq(str(p))} | head -c {hi - lo}", _REMOTE_IO_TIMEOUT, binary=True
         )
         if r.code != 0:
             raise OSError(f"cannot read {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-        return base64.b64decode(r.stdout.strip())
+        return r.stdout.encode("latin-1")
 
     def size(self, path: str) -> int:
         """Total file size in bytes: wc -c on a regular file stats it (O(1)),
@@ -420,6 +487,21 @@ class RemoteWorkspace(Workspace):
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
         self._exec_append(p, line, first_op=">>", add_trailing_nl=True, ensure_dir=False)
+
+    def write_at(self, path: str, offset: int, data: bytes) -> None:
+        """In-place overwrite at a byte offset (the .clc memory index header
+        line). The bytes travel as POSIX octal escapes through printf %b (a sh
+        builtin — the remote needs no base64); dd with conv=notrunc writes over
+        the range without truncating the file or touching anything past it."""
+        p = self.resolve(path)
+        octal = "".join(f"\\{b:03o}" for b in data)
+        cmd = (
+            f"printf '%b' '{octal}' | "
+            f"dd of={shq(str(p))} bs=1 seek={offset} conv=notrunc"
+        )
+        r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
+        if r.code != 0:
+            raise OSError(f"cannot write_at {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
 
     def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
         # busybox grep has no --include and no dotfile awareness, so build the file
