@@ -307,16 +307,29 @@ def main() -> None:
         r = reg.execute(sb, config, "run_command", {"command": "python3 bad.py"})
         check(r["error"] and "syntax check failed" in r["content"], "syntax check rejects bad python")
 
-        # 5. doom-loop detection
+        # 5. doom-loop detection: warn on first detection, escalate on repeat
         term = Terminator(config)
-        hit = False
+        status = ""
         for _ in range(4):
-            hit = term.record_call("run_command", '{"command": "ls"}')
-        check(hit, "doom-loop detected after 4 identical calls")
+            status = term.record_call("run_command", '{"command": "ls"}', "same output")
+        check(status == "warn", "doom-loop warns after 4 identical calls (same args + result)")
+        check(term.should_escalate("run_command", '{"command": "ls"}'), "repeating the warned call escalates")
+        check(not term.should_escalate("run_command", '{"command": "ls -l"}'), "different call does not escalate")
+        term.record_call("run_command", '{"command": "ls -l"}', "other")
+        check(not term.should_escalate("run_command", '{"command": "ls"}'), "different call forgives the warning")
+        # identical calls whose results change are progress, not a doom loop
         term2 = Terminator(config)
         for i in range(4):
-            term2.record_call("run_command", f'{{"command": "ls{i}"}}')
-        check(not term2.record_call("run_command", '{"command": "ls1"}'), "varying calls not doom-loop")
+            term2.record_call("run_command", '{"command": "poll"}', f"out {i}")
+        check(
+            not term2.should_escalate("run_command", '{"command": "poll"}'),
+            "changing results are progress, not doom",
+        )
+        # varying calls not doom-loop
+        term3 = Terminator(config)
+        for i in range(4):
+            term3.record_call("run_command", f'{{"command": "ls{i}"}}', "x")
+        check(term3.record_call("run_command", '{"command": "ls1"}', "x") != "warn", "varying calls not doom-loop")
 
         # 6. verification gate
         vterm = Terminator(Config(verify_command="echo pass"))

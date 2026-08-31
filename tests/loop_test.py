@@ -14,7 +14,14 @@ from typing import Any
 from agent.config import Config
 from agent.core.compaction import Compactor
 from agent.core.lazy import LazyEventLog
-from agent.events import AssistantMessageEvent, CompactionEvent, FinalEvent, StateUpdateEvent, UserMessageEvent
+from agent.events import (
+    AssistantMessageEvent,
+    CompactionEvent,
+    FinalEvent,
+    StateUpdateEvent,
+    ToolResultEvent,
+    UserMessageEvent,
+)
 from agent.loop import Agent
 from agent.tools.registry import ToolRegistry, build_default_tools
 from agent.tools.workspace import LocalWorkspace, Workspace, shq
@@ -164,7 +171,7 @@ def main() -> int:
         check(result == "ABORTED", "budget abort even when only tool calls")
         check(len(fake.calls) == 3, "budget stops after max_turns calls")
 
-    # 4. doom-loop abort: 4 identical calls in a row
+    # 4. doom-loop: first detection warns (feeds back), repeating the exact call aborts
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         fake = FakeLLM(
@@ -173,11 +180,34 @@ def main() -> int:
                 _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
                 _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
                 _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(content="course corrected"),
+            ],
+            fallback=_resp(content="course corrected"),
+        )
+        agent = _agent(fake, config, sb)
+        result = agent.run("t")
+        check(result == "course corrected", "first doom-loop detection warns, does not abort")
+        results = [e for e in agent.log.events() if isinstance(e, ToolResultEvent)]
+        check(
+            bool(results) and "Dead loop detected" in results[-1].content,
+            "doom warning fed back inside the tool result",
+        )
+
+    # 4b. repeating the exact warned call aborts the run
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
+                _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
             ],
             fallback=_resp(content="never"),
         )
         result = _agent(fake, config, sb).run("t")
-        check(result == "ABORTED", "doom-loop aborts run")
+        check(result == "ABORTED", "repeating the warned call aborts the run")
 
     # 5. max-tokens truncation: drop tool calls, feed user message, model retries
     with tempfile.TemporaryDirectory() as tmp:

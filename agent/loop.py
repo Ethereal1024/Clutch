@@ -218,13 +218,26 @@ class Agent:
                         self._emit(ev)
 
                     for ev in tc_events:
-                        if self.terminator.record_call(ev.name, ev.arguments):
-                            # doom loop: repeated identical calls; escalate to abort unless disabled
+                        # after a doom warning, repeating the exact same call escalates
+                        if self.terminator.should_escalate(ev.name, ev.arguments):
                             if self.config.abort_on_doom_loop:
-                                return self._finish("aborted", render("doom_loop.md"))
-                            result = {"content": render("doom_loop.md"), "error": True}
+                                return self._finish("aborted", render("doom_loop.md", tool=ev.name))
+                            result = {"content": render("doom_loop.md", tool=ev.name), "error": True}
                         else:
                             result = self._execute_tool(ev)
+                            # result-aware doom check: identical call AND identical
+                            # result; the tool runs first so its output is known
+                            status = self.terminator.record_call(
+                                ev.name, ev.arguments, result.get("content", "")
+                            )
+                            if status == "warn":
+                                # first detection: keep the real result, append the
+                                # warning, and let the model course-correct
+                                result = {
+                                    "content": f"{result.get('content', '')}\n\n{render('doom_loop.md', tool=ev.name)}",
+                                    "error": True,
+                                    "diff": result.get("diff", ""),
+                                }
                         self._emit(
                             ToolResultEvent(
                                 tool_call_id=ev.tool_call_id,

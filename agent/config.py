@@ -41,6 +41,11 @@ class Config:
 
     # Loop budget
     max_turns: int = 0  # 0 = no turn limit (compaction keeps long runs going); >0 caps turns
+    # Doom-loop guard: N identical calls (same name + arguments + result content)
+    # in a row. First detection feeds a warning back as an error; repeating the
+    # exact warned call then aborts the run (abort_on_doom_loop=False keeps
+    # feeding feedback instead). Identical calls whose results change are
+    # progress (polling, flaky tests) and never trigger.
     doom_loop_limit: int = 4
     abort_on_doom_loop: bool = True
 

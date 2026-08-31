@@ -1,2 +1,2 @@
-ERROR: Dead loop detected: the same tool was called repeatedly with identical arguments.
-Change your approach or parameters.
+ERROR: Dead loop detected: `$tool` was called repeatedly with identical arguments and identical results.
+Change your approach or parameters — do not repeat this exact call again.
