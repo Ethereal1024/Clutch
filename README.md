@@ -1,10 +1,10 @@
-# clutch
+# Clutch
 
 [![License: MIT](https://img.shields.io/github/license/Ethereal1024/Clutch)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=CI)](https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
-clutch 是一个编程智能体：给它一句话任务，它会调用大语言模型，自主地读写文件、
+Clutch 是一个编程智能体：给它一句话任务，它会调用大语言模型，自主地读写文件、
 执行命令、运行测试，直到任务完成或触发停止条件。
 
 循环里的关键逻辑都是自己实现的：对话历史的维护、工具的定义与本地执行、模型输出的
@@ -40,6 +40,23 @@ npm start                    # 启动界面，后端由应用自动拉起
 情况由模型引导安装）。远端每个窗口是一个独立会话，LLM 请求经隧道转发回客户端本地
 反代，因此远端不需要 API key。
 
+```mermaid
+flowchart LR
+    subgraph local["本机"]
+        UI["Clutch 界面"]
+        PXY["LLM 反代"]
+    end
+    subgraph remote["远端"]
+        SUP["supervisor"]
+        S["agent 会话"]
+    end
+    UI -- "SSH 隧道 (ssh2)" --> SUP
+    SUP -. "分配端口" .-> S
+    S -- "tool calling" --> PXY
+    PXY -- "HTTPS" --> LLM["大模型"]
+    S -- "读写 / 执行" --> WS["远端工作目录"]
+```
+
 ## 桌面版（Linux）
 
 `scripts/release.sh` 把后端打成 PyInstaller 二进制，连同 Electron 界面打包成 deb，
@@ -60,10 +77,33 @@ sudo dpkg -i clutch-ui_<版本>_amd64.deb
 
 ```mermaid
 flowchart LR
-    UI["Electron 界面"] -- "HTTP + SSE" --> S["agent 会话"]
+    UI["Clutch 界面"] -- "HTTP + SSE" --> S["agent 会话"]
     SUP["supervisor"] -. "分配 / 回收" .-> S
     S -- "tool calling" --> LLM["大模型"]
     S -- "读写 / 执行" --> WS["工作目录"]
+```
+
+单个任务在会话里的执行循环：
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant A as Clutch 会话
+    participant M as 大模型
+    participant T as 工具
+
+    U->>A: 一句话任务
+    loop 迭代，直到验证门通过或轮数耗尽
+        A->>M: 上下文与事件日志
+        M-->>A: 工具调用 / 声明完成
+        alt 工具调用
+            A->>T: 读写 / 执行
+            T-->>A: 结果（含错误原文）
+        else 声明完成
+            A->>A: 可选验证命令
+            A-->>U: 任务结果
+        end
+    end
 ```
 
 几个设计选择：
