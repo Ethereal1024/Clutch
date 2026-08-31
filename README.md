@@ -1,131 +1,120 @@
-clutch —— 从零手写的编程智能体
-================================
+# clutch
 
-Git 仓库：<你的 GitHub 仓库地址>
+[![License: MIT](https://img.shields.io/github/license/Ethereal1024/Clutch)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=CI)](https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
-一句话
-------
-clutch 是一个自主编程智能体：给它一句话任务，它通过与大模型交互，自主读写文件、
-执行命令、运行自测，直到验证门证明任务完成。全部核心从零手写，未使用任何 agent
-框架（无 LangChain / AutoGen / Agents SDK 等），模型走 DeepSeek 的 OpenAI 兼容
-tool-calling 接口。
+clutch 是一个编程智能体：给它一句话任务，它会调用大语言模型，自主地读写文件、
+执行命令、运行测试，直到任务完成或触发停止条件。
 
-如何运行
---------
-前后端已解耦：后端是纯 API 服务，前端是独立的 Electron 程序（或任意静态托管），
-两者通过 HTTP 通信。跨设备走 **SSH 隧道**（对齐 VSCode Remote）：客户端连到远端
-后端，后端无需暴露端口、无需外网、无需 API key——客户端自己充当 LLM 反代。
+循环里的关键逻辑都是自己实现的：对话历史的维护、工具的定义与本地执行、模型输出的
+解析、循环终止、错误处理，没有使用现成的 agent 框架或 SDK。模型通过 OpenAI 兼容的
+tool-calling 接口调用（DeepSeek 等均可），需要自备 API key。
 
-**本机模式**
-1. 安装依赖：pip install uv && uv sync  （前端另需：cd ui && npm install）
-2. 设置密钥：export CLUTCH_API_KEY=你的key
-3. 启动前端：cd ui && npm start   （或用 npm run dev 同时起前后端）
-   - 后端无需手动启动：应用自动拉起机器级 supervisor（127.0.0.1:8890），每个
-     窗口再向 supervisor 领一个**独立会话**（agent.server --port 0，随机端口）；
-     窗口关闭 → 会话停止，末窗退出 → supervisor 空闲自退
-   - 想手动起后端也可以：uv run python -m agent.server --port 0，再设
-     CLUTCH_API_URL=http://127.0.0.1:<该端口> 让应用直连（direct 模式，不建会话）
-   - 注意：本机 electron 包为无 postinstall 的重打包版，首次运行会惰性下载二进制
-     （走 ~/.npmrc 代理）；若因某种原因每次都触发 "Downloading Electron binary..."，
-     是 path.txt 带了尾随换行——npm install 后 ui/ 的 postinstall 已自动修剪，
-     可手动执行 node -e "require('fs').writeFileSync('node_modules/electron/path.txt','electron')"
-4. 在欢迎界面用**文件浏览器**新建/打开项目（.clc 文件）后开始对话
+## 快速开始
 
-**跨设备（两台机器）**
-1. 远端：什么都不用装——客户端连接后会自动安装并启动服务器
-2. 本机：cd ui && npm start，在「⚙ 设置」→ SSH 填入 host/user/port（可选填密码，
-   或留空用本机 ~/.ssh 密钥 / ssh-agent）点 Connect
-   —— 程序化 ssh2 隧道：密码在 App 内输入，无需终端；也可用密钥免密
-   —— **自动安装**（对齐 VSCode Remote）：按远端环境自适应——
-      远端有 python3 → 客户端按其 os/架构/libc/python 版本**下载对应 wheel 打包上传**
-      （`PYTHONPATH` 直跑，**远端永不运行 pip/venv、无需外网**，跨平台亦然）；
-      无 python3 且同架构 → 自包含二进制（PyInstaller 现构建）；
-      其余极端环境 → 客户端 LLM 引导安装（模型在远端执行命令，装 python3/pip 并启动）
-   —— 远端跑的是同一个 supervisor（agent-supervisor，与本地 deb 内置同一架构）：
-      隧道只转发到远端 8890 控制通道，每个窗口向远端 supervisor **各领一个独立
-      会话**（随机端口 + 每窗口单独转发），会话自动带
-      --base-url http://127.0.0.1:8892/v1（LLM 走客户端反代）——跨窗口/跨机器的
-      .clc 写锁语义与本地完全一致
-   —— 每次连接会追加写入 ~/.clutch/tunnel.log（含 host/user/port/明文密码与 ssh2
-      协议跟踪，用于复现连接失败；开发期功能，发布前删除）
-3. 欢迎界面的文件浏览器浏览的是**远端服务器**的文件系统
+需要 Python ≥ 3.10 和 Node.js，包管理用 uv。
 
-**直连局域网（可选，不推荐）**：--host 0.0.0.0 直接暴露 HTTP，无鉴权，仅可信
-局域网内使用；此时后端需自行连接 LLM（设 CLUTCH_API_KEY 或 --base-url）。
+```bash
+pip install uv && uv sync    # 后端依赖
+cd ui && npm install         # 前端依赖
+export CLUTCH_API_KEY=...    # API key
+npm start                    # 启动界面，后端由应用自动拉起
+```
 
-桌面版（Linux deb）
-------------------
-打包定位：自包含的 Linux 发行版桌面应用。deb 内含 Electron GUI + 打包好的后端
-二进制（PyInstaller onefile），安装后从应用菜单/命令行启动即用，目标机器**不需要
-python/pip/网络**。
+`npm run dev` 由脚本先起后端再起界面（自动清理端口占用），效果等同。只跑后端的话
+也可以手动起：`uv run python -m agent.server --port 0`，`--verify "命令"` 可为任务
+指定验证命令。
 
-安装：
-  sudo dpkg -i clutch-ui_<ver>_amd64.deb     # 或 apt install ./clutch-ui_<ver>_amd64.deb
-  # 启动：应用菜单「Clutch」，或命令行 clutch
-  # 后端由应用自动拉起（supervisor + 随机会话），退出应用时自动停止
+启动后在欢迎界面新建或打开一个 `.clc` 文件，输入任务即可开始对话。一个对话对应一个
+`.clc` 文件，工作目录就是文件所在目录，重新打开即恢复整个对话。
 
-行为细节：
-  · 首窗启动时探测 127.0.0.1:8890：已是 Clutch supervisor（/api/health 返回
-    {"status":"ok"}）则复用；否则自动拉起 deb 内置的 agent-supervisor
-  · 每个窗口向 supervisor 领一个**独立会话**（agent/server.py --port 0，随机
-    端口）；窗口关闭 → 会话停止，会话 30s 无心跳被回收，末窗退出 → supervisor
-    空闲自退——任何窗口/会话崩溃都不泄漏进程（双向 watchdog 兜底）
-  · 设 CLUTCH_API_URL=http://host:port 指向自定义/远程后端时，应用不建会话，
-    直连该地址（SSH 连接也走这条路径）
-  · deb 内后端绑定构建机的 OS/架构/glibc 族（本机打包 = 本机即用；跨平台远端由
-    SSH 自适应安装器处理）
+模型、接口地址和 key 在界面的设置弹窗里填，也可以用环境变量 `CLUTCH_MODEL`、
+`CLUTCH_BASE_URL`、`CLUTCH_API_KEY` 提供。
 
-构建 deb：
-  一键：bash scripts/release.sh            # 图标 → 后端二进制 → deb
-  单步：.venv/bin/python scripts/make-icon.py          # ui/build/icon.png + .svg
-        bash scripts/build-server-bundle.sh <ver> dist/agent-server
-        cd ui && npm run dist              # predist 自动校验 transport_defaults 一致性
-  · 默认从 npmmirror 拉取 electron / electron-builder 工具（CN 网络友好），可用
-    ELECTRON_MIRROR / ELECTRON_BUILDER_BINARIES_MIRROR 覆盖
-  · CI：推送 vX.Y.Z tag 自动构建 deb 并附加到 GitHub Release（见
-    .github/workflows/release.yml）
+## 跨设备使用
 
-独立评测工具（可选）：uv run python -m eval.harness，见 eval/
+在设置的 SSH 里填远端 host / user / port 即可连接，隧道由程序化 ssh2 建立（密码在
+应用内输入，或用本机密钥）。远端不需要预装任何东西：客户端会按远端的系统和 Python
+版本自动上传并运行后端（远端无需外网；没有 Python 的同架构机器用自包含二进制，其余
+情况由模型引导安装）。远端每个窗口是一个独立会话，LLM 请求经隧道转发回客户端本地
+反代，因此远端不需要 API key。
 
-特色功能
---------
-· 事件流驱动架构：会话日志、界面、回放都从唯一事件流派生（借鉴 Claude Code / OpenHands）
-· 项目即文件（类似 PSD）：一个对话 = 一个 .clc 文件，工作目录 = 文件所在目录，
-  打开项目即恢复整个对话；无集中会话管理，去中心化
-· 验证门终止：任务可显式附带验证命令（如测试套件），模型说"完成了"不算数，
-  必须通过该命令才判定成功；不提供则自然终止（对齐 Anthropic「给 agent 一个
-  验证自己工作的方法」原则）
-· 错误即数据：工具失败会喂回给模型，让它读错自纠、迭代修复
-· 工作目录 + 权限确认（对齐 opencode）：agent 在项目目录里干活、产物直接落在那；
-  危险操作（如 rm -rf、写项目目录外）会弹出确认框，由你决定放行或拒绝
-· Skills：系统提示里列目录，模型按需用 load_skill 拉取领域知识（如 web-design），
-  保持基础提示精简
-· 独立评测工具：eval/ 内置落地页 / 修 bug / 重构 三个场景，harness 可重复跑
-  （评测工具与产品解耦，产品不依赖它）
-· 产品化界面：独立 Electron 前端（与后端解耦，可经 SSH 隧道跨设备运行，客户端自带
-  LLM 反代让远端无需外网）+ 欢迎界面（服务器文件浏览器新建/打开项目）+ 任务输入 +
-  运行/停止 + 实时流式输出（文本/思考流式渲染）+ 项目文件树预览
+## 桌面版（Linux）
 
-核心模块（题目必写 5 项一一对应）
---------------------------------
-  agent/core/context.py     对话历史与上下文管理（事件日志派生 + 窗口/字符预算）
-  agent/tools/              工具的定义与本地执行（read/write/list/run，poka-yoke）
-  agent/core/parse.py       模型输出的解析（参数 JSON，错误即数据）
-  agent/core/terminate.py   循环终止条件（验证门 + 轮数预算 + Doom-loop 检测）
-  agent/core/errors.py      错误处理（归一化 + 分层回填）
+`scripts/release.sh` 把后端打成 PyInstaller 二进制，连同 Electron 界面打包成 deb，
+目标机器不需要 Python / Node / 网络：
 
-测试
-----
-  uv run python -m tests.selfcheck         核心逻辑自检
-  uv run python -m tests.loop_test         循环路径测试（假模型驱动，零成本）
-  uv run python -m tests.server_test       HTTP+SSE 端到端测试
-  uv run python -m tests.lazy_check        懒加载路径验证（窗口物化 + 历史分页）
-  uv run python -m tests.supervisor_test   监督进程端到端检查（生命周期 + 跨进程锁）
-  uv run python -m tests.transport_test    传输层 + 远程工作区往返检查（exec 桥）
-  uv run python -m eval.harness            跑全部评测场景并记录结果
+```bash
+sudo dpkg -i clutch-ui_<版本>_amd64.deb
+```
 
-其它说明
---------
-· 演示视频展示了 agent 为 clutch 自己做一个产品介绍页的全过程
-· 真实开发过程见 git 提交历史（逐步 commit，保留完整轨迹）
-· 安全：工作目录内运行 + 命令超时 + 输出截断 + 路径逃逸防护 + 密钥仅环境变量
+推送 vX.Y.Z 的 tag 会触发 CI 自动构建（见 `.github/workflows/release.yml`）。deb 内
+的后端绑定构建机的系统与架构，跨平台场景建议用上面的 SSH 路径。
+
+## 工作原理
+
+前后端解耦：Electron 界面（`ui/`）与 Python 后端（`agent/`）通过 HTTP + SSE 通信。
+后端由 supervisor 统一管理——每个窗口向 supervisor 申请一个独立会话（随机端口），
+窗口关闭会话即停止，末窗退出后 supervisor 自动退出。
+
+```mermaid
+flowchart LR
+    UI["Electron 界面"] -- "HTTP + SSE" --> S["agent 会话"]
+    SUP["supervisor"] -. "分配 / 回收" .-> S
+    S -- "tool calling" --> LLM["大模型"]
+    S -- "读写 / 执行" --> WS["工作目录"]
+```
+
+几个设计选择：
+
+- 事件流：会话日志、界面、回放都从同一条事件流派生，历史与上下文管理基于事件日志，
+  而不是增量拼接的字符串。
+- 验证门：任务可以附带一个验证命令（比如测试套件）。模型说"完成了"不算数，验证
+  命令通过才判定成功；不附带则自然终止。
+- 错误即数据：工具执行失败会连同错误原文喂回给模型，让它自己读错、自己修。
+- 项目即文件：一个对话就是一个 `.clc` 文件，重新打开即恢复整个对话，没有集中的
+  会话管理。
+- Skills：系统提示里只列技能的名字和一句话描述，模型按需用 load_skill 拉取详情，
+  基础提示保持精简。
+- 权限确认：危险操作（`rm -rf`、写到项目目录之外）会弹确认框，由人决定放行或拒绝。
+
+## 项目结构
+
+```
+agent/                 后端
+  core/                上下文管理（context.py）、输出解析（parse.py）、
+                       终止条件（terminate.py）、错误处理（errors.py）
+  tools/               工具定义与本地执行：read_file / write_file / edit_file /
+                       grep / run_command
+  llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）
+  server.py            HTTP + SSE 服务（会话入口）
+  supervisor.py        会话进程管理
+  skills/              按需加载的领域知识
+ui/                    Electron 前端（设置、SSH 隧道、LLM 反代）
+eval/                  评测场景（落地页 / 修 bug / 重构）
+tests/                 测试
+scripts/               打包与构建脚本
+```
+
+## 测试
+
+```bash
+uv run python -m tests.selfcheck        # 核心逻辑自检
+uv run python -m tests.loop_test        # 循环路径（假模型驱动，不消耗 API）
+uv run python -m tests.server_test      # HTTP + SSE 端到端
+uv run python -m tests.lazy_check       # 历史分页与惰性加载
+uv run python -m tests.supervisor_test  # 会话生命周期与跨进程锁
+uv run python -m tests.transport_test   # 传输层与远程工作区往返
+uv run python -m eval.harness           # 三个评测场景
+```
+
+## 安全
+
+- 命令默认在工作目录内运行，带超时与输出截断
+- 路径逃逸有防护，危险操作需人工确认
+- API key 通过环境变量或界面设置提供，不写入仓库
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。

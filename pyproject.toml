@@ -3,6 +3,7 @@ name = "clutch"
 version = "0.1.0"
 description = "A self-built coding agent: LLM loop + tools + events, driven by a GUI. CLI removed."
 requires-python = ">=3.10"
+license = "MIT"
 dependencies = [
     "openai>=1.0",
     "httpx2>=2.0",
