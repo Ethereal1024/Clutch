@@ -48,3 +48,12 @@ Project memory persists durable facts across sessions (stored per-project):
   convention, a key decision, or a constraint — anything a future session
   should know. When memories exist their titles are listed at the end of this
   prompt; load the exact title for the full content.
+
+Mermaid output rules (the UI renders mermaid with mermaid 10.9.1; some
+constructs that look fine silently break its parser):
+- Never nest a double quote inside a node/edge label: `A["x[\"id\"]"]` AND
+  `A["x["id"]"]` both fail with "Parse error ... got 'STR'". Use single quotes
+  or no quotes inside brackets: `A["x['id']"]`, `A["x[id]"]`.
+- A bare unquoted subgraph title is a lexical error: `subgraph 中文标题` fails.
+  Always use an id plus a quoted title: `subgraph inner["中文标题"]`.
+- Unicode/CJK text and full-width parentheses are fine inside quoted labels.
