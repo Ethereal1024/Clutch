@@ -31,8 +31,8 @@ def read_file(
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
             return _result(render("errors/protected_read.md", path=path), error=True)
-        # a directory reads as its entry listing (replaces the old list_dir tool);
-        # workspace.list raises NotADirectoryError for a file or missing path
+        # a directory reads as its entry listing; workspace.list raises
+        # NotADirectoryError for a file or missing path
         try:
             entries = workspace.list(str(p))
         except NotADirectoryError:
@@ -49,9 +49,7 @@ def read_file(
         if offset > 0 or limit > 0:
             return _read_range(text, offset, limit, limit_chars)
         if len(text) > limit_chars:
-            # tell the model how to continue (offset = the first unread line)
-            # instead of silently re-serving the same truncated head, so it pages
-            # forward rather than re-reading the file
+            # point the model at the first unread line instead of re-serving the same head
             head = text[:limit_chars]
             next_offset = head.count("\n") + 1
             text = head + f"\n... [truncated, file is {len(text)} chars; use offset={next_offset} to continue]"
@@ -63,10 +61,8 @@ def read_file(
 
 
 def _read_range(text: str, offset: int, limit: int, limit_chars: int) -> dict:
-    """Read lines [offset, offset+limit) (1-based) with line numbers, so the model
-    reads only the slice it needs and can continue with offset=end+1. An explicit
-    range that cannot fit the char budget is an ERROR, not a silent truncation —
-    the model must narrow the limit or use grep (Claude Code's Read behavior)."""
+    """Read lines [offset, offset+limit) (1-based) with line numbers; a range
+    that cannot fit the char budget is an ERROR, not a silent truncation."""
     lines = text.splitlines()
     total = len(lines)
     start = max(0, offset - 1) if offset > 0 else 0
@@ -99,8 +95,7 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
         if old:
             workspace.snapshot(p, old)
         workspace.write(str(p), content)
-        # external paths (user-approved escapes) aren't under the root; show the
-        # absolute path in the diff header then
+        # external paths (approved escapes): show the absolute path in the diff header
         try:
             rel = p.relative_to(workspace.root)
         except ValueError:
@@ -117,10 +112,8 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
 
 
 def edit_file(workspace: Workspace, config: Config, path: str, old_string: str, new_string: str) -> dict:
-    """Targeted string replacement (Claude Code-style Edit): one occurrence of
-    old_string is replaced with new_string. Tiny diffs — a change costs hundreds of
-    tokens instead of re-emitting the whole file, so the context stays small and
-    mid-task compaction (which wiped whole-file rewrites) is avoided."""
+    """Targeted string replacement: one occurrence of old_string becomes new_string
+    (tiny diffs keep the context small instead of re-emitting the whole file)."""
     try:
         p: Path = workspace.resolve(path)
         if workspace.is_protected(p):
@@ -166,7 +159,6 @@ def _unified_diff(old: str, new: str, rel: str | Path) -> str:
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
     diff_lines = list(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{rel}", tofile=f"b/{rel}", n=3))
-    # unified_diff returns [] when files are identical; treat identical as "no changes"
     return "".join(diff_lines)
 
 

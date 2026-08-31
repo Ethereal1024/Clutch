@@ -1,7 +1,5 @@
 # Every configured endpoint speaks the OpenAI chat-completions protocol, so the
-# OpenAI SDK serves them all (DeepSeek, Zhipu, Moonshot, Ollama, self-hosted
-# gateways, ...). A provider with a proprietary SDK would add its own client
-# class here instead.
+# OpenAI SDK serves them all; a proprietary provider would add its own client here.
 from .client import LlmClient
 from .llm_clients import OpenaiLlmClient
 

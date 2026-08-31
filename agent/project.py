@@ -34,10 +34,8 @@ from .memory import (
 HEADER_PREFIX = "# clutch project v1"
 SEPARATOR = "---"
 
-# the window start (the newest compaction line's offset, relative to the event
-# region) lives in a fixed-width header line so a compaction can update it with
-# one in-place write (stable offsets for the file's lifetime). 10 digits = up
-# to ~10 GB of event region — far beyond any real .clc.
+# the window start lives in a fixed-width header line so a compaction updates it
+# with one in-place write (stable offsets). 10 digits = ~10 GB of event region.
 _CPR_START_PREFIX = "cpr_start="
 _CPR_START_FIELD_W = 10
 _CPR_START_LINE_W = len(_CPR_START_PREFIX) + _CPR_START_FIELD_W  # 20 bytes
@@ -171,17 +169,13 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
     read = raw_read
     if on_progress is not None:
         read = _wrap_progress(raw_read, total, on_progress)
-    # nothing below rewrites the file (legacy conversion is the migration
-    # script's job), so one reader covers the memories load, the header and the
-    # log
+    # one reader covers memories + header + log (nothing below rewrites the file)
     memories = _load_memories(path, read, total, writer, workspace)
     # the header lives at the very start of the file: a tiny range read
     head = read(0, min(total, 1 << 16))
     meta = _parse_meta_lines(head.decode("utf-8", "replace").splitlines())
     base = _event_region_start(head)  # first durable line; header-only files: right after the separator
-    # the window start (cpr_start) comes from the header's fixed-width line —
-    # no scan, no index. A stale/out-of-range value clamps to 0 (everything
-    # loads; a compaction's summary is never lost).
+    # cpr_start comes from the header's fixed-width line; stale values clamp to 0
     cpr_line_off = _find_cpr_line(head)
     cpr_rel = (
         _parse_cpr_start(_read_line_at(read, cpr_line_off, total, _CPR_START_LINE_W))
@@ -227,9 +221,7 @@ def _event_region_start(head: bytes) -> int:
         if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:
             return pos
         pos += len(seg) + 1
-    # header-only file (no durable line yet): the event region starts right
-    # after the separator — rfind keeps this exact even when the trailing
-    # newline split produced a phantom empty segment (pos would overcount +1)
+    # header-only file: the event region starts after the separator (rfind keeps this exact)
     sep = head.rfind(SEPARATOR.encode())
     if sep >= 0:
         return sep + len(SEPARATOR) + 1

@@ -48,9 +48,7 @@ def parse_durable(text: str) -> list[Event]:
             data = json.loads(line)
         except (ValueError, TypeError, json.JSONDecodeError):
             continue
-        # the [memories] content lines are valid JSON but NOT events (no `type`);
-        # they belong to the MemoryStore, parsed separately — skip them here so
-        # the returned list is exactly the durable events in the range
+        # [memories] lines are valid JSON but not events; skip them
         if not isinstance(data, dict) or "type" not in data:
             continue
         ev = event_from_dict(data)
@@ -60,15 +58,9 @@ def parse_durable(text: str) -> list[Event]:
 
 
 def _parse_with_offsets(raw: bytes, base_rel: int) -> list[tuple[int, Event]]:
-    """Parse a byte range into (relative_offset, event) pairs.
-
-    ``base_rel`` is the range's start offset relative to the event region. A
-    range whose start/end cuts mid-line yields a mangled first/last line — both
-    are dropped (JSON parse failure / missing trailing newline), so the returned
-    offsets are always exact line starts (UTF-8 safe: a line starts at ``{``).
-    Splitting on raw BYTES keeps offsets exact even when a cut lands inside a
-    multibyte character (the mangled line decodes with a replacement char and
-    fails JSON; the byte counter never saw the replacement).
+    """Parse a byte range into (relative_offset, event) pairs; a range cut
+    mid-line yields a mangled first/last line, which is dropped (JSON fails).
+    Splitting on raw bytes keeps offsets exact across multibyte characters.
     """
     if not raw.endswith(b"\n"):
         raw = raw.rsplit(b"\n", 1)[0]  # drop a trailing line cut by the range end
@@ -96,14 +88,9 @@ def _parse_with_offsets(raw: bytes, base_rel: int) -> list[tuple[int, Event]]:
 
 
 def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int], bytes], int]:
-    """Range reader for a .clc over local or remote (exec-bridge) storage.
-
-    Returns ``(read(lo, hi) -> bytes, total_bytes)``. Local: binary streaming
-    straight off the file (workspace is a pure path wrapper on the same host, so
-    its presence changes nothing). Remote: EVERY read is a byte-range exec
-    (``tail -c +A | head -c B | base64`` — base64 keeps the round trip exact even
-    when a range cuts mid-multibyte-character), so opening a big .clc over SSH
-    transfers only the header + the window, never the whole file.
+    """Range reader for a .clc over local or remote (exec-bridge) storage;
+    returns (read(lo, hi) -> bytes, total_bytes). Remote reads are byte-range
+    execs, so opening a big .clc over SSH transfers only header + window.
     """
     if workspace is not None and not isinstance(workspace, LocalWorkspace):
         total = workspace.size(str(path))
@@ -124,18 +111,9 @@ def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int]
 class LazyEventLog:
     """The event log over a byte-addressed .clc.
 
-    Resident durable events are the WINDOW ``[cpr_start, event region end)``:
-    the newest compaction line and everything after it. Older history (before
-    cpr_start) is never resident — the UI pages it with ``read_page``, a pure
-    disk read that does not touch this log (model context and history browsing
-    are fully decoupled).
-
-    The window contract is preserved across reopen: ``cpr_start`` is a byte
-    offset relative to the event region, persisted in the .clc header, so a
-    lazily reopened log resolves the same boundary as the live one did. A
-    compaction slides the window: it summarizes the whole current window, appends
-    the new CompactionEvent at the file end, and moves cpr_start to that line's
-    start (the window collapses to just the new summary).
+    Resident events are the window ``[cpr_start, event region end)``; older
+    history stays on disk, paged by the UI. Compaction appends a summary line
+    and slides cpr_start to it, collapsing the window to the new summary.
     """
 
     def __init__(
@@ -168,27 +146,17 @@ class LazyEventLog:
         return self._path
 
     def _materialize_open(self, stored_cpr_start: int) -> None:
-        """Open-time materialization: ONLY the window ``[cpr_start, event
-        region end)`` is resident — nothing else. History before cpr_start
-        (the raw task included) stays on disk and is paged by the UI's
-        scroll-up channel, so opening a compacted file is one range read."""
-        # clamp a stale/out-of-range cpr_start to 0 (everything loads, and a
-        # compaction's summary is never lost)
+        """Open-time materialization: ONLY the window [cpr_start, end) is resident;
+        earlier history stays on disk (opening a compacted file is one range read)."""
+        # clamp a stale/out-of-range cpr_start to 0 (never lose a compaction summary)
         region_len = self._file_bytes - self._base
         self._cpr_start = stored_cpr_start if 0 <= stored_cpr_start <= region_len else 0
-        # A legacy file (no cpr_start header line) cannot persist its compaction
-        # boundary, so the whole history (past summaries included) would be
-        # treated as the window and re-summarized on EVERY open — the UI flashes
-        # "compressing context" each session and the file grows with redundant
-        # full-history summaries. Derive the boundary from the newest compaction
-        # line instead (the same scan the migration script uses); a never-
-        # compacted file scans to 0 (whole region, as before).
+        # legacy file (no header cpr_start): derive the boundary from the newest
+        # compaction line, else every open would re-summarize the whole history
         if not self._cpr_line_off and region_len > 0:
             from ..project import _last_compaction_rel  # project imports lazy at module load
 
-            # scan the event region for the newest compaction line: `whole`
-            # starts AT the region, so its byte positions are already relative
-            # to the region start (base=0) — exactly cpr_start's semantics
+            # whole starts at the region, so its offsets are already cpr_start-relative
             whole = self._read(self._base, self._file_bytes)
             self._cpr_start = _last_compaction_rel(whole, 0)
         window = self._read(self._base + self._cpr_start, self._file_bytes)
@@ -217,7 +185,7 @@ class LazyEventLog:
 
     def items(self) -> list[tuple[int, Event]]:
         """Materialized (relative_byte_offset, event) pairs, in file order."""
-        return list(zip(self._offsets, self._events))
+        return list(zip(self._offsets, self._events, strict=True))
 
     # ------------------------------------------------------------- the window
 
@@ -235,34 +203,25 @@ class LazyEventLog:
         return next((e for e in reversed(self._events) if isinstance(e, CompactionEvent)), None)
 
     def set_cpr_start(self, off: int) -> None:
-        """Slide the window start to a new boundary (a fresh compaction line):
-        persist it in the header's fixed-width line (in-place write, stable
-        offsets) and update the resident value."""
+        """Slide the window start to a new boundary; persist it in the header's
+        fixed-width line (in-place write keeps every other offset stable)."""
         if not 0 <= off <= (self._file_bytes - self._base):
             return  # defensive: never record a boundary outside the event region
         if self._path and self._write_at is not None and self._cpr_line_off:
-            # the whole fixed-width line (prefix included — the line never
-            # shifts, so the in-place write keeps every other offset stable).
-            # _cpr_line_off 0/None = a file whose header has no cpr_start line:
-            # never write there (offset 0 is the header prefix) — migration is
-            # the script's job, so the boundary just stays in memory.
+            # no cpr_start line (0/None): never write there; boundary stays in memory
             self._write_at(self._cpr_line_off, f"cpr_start={off:010d}".encode("ascii"))
         self._cpr_start = off
 
     def note_bytes_written(self, n: int) -> None:
         """Count bytes the MemoryStore appended to the same file (memory lines
-        and the [memories] marker): they grow the file but are not events, so
-        the log's own bookkeeping would otherwise undercount the on-disk size,
-        drifting every later event offset (and the persisted window boundary)."""
+        are not events, so the log's own bookkeeping would undercount the size)."""
         self._file_bytes += n
 
     # ------------------------------------------------- history paging (decoupled)
 
     def read_page(self, lo: int, hi: int) -> list[tuple[int, Event]]:
-        """Pure disk read of [lo, hi) (relative offsets): parse and return the
-        durable events WITHOUT touching the resident log. This is the UI's
-        scroll-up history channel — the bytes before cpr_start are read on
-        demand and never enter the model context."""
+        """Pure disk read of [lo, hi): parse durable events without touching the
+        resident log (the UI's scroll-up history channel)."""
         lo = max(0, lo)
         hi = min(hi, self._file_bytes - self._base)
         if lo >= hi:

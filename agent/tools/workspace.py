@@ -52,8 +52,7 @@ def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
     return out
 
 
-# Single source for the remote-wire limits, shared with the Node exec upload path
-# (ui/ssh-tunnel.js) so the two languages can never drift apart.
+# Single source for the remote-wire limits, shared with ui/ssh-tunnel.js
 _DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defaults.json").read_text(encoding="utf-8"))
 
 # Scratch dirs that are harmless to write to (test logs, /dev/null redirects).
@@ -81,12 +80,10 @@ class Workspace(ABC):
         self.root.mkdir(parents=True, exist_ok=True)
         self._transport = transport or LocalTransport(str(self.root))
         self._protected: set[Path] = set()
-        # absolute paths outside the root that the CURRENT tool call may touch;
-        # granted by the permission gate after the user approves an escape and
-        # cleared by the loop after every tool call (see loop._execute_tool).
+        # absolute paths outside the root the CURRENT tool call may touch;
+        # granted by the permission gate, cleared after every tool call
         self._allowed_escapes: set[Path] = set()
-        # per-file undo stack: previous contents recorded before every overwrite,
-        # so the agent can recover a file it just wrote badly without git checkout
+        # per-file undo stack: previous contents recorded before every overwrite
         self._snapshots: dict[str, list[str]] = {}
 
     def allow(self, paths) -> None:
@@ -306,12 +303,8 @@ class LocalWorkspace(Workspace):
             return True
 
 
-# ponytail: minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a
-# single exec request over ~8KB (measured on the test router: 7929 B ok, 9636 B
-# died). Every remote write/append is chunked well below that, and run_command
-# commands are capped so an oversized inline command fails cleanly instead of
-# killing the tunnel (which would teach the model a hard limit). The limits come
-# from transport_defaults.json — the same file ui/ssh-tunnel.js reads.
+# Minimal sshd drops a single exec over ~8KB: writes are chunked below it;
+# limits come from transport_defaults.json (shared with ui/ssh-tunnel.js).
 _EXEC_CHUNK_BYTES = int(_DEFAULTS["exec_chunk_bytes"])
 _EXEC_MAX_COMMAND_BYTES = int(_DEFAULTS["exec_max_command_bytes"])
 
@@ -338,9 +331,7 @@ class RemoteWorkspace(Workspace):
 
     def run(self, command: str, timeout: float) -> CommandResult:
         cmd = f"cd {shq(str(self.root))} && {command}"
-        # pre-check: an oversized exec command would make a minimal sshd drop the
-        # connection. Fail cleanly up front (guide the model to write_file) rather
-        # than let the tunnel die and teach the model a hard size limit.
+        # oversized exec commands drop a minimal sshd: fail cleanly up front
         size = len(cmd.encode("utf-8"))
         if size > _EXEC_MAX_COMMAND_BYTES:
             raise TransportError(
@@ -429,8 +420,7 @@ class RemoteWorkspace(Workspace):
 
     def list(self, path: str) -> list[str]:
         p = self.resolve(path)
-        # ls alone succeeds on a plain file; test -d first so a non-dir surfaces
-        # as NotADirectoryError like LocalWorkspace.list
+        # test -d first: ls alone succeeds on a plain file
         r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", _REMOTE_IO_TIMEOUT)
         if r.code != 0:
             raise NotADirectoryError(str(p))
@@ -504,10 +494,8 @@ class RemoteWorkspace(Workspace):
             raise OSError(f"cannot write_at {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
 
     def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
-        # busybox grep has no --include and no dotfile awareness, so build the file
-        # list with find (portable: find/xargs/grep/head all exist on OpenWrt) and
-        # mirror the local implementation's skips: hidden files/dirs and the
-        # protected project .clc are never searched.
+        # busybox grep lacks --include/dotfile awareness: use find, skip hidden
+        # files/dirs and the protected .clc
         p = self.resolve(path)
         find_cmd = f"find {shq(str(p))} -type f ! -path '*/.*' ! -path '*/.*/*'"
         for prot in self._protected:

@@ -186,7 +186,5 @@ def event_from_dict(data: dict[str, str]) -> Event:
     return cls(**fields)
 
 
-# Only final/durable events are persisted to .clc (opencode stores parts, not
-# streaming deltas): text_delta/reasoning_delta/step_start/state_update are
-# display-transient and never written to disk.
+# Only final/durable events persist to .clc; streaming deltas never touch disk
 DURABLE_TYPES = {"user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"}

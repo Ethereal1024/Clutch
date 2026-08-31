@@ -39,10 +39,7 @@ class Rule:
     action: Action
     tool: str = "*"  # tool name or "*"
     pattern: str = ""  # regex on the args; empty = match any args
-    # True = a workspace-escape heuristic: the rule fires only when the paths it
-    # guards REALLY leave the workspace (resolved against the root in evaluate,
-    # `~` expanded) — an absolute/../~ path that stays inside the sandbox (the
-    # workdir itself or a subfolder) is allowed, never prompted
+    # True = only fires when the guarded paths really leave the workspace
     escape: bool = False
 
     def matches(self, tool: str, args_repr: str) -> bool:
@@ -71,8 +68,7 @@ DEFAULT_RULES: list[Rule] = [
     Rule("ask", "run_command", r"\brm\s+-rf\b|\bsudo\b|\bshutdown\b|\breboot\b|\bmkfs\b|\bdd\b\s"),
     # commands that delete anything ask
     Rule("ask", "run_command", r"^\s*rm\b"),
-    # writing/running outside the workspace asks — but decided by REAL path
-    # resolution (escape=True): an absolute path INSIDE the sandbox never prompts
+    # writing/running outside the workspace asks — only when it really escapes
     Rule("ask", "run_command", r"\bmv\s+.*\s/\s", escape=True),
     Rule("ask", "write_file", r"(\.\./|^/|~)", escape=True),
     Rule("ask", "run_command", r"(\.\./|^/)", escape=True),
@@ -87,11 +83,8 @@ class PermissionEvaluator:
     rules: list[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
     def evaluate(self, tool: str, args_repr: str, workspace: Workspace) -> Action:
-        # Rules match the ACTUAL argument they guard, not the whole JSON envelope:
-        # run_command matches the command; write_file matches the target path.
-        # Matching against the full args would flag e.g. a report whose CONTENT
-        # contains "~" or "../" — content is data, not a path, and must never
-        # prompt a write it doesn't touch.
+        # match the guarded argument (command/path), not the whole JSON: content
+        # is data, not a path, and must never prompt a write it doesn't touch
         match_text = args_repr
         if tool in ("run_command", "write_file"):
             key = "command" if tool == "run_command" else "path"
@@ -101,26 +94,21 @@ class PermissionEvaluator:
                     match_text = parsed[key]
             except (ValueError, TypeError):
                 pass
-        # last matching rule wins (opencode findLast semantics)
+        # last matching rule wins
         decision: Rule | None = None
         for rule in self.rules:
             if rule.matches(tool, match_text):
                 decision = rule
         if decision is not None:
-            # a workspace-escape heuristic (absolute/../~ paths) fires only when
-            # the referenced paths REALLY leave the workspace — resolved against
-            # the root with `~` expanded. The workdir itself or a subfolder,
-            # spelled as an absolute path, is NOT an escape and must not prompt.
+            # escape rule: allow when no referenced path really leaves the workspace
             if decision.escape and not self.escaped_paths(tool, args_repr, workspace):
                 return "allow"
             return decision.action
         return "allow"
 
     def escaped_paths(self, tool: str, args_repr: str, workspace: Workspace) -> frozenset[Path]:
-        """Absolute paths outside the workspace root this call references, resolved
-        for real (not regex-matched): read/write/edit/grep use their ``path`` arg,
-        run_command every command token. Empty means the call stays in the
-        sandbox. These are what the user approves when an escape is asked for."""
+        """Resolved absolute paths outside the workspace root this call references;
+        empty means the call stays in the sandbox."""
         if tool not in _PATH_TOOLS:
             return frozenset()
         args = _parse_args(args_repr)
@@ -136,11 +124,7 @@ class PermissionEvaluator:
             tokens = [path]
         out: set[Path] = set()
         if tool == "run_command":
-            # track `cd <dir>` so a following `../` is judged against that
-            # subdir, not the workspace root: `cd agent && ../.venv/ruff` runs
-            # INSIDE the workspace, only `..` from the root would escape. The
-            # per-token verdict is delegated to workspace.escape_path — the one
-            # source of truth for root/scratch containment.
+            # track `cd <dir>` so a following `../` is judged against that subdir
             cwd: Path | None = None  # None => anchor at the workspace root
             i = 0
             while i < len(tokens):
@@ -192,7 +176,7 @@ class PermissionGate:
         auto_allow: bool = False,
     ) -> None:
         self.evaluator = evaluator
-        # (request_id, tool, args_repr, reason) -> None to block, or False when no
+        # (request_id, tool, args_repr, reason) -> None to block, False when no
         # UI is attached to confirm (the gate then denies instead of hanging)
         self.on_ask = on_ask
         self.auto_allow = auto_allow
@@ -204,10 +188,8 @@ class PermissionGate:
     def require(self, tool: str, args_repr: str, workspace: Workspace) -> None:
         """Raise PermissionRequired if the user must confirm (or deny).
 
-        On approval the approved external paths are recorded on the workspace so
-        the tool's resolve() may touch them; the loop clears them after the call.
-        Escapes always require a real human (or interactive caller): auto_allow
-        (eval/unattended) denies them rather than silently opening the sandbox.
+        Approved escapes are recorded on the workspace for the call; auto_allow
+        (unattended/eval) denies escapes rather than silently opening the sandbox.
         """
         action = self.evaluator.evaluate(tool, args_repr, workspace)
         escapes = self.evaluator.escaped_paths(tool, args_repr, workspace)
@@ -231,8 +213,7 @@ class PermissionGate:
             self._pending[request_id] = ev
             self._decisions[request_id] = False
         if self.on_ask and self.on_ask(request_id, tool, args_repr, reason) is False:
-            # nobody can see/answer the prompt (renderer disconnected): deny rather
-            # than wait forever on an invisible request
+            # renderer disconnected: deny rather than wait forever
             with self._lock:
                 self._pending.pop(request_id, None)
                 self._decisions.pop(request_id, None)

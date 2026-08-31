@@ -1,8 +1,6 @@
-"""Loop self-check driven by a scripted fake LLM (no network, no cost).
+"""Loop self-check with a scripted fake LLM (no network).
 
 Run: uv run python -m tests.loop_test
-Covers: tool execution, verify-fail -> iterate -> pass, budget abort,
-doom-loop abort, max-tokens truncation, sink isolation.
 """
 
 from __future__ import annotations
@@ -97,7 +95,7 @@ def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: LazyEventLo
 def main() -> int:
     config = Config(verify_command="echo ok")
 
-    # 0. no verify command (default): a generic task completes directly, no gate runs
+    # 0. no verify command: task completes directly
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         no_gate = Config()  # verify_command defaults to ""
@@ -313,8 +311,7 @@ def main() -> int:
         check(result == "done", "permission ask resolved by UI then executes")
         check((sb.root / "a.txt").read_text() == "hi", "asked-and-allowed tool wrote file")
 
-    # 10b. sandbox escape: a user-approved external write executes (the old flat
-    # denial is gone — the ask gate approves, the tool writes outside)
+    # 10b. sandbox escape: approved external write executes
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         outside = Path(tmp).parent / f"{Path(tmp).name}.out.txt"
@@ -438,9 +435,7 @@ def main() -> int:
             "error state emitted",
         )
 
-    # 12. Stop mid-stream: cancel set while the LLM is streaming aborts promptly —
-    # the partial turn is dropped (no verify gate, no phantom 'done'), and the
-    # stream is not consumed to the end.
+    # 12. Stop mid-stream: cancel aborts promptly, partial turn dropped
     import threading
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -477,11 +472,7 @@ def main() -> int:
             "no verify/tool path ran on the partial turn",
         )
 
-    # 13. compaction: context overflow rolls the older turns into a summary and the
-    # run continues (no abort); the summary is persisted as a CompactionEvent. The
-    # window is sized so one real work turn (~1KB of events) stays under it while
-    # two overflow it — the byte trigger fires after the second tool round, leaving
-    # both rounds' events as the compaction head.
+    # 13. compaction: overflow rolls older turns into a summary, run continues
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         (sb.root / "a.txt").write_text("some content\n" * 30)
@@ -505,10 +496,7 @@ def main() -> int:
         check(len(comps) == 1, "context overflow triggered one compaction")
         check(comps[0].summary == "SUMMARY", "compaction summary recorded")
 
-    # 13b. compaction live progress: the compactor streams compaction_delta events
-    # through its sink as the summary call writes (start marker, throttled char
-    # counts), so a long compression never looks frozen in the UI — and a failed
-    # summary call sends done=True so the live block closes instead of hanging.
+    # 13b. compaction progress: delta events stream; done=True closes on failure
     with tempfile.TemporaryDirectory() as tmp:
         log13 = LazyEventLog.in_memory()
         log13.append(UserMessageEvent(content="original task"))
@@ -532,7 +520,7 @@ def main() -> int:
         check(deltas[-1].chars == 600, "final progress carries the total summary chars")
         check(not any(e.done for e in deltas), "no done marker on success")
 
-        # failed summary call: the live block must be closed so the UI can't hang
+        # failed summary: the live block must close
         class BoomLlm:
             def stream(self, messages, tools=None):
                 yield {"type": "text", "delta": "partial"}
@@ -555,9 +543,7 @@ def main() -> int:
             "done marker closes the live block on failure",
         )
 
-    # 13d. the summary prompt is CAPPED: a multi-MB head must not be serialized
-    # in full into the compaction call — the API would reject it, every
-    # compaction fails, and the UI flashes "compressing context" every turn.
+    # 13d. summary prompt capped: multi-MB head not serialized in full
     log13d = LazyEventLog.in_memory()
     log13d.append(UserMessageEvent(content="task"))
     for i in range(1500):
@@ -578,11 +564,7 @@ def main() -> int:
         f"({prompt_len['n']} <= ~197000)",
     )
 
-    # 13f. steady-state input is the WHOLE CURRENT WINDOW, not a capped slice:
-    # the second compaction's prompt carries every event appended since the
-    # first compaction verbatim (its first event included). A cap-slice
-    # approach would have dropped that first event; the window approach must
-    # not.
+    # 13f. second compaction input is the whole current window, not a capped slice
     log13f = LazyEventLog.in_memory()
     log13f.append(UserMessageEvent(content="task"))
     for i in range(600):
@@ -611,9 +593,8 @@ def main() -> int:
     check(comp13f.compact() is False,
           "third compaction is a no-op (the window holds only the summary line)")
 
-    # 13e. cancel aborts an in-flight compaction: the stop button must work
-    # while the summary call streams (compaction is synchronous otherwise)
-    import threading  # noqa: PLC0415 -- local import matches the file's test pattern
+    # 13e. cancel aborts an in-flight compaction
+    import threading  # noqa: PLC0415
 
     cancel = threading.Event()
     log13e = LazyEventLog.in_memory()
@@ -634,9 +615,7 @@ def main() -> int:
     check(comp13e.compact() is False, "cancel mid-summary aborts compaction")
     check(len(calls) == 1, "summary stream interrupted once, not completed")
 
-    # 13c. an empty reply (no visible text) is NOT a completion: it is fed back
-    # as an error and retried, so the user never sees a silent "completed" with
-    # no agent output on screen
+    # 13c. empty reply is fed back as an error and retried
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         empty_gate = Config(verify_command="echo ok")
@@ -656,10 +635,7 @@ def main() -> int:
             "retry prompt mentions the empty reply",
         )
 
-    # 14. resumed long session: the byte trigger (resident window vs the model
-    # window budget) fires on the first turn — the resume case that turn-count
-    # windowing used to brutalise (nothing to compare against on a resume, so the
-    # old estimate-based check was the only thing that could fire).
+    # 14. resumed session: the byte trigger fires on the first turn
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         cfg = Config(llm_context_window_bytes=1000)
@@ -678,9 +654,7 @@ def main() -> int:
         check(len(comps) == 1, "byte trigger compacted on the first turn")
         check(comps[0].summary == "SUMMARY", "resume compaction summary recorded")
 
-    # 15. tool-call argument streaming: the loop forwards the model's tool_call
-    # deltas as ToolCallDeltaEvent so the UI can render a write/edit as it happens;
-    # the concatenated deltas equal the final arguments.
+    # 15. tool-call argument streaming: deltas reassemble to the final arguments
     from agent.events import ToolCallDeltaEvent
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -725,8 +699,7 @@ def main() -> int:
         check("work (full access)" in msgs_work[0]["content"], "work system prompt carries the work note")
         check("chat (read-only)" not in msgs_work[0]["content"], "work system prompt has no chat note")
 
-    # 15d. project memory: all stored titles are listed with an active recall
-    # prompt, and the base prompt always carries the save guidance
+    # 15d. project memory: titles listed; base prompt carries save guidance
     from agent.memory import MemoryStore
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -759,8 +732,7 @@ def main() -> int:
             "save guidance is present even without stored memories",
         )
 
-    # 15c. chat-mode run_command: read-only commands run, writes/unknowns are
-    # rejected and fed back as errors (default deny), nothing touches the disk
+    # 15c. chat run_command: reads run, writes/unknowns rejected (default deny)
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         fake = FakeLLM(

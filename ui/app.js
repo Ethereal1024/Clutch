@@ -1,43 +1,30 @@
 "use strict";
 
-// Where the agent API lives. Every window gets its own SESSION child from the
-// machine supervisor (see server-bootstrap.js): an agent.server spawned with
-// --port 0, its random port learned via preload IPC (window.clutchApi.baseUrl
-// is an async call into the main process). DEFAULT_BASE tracks the RESOLVED
-// session base so SSH fallbacks land back on THIS window's own session, never
-// on a guessed default port; localStorage is deliberately NOT used for the
-// initial base — a persisted random port would be dead by the next launch.
-// SSH connections / manual picker URLs still route through switchBackend().
-// The 8890 fallback only matters when the preload IPC is unavailable
-// (plain-browser debugging without Electron): no session exists, so it is an
-// unreachable placeholder, not a real backend address.
+// Session API base: 8890 is the supervisor's lifecycle port, never a real backend.
 let DEFAULT_BASE = "http://127.0.0.1:8890";
 let API_BASE = null; // resolved in resolveApiBase() before the app starts
 
 async function resolveApiBase() {
-  let base = "http://127.0.0.1:8890";
   if (window.clutchApi && window.clutchApi.baseUrl) {
-    // a session URL is the ONLY valid backend; 8890 is the supervisor
-    // (lifecycle-only), so a null/8890 answer means the session couldn't be
-    // claimed yet — a second window booting while the supervisor is mid-spawn
-    // can transiently fail, so retry a few times before accepting the fallback
+    // null/8890 = session not claimed yet (supervisor mid-spawn); retry
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
         const clean = b ? String(b).replace(/\/+$/, "") : "";
         if (clean && clean !== "http://127.0.0.1:8890") {
-          base = clean;
-          break;
+          API_BASE = clean;
+          DEFAULT_BASE = clean;
+          return clean;
         }
       } catch {
-        /* preload unavailable (plain-browser debugging) — keep the placeholder */
+        /* preload unavailable — plain-browser debugging */
       }
       await new Promise((r) => setTimeout(r, 800));
     }
   }
-  API_BASE = base;
-  DEFAULT_BASE = base;
-  return base;
+  // Still unresolved: leave null. 8890 is the supervisor's port (no session
+  // API); the main process announces the real URL via backend:base-changed.
+  return API_BASE; // null
 }
 
 const $ = (s) => document.querySelector(s);
@@ -53,9 +40,7 @@ const els = {
   projectLabel: $("#project-label"),
 };
 
-// agent mode for the next run: "work" (full tools) | "chat" (read-only).
-// Sticky per session (localStorage); applied in the /api/run payload, so a
-// switch only affects the NEXT run, never a running one.
+// agent mode for the next run: "work" (full tools) | "chat" (read-only); sticky per session
 let agentMode = localStorage.getItem("clutch_mode") || "work";
 
 function setMode(mode) {
@@ -80,20 +65,13 @@ function nearBottom() {
   return stream.scrollHeight - stream.scrollTop - stream.clientHeight < JUMP_BOTTOM_GAP;
 }
 
-// The floating ↓ button's visibility mirrors the latch, and is updated in exactly
-// this one place: autoScroll, the scroll latch and appendCompletion all report
-// through here, so no path can leave the button and the latch out of sync.
+// ↓ button visibility mirrors the latch; all latch paths report through here
 function setJumpVisible(visible) {
   jumpBottom.classList.toggle("hidden", !visible);
 }
 
-// Follow the tail of the stream, but never during project-load (content is hidden
-// then), and never yank the view back down if the user has scrolled up to read —
-// a floating '↓' button appears instead so they can return to the live tail.
-// followTail is latched state, not a live distance check: reaching the bottom
-// (or clicking ↓) enters the tail, and fresh content keeps us pinned even though
-// the gap to the bottom then grows past JUMP_BOTTOM_GAP. Only the user's own
-// upward scroll breaks the latch — programmatic smooth glides stay latched.
+// Latched tail-follow: reaching the bottom (or ↓) pins the view; only a user's
+// upward scroll breaks the latch (the ↓ button returns to the tail).
 let followTail = true;
 let lastScrollTop = 0;
 
@@ -103,10 +81,8 @@ let glideRaf = 0;
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
   if (force) {
-    // User-initiated jump (message send, ↓ button, Cmd/Ctrl+Down). The two
-    // states are decoupled: tracked = instant pin (streaming never animates);
-    // untracked = the one smooth glide, which owns the scroll until it lands
-    // and re-latches on arrival.
+    // User-initiated jump (message send, ↓, Cmd/Ctrl+Down): tracked = instant pin,
+    // untracked = the one smooth glide that re-latches on arrival.
     if (followTail) {
       if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
       gliding = false;
@@ -118,7 +94,7 @@ function autoScroll(force) {
     return;
   }
   if (followTail) {
-    // tracked: instant pin — but never during a user jump-glide (untracked ↓)
+    // tracked: instant pin — never during a user jump-glide (untracked ↓)
     if (gliding) return;
     stream.scrollTop = stream.scrollHeight;
     setJumpVisible(false);
@@ -129,18 +105,14 @@ function autoScroll(force) {
 }
 
 // ---- jump-to-bottom glide (user-initiated only) ----
-// The original native smooth animation, restored: scrollTo smooths to the tail
-// captured at call time. The gliding flag makes the animation exclusive — every
-// other scroll/heigh change is ignored until it lands, so nothing can fight it.
-// A rAF poll detects the landing (target reached, clamped to a new bottom, or
-// interrupted by a real user scroll) and then re-pins once to absorb any content
-// growth that arrived mid-glide.
+// scrollTo glides to the tail captured at call time; a rAF poll detects the
+// landing and re-pins to absorb growth that arrived mid-glide.
 function glideToBottom() {
   if (stream.classList.contains("loading")) return;
   cancelAnimationFrame(glideRaf);
   const target = stream.scrollHeight;
   if (stream.scrollTop >= target - 1) {
-    // already at the tail: nothing to travel — land straight into the latch
+    // already at the tail: land straight into the latch
     gliding = false;
     followTail = true;
     setJumpVisible(false);
@@ -159,8 +131,7 @@ function glideToBottom() {
     const bottom = stream.scrollHeight - stream.clientHeight;
     if (!gliding || Math.abs(stream.scrollTop - target) < 2 || Math.abs(stream.scrollTop - bottom) < 2) {
       gliding = false;
-      // landed (or clamped to a new bottom): re-latch — the smooth glide was the
-      // only animated moment, and fresh content pins instantly from here on
+      // landed (or clamped to a new bottom): re-latch
       followTail = true;
       setJumpVisible(false);
       if (!stream.classList.contains("loading")) {
@@ -173,14 +144,8 @@ function glideToBottom() {
   glideRaf = requestAnimationFrame(finish);
 }
 
-// WebFont / image / any async layout growth can land AFTER the render path's own
-// autoScroll (font swap, image load, MathJax typeset, fold settle), leaving a
-// latched view hovering mid-air — and #stream disables native anchoring
-// (overflow-anchor: none), so the browser never compensates on its own. Watch
-// the CONTENT's height, not the viewport's: whenever the content grows while
-// latched, re-pin. The task input resizing the viewport never changes
-// eventsEl's height, so this observer can never re-trigger the resize jump it
-// exists to absorb.
+// Async layout growth (fonts, images, math) can land after autoScroll: watch the
+// CONTENT's height (never the viewport) and re-pin while latched.
 if (typeof ResizeObserver !== "undefined") {
   new ResizeObserver(() => {
     if (followTail && !stream.classList.contains("loading")) autoScroll();
@@ -188,13 +153,10 @@ if (typeof ResizeObserver !== "undefined") {
 }
 
 jumpBottom.addEventListener("click", () => {
-  // no pre-latch here: autoScroll(force) decides by state — instant pin when
-  // already tracked, the smooth ↓ glide when untracked (which re-latches on
-  // landing). The resulting scroll event is isTrusted=false and never touches
-  // the latch.
+  // autoScroll(force) decides: instant pin when tracked, smooth glide when untracked
   autoScroll(true);
 });
-// Cmd/Ctrl+Down anywhere: same jump-to-tail as the ↓ button (glides via autoScroll(true))
+// Cmd/Ctrl+Down anywhere: same jump-to-tail as the ↓ button
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "ArrowDown") {
     autoScroll(true);
@@ -202,40 +164,24 @@ document.addEventListener("keydown", (e) => {
 });
 let prevClientH = stream.clientHeight;
 let prevScrollH = stream.scrollHeight;
-// armed by autoGrowTask for ~120ms after the input box resizes: the clamp scroll
-// event that resize triggers can fire BEFORE the shrunken viewport is observable
-// (clientHeight may not have settled yet), so blanket-ignore latch changes in
-// that window — the resize itself is never a user scroll gesture.
+// ignore latch changes ~120ms after the input box resizes: the clamp scroll
+// event can fire before the shrunken viewport is observable
 let suppressLatchUntil = 0;
 stream.addEventListener("scroll", (e) => {
-  // Only the user's own gestures update the latch. Programmatic scrolls (smooth
-  // glides, force jumps) fire isTrusted=false and never touch it. A passive
-  // clamp is NOT isTrusted=false though: when the task input grows and shrinks
-  // the viewport, scrollTop gets clamped down and the browser fires a trusted
-  // scroll event — treating that as "the user scrolled up" would drop the latch
-  // and pop the ↓ button while typing. A shrunken viewport is the fingerprint
-  // of such a clamp, so ignore scrolls that coincide with it; the time window
-  // above catches the clamp even when the fingerprint is not yet visible.
-  // The same clamp happens when the CONTENT shrank — e.g. a streamed tool_call
-  // preview (full args, up to 320px) is swapped for its final collapsed row —
-  // and a shrunken scrollHeight is the fingerprint there.
+  // Only the user's own gestures update the latch. Programmatic scrolls fire
+  // isTrusted=false and never touch it; a passive clamp (viewport or content
+  // shrink) fires a TRUSTED scroll — ignore it via the fingerprints above.
   const cur = stream.scrollTop;
   if (!e.isTrusted) {
     lastScrollTop = cur;
-    // Programmatic pins never fire a trusted event, so without this refresh the
-    // clamp fingerprints below compare against a stale baseline: a long pinned
-    // stream (thinking + grep results) freezes prevScrollH/prevClientH, and the
-    // next genuine clamp (fold collapse, preview swap, viewport resize) is then
-    // misread as a user scroll-up, dropping the latch mid-stream.
+    // refresh baselines on programmatic pins so clamp fingerprints never compare
+    // against a stale baseline
     prevClientH = stream.clientHeight;
     prevScrollH = stream.scrollHeight;
     return;
   }
-  // ANY viewport-size change (the task input grow/shrink resizes this flex
-  // scroller; browser window resize) or content shrink (fold collapse, preview
-  // swap) clamps scrollTop and fires a trusted scroll event — none of those is
-  // a user gesture, so they must neither cancel an in-flight jump glide nor
-  // drop the latch. The send-time input reset is exactly such a resize.
+  // viewport resize / content shrink clamps fire trusted scrolls; none is a user
+  // gesture, so they must neither cancel a glide nor drop the latch
   const viewportChanged = stream.clientHeight !== prevClientH;
   prevClientH = stream.clientHeight;
   const scrollShrank = stream.scrollHeight < prevScrollH;
@@ -247,16 +193,13 @@ stream.addEventListener("scroll", (e) => {
   // a real user gesture takes over from any in-flight jump glide
   if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
   gliding = false;
-  // A clamp can only land the view at the (new) bottom edge; only a scroll away
-  // from it is a user intent to leave the latch. Guarding `up` with nearBottom()
-  // is defense-in-depth: even if a fingerprint misses (racing a huge fold
-  // collapse), the clamp still reads as "at the bottom" and the latch survives.
+  // only a scroll away from the bottom is a user intent to leave the latch
   const up = cur < lastScrollTop && !nearBottom();
   if (up) {
     followTail = false;
   } else if (nearBottom()) followTail = true;
   lastScrollTop = cur;
-  // the button is visible exactly when NOT latched: followTail=true must hide it
+  // the button is visible exactly when NOT latched
   setJumpVisible(!followTail);
 }, { passive: true });
 
@@ -268,9 +211,7 @@ function setStatus(state) {
   els.run.textContent = busy ? "■ Stop" : "▶ Run";
   els.run.classList.toggle("stop-mode", busy);
   els.run.disabled = busy ? false : !currentProject;
-  // a run is pinned to the mode it started with: switching mid-run would only
-  // relabel the button, not change the running agent — lock the toggle while
-  // busy (generic button:disabled styling greys it out)
+  // the mode applies to the next run only: lock the toggle while busy
   els.mode.disabled = busy;
   els.mode.title = busy
     ? "A run is in progress; the mode applies to the next run."
@@ -289,17 +230,14 @@ let compactionEl = null; // live "compressing context" block (compaction_delta)
 const toolCalls = {};
 // the group block currently collecting consecutive tool_calls (for merging)
 let toolGroupEl = null;
-// tool_call_id -> owning group: a tool_result must land in ITS group even when a
-// later call (or an interleaved thinking block that reset toolGroupEl) moved the
-// collector elsewhere — otherwise the result renders orphaned outside the group.
+// tool_call_id -> owning group: results land next to their own call row
 const toolCallGroups = new Map();
 
 function isReadTool(name) {
   return name === "read_file" || name === "grep";
 }
 
-// Ensure a tool_group container exists for read/non-read rows and return it.
-// Consecutive calls share the block; a new user turn / text / thinking closes it.
+// ensure a tool_group container exists for read/non-read rows
 function ensureToolGroup(readGroup) {
   if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
     toolGroupEl = {
@@ -315,9 +253,7 @@ function ensureToolGroup(readGroup) {
   return toolGroupEl;
 }
 
-// Reserve a tool call in its read/non-read group and record its id — shared by
-// the finished-call path and the streaming preview path, so both land in the
-// same group.
+// reserve a call row in its group; shared by the finished and streaming paths
 function toolGroupFor(id, name) {
   const group = ensureToolGroup(isReadTool(name));
   group.ids.add(id);
@@ -325,8 +261,7 @@ function toolGroupFor(id, name) {
   return group;
 }
 
-// The shared tool-row skeleton: name chip + caller-specific tail. Finished calls
-// add the args toggle (makeToolRow); streaming previews add a live body instead.
+// shared tool-row skeleton: name chip + caller-specific tail
 function makeToolRowBase(name) {
   const row = document.createElement("div");
   row.className = "tool-row";
@@ -334,7 +269,7 @@ function makeToolRowBase(name) {
   return row;
 }
 
-// Build one tool_call row (name + expandable args). Does not touch the group.
+// one tool_call row (name + expandable args)
 function makeToolRow(ev) {
   const row = makeToolRowBase(ev.name);
   let argsTxt = ev.arguments;
@@ -369,15 +304,14 @@ function makeToolRow(ev) {
   return row;
 }
 
-// Render one tool_call row; consecutive calls append to the same group block.
-// Read tools (read_file/grep) keep their results in the same block too.
+// render one tool_call row; consecutive calls append to the same group block
 function addToolCallRow(ev) {
   const group = toolGroupFor(ev.tool_call_id, ev.name);
   group.el.appendChild(makeToolRow(ev));
   autoScroll();
 }
 
-// Append a read tool's result as a collapsible row inside the tool group.
+// append a read tool's result as a collapsible row inside the tool group
 function addReadResultRow(ev) {
   const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
   const { row, full } = buildReadRow(call, ev.content);
@@ -386,12 +320,8 @@ function addReadResultRow(ev) {
   autoScroll();
 }
 
-// live-streamed tool-call previews: callId -> {name, text, row, body, group}. The
-// model's tool-call arguments arrive as tool_call_delta chunks; this shows the call
-// being generated (a file being written, a command being typed) inside the SAME
-// 'tools' group the finished call will use, so the live view matches the final one.
-// Reads stay collapsed (their content is huge); run_command shows just the command
-// and write/edit show the content/strings, not the JSON envelope.
+// live tool-call previews: callId -> {name, text, row, body, group}; reads stay
+// collapsed, run_command shows just the command
 const streamRows = {};
 
 function friendlyArgs(name, raw) {
@@ -403,8 +333,7 @@ function friendlyArgs(name, raw) {
     let t = raw;
     const prefix = '{"command": "';
     if (t.startsWith(prefix)) t = t.slice(prefix.length);
-    // mid-stream: cut at the closing quote so trailing fields ("comment", ...)
-    // never leak into the preview; escaped quotes inside the command are kept
+    // mid-stream: cut at the closing quote so trailing fields never leak into the preview
     let end = -1;
     for (let i = 0; i < t.length; i++) {
       if (t[i] === '"' && t[i - 1] !== "\\") { end = i; break; }
@@ -426,7 +355,7 @@ function friendlyArgs(name, raw) {
         if (lines.length) return lines.join("\n");
       }
     } catch (e) {}
-    // mid-stream: drop the JSON braces and unescape so it reads as text and wraps
+    // mid-stream: strip JSON braces/escapes so it reads as plain text
     return raw.replace(/^\{/, "").replace(/\}$/, "").replace(/\\n/g, "\n").replace(/\\"/g, '"');
   }
   return raw;
@@ -453,13 +382,11 @@ function handleToolCallDelta(ev) {
   }
   st.text += ev.delta;
   if (st.body) st.body.textContent = friendlyArgs(st.name, st.text);
-  // the preview grows in place: no scroll event fires, so re-pin explicitly
-  // while latched or the live write_file args drift out of view
+  // the preview grows in place (no scroll event): re-pin while latched
   autoScroll();
 }
 
-// Remove any stream previews left by an aborted turn (a tool call that streamed
-// but never got its final tool_call event).
+// remove previews left by an aborted turn (a tool call that streamed but never finished)
 function clearStreamPreviews() {
   for (const id of Object.keys(streamRows)) {
     if (streamRows[id]) streamRows[id].row.remove();
@@ -467,8 +394,7 @@ function clearStreamPreviews() {
   }
 }
 
-// Build one collapsible read row (toggle + summary + hidden code panel).
-// Shared by the tool-group path and the standalone renderEvent path.
+// one collapsible read row (toggle + summary + hidden code panel)
 function buildReadRow(call, content) {
   const toolName = call.name || "";
   const path = (call.args && call.args.path) || "";
@@ -497,40 +423,30 @@ function buildReadRow(call, content) {
 }
 
 function addEvent(ev) {
-  // lazy wire shape: {offset, event} wrappers (open NDJSON stream + SSE replay of
-  // a lazily-opened project) carry each durable event's byte offset (relative to
-  // the event region) so the UI can page the earlier records. The oldest loaded
-  // offset seeds the pill; the raw task is paged like any other older record.
+  // lazy wire shape: {offset, event} carries each durable event's byte offset
+  // so the UI can page the earlier records
   if (ev && typeof ev === "object" && ev.event && typeof ev.offset === "number") {
     if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
     ev = ev.event;
   }
-  // SSE replay of a lazy project opens with a history line: restore the pill's
-  // honest on-disk older count (a reconnect may have lost server-side pages)
+  // reconnect history line: restore the honest on-disk older count
   if (ev && ev.type === "history") {
     setOlderPill(ev.older || 0);
     return;
   }
-  // history replay: stale live-control events (status, permission) must not
-  // drive the current UI — the badge/busy state belongs to the live run
+  // replayed status/permission events must not drive the live UI
   if (stream.classList.contains("loading") &&
       (ev.type === "state_update" || ev.type === "permission_request")) {
     return;
   }
-  // finalize a coalesced streaming text block before any non-text event (tool
-  // call, next turn, final): the block must be fully rendered before it is
-  // superseded or collapsed
+  // finalize the coalesced text block before any non-text event
   if (ev && ev.type !== "text_delta") flushTextRender();
-  // events that break a tool group: new user turn, agent text, thinking, final.
-  // assistant_message is just a record (not shown) and does NOT break the group,
-  // because results follow the tool_calls they belong to.
+  // events that break a tool group; results follow their own tool_calls
   if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
     toolGroupEl = null;
   }
   if (ev.type === "compaction_delta") {
-    // live progress of an in-flight compaction (transient, not stored): a
-    // counter that updates as the summary streams in, so a long compression
-    // never looks frozen. done=True means the compaction aborted/failed.
+    // live progress of an in-flight compaction (transient, not stored)
     if (ev.done) {
       if (compactionEl) { compactionEl.remove(); compactionEl = null; }
       return;
@@ -569,18 +485,14 @@ function addEvent(ev) {
   }
   if (ev.type === "assistant_message") {
     toolGroupEl = null;
-    // During a live stream the text was already rendered by text_delta; a stored
-    // session (no deltas) must render the final message once — opencode loads
-    // final parts, not the streaming tape.
+    // stored sessions render the final message once (no delta stream)
     if (lastTextEl && lastTextEl.isConnected) {
       lastTextEl = null;
       lastTextContent = "";
       return;
     }
-    // thinking renders above the agent text, matching the live stream (reasoning
-    // deltas arrive before text deltas). Skip the stored record when a live
-    // reasoning_delta stream already rendered this turn's thinking — otherwise
-    // the replay block would duplicate it.
+    // thinking renders above the agent text; skip if a live reasoning stream already
+    // rendered this turn
     if (ev.reasoning && !(thinkingEl && thinkingEl.isConnected)) appendThinkingRow(ev.reasoning);
     if (ev.content) {
       const wrap = createAgentTextBlock();
@@ -591,12 +503,10 @@ function addEvent(ev) {
     return;
   }
   if (ev.type === "final") {
-    // the run is over: any open permission prompt is stale — dismiss it so a
-    // late approve can't flip the UI back into a stuck "running" state
+    // the run is over: dismiss any stale permission prompt
     if (pendingPerm) closePerm();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
-    // diagrams skipped mid-stream (their fence was still open at the last
-    // delta) are complete now — force one final render pass
+    // fences may have closed since the last delta: one final render pass
     if (lastTextEl && lastTextEl.isConnected) highlightCode(lastTextEl);
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
@@ -609,8 +519,7 @@ function addEvent(ev) {
     toolCalls[ev.tool_call_id] = { name: ev.name, args };
     const st = streamRows[ev.tool_call_id];
     if (st) {
-      // the call finished: swap the live preview for the final row IN THE SAME
-      // group, so the 'tools' header stays put and no second group appears
+      // the call finished: swap the live preview for the final row in the same group
       st.row.remove();
       streamRows[ev.tool_call_id] = undefined;
       toolGroupEl = st.group;
@@ -627,10 +536,8 @@ function addEvent(ev) {
     return;
   }
 
-  // read tool results merge into the group block; other results render independently.
-  // Look the group up by call id (not the current collector): interleaved thinking
-  // or a later call may have moved toolGroupEl to another group, and the result
-  // must still land next to its own call row.
+  // read results merge into their group; look it up by call id (the collector
+  // may have moved elsewhere)
   if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
     const call = toolCalls[ev.tool_call_id];
     if (isReadTool(call.name)) {
@@ -649,12 +556,7 @@ function addEvent(ev) {
     }
   }
 
-  // streaming text: accumulate plain text and schedule ONE render per animation
-  // frame. Rendering the whole accumulated block per token re-parses markdown,
-  // re-highlights every code block and re-typesets all math on each one — an
-  // O(n²) main-thread stall that surfaced as "freeze, then a burst of output".
-  // Coalescing per frame bounds the work and lets the browser paint between
-  // frames; the next non-text event flushes whatever is still pending.
+  // accumulate text and render once per frame (a full re-parse per token is O(n²))
   if (ev.type === "text_delta" && ev.content) {
     if (!lastTextEl) {
       lastTextEl = createAgentTextBlock();
@@ -675,7 +577,7 @@ function addEvent(ev) {
     }
     thinkingEl.querySelector(".thinking-label").textContent =
       "thinking… " + thinkingContent.length + " chars";
-    // keep the block's own copy in sync; if the full text is open, update it live
+    // keep the block's own copy in sync; update it live if the full text is open
     const full = thinkingEl.querySelector(".thinking-full");
     full._content = thinkingContent;
     const fold = thinkingEl.querySelector(".fold");
@@ -694,11 +596,9 @@ function addEvent(ev) {
   const el = renderEvent(ev);
   if (el) {
     (pageSink || eventsEl).appendChild(el);
-    // user tasks render markdown too: highlight code and draw mermaid diagrams
-    // (replay also hits this path — highlightCode is synchronous and layout-free)
+    // user tasks render markdown too; replay hits this path as well
     if (el.classList.contains("event.user")) highlightCode(el);
-    // user tasks can carry LaTeX too; typeset on the live path only (replay
-    // batches it after insertion in openProject — MathJax needs real layout)
+    // user tasks may carry LaTeX; live path only (replay batches it after insertion)
     if (el.classList.contains("event.user") && !pageSink) typesetMath(el);
     autoScroll();
   }
@@ -711,9 +611,8 @@ function createAgentTextBlock() {
   return wrap;
 }
 
-// Coalesced streaming render (see the text_delta branch above): at most one
-// full-block render per animation frame, flushed synchronously by the next
-// non-text event so a superseded block is always complete.
+// coalesced streaming render: one full-block render per frame, flushed by the
+// next non-text event so a superseded block is always complete
 let textRenderRaf = 0;
 function renderTextBlock() {
   textRenderRaf = 0;
@@ -735,12 +634,10 @@ function flushTextRender() {
   }
 }
 
-// Height animation shared by the diff expand (partial collapse to 140px): animates
-// an explicit height via WAAPI; overflow-y is suppressed so no scrollbar shifts.
+// height animation via WAAPI with overflow hidden (no scrollbar shift)
 const FOLD_EASE = "cubic-bezier(.23, 1, .32, 1)";
 
-// One fold/diff animation per element; cancel any in-flight one before starting
-// a new one (shared by animateFold, foldExpand, foldCollapse and the settle pass).
+// one fold/diff animation per element; cancel any in-flight one
 function cancelFoldAnim(el) {
   if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
   el._foldAnim = null;
@@ -753,8 +650,7 @@ function animateFold(el, from, to, onDone) {
   const settle = () => {
     cancelFoldAnim(el);
     onDone();
-    // the fold's height just settled (or was cancelled): re-pin the tail if
-    // the user is latched, so the view never ends up hovering off the bottom
+    // the fold's height settled (or was cancelled): re-pin the tail if latched
     if (followTail && !stream.classList.contains("loading")) autoScroll();
   };
   if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -776,7 +672,7 @@ function resetFold(el) {
   el.style.overflowY = "";
 }
 
-// Diff expand: grow from its collapsed 140px to the content height.
+// diff expand: grow from its collapsed 140px to the content height
 function expandDiff(pre) {
   const start = pre.offsetHeight; // 140 while .diff-collapsed
   pre.classList.remove("diff-collapsed");
@@ -791,9 +687,7 @@ function collapseDiff(pre) {
   });
 }
 
-// Grid-rows accordion wrapper: the container height animates 0fr<->1fr while the
-// inner content is clipped — large text never reflows per frame and scrollbars
-// never shift (unlike animating height on the content itself).
+// grid-rows accordion: animate 0fr<->1fr so large text never reflows per frame
 function wrapFold(contentEl) {
   const inner = document.createElement("div");
   inner.className = "fold-inner";
@@ -808,9 +702,7 @@ function reducedMotion() {
   return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-// While a fold/diff expands, its height grows every frame; keep the view pinned
-// to the live tail each frame if the user is latched — a single post-animation
-// scroll would leave the view hovering mid-air for the whole 200ms.
+// keep the view pinned to the tail each frame while a fold/diff expands
 function followTailDuring(anim) {
   let raf = requestAnimationFrame(function tick() {
     if (followTail && !stream.classList.contains("loading")) autoScroll();
@@ -861,10 +753,7 @@ function toggleFold(fold, onExpand) {
   return wasHidden;
 }
 
-// One collapsible thinking row (event container + toggle + label + fold panel),
-// shared by the stored-replay path (appendThinkingRow) and the live
-// reasoning_delta stream. The live path updates label and _content incrementally;
-// the fold's expand callback renders _content so an open panel never goes stale.
+// collapsible thinking row; shared by the stored-replay and live streaming paths
 function buildThinkingBlock(initialLabel, initialContent) {
   const el = document.createElement("div");
   el.className = "event thinking";
@@ -894,37 +783,30 @@ function buildThinkingBlock(initialLabel, initialContent) {
   return { el, full, fold };
 }
 
-// A collapsed thinking row rebuilt once from a stored assistant_message.reasoning
-// (used when a stored session replays without reasoning_delta stream).
+// thinking row rebuilt from a stored assistant_message.reasoning
 function appendThinkingRow(reasoning) {
   const block = buildThinkingBlock("thinking", reasoning);
   (pageSink || eventsEl).appendChild(block.el);
 }
 
-// Render LaTeX ($...$, $$...$$) inside a freshly-inserted markdown block.
-// MathJax scans text nodes; pre/code are skipped via skipHtmlTags so code stays
-// literal. Content is already DOMPurify-sanitized before this runs.
+// typeset LaTeX; pre/code are skipped so code stays literal
 const MATH_RE = /\$\$[\s\S]*?\$\$|\$[^$\n]*\$/;
 
 function typesetMath(el) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
   if (!el || !MATH_RE.test(el.textContent)) return;
-  // MathJax typesets asynchronously and can change the block's height after
-  // the delta that triggered it; re-pin the tail when it settles so a latched
-  // view never drifts off the bottom mid-render
+  // typesetting changes height asynchronously: re-pin the tail when it settles
   MathJax.typesetPromise([el]).then(() => autoScroll()).catch(() => {});
 }
 
-// Strict gate for the replay pass: a block only needs MathJax when a $…$ or
-// $$…$$ pair survives in its non-code text — lone $ signs in shell/code/currency
-// (e.g. `$ echo`, `$PATH`, `$5`) never trigger a scan.
+// gate: only scan when a $…$ pair survives in non-code text
 function hasMathText(el) {
   const clone = el.cloneNode(true);
   clone.querySelectorAll("pre, code").forEach((n) => n.remove());
   return MATH_RE.test(clone.textContent);
 }
 
-// Typeset replayed math block-by-block so the progress bar tracks the work.
+// typeset replayed math block-by-block so the progress bar tracks the work
 async function typesetProgressively(root, onPct) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
   const blocks = Array.from(root.querySelectorAll(".event.text .body, .event.user .body")).filter(hasMathText);
@@ -936,12 +818,8 @@ async function typesetProgressively(root, onPct) {
   }
 }
 
-// Syntax-highlight every <pre><code> inside a freshly rendered block.
-// Marked only emits a fenced <pre> once the closing ``` has arrived, so
-// streaming renders stay clean (no half-block flicker). streaming=true tells
-// renderMermaid to skip a diagram that is still the LAST element of its body —
-// its fence may not be closed yet (marked runs an unclosed fence to the end of
-// the text), and drawing it would show a half-finished diagram.
+// syntax-highlight a freshly rendered block; streaming skips a last-element
+// diagram (its fence may still be open)
 function highlightCode(root, streaming = false) {
   if (typeof hljs === "undefined" || !root) return;
   root.querySelectorAll("pre code").forEach((el) => {
@@ -951,17 +829,10 @@ function highlightCode(root, streaming = false) {
 }
 
 let mermaidInitialized = false;
-// Rendered SVGs are cached by source text: streaming re-renders the whole body
-// on every delta (a fresh DOM replaces every pre), so a finished diagram must
-// be restored synchronously from the cache instead of redrawn — no flash, no
-// duplicate async renders. The cache is bounded; on overflow it resets and the
-// next pass simply re-renders.
+// rendered SVGs cached by source: restore synchronously on streaming re-renders
 const mermaidCache = new Map();
 
-// Is `pre` the last meaningful child of its parent (ignoring whitespace-only
-// text nodes)? During streaming an unclosed mermaid fence is the last thing in
-// the body; a diagram only renders once content follows it (fence closed) or
-// the final event forces a pass.
+// is this pre the last meaningful child? streaming skips it (fence may be open)
 function isLastElement(pre) {
   let n = pre.nextSibling;
   while (n) {
@@ -972,26 +843,14 @@ function isLastElement(pre) {
   return true;
 }
 
-// Render mermaid diagrams: every <pre><code class="language-mermaid"> becomes a
-// rendered SVG. Two gates keep half-finished or broken diagrams off screen:
-// 1) streaming: a block still at the END of its body may lack its closing
-//    fence (marked runs an unclosed fence to the end of the text) — wait for
-//    the final event instead of drawing a half-finished diagram;
-// 2) parse: mermaid.render resolves a huge error diagram on parse errors
-//    instead of rejecting; mermaid.parse (v10+) is ASYNC and rejects on bad
-//    syntax, so a broken source stays literal and is not re-parsed while
-//    identical. (The old synchronous parse contract throws — the same
-//    try/await/catch handles both shapes.)
+// render mermaid: skip a last-element block mid-stream (open fence), keep
+// broken source literal (async parse gate)
 async function renderMermaid(root, streaming = false) {
   if (typeof mermaid === "undefined" || !root) return;
   if (!mermaidInitialized) {
     mermaidInitialized = true;
     try {
-      // Palette follows the UI (near-monochrome + red accent): every diagram
-      // type has its own themeVariables keys, so all of them are overridden.
-      //   strokes/lines -> accent red; fills/labels -> neutral dark greys
-      //   (mermaid dark defaults to blue-grey #6b7b8f borders, a yellow note
-      //   fill, and multicolour pie/git palettes — none fit the theme)
+      // palette follows the UI: accent red strokes/lines, neutral dark fills
       const accent =
         (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#EF4444";
       mermaid.initialize({
@@ -999,7 +858,7 @@ async function renderMermaid(root, streaming = false) {
         theme: "dark",
         securityLevel: "strict",
         themeVariables: {
-          // --- strokes & lines: accent red ---
+          // strokes & lines: accent red
           lineColor: accent,
           primaryBorderColor: accent,
           secondaryBorderColor: accent,
@@ -1011,14 +870,7 @@ async function renderMermaid(root, streaming = false) {
           labelBoxBorderColor: accent,
           noteBorderColor: accent,
           activationBorderColor: accent,
-          // gantt — three states stay distinguishable within the theme:
-          //   active (running) = red fill + dark text, most prominent
-          //   normal (planned) = dark grey + red border
-          //   done (archived)  = darker grey + grey border, least prominent
-          // mermaid 10 reads the *BkgColor keys for fills (mermaid 9's plain
-          // *Bkg names are ignored: active would default to blue #81B1DB, done
-          // to lightgrey); borders keep no Color suffix; text is shared via
-          // taskTextColor/taskTextLightColor (default white)
+          // gantt: active = red fill, planned = grey, done = darker grey
           taskBorderColor: accent,
           taskBkgColor: "#2d2d33",
           taskBkg: "#2d2d33", // harmless alias for any theme that reads it
@@ -1035,22 +887,17 @@ async function renderMermaid(root, streaming = false) {
           todayLineColor: accent,
           // clusters / subgraphs
           clusterBorder: accent,
-          // state diagrams (stateDiagram-v2): state nodes read stateBorder, but
-          // the diagram's outer container (.stateGroup rect) is hard-coded to
-          // the legacy border1 key (dark default #81B1DB blue) — override it
-          // too; stateGroup label text also carries border1 but a later #ccc
-          // rule wins, so text stays grey
+          // state diagrams: also override the outer container's legacy border1
           stateBorder: accent,
           border1: accent,
-          // --- fills & labels: neutral dark greys (no yellow/blue/light) ---
+          // fills & labels: neutral dark greys
           noteBkgColor: "#1c1c1f",
           noteTextColor: "#d4d4d8",
           edgeLabelBackground: "#1c1c1f",
           clusterBkg: "#1c1c1f",
           taskTextOutsideColor: "#a1a1aa",
           activationBkgColor: "#27272a",
-          // --- pie: first slice gets the red accent, rest a grayscale ramp
-          // (pie0 is an unused definition — pie rendering starts at pie1) ---
+          // pie: first slice red, rest grayscale (pie0 unused)
           pie1: accent,
           pie2: "#27272a",
           pie3: "#3f3f46",
@@ -1063,7 +910,7 @@ async function renderMermaid(root, streaming = false) {
           pie10: "#d4d4d8",
           pie11: "#e0e0e4",
           pie12: "#ededf0",
-          // --- git graphs: grayscale + red (git0-git7) ---
+          // git graphs: grayscale + red (git0-git7)
           git0: accent,
           git1: "#71717a",
           git2: "#d4d4d8",
@@ -1074,9 +921,7 @@ async function renderMermaid(root, streaming = false) {
           git7: "#52525b",
         },
       });
-      // Never let the parser's default error path paint its giant
-      // "Syntax error in text" diagram: route parse errors to the console and
-      // let showMermaidError present a small inline notice instead.
+      // never let the parser's error path paint its giant error diagram
       mermaid.parseError = (err) => console.warn("[mermaid]", err);
     } catch (e) {
       return;
@@ -1099,12 +944,7 @@ async function renderMermaid(root, streaming = false) {
     }
     // gate 1 — possible unclosed fence mid-stream: don't draw half a diagram
     if (streaming && isLastElement(pre)) continue;
-    // gate 2 — syntax check before the async render (render() would resolve an
-    // error diagram instead of rejecting); broken source stays literal.
-    // mermaid.parse is ASYNC in the bundled v10+: a bare try/catch could never
-    // see its rejection, so the parse gate silently passed every broken source
-    // and the error diagram reached the DOM. Await inside a plain for...of
-    // (forEach callbacks can't await); a sync throw is caught the same way.
+    // gate 2 — async syntax check before rendering; broken source stays literal
     let parsed = true;
     let parseErr = null;
     try {
@@ -1125,20 +965,13 @@ async function renderMermaid(root, streaming = false) {
     mermaid
       .render("mmd-" + Math.random().toString(36).slice(2), src)
       .then(({ svg }) => {
-        // a later streaming delta may have rebuilt the DOM: re-locate a block
-        // with this exact source before swapping, so the SVG never lands orphaned
+        // a later delta may have rebuilt the DOM: re-locate the block by source
         let target = null;
         for (const el of root.querySelectorAll("pre code.language-mermaid")) {
           if (el.textContent === src) { target = el.parentElement; break; }
         }
         if (!target) return;
-        // gate 3 — mermaid.render can resolve a giant error diagram instead of
-        // rejecting; never let that hit the DOM. The bundled v10+ jison parser
-        // emits "Parse error on line N: Unexpected ..." (syntax) and "Lexical
-        // error on line N. Unrecognized text." (lexer), older builds said
-        // "Syntax error in text" — match every phrasing (the previous
-        // exact-string check never matched v10 errors and let them through).
-        // Keep the literal source with a small inline notice.
+        // gate 3 — render can resolve a giant error diagram; never let it hit the DOM
         if (/Parse error on line|Lexical error on line|Syntax error in text|Parse error[:\s]/.test(svg)) {
           showMermaidError(target, null);
           delete target.dataset.mermaidSrc; // a corrected source can retry
@@ -1154,8 +987,7 @@ async function renderMermaid(root, streaming = false) {
         if (followTail) autoScroll(); // a diagram can be taller than its source
       })
       .catch((e) => {
-        // defensive: keep the literal source with a small notice; drop the
-        // marker so a later identical source can retry once its text changes
+        // keep the literal source; drop the marker so a corrected source can retry
         if (pre.isConnected) {
           showMermaidError(pre, e);
           delete pre.dataset.mermaidSrc;
@@ -1164,10 +996,8 @@ async function renderMermaid(root, streaming = false) {
   }
 }
 
-// A broken diagram must never paint mermaid's giant error SVG: mark the block
-// as failed and attach one small inline notice while keeping the literal
-// source readable/copyable. The parser's message (if any) goes into the tip's
-// hover title so the on-screen text stays a short plain sentence.
+// mark a failed diagram with a small inline notice; the parser message goes
+// into the hover title
 function showMermaidError(pre, detail) {
   if (!pre || !pre.classList) return;
   pre.classList.add("mermaid-failed");
@@ -1181,8 +1011,7 @@ function showMermaidError(pre, detail) {
   }
 }
 
-// Map a file extension to a highlight.js language id and highlight a bare
-// <pre> (read results). Unknown extensions fall back to the code child path.
+// map a file extension to a highlight.js language id for bare <pre> results
 const CODE_LANGS = {
   py: "python", js: "javascript", mjs: "javascript", jsx: "javascript",
   ts: "typescript", tsx: "typescript", html: "xml", htm: "xml", xml: "xml",
@@ -1214,19 +1043,14 @@ function appendCompletion(status, summary) {
   div.className = "completion";
   div.textContent = status === "completed" ? "completed" : status;
   (pageSink || eventsEl).appendChild(div);
-  // completed summaries duplicate the streamed agent text; abort/error reasons
-  // are the only place the termination cause is shown
+  // completed summaries duplicate the streamed text; only abort/error reasons are shown
   if (status !== "completed" && summary) {
     const note = document.createElement("div");
     note.className = "completion-note";
     note.textContent = summary;
     (pageSink || eventsEl).appendChild(note);
   }
-  // live runs re-pin to the completion divider; during replay the end-scroll
-  // at openProject already lands on the last record, so skip the pass.
-  // If the user has scrolled up, don't yank them — the ↓ button is already shown.
-  // Instant pin, not smooth: the completion divider often lands in the same
-  // burst as trailing tool results, and a glide animation would fight them.
+  // live runs re-pin to the completion divider; never yank a user who scrolled up
   if (!stream.classList.contains("loading")) {
     // never yank mid-glide: the user's jump animation owns the scroll until it lands
     if (gliding) return;
@@ -1246,9 +1070,7 @@ function renderEvent(ev) {
       wrap.className = "event user";
       wrap.innerHTML = '<div class="hdr">task</div>';
       body.className = "body";
-      // hard-wrapped markdown (breaks: true): the task is WYSIWYG — every line
-      // break shows, LaTeX renders via typesetMath (gated by MATH_RE after the
-      // block is in the DOM; the replay pass batches it separately)
+      // hard-wrapped markdown (breaks: true): WYSIWYG line breaks
       body.innerHTML = renderMarkdown(ev.content, true);
       break;
     }
@@ -1275,7 +1097,7 @@ function renderEvent(ev) {
       }
 
       if (isWrite && ev.diff) {
-        // show the file change as a unified diff (# Wrote <path> + coloured lines)
+        // show the file change as a unified diff
         const path = call.args.path || "";
         wrap.innerHTML = `<div class="hdr">✓ wrote <span class="diff-file">${escapeHtml(path)}</span></div>`;
         body.textContent = ev.content; // summary line (e.g. OK: wrote /x (+5 -2 lines))
@@ -1351,23 +1173,15 @@ function escapeHtml(s) {
   })[c]);
 }
 
-// Render markdown with marked + DOMPurify. LLM output is untrusted: DOMPurify
-// strips any raw HTML/script before it reaches the DOM. Falls back to plain
-// text if the vendor libs are unavailable (e.g. offline without the vendor
-// files). breaks=true turns single newlines into <br> (hard wrap) — used for
-// user tasks so the input is WYSIWYG; assistant output keeps soft wrap.
+// markdown via marked + DOMPurify (LLM output is untrusted); breaks=true
+// hard-wraps user tasks
 function renderMarkdown(text, breaks = false) {
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
     return escapeHtml(text);
   }
   try {
     const src = String(text);
-    // Protect math ($...$, $$...$$) from marked's backslash escapes before
-    // parsing: marked treats `\` + ASCII punctuation as markdown escapes and
-    // would strip the backslash from LaTeX sequences like \! or \_ (turning
-    // `\text{softmax}\!\left(` into a literal "!" and `\text{seq\_len}` into a
-    // bare `_` that breaks \text). ⟦MATHn⟧ is plain Unicode: marked leaves it
-    // alone and DOMPurify keeps it, so we can restore the exact math after.
+    // protect math from marked's backslash escapes via ⟦MATHn⟧ placeholders
     const math = [];
     const protectedSrc = src.replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, (m) => {
       math.push(m);
@@ -1381,7 +1195,7 @@ function renderMarkdown(text, breaks = false) {
   }
 }
 
-// Render a unified diff string as a <pre> with per-line +/- colouring.
+// render a unified diff string as a <pre> with per-line +/- colouring
 function renderDiff(diff) {
   const pre = document.createElement("pre");
   pre.className = "diff-view";
@@ -1410,14 +1224,10 @@ async function run() {
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
-  // sending a message means "back to the live tail": commit to the tail
-  // unconditionally — a dropped latch or an in-flight glide (reading history)
-  // must not leave the fresh message below the fold
+  // sending a message returns to the live tail unconditionally
   followTail = true;
   autoScroll(true);
-  // runs append to the active project's conversation; the mode travels with the
-  // request so a switch only affects this run. project pins the target .clc so
-  // the server never appends to another window's project.
+  // runs append to the active project; the mode travels with the request
   const payload = { task, mode: agentMode, project: currentProject };
   try {
     const r = await fetch(API_BASE + "/api/run", {
@@ -1458,12 +1268,8 @@ function autoGrowTask() {
     els.task.style.height = "auto";
     els.task.style.height = Math.min(els.task.scrollHeight, Math.round(window.innerHeight * 0.3)) + "px";
   }
-  // the input box resize resizes the stream viewport; a shrink can clamp
-  // scrollTop. The clamp fires a trusted scroll event that the listener above
-  // ignores (via the shrunken-viewport fingerprint AND the armed time window),
-  // so the latch stays latched — re-pin right here while the user is still
-  // typing, otherwise the view would hover just off the tail until the next
-  // content arrives.
+  // the input resize clamps scrollTop; the listener ignores it, so re-pin while
+  // typing to stay on the tail
   if (was !== els.task.style.height) {
     suppressLatchUntil = performance.now() + 120;
     if (followTail && !nearBottom()) autoScroll();
@@ -1472,25 +1278,7 @@ function autoGrowTask() {
 els.task.addEventListener("input", autoGrowTask);
 
 // ---- API settings modal ----
-// The modal carries the LLM endpoint (base_url/model/reasoning_effort — what the
-// agent talks to), persisted on the backend (~/.clutch/settings.json via
-// /api/settings) and, through the preload bridge, in the client-side settings
-// file the LLM reverse proxy reads (so SSH-mode upstream changes apply without
-// restarting the app). There is no manual "Backend URL" field: the window's
-// backend is always a supervisor session (local or tunnel), chosen by the main
-// process.
-//
-// Named LLM profiles work like the saved SSH connections: stored in
-// localStorage, picked from a dropdown, applied to the backend on selection.
-// A profile stores the full form (base_url/model/api_key/reasoning_effort), so
-// switching providers is one click instead of retyping the key.
-// ---- custom dropdown ----
-// Native <select> popups can't be themed or animated (Linux renders them as an
-// HTML-default list), so the three pickers use this component: a button that
-// opens a themed popup with a fade/slide-in. It mimics just enough of the
-// <select> DOM API (innerHTML / appendChild / value / disabled /
-// addEventListener("change")) that the existing render functions (renderLlmProfiles,
-// renderConnSelector) work unchanged.
+// endpoint persisted on the backend + client proxy; profiles pick the backend
 function customSelect(root) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -1558,7 +1346,7 @@ const modal = $("#settings-modal");
 const keyInput = $("#api-key-input");
 const modelInput = $("#model-input");
 const reasoningEffortInput = customSelect($("#reasoning-effort-input"));
-// reasoning-effort options (was a static <select> in the markup)
+// reasoning-effort options
 for (const [v, t] of [["", "default"], ["low", "low"], ["medium", "medium"], ["max", "max"]]) {
   const o = document.createElement("option");
   o.value = v;
@@ -1591,12 +1379,10 @@ function renderLlmProfiles(activeName) {
     opt.textContent = name === activeName ? name + " ✓" : name;
     profileSelect.appendChild(opt);
   }
-  // no "— profiles —" placeholder: an empty list means no profiles — disable
-  // the picker (＋ New still works to create the first one)
+  // empty list = no profiles: disable the picker
   profileSelect.disabled = names.length === 0;
   profileSelect.value = names.includes(activeName) ? activeName : (names[0] || "");
-  // Delete/Edit act on the SELECTED profile: grey them out when nothing is
-  // selected so their purpose is obvious from the start.
+  // Delete/Edit act on the selected profile: grey them out when none is selected
   $("#llm-profile-del").disabled = !profileSelect.value;
   $("#llm-profile-edit").disabled = !profileSelect.value;
 }
@@ -1637,9 +1423,7 @@ function saveProfileAs(name, oldName) {
 }
 
 // ---- LLM profile editor (mirrors the SSH connection modal) ----
-// The settings modal is a profile manager: pick one to apply, ＋ New to create
-// a BLANK profile (never prefilled), Edit to change the selected one, Delete to
-// remove it. The url/key/model/reasoning fields live HERE.
+// pick to apply, ＋ New (blank), Edit, Delete; url/key/model fields live here
 const llmProfileModal = $("#llm-profile-modal");
 const llmProfileTitle = $("#llm-profile-title");
 const llmProfileError = $("#llm-profile-error");
@@ -1688,8 +1472,7 @@ $("#llm-profile-save").addEventListener("click", async () => {
     profileNameInput.focus();
     return;
   }
-  // a name is only a conflict when it belongs to a DIFFERENT profile (editing
-  // the same profile under its own name is fine, and rename is allowed)
+  // a name conflicts only when it belongs to a DIFFERENT profile
   const taken = llmProfiles()[name];
   if (taken && name !== editingProfile) {
     showLlmProfileError("A profile named \"" + name + "\" already exists — pick a different name.");
@@ -1725,15 +1508,13 @@ $("#llm-profile-del").addEventListener("click", () => {
 
 async function openSettings() {
   modal.classList.remove("hidden", "closing");
-  // the settings modal is now a profile manager: the url/key/model fields live
-  // in the profile editor (llm-profile-modal), so there is nothing to prefill
+  // url/key/model fields live in the profile editor; nothing to prefill here
   renderLlmProfiles(localStorage.getItem("clutch_llm_active") || "");
 }
 function closeSettings() {
   closeModal(modal);
 }
-// Push the CURRENT profile-editor form values to the backend (the LLM endpoint,
-// the proxy's local settings file). No modal close — callers decide.
+// push the profile-editor form values to the backend
 async function pushSettings() {
   const key = keyInput.value.trim();
   const llmUrl = llmUrlInput.value.trim();
@@ -1755,8 +1536,7 @@ async function pushSettings() {
     if (!r.ok) throw new Error(data.error || r.status);
     if (key) localStorage.setItem("clutch_api_key", key);
     localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
-    // Keep the client-side LLM reverse proxy in sync (SSH mode: the backend
-    // above may be remote, but the proxy reads the LOCAL settings file).
+    // keep the client-side LLM proxy in sync (it reads the local settings file)
     if (window.clutchSettings && window.clutchSettings.save) {
       await window.clutchSettings.save({ api_key: key, model, base_url: llmUrl });
     }
@@ -1771,10 +1551,8 @@ $("#settings-close").addEventListener("click", closeSettings);
 $("#older-pill").addEventListener("click", loadOlder);
 dismissOnOverlayPress(modal, closeSettings);
 
-// Close a modal only when the press STARTS on the overlay itself. The click
-// event fires on the overlay even for a drag that begins inside the box and is
-// released outside (mouse slips off the modal while typing) — mousedown targets
-// the actual element under the button, so that slip can no longer close it.
+// close only when the press STARTS on the overlay (a drag released outside
+// must not close it)
 function dismissOnOverlayPress(overlayEl, onClose) {
   overlayEl.addEventListener("mousedown", (e) => {
     if (e.target === overlayEl) onClose();
@@ -1783,16 +1561,11 @@ function dismissOnOverlayPress(overlayEl, onClose) {
 
 const MODAL_CLOSE_MS = 180;
 
-// Animated modal close: add .closing (fade the overlay, slide the box down),
-// then land the .hidden display:none when the animation finishes. Opening
-// functions remove .closing alongside .hidden, so a reopen mid-animation is
-// clean (the pending close timer then becomes a no-op). Reduced motion closes
-// instantly; re-entrant calls are no-ops.
+// animated close: fade the overlay, then land display:none when done
 function closeModal(overlayEl, onDone) {
   if (!overlayEl || overlayEl.classList.contains("hidden") || overlayEl.classList.contains("closing")) return;
   const finish = () => {
-    // the modal was reopened before the animation finished: the open removed
-    // .closing, so this stale timer must not hide it
+    // reopened before the animation finished: this stale timer must not hide it
     if (!overlayEl.classList.contains("closing")) return;
     overlayEl.classList.remove("closing");
     overlayEl.classList.add("hidden");
@@ -1847,8 +1620,7 @@ function renderConnSelector() {
   localOpt.value = "local";
   localOpt.textContent = "Local (this machine)";
   connSelect.appendChild(localOpt);
-  // select the actual host entry we're connected to (marked ✓) instead of adding a
-  // synthetic URL option — picking qianli must leave qianli selected
+  // keep the connected host entry selected instead of adding a synthetic URL
   let connectedValue = null;
   for (const c of sshConns()) {
     const label = connLabel(c);
@@ -1864,8 +1636,7 @@ function renderConnSelector() {
     if (connectedValue) {
       connSelect.value = connectedValue;
     } else {
-      // connected via a path that didn't save the host (rare: e.g. manual URL):
-      // still show the host we're on (user@host:port), not the raw tunnel URL
+      // connected via a path that didn't save a host: still show user@host:port
       const opt = document.createElement("option");
       opt.value = "ssh:__connected__";
       opt.textContent = cHost
@@ -1880,20 +1651,15 @@ function renderConnSelector() {
   connStatus.textContent = connected ? "Connected: " + override : "Using " + API_BASE;
 }
 
-// Switch the active backend in place (SSH connect / disconnect / reset) without a
-// full page reload: repoint API_BASE + the SSE stream. No picker side effects —
-// callers refresh the picker explicitly (refreshPicker) when it's relevant.
+// switch the active backend in place without a full page reload
 function switchBackend(url) {
   API_BASE = url.replace(/\/+$/, "");
   localStorage.setItem("clutch_api_url", API_BASE);
   reconnectSSE();
 }
 
-// Ask the main process for the current backend URL (it owns the per-window
-// session: local supervisor session, tunnel session, or direct) and switch to
-// it. The renderer never guesses session ports — a guessed port dies with the
-// session. A previously active SSH-degradation mode is re-applied to the new
-// session (the degrade state lives in the old session process and dies with it).
+// ask the main process for the current backend URL; re-apply degrade mode
+// to the new session
 async function switchBackendResolved() {
   if (!window.clutchApi) return false;
   const url = await window.clutchApi.baseUrl();
@@ -1904,14 +1670,8 @@ async function switchBackendResolved() {
   return Boolean(url);
 }
 
-// SSH-degradation mode ("local agent, remote exec bridge") is a per-process
-// setting on the agent server, so it dies with the session process. The marker
-// is persisted in localStorage; whenever the session is (re)claimed — the main
-// process falls back to a fresh local session when the tunnel has no
-// supervisor, and that fresh session must be told about the bridge again —
-// re-apply the mode to the CURRENT backend. Callers that intentionally exit
-// degrade mode (disconnect/reset/tunnel end) MUST clear the marker first, or
-// the next switchBackendResolved would resurrect it.
+// degrade mode is a per-process setting that dies with the session: re-apply
+// it whenever the session is (re)claimed
 async function reapplyDegradeIfNeeded() {
   const raw = localStorage.getItem("clutch_degrade");
   if (!raw || !window.clutchTunnel) return;
@@ -1940,29 +1700,15 @@ async function reapplyDegradeIfNeeded() {
 }
 
 // ---- SSH-tools degradation (host alive but unusable for bootstrap) ----
-// A host with no Python and no matching bundle is still fully usable through the
-// exec bridge: the local server runs the agent, and every file/command operation
-// goes over the SSH tunnel. These two helpers toggle that mode on the local
-// server's /api/backend. Both are best-effort against the local backend.
-//
-// Returns:
-//   true     — degraded, ssh mode is active
-//   false    — the tunnel itself is dead (a genuine connection failure; the
-//              caller should show the SSH error, not a degrade message)
-//   string   — the tunnel is up but the local backend is not: the reason the
-//              SSH-tools fallback failed (this is the real failure to report)
+// local agent, remote exec bridge; true = degraded, false = tunnel dead
 
 async function tryDegradeToSshTools() {
   if (!window.clutchTunnel) return false;
   const s = await window.clutchTunnel.status();
-  // degradable only while the tunnel itself is still alive: a dead tunnel has no
-  // bridge to exec through (this also filters out genuine connection failures)
+  // degradable only while the tunnel is alive (a dead tunnel has no bridge)
   if (!s.active || !s.execBridge) return false;
-  // Resolve the current backend first: the tunnel may be live WITHOUT a
-  // supervisor on the far end (that is exactly this host's situation), so the
-  // main process falls back to a fresh local session — that session is the one
-  // we must put into ssh mode (DEFAULT_BASE may be a dead URL from an earlier
-  // session).
+  // resolve the current backend first: the main process may have fallen back
+  // to a fresh local session
   const url = await window.clutchApi.baseUrl();
   if (!url) return "not running";
   try {
@@ -1975,8 +1721,7 @@ async function tryDegradeToSshTools() {
   } catch (e) {
     return "unreachable";
   }
-  // persist the mode: the session process may be re-created later (see
-  // reapplyDegradeIfNeeded), taking the setting down with it
+  // persist the mode: the session process may be re-created later
   localStorage.setItem("clutch_degrade", JSON.stringify({ bridge: s.execBridge }));
   return true;
 }
@@ -1993,9 +1738,7 @@ async function resetBackendLocal() {
   }
 }
 
-// Bring the file picker back to its normal browsing state after a connect or
-// disconnect: show the body, load the (possibly new) backend's files, re-render
-// the connection selector.
+// restore the picker's normal browsing state after a connect/disconnect
 function refreshPicker() {
   showPickerBody();
   loadDir("", false); // re-list the (new) backend from home; keep the remembered dir
@@ -2013,8 +1756,7 @@ function showPasswordPrompt(label) {
 }
 
 function closePasswordPrompt() {
-  // resolve immediately (the connect flow is waiting on it); only the visual
-  // close is animated
+  // resolve immediately (the connect flow is waiting); only the visual close animates
   closeModal(passModal);
   if (passResolve) passResolve(null);
   passResolve = null;
@@ -2023,9 +1765,7 @@ function closePasswordPrompt() {
 let connBusy = false; // a connect is in flight: ignore re-clicks
 let lastConn = null;  // { host, user, port, statusEl } of the last attempt (Retry)
 
-// Collapse the whole picker body (path bar, file list, new-project area, action
-// buttons) during an SSH connect or after a failure — only the conn bar with its
-// single status line + progress bar remains, no duplicate message, no dead space.
+// collapse the picker body during a connect/failure; only the conn bar remains
 function hidePickerBody() {
   $("#fs-body").classList.add("collapsed");
 }
@@ -2039,7 +1779,7 @@ function showPickerBody() {
 
 let activeConnStatus = null; // status element of the modal currently connecting
 
-// Connection progress bar: the tunnel reports coarse stages over IPC.
+// connection progress bar: the tunnel reports coarse stages over IPC
 const CONN_STAGES = {
   auth: { pct: 10, label: "Connecting…" },
   probe: { pct: 22, label: "Inspecting remote…" },
@@ -2116,14 +1856,13 @@ async function handleSshConnect(host, user, port, statusEl) {
     if (res.ok) {
       upsertConn(host, user, port);
       localStorage.setItem("clutch_ssh_connected", "1");
-      // the tunnel's own URL is the SUPERVISOR control channel; the window's
-      // API base is its per-window remote session, decided by the main process
+      // the tunnel URL is the supervisor control channel; the API base is the
+      // per-window session, decided by the main process
       await switchBackendResolved();
       refreshPicker();
       return true;
     } else {
-      // hard bootstrap reject (host alive, but no Python/bundle to install):
-      // degrade to SSH-tools — local server runs the agent, tools go over the bridge
+      // host alive but unbootstrappable: degrade to SSH-tools
       const degraded = await tryDegradeToSshTools();
       if (degraded === true) {
         upsertConn(host, user, port);
@@ -2132,9 +1871,7 @@ async function handleSshConnect(host, user, port, statusEl) {
         refreshPicker();
         return true;
       }
-      // false: the tunnel never came up — report the real SSH error.
-      // string: the tunnel is up but the local backend is down — that is the
-      // real failure here, not the device's bootstrap message.
+      // false = tunnel never came up; string = local backend down (the real failure)
       setFsConnectError(
         degraded === false
           ? "connection failed: " + (res.error || "could not connect")
@@ -2175,7 +1912,7 @@ connSelect.addEventListener("change", async () => {
   }
 });
 
-// New-connection popup (only shown when the user asks to add an SSH host)
+// new-connection popup (only shown when the user asks to add an SSH host)
 const connNewModal = $("#conn-new-modal");
 const connNewStatus = $("#conn-new-status");
 
@@ -2229,26 +1966,15 @@ passInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#ssh-pass-ok").click();
 });
 
-// Reconcile the renderer's stored backend URL with the tunnel's real state and
-// return the URL it should point at (or null if already correct). No UI side
-// effects — the caller switches and refreshes. A live tunnel is authoritative; a
-// dead-tunnel leftover (the connected flag is set) falls back to the local
-// backend instead of pointing every fetch at a dead port ("Failed to fetch").
-// Degraded mode counts as connected too: the tunnel has no forward URL, but its
-// exec bridge is live, so the local server is the right target.
-//
-// Note: URL shape can no longer distinguish "tunnel leftover" from "local
-// session" — since the machine-supervisor architecture, local sessions also
-// listen on 127.0.0.1:<random port>. The connected flag is the only
-// authoritative marker.
+// reconcile the stored URL with the tunnel's real state; a live tunnel is
+// authoritative, a dead-tunnel leftover falls back to the local backend
 async function reconciledBackendUrl() {
   if (!window.clutchTunnel) return null;
   const s = await window.clutchTunnel.status();
   const override = localStorage.getItem("clutch_api_url");
   const flag = localStorage.getItem("clutch_ssh_connected");
   if (s.active) {
-    // a live tunnel is authoritative: the main process owns this window's
-    // session URL (tunnel session) — ask it instead of guessing
+    // live tunnel: the main process owns this window's session URL — ask it
     const target = await window.clutchApi.baseUrl();
     if (target && override !== target) {
       localStorage.setItem("clutch_ssh_connected", "1");
@@ -2257,9 +1983,7 @@ async function reconciledBackendUrl() {
     return null;
   }
   if (flag) {
-    // stale SSH leftover: fall back to the local backend — resolved via the
-    // main process (it owns the per-window session; DEFAULT_BASE may be a dead
-    // URL after a tunnel session was claimed over it)
+    // stale SSH leftover: fall back to the local backend via the main process
     localStorage.removeItem("clutch_ssh_connected");
     await switchBackendResolved();
     return null; // switchBackendResolved already switched
@@ -2267,9 +1991,7 @@ async function reconciledBackendUrl() {
   return null;
 }
 
-// When a live tunnel dies mid-session (not an intentional disconnect), fall back to
-// the local backend in place so the UI stops failing; refresh the picker only when
-// it is open (a closed picker must not fire background directory fetches).
+// tunnel died mid-session: fall back to the local backend in place
 if (window.clutchTunnel) {
   window.clutchTunnel.onEnd(async () => {
     // the tunnel (and its exec bridge) is gone: any degrade mode dies with it
@@ -2283,9 +2005,7 @@ if (window.clutchTunnel) {
   });
 }
 
-// The main process re-established this window's session (it died on the remote
-// or locally): point the app at the new URL. SSE reconnects through
-// switchBackend; a null URL means no backend is possible right now.
+// the main process re-established this window's session: point the app at the new URL
 if (window.clutchApi && window.clutchApi.onBaseChanged) {
   window.clutchApi.onBaseChanged((url) => {
     if (url) switchBackend(url);
@@ -2324,8 +2044,7 @@ function openPerm(ev) {
   setStatus("waiting");
 }
 function closePerm() {
-  // the response must fire immediately (the agent is blocked on it); only the
-  // visual close is animated — pendingPerm clears here to guard double-clicks
+  // respond immediately (the agent is blocked); only the visual close animates
   closeModal(permModal);
   pendingPerm = null;
 }
@@ -2350,8 +2069,7 @@ dismissOnOverlayPress(permModal, () => respondPerm(false));
 let lastTreeSig = "";
 let treeRefreshTimer = null;
 
-// Hidden files (dotfiles) are hidden everywhere — picker (open/new) and workspace
-// tree — until the shared toggle turns them on.
+// dotfiles hidden everywhere until the shared toggle turns them on
 let showHidden = localStorage.getItem("clutch_show_hidden") === "1";
 
 function updateHiddenToggles() {
@@ -2372,9 +2090,7 @@ $("#fs-hidden-toggle").addEventListener("change", toggleHidden);
 $("#tree-hidden-toggle").addEventListener("change", toggleHidden);
 updateHiddenToggles();
 
-// File changes only happen through tool results (write_file / run_command, or any
-// future FS tool): schedule a debounced refresh instead of polling. Change
-// detection skips re-rendering when nothing changed, preserving expansion state.
+// file changes only arrive via tool results: debounced refresh, no polling
 function scheduleTreeRefresh() {
   clearTimeout(treeRefreshTimer);
   treeRefreshTimer = setTimeout(refreshTree, 300);
@@ -2389,8 +2105,7 @@ async function refreshTree() {
     const r = await fetch(API_BASE + "/api/workspace/tree" + qs);
     const data = await r.json();
     if (data.root) els.workspace.textContent = data.root;
-    // the payload depends on expansion state too: include it so a toggle always
-    // re-renders (e.g. expanding an empty dir changes nothing in the payload)
+    // include expansion state in the signature so a toggle always re-renders
     const sig = JSON.stringify([...expandedDirs]) + "|" + JSON.stringify(data.tree || []);
     if (sig === lastTreeSig) return; // unchanged: keep expansion state
     lastTreeSig = sig;
@@ -2431,9 +2146,7 @@ function renderNode(node, depth) {
       } else {
         expandedDirs.add(node.path);
         row.querySelector(".icon").textContent = "▾";
-        // clear the container first: rapid expand/collapse toggles reuse this
-        // element (the debounced refresh hasn't rebuilt it), so appending without
-        // clearing stacks another copy of the children on every expand
+        // clear first: rapid toggles reuse this element
         children.innerHTML = "";
         // reveal the pre-loaded lookahead level instantly, then fetch deeper
         if (node.children && node.children.length) {
@@ -2454,10 +2167,11 @@ function renderNode(node, depth) {
 let es = null;
 
 function connectSSE(replay = true) {
-  // ?project= scopes the stream to this window's .clc: the server replays that
-  // project's history and filters live events to its runs, so multiple windows
-  // on different projects never see each other. replay=0 is used right after
-  // openProject/createProject, which already rendered the history themselves.
+  // backend not claimed yet: the main process announces the real URL via
+  // backend:base-changed -> switchBackend -> reconnectSSE
+  if (!API_BASE) return;
+  // ?project= scopes the stream to this window's .clc; replay=0 right after
+  // open/create already rendered the history
   const qs = new URLSearchParams();
   if (currentProject) qs.set("project", currentProject);
   qs.set("replay", replay ? "1" : "0");
@@ -2465,8 +2179,7 @@ function connectSSE(replay = true) {
   es.onmessage = (e) => {
     try { addEvent(JSON.parse(e.data)); } catch (err) {}
   };
-  // On (re)connect the server replays the stored history as durable final events;
-  // reset the streaming state so each replayed assistant_message renders once.
+  // on (re)connect the server replays stored history: reset the streaming state
   es.onopen = () => {
     lastTextEl = null;
     lastTextContent = "";
@@ -2480,12 +2193,11 @@ function connectSSE(replay = true) {
   es.onerror = () => { /* auto-reconnect */ };
 }
 
-// Point the SSE stream at the (possibly new) API_BASE. Only re-create an existing
-// stream; when es is still null (startup reconcile runs before the first connect)
-// the caller's connectSSE() will create the single stream against the fixed URL.
+// point the SSE stream at the (possibly new) API_BASE; when es is null (boot
+// before the backend resolved) this CREATES the stream — that is exactly the
+// late-heal path
 function reconnectSSE(replay = true) {
-  if (!es) return;
-  es.close();
+  if (es) es.close();
   connectSSE(replay);
 }
 
@@ -2503,18 +2215,12 @@ function clearStream() {
 }
 
 // ---- scroll-up paging (lazily-opened projects) ----
-// A lazy .clc loads only the model window (since the newest compaction line); the
-// pill at the top pages the earlier records from /api/history. olderRemaining
-// mirrors the server-side count of event-region BYTES still on disk before the
-// oldest loaded one — the server's own number, so a dropped page never makes the
-// pill lie (a page the server dropped stays rendered in the DOM; only a reconnect
-// re-fetches it).
+// olderRemaining mirrors the server's on-disk count, so a dropped page
+// never makes the pill lie
 let olderRemaining = 0;
 let oldestOffset = null; // byte offset of the oldest loaded (rendered) non-task event
 let paging = false;   // one history fetch at a time
-// when non-null, addEvent appends into this off-DOM sink instead of #events:
-// loadOlder renders a history page through the full replay pipeline (agent text,
-// thinking, tool groups, completions), then prepends the sink in one pass.
+// when non-null, addEvent appends into this off-DOM sink instead of #events
 let pageSink = null;
 
 function setOlderPill(n) {
@@ -2542,11 +2248,8 @@ async function loadOlder() {
     const page = data.events || [];
     if (!page.length) { setOlderPill(0); return; }
     const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;
-    // Render the page chronologically through addEvent into an off-DOM sink so
-    // agent text, thinking, tool groups and completions build exactly as during
-    // the open replay — then prepend the sink in one pass. Live-stream state is
-    // saved/restored around the build: the page must not merge into (or clobber)
-    // an in-progress live turn, and the sink's own state dies with the sink.
+    // render the page through the full replay pipeline into an off-DOM sink,
+    // then prepend it in one pass; save/restore live-stream state
     const sink = document.createElement("div");
     sink.style.display = "contents"; // transparent wrapper: children lay out in #events
     const savedLastTextEl = lastTextEl, savedLastTextContent = lastTextContent;
@@ -2564,8 +2267,7 @@ async function loadOlder() {
       thinkingEl = savedThinkingEl; thinkingContent = savedThinkingContent;
       toolGroupEl = savedToolGroupEl;
     }
-    // typeset AFTER insertion: MathJax needs real layout, and any height it adds
-    // must be accounted for before the anchor re-adjusts the scroll position
+    // typeset AFTER insertion: MathJax needs real layout
     const mathBlocks = Array.from(sink.querySelectorAll(".event.text .body, .event.user .body")).filter(hasMathText);
     const frag = document.createDocumentFragment();
     while (sink.firstChild) frag.appendChild(sink.firstChild);
@@ -2664,8 +2366,7 @@ async function openProject(path, readOnly = false) {
           started = true;
         } else if (msg.count) {
           totalEvents = msg.count;
-          // lazy open: "older" is the count of durable records still on disk
-          // before the loaded tail — the pill's starting value
+          // lazy open: "older" = durable records still on disk before the loaded tail
           if (typeof msg.older === "number") setOlderPill(msg.older);
         } else if (msg.progress && msg.progress.total) {
           // phase A: server file parse maps to the first 50% of the bar
@@ -2676,28 +2377,23 @@ async function openProject(path, readOnly = false) {
           // phase B: client rendering of the events maps to 50-90%
           if (totalEvents) setPct(50 + 40 * (++rendered / totalEvents));
         }
-        // yield periodically so the browser can paint the progress bar and
-        // stream events progressively instead of one blocking burst
+        // yield periodically so the browser paints the bar and streams events progressively
         if (++processed % 25 === 0) await new Promise((r) => setTimeout(r, 0));
       }
     }
-    // phase C: typeset replayed math as the remaining 90-100%, so the bar stays
-    // alive through typesetting and there is no blank gap before reveal
+    // phase C: typeset replayed math as the remaining 90-100%
     await typesetProgressively(eventsEl, (f) => setPct(90 + 10 * f));
     if (started) setPct(100);
     prog.classList.add("hidden");
     stream.classList.remove("loading"); // instant reveal — no fade, no replay
     stream.scrollTop = stream.scrollHeight; // jump straight to the end of the record
-    // re-scope the live stream to the newly opened project; replay=0 because
-    // the NDJSON stream above just rendered the history
+    // re-scope the live stream to the new project; replay=0 (history already rendered)
     reconnectSSE(false);
     refreshTree();
   } catch (e) {
     prog.classList.add("hidden");
     stream.classList.remove("loading");
-    // the same project is open (for write) in another window: offer read-only
-    // instead of failing — reads are fully functional, runs are rejected by
-    // the server with a clear reason
+    // same project open for write in another window: offer read-only instead of failing
     if (e && e.code === "project_open_conflict") {
       const wantReadOnly = confirm(
         "This project is already open in another window.\nOpen it read-only? Read-only mode cannot run tasks."
@@ -2709,10 +2405,7 @@ async function openProject(path, readOnly = false) {
       return; // cancelled: keep the previous project as-is
     }
     alert("Failed to open project: " + e.message);
-    // the tunnel log (main process) is the place to look: a network-level
-    // "Failed to fetch" here usually means the remote session forward died —
-    // check ~/.clutch/tunnel.log for "[session] forwardOut failed" / the
-    // remote supervisor log for a reaped/crashed session child
+    // a network "Failed to fetch" usually means the remote session forward died
     console.error("[openProject] failed:", { api: API_BASE, path, error: e && e.message });
   }
 }
@@ -2756,8 +2449,7 @@ function openFsBrowser(mode) {
   $("#fs-go").disabled = false;
   $("#fs-path-input").disabled = false;
   fsModal.classList.remove("hidden", "closing");
-  // settle the stored URL against the tunnel's real state first, then list + draw
-  // the selector once against the correct backend (no double loadDir)
+  // settle the stored URL against the tunnel's real state first, then list once
   reconciledBackendUrl().then((url) => {
     if (url) switchBackend(url);
     // reopen where the user last left the browser instead of the home directory
@@ -2778,8 +2470,33 @@ function fsRow(label, cls, onClick) {
   return row;
 }
 
+// wait for the backend to be claimed (cold start: supervisor spawn + session
+// child boot take a few seconds) so a click during that window just works
+// instead of telling the user to close and re-click
+function waitBackend(ms = 20000) {
+  if (API_BASE) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (API_BASE || Date.now() - t0 >= ms) {
+        clearInterval(iv);
+        resolve(Boolean(API_BASE));
+      }
+    }, 200);
+  });
+}
+
 async function loadDir(path, remember = true) {
   const listEl = $("#fs-list");
+  if (!API_BASE) {
+    // backend not claimed yet (supervisor mid-spawn): show progress and pick
+    // the listing up automatically the moment the session is up
+    listEl.innerHTML = '<div class="fs-row plain">connecting to backend…</div>';
+    if (!(await waitBackend())) {
+      listEl.innerHTML = '<div class="fs-row error-row">backend did not come up — close this dialog and retry</div>';
+      return;
+    }
+  }
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
   try {
     const r = await fetch(
@@ -2789,8 +2506,7 @@ async function loadDir(path, remember = true) {
     if (!r.ok || data.error) throw new Error(data.error || r.status);
     fsPath = data.path;
     fsParent = data.parent;
-    // remember the last browsed directory so the browser reopens there next time
-    // (the picker's own re-lists pass remember=false and must not overwrite it)
+    // remember the last browsed directory (re-lists pass remember=false)
     if (remember) localStorage.setItem("clutch_fs_last_dir", fsPath);
     $("#fs-path-input").value = data.path;
     listEl.innerHTML = "";
@@ -2814,9 +2530,7 @@ async function loadDir(path, remember = true) {
     }
     if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
   } catch (e) {
-    // a remembered last directory may be gone (backend switch, deleted dir):
-    // forget it and retry from the home directory once — only show the error
-    // UI for the retry (a retry that fails again has path=="" and no record)
+    // a remembered last directory may be gone: forget it and retry from home once
     const remembered = localStorage.getItem("clutch_fs_last_dir");
     if (remembered && path === remembered) {
       localStorage.removeItem("clutch_fs_last_dir");
@@ -2862,9 +2576,7 @@ $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
 $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
 $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
-// settle the stored URL against the tunnel's real state before connecting SSE, so
-// the stream targets the right backend; reconnectSSE() no-ops while es is null, so
-// a switch here leaves connectSSE() below to create the single stream
+// settle the stored URL before connecting SSE; reconnectSSE no-ops while es is null
 (async () => {
   await resolveApiBase(); // learn this window's session port (IPC) first
   const url = await reconciledBackendUrl();

@@ -1,7 +1,5 @@
-// Logic test for renderMermaid: streaming gate (skip last unclosed block),
-// parse gate (broken source stays literal), cache-hit restore, in-flight dedupe.
-// Mirrors the function in ui/app.js (node cannot require the real mermaid UMD —
-// it touches `document` at module top-level; the browser is fine).
+// Logic test for renderMermaid: streaming/parse gates, cache restore, dedupe.
+// Mirrors ui/app.js (the real mermaid UMD touches `document` at top level).
 "use strict";
 
 let mermaidInitialized = false;

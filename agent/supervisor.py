@@ -43,7 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
-SESSION_START_TIMEOUT_S = 30.0  # wait for the child's port banner (onefile extraction on a slow remote can take a while)
+SESSION_START_TIMEOUT_S = 30.0  # child port banner: onefile extraction is slow on a remote
 SESSION_STALE_S = 10.0  # no heartbeat for this long -> reap the session (heartbeat interval is 8s)
 REAP_INTERVAL_S = 2.0
 IDLE_TIMEOUT_S = 8.0  # no sessions for this long -> self-exit
@@ -137,26 +137,20 @@ class Supervisor:
         self._lock = threading.Lock()
         self.last_activity = time.time()  # last moment a session existed
         self.exit_event = threading.Event()
-        # set by POST /api/shutdown (normal app close): once no sessions remain,
-        # exit immediately instead of waiting out the idle grace — a deliberately
-        # closed supervisor must never linger as an orphan
+        # set by POST /api/shutdown: exit as soon as no sessions remain
         self.exit_when_idle = False
 
     # ---- session lifecycle ----
 
     def start_session(self, base_url: str | None = None) -> Session | None:
-        """Spawn one agent.server child on a random port and learn the port
-        from its stdout banner. None when the child never prints it.
-
-        base_url (e.g. the remote LLM reverse-proxy) is forwarded to the child
-        as --base-url; the local supervisor omits it and the session uses the
-        environment's CLUTCH_API_KEY instead."""
-        # refresh the idle timer BEFORE spawning: the session is only registered
-        # once the child prints its port (up to start_timeout_s), and a slow
-        # child (e.g. a PyInstaller onefile extracting on the remote) must not
-        # let the idle reaper self-exit mid-start
+        """Spawn one agent.server child on a random port, learning the port from
+        its stdout banner. None when the child never prints it. base_url is
+        forwarded as --base-url."""
+        # refresh the idle timer before spawning (a slow child must not let the
+        # reaper self-exit mid-start) and clear a pending shutdown flag
         with self._lock:
             self.last_activity = time.time()
+            self.exit_when_idle = False
         try:
             env = dict(os.environ)
             cmd = [*self.agent_cmd, "--port", "0"]
@@ -217,10 +211,8 @@ class Supervisor:
     # ---- reaper: stale sessions + idle self-exit ----
 
     def reap_loop(self) -> None:
-        # The reaper is the supervisor's only self-governance (stale-session
-        # reap + idle self-exit): one unhandled exception killing this thread
-        # would leave the supervisor squatted on its port forever, leaking
-        # session children. Never let that happen — log and keep going.
+        # an unhandled exception here would strand the supervisor and leak
+        # session children; log and keep going
         while not self.exit_event.is_set():
             try:
                 now = time.time()
@@ -245,15 +237,9 @@ class Supervisor:
     # ---- internals ----
 
     def _wait_port(self, proc: subprocess.Popen) -> int | None:
-        """Read the child's stdout until the port banner appears (then keep
-        forwarding everything to our stdout so the pipe never fills).
-
-        Banner detection is DECOUPLED from the stdout forward: a reader thread
-        drains the child's pipe and queues every line, a separate forwarder
-        writes them to our stdout best-effort. The old single-thread design
-        blocked on ``sys.stdout.write`` (e.g. when the supervisor is orphaned
-        and its stdout is a dead socket) BEFORE reaching the banner line, so
-        session/start hung and the child was killed on a false timeout."""
+        """Read the child's stdout until the port banner appears, forwarding
+        lines to our stdout so the pipe never fills. Banner detection is
+        decoupled from forwarding so a blocked stdout can't delay the banner."""
         q: "queue.Queue[int]" = queue.Queue()
         sink: "queue.Queue[str]" = queue.Queue()
 
@@ -356,26 +342,19 @@ class _Handler(BaseHTTPRequestHandler):
             ok = sup.heartbeat(sid)
             self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
         elif self.path == "/api/shutdown":
-            # normal client close: exit as soon as no sessions remain (skips the
-            # idle grace). Never kills an in-use supervisor (n must be 0 first).
+            # normal close: exit once no sessions remain; arm the flag only
+            # when nothing is running (a sticky flag could kill a re-claim)
             with sup._lock:
-                sup.exit_when_idle = True
+                if not sup.sessions:
+                    sup.exit_when_idle = True
             self._json({"status": "ok"})
         else:
             self._json({"error": "not found"}, 404)
 
 
 def _agent_cmd_default() -> list[str]:
-    """Default command to spawn session children.
-
-    Dev: the same interpreter that runs the supervisor, launching agent.server
-    from the repo root (agent package importable).
-
-    PyInstaller onefile (sys.frozen): the supervisor binary lives in the app's
-    extraResources directory (Electron's resourcesPath), and the agent-server
-    binary sits next to it — launch it directly. `sys.executable` is the
-    extracted onefile runtime, so `-m agent.server` would find no module.
-    """
+    """Dev: run agent.server with this interpreter. PyInstaller onefile: launch
+    the agent-server binary next to the supervisor."""
     if getattr(sys, "frozen", False):
         return [os.path.join(os.path.dirname(sys.executable), "agent-server")]
     return [sys.executable, "-m", "agent.server"]
@@ -386,9 +365,7 @@ def build_server(port: int, sup: Supervisor) -> ThreadingHTTPServer:
     try:
         return ThreadingHTTPServer(("127.0.0.1", port), handler)
     except OSError as e:
-        # an occupied port is the classic silent killer: the supervisor dies and
-        # the caller only sees "backend not reachable". Say exactly what happened
-        # (and, for the remote, /tmp/clutch-server.log carries this line).
+        # an occupied port kills silently; say exactly what happened
         raise SystemExit(
             f"[clutch-supervisor] ERROR: cannot bind 127.0.0.1:{port} — port in use "
             f"({e}). Close the other Clutch/agent server on this port and retry."
@@ -396,8 +373,7 @@ def build_server(port: int, sup: Supervisor) -> ThreadingHTTPServer:
 
 
 def main() -> int:
-    # wrap before the first print: an orphaned supervisor writes to a dead
-    # socketpair (see _SafeStdStream) — a startup print must not crash it either
+    # wrap before the first print: a dead stdout must not crash startup
     sys.stdout = _SafeStdStream(sys.stdout)
     sys.stderr = _SafeStdStream(sys.stderr)
 
@@ -419,8 +395,7 @@ def main() -> int:
     else:
         cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sup = Supervisor(agent_cmd=agent_cmd, cwd=cwd, idle_timeout_s=args.idle_timeout)
-    # a dead/full stdout (orphaned supervisor) must never hang our logging or the
-    # session-start handler (see _log/_make_stdout_nonblocking)
+    # a dead/full stdout must never hang logging or the session-start handler
     _make_stdout_nonblocking()
     srv = build_server(args.port, sup)
     bound_port = srv.server_address[1]
@@ -438,8 +413,7 @@ def main() -> int:
     threading.Thread(target=sup.reap_loop, daemon=True).start()
 
     def _exit_watch() -> None:
-        # idle/stale lifecycle ends the reaper loop; stop the HTTP server too,
-        # otherwise serve_forever keeps the process alive forever
+        # stop the HTTP server too, or serve_forever keeps the process alive
         while not sup.exit_event.is_set():
             time.sleep(0.2)
         srv.shutdown()

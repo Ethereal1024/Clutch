@@ -46,7 +46,7 @@ from .prompts import render
 from .tools.registry import ToolRegistry
 from .tools.workspace import Workspace
 
-# Callback for subscribers (GUI/SSE); the engine does not care who listens.
+# Callback for subscribers (GUI/SSE).
 EventSink = Callable[[Event], None]
 
 
@@ -73,14 +73,11 @@ class Agent:
         self.sink = sink
         self.cancel = cancel
         self.gate = gate
-        # context-window compaction: serializing, summarizing and the byte-budget
-        # check all live in the Compactor; the loop only asks should_compact /
-        # compact. A dedicated compaction_model (when set) is built lazily via
-        # llm_factory on the first compaction.
+        # compaction lives in the Compactor (dedicated model built lazily)
         self.compactor = Compactor(
             config, self.log, llm, llm_factory=compactor_factory, sink=self.sink, cancel=self.cancel
         )
-        # project memory store (durable facts in the .clc), if any
+        # durable project-memory store, if any
         self.memories = memories
 
     def _emit(self, event: Event) -> None:
@@ -113,8 +110,7 @@ class Agent:
 
         try:
             for ev in self.llm.stream(msgs, tools=self.registry.schemas()):
-                # Stop must abort mid-stream, not after the whole turn: check the
-                # cancel flag between chunks and give up the partial generation.
+                # abort mid-stream: check the cancel flag between chunks
                 if self.cancel and self.cancel.is_set():
                     break
                 t = ev["type"]
@@ -132,8 +128,7 @@ class Agent:
                 elif t == "tool_call_delta":
                     entry = tool_accum.setdefault(ev["index"], {"id": "", "name": "", "args": ""})
                     entry["args"] += ev["delta"]
-                    # stream the argument chunks so the UI shows the tool call (e.g.
-                    # a file being written) as it is generated, not when it finishes
+                    # stream args so the UI shows the call as it is generated
                     self._emit(ToolCallDeltaEvent(tool_call_id=entry["id"], name="", delta=ev["delta"]))
                 elif t == "finish":
                     finish_reason = ev["reason"]
@@ -146,10 +141,7 @@ class Agent:
             if e.code == "context_window_exceeded":
                 raise agent_errors.context_window_error(e.message) from e
             raise agent_errors.AgentError(code=e.code, message=e.message) from e
-        # any non-LlmError here is a genuine bug (openai SDK errors are all
-        # normalized by _classify); let it propagate as a traceback instead of
-        # masking it as llm_unknown
-
+        # any non-LlmError here is a genuine bug; let it propagate
         return "".join(content_parts), [], finish_reason, "".join(reasoning_parts)
 
     def run(self, task: str) -> str:
@@ -168,30 +160,24 @@ class Agent:
                         "aborted",
                         render("budget_exceeded.md", max_turns=self.config.max_turns),
                     )
-                # derive once per turn; the compaction check and the LLM call share it
+                # derive once per turn; compaction check and LLM call share it
                 msgs = context.derive_messages(self.log, self.config, task, memories=self.memories)
-                # context near the window: roll the older turns into a summary and
-                # continue with a fresh (compacted) context instead of dropping or
-                # aborting. Exact byte comparison: the resident window's bytes vs
-                # the model window budget (see Compactor.should_compact).
+                # near the window: compact and continue instead of dropping/aborting
                 if self.compactor.should_compact():
                     if self.compactor.compact():
                         continue  # log changed; the next iteration re-derives
-                    # no-op / failed compaction: proceed with the messages already
-                    # derived (the log is unchanged, so they are still valid)
+                    # failed compaction: the derived messages are still valid
                 self._emit(StepStartEvent())
 
                 try:
                     content, tool_calls, finish_reason, reasoning = self._llm_call(msgs)
                 except agent_errors.AgentError as e:
                     if e.code == "context_window_exceeded":
-                        # last resort: force a compaction and retry once; if nothing
-                        # can be compacted, re-raise and end with a graceful error
+                        # last resort: force a compaction and retry once
                         if self.compactor.compact():
                             continue
                     raise
-                # Stop during streaming left a partial (empty) turn; never treat it
-                # as a done candidate or run the verify gate on it.
+                # partial turn left by Stop: not a done candidate, skip the verify gate
                 if self.cancel and self.cancel.is_set():
                     return self._finish("aborted", render("cancelled.md"))
 
@@ -212,9 +198,8 @@ class Agent:
                             )
                         )
 
-                    # record the assistant turn (text + tool_calls) BEFORE the tool
-                    # call events, so a stored session replays as text → tools →
-                    # results (opencode's message/part ordering)
+                    # record the assistant turn BEFORE the tool-call events, so a
+                    # stored session replays as text → tools → results
                     self._emit(
                         AssistantMessageEvent(
                             content=content,
@@ -253,10 +238,7 @@ class Agent:
                 # ---- no tool call: candidate done -> verification gate ----
                 self._emit(AssistantMessageEvent(content=content, reasoning=reasoning))
                 if not content.strip():
-                    # an empty reply (GLM-5.3 often thinks without emitting
-                    # text) is NOT a completion: feeding it back as an error
-                    # forces a visible answer instead of a silent completed
-                    # with no agent output on screen
+                    # empty reply is NOT a completion: feed it back as an error
                     self._emit(UserMessageEvent(content=render("empty_response.md")))
                     continue
                 v = self.terminator.verify(self.workspace)
@@ -266,16 +248,11 @@ class Agent:
                 # gate failed: feed verification output back and keep iterating
                 self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
         except agent_errors.AgentError as e:
-            # fatal LLM/context failures terminate gracefully instead of dying
-            # silently in the worker thread
+            # fatal LLM/context failures terminate gracefully
             return self._finish("error", str(e))
 
     def _execute_tool(self, ev: ToolCallEvent) -> dict[str, Any]:
-        """Parse arguments, check permission, then run the tool.
-
-        A denied or user-rejected action feeds an error back to the model
-        (error-as-data), so it can change its approach instead of crashing.
-        """
+        """Parse args, check permission, then run the tool; denials feed an error back."""
         try:
             args = parse_arguments(ev.arguments)
         except ParseError as e:

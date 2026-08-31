@@ -75,9 +75,8 @@ def _local_lock_path(clc_path: str) -> str:
 class ProjectLock:
     """Static acquire/release API. One exclusive lock per .clc path."""
 
-    # same-process handles, keyed by the absolute .clc path: a reopen in the
-    # same window must reuse the held lock — flock is exclusive even between
-    # two fds of one process, so a fresh flock would self-conflict.
+    # same-process handles keyed by the .clc path: a reopen must reuse the held
+    # lock (flock is exclusive even between two fds of one process)
     _held: dict[str, LockHandle] = {}
 
     @classmethod

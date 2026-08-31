@@ -170,9 +170,6 @@ def main() -> int:
     sup4.shutdown_all()
 
     # ---- 6. no parent watchdog: a session child ignores CLUTCH_SUPERVISOR_PID ----
-    # Lifecycle cleanup is heartbeat-based (the supervisor reaps stale sessions,
-    # kills children on its own exit): the child must NOT suicide when the env
-    # is bogus, or every session would die ~5s after spawn.
     import subprocess as _sp
 
     wd_env = dict(os.environ)
@@ -221,10 +218,7 @@ def main() -> int:
     )
 
     # ---- 9. dead-parent resilience (orphaned supervisor: stdout is a dead socket) ----
-    # The supervisor is spawned by Electron and keeps running after the app exits
-    # (orphaned, stdio socketpair dangling). Prints on the dead stream must not
-    # kill the request handler / reaper. Regression for the session/start "empty
-    # reply" + leaked-children + squatted-8890 failure seen in the field.
+    # prints on the dead stream must not kill the handler / reaper
     import os as _os
     import socket as _sock
 
@@ -266,9 +260,16 @@ def main() -> int:
     check(st == 200, "shutdown accepted while a session is live")
     time.sleep(2)
     check(not sup8.exit_event.is_set(), "shutdown does NOT kill an in-use supervisor")
-    # once the session is gone, the exit_when_idle flag fires at the next reap tick
+    # a shutdown POST with sessions live is IGNORED (never armed): otherwise one
+    # instance's exit would kill the supervisor the moment ANOTHER window's
+    # re-claim transiently hit n==0
     st, _ = http_post(f"{base8}/api/session/stop", {"session_id": sid8})
     check(st == 200, "session stopped")
+    time.sleep(3)
+    check(not sup8.exit_event.is_set(), "ignored in-use shutdown leaves no sticky flag")
+    # the real last-window path: shutdown POST at n==0 arms and exits promptly
+    st, _ = http_post(f"{base8}/api/shutdown")
+    check(st == 200, "shutdown accepted at n==0")
     ok = wait_until(lambda: sup8.exit_event.is_set(), 6.0, "exit after last session (shutdown flag)")
     check(ok, "shutdown supervisor exits as soon as its sessions are gone")
     sup8.shutdown_all()

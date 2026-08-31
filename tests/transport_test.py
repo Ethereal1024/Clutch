@@ -25,10 +25,9 @@ from tests.testsupport import check
 
 
 class MockBridge(BaseHTTPRequestHandler):
-    # peak single exec-command length seen (asserts RemoteWorkspace chunking caps
-    # the command under the sshd's limit even for large content)
+    # peak exec-command length seen (chunking caps under the sshd limit)
     max_cmd_len = 0
-    # total /exec POSTs issued (asserts list_many batches a level into one exec)
+    # total /exec POSTs issued (list_many batches a level into one exec)
     post_count = 0
 
     def log_message(self, *a) -> None:  # silence request spam
@@ -74,8 +73,7 @@ def main() -> int:
         ws.write("no-nl.txt", "abc")
         check(ws.read("no-nl.txt") == "abc", "remote write is byte-exact (no added newline)")
 
-        # large content: single multi-KB command would kill a minimal sshd — chunking
-        # must keep every exec command under the cap AND preserve the bytes exactly
+        # large content: chunking keeps every exec under the cap, bytes exact
         big = "".join(f"line {i:04d} with $VAR and 'quotes' and \"dquotes\" and \ttab\t\n" for i in range(300))  # ~21KB
         ws.write("big.txt", big)
         check(ws.read("big.txt") == big, "large remote write byte-exact (chunked)")
@@ -109,8 +107,7 @@ def main() -> int:
         r = ws.run("pwd", 30.0)
         check(r.code == 0 and r.stdout.strip() == rtmp, "remote run cwd = root")
 
-        # oversized run_command: rejected up front (TransportError) instead of killing
-        # the tunnel — and it never reaches the bridge (max_cmd_len stays small)
+        # oversized run_command: rejected up front, never reaches the bridge
         try:
             ws.run("echo " + ("x" * 20000), 30.0)
             check(False, "oversized command raises TransportError")
@@ -124,9 +121,7 @@ def main() -> int:
         ws.write("sub/secret.txt", "x")
         check("secret.txt" not in ws.list("sub"), "remote list hides protected files")
 
-        # list_many: one exec lists a whole level; results match per-dir list();
-        # missing dirs come back empty. Also hidden entries are NOT pre-filtered by
-        # ls (the tree walk filters), so a dotfile dir appears here too.
+        # list_many: one exec lists a level; hidden entries not pre-filtered
         (Path(rtmp) / "a").mkdir()
         (Path(rtmp) / "a" / "inner").mkdir()
         (Path(rtmp) / "b").mkdir()

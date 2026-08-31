@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the Clutch app icon — pure stdlib, zero image dependencies.
-
-Renders the brand mark (a red "▣" glyph from the UI, which uses `--accent`
-#EF4444 on the swiss-dark tile #0F0F10) into:
-  ui/build/icon.png   512x512, 4x supersampled for anti-aliased edges
-  ui/build/icon.svg   same geometry, hand-edit free (single source of truth)
+"""Generate the Clutch app icon (pure stdlib): the red "▣" brand glyph on a
+#0F0F10 tile, written as ui/build/icon.png (512x512, 4x supersampled) and
+ui/build/icon.svg.
 
 Usage:
   python3 scripts/make-icon.py            # write both files
   python3 scripts/make-icon.py --ascii    # print a coarse preview instead
-
-Geometry (canvas 512, origin top-left, glyph centered at 256,256):
-  tile   : full-bleed #0F0F10 square (sharp corners — the brand is "swiss dark")
-  ring   : square outline, visual band 88..152 and 360..424 (thickness 64)
-  center : filled #EF4444 square 184..328 (144x144)
 """
 
 from __future__ import annotations
@@ -94,11 +86,15 @@ def write_png(path: Path, rows: list[bytes]) -> None:
 
 
 def write_svg(path: Path) -> None:
-    # stroke centered on the ring square: visual band 88..152 / 360..424
-    # (thickness = RING_OUTER - RING_INNER), so the rect edge sits at
-    # 88 + thickness/2 = 120 and the rect spans 120..392 (width 272)
-    ring = f'<rect x="120" y="120" width="272" height="272" fill="none" stroke="#EF4444" stroke-width="{RING_OUTER - RING_INNER}"/>'
-    center = f'<rect x="{256 - CENTER_HALF}" y="{256 - CENTER_HALF}" width="{2 * CENTER_HALF}" height="{2 * CENTER_HALF}" fill="#EF4444"/>'
+    # stroke centered on the ring square: band 88..152 / 360..424
+    ring = (
+        f'<rect x="120" y="120" width="272" height="272" fill="none" '
+        f'stroke="#EF4444" stroke-width="{RING_OUTER - RING_INNER}"/>'
+    )
+    center = (
+        f'<rect x="{256 - CENTER_HALF}" y="{256 - CENTER_HALF}" '
+        f'width="{2 * CENTER_HALF}" height="{2 * CENTER_HALF}" fill="#EF4444"/>'
+    )
     svg = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">\n'

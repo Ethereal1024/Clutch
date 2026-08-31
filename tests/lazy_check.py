@@ -106,8 +106,7 @@ def main() -> None:
     book = build_clc(path)
 
     _run(config, tmp, path, book)
-    # a tiny history also opens through the same lazy path (one code path for
-    # every file size: no compaction → cpr_start 0 → everything materializes)
+    # a tiny history opens through the same lazy path (no compaction → cpr_start 0)
     with tempfile.TemporaryDirectory() as d:
         p3 = Path(d) / "tiny.clc"
         p3.write_text("\n".join([
@@ -187,9 +186,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     check(not comp.should_compact(), "one new turn after compaction does NOT re-trigger (200K window)")
 
     # ---- 5. the window contract survives a reopen --------------------------
-    # the compaction's header write is an in-place fixed-width update: the file
-    # is not rewritten, so every event offset is stable, and a reopen resolves
-    # the SAME boundary from the persisted cpr_start
+    # header write is an in-place fixed-width update: offsets stay stable
     header = p_long.read_text(encoding="utf-8").split("---", 1)[0]
     check(f"cpr_start={new_off:010d}" in header,
           "the header line holds the new 10-digit boundary (in-place write)")
@@ -244,10 +241,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         check(proj_ro.log.cpr_start() == 0, "read-only legacy open: full window, no migration")
         check(ro.read_bytes() == before, "read-only open leaves the file untouched")
 
-        # legacy file WITH a compaction: a legacy file cannot persist its
-        # compaction boundary, so the open must DERIVE it from the newest
-        # compaction line — otherwise every session re-summarizes the whole
-        # history and the UI flashes "compressing context" on the first task.
+        # legacy file with a compaction: boundary derived from the newest compaction line
         l2 = Path(d) / "legacy-comp.clc"
         evs2 = [
             UserMessageEvent(content="task"),
@@ -284,9 +278,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
 
 
 def _load_full(path: Path) -> LazyEventLog:
-    """Fully load a .clc into an IN-MEMORY lazy log — an independent line walk,
-    kept as a cross-check against the range-reader open path (the derived
-    context must be identical whether the middle is on disk or resident)."""
+    """Fully load a .clc into an in-memory lazy log (cross-check for the range reader)."""
     log = LazyEventLog.in_memory()
     text = path.read_text(encoding="utf-8")
     in_events = False

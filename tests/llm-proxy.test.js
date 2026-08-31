@@ -1,10 +1,8 @@
 // Standalone check for llm-proxy.js's upstream URL joining.
 // Run: node tests/llm-proxy.test.js
 //
-// The proxy must forward the remote backend's /v1/... requests onto ANY
-// OpenAI-compatible upstream, including ones that carry their own path
-// (Zhipu /api/paas/v4, Ollama /v1, ...) — the original bug concatenated the
-// URLs and produced /api/paas/v4/v1/chat/completions for Zhipu.
+// /v1/... requests must land on ANY OpenAI-compatible upstream, including ones
+// that carry their own path (e.g. Zhipu /api/paas/v4).
 
 "use strict";
 

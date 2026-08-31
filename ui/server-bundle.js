@@ -1,14 +1,5 @@
-// Bundle builder + cache for the remote clutch-server.
-//
-// Self-contained artifacts cached in ~/.clutch/bundles/, keyed by a CONTENT
-// HASH of what gets uploaded — no git, no version tags:
-//   - agent-server-<os>-<arch>-<hash> + agent-supervisor-<os>-<arch>-<hash>
-//   - agent-pylibs-<os>-<arch>-<libc>-<pyver>-<hash>.tar.gz
-//
-// The hash doubles as the version written to the remote's VERSION file, so an
-// exact content match is the ONLY install gate: a deb upgrade or a dev rebuild
-// with different bytes always reinstalls, identical bytes never do.
-
+// Bundle builder + content-hash cache: the hash doubles as the version written
+// to the remote's VERSION file (an exact content match is the only install gate).
 const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const os = require("os");
@@ -29,8 +20,7 @@ function fileHash(p) {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 }
 
-// Dev build gate: fingerprint the source the bundle is built from (no git), so
-// the PyInstaller build only reruns when that source actually changes.
+// Dev build gate: fingerprint the source so PyInstaller only reruns on changes
 function sourceFingerprint() {
   const h = crypto.createHash("sha256");
   const visit = (p) => {
@@ -67,12 +57,9 @@ function buildIfStale() {
   fs.writeFileSync(marker, fp);
 }
 
-// True only inside a packaged Electron app (where the agent binaries ship in
-// resources/). process.resourcesPath is ALSO a string in dev mode (it points at
-// the electron binary's own resources, which never hold the agent binaries), so
-// it cannot distinguish the two — app.isPackaged is the correct signal. The
-// require is guarded: in plain-node (tests) require("electron") yields the
-// binary path, so .app is undefined and we fall back to the dev build.
+// app.isPackaged is the signal: resourcesPath also exists in dev mode, and in
+// plain node require("electron") yields the binary path (so .app is undefined
+// and we fall back to the dev build).
 function isPackagedApp() {
   try {
     return require("electron").app.isPackaged;
@@ -81,9 +68,8 @@ function isPackagedApp() {
   }
 }
 
-// Resolve the agent-server + agent-supervisor binaries (packaged resources, or a
-// dev build), cache them under a CONTENT-HASH key, and return their paths plus
-// the combined hash (the version to write into the remote VERSION file).
+// Resolve agent binaries (packaged resources or a dev build), cache under a
+// content-hash key, return paths + combined version hash.
 function ensureBundle() {
   let server, supervisor;
   if (isPackagedApp()) {
@@ -115,9 +101,8 @@ function ensureBundle() {
   return { server: out, supervisor: supOut, version };
 }
 
-// target: { os, arch, libc, pyver } from the remote probe. Download the exact
-// wheels for that platform on the client and package agent + site-packages into
-// a tar cached under a content-hash key.
+// Download exact wheels for the remote platform, package agent + site-packages
+// into a tar cached under a content-hash key.
 function ensurePyLibsTar(target) {
   const key = `${target.os}-${target.arch}-${target.libc}-${target.pyver}`;
   fs.mkdirSync(CACHE, { recursive: true });

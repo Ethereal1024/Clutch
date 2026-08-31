@@ -1,14 +1,7 @@
-// Machine-supervisor bootstrap check (phase 4 architecture).
-// Runs the REAL spawn path and verifies, with two window instances:
-//   - window 1: supervisor down -> first window spawns it (127.0.0.1:8890),
-//     then gets a session child on a random port, healthy
-//   - window 2: supervisor already up -> NOT re-spawned; a second session
-//     child on a DIFFERENT port
-//   - cross-process lock: both session children are independent processes, so
-//     opening the same .clc from window 2 gets a kernel-level 409; when
-//     window 1 closes (session killed), the lock is freed without TTL
-//   - last window closes -> supervisor self-exits (idle); the next window
-//     pulls it up again ("first window starts it, last window ends it")
+// Machine-supervisor bootstrap check: runs the REAL spawn path with two
+// windows — first spawns the supervisor + session, second reuses it with its
+// own session child (independent processes, so the .clc lock is kernel-level);
+// last window closes -> supervisor idle-exits.
 // Run: node tests/server-bootstrap.test.js
 const assert = require("assert");
 const fs = require("fs");

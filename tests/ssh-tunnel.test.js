@@ -1,11 +1,9 @@
 // Standalone check for ssh-tunnel.js's exec upload path.
 // Run: node tests/ssh-tunnel.test.js
 //
-// uploadFileViaExec must write text byte-exactly (printf chunks, no added
-// newline) and binary via base64, and every exec command must stay under the
-// chunk cap so a minimal sshd (~8KB single-command limit) never drops the
-// connection. The injectable `exec` runs the command through local sh against a
-// temp "remote" path, so no real SSH host is needed.
+// Text must be written byte-exactly (printf chunks) and binary via base64, and
+// every exec command must stay under the chunk cap (~8KB on minimal sshd). The
+// injectable `exec` runs through local sh, so no real SSH host is needed.
 
 "use strict";
 

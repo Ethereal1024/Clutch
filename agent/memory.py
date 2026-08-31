@@ -30,13 +30,9 @@ SECTION = "[memories]"
 MAX_TITLE_CHARS = 80
 MAX_CONTENT_CHARS = 4000
 
-# --- fixed-width header memory index ----------------------------------------
-# One line: "memory_index=<count>,<head>,<off0>..<off9>" where every field is
-# zero-padded to a fixed width, so the line's byte length NEVER changes once
-# written — the event region's relative offsets stay stable. count = valid ring
-# entries (0..10); head = ring slot of the OLDEST entry (FIFO); slot values are
-# absolute byte offsets of memory lines (0 = empty slot; a real memory line
-# always sits past the header, so offset 0 is a safe sentinel).
+# --- fixed-width header memory index ---
+# Zero-padded fields keep the line length constant (stable event-region
+# offsets); slots are absolute byte offsets, 0 = empty.
 MEMORY_INDEX_SLOTS = 10
 _MEMORY_INDEX_PREFIX = "memory_index="
 _MEMORY_INDEX_FIELD_W = 16  # decimal offset width: up to ~90 PB, plenty
@@ -142,10 +138,8 @@ class MemoryStore:
         self._items: dict[str, Memory] = items or {}
         self._section_written = bool(items)  # a loaded section already exists
         self._index_offset = index_offset
-        # the project's LazyEventLog, so memory appends can count their bytes
-        # into the log's on-disk size (keeps event offsets and the window
-        # boundary exact). None for stores built before the log exists (the
-        # open wires it in afterwards).
+        # the project's LazyEventLog: appends count bytes into the log (keeps
+        # event offsets and the window boundary exact); None before open
         self._log = log
 
     def items(self) -> dict[str, Memory]:
@@ -258,7 +252,14 @@ class MemoryStore:
         append_jsonl(self._path, line, self._writer)
 
     @classmethod
-    def parse(cls, raw_lines: list[str], path: str, writer: Callable[[str, str], None] | None = None, workspace=None, log=None) -> "MemoryStore":
+    def parse(
+        cls,
+        raw_lines: list[str],
+        path: str,
+        writer: Callable[[str, str], None] | None = None,
+        workspace=None,
+        log=None,
+    ) -> "MemoryStore":
         """Loader for a [memories] section scan: parse memory lines out of the
         raw text (used for files without a header index and as the corrupt-index
         fallback)."""

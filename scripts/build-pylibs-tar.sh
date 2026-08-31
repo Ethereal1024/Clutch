@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # Build the portable-site-packages tar for a TARGET platform.
 #
-# The CLIENT downloads the exact wheels for the remote's (os/arch/libc/python)
-# from the index and packages them with the agent source, so the remote never
-# runs pip/venv and needs no internet. "跨平台也走传包" — pip only runs here.
-#
 # Usage: build-pylibs-tar.sh <key> <out> <os> <arch> <libc> <pyver>
 set -euo pipefail
 
@@ -36,8 +32,7 @@ case "$OS" in
 esac
 ABI="cp${PYVER//./}"
 
-# pin the exact versions the client's venv runs (from uv.lock) so the remote gets
-# the same tested dependency set
+# pin the client venv's exact versions from uv.lock
 OPENAI_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('openai'))")"
 HTTPX2_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('httpx2'))")"
 

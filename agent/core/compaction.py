@@ -54,15 +54,12 @@ class Compactor:
         self.config = config
         self.log = log
         self.llm = llm
-        # summarizer used by compaction; built lazily on first compaction when a
-        # dedicated compaction_model is configured, otherwise the main llm is used
+        # compaction summarizer: built lazily if a dedicated model is configured
         self.llm_factory = llm_factory
         self.compactor_llm: LlmClient | None = None
-        # live-progress sink (the run's event broadcaster): compaction can take a
-        # while, so the UI gets compaction_delta events instead of looking frozen
+        # progress sink: the UI gets compaction_delta events instead of looking frozen
         self.sink = sink
-        # run-cancel flag: compaction is synchronous, so it must check the stop
-        # signal itself or the UI's stop button freezes during a long summary
+        # stop flag: compaction is synchronous, so it checks cancel itself
         self.cancel = cancel
 
     def _report_progress(self, chars: int, done: bool = False) -> None:
@@ -75,43 +72,25 @@ class Compactor:
             pass
 
     def should_compact(self) -> bool:
-        """True when the current window (everything since the newest compaction
-        line) fills the model window.
-
-        Pure byte comparison, O(1): the window's exact on-disk bytes — no token
-        estimation, no per-event walk. The window itself is a conservative byte
-        estimate (≈128K tokens × 1.5 中文/token × 3 字节/汉字 ≈ 500K), so
-        firing at the full window still leaves real headroom for the completion
-        output."""
+        """True when the current window fills the model window: pure byte
+        comparison, O(1) — no token estimation, no per-event walk."""
         if not self.config.compaction_enabled:
             return False
         return self.log.window_bytes() >= self.config.llm_context_window_bytes
 
     def compact(self) -> bool:
         """Roll the whole current window into a CompactionEvent; False on no-op.
-
-        Works uniformly over any LazyEventLog (in-memory included): the window
-        is already resident, so compaction reads NO disk. Input = the window's
-        durable events verbatim (the task included on the FIRST compaction,
-        when cpr_start is 0 and the task is still inside the window). After the
-        summary the new CompactionEvent is appended and cpr_start slides to its
-        line's start — the window is now just the new summary, so the
-        summarized history can never re-enter the context."""
+        The window is resident, so compaction reads no disk; the new summary
+        line becomes the new window start, so history never re-enters context."""
         try:
             if self.cancel and self.cancel.is_set():
                 return False  # stop requested: don't start a long summary
-            # the input is the WINDOW — the resident events at/after cpr_start
-            # (the task joins on the FIRST compaction, when cpr_start is 0);
-            # resident events before cpr_start are already-summarized history
-            # and never enter a summary again
+            # the window: resident events at/after cpr_start (before it is already-summarized)
             window = [ev for off, ev in self.log.items() if off >= self.log.cpr_start()]
-            # nothing new since the last compaction (the window holds only the
-            # summary line itself, or is empty): never re-summarize the same head
+            # nothing new since the last compaction: never re-summarize the same head
             if len(window) <= 1:
                 return False
-            # the summary call can take a while (a long window, a slow model):
-            # tell the UI it started before the first token lands, then stream
-            # progress
+            # long call: announce start before the first token lands
             self._report_progress(0)
             summary, chars = self._summarize(
                 self._serialize(window), self._previous_summary()
@@ -124,8 +103,7 @@ class Compactor:
             self.log.set_cpr_start(self.log.items()[-1][0])
             return True
         except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
-            # LlmError is a dataclass whose str() is empty (Exception args never
-            # set); log the .message field so failures are diagnosable
+            # LlmError's str() is empty; log the .message field
             print(f"[clutch] compaction failed: {getattr(e, 'message', '') or e}", file=sys.stderr)
             self._report_progress(0, done=True)
             return False
@@ -135,17 +113,8 @@ class Compactor:
         return comp.summary if comp else ""
 
     def _serialize(self, events: list[Event]) -> str:
-        """Compact transcript of the window, for the summary prompt.
-
-        Capped to fit the model's own window TOGETHER with the previous summary
-        and the template, keeping the MOST RECENT part of the window (cut at a
-        line boundary). The cap is dynamic: a big previous summary shrinks the
-        head budget automatically. In steady state the window is bounded by the
-        context window itself and the cap never bites — it only defends the
-        FIRST compaction, whose input is the whole (multi-MB) history.
-        An uncapped head is exactly what made every compaction fail before: the
-        API rejected the multi-MB prompt, the window never shrank, and the UI
-        flashed "compressing context" on every turn.
+        """Compact transcript of the window for the summary prompt, capped to
+        fit with the previous summary and template (keeps the most recent part).
         """
         lines = []
         for ev in events:
@@ -190,8 +159,7 @@ class Compactor:
             if ev["type"] == "text":
                 parts.append(ev["delta"])
                 chars += len(ev["delta"])
-                # throttle progress broadcasts: ~every 200 chars is plenty for a
-                # live counter without flooding the SSE channel
+                # throttle: ~every 200 chars is plenty for a live counter
                 if chars - reported >= 200:
                     reported = chars
                     self._report_progress(chars)

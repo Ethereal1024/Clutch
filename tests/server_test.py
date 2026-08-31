@@ -129,8 +129,7 @@ def _run_server_test() -> int:
         check(state.api_key == "sk-test-123", "settings stored in state")
         state.api_key = None
 
-        # 2d. settings: one flat LLM endpoint (base_url/model/api_key) — no
-        # provider presets, no profiles
+        # 2d. settings: one flat LLM endpoint (base_url/model/api_key)
         st, body = http_post(
             f"{base_url}/api/settings",
             {"base_url": "https://open.bigmodel.cn/api/coding/paas/v4", "model": "glm-5.3", "api_key": "sk-test-123"},
@@ -168,8 +167,7 @@ def _run_server_test() -> int:
         check(config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4", "partial save keeps the saved base_url")
         st, body = http_post(f"{base_url}/api/settings", {})
         check(st == 400, "empty settings body rejected")
-        # restore the SAVED endpoint (the one the saved key belongs to) so the
-        # real-run section targets a working pairing
+        # restore the saved endpoint so the real-run section targets a working pairing
         saved_url, saved_model = _saved_endpoint()
         check(bool(saved_url and saved_model), "saved endpoint present for the real-run section")
         st, body = http_post(f"{base_url}/api/settings", {"base_url": saved_url, "model": saved_model})
@@ -224,10 +222,7 @@ def _run_server_test() -> int:
         check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
         check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
 
-        # 3e. lazy .clc (compaction + enough durable events): the open stream
-        # reports the on-disk older BYTES and wraps every event as {offset,
-        # event}; /api/history pages the middle records by byte range; the SSE
-        # replay opens with a history info line before the offset-wrapped tail.
+        # 3e. lazy .clc: open reports older bytes; history pages by byte range
         from agent.events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, _line_bytes, event_to_json
 
         lazy_dir = Path(sdir) / "lazywork"
@@ -236,9 +231,7 @@ def _run_server_test() -> int:
         levents = [UserMessageEvent(content="task")]
         for i in range(1, 500):
             levents.append(AssistantMessageEvent(content=f"old work {i}"))
-        # the newest compaction line's offset is the WINDOW start (persisted in
-        # the header): everything at/after it materializes, the 449 middle
-        # events stay on disk for /api/history paging
+        # compaction line offset = window start (persisted in header)
         comp_off = sum(_line_bytes(ev) for ev in levents[:450])
         levents.append(CompactionEvent(summary="old work summarized"))
         for i in range(501, 531):
@@ -251,8 +244,7 @@ def _run_server_test() -> int:
             lazy_lines.append(event_to_json(ev))
         lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8")
 
-        # every open is lazy now (one code path): this synthetic file opens the
-        # same way a giant one does
+        # every open is lazy now (one code path)
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
         check(st == 200, "lazy project reopened")
         llines = [json.loads(line) for line in body.splitlines() if line.strip()]
@@ -387,10 +379,7 @@ def _run_server_test() -> int:
         check(st == 200, "switched back to the demo project after isolation")
 
         # ---- 3f. per-window write lock: one writer per .clc ----
-        # (the reopen above holds the demo lock in-process; simulate ANOTHER
-        # window by dropping our handle and flocking a fresh fd — flock is
-        # exclusive even between two fds of one process, so this models the
-        # other process exactly)
+        # flock a fresh fd: exclusive even within one process
         import fcntl
 
         from agent.core.project_lock import ProjectLock, _local_lock_path
@@ -432,13 +421,7 @@ def _run_server_test() -> int:
         check(st == 200, "open works after the other window released")
         check(state.project is not None and not state.project.read_only, "reopen is writable again")
 
-        # ---- 3g. remote (ssh) workspaces lock LOCALLY, keyed by remote path ----
-        # Every Clutch window is a process on the CLIENT, so even a remote
-        # workspace locks a local flock keyed by the .clc's absolute path. No
-        # write is ever needed on the remote project directory — regression for
-        # the old remote .clc.lock file, which required write access to the
-        # remote dir (a non-root ssh user on a root-owned dir could not open a
-        # project at all) and left phantom locks for 6h after a crash.
+        # ---- 3g. remote workspaces lock locally (flock keyed by .clc path) ----
         from agent.core.project_lock import ProjectLock, _local_lock_path
 
         with tempfile.TemporaryDirectory() as rdir:
@@ -464,8 +447,7 @@ def _run_server_test() -> int:
             check(ProjectLock.acquire(rclc) is not None, "fresh acquire after release")
             ProjectLock.release_all()
 
-            # regression: a read-only remote project dir must still open for write
-            # (the old lock file could not be created there)
+            # read-only remote dir must open for write (old lock file could not be created there)
             ro = root / "ro-dir"
             ro.mkdir()
             (ro / "proj.clc").write_text("x\n")
@@ -478,9 +460,6 @@ def _run_server_test() -> int:
                 ro.chmod(0o700)  # restore so the temp dir cleans up
 
         # ---- 3h. a dying holder frees the lock via the kernel ----
-        # No TTL, no cleanup call: when a window's session process dies, the
-        # kernel releases its flock, so the next window can open the project
-        # immediately (regression for the 6h stale remote lock).
         import os
         import signal
         import subprocess
@@ -576,7 +555,7 @@ def _run_server_test() -> int:
         finals = [e for e in events if e["type"] == "final"]
         check(finals and finals[-1]["status"] == "completed", "final status completed")
 
-        # 5. workspace tree after run (file preview endpoint was removed)
+        # 5. workspace tree after run
         st, body = http_get(f"{base_url}/api/workspace/tree")
         data = json.loads(body)
         check(st == 200 and data.get("root"), "workspace tree has root")
@@ -584,8 +563,7 @@ def _run_server_test() -> int:
         check("hello.txt" in names, "workspace shows created file")
         check(clc.name not in names, ".clc file hidden from workspace tree")
 
-        # 5b. user-side undo endpoint: routing + guards (restore logic is tested in
-        # selfcheck); the run created hello.txt, so it has no snapshot to revert
+        # 5b. undo endpoint: routing + guards (restore logic in selfcheck)
         st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "hello.txt"})
         check(st == 404, "revert on a never-snapshot file returns 404")
         st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "../escape"})

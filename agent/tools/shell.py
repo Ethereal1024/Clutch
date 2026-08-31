@@ -21,15 +21,7 @@ from .transport import TransportError
 from .workspace import Workspace
 
 # ---- chat-mode read-only classification ----
-#
-# Static analysis cannot prove a command is *safe*; it can only prove a command
-# is *read-only*. The chat-mode gate therefore uses a whitelist: commands whose
-# every form is free of filesystem side effects pass, everything else is
-# rejected (default deny). Quoted metacharacters may be misjudged — always in
-# the safe direction (a read-only command rejected, never a write let through).
-
-# Commands with no form that writes the filesystem. Metacharacter checks below
-# (redirections, pipes, separators) handle `echo hi > f`, `ls | grep`, etc.
+# static analysis can only prove read-only: whitelist (default deny)
 _READ_ONLY_CMDS = frozenset(
     {
         "ls", "cat", "grep", "find", "pwd", "cd", "whoami", "id", "uname", "date",
@@ -42,8 +34,7 @@ _READ_ONLY_CMDS = frozenset(
     }
 )
 
-# Commands whose common forms write files / change system state. Used only to
-# give a sharper error message; the gate rejects them either way.
+# Common write/state-changing commands: only for a sharper error message
 _WRITE_CMDS = frozenset(
     {
         "rm", "mv", "cp", "touch", "mkdir", "rmdir", "ln", "chmod", "chown",
@@ -65,10 +56,8 @@ _GIT_READ = frozenset(
     }
 )
 
-# git subcommands that mutate the repo (index, worktree, refs, config); listed
-# explicitly because _WRITE_CMDS holds command names, not git subcommands.
-# Ambiguous ones (branch/tag/stash/config — read in some forms, write in others)
-# are conservatively treated as write.
+# git subcommands that mutate the repo; ambiguous ones (branch/tag/stash/config)
+# are conservatively treated as write
 _GIT_WRITE = frozenset(
     {
         "add", "commit", "push", "pull", "fetch", "merge", "rebase", "reset",
@@ -108,8 +97,7 @@ def _classify_segment(seg: list[str]) -> str:
     """Classify one command segment (no separators inside) as read/write/unknown."""
     if not seg:
         return "read"
-    # a token containing ">" is an output redirection (or a quoted ">", which we
-    # conservatively treat the same); "<" alone is a read-only input redirect
+    # ">" = output redirect (quoted too, conservatively); "<" alone is read-only input
     for tok in seg:
         if ">" in tok:
             return "write"
@@ -208,9 +196,7 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     if not command.strip():
         return {"content": render("errors/empty_command.md"), "error": True}
 
-    # Path escape guard: reject tokens that look like file paths resolving outside
-    # the workspace. We check the tokenized command first, then run the raw string
-    # through a shell so `&&`, pipes and redirections keep their real meaning.
+    # Path escape guard: reject tokens resolving outside the workspace
     for tok in shlex.split(command):
         try:
             p = workspace.resolve(tok)
@@ -287,8 +273,7 @@ def _syntax_check(workspace: Workspace, path: str) -> str | None:
         text = workspace.read(path)
     except FileNotFoundError:
         return f"syntax check failed: file not found: {path}"
-    # compile() in-process: no subprocess/interpreter to invoke, so it also works
-    # under PyInstaller (where sys.executable is the bundle, not a python binary)
+    # compile() in-process: no subprocess, works under PyInstaller too
     try:
         compile(text, path, "exec")
     except SyntaxError as e:

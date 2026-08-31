@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Dev convenience: start the backend API + the Electron UI from one command.
-# The backend is cleaned up when the UI exits. Server logs go to a file so the
+# Dev convenience: start backend API + Electron UI from one command; the
+# backend is cleaned up when the UI exits. Server logs go to a file so the
 # background process never holds this command's output pipe open.
 set -euo pipefail
 
@@ -8,9 +8,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$DIR")"
 LOG="/tmp/clutch-server.log"
 
-# a stale clutch-server (e.g. an old installed copy) left on 8890 would serve the
-# UI old code and block our own bind; clear it before starting ours. Kill only the
-# LISTENER on 8890 — lsof would also match the Electron client's network process.
+# a stale server on 8890 would serve old code and block our bind; kill only
+# the LISTENER — lsof would also match the Electron client.
 if curl -sf "http://127.0.0.1:8890/api/health" >/dev/null 2>&1; then
   echo "[clutch-ui] clearing existing clutch-server on 8890 (stale?)"
   PIDS=$(ss -ltnp 2>/dev/null | awk -F'pid=' '/:8890 /{split($2,a,","); print a[1]}' | sort -u)
@@ -36,10 +35,8 @@ for _ in $(seq 1 20); do
   sleep 0.25
 done
 
-# The installed electron package has no postinstall (its binary is downloaded
-# lazily on first run), so after a fresh `npm install`/`npm ci` the binary is
-# gone again. Fetch it explicitly with a clear message instead of a silent
-# lazy download mid-launch.
+# The installed electron package downloads its binary lazily on first run; a
+# fresh npm install leaves it missing, so fetch it explicitly.
 ELECTRON_BIN="$DIR/node_modules/electron/dist/$(cat "$DIR/node_modules/electron/path.txt" 2>/dev/null || true)"
 if [ ! -x "$ELECTRON_BIN" ]; then
   echo "[clutch-ui] Electron binary missing (fresh npm install?) — downloading…"

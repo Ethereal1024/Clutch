@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 # Build the standalone clutch-server binaries (PyInstaller onefile) for THIS
-# host's platform, and copy them to the given output path:
+# host's platform:
 #   - agent-server       the agent API backend (session child)
 #   - agent-supervisor   the per-machine supervisor (spawns session children)
 #
 # Usage: build-server-bundle.sh <version> <out-path>
-#
-# The artifacts are self-contained (no python/pip needed on the target) but are
-# bound to the build host's OS/arch/glibc family. Cross-platform remotes are
-# handled by the adaptive installer (venv+pip, portable site-packages, or the
-# client-side LLM assist) instead of a pre-built matrix.
 set -euo pipefail
 
 VERSION="${1:?version required}"
@@ -27,12 +22,8 @@ cd "$ROOT"
   scripts/supervisor_entry.py
 
 mkdir -p "$(dirname "$OUT")"
-# dist/ holds both binaries (electron-builder's extraResources read from
-# ../dist/); OUT keeps its original meaning: the agent-server path (usually
-# dist/agent-server itself, or an external copy target). The tunnel uploads
-# BOTH binaries (supervisor + session child) to the remote, so when OUT is an
-# external copy target, deliver the supervisor next to it under a sibling
-# version-keyed name (agent-supervisor-<same-suffix>).
+# OUT = the agent-server path; when external, also deliver the supervisor under
+# a sibling version-keyed name (agent-supervisor-<same-suffix>).
 if [ "$(realpath "$OUT")" != "$(realpath "$ROOT/dist/agent-server")" ]; then
   SUPERVISOR_OUT="$(dirname "$OUT")/$(basename "$OUT" | sed 's/^agent-server/agent-supervisor/')"
   cp dist/agent-server "$OUT"

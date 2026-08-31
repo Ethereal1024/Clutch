@@ -46,9 +46,7 @@ class OpenaiLlmClient(LlmClient):
                 }
                 if tools:
                     kwargs["tools"] = tools
-                # Reasoning effort (extra_body thinking.reasoning_effort). Only
-                # set when configured: an unset knob leaves the provider
-                # default, and endpoints that ignore the field must not see it.
+                # reasoning_effort: only set when configured (provider default otherwise)
                 if self.reasoning_effort:
                     kwargs["extra_body"] = {
                         "thinking": {

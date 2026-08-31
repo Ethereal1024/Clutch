@@ -168,9 +168,8 @@ select:hover { border-color: var(--accent); }
 select option { background-color: var(--bg2); color: var(--text); }
 
 /* ---- custom dropdown ----
-   Native <select> popups can't be themed or animated (Linux renders them as an
-   HTML-default list), so the pickers use this component: a button + themed
-   popup that fades/slides in. Container classes mirror where selects lived. */
+   Native <select> popups can't be themed/animated, so pickers use this
+   button + themed popup component. */
 .cselect { position: relative; }
 .cselect-btn {
   display: flex;
@@ -283,9 +282,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .older-pill.hidden { display: none; }
 
 /* event stream: a numbered execution track threaded by a connector rail.
-   Wrapped in a non-scrolling .stream-wrap so the floating ↓ button anchors to
-   the visible viewport instead of riding the scroll content (an absolute child
-   of a scroller scrolls away with the content). */
+   Wrapped in a non-scrolling .stream-wrap so the ↓ button anchors to the
+   viewport instead of riding the scroll content. */
 .stream-wrap {
   position: relative; flex: 1; display: flex;
   flex-direction: column; min-height: 0;
@@ -294,11 +292,7 @@ main { display: flex; flex: 1; min-height: 0; }
   position: relative; /* anchors the ::before rail and the absolute jump-bottom */
   flex: 1; overflow-y: auto; padding: 16px 16px 24px 16px;
   counter-reset: step;
-  /* the task input above grows and shrinks while typing, resizing this viewport;
-     browser scroll anchoring would silently adjust scrollTop to keep its anchor
-     on screen — the view appears to "jump to the bottom" on every input-box
-     resize. All scrolling here is driven by the latch in app.js, so anchoring
-     must stay out of the way. */
+  /* scroll anchoring would fight the latch-driven scrolling in app.js */
   overflow-anchor: none;
 }
 /* the session content wrapper: hidden while the project-open progress runs,
@@ -476,10 +470,8 @@ main { display: flex; flex: 1; min-height: 0; }
   font-size: 13px; line-height: 1.45; max-height: 320px;
 }
 /* floating 'jump to bottom' button, shown only while the user has scrolled up.
-   The glyph is a pure SVG equilateral triangle (not a font character), so its
-   ink center equals the viewBox center and the flex-centered circle — alignment
-   is font-independent. Show/hide animates via opacity/transform/visibility:
-   display:none cannot transition, so .hidden here overrides the global rule. */
+   The glyph is a pure SVG triangle so its ink center equals the viewBox center;
+   show/hide animates via opacity/transform/visibility (display cannot transition). */
 .jump-bottom {
   position: absolute; bottom: 16px; right: 20px; z-index: 10;
   width: 34px; height: 34px; border-radius: 50%;
@@ -748,17 +740,12 @@ main { display: flex; flex: 1; min-height: 0; }
 .conn-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .18s linear; }
 .conn-progress-fill.indeterminate { width: 35%; animation: conn-slide 1.1s ease-in-out infinite; }
 @keyframes conn-slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
-/* SSH failure options: Retry + Cancel pinned to the bottom-right of the picker
-   box. The collapsed (failure) box becomes a flex column with a taller
-   min-height so the two buttons sit comfortably in the corner instead of a
-   lone reset link. */
+/* SSH failure options: Retry + Cancel pinned to the bottom-right of the picker.
+   The collapsed (failure) box becomes a flex column with a taller min-height. */
 #conn-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: auto; padding-top: 18px; }
 #fs-modal .modal-box:has(#fs-body.collapsed) { display: flex; flex-direction: column; min-height: 210px; }
 /* the file-browsing body collapses smoothly during SSH connect (height + fade).
-   max-height clamps it deterministically so the hidden body can never leave a
-   dead height (the 260px file list) behind. Ceiling: the body is bounded — 260px
-   list + path bar + (new-project area) + action buttons ≈ 420px in new mode, so
-   480px is a safe max that still lets the animation track the real height. */
+   max-height clamps it deterministically; 480px safely covers the bounded body. */
 #fs-body {
   overflow: hidden;
   max-height: 480px;

@@ -1,9 +1,5 @@
-// Preload: expose the backend URL + the SSH tunnel bridge to the renderer.
-// baseUrl is an async call into the main process: the sandboxed preload has no
-// fs/child access and this window's session child (spawned by the machine
-// supervisor, agent/server.py --port 0) runs on a random port that only the
-// main process knows. The main process may re-establish a dead session at any
-// time and announce the new URL via onBaseChanged.
+// Expose the backend URL + SSH tunnel bridge to the renderer.
+// baseUrl is an async IPC call: the session port is only known to the main process.
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("clutchApi", {

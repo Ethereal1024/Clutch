@@ -1,11 +1,6 @@
-// Regression simulation for the grep+think latch-drop bug.
-// Reproduces the scroll-event sequence of a long pinned stream (thinking +
-// grep results pinning via isTrusted=false scrolls) followed by a huge fold
-// collapse whose clamp fires a trusted scroll event.
-//
-// Old logic: baselines (prevScrollH/prevClientH) only refresh on trusted events
-//   -> stale baseline -> fingerprint misses -> clamp misread as scroll-up.
-// New logic: baselines refresh on every scroll + `up` guarded by nearBottom().
+// Regression sim for the grep+think latch-drop bug (pinned results + huge fold
+// collapse). Old logic refreshed baselines only on trusted events -> stale
+// baseline -> clamp misread as scroll-up; new logic refreshes every scroll.
 
 const JUMP_BOTTOM_GAP = 80;
 const nearBottom = (H, S, C) => H - S - C < JUMP_BOTTOM_GAP;

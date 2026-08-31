@@ -1,26 +1,7 @@
-// Programmatic SSH tunnel (ssh2) to a remote clutch-server, embedded in the
-// Electron main process.
-//
-// Bidirectional:
-//   - local forward: 127.0.0.1:<localPort> -> remote 127.0.0.1:8890 (the API)
-//   - reverse forward: remote 127.0.0.1:<LLM_PROXY_REMOTE_PORT> -> the client-side
-//     LLM proxy (llm-proxy.js), so the remote backend needs no internet and no key.
-//
-// Auth is in-app: password (also used as an encrypted-key passphrase), SSH agent,
-// or a default private key (~/.ssh/id_*). No terminal prompt is involved.
-//
-// Bootstrap: if the remote has no clutch-server yet, the client installs it
-// adaptively (VSCode-style):
-//   - same arch as client                          -> self-contained bundle
-//   - cross-arch but python3 present               -> portable site-packages
-//   - otherwise (no install path)                  -> SSH-tools degradation:
-//     the remote only needs an sshd + sh, the local server drives it over exec
-//     (the LLM-guided installer was removed — degradation covers those hosts).
-
-// ---- debug logging (dev-only; remove before shipping) ----
-// Every connect attempt (host/user/port/password), the ssh2 protocol trace, phase
-// transitions and errors are appended to ~/.clutch/tunnel.log so a failed
-// connection can be reproduced. NOTE: the password is written in plaintext.
+// SSH tunnel (ssh2) to a remote clutch-server, embedded in the Electron main
+// process: local forward to the remote supervisor API + reverse forward to the
+// client-side LLM proxy. Debug logging appends to ~/.clutch/tunnel.log (NOTE:
+// the password is written in plaintext).
 
 const http = require("http");
 const net = require("net");
@@ -115,10 +96,7 @@ function httpGetBody(url, timeoutMs) {
   });
 }
 
-// Distinguish the machine supervisor from anything else squatting on the remote
-// 8890: the supervisor answers {"status":"ok"} — the same shape the local
-// server-bootstrap probes for. A legacy shared agent-server answers
-// {"ok":true,...} (foreign); a dead port is "down".
+// Supervisor: {"status":"ok"} → "up"; legacy shared server → "foreign"; dead port → "down"
 async function probeSupervisorShape(base) {
   try {
     const body = await httpGetBody(base + "/api/health", 3000);
@@ -172,8 +150,7 @@ function remoteExec(command, timeoutMs = 60000, binary = false) {
         done = true;
         clearTimeout(timer);
         if (binary) {
-          // raw bytes: the bridge returns them base64-encoded CLIENT-side, so
-          // the remote never needs its own base64 (minimal hosts lack it)
+          // raw bytes: base64-encoded client-side so minimal hosts need no base64
           resolve({ code, stdout_b64: Buffer.concat(out).toString("base64"), stderr });
         } else {
           resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr });
@@ -196,8 +173,7 @@ function remoteExec(command, timeoutMs = 60000, binary = false) {
 }
 
 function getSftp() {
-  // one sftp subsystem reused across uploads: opening one per file blows past
-  // sshd's MaxSessions and the channel open gets refused
+  // reuse one sftp subsystem: per-file opens exceed sshd's MaxSessions
   if (sftpUnavailable) return Promise.reject(new Error("SFTP unavailable on this host"));
   if (sftpHandle) return Promise.resolve(sftpHandle);
   return new Promise((resolve, reject) => {
@@ -227,12 +203,8 @@ function checkExec(r) {
   }
 }
 
-// A minimal sshd (dropbear/BusyBox on OpenWrt) drops the connection on a single
-// exec request over ~8KB (measured on the test router: 7,929B ok / 9,636B died).
-// Every upload exec command stays well under that. The limit is the single
-// source in agent/transport_defaults.json — the same file the Python side reads,
-// so the two languages can never drift apart. The file is copied into ui/ at
-// build time and checked for drift by the predist script.
+// Minimal sshd (dropbear/BusyBox) drops a single exec over ~8KB; chunk limit
+// comes from agent/transport_defaults.json so the Python side stays in sync.
 const { exec_chunk_bytes: EXEC_CHUNK_BYTES } = require("./transport_defaults.json");
 
 function shq(s) {
@@ -241,9 +213,7 @@ function shq(s) {
 }
 
 function chunkText(s, cap) {
-  // Split into pieces whose on-wire size after shq stays under cap. A single
-  // quote inflates to the 4-char sequence '\'', so budget it at 4; multibyte
-  // characters are never split.
+  // split so on-wire size after shq stays under cap; a quote inflates to 4 chars
   const chunks = [];
   let cur = "";
   let size = 0;
@@ -261,12 +231,8 @@ function chunkText(s, cap) {
   return chunks;
 }
 
-// Fallback upload for remotes whose sshd has no SFTP subsystem (e.g. minimal
-// embedded devices). Text files go through byte-exact `printf '%s'` chunks (no
-// base64 needed, which minimal devices often lack); binary files fall back to
-// chunked base64. Chunking keeps every exec command under the sshd's limit, and
-// every exit code is checked so a missing tool fails loudly instead of silently
-// writing nothing. `exec` is injectable for tests.
+// Fallback upload without SFTP: byte-exact printf chunks (text) or chunked
+// base64 (binary), each under the sshd's exec limit; `exec` is injectable.
 function uploadFileViaExec(localPath, remotePath, timeoutMs = 120000, exec = remoteExec) {
   const buf = fs.readFileSync(localPath);
   if (!buf.includes(0)) {
@@ -332,15 +298,11 @@ function parseProbe(out) {
 }
 
 function startCommand(strategy, home) {
-  // The remote runs the machine SUPERVISOR on 8890 (phase 4, same as local);
-  // session children get --base-url later, per session/start (the LLM reverse
-  // proxy 8892 is per-connection). The supervisor self-exits after an idle
-  // grace with zero sessions, so a dropped tunnel leaves nothing behind.
+  // remote supervisor runs on 8890 like local; session children get --base-url later
   const args = "--port " + REMOTE_API_PORT + " --idle-timeout 8";
   const nohup = "nohup setsid ";
   if (strategy === "bundle") {
-    // --agent-cmd is explicit: a PyInstaller onefile's sys.executable is not a
-    // reliable way to find the sibling agent-server, so never rely on it
+    // explicit: a onefile's sys.executable cannot locate the sibling agent-server
     return `${nohup}${home}/.clutch-server/agent-supervisor ${args} --agent-cmd ${home}/.clutch-server/agent-server >/tmp/clutch-server.log 2>&1 </dev/null &`;
   }
   // pylibs
@@ -354,8 +316,7 @@ function remoteRunningCmd(probe) {
   return `(command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ':${REMOTE_API_PORT} ' && echo UP) || echo DOWN`;
 }
 
-// force is for tests; auto-decides when omitted. progress(stage) reports coarse
-// bootstrap stages so the renderer can drive a connection progress bar.
+// force is for tests; auto-decides when omitted. progress(stage) drives the UI progress bar.
 async function installServer(probe, { force, progress } = {}) {
   const sameArch = probe.arch === platformTag().split("-")[1];
   tunnelLog(
@@ -368,17 +329,13 @@ async function installServer(probe, { force, progress } = {}) {
   } else if (process.env.CLUTCH_TUNNEL_FORCE) {
     strategy = process.env.CLUTCH_TUNNEL_FORCE;
   } else if (sameArch) {
-    // unified: same-arch remotes use the self-contained bundle (embedded, known-good
-    // client python) — the remote's own python3 with downloaded wheels has already
-    // been seen segfaulting (native extension crash) on a NAS
+    // same-arch: self-contained bundle (remote python3 has segfaulted on a NAS)
     strategy = "bundle";
   } else if (probe.python) {
-    // cross-arch: client downloads the exact wheels for the target; remote never runs pip
+    // cross-arch: client downloads exact wheels; remote never runs pip
     strategy = "pylibs";
   } else {
-    // cross-arch with no python3: no deterministic install path exists. The old
-    // LLM-assisted installer (needsAssist) is gone — SSH-tools degradation covers
-    // these hosts, so reject the install and let the renderer drop into exec mode.
+    // no python3: no deterministic install path — reject, renderer falls to SSH-tools
     return {
       ok: false,
       error:
@@ -392,12 +349,9 @@ async function installServer(probe, { force, progress } = {}) {
     // e.g. an explicit CLUTCH_TUNNEL_FORCE=assist
     return { ok: false, error: `no install strategy '${strategy}'; falling back to SSH-tools` };
   }
-  // Resolve the artifact to install and its CONTENT-HASH version. The hash is
-  // the only install gate: `installed` is true iff the remote's VERSION equals
-  // our binaries' hash — exact content match, no git, no strategy/artifacts
-  // heuristics.
-  let artifact;
-  let version;
+  // content-hash version is the only install gate: installed iff the remote's
+  // VERSION equals our binaries' hash
+  let artifact;  let version;
   if (strategy === "bundle") {
     artifact = ensureBundle();
     version = artifact.version;
@@ -426,9 +380,7 @@ async function installServer(probe, { force, progress } = {}) {
 
   let reinstalled = false;
   if (!installed) {
-    // a reinstall replaces files the running server may be using (the bundle is an
-    // executing binary the NAS refuses to truncate in place): stop the old server
-    // first, then install, then start the new one
+    // the NAS refuses to truncate an executing binary in place: stop first
     await remoteExec(`mkdir -p ${dir}`);
     tunnelLog("[bootstrap] stopping old server before reinstall");
     await remoteExec(stopServerCmd(strategy));
@@ -437,8 +389,7 @@ async function installServer(probe, { force, progress } = {}) {
       tunnelLog(`[bootstrap] uploading bundle ${path.basename(server)} + supervisor`);
       if (progress) progress("install:upload");
       try {
-        // atomic replace: rename over the old binary, safe even while a process
-        // still runs from the old inode
+        // atomic rename over the old binary
         await uploadFile(server, `${dir}/agent-server.new`);
         await uploadFile(supervisor, `${dir}/agent-supervisor.new`);
       } catch (e) {
@@ -475,12 +426,9 @@ async function installServer(probe, { force, progress } = {}) {
   if (reinstalled || !run.stdout.includes("UP")) {
     tunnelLog("[bootstrap] starting server");
     if (progress) progress("install:start");
-    // short timeout: the start command backgrounds the server; do not wait up to
-    // the default 60s for its exec channel to close
+    // short timeout: the start command backgrounds the server
     await remoteExec(startCommand(strategy, home), 10000);
-    // give it a moment to bind; if it never comes up, fail fast with the remote
-    // log (the earlier behavior silently proceeded to a doomed forward and the
-    // user only got the generic "backend not reachable" after 15s)
+    // wait for it to bind; on failure surface the remote log
     for (let i = 0; i < 12; i++) {
       const chk = await remoteExec(remoteRunningCmd(probe));
       if (chk.stdout.includes("UP")) break;
@@ -510,10 +458,8 @@ async function installServer(probe, { force, progress } = {}) {
 }
 
 function stopServerCmd(strategy) {
-  // bracket guards avoid the pkill matching the command's own shell. Also stop
-  // any LEGACY shared agent-server/agent.server on 8890 (pre-supervisor
-  // clients): a fresh supervisor install must not bind-fail against it. The
-  // unified supervisor pkill covers every strategy.
+  // bracket guards avoid pkill matching its own shell; also stops legacy
+  // shared servers on 8890 that would make the supervisor bind-fail
   void strategy;
   return (
     "pkill -f '[a]gent-supervisor' 2>/dev/null; " +
@@ -537,7 +483,7 @@ async function stopTunnel() {
     }
   }
   sessionForwards = new Set();
-  // null the global before end() so a stale 'end' event cannot clear a newer client
+  // null the global before end() so a stale 'end' cannot clear a newer client
   const cur = sshClient;
   if (cur) {
     sshClient = null;
@@ -549,10 +495,7 @@ async function stopTunnel() {
   }
   stopLlmProxy();
   stopExecBridge();
-  // no notifyEnd(): stopTunnel runs on INTENTIONAL disconnects (renderer-driven
-  // switches, connect resets) where the caller manages the transition; only a
-  // genuine unexpected tunnel death (the ssh 'end' event on the current client)
-  // should fire the end notification.
+  // intentional disconnects are caller-managed; only unexpected death notifies
 }
 
 function notifyEnd() {
@@ -582,11 +525,7 @@ function tunnelStatus() {
 }
 
 // ---- per-window session forwards ----
-// The tunnel itself forwards only to the remote supervisor (control channel).
-// Each UI window additionally gets its OWN forward to its session child's
-// random port, so windows are isolated exactly like on the local machine. All
-// session forwards die with the tunnel (stopTunnel closes them; a dead ssh
-// client kills them anyway).
+// Each window gets its own forward to its session child's port; all die with the tunnel.
 let sessionForwards = new Set();
 
 function openSessionForward(remotePort) {
@@ -629,11 +568,7 @@ function openSessionForward(remotePort) {
 }
 
 // ---- dead-backend self-healing ----
-// The tunnel can stay up while the remote agent.server dies (e.g. a native crash
-// like the segfault seen on the NAS). Periodically health-check the forward and,
-// if the backend is gone, restart it via the tunnel; if that fails, tear the
-// tunnel down so the renderer falls back to a clear state.
-
+// Health-check the forward, restart the backend via the tunnel, else tear down.
 async function collectRemoteDiagnostics() {
   try {
     const r = await remoteExec(
@@ -733,9 +668,8 @@ async function connectTunnel({ host, user, port, password }, progress) {
     tunnelLog("[phase] ssh ready");
     if (progress) progress("probe");
 
-    // runtime handlers (registered once per connection). Guard every handler that
-    // mutates the module-level sshClient: a STALE tunnel's 'end' event may fire
-    // after a reconnect already installed a newer client, and must not clobber it.
+    // runtime handlers (once per connection). Guard mutations of sshClient: a
+    // stale tunnel's 'end' may fire after a reconnect and must not clobber it.
     client.on("tcp connection", (info, accept, reject) => {
       if (info.destPort !== LLM_PROXY_REMOTE_PORT) {
         reject();
@@ -748,9 +682,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     client.on("end", () => {
       tunnelLog("[disconnect] tunnel ended");
       stopHealing();
-      // only the CURRENT client may tear down shared state: a STALE tunnel's
-      // delayed 'end' event must not close the new connection's forward/proxy or
-      // fire the end notification (which would reset the renderer to local)
+      // only the CURRENT client may tear down shared state
       if (sshClient === client) {
         sshClient = null;
         currentUrl = null;
@@ -774,10 +706,8 @@ async function connectTunnel({ host, user, port, password }, progress) {
     if (progress) progress("install");
     const boot = await installServer(probe, { progress });
     if (boot && boot.ok === false) {
-      // no install path (hard reject): the SSH session (and with it the exec
-      // bridge) stays open so the renderer can degrade to SSH-tools; mark the
-      // tunnel as live so an unexpected death fires onEnd and the renderer
-      // resets back to local.
+      // hard reject: keep the SSH session for SSH-tools degradation; mark the
+      // tunnel live so an unexpected death fires onEnd
       tunnelLog("[bootstrap] rejected: " + boot.error);
       wasDisconnected = false;
       return { ok: false, error: boot.error };

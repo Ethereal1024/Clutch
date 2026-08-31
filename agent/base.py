@@ -72,11 +72,9 @@ class RunState:
         self.workspace: Workspace | None = None
         self.api_key: str | None = None
         self.gate: PermissionGate | None = None
-        # path of the project the currently-active run belongs to (None when
-        # idle). SSE subscribers filter live events against it so multiple UI
-        # windows, each on its own project, never see each other's runs.
+        # project of the active run; SSE subscribers filter live events by it
         self.run_project: str | None = None
-        # SSH degradation layer: when set, tools/.clc/fs run through the exec bridge
+        # when set, tools/.clc/fs run through the exec bridge
         self.backend_mode: str = "local"  # "local" | "ssh"
         self.bridge_url: str | None = None
         self.remote_root: str | None = None  # initial browse root on the remote
@@ -89,8 +87,7 @@ class RunState:
 
     def set_backend(self, mode: str, bridge_url: str | None = None, remote_root: str | None = None) -> None:
         """Switch the SSH-degradation backend (mode: "local" | "ssh"). A mode
-        switch invalidates any previously-opened project's workspace: paths and
-        transport differ per mode, so the UI must re-open the project after."""
+        switch invalidates the open project's workspace (paths differ per mode)."""
         with self.lock:
             self.backend_mode = mode
             self.bridge_url = bridge_url
@@ -133,9 +130,7 @@ class BaseServer(ABC):
         self.state = state
 
     def _build_llm(self, api_key: str, model: str, cfg: Config) -> LlmClient:
-        """Assemble one LLM client — the only construction site in the repo.
-        build_llm and the per-run compactor closure both go through here, so a
-        new client knob (timeout, retries, …) is added in exactly one place."""
+        """Assemble one LLM client — the only construction site in the repo."""
         return create_llm_client(
             api_key=api_key,
             model=model,
@@ -151,8 +146,8 @@ class BaseServer(ABC):
         return self._build_llm(self.state.api_key or self.config.api_key, self.config.model, self.config)
 
     def build_tools(self, project: Project | None = None, config: Config | None = None) -> ToolRegistry:
-        """Tools for a run. ``config`` overrides self.config so a per-run mode
-        (chat read-only toolset) takes effect; work mode keeps the full set."""
+        """Tools for a run; config overrides self.config for a per-run mode
+        (chat read-only toolset vs work's full set)."""
         cfg = config or self.config
         return ToolRegistry(build_default_tools(cfg, memories=project.memories if project else None))
 
@@ -168,25 +163,18 @@ class BaseServer(ABC):
         cancel: threading.Event | None = None,
         config: Config | None = None,
     ) -> Agent | None:
-        """Assemble and claim a run on the project: workspace + LLM + tools + gate
-        + Agent. Returns the Agent (caller runs it) or None when a run is already
-        active. ``config`` overrides this server's config per run (e.g. a
-        per-request verify command); build_llm/build_tools still use self.config.
+        """Assemble and claim a run on the project: workspace + LLM + tools +
+        gate + Agent. Returns the Agent (caller runs it) or None when a run is
+        already active.
         """
         cfg = config or self.config
-        # reuse the workspace the UI already built for this project (set_project),
-        # so the file tree and the agent's run share ONE workspace instance;
-        # fall back to building a fresh one when none is open or its root is a
-        # different directory (eval harness calls start_task without set_project)
+        # reuse the UI-built workspace when it matches the project root, else build fresh
         workspace = self.state.workspace
         if workspace is None or workspace.root != project.workdir:
             workspace = self.build_workspace(project)
         workspace.protect(project.path)
         llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
-        # separate summarizer for compaction is built lazily (only on the first
-        # compaction) via a factory that captures the resolved key — no per-run
-        # client construction, and a missing key only surfaces inside the
-        # best-effort compaction fallback.
+        # compaction summarizer built lazily via a factory capturing the resolved key
         compactor_factory = None
         if cfg.compaction_model and cfg.compaction_model != cfg.model:
             api_key = self.state.api_key or cfg.api_key

@@ -1,24 +1,5 @@
-// Machine supervisor bootstrap + per-window session management.
-//
-// Architecture (phase 4): every machine — local or remote — runs exactly ONE
-// supervisor (a thin process that owns no session logic). Each UI window asks
-// the supervisor for a SESSION: a dedicated agent.server child spawned with
-// --port 0 whose real port is parsed from its stdout banner. The window then
-// talks to its session child DIRECTLY; the supervisor never proxies traffic,
-// it only owns the lifecycle (spawn / kill / stale-reap / idle-exit).
-//
-// Lifecycle per product decision:
-//   - the FIRST window starts the supervisor (probe /api/health, spawn when
-//     down); the LAST window's exit ends it — every window stops its session
-//     on close, and the supervisor self-exits after an idle grace at zero
-//     sessions. So we never kill the supervisor; it governs itself.
-//   - a window that crashes stops heartbeating, and the supervisor reaps the
-//     stale session (heartbeat timeout) — no leaked children.
-//
-// The app ONLY ever runs through the supervisor (local or remote): there is no
-// direct-connect to a shared agent-server anymore. A non-supervisor squatting
-// on the supervisor port is rejected with an explicit message.
-
+// One supervisor per machine (agent/supervisor.py) spawns/kills per-window
+// session children; the first window starts it and it self-exits when idle.
 const { app } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -29,12 +10,7 @@ const SUPERVISOR_PORT = parseInt(process.env.CLUTCH_SUPERVISOR_PORT || "8890", 1
 const HEALTH_TIMEOUT_MS = 20_000; // PyInstaller onefile extracts on first run
 const HEALTH_POLL_MS = 250;
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
-// session/start can take much longer than a health probe: the remote supervisor
-// blocks until its session child (a PyInstaller onefile) boots and prints its
-// port banner (up to SESSION_START_TIMEOUT_S on the supervisor). A 2s probe
-// timeout here aborts the request mid-boot and the connect falls back to a
-// LOCAL session — which is exactly "connected but the files are local". Cover
-// the supervisor's start timeout plus tunnel overhead.
+// session/start boots a onefile child: cover the supervisor's start timeout
 const SESSION_START_TIMEOUT_MS = 35_000;
 const HEARTBEAT_INTERVAL_MS = 8000; // < supervisor stale timeout (30s)
 
@@ -45,10 +21,7 @@ function sleep(ms) {
 }
 
 async function supervisorProbe() {
-  // Distinguish the supervisor from any other server squatting on the port:
-  //   "up"      — /api/health answered with {"status":"ok"} (supervisor shape)
-  //   "foreign" — something else answered (old shared agent-server, another app)
-  //   "down"    — nothing listening
+  // "up" = supervisor shape, "foreign" = another server on the port, "down" = nothing listening
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
@@ -66,7 +39,7 @@ async function supervisorProbe() {
 }
 
 function spawnSupervisorCommand() {
-  const idleTimeout = process.env.CLUTCH_SUPERVISOR_IDLE_TIMEOUT || "8"; // seconds
+  const idleTimeout = process.env.CLUTCH_SUPERVISOR_IDLE_TIMEOUT || "8";
   const portArgs = ["--port", String(SUPERVISOR_PORT), "--idle-timeout", idleTimeout];
   if (app.isPackaged) {
     const bin = path.join(process.resourcesPath, "agent-supervisor");
@@ -79,8 +52,7 @@ function spawnSupervisorCommand() {
     } catch (e) {
       console.error("[server-bootstrap] chmod failed:", e && e.message);
     }
-    // --agent-cmd is explicit: a PyInstaller onefile's sys.executable is not a
-    // reliable way to find the sibling agent-server, so never rely on it
+    // a onefile's sys.executable is not the sibling agent-server: pass it explicitly
     const agent = path.join(process.resourcesPath, "agent-server");
     return { cmd: bin, args: [...portArgs, "--agent-cmd", agent], cwd: os.homedir() };
   }
@@ -92,9 +64,7 @@ function spawnSupervisorCommand() {
   return { cmd: "uv", args: ["run", "python", ...args], cwd: root };
 }
 
-// Bring the machine supervisor up if it is not already there. Idempotent and
-// race-safe: we always probe first; if two windows spawn concurrently, the
-// loser's bind fails and it exits, while the winner serves both.
+// Idempotent and race-safe: concurrent spawns lose the bind and exit
 async function ensureSupervisor() {
   const probe = await supervisorProbe();
   if (probe === "up") return true;
@@ -128,12 +98,7 @@ async function ensureSupervisor() {
   return false;
 }
 
-// ---- shared supervisor session HTTP (local AND tunnel use this) ----
-// The machine supervisor API is identical wherever it runs: locally on
-// 127.0.0.1:8890, or remotely behind the SSH tunnel (the control forward to
-// the remote 8890). A caller passes the supervisor's base URL; sessions are
-// per-window and the heartbeat owns its own timer.
-
+// ---- shared supervisor session HTTP (identical local and behind the tunnel) ----
 async function supervisorSessionStart(base, baseUrl) {
   // POST {base}/api/session/start {base_url} -> {session_id, port}
   const ctl = new AbortController();
@@ -169,9 +134,7 @@ function supervisorSessionStop(base, sid) {
   } catch { /* supervisor already gone: nothing to tell */ }
 }
 
-// Keep a session alive; onFail fires when the supervisor stops answering (the
-// session was reaped, the remote supervisor restarted, the tunnel died, ...).
-// The caller decides whether to re-establish the session.
+// Keep a session alive; onFail fires when the supervisor stops answering
 function startSupervisorHeartbeat(base, sid, onFail) {
   const timer = setInterval(async () => {
     try {
@@ -198,13 +161,14 @@ function startSupervisorHeartbeat(base, sid, onFail) {
 }
 
 // ---- local session: this window's session child from the LOCAL supervisor ----
-async function startLocalSession() {
+// onFail fires when the supervisor stops answering (idle-exit or crash)
+async function startLocalSession(onFail = null) {
   if (!(await ensureSupervisor())) {
     return { mode: "failed", reason: "could not start the machine supervisor" };
   }
   const res = await supervisorSessionStart(`http://127.0.0.1:${SUPERVISOR_PORT}`);
   if (res.error) return { mode: "failed", reason: res.error };
-  const hb = startSupervisorHeartbeat(`http://127.0.0.1:${SUPERVISOR_PORT}`, res.sessionId, null);
+  const hb = startSupervisorHeartbeat(`http://127.0.0.1:${SUPERVISOR_PORT}`, res.sessionId, onFail);
   console.log(`[server-bootstrap] session ${res.sessionId} on port ${res.port}`);
   return {
     mode: "spawned",
@@ -213,9 +177,7 @@ async function startLocalSession() {
     stop: () => {
       hb.stop();
       supervisorSessionStop(`http://127.0.0.1:${SUPERVISOR_PORT}`, res.sessionId);
-      // We deliberately do NOT touch supervisorChild here: we spawned the
-      // supervisor, but we do not own its lifetime — it self-exits at zero
-      // sessions; the exit handler just logs the fact.
+      // we don't own the supervisor's lifetime: it self-exits at zero sessions
     },
   };
 }

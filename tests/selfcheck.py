@@ -54,8 +54,7 @@ def main() -> None:
     check(msgs[2]["role"] == "assistant" and msgs[2]["tool_calls"][0]["id"] == "c1", "assistant tool_calls preserved")
     check(msgs[3] == {"role": "tool", "tool_call_id": "c1", "content": "file content"}, "tool result paired")
 
-    # 2b. dangling tool_calls (crash/connection drop left the .clc mid-batch) must not
-    # reach the API: the incomplete assistant block is stripped, the user turn survives
+    # 2b. dangling tool_calls are stripped, the user turn survives
     log = LazyEventLog.in_memory()
     log.append(
         AssistantMessageEvent(
@@ -76,7 +75,7 @@ def main() -> None:
     check(not any(m["role"] == "tool" for m in msgs), "orphan/partial tool messages dropped")
     check(msgs[-1] == {"role": "user", "content": "continue"}, "user turn survives dangling block")
 
-    # 2c. assistant with real text + dangling tool_calls keeps the text, drops the calls
+    # 2c. real text + dangling tool_calls: text kept, calls dropped
     log = LazyEventLog.in_memory()
     log.append(
         AssistantMessageEvent(
@@ -91,8 +90,7 @@ def main() -> None:
         "dangling block keeps text, drops tool_calls",
     )
 
-    # 2d. dangling block with empty content + only reasoning must NOT leak a
-    # reasoning-only assistant (API rejects: "content or tool_calls must be set")
+    # 2d. reasoning-only assistant must not leak (API rejects it)
     log = LazyEventLog.in_memory()
     log.append(
         AssistantMessageEvent(
@@ -109,8 +107,7 @@ def main() -> None:
     valid_assistants = all(m["role"] != "assistant" or m.get("content") or "tool_calls" in m for m in msgs)
     check(valid_assistants, "every surviving assistant has content or tool_calls")
 
-    # 2e. compaction: the newest CompactionEvent's summary becomes the head; only
-    # the events AFTER it (the model window) are projected, old turns are omitted
+    # 2e. compaction: newest summary is the head; only events after it project
     log = LazyEventLog.in_memory()
     log.append(UserMessageEvent(content="old task"))
     log.append(AssistantMessageEvent(content="old turn done"))
@@ -126,9 +123,7 @@ def main() -> None:
         "pre-window turns omitted by compaction",
     )
 
-    # 2e2. when the window (after the newest compaction line) contains files the
-    # model worked on, they are listed so it re-reads them instead of writing
-    # their content from the summary's memory
+    # 2e2. window files are listed so the model re-reads them
     log2 = LazyEventLog.in_memory()
     log2.append(UserMessageEvent(content="task"))
     log2.append(AssistantMessageEvent(content="old work"))
@@ -154,9 +149,7 @@ def main() -> None:
         "compaction note lists the working files to re-read",
     )
 
-    # 2h. the model window is the events after the newest compaction line; a
-    # reopened (durable-only) log derives the same context as the live one —
-    # transient streaming deltas never enter the window.
+    # 2h. reopened (durable-only) log derives the same context as the live one
     live = LazyEventLog.in_memory()
     live.append(UserMessageEvent(content="task"))
     live.append(TextDeltaEvent(content="x"))
@@ -182,9 +175,7 @@ def main() -> None:
         "reopen keeps the same window (index stable across persistence)",
     )
 
-    # 2f. no turn-count windowing: a long log projects EVERYTHING (compaction is the
-    # only turn-level budget guard), and the raw task copy (index 0) is not sent
-    # twice — task.md re-injects it once
+    # 2f. long log projects everything; the raw task copy is not sent twice
     big = LazyEventLog.in_memory()
     big.append(UserMessageEvent(content="original task"))
     for i in range(30):
@@ -202,8 +193,7 @@ def main() -> None:
         "raw task copy excluded from projection",
     )
 
-    # 2g. no incremental tool-output folding: everything is preserved verbatim in the
-    # derived context (reads accumulate until compaction; only compaction trims)
+    # 2g. tool output is preserved verbatim (only compaction trims)
     cblog = LazyEventLog.in_memory()
     cblog.append(UserMessageEvent(content="t"))
     cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}]))
@@ -243,8 +233,7 @@ def main() -> None:
         )
         r = reg.execute(sb, config, "read_file", {"path": "multi.txt", "offset": 4, "limit": 2})
         check(r["content"] == "4: line4\n5: line5", "read_file range covering the tail has no footer")
-        # whole-file truncation tells the model how to continue, so it pages
-        # forward instead of re-reading the same head
+        # truncation tells the model how to continue
         big_body = "".join(f"line {i}\n" for i in range(3000))
         reg.execute(sb, config, "write_file", {"path": "big.txt", "content": big_body})
         r = reg.execute(sb, config, "read_file", {"path": "big.txt", "max_chars": 2000})
@@ -282,7 +271,7 @@ def main() -> None:
         check((sb.root / "edit.txt").read_text() == "alpha\nBETA\ngamma\n", "restore wrote the previous content back")
         check(sb.restore(sb.resolve("edit.txt")) == "alpha\nbeta\ngamma\n", "second restore pops the next snapshot")
         check(sb.restore(sb.resolve("edit.txt")) is None, "restore with no snapshot returns None")
-        # read_file on a directory lists its entries (the old list_dir tool)
+        # read_file on a directory lists its entries
         r = reg.execute(sb, config, "read_file", {"path": "."})
         check("edit.txt" in r["content"] and not r["error"], "read_file on a directory lists entries")
         r = reg.execute(sb, config, "read_file", {"path": ".", "offset": 1, "limit": 5})
@@ -337,7 +326,7 @@ def main() -> None:
         v = vterm2.verify(sb)
         check(not v.done and v.status == "verify_failed", "verify gate fails on failure")
 
-    # 7. skills: catalog + load_skill (model-chosen; no keyword matching, no hardcoded skill)
+    # 7. skills: catalog + load_skill
     from pathlib import Path
 
     lib = load_skill_library(Path(__file__).resolve().parents[1] / "agent" / "skills")
@@ -363,7 +352,7 @@ def main() -> None:
         r = reg.execute(sws, config, "load_skill", {"name": first, "file": "../escape.txt"})
         check(r["error"], "load_skill blocks path escape from skill dir")
 
-    # 8. proxy: socks scheme must never crash the client (the user's environment bug)
+    # 8. proxy: socks scheme must never crash the client
     import os
 
     from agent.llm.proxy import get_proxy_for_url
@@ -429,9 +418,7 @@ def main() -> None:
             pe.evaluate("write_file", '{"path": "../x.txt"}', ws) == "ask",
             "permission asks on escaping write",
         )
-        # write_file rules must match the PATH, not the content: a report whose text
-        # contains "~" (e.g. "16:07 UTC ~ 16:09 UTC") must not trigger an ask — that
-        # was teaching the model a fake "large-file limit" via permission timeouts
+        # write_file rules match the PATH, not the content ("~" in a report must not ask)
         check(
             pe.evaluate("write_file", '{"content": "16:07 UTC ~ 16:09 UTC", "path": "report.md"}', ws) == "allow",
             "write_file content with ~ does not prompt (path-only matching)",
@@ -441,9 +428,7 @@ def main() -> None:
             "write_file path with ~ still asks",
         )
 
-        # an absolute path INSIDE the workspace (the workdir or a subfolder) is
-        # not an escape: writes/runs against it must NOT prompt (regression: the
-        # `^/` heuristic used to ask on every absolute path)
+        # absolute paths INSIDE the workspace are not escapes; must not prompt
         sub = Path(wtmp) / "sub"
         sub.mkdir()
         check(
@@ -467,8 +452,7 @@ def main() -> None:
             "write_file on an absolute path outside still asks",
         )
 
-        # 9b. gate: an ask blocks until resolved (no timeout — the model must never
-        # see "permission request timed out"); resolve(False) unblocks as a deny
+        # 9b. gate: an ask blocks until resolved; resolve(False) denies
         import threading as _threading
 
         from agent.core.permission import PermissionGate, PermissionRequired
@@ -505,8 +489,7 @@ def main() -> None:
             )
         check(len(gate2.pending_ids()) == 0, "no-UI ask leaves no pending entry")
 
-        # 9d. sandbox escapes: real resolution (not regex) flags external paths for
-        # an ask; the approval is granted for that one path until cleared
+        # 9d. sandbox escapes: real resolution flags external paths for an ask
         check(
             pe.escaped_paths("read_file", '{"path": "/etc/passwd"}', ws) == frozenset({Path("/etc/passwd").resolve()}),
             "escaped_paths flags an external read",
@@ -517,8 +500,7 @@ def main() -> None:
             "escaped_paths flags external tokens in run_command",
         )
         check(pe.escaped_paths("read_file", '{"path": "a.txt"}', ws) == frozenset(), "in-sandbox path has no escapes")
-        # scratch exemption needs a workspace that is NOT itself inside /tmp
-        # (a /tmp workspace's own escapes must stay flagged, see 9c above)
+        # scratch exemption: the workspace must not itself be inside /tmp
         with tempfile.TemporaryDirectory(dir=Path.home()) as home_tmp:
             home_ws = LocalWorkspace(home_tmp)
             check(
@@ -572,9 +554,7 @@ def main() -> None:
         except ValueError:
             check(True, "cleared escape is refused again")
 
-        # 9f. auto-allow (eval harness / unattended) fails CLOSED on escapes — no
-        # user is attached to approve, so the sandbox stays intact; rule asks are
-        # still auto-allowed as before
+        # 9f. auto-allow fails closed on escapes; rule asks stay auto-allowed
         unattended = PermissionGate(evaluator=pe, auto_allow=True)
         try:
             unattended.require("read_file", '{"path": "/etc/passwd"}', ws)
@@ -611,8 +591,7 @@ def main() -> None:
         r = reg.execute(ws, config, "read_file", {"path": "."})
         check(proj.path.name not in r["content"], "read_file on a directory hides .clc")
 
-    # 10b. project memory: saved memories persist to the [memories] section of the
-    # .clc and survive a reopen; the memory tools read/write them.
+    # 10b. project memory: memories persist to the .clc and survive reopen
     with tempfile.TemporaryDirectory() as ptmp:
         proj = create_project(Path(ptmp) / "mem", "mem")
         check(proj.memories is not None, "create_project attaches a MemoryStore")
@@ -645,10 +624,7 @@ def main() -> None:
             "no memory tools without a MemoryStore",
         )
 
-    # 10c. fixed-width header memory index: FIFO ring keeps the newest 10, the
-    # index line is updated IN PLACE (never appended) so event offsets stay
-    # stable; legacy files (no index) load memories via the section scan and
-    # are NEVER rewritten — conversion is the migration script's job.
+    # 10c. fixed-width header memory index (in-place update, offsets stable)
     from agent.events import _line_bytes
     from agent.memory import _MEMORY_INDEX_PREFIX, parse_index_line
 
@@ -678,9 +654,7 @@ def main() -> None:
         )
         check(reopened2.memories._index_offset == off_before, "index line never moves (absolute offset stable)")
 
-        # legacy file without an index: memories load via the [memories] section
-        # scan — the open NEVER migrates (that is the migration script's job),
-        # so the file is left byte-for-byte untouched
+        # legacy file without an index: open never migrates, file untouched
         legacy = Path(ptmp) / "legacy.clc"
         evs = [UserMessageEvent(content="task")]
         for i in range(1, 60):
@@ -702,9 +676,7 @@ def main() -> None:
         mig = open_project_lazy(legacy)
         check(mig.memories.get("m1") is not None, "legacy file memories load via section scan")
         check(legacy.read_bytes() == legacy_before, "writable open never rewrites a legacy file")
-        # a legacy file cannot persist its compaction boundary, so the open
-        # DERIVES it from the newest compaction line (never re-summarizes the
-        # whole history); it is still never migrated/rewritten
+        # legacy file: open derives the compaction boundary from the newest line
         check(mig.log.cpr_start() > 0, "legacy file with a compaction derives its window boundary")
         check(
             all(e.type != "user_message" or i == 0 for i, e in enumerate(mig.events())),
@@ -713,8 +685,7 @@ def main() -> None:
         mig.memories.save("m2", "two")
         check(open_project_lazy(legacy).memories.get("m2") is not None, "post-open save persists (scan fallback)")
 
-        # corrupt index line: the parse fails and memories fall back to the
-        # section scan — the file is left untouched (the script rebuilds indexes)
+        # corrupt index: fall back to the section scan, file untouched
         corrupt = Path(ptmp) / "corrupt.clc"
         cproj = create_project(corrupt, "c")
         cproj.memories.save("a", "A")
@@ -741,11 +712,8 @@ def main() -> None:
         check(roproj.memories.get("ro1") is not None, "read_only: legacy scan loads memories")
         check(ro.read_bytes() == before, "read_only: file untouched (no migration)")
 
-    # 11. windowed .clc loading: a compaction file opens with ONLY the model
-    # WINDOW (everything since the newest compaction line, from its
-    # header-persisted cpr_start) materialized; the raw task and the summarized
-    # middle stay on disk (older = cpr_start) and are paged via pure-disk
-    # read_page; deriving with the middle on disk == a full load.
+    # 11. windowed .clc loading: only the model window materializes; older
+    # history stays on disk and is paged via pure-disk read_page
     with tempfile.TemporaryDirectory() as ptmp:
         from agent.core.lazy import _make_reader, parse_durable
         from agent.events import _line_bytes
@@ -785,9 +753,7 @@ def main() -> None:
         read, total = _make_reader(p, None)
         check(total == log._file_bytes, "reader sees the full file bytes")
 
-        # paging: pure-disk read of the history before the window — it NEVER
-        # enters the resident log (browsing is decoupled from the model context)
-        # — and the derived context with that history on disk == a full load
+        # paging: pure-disk read of pre-window history; derived context == a full load
         page = log.read_page(0, comp_off)
         check(len(page) == 90, "read_page pages the task + the on-disk middle on demand (90 events)")
         check(
@@ -809,8 +775,7 @@ def main() -> None:
             "middle stays summarized away (the window excludes it)",
         )
 
-        # a .clc with no cpr_start line: full window (everything materializes,
-        # older = 0); the open never migrates it (the script's job)
+        # no cpr_start line: full window; open never migrates it
         legacy = Path(ptmp) / "legacy.clc"
         legacy.write_text(
             "\n".join(
@@ -837,10 +802,7 @@ def main() -> None:
             "open never rewrites a legacy file (no cpr_start inserted)",
         )
 
-    # 12. lazy open handles a [memories] section: the index records the marker and
-    # parse_durable skips the memory lines (valid JSON with no `type`), so opening
-    # a .clc that has memories (even with events after them) neither crashes nor
-    # silently drops them.
+    # 12. lazy open handles a [memories] section (parse_durable skips memory lines)
     with tempfile.TemporaryDirectory() as ptmp:
         from agent.project import open_project_lazy
 
@@ -883,9 +845,7 @@ def main() -> None:
             "events after the memory section still load",
         )
 
-    # 13. LLM endpoint configurability: one flat settings surface (base_url /
-    # model / api_key / reasoning_effort), legacy profile-map migration, and
-    # the client factory (no provider presets anywhere).
+    # 13. LLM endpoint configurability: one flat settings surface + legacy migration
     from agent.config import flatten_settings
     from agent.llm import create_llm_client
 
@@ -933,8 +893,7 @@ def main() -> None:
             else:
                 os.environ[k] = v
 
-    # 13b. provider error strings are tidied: the SDK's 'Error code: N - {dict}'
-    # dump becomes the provider's own message (+ code / HTTP status)
+    # 13b. provider error strings are tidied to the provider's own message
     from agent.llm.client import _clean_provider_message
 
     m = _clean_provider_message(

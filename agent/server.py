@@ -44,9 +44,8 @@ from .project import Project, create_project, open_project_lazy
 from .tools.transport import SshTransport
 from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
 
-# a client hanging up mid-SSE surfaces as one of these on the socket write; any
-# of them means "stream over" — end cleanly, never let socketserver print a
-# BrokenPipeError traceback
+# a client hanging up mid-SSE surfaces as one of these on the socket write;
+# end cleanly, never let socketserver print a BrokenPipeError traceback
 _SSE_ERR = (BrokenPipeError, ConnectionResetError, ValueError)
 
 
@@ -211,10 +210,8 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
-            # publish the permission request to the UI; the agent blocks until
-            # the UI replies via /api/permission/respond. With no live SSE
-            # subscriber the prompt is invisible, so report that back and let the
-            # gate deny instead of blocking forever on an unseen request.
+            # publish the permission request to the UI; with no SSE subscriber
+            # the gate denies instead of blocking forever
             if self._broadcaster.count() == 0:
                 return False
             self._broadcaster.publish(
@@ -393,21 +390,13 @@ class Handler(BaseHTTPRequestHandler):
             # taskbar after a project switch or an interrupted run
             try:
                 self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
-                # replay the requested project's history first (only durable display
-                # events — streaming deltas are transient and never replayed).
-                # Each SSE subscriber asks for its own project (per-window isolation);
-                # replay=False skips it when the UI just rendered the history itself
-                # via the open NDJSON stream. A lazy project replays its resident
-                # events with their byte offsets so the UI can restore the scroll-up
-                # pill and keep paging; the "history" info line carries the honest
-                # on-disk older count.
+                # replay durable events only (deltas are transient); replay=False
+                # skips it when the UI just rendered the open NDJSON stream
                 if replay:
                     project = self._project_for_sse(project_q)
                     if project is not None:
                         log = project.log
-                        # every project is a lazy log: replay the resident events
-                        # with their byte offsets so the UI can restore the scroll-up
-                        # pill and keep paging; the history line carries the honest
+                        # lazy log: resident events replay with byte offsets + the
                         # on-disk older count
                         self._write_sse_raw({"type": "history", "older": max(0, log.cpr_start())})
                         for off, ev in log.items():
@@ -664,14 +653,8 @@ class Handler(BaseHTTPRequestHandler):
                 }
             }
         )
-        # every project is a lazy log: ONLY the model WINDOW (everything since
-        # the newest compaction line) is resident at open; every line carries
-        # its byte offset (relative to the event region) so the UI can page the
-        # rest (the raw task included) via /api/history.
-        # "older" is the honest count of event-region BYTES still on disk
-        # before the loaded window (0 once everything is materialized). The
-        # paging channel is a pure disk read — it never touches the resident
-        # log, so history browsing is fully decoupled from the model context.
+        # lazy log: only the model window (since the newest compaction line) is
+        # resident; "older" = event-region BYTES still on disk, paged via /api/history
         log = project.log
         pairs = log.items()
         emit({"count": len(pairs), "older": max(0, log.cpr_start())})

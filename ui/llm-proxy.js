@@ -1,15 +1,8 @@
-// Client-side LLM reverse proxy, embedded in the Electron main process.
-//
-// Transparent: accepts OpenAI-compatible POST /chat/completions, injects the
-// client's API key, forwards to the upstream provider, and streams the response
-// (SSE, tools, reasoning_content) back byte-for-byte. The remote backend points
-// --base-url at http://127.0.0.1:8892/v1 and the SSH -R reverse tunnel maps that
-// port back here, so the remote server needs no internet and no API key.
-//
-// The upstream call honors the machine's HTTP proxy (env http_proxy/https_proxy/
-// all_proxy, or the proxy in ~/.npmrc), has a timeout, and surfaces the real
-// upstream error instead of a bare 502.
-
+// Client-side LLM reverse proxy (Electron main process): accepts
+// OpenAI-compatible /chat/completions, injects the client API key, forwards to
+// the upstream provider, and streams the response back. The remote backend
+// reaches it via the SSH -R tunnel (no remote internet/key needed). Honors the
+// machine's HTTP proxy and surfaces the real upstream error.
 const http = require("http");
 const https = require("https");
 const os = require("os");
@@ -22,8 +15,7 @@ const UPSTREAM_TIMEOUT_MS = 90000;
 let server = null;
 let agent = null;
 
-// Read ~/.clutch/settings.json, resolving to the flat endpoint config.
-// Legacy {profiles, active} maps resolve to the active profile's values.
+// Read ~/.clutch/settings.json; legacy {profiles, active} maps resolve to the active profile
 function readSettingsFile() {
   try {
     const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
@@ -36,11 +28,8 @@ function readSettingsFile() {
   }
 }
 
-// Upstream LLM endpoint: env first, then the local settings file the app
-// writes (~/.clutch/settings.json — base_url saved in the UI settings modal),
-// falling back to the DeepSeek default. This is what keeps the proxy from
-// being hard-locked to one provider: any OpenAI-compatible base URL (Zhipu,
-// Moonshot, Ollama, ...) works here.
+// Upstream LLM endpoint: env first, then ~/.clutch/settings.json, then the
+// DeepSeek default — any OpenAI-compatible base URL works.
 function getUpstream() {
   const e = process.env;
   if (e.CLUTCH_LLM_UPSTREAM) return e.CLUTCH_LLM_UPSTREAM;
@@ -49,8 +38,7 @@ function getUpstream() {
   return "https://api.deepseek.com";
 }
 
-// Client API key: env first, then the local settings file the app writes
-// (~/.clutch/settings.json), so a key saved in the UI is honored too.
+// Client API key: env first, then the settings file, so a UI-saved key is honored
 function getApiKey() {
   const e = process.env;
   if (e.CLUTCH_API_KEY) return e.CLUTCH_API_KEY;
@@ -87,13 +75,9 @@ function getAgent(target) {
   return agent;
 }
 
-// Build the upstream URL for a proxied request. Remote sessions target the
-// proxy with an OpenAI-style base URL (http://127.0.0.1:8892/v1), so reqUrl is
-// /v1/chat/completions. The configured upstream may itself carry a path
-// (Zhipu: /api/paas/v4, Ollama: /v1, ...): strip the SDK's /v1 segment and
-// append the remainder to the upstream's path instead of blind concatenation
-// (which would double the path: …/api/paas/v4/v1/chat/completions) — and NOT
-// via new URL(path, base), whose leading "/" would replace the upstream path.
+// Build the upstream URL: strip the SDK's /v1, append the remainder to the
+// upstream's own path (which may carry one, e.g. Zhipu /api/paas/v4) — not new
+// URL(path, base), whose leading "/" would replace that path.
 function joinUpstream(upstream, reqUrl) {
   const [rawPath, search = ""] = reqUrl.split("?");
   const rel = rawPath.replace(/^\/v1(?=\/|$)/, "").replace(/^\//, "");
