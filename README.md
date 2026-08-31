@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/github/license/Ethereal1024/Clutch)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=CI)](https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml)
+[![Release](https://img.shields.io/github/v/release/Ethereal1024/Clutch?label=Release&color=blue)](https://github.com/Ethereal1024/Clutch/releases/latest)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
 Clutch 是一个编程智能体：给它一句话任务，它会调用大语言模型，自主地读写文件、
@@ -59,15 +60,21 @@ flowchart LR
 
 ## 桌面版（Linux）
 
-`scripts/release.sh` 把后端打成 PyInstaller 二进制，连同 Electron 界面打包成 deb，
-目标机器不需要 Python / Node / 网络：
+安装包发布在 GitHub Releases（顶部 Release 徽章直通最新版）：
+
+**[https://github.com/Ethereal1024/Clutch/releases](https://github.com/Ethereal1024/Clutch/releases)**
+
+在 Release 页面下载 `clutch-ui_<版本>_amd64.deb`（例：v0.1.1 →
+`clutch-ui_0.1.1_amd64.deb`），目标机器不需要 Python / Node / 网络：
 
 ```bash
 sudo dpkg -i clutch-ui_<版本>_amd64.deb
 ```
 
-推送 vX.Y.Z 的 tag 会触发 CI 自动构建（见 `.github/workflows/release.yml`）。deb 内
-的后端绑定构建机的系统与架构，跨平台场景建议用上面的 SSH 路径。
+`scripts/release.sh` 把后端打成 PyInstaller 二进制，连同 Electron 界面打包成 deb。
+推送 vX.Y.Z 的 tag 会触发 CI 自动构建并附加到 Release（见
+`.github/workflows/release.yml`）。deb 内的后端绑定构建机的系统与架构，跨平台场景
+建议用上面的 SSH 路径。
 
 ## 工作原理
 
