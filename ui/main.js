@@ -1,6 +1,6 @@
 // Electron main process: claims/releases each window's backend session
 // (local or tunneled) and re-establishes it on death via backend:base-changed.
-const { app, BrowserWindow, ipcMain, session } = require("electron");
+const { app, BrowserWindow, ipcMain, session, shell } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -172,6 +172,15 @@ process.on("unhandledRejection", (e) => {
 // for saved state) the loser cannot open the profile's LevelDB lock, so its
 // localStorage — saved SSH connections, last dir, mode — reads EMPTY and every
 // write is silently lost (the "device list only shows localhost" bug).
+// external URLs (model-provided links etc.) must open in the SYSTEM browser;
+// an in-window navigation would replace the whole app UI with the target page
+// and leave no way back (no back button), forcing the user to restart the session
+function openExternally(url) {
+  if (url && (url.startsWith("http:") || url.startsWith("https:"))) {
+    shell.openExternal(url);
+  }
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -184,6 +193,25 @@ function createWindow() {
       nodeIntegration: false,
       preload: path.join(__dirname, "preload.js"),
     },
+  });
+  // window.open() / target=_blank: never create a new app window, hand off to the browser
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
+    return { action: "deny" };
+  });
+  // plain link clicks (no target) would navigate THIS window: the app itself
+  // lives on file://, so anything that leaves the current URL is an external
+  // link — web URLs go to the system browser, everything else is blocked
+  win.webContents.on("will-navigate", (event, url) => {
+    const current = win.webContents.getURL();
+    if (url.startsWith("http:") || url.startsWith("https:")) {
+      event.preventDefault();
+      openExternally(url);
+    } else if (url !== current) {
+      // file: (relative links to project files), javascript:, … — never let a
+      // link swap the app UI out (no way back) nor hand untrusted file: to the OS
+      event.preventDefault();
+    }
   });
   // release the session as soon as the window closes/crashes so its lock frees
   const winId = win.webContents.id;
