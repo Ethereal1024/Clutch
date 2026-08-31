@@ -211,16 +211,27 @@
       loader: {
         paths: { fonts: "vendor/mathjax-fonts" },
       },
-      // a11y speech/braille spin up a WebWorker (sre/speech-worker.js) that is
-      // not part of the single-file build and cannot load under file:// — the
-      // worker's importScripts fails inside the worker, no message ever comes
-      // back, and MathJax waits forever (open-project bar sticks at 90%).
-      // The menu settings (enrich/speech/braille, all default true) drive
-      // these via enableEnrichment/enableSpeech/enableBraille on the document;
-      // their config merge path is not exposed, so flip them at startup.
-      // Visual rendering is unaffected.
+      // Root cause of "$F = ma$ stays literal": MathJax init hangs. The menu
+      // constructor's checkLoadableItems() sees settings.enrich=true (default)
+      // and calls loadA11y("explorer") -> loadComponent("a11y/explorer"), whose
+      // SRE/explorer modules are NOT part of this single-file build and cannot
+      // load under file:// — menu.loadingPromise stays pending forever, which
+      // wedges defaultPageReady()'s chain and thus every typesetPromise().
+      // MathJax.config.menu is never read by the bundle, so the only lever is
+      // to patch Menu.OPTIONS.settings BEFORE defaultReady() runs. Also flip
+      // the document flags (they would otherwise re-enable speech/braille
+      // workers that cannot load under file://). Visual rendering is
+      // unaffected; the menu just loses the a11y (enrich/speech/braille)
+      // toggle entries.
       startup: {
         ready: () => {
+          const M =
+            MathJax._ && MathJax._.ui && MathJax._.ui.menu && MathJax._.ui.menu.Menu && MathJax._.ui.menu.Menu.Menu;
+          if (M && M.OPTIONS && M.OPTIONS.settings) {
+            M.OPTIONS.settings.enrich = false;
+            M.OPTIONS.settings.speech = false;
+            M.OPTIONS.settings.braille = false;
+          }
           MathJax.startup.defaultReady();
           const doc = MathJax.startup.document;
           if (doc && doc.options) {

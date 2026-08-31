@@ -596,10 +596,13 @@ function addEvent(ev) {
   const el = renderEvent(ev);
   if (el) {
     (pageSink || eventsEl).appendChild(el);
-    // user tasks render markdown too; replay hits this path as well
-    if (el.classList.contains("event.user")) highlightCode(el);
+    // user tasks render markdown too; replay hits this path as well.
+    // NOTE: className is "event user" (two tokens) — classList.contains("event.user")
+    // would be a single-token lookup and ALWAYS false (live math never typeset);
+    // use CSS selector semantics like the replay path's ".event.user .body".
+    if (el.matches(".event.user")) highlightCode(el);
     // user tasks may carry LaTeX; live path only (replay batches it after insertion)
-    if (el.classList.contains("event.user") && !pageSink) typesetMath(el);
+    if (el.matches(".event.user") && !pageSink) typesetMath(el);
     autoScroll();
   }
 }
