@@ -17,3 +17,7 @@ dist/
 # one-time .clc migration tool — RECOVERY.md's escape hatch for old files on
 # this machine; keep it local, do not ship it in the repo
 scripts/convert-clc-to-cpr.py
+
+# local debug/scratch workspaces (mermaid render repro, jsdom repro) — keep out
+.mermaid-test/
+mj-repro/
