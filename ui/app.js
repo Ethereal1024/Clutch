@@ -2173,6 +2173,13 @@ function connectSSE(replay = true) {
   // backend not claimed yet: the main process announces the real URL via
   // backend:base-changed -> switchBackend -> reconnectSSE
   if (!API_BASE) return;
+  // INVARIANT: at most one live stream per window. es is module-level and its
+  // callers are many (boot, switchBackend, open/new project, base-changed
+  // heal); the owner enforces single-stream here, so any call order — e.g. the
+  // boot IIFE switching backends before its trailing connect — replaces the
+  // old stream instead of leaking a second one (two live streams deliver every
+  // event twice: the per-token stutter).
+  if (es) es.close();
   // ?project= scopes the stream to this window's .clc; replay=0 right after
   // open/create already rendered the history
   const qs = new URLSearchParams();
@@ -2579,7 +2586,9 @@ $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
 $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
 $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
-// settle the stored URL before connecting SSE; reconnectSSE no-ops while es is null
+// settle the stored URL before connecting SSE; connectSSE is idempotent, so a
+// switch inside reconciledBackendUrl (stale-SSH fallback, tunnel target) plus
+// the trailing call still leaves exactly one live stream
 (async () => {
   await resolveApiBase(); // learn this window's session port (IPC) first
   const url = await reconciledBackendUrl();
