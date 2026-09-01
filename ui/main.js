@@ -246,31 +246,58 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    // Mirror UI LLM settings into the proxy's flat ~/.clutch/settings.json
-    // (legacy {profiles, active} maps collapse to their active profile).
+    // The flat mirror file the backend + LLM proxy read; the UI's localStorage
+    // is the source of truth, this file is (re)written on every UI save.
+    function writeSettingsFile(data) {
+      const p = path.join(os.homedir(), ".clutch", "settings.json");
+      let cur = {};
+      try {
+        cur = JSON.parse(fs.readFileSync(p, "utf-8"));
+      } catch (e) {
+        /* first save: start from an empty file */
+      }
+      if (cur && cur.profiles) {
+        cur = cur.profiles[cur.active] || {}; // legacy map: keep the active profile's values
+      }
+      const upd = {};
+      for (const k of ["base_url", "model"]) {
+        if (data && data[k]) upd[k] = data[k];
+      }
+      if (data && data.api_key) upd.api_key = data.api_key;
+      // empty string clears the knob (provider default), undefined keeps it
+      if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
+      const flat = Object.assign({}, cur, upd);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, JSON.stringify(flat, null, 2), { mode: 0o600 });
+    }
+
     ipcMain.handle("settings:save", async (_e, data) => {
       try {
-        const p = path.join(os.homedir(), ".clutch", "settings.json");
+        writeSettingsFile(data);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) };
+      }
+    });
+
+    // Self-heal the mirror: settings.json is derived state that session
+    // children (LLM config) and the LLM proxy read, but only a UI save
+    // recreates it — if it went missing/corrupt while localStorage still holds
+    // the config, the next session spawn silently boots with an EMPTY LLM
+    // config. Rebuild from the renderer's copy, but ONLY when the file is
+    // missing/blank: an existing file may hold intentional manual edits.
+    ipcMain.handle("settings:ensure", async (_e, data) => {
+      try {
         let cur = {};
         try {
-          cur = JSON.parse(fs.readFileSync(p, "utf-8"));
+          cur = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
         } catch (e) {
-          /* first save: start from an empty file */
+          /* missing/corrupt: heal below */
         }
-        if (cur && cur.profiles) {
-          cur = cur.profiles[cur.active] || {}; // legacy map: keep the active profile's values
-        }
-        const upd = {};
-        for (const k of ["base_url", "model"]) {
-          if (data && data[k]) upd[k] = data[k];
-        }
-        if (data && data.api_key) upd.api_key = data.api_key;
-        // empty string clears the knob (provider default), undefined keeps it
-        if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
-        const flat = Object.assign({}, cur, upd);
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        fs.writeFileSync(p, JSON.stringify(flat, null, 2), { mode: 0o600 });
-        return { ok: true };
+        if (cur && (cur.base_url || cur.api_key || cur.model)) return { ok: true, healed: false };
+        writeSettingsFile(data);
+        tunnelLog("[settings] mirror missing — rebuilt ~/.clutch/settings.json from the UI config");
+        return { ok: true, healed: true };
       } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
       }

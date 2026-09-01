@@ -2586,11 +2586,49 @@ $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
 $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
 $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
+// the flat LLM config this UI would mirror to ~/.clutch/settings.json, read
+// from localStorage (the UI's own source of truth); null when nothing stored.
+// Active profile first, then the legacy clutch_llm + clutch_api_key pair.
+function storedLlmConfig() {
+  try {
+    const active = localStorage.getItem("clutch_llm_active");
+    const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
+    const p = active && profiles[active];
+    if (p && (p.base_url || p.model || p.api_key)) {
+      return {
+        base_url: p.base_url || "",
+        model: p.model || "",
+        api_key: p.api_key || "",
+        reasoning_effort: p.reasoning_effort || "",
+      };
+    }
+  } catch (e) {}
+  try {
+    const legacy = JSON.parse(localStorage.getItem("clutch_llm") || "null");
+    const key = localStorage.getItem("clutch_api_key") || "";
+    if (legacy && (legacy.base_url || legacy.model || key)) {
+      return { base_url: legacy.base_url || "", model: legacy.model || "", api_key: key, reasoning_effort: "" };
+    }
+  } catch (e) {}
+  return null;
+}
+
+// rebuild the settings.json mirror if it went missing while the UI still has
+// the config (fire-and-forget: the next session spawn / proxy request needs it)
+function healSettingsMirror() {
+  const cfg = storedLlmConfig();
+  if (!cfg) return; // nothing stored: nothing to heal from
+  if (window.clutchSettings && window.clutchSettings.ensure) {
+    window.clutchSettings.ensure(cfg).catch(() => {});
+  }
+}
+
 // settle the stored URL before connecting SSE; connectSSE is idempotent, so a
 // switch inside reconciledBackendUrl (stale-SSH fallback, tunnel target) plus
 // the trailing call still leaves exactly one live stream
 (async () => {
   await resolveApiBase(); // learn this window's session port (IPC) first
+  healSettingsMirror();
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();

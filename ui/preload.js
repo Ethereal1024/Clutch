@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld("clutchApi", {
 
 contextBridge.exposeInMainWorld("clutchSettings", {
   save: (data) => ipcRenderer.invoke("settings:save", data),
+  // rebuild the ~/.clutch/settings.json mirror when it is missing (self-heal)
+  ensure: (data) => ipcRenderer.invoke("settings:ensure", data),
 });
 
 contextBridge.exposeInMainWorld("clutchTunnel", {
