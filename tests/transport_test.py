@@ -61,6 +61,31 @@ def main() -> int:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         bridge = f"http://127.0.0.1:{srv.server_address[1]}"
 
+        # regression (macOS SSH): constructing a RemoteWorkspace must not touch
+        # the LOCAL filesystem — the root lives on the remote host, and macOS
+        # autofs (/home) fails a local mkdir with [Errno 45] ENOTSUP, which
+        # surfaced as "cannot create project: [Errno 45] Operation not
+        # supported: '/home/<user>'".
+        mkdir_calls: list[str] = []
+        real_mkdir = Path.mkdir
+
+        def _rec_mkdir(self, *a, **k):  # pure recorder: no real FS writes
+            mkdir_calls.append(str(self))
+
+        Path.mkdir = _rec_mkdir  # type: ignore[method-assign]
+        try:
+            _ = RemoteWorkspace("/home/remote-user/proj", bridge)
+        finally:
+            Path.mkdir = real_mkdir  # type: ignore[method-assign]
+        check(
+            not any(c.startswith("/home/") for c in mkdir_calls),
+            "RemoteWorkspace construction never mkdirs the remote root locally",
+        )
+
+        made = Path(rtmp) / "init-made" / "deep"
+        _ = LocalWorkspace(str(made))
+        check(made.is_dir(), "LocalWorkspace still creates its root (behavior kept)")
+
         ws = RemoteWorkspace(rtmp, bridge)
 
         # heredoc round trip: $, backticks, single/double quotes, tab, newline

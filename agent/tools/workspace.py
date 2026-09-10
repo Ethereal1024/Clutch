@@ -77,7 +77,11 @@ def _inside_or_scratch(p: Path, root: Path) -> bool:
 class Workspace(ABC):
     def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
         self.root: Path = Path(root) if root else Path(tempfile.mkdtemp(prefix="clutch-"))
-        self.root.mkdir(parents=True, exist_ok=True)
+        # No local mkdir here on purpose: this base also serves RemoteWorkspace,
+        # whose root lives on another HOST. Creating it locally broke macOS
+        # (/home is an autofs mount: mkdir -> [Errno 45] ENOTSUP -> "cannot
+        # create project"). LocalWorkspace ensures its root in its own
+        # __init__; the remote side creates what it needs (mkdir -p on write).
         self._transport = transport or LocalTransport(str(self.root))
         self._protected: set[Path] = set()
         # absolute paths outside the root the CURRENT tool call may touch;
@@ -222,6 +226,10 @@ class Workspace(ABC):
 
 
 class LocalWorkspace(Workspace):
+    def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
+        super().__init__(root, transport)
+        self.root.mkdir(parents=True, exist_ok=True)
+
     def read(self, path: str) -> str:
         p = self.resolve(path)
         if not p.is_file():
