@@ -61,10 +61,67 @@ class ProjectOpenConflict(AgentError):
 @dataclass
 class LockHandle:
     """A held lock. release() drops it; a crashed holder frees it automatically
-    because the kernel releases the flock when the process exits."""
+    because the kernel releases the flock when the process exits (POSIX). On
+    Windows the claim is an O_EXCL marker file carrying the holder pid — a
+    crashed holder's marker is reclaimed by the pid check instead."""
 
     clc_path: str
-    fd: int | None = None  # the flock fd (POSIX) / O_EXCL fd (Windows)
+    fd: int | None = None  # the flock fd (POSIX); None on Windows
+    marker: str | None = None  # the O_EXCL marker file path (Windows)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is a process id live? POSIX: kill(pid, 0). Windows: OpenProcess + a
+    zero-timeout wait — os.kill(pid, 0) on Windows TERMINATES the target, it
+    does not probe. Unreadable cases answer "alive" (fail closed: never steal
+    a lock we cannot prove is stale)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            SYNCHRONIZE = 0x00100000
+            WAIT_TIMEOUT = 0x102  # a zero-timeout wait timing out == alive
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if not handle:
+                return False
+            try:
+                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:  # noqa: BLE001 -- cannot tell -> assume alive
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return True
+
+
+def _reclaim_stale(lock_path: str) -> bool:
+    """Windows only: a crashed holder leaves its marker file forever (nothing
+    holds it open, so no kernel cleanup). Read the pid; when the process is
+    gone the lock is free — unlink so the O_EXCL create can win. Returns True
+    when the marker was removed."""
+    try:
+        with open(lock_path, "rb") as f:
+            raw = f.read(32).decode("ascii", errors="ignore").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return False  # unreadable/garbage marker: treat it as held
+    if _pid_alive(pid):
+        return False
+    try:
+        os.unlink(lock_path)
+        return True
+    except OSError:
+        return False
 
 
 def _local_lock_path(clc_path: str) -> str:
@@ -98,30 +155,47 @@ class ProjectLock:
     @staticmethod
     def _acquire_local(key: str) -> LockHandle | None:
         lock_path = _local_lock_path(key)
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-        except OSError:
-            return None
         if fcntl is not None:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            except OSError:
+                return None
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 os.close(fd)
                 return None
-        else:  # pragma: no cover - Windows: O_EXCL atomic create instead
+            return LockHandle(clc_path=key, fd=fd)
+        # Windows: no flock. The O_EXCL create is the atomic claim, and the
+        # marker file carries the holder pid so a crashed process's stale
+        # marker can be reclaimed. The earlier O_CREAT probe must NOT run
+        # here: it would create the file and doom the O_EXCL open below.
+        if os.name != "nt":  # pragma: no cover - flock-less POSIX: no claim
+            return None
+        for attempt in range(2):
             try:
-                fd2 = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-            except OSError:
-                os.close(fd)
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                if attempt == 0 and _reclaim_stale(lock_path):
+                    continue  # crashed holder: marker removed, retry the claim
                 return None
-            os.close(fd)
-            fd = fd2
-        return LockHandle(clc_path=key, fd=fd)
+            except OSError:
+                return None
+            try:
+                os.write(fd, str(os.getpid()).encode("ascii"))
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+            return LockHandle(clc_path=key, fd=None, marker=lock_path)
+        return None  # pragma: no cover - unreachable (loop always returns)
 
     @classmethod
     def release(cls, handle: LockHandle | None) -> None:
-        """Drop a lock: unlock+close the fd. The kernel also frees it if this
-        process dies while holding it — no stale lock survives a crash."""
+        """Drop a lock: unlock+close the fd (POSIX) or remove the marker file
+        (Windows). The kernel also frees a flock if this process dies while
+        holding it — no stale lock survives a crash; the Windows marker is
+        reclaimed by the pid check instead."""
         if handle is None:
             return
         cls._held.pop(handle.clc_path, None)
@@ -135,11 +209,11 @@ class ProjectLock:
                 os.close(handle.fd)
             except OSError:
                 pass
-            if fcntl is None:  # Windows: remove the O_EXCL marker file
-                try:
-                    os.unlink(_local_lock_path(handle.clc_path))
-                except OSError:
-                    pass
+        if handle.marker is not None:
+            try:
+                os.unlink(handle.marker)
+            except OSError:
+                pass
 
     @classmethod
     def release_all(cls) -> None:

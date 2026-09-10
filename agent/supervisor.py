@@ -156,13 +156,18 @@ class Supervisor:
             cmd = [*self.agent_cmd, "--port", "0"]
             if base_url:
                 cmd += ["--base-url", base_url]
+            # POSIX: own process group -> group kill. Windows has no setsid/
+            # killpg; a new process group lets CTRL_BREAK reach the child.
+            spawn: dict = {"start_new_session": True} if os.name == "posix" else {}
+            if os.name == "nt":
+                spawn["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             proc = subprocess.Popen(
                 cmd,
                 cwd=self.cwd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,  # own process group -> group kill
                 env=env,
+                **spawn,
             )
         except OSError as e:  # pragma: no cover - venv/bundle missing
             _log(f"[supervisor] spawn failed: {e}")
@@ -278,7 +283,12 @@ class Supervisor:
         if proc.poll() is not None:
             return
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            else:
+                # Windows: no killpg; CTRL_BREAK is the graceful stop (the
+                # child is spawned with CREATE_NEW_PROCESS_GROUP)
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
         except (ProcessLookupError, PermissionError):
             try:
                 proc.kill()
@@ -288,7 +298,10 @@ class Supervisor:
             proc.wait(timeout=KILL_GRACE_S)
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                if os.name == "posix":
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.kill()
             except (ProcessLookupError, PermissionError):
                 pass
 
@@ -356,7 +369,9 @@ def _agent_cmd_default() -> list[str]:
     """Dev: run agent.server with this interpreter. PyInstaller onefile: launch
     the agent-server binary next to the supervisor."""
     if getattr(sys, "frozen", False):
-        return [os.path.join(os.path.dirname(sys.executable), "agent-server")]
+        # Windows bundles carry the .exe suffix
+        exe = "agent-server.exe" if os.name == "nt" else "agent-server"
+        return [os.path.join(os.path.dirname(sys.executable), exe)]
     return [sys.executable, "-m", "agent.server"]
 
 

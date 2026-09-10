@@ -17,11 +17,12 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import posixpath
 import re
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 from .transport import CommandResult, LocalTransport, SshTransport, Transport, TransportError
 
@@ -56,19 +57,23 @@ def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
 _DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defaults.json").read_text(encoding="utf-8"))
 
 # Scratch dirs that are harmless to write to (test logs, /dev/null redirects).
-SCRATCH_DIRS = (Path("/tmp"), Path("/var/tmp"), Path("/dev"))
+# POSIX spellings; see Workspace._scratch_dirs for how they are flavored per
+# workspace kind (a Windows LOCAL host has no /tmp; the REMOTE host is the
+# POSIX side).
+POSIX_SCRATCH_DIRS = ("/tmp", "/var/tmp", "/dev")
 
 
-def _inside_or_scratch(p: Path, root: Path) -> bool:
+def _inside_or_scratch(p: PurePath, root: PurePath, scratches: tuple[PurePath, ...]) -> bool:
     """SINGLE containment verdict: ``p`` is inside the workspace ``root``, or
-    inside a harmless scratch dir (test logs, /dev/null) — provided the root
-    itself is not inside that scratch dir (a /tmp-hosted workspace must still
-    flag its own escapes). Shared by ``Workspace.resolve`` (real-path guard)
-    and ``Workspace.escape_path`` (permission gate), so the two can never
-    disagree."""
+    inside one of the workspace's harmless scratch dirs (test logs, /dev/null)
+    — provided the root itself is not inside that scratch dir (a /tmp-hosted
+    workspace must still flag its own escapes). Shared by ``Workspace.resolve``
+    (real-path guard) and ``Workspace.escape_path`` (permission gate), so the
+    two can never disagree. ``p``, ``root`` and ``scratches`` must share one
+    path flavor — mixing PurePosixPath with a host WindowsPath raises."""
     if p.is_relative_to(root):
         return True
-    for scratch in SCRATCH_DIRS:
+    for scratch in scratches:
         if p.is_relative_to(scratch) and not root.is_relative_to(scratch):
             return True
     return False
@@ -76,7 +81,10 @@ def _inside_or_scratch(p: Path, root: Path) -> bool:
 
 class Workspace(ABC):
     def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
-        self.root: Path = Path(root) if root else Path(tempfile.mkdtemp(prefix="clutch-"))
+        # _root_path picks the path FLAVOR: the host's Path locally, PurePosixPath
+        # remotely (a Windows client's Path would re-separator remote /-paths
+        # with backslashes before they were ever sent over the bridge)
+        self.root: PurePath = self._root_path(root) if root else Path(tempfile.mkdtemp(prefix="clutch-"))
         # No local mkdir here on purpose: this base also serves RemoteWorkspace,
         # whose root lives on another HOST. Creating it locally broke macOS
         # (/home is an autofs mount: mkdir -> [Errno 45] ENOTSUP -> "cannot
@@ -92,7 +100,7 @@ class Workspace(ABC):
 
     def allow(self, paths) -> None:
         """Record user-approved external paths for the current tool call."""
-        self._allowed_escapes |= {Path(p).resolve() for p in paths}
+        self._allowed_escapes |= {self.realpath(p) for p in paths}
 
     def clear_allowed(self) -> None:
         """Drop the per-call escape allowance (called after every tool call)."""
@@ -100,7 +108,7 @@ class Workspace(ABC):
 
     def snapshot(self, path: Path, content: str) -> None:
         """Record the previous content of a file before an overwrite (undo stack)."""
-        key = str(Path(path).resolve())
+        key = str(self.realpath(path))
         stack = self._snapshots.setdefault(key, [])
         stack.append(content)
         if len(stack) > _MAX_SNAPSHOTS_PER_FILE:
@@ -109,7 +117,7 @@ class Workspace(ABC):
     def restore(self, path: Path) -> str | None:
         """Pop the last snapshot and write it back; returns the restored content
         (None when there is no snapshot for this file)."""
-        key = str(Path(path).resolve())
+        key = str(self.realpath(path))
         stack = self._snapshots.get(key)
         if not stack:
             return None
@@ -119,11 +127,11 @@ class Workspace(ABC):
 
     def protect(self, path: Path) -> None:
         """Mark a file as invisible/unusable to the agent (e.g. the .clc project file)."""
-        self._protected.add(Path(path).resolve())
+        self._protected.add(self.realpath(path))
 
     def is_protected(self, path: Path) -> bool:
         try:
-            return Path(path).resolve() in self._protected
+            return self.realpath(path) in self._protected
         except OSError:
             return False
 
@@ -136,6 +144,42 @@ class Workspace(ABC):
             out.append(ent)
         return out
 
+    def _root_path(self, root: str) -> PurePath:
+        """Path flavor for the workspace root: the host's Path locally."""
+        return Path(root)
+
+    def _scratch_dirs(self) -> tuple[PurePath, ...]:
+        """Harmless scratch dirs for escape verdicts (test logs, /dev/null),
+        in the workspace's OWN path flavor. Local: the host temp dir on Windows
+        (there is no /tmp), the POSIX trio on POSIX hosts. Remote: overridden —
+        the remote host is the POSIX side, in PurePosixPath flavor."""
+        if os.name == "nt":
+            return (Path(tempfile.gettempdir()),)
+        return (Path("/tmp"), Path("/var/tmp"), Path("/dev"))
+
+    def norm_join(self, base: str, token: str) -> PurePath:
+        """Lexical base+token join for escape verdicts and the `cd` tracker, in
+        the workspace's own path flavor: host os.path locally, posixpath
+        remotely (on Windows ntpath would backslash-rewrite remote paths)."""
+        return Path(os.path.normpath(os.path.join(base, token)))
+
+    def realpath(self, path: Path | str) -> Path:
+        """Normalize a workspace path for bookkeeping (containment checks, the
+        protected set, undo keys, escape verdicts). LOCAL workspaces resolve
+        symlinks through the OS; REMOTE workspaces must NOT touch the local
+        filesystem at all: the app host's filesystem knows nothing about the
+        remote host's layout, and resolving a remote path locally rewrote it
+        with the app host's spelling of /home (on macOS the autofs target
+        /System/Volumes/Data/home) before the remote ever saw it. Everything
+        internal goes through this hook so the two can never drift."""
+        return Path(path).resolve()
+
+    def home(self) -> Path:
+        """The home directory a leading `~` expands to for this workspace.
+        Local: the app user's home; remote: the REMOTE user's home — a `~` in
+        a remote path must never expand to the app host's home."""
+        return Path.home()
+
     def resolve(self, rel_path: str) -> Path:
         """Resolve a path to inside the workspace (or a user-approved external
         path); raise ValueError on an unapproved escape. The root is resolved
@@ -144,20 +188,20 @@ class Workspace(ABC):
         containment check: a project-local symlink such as .venv/bin/python
         (-> /usr/bin/python3.10) must read as inside the workspace, not as an
         escape. The OS follows it when the path is actually opened."""
-        root = self.root.resolve()
+        root = self.realpath(self.root)
         base = root / rel_path
         try:
             if base.name:
-                p = base.parent.resolve() / base.name
+                p = self.realpath(base.parent) / base.name
             else:
-                p = base.resolve()
+                p = self.realpath(base)
         except (OSError, ValueError):
-            p = base.resolve()
-        if p in self._allowed_escapes or _inside_or_scratch(p, root):
+            p = self.realpath(base)
+        if p in self._allowed_escapes or _inside_or_scratch(p, root, self._scratch_dirs()):
             return p
         raise ValueError(f"path escapes workspace: {rel_path!r}")
 
-    def escape_path(self, token: str, anchor: Path | None = None) -> Path | None:
+    def escape_path(self, token: str, anchor: PurePath | None = None) -> PurePath | None:
         """Lexical escape verdict for one path token: the absolute path it
         refers to OUTSIDE the workspace, or None when it stays inside (or in a
         harmless scratch dir). ``anchor`` is the directory the token is
@@ -168,14 +212,13 @@ class Workspace(ABC):
         if not token:
             return None
         if token.startswith("~"):
-            token = os.path.expanduser(token)
+            # workspace.home(), not expanduser: in ssh mode `~` is the REMOTE
+            # user's home, never the app host's
+            token = str(self.home()) + token[1:]
         base = anchor if anchor is not None else self.root
-        root = self.root.resolve()
-        try:
-            p = Path(os.path.normpath(os.path.join(str(base), token)))
-        except (OSError, ValueError):
-            return None
-        if _inside_or_scratch(p, root):
+        root = self.realpath(self.root)
+        p = self.norm_join(str(base), token)
+        if _inside_or_scratch(p, root, self._scratch_dirs()):
             return None
         return p
 
@@ -336,6 +379,52 @@ class RemoteWorkspace(Workspace):
 
     def __init__(self, root: str | None, bridge_url: str) -> None:
         super().__init__(root, transport=SshTransport(bridge_url))
+        self._remote_home: str | None = None
+
+    def _root_path(self, root: str) -> PurePath:
+        """PurePosixPath, never the host's Path: remote paths are POSIX, and a
+        Windows client's Path (WindowsPath) would turn their '/' separators
+        into '\\' in every str() — mangling every command sent over the bridge.
+        PurePosixPath keeps the spelling host-independent."""
+        return PurePosixPath(root)
+
+    def _scratch_dirs(self) -> tuple[PurePath, ...]:
+        # the remote runs the POSIX shell stack: keep the POSIX trio in the
+        # REMOTE path flavor so the verdict never mixes PurePosixPath with a
+        # host WindowsPath (TypeError)
+        return tuple(PurePosixPath(s) for s in POSIX_SCRATCH_DIRS)
+
+    def norm_join(self, base: str, token: str) -> PurePath:
+        """posixpath, not the host's os.path: the token is judged against the
+        REMOTE layout (on Windows ntpath would backslash it)."""
+        return PurePosixPath(posixpath.normpath(posixpath.join(base, token)))
+
+    def realpath(self, path: PurePath | str) -> PurePath:
+        """LEXICAL normalization only — never a local filesystem call.
+
+        Every path here lives on the REMOTE host, so the app host's view of the
+        filesystem must not rewrite it: on the macOS app host,
+        Path('/home/u/p').resolve() spelled /home through the local autofs
+        layout (/System/Volumes/Data/home/u/p), and the project write then ran
+        `mkdir -p '/System/...'` on the Linux remote -> permission denied.
+        normpath collapses `..`, `.` and duplicate slashes without consulting
+        any filesystem; remote-side symlinks stay invisible to the client, so
+        containment is lexical here exactly like escape_path's verdict. The
+        backslash rewrite tolerates a caller that str()'d a host Path first.
+        """
+        return PurePosixPath(posixpath.normpath(str(path).replace("\\", "/")))
+
+    def home(self) -> PurePath:
+        """The REMOTE user's home for `~` tokens: one cached exec (`echo $HOME`
+        over the bridge) instead of expanduser, which would return the app
+        host's home. On failure falls back to the literal `~` — a relative-ish
+        path that reads as an escape and asks the user, never silently maps a
+        remote path onto the app host. PurePosixPath: a Windows host's
+        Path('/home/u') would str() backslash it."""
+        if self._remote_home is None:
+            r = self._transport.run("echo $HOME", _REMOTE_IO_TIMEOUT)
+            self._remote_home = r.stdout.strip() if (r.code == 0 and r.stdout.strip()) else "~"
+        return PurePosixPath(self._remote_home)
 
     def run(self, command: str, timeout: float) -> CommandResult:
         cmd = f"cd {shq(str(self.root))} && {command}"
@@ -529,7 +618,9 @@ class RemoteWorkspace(Workspace):
                 continue
             fpath = line[:first]
             try:
-                rel = str(Path(fpath).relative_to(self.root))
+                # PurePosixPath: the remote prints POSIX paths; the host's Path
+                # flavor must not re-separator them (WindowsPath on Windows)
+                rel = str(PurePosixPath(fpath).relative_to(self.root))
             except ValueError:
                 rel = fpath
             out.append((rel, lineno, rest[second + 1 :]))

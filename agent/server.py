@@ -22,11 +22,12 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import posixpath
 import queue
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -168,6 +169,19 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return data if isinstance(data, dict) else None
 
+    def _project_path(self, raw: str) -> Path:
+        """Normalize a client-supplied .clc path WITHOUT local filesystem
+        semantics in ssh mode: the path lives on the REMOTE host, and
+        Path.resolve() here would rewrite it with the app host's view of the
+        world (/home -> /System/Volumes/Data/home on macOS autofs) — and a
+        Windows host's Path would even re-separator it with backslashes.
+        ssh mode therefore normalizes lexically in the PurePosixPath flavor;
+        Local mode keeps the OS realpath — it feeds the is_file() existence
+        check. Ssh mode leaves existence to the remote open/read itself."""
+        if self._state.backend_mode == "ssh":
+            return PurePosixPath(posixpath.normpath(raw.replace("\\", "/")))
+        return Path(raw).resolve()
+
     def _run(self) -> None:
         body = self._read_body()
         if body is None:
@@ -186,8 +200,8 @@ class Handler(BaseHTTPRequestHandler):
         if req_project and (project is None or str(project.path) != req_project):
             # a different window's project: switch the active project to this
             # window's file so each UI window's runs append to its own .clc
-            full = Path(req_project).resolve()
-            if full.suffix != ".clc" or not full.is_file():
+            full = self._project_path(req_project)
+            if full.suffix != ".clc" or (self._state.backend_mode != "ssh" and not full.is_file()):
                 return self._json({"error": f"cannot open project: {req_project}"}, status=400)
             try:
                 ws = self._state.build_workspace(str(full.parent))
@@ -364,8 +378,8 @@ class Handler(BaseHTTPRequestHandler):
                 global_proj = self._state.project
                 if global_proj is not None and str(global_proj.path) == project_q:
                     return global_proj
-                full = Path(project_q).resolve()
-                if full.suffix == ".clc" and full.is_file():
+                full = self._project_path(project_q)
+                if full.suffix == ".clc" and (self._state.backend_mode == "ssh" or full.is_file()):
                     ws = self._state.build_workspace(str(full.parent))
                     # SSE only replays/watchs: open read-only so a subscriber
                     # never takes the write lock (or fights the real writer)
@@ -553,8 +567,11 @@ class Handler(BaseHTTPRequestHandler):
         ws = None
         try:
             if self._state.backend_mode == "ssh" and self._state.bridge_url:
-                ws = self._state.build_workspace(str(Path(dirname)))
-                project = create_project(Path(dirname) / name, name, model=self._cfg.model, workspace=ws)
+                # _project_path: PurePosixPath lexical normalization — never the
+                # host's Path (backslash re-separation on a Windows client)
+                root = self._project_path(dirname)
+                ws = self._state.build_workspace(str(root))
+                project = create_project(root / name, name, model=self._cfg.model, workspace=ws)
             else:
                 project = create_project(Path(dirname) / name, name, model=self._cfg.model)
         except OSError as e:
@@ -578,7 +595,7 @@ class Handler(BaseHTTPRequestHandler):
         path = (body.get("path") or "").strip()
         if not path:
             return self._json({"error": "path is required"}, status=400)
-        full = Path(path).resolve()
+        full = self._project_path(path)
         if full.suffix != ".clc":
             return self._json({"error": "not a .clc project file"}, status=400)
         if self._state.backend_mode != "ssh":

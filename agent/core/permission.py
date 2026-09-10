@@ -18,7 +18,6 @@ The default action is allow for anything inside the workspace.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 import threading
@@ -132,9 +131,14 @@ class PermissionEvaluator:
                 if tok == "cd" and i + 1 < len(tokens):
                     nxt = tokens[i + 1]
                     if nxt.startswith("~"):
-                        nxt = os.path.expanduser(nxt)
-                    base = cwd if cwd is not None else workspace.root.resolve()
-                    cwd = Path(os.path.normpath(os.path.join(str(base), nxt)))
+                        # workspace.home(), not expanduser: in ssh mode `~` is
+                        # the REMOTE user's home, never the app host's
+                        nxt = str(workspace.home()) + nxt[1:]
+                    base = cwd if cwd is not None else workspace.realpath(workspace.root)
+                    # norm_join, not os.path: in ssh mode the token is judged
+                    # against the remote layout (ntpath on Windows would
+                    # backslash-rewrite it)
+                    cwd = workspace.norm_join(str(base), nxt)
                     i += 2
                     continue
                 p = workspace.escape_path(tok, cwd)
