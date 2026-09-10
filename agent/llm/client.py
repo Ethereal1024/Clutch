@@ -49,7 +49,16 @@ class LlmError(Exception):
 
     @staticmethod
     def classify(e: Exception, retryable_status: Collection[int]) -> LlmError:
-        """Normalize openai SDK exceptions into a structured LlmError."""
+        """Normalize openai SDK / httpx2 transport exceptions into a structured
+        LlmError. The openai SDK only wraps errors raised while the *request* is
+        being sent; errors raised while the SSE *body* is being consumed (a
+        mid-stream stall past the read timeout, a sudden disconnect/reset, a
+        truncated response) escape `Stream.__stream__` unwrapped (its try only
+        closes the response), so they arrive here as raw httpx2 exceptions and
+        must be mapped explicitly — otherwise they fall into the non-retryable
+        "unknown" catch-all and a transient network blip kills the whole run.
+        """
+        import httpx2
         import openai
 
         if isinstance(e, openai.RateLimitError):
@@ -72,6 +81,17 @@ class LlmError(Exception):
                 status=status,
                 retryable=status in retryable_status,
                 message=_clean_provider_message(str(e), status),
+            )
+        # httpx2 transport errors raised mid-stream (read timeout / reset / EOF /
+        # remote protocol error). TimeoutException is itself a TransportError
+        # subclass, so check it first to keep the more specific code.
+        if isinstance(e, httpx2.TimeoutException):
+            return LlmError(code="timeout", retryable=True, message="Request timed out.")
+        if isinstance(e, httpx2.TransportError):
+            return LlmError(
+                code="connection",
+                retryable=True,
+                message=f"Connection interrupted: {e}" if str(e) else "Connection interrupted.",
             )
         return LlmError(code="unknown", retryable=False, message=str(e))
 

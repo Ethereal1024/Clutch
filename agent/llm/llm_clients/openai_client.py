@@ -38,7 +38,21 @@ class OpenaiLlmClient(LlmClient):
         tools: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         # Streamed chat completion.
-        for attempt in range(self.max_retries):
+        #
+        # Transport failures raised while the SSE body is being consumed (read
+        # timeout / reset / truncated response) escape the openai SDK unwrapped
+        # as raw httpx2 exceptions (see LlmError.classify); this loop turns them
+        # into a retry. A retry restarts the request from scratch, so it is only
+        # safe when NOTHING of this attempt has reached the caller yet — retrying
+        # after a partial stream would re-emit already-delivered text and
+        # duplicate it in the transcript. A failure after the first token is
+        # therefore raised immediately (clear error instead of a silent stall);
+        # a failure before it retries with backoff, yielding a
+        # {"type": "retry", ...} notice first so the caller/UI can show
+        # "reconnecting…" instead of looking frozen until the next attempt dies.
+        attempts = max(1, int(self.max_retries))
+        for attempt in range(attempts):
+            delivered = False
             try:
                 kwargs: dict[str, Any] = {
                     "model": self.model,
@@ -68,6 +82,7 @@ class OpenaiLlmClient(LlmClient):
                             if event["type"] == "finish":
                                 pending_finish = event
                             else:
+                                delivered = True
                                 yield event
                     if state.finished:
                         break
@@ -83,8 +98,21 @@ class OpenaiLlmClient(LlmClient):
                         ],
                     }
                 yield finish
+                return  # this attempt completed the turn: never start another one
             except Exception as e:  # noqa: BLE001 -- classify then decide to retry
                 last_err = LlmError.classify(e, self.retryable_status)
-                if not last_err.retryable or attempt == self.max_retries - 1:
+                if not last_err.retryable or delivered or attempt == attempts - 1:
+                    if not delivered and last_err.retryable:
+                        # all attempts exhausted: say so instead of a bare transport message
+                        last_err.message = f"{last_err.message} (after {attempts} attempts)"
                     raise last_err from e
+                # announce the retry before the backoff sleep so the caller/UI can
+                # show the recovery process instead of a silent stall
+                yield {
+                    "type": "retry",
+                    "attempt": attempt + 1,
+                    "max": attempts,
+                    "code": last_err.code,
+                    "message": f"{last_err.message} — retrying ({attempt + 1}/{attempts})",
+                }
                 time.sleep((2**attempt) + attempt * 0.5)

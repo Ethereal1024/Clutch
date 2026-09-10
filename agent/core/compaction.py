@@ -62,12 +62,14 @@ class Compactor:
         # stop flag: compaction is synchronous, so it checks cancel itself
         self.cancel = cancel
 
-    def _report_progress(self, chars: int, done: bool = False) -> None:
-        """Broadcast in-flight compaction progress; never fatal."""
+    def _report_progress(self, chars: int, done: bool = False, note: str = "") -> None:
+        """Broadcast in-flight compaction progress; never fatal. A ``note``
+        overrides the live paragraph (e.g. the summary stream dropped and is
+        being retried) so the UI never shows a frozen block."""
         if not self.sink:
             return
         try:
-            self.sink(CompactionDeltaEvent(chars=chars, done=done))
+            self.sink(CompactionDeltaEvent(chars=chars, done=done, note=note))
         except Exception:  # noqa: BLE001 -- subscriber failure is non-fatal
             pass
 
@@ -156,13 +158,20 @@ class Compactor:
             # stop must interrupt the summary call, not just the main turn
             if self.cancel and self.cancel.is_set():
                 return "", chars
-            if ev["type"] == "text":
+            t = ev["type"]
+            if t == "retry":
+                # transport hiccup before the first summary token: the client is
+                # reconnecting with backoff — mirror the notice into the live
+                # compaction block instead of letting it sit silently
+                self._report_progress(chars, note=ev.get("message", ""))
+                continue
+            if t == "text":
                 parts.append(ev["delta"])
                 chars += len(ev["delta"])
                 # throttle: ~every 200 chars is plenty for a live counter
                 if chars - reported >= 200:
                     reported = chars
                     self._report_progress(chars)
-            elif ev["type"] == "finish":
+            elif t == "finish":
                 break
         return "".join(parts).strip(), chars

@@ -152,6 +152,20 @@ class CompactionDeltaEvent(Event):
     type: str = "compaction_delta"
     chars: int = 0
     done: bool = False
+    note: str = ""  # status override (e.g. "connection lost — retrying"); live display only
+
+
+@dataclass
+class LlmRetryEvent(Event):
+    """Transient notice that an LLM stream attempt failed before its first token
+    (network drop / read timeout while consuming the SSE body) and the client is
+    reconnecting with backoff. Purely for live UI display — never persisted,
+    never replayed; the next streamed delta is the signal that the retry landed."""
+
+    type: str = "llm_retry"
+    attempt: int = 0  # the retry about to run (1-based)
+    max_retries: int = 0  # total attempts configured on the client
+    message: str = ""  # human text ("Request timed out. — retrying (1/3)")
 
 
 EVENT_TYPES: dict[str, type] = {
@@ -170,6 +184,7 @@ EVENT_TYPES: dict[str, type] = {
         PermissionRequestEvent,
         CompactionEvent,
         CompactionDeltaEvent,
+        LlmRetryEvent,
     ]
 }
 

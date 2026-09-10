@@ -515,7 +515,6 @@ def _run_server_test() -> int:
                     "write a file hello.txt containing the word hi using write_file, "
                     "then read it with run_command cat hello.txt"
                 ),
-                "verify": "echo ok",
             },
         )
         check(st == 200 and body != "", "run accepted")

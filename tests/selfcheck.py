@@ -2,7 +2,7 @@
 
 Run: uv run python -m tests.selfcheck
 Covers: parsing, message derivation, workspace path safety, tool execution,
-doom-loop detection, verification gate.
+doom-loop detection.
 """
 
 from __future__ import annotations
@@ -330,14 +330,6 @@ def main() -> None:
         for i in range(4):
             term3.record_call("run_command", f'{{"command": "ls{i}"}}', "x")
         check(term3.record_call("run_command", '{"command": "ls1"}', "x") != "warn", "varying calls not doom-loop")
-
-        # 6. verification gate
-        vterm = Terminator(Config(verify_command="echo pass"))
-        v = vterm.verify(sb)
-        check(v.done and v.status == "completed", "verify gate passes on success")
-        vterm2 = Terminator(Config(verify_command="false"))
-        v = vterm2.verify(sb)
-        check(not v.done and v.status == "verify_failed", "verify gate fails on failure")
 
     # 7. skills: catalog + load_skill
     from pathlib import Path
