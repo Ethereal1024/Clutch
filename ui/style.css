@@ -363,6 +363,24 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.compaction .hdr::before { content: none; }
 .event.compaction .body { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
 
+/* transient "reconnecting…" chip (llm_retry): a stream attempt failed before
+   its first token and the client is retrying with backoff. Same live-block
+   treatment as the compaction notice; the accent border marks a degraded
+   stream. Removed by the UI as soon as tokens flow again or the run ends. */
+.event.llm-note {
+  counter-increment: none;
+  opacity: 0.92;
+  background: var(--code-bg);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 10px 12px 10px 26px;
+  margin-top: 4px;
+  animation: none;
+}
+.event.llm-note::before { display: none; }
+.event.llm-note .hdr::before { content: none; }
+.event.llm-note .body { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); white-space: normal; }
+
 /* rendered markdown inside event bodies */
 .event .body h1, .event .body h2, .event .body h3, .event .body h4 {
   margin: 8px 0 6px; line-height: 1.3; font-weight: 700;

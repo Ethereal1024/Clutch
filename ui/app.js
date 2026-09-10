@@ -225,6 +225,7 @@ let lastTextContent = "";
 let thinkingEl = null;
 let thinkingContent = "";
 let compactionEl = null; // live "compressing context" block (compaction_delta)
+let retryNoteEl = null; // live "reconnecting…" chip (llm_retry), removed once the stream resumes
 
 // map tool_call_id -> {name, args} so a tool_result knows which tool produced it
 const toolCalls = {};
@@ -422,6 +423,30 @@ function buildReadRow(call, content) {
   return { row, full: fold };
 }
 
+// transient "connection lost — retrying…" chip. Shown when an LLM stream
+// attempt fails before its first token (network drop / read timeout) and the
+// client reconnects with backoff; removed as soon as new tokens arrive, the
+// compaction clears, or the run ends — so the UI never looks frozen.
+function setRetryNote(ev) {
+  if (retryNoteEl) retryNoteEl.remove();
+  retryNoteEl = document.createElement("div");
+  retryNoteEl.className = "event llm-note live";
+  const p = document.createElement("p");
+  p.className = "body";
+  const fallback = `connection lost — retrying (${ev.attempt}/${ev.max_retries || "…"})`;
+  p.textContent = "⚠ " + (ev.message || fallback);
+  retryNoteEl.appendChild(p);
+  (pageSink || eventsEl).appendChild(retryNoteEl);
+  autoScroll();
+}
+
+function clearRetryNote() {
+  if (retryNoteEl) {
+    retryNoteEl.remove();
+    retryNoteEl = null;
+  }
+}
+
 function addEvent(ev) {
   // lazy wire shape: {offset, event} carries each durable event's byte offset
   // so the UI can page the earlier records
@@ -449,6 +474,7 @@ function addEvent(ev) {
     // live progress of an in-flight compaction (transient, not stored)
     if (ev.done) {
       if (compactionEl) { compactionEl.remove(); compactionEl = null; }
+      clearRetryNote();
       return;
     }
     if (!compactionEl) {
@@ -460,10 +486,19 @@ function addEvent(ev) {
       compactionEl.appendChild(p);
       (pageSink || eventsEl).appendChild(compactionEl);
     }
-    compactionEl.querySelector("p").textContent = ev.chars > 0
-      ? `summarizing earlier turns… ${ev.chars} chars streamed`
-      : "compressing context — rolling earlier turns into a summary…";
+    // a note (e.g. the summary stream dropped and is retrying) overrides the counter
+    compactionEl.querySelector("p").textContent = ev.note
+      ? ev.note
+      : ev.chars > 0
+        ? `summarizing earlier turns… ${ev.chars} chars streamed`
+        : "compressing context — rolling earlier turns into a summary…";
     autoScroll();
+    return;
+  }
+  if (ev.type === "llm_retry") {
+    // transient: an LLM stream attempt failed; the client is reconnecting with
+    // backoff (transient, never stored; the next delta removes the chip)
+    setRetryNote(ev);
     return;
   }
   if (ev.type === "compaction") {
@@ -506,6 +541,7 @@ function addEvent(ev) {
     // the run is over: dismiss any stale permission prompt
     if (pendingPerm) closePerm();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
+    clearRetryNote(); // a lost stream that never recovered leaves no chip behind
     // fences may have closed since the last delta: one final render pass
     if (lastTextEl && lastTextEl.isConnected) highlightCode(lastTextEl);
     // completion divider; for non-completed runs the summary carries the reason
@@ -532,6 +568,7 @@ function addEvent(ev) {
     return;
   }
   if (ev.type === "tool_call_delta" && ev.tool_call_id) {
+    clearRetryNote(); // args are flowing again: the reconnect landed
     handleToolCallDelta(ev);
     return;
   }
@@ -558,6 +595,7 @@ function addEvent(ev) {
 
   // accumulate text and render once per frame (a full re-parse per token is O(n²))
   if (ev.type === "text_delta" && ev.content) {
+    clearRetryNote(); // text is flowing again: the reconnect landed
     if (!lastTextEl) {
       lastTextEl = createAgentTextBlock();
       (pageSink || eventsEl).appendChild(lastTextEl);
@@ -569,6 +607,7 @@ function addEvent(ev) {
 
   // streaming reasoning: compact row while streaming, expandable on click
   if (ev.type === "reasoning_delta" && ev.content) {
+    clearRetryNote(); // thinking is flowing again: the reconnect landed
     thinkingContent += ev.content;
     if (!thinkingEl) {
       const block = buildThinkingBlock("", "");
@@ -587,10 +626,12 @@ function addEvent(ev) {
   }
 
   if (ev.type === "step_start") {
+    // a new LLM turn begins: reset the streaming blocks (and any stale chip)
     lastTextEl = null;
     lastTextContent = "";
     thinkingEl = null;
     thinkingContent = "";
+    clearRetryNote();
   }
 
   const el = renderEvent(ev);
@@ -2196,6 +2237,7 @@ function connectSSE(replay = true) {
     thinkingEl = null;
     thinkingContent = "";
     toolGroupEl = null;
+    clearRetryNote(); // a reconnect may have skipped the event that would clear it
     if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
     // the backend (re)connected, possibly after a self-heal restart: resync the tree
     refreshTree();
@@ -2220,6 +2262,8 @@ function clearStream() {
   thinkingEl = null;
   thinkingContent = "";
   if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
+  compactionEl = null;
+  retryNoteEl = null;
   oldestOffset = null; // fresh project: no loaded events yet
   setOlderPill(0);
 }
