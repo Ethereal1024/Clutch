@@ -22,17 +22,22 @@ directories:
 files:
   - "!dev.sh"
 
-# the bundled backend binaries (built by scripts/build-server-bundle.sh;
-# both live in dist/ — agent-server and agent-supervisor)
-extraResources:
-  - from: ../dist/agent-server
-    to: agent-server
-  - from: ../dist/agent-supervisor
-    to: agent-supervisor
+# The bundled backend binaries (built by scripts/build-server-bundle.sh; both
+# live in dist/ — agent-server and agent-supervisor) are declared per platform
+# instead of at the top level: electron-builder ADDS platform-specific
+# extraResources to the root list rather than replacing it (fileMatcher.js:
+# addPatterns(config[name]) then addPatterns(customBuildOptions[name])), so a
+# root list would leak the POSIX names into the Windows bundle. Windows carries
+# the .exe suffix (ui/server-bootstrap.js spawns them with .exe on win32).
 
 linux:
   target:
     - deb
+  extraResources:
+    - from: ../dist/agent-server
+      to: agent-server
+    - from: ../dist/agent-supervisor
+      to: agent-supervisor
   # .desktop Categories (appended with ";"); the deb Section is packageCategory
   category: Development;Utility
   packageCategory: devel
@@ -73,6 +78,38 @@ mac:
   # .icns automatically by electron-builder
   icon: build/icon.png
   identity: null # skip codesign lookup; PyInstaller output stays ad-hoc signed
+  extraResources:
+    - from: ../dist/agent-server
+      to: agent-server
+    - from: ../dist/agent-supervisor
+      to: agent-supervisor
 
 dmg:
   title: Clutch
+
+# Windows: unsigned NSIS installer (x64). Same self-contained shape as the deb
+# — the PyInstaller onefile binaries ride in extraResources, with the .exe
+# names Windows produces (the POSIX names stay in the linux:/mac: sections
+# above, so this list is the only one that applies here).
+#
+# Unsigned on purpose (no code-signing cert): SmartScreen warns on the first
+# run ("Windows protected your PC" -> More info -> Run anyway). Debug builds
+# are produced by .github/workflows/windows-debug.yml (workflow_dispatch, no
+# release attached); a future release job only needs the same npm run dist:win.
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico # pure-stdlib ico from scripts/make-icon.py
+  extraResources:
+    - from: ../dist/agent-server.exe
+      to: agent-server.exe
+    - from: ../dist/agent-supervisor.exe
+      to: agent-supervisor.exe
+
+nsis:
+  oneClick: false # allow "install for me only" vs per-machine
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  shortcutName: Clutch

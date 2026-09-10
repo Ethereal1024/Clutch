@@ -63,7 +63,7 @@ def render(size: int) -> list[bytes]:
     return rows
 
 
-def write_png(path: Path, rows: list[bytes]) -> None:
+def png_bytes(rows: list[bytes]) -> bytes:
     def chunk(typ: bytes, data: bytes) -> bytes:
         return (
             struct.pack(">I", len(data))
@@ -76,13 +76,37 @@ def write_png(path: Path, rows: list[bytes]) -> None:
     w = len(rows[0]) // 4
     raw = b"".join(b"\x00" + r for r in rows)
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
-    png = (
+    return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", ihdr)
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
-    path.write_bytes(png)
+
+
+def write_png(path: Path, rows: list[bytes]) -> None:
+    path.write_bytes(png_bytes(rows))
+
+
+def write_ico(path: Path, size: int = 256) -> None:
+    """One size-N PNG (N=256 advertised) wrapped in a minimal .ico (Vista+
+    container: PNG bytes embedded verbatim). Windows NSIS needs icon.ico;
+    embedding the PNG keeps this stdlib-only (no Pillow). The embedded image
+    must MATCH the directory entry's declared size, so it is rendered here."""
+    png = png_bytes(render(size))
+    icondir = struct.pack("<HHH", 0, 1, 1)  # reserved, type=icon, count=1
+    entry = struct.pack(
+        "<BBBBHHII",
+        size % 256,  # 0 encodes 256
+        size % 256,
+        0,  # palette colors
+        0,  # reserved
+        1,  # color planes
+        32,  # bits per pixel
+        len(png),
+        6 + 16,  # ICONDIR + one ICONDIRENTRY
+    )
+    path.write_bytes(icondir + entry + png)
 
 
 def write_svg(path: Path) -> None:
@@ -132,8 +156,11 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     write_png(out_dir / "icon.png", render(W))
     write_svg(out_dir / "icon.svg")
+    # 256px PNG inside an .ico container (Windows NSIS app icon)
+    write_ico(out_dir / "icon.ico")
     print(f"icon written: {out_dir / 'icon.png'} ({W}x{W})")
     print(f"icon written: {out_dir / 'icon.svg'}")
+    print(f"icon written: {out_dir / 'icon.ico'}")
     return 0
 
 

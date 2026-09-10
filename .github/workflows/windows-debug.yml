@@ -1,0 +1,93 @@
+# Debug Windows installer (workflow_dispatch only): builds the same
+# self-contained shape as the deb/dmg — PyInstaller onefile backend bundled
+# into the app's resources + an unsigned NSIS installer — and uploads it as a
+# workflow ARTIFACT. Deliberately NO tag, NO GitHub release: this is for
+# installing on a Windows box to debug, not for shipping.
+#
+# Download: Actions -> this run -> Artifacts -> clutch-win-debug-<run>.
+# Install your way: installer (per-user, changeable dir), SmartScreen warns on
+# first run -> "More info" -> "Run anyway" (unsigned).
+#
+# release.yml stays untouched; when Windows ships for real its job is the same
+# `npm run dist:win` plus the softprops release step.
+name: windows-debug
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync python deps (PyInstaller, etc.)
+        run: uv sync
+
+      # Windows PyInstaller wants ';' as the --add-data separator (':' would be
+      # taken literally) and the venv interpreter lives in Scripts\python.exe.
+      # Output: dist/agent-server.exe + dist/agent-supervisor.exe.
+      - name: Build bundled server + supervisor (PyInstaller onefile)
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-server \
+            --add-data "agent/prompts;agent/prompts" \
+            --add-data "agent/skills;agent/skills" \
+            --add-data "agent/transport_defaults.json;agent/" \
+            scripts/server_entry.py
+          .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-supervisor \
+            scripts/supervisor_entry.py
+          ls -l dist/
+
+      - name: Generate app icon (png/svg + win ico)
+        shell: bash
+        run: .venv/Scripts/python scripts/make-icon.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI deps
+        working-directory: ui
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      # same guard as `predist`, which vite/npm does not run for dist:win
+      - name: Check transport_defaults drift
+        shell: bash
+        run: |
+          cmp -s agent/transport_defaults.json ui/transport_defaults.json \
+            || { echo "transport_defaults.json drifted — cp agent/transport_defaults.json ui/"; exit 1; }
+
+      # platform extraResources/icon guard (no build): see ui/verify-build-config.js
+      - name: Verify builder config
+        working-directory: ui
+        run: node verify-build-config.js
+
+      - name: Build unsigned NSIS installer
+        working-directory: ui
+        run: npm run dist:win
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+
+      - name: Upload debug installer (artifact only — no release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: clutch-win-debug-${{ github.run_number }}
+          path: ui/dist/*.exe
+          if-no-files-found: error

@@ -42,7 +42,9 @@ function spawnSupervisorCommand() {
   const idleTimeout = process.env.CLUTCH_SUPERVISOR_IDLE_TIMEOUT || "8";
   const portArgs = ["--port", String(SUPERVISOR_PORT), "--idle-timeout", idleTimeout];
   if (app.isPackaged) {
-    const bin = path.join(process.resourcesPath, "agent-supervisor");
+    // Windows bundles carry the .exe suffix (PyInstaller onefile)
+    const exe = process.platform === "win32" ? ".exe" : "";
+    const bin = path.join(process.resourcesPath, "agent-supervisor" + exe);
     if (!fs.existsSync(bin)) {
       console.error("[server-bootstrap] bundled supervisor missing:", bin);
       return null;
@@ -53,7 +55,7 @@ function spawnSupervisorCommand() {
       console.error("[server-bootstrap] chmod failed:", e && e.message);
     }
     // a onefile's sys.executable is not the sibling agent-server: pass it explicitly
-    const agent = path.join(process.resourcesPath, "agent-server");
+    const agent = path.join(process.resourcesPath, "agent-server" + exe);
     return { cmd: bin, args: [...portArgs, "--agent-cmd", agent], cwd: os.homedir() };
   }
   const root = path.join(__dirname, "..");
@@ -81,6 +83,7 @@ async function ensureSupervisor() {
   supervisorChild = spawn(spec.cmd, spec.args, {
     cwd: spec.cwd,
     detached: process.platform !== "win32",
+    windowsHide: true, // no console flash behind the GUI on Windows
     stdio: ["ignore", "pipe", "pipe"],
   });
   supervisorChild.stdout.on("data", (d) => process.stdout.write(d));
