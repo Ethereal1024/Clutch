@@ -174,8 +174,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad json body"}, status=400)
         task = (body.get("task") or "").strip()
         config = self._cfg
-        if body.get("verify"):
-            config = _replace(config, verify_command=body["verify"])
         mode = body.get("mode")
         if mode in ("chat", "work"):
             config = _replace(config, mode=mode)
@@ -828,14 +826,11 @@ def main() -> int:
             "(http://127.0.0.1:8892/v1) when the server has no internet."
         ),
     )
-    parser.add_argument("--verify", default=None, help="verification command; empty disables the gate")
     args = parser.parse_args()
 
     config = Config()
     config.host = args.host
     config.port = args.port
-    if args.verify:
-        config.verify_command = args.verify
 
     # LLM endpoint resolution — precedence: CLI args > env > GUI-saved settings
     # (flat ~/.clutch/settings.json; legacy profile-map files migrate on read)

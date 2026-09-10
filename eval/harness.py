@@ -6,7 +6,9 @@ never references it.
 An eval scenario dir contains:
   task.md      - the prompt given to the agent
   seed/        - files copied into a fresh workspace before the run
-  verify.sh    - verification gate command (run inside the workspace)
+  verify.sh    - grading command: run by the harness in the finished workspace
+                 AFTER the agent stops (SWE-bench style external scoring, exit 0
+                 = pass); never part of the agent's own loop.
 
 The harness drives the agent through the same BaseServer contract as the HTTP
 server (build_llm/build_tools/build_workspace/start_task), so eval and product
@@ -34,8 +36,10 @@ sys.path.insert(0, str(BASE))
 
 from agent.base import BaseServer, Broadcaster, RunState  # noqa: E402
 from agent.config import Config  # noqa: E402
-from agent.events import EventLog, event_to_json  # noqa: E402
+from agent.core.lazy import LazyEventLog  # noqa: E402
+from agent.events import event_to_json  # noqa: E402
 from agent.project import Project  # noqa: E402
+from agent.tools.transport import TransportError  # noqa: E402
 from agent.tools.workspace import LocalWorkspace, Workspace  # noqa: E402
 
 SCENARIOS_DIR = Path(__file__).resolve().parent
@@ -59,12 +63,30 @@ class HarnessServer(BaseServer):
         return LocalWorkspace(str(project.workdir))
 
 
+def _grade(workspace_dir: Path, verify_cmd: str) -> bool:
+    """External scoring: run the scenario's verify.sh in the finished workspace.
+
+    Exit 0 = pass. This runs only after the agent stopped — never inside its
+    loop — so it stays an objective check the agent cannot game mid-run.
+    """
+    if not verify_cmd:
+        return True  # no objective check for this scenario
+    try:
+        r = LocalWorkspace(str(workspace_dir)).run(verify_cmd, 600.0)
+    except TransportError:
+        return False
+    return r.code == 0
+
+
 def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str = "") -> dict:
     task = (scenario_dir / "task.md").read_text(encoding="utf-8").strip()
-    verify_cmd = (scenario_dir / "verify.sh").read_text(encoding="utf-8").strip().splitlines()[0]
+    # grading command (external, post-run): verify.sh's first line is the command
+    verify_cmd = ""
+    verify_sh = scenario_dir / "verify.sh"
+    if verify_sh.exists():
+        verify_cmd = verify_sh.read_text(encoding="utf-8").strip().splitlines()[0]
 
     run_cfg = Config(
-        verify_command=verify_cmd,
         max_turns=config.max_turns,
         model=config.model,
         non_interactive=True,
@@ -92,14 +114,16 @@ def run_scenario(scenario_dir: Path, config: Config, report_dir: Path, tag: str 
             agent = server.start_task(task, project, on_ask=None)
             if agent is None:
                 raise RuntimeError("a run is already active (harness runs fresh servers; should not happen)")
-            log: EventLog = project.log
+            log: LazyEventLog = project.log
             outcome["workspace"] = str(root)
 
             try:
                 result = agent.run(task)
                 outcome["result"] = result
                 outcome["turns"] = len([e for e in log.events() if e.type == "step_start"])
-                outcome["pass"] = result != "ABORTED"
+                # pass = the agent finished naturally AND the workspace passes the
+                # scenario's verify.sh (external grading, run after the agent)
+                outcome["pass"] = result != "ABORTED" and _grade(Path(root), verify_cmd)
             except Exception as e:  # noqa: BLE001
                 outcome["result"] = f"EXCEPTION: {e}"
                 traceback.print_exc()

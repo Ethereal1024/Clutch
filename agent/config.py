@@ -63,10 +63,6 @@ class Config:
     # Agent mode: "work" = full toolset, "chat" = read-only (whitelist + memory + skills)
     mode: str = "work"
 
-    # Verification gate: a command the agent must pass before the task counts as
-    # done; empty = the agent's own "done" reply is trusted.
-    verify_command: str = ""
-
     # Commands that hang in a non-TTY pipe
     blocked_prefixes: list[str] = field(
         default_factory=lambda: [

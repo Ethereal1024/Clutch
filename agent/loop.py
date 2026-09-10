@@ -5,8 +5,8 @@ Per run:
 2. while True:
    a. derive model messages from the event log
    b. call LLM, parse (content, tool_calls, finish_reason)
-   c. no tool call -> candidate done -> run verification gate;
-      pass => stop, fail => feed output back and continue
+   c. no tool call + non-empty text -> natural finish (stop);
+      an empty reply is fed back as an error and retried
    d. tool call(s) -> execute each, feed result back as tool_result
    e. budget / doom-loop checks
 3. Terminate -> append final event.
@@ -32,6 +32,7 @@ from .events import (
     AssistantMessageEvent,
     Event,
     FinalEvent,
+    LlmRetryEvent,
     ReasoningDeltaEvent,
     StateUpdateEvent,
     StepStartEvent,
@@ -130,6 +131,18 @@ class Agent:
                     entry["args"] += ev["delta"]
                     # stream args so the UI shows the call as it is generated
                     self._emit(ToolCallDeltaEvent(tool_call_id=entry["id"], name="", delta=ev["delta"]))
+                elif t == "retry":
+                    # transient notice: a stream attempt failed before its first
+                    # token (network drop / read timeout) and the client is
+                    # reconnecting with backoff — live UI display only, never
+                    # durable; the next delta means the retry landed
+                    self._emit(
+                        LlmRetryEvent(
+                            attempt=ev.get("attempt", 0),
+                            max_retries=ev.get("max", 0),
+                            message=ev.get("message", ""),
+                        )
+                    )
                 elif t == "finish":
                     finish_reason = ev["reason"]
                     content = "".join(content_parts)
@@ -177,7 +190,7 @@ class Agent:
                         if self.compactor.compact():
                             continue
                     raise
-                # partial turn left by Stop: not a done candidate, skip the verify gate
+                # partial turn left by Stop: not a completed turn — abort
                 if self.cancel and self.cancel.is_set():
                     return self._finish("aborted", render("cancelled.md"))
 
@@ -248,18 +261,13 @@ class Agent:
                         )
                     continue
 
-                # ---- no tool call: candidate done -> verification gate ----
+                # ---- no tool call: natural finish (an empty reply is not one) ----
                 self._emit(AssistantMessageEvent(content=content, reasoning=reasoning))
                 if not content.strip():
                     # empty reply is NOT a completion: feed it back as an error
                     self._emit(UserMessageEvent(content=render("empty_response.md")))
                     continue
-                v = self.terminator.verify(self.workspace)
-                if v.done:
-                    return self._finish("completed", content)
-
-                # gate failed: feed verification output back and keep iterating
-                self._emit(UserMessageEvent(content=render("verify_failed.md", output=v.verify_output)))
+                return self._finish("completed", content)
         except agent_errors.AgentError as e:
             # fatal LLM/context failures terminate gracefully
             return self._finish("error", str(e))

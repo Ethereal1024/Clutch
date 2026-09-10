@@ -18,7 +18,9 @@ from agent.events import (
     AssistantMessageEvent,
     CompactionEvent,
     FinalEvent,
+    LlmRetryEvent,
     StateUpdateEvent,
+    TextDeltaEvent,
     ToolResultEvent,
     UserMessageEvent,
 )
@@ -100,27 +102,20 @@ def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: LazyEventLo
 
 
 def main() -> int:
-    config = Config(verify_command="echo ok")
+    config = Config()
 
-    # 0. no verify command: task completes directly
+    # 0. natural finish: a no-tool answer completes in one round trip
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
-        no_gate = Config()  # verify_command defaults to ""
         fake = FakeLLM(
             responses=[_resp(content="done")],
             fallback=_resp(content="done"),
         )
-        agent = Agent(
-            llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(no_gate)),
-            workspace=sb,
-            config=no_gate,
-        )
-        result = agent.run("write an intro file")
-        check(result == "done", "no verify command: natural finish, no gate")
-        check(len(fake.calls) == 1, "no verify command: no extra LLM round trips")
+        result = _agent(fake, config, sb).run("write an intro file")
+        check(result == "done", "natural finish completes the task")
+        check(len(fake.calls) == 1, "no extra LLM round trips on natural finish")
 
-    # 1. tool execution round trip: write a file, then no-tool answer -> verify passes
+    # 1. tool execution round trip: write a file, then a no-tool answer completes
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         fake = FakeLLM(
@@ -135,30 +130,10 @@ def main() -> int:
         check((sb.root / "a.txt").read_text() == "hi", "tool actually wrote file")
         check(fake.calls[1][-1]["role"] == "tool", "tool result fed back")
 
-    # 2. verify gate fails (marker absent), model writes marker, then passes
-    with tempfile.TemporaryDirectory() as tmp:
-        sb = LocalWorkspace(tmp)
-        gate_cfg = Config(verify_command="test -f ok.txt")
-        fake = FakeLLM(
-            responses=[
-                _resp(content="first attempt"),
-                _resp(tool_calls=[_tool_call("write_file", '{"path": "ok.txt", "content": "1"}')]),
-                _resp(content="second attempt"),
-            ],
-            fallback=_resp(content="final"),
-        )
-        agent = _agent(fake, gate_cfg, sb)
-        result = agent.run("t")
-        check(result == "second attempt", "verify fail fed back then passed")
-        # verify-fail feedback is a user message (not orphan tool msg)
-        last_call = fake.calls[1]
-        check(last_call[-1]["role"] == "user", "verify-fail feedback is a user message")
-        check("verification gate did NOT pass" in last_call[-1]["content"], "verify feedback carries output")
-
     # 3. budget abort: model keeps returning tool calls until turns exhausted
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
-        budget = Config(verify_command="echo ok", max_turns=3)
+        budget = Config(max_turns=3)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("read_file", '{"path": "."}')]),
@@ -484,12 +459,12 @@ def main() -> int:
                 yield {"type": "finish", "reason": "stop", "content": "part1part2", "tool_calls": []}
 
         fake = InterruptingLLM()
-        gate_cfg = Config(verify_command="echo ok")
+        cfg = Config()
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(gate_cfg)),
+            registry=ToolRegistry(build_default_tools(cfg)),
             workspace=sb,
-            config=gate_cfg,
+            config=cfg,
             cancel=cancel,
         )
         result = agent.run("t")
@@ -499,17 +474,61 @@ def main() -> int:
         check(bool(finals) and finals[-1].status == "aborted", "aborted final, not a phantom completed")
         check(
             not any(e.type == "tool_call" for e in agent.log.events()),
-            "no verify/tool path ran on the partial turn",
+            "no tool path ran on the partial turn",
+        )
+
+    # 12b. mid-stream transport drop: the client's retry notice reaches the live
+    # sink BEFORE the recovered text, and nothing transient touches the durable log
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        live: list[Any] = []
+
+        class ReconnectingLlm:
+            """Client-shaped recovery: the first stream attempt died before its
+            first token (network drop / read timeout); the client reconnects with
+            backoff and the second attempt delivers. From the loop's perspective
+            the stream yields a "retry" notice, then the recovered text."""
+
+            def stream(self, messages, tools=None):
+                yield {
+                    "type": "retry",
+                    "attempt": 1,
+                    "max": 3,
+                    "code": "timeout",
+                    "message": "Request timed out. — retrying (1/3)",
+                }
+                yield {"type": "text", "delta": "recovered"}
+                yield {"type": "finish", "reason": "stop", "content": "recovered", "tool_calls": []}
+
+        agent = Agent(
+            llm=ReconnectingLlm(),  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(config)),
+            workspace=sb,
+            config=config,
+            sink=live.append,
+        )
+        result = agent.run("t")
+        check(result == "recovered", "run completes after a pre-token retry")
+        retries = [e for e in live if isinstance(e, LlmRetryEvent)]
+        check(len(retries) == 1, "retry notice reached the live sink")
+        check(retries[0].attempt == 1 and retries[0].max_retries == 3, "retry notice carries attempt/max")
+        check("retrying (1/3)" in retries[0].message, "retry notice names the attempt and budget")
+        texts = [e for e in live if isinstance(e, TextDeltaEvent)]
+        check(
+            bool(texts) and "".join(e.content for e in texts) == "recovered",
+            "recovered text streamed after the retry",
+        )
+        check(live.index(retries[0]) < live.index(texts[0]), "retry notice precedes the recovered text")
+        check(
+            not any(isinstance(e, LlmRetryEvent) for e in agent.log.events()),
+            "retry notice never lands in the durable log",
         )
 
     # 13. compaction: overflow rolls older turns into a summary, run continues
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         (sb.root / "a.txt").write_text("some content\n" * 30)
-        cfg = Config(
-            verify_command="echo ok",
-            llm_context_window_bytes=1200,
-        )
+        cfg = Config(llm_context_window_bytes=1200)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("read_file", '{"path": "a.txt"}')]),
@@ -648,12 +667,11 @@ def main() -> int:
     # 13c. empty reply is fed back as an error and retried
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
-        empty_gate = Config(verify_command="echo ok")
         fake13c = FakeLLM(
             responses=[_resp(content=""), _resp(content="real answer")],
             fallback=_resp(content="done"),
         )
-        agent13c = _agent(fake13c, empty_gate, sb)
+        agent13c = _agent(fake13c, config, sb)
         result13c = agent13c.run("t")
         check(result13c == "real answer", "empty reply is retried, not completed")
         check(len(fake13c.calls) == 2, "empty reply costs exactly one retry")
@@ -664,6 +682,43 @@ def main() -> int:
             ),
             "retry prompt mentions the empty reply",
         )
+
+    # 13g. compaction summary transport drop: the client's retry notice is
+    # mirrored into the live progress block; the resumed summary lands intact
+    log13g = LazyEventLog.in_memory()
+    log13g.append(UserMessageEvent(content="task"))
+    log13g.append(AssistantMessageEvent(content="x" * 300))
+    notes: list[object] = []
+
+    class ReconnectingSummaryLlm:
+        def stream(self, messages, tools=None):
+            yield {
+                "type": "retry",
+                "attempt": 1,
+                "max": 3,
+                "code": "timeout",
+                "message": "Request timed out. — retrying (1/3)",
+            }
+            yield {"type": "text", "delta": "the summary"}
+            yield {"type": "finish", "reason": "stop"}
+
+    comp13g = Compactor(
+        Config(llm_context_window_bytes=1000),
+        log13g,
+        ReconnectingSummaryLlm(),
+        sink=notes.append,
+    )
+    check(comp13g.compact() is True, "compaction survives a pre-token retry")
+    deltas13g = [e for e in notes if e.type == "compaction_delta"]
+    check(
+        any(e.note and "retrying" in e.note for e in deltas13g),
+        "retry notice mirrored into the live compaction block",
+    )
+    comps13g = [e for e in log13g.events() if isinstance(e, CompactionEvent)]
+    check(
+        len(comps13g) == 1 and comps13g[0].summary == "the summary",
+        "resumed summary streamed once, no duplication",
+    )
 
     # 14. resumed session: the byte trigger fires on the first turn
     with tempfile.TemporaryDirectory() as tmp:
@@ -714,7 +769,7 @@ def main() -> int:
     # 15b. chat-mode toolset: schema pruning + system-prompt mode note
     from agent.core import context as _context
 
-    chat_cfg = Config(mode="chat", verify_command="echo ok")
+    chat_cfg = Config(mode="chat")
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         chat_names = [t.name for t in build_default_tools(chat_cfg)]
