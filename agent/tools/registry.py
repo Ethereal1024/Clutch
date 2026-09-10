@@ -43,7 +43,7 @@ class Tool:
         }
 
 
-def _str_param(desc: str, required: bool = True) -> dict:
+def _str_param(desc: str) -> dict[str, Any]:
     return {"type": "string", "description": desc}
 
 
@@ -79,8 +79,8 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
             parameters={
                 "properties": {
                     "pattern": _str_param("regex to search for"),
-                    "path": _str_param("subdirectory or file to search (default: whole workspace)", required=False),
-                    "include": _str_param("filename glob filter (e.g. '*.py')", required=False),
+                    "path": _str_param("subdirectory or file to search (default: whole workspace)"),
+                    "include": _str_param("filename glob filter (e.g. '*.py')"),
                 },
                 "required": ["pattern"],
             },
@@ -234,8 +234,7 @@ def _build_load_skill(config: Config) -> Tool | None:
                 },
                 "file": _str_param(
                     "optional file inside the skill directory to read instead of SKILL.md "
-                    "(e.g. resources/template.html)",
-                    required=False,
+                    "(e.g. resources/template.html)"
                 ),
             },
             "required": ["name"],

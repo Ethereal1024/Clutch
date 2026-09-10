@@ -27,8 +27,6 @@ from typing import Any, Callable
 from .core.persist import append_jsonl
 
 SECTION = "[memories]"
-MAX_TITLE_CHARS = 80
-MAX_CONTENT_CHARS = 4000
 
 # --- fixed-width header memory index ---
 # Zero-padded fields keep the line length constant (stable event-region
@@ -43,8 +41,9 @@ _MEMORY_INDEX_LINE_W = (
     + MEMORY_INDEX_SLOTS * _MEMORY_INDEX_FIELD_W  # 160
     + (3 + MEMORY_INDEX_SLOTS - 1)  # commas between the 3 + SLOTS fields
 )  # = 189 bytes, fixed
-# how many bytes to read when pulling one memory line by its offset (content is
-# capped at MAX_CONTENT_CHARS ≈ 13 KB UTF-8, so 32 KB always covers a full line)
+# how many bytes to read when pulling one memory line by its offset (memory
+# content is a short note — at most a few KB as UTF-8 — so 32 KB always covers
+# a full line)
 _MEMORY_READ_CHUNK = 32 * 1024
 
 

@@ -401,7 +401,7 @@ def main() -> int:
     bound_port = srv.server_address[1]
     _log(f"[clutch-supervisor] http://127.0.0.1:{bound_port}  (session lifecycle API)")
 
-    def _on_term(signum, frame):  # noqa: ARG001
+    def _on_term(_signum, _frame):
         _log("[supervisor] SIGTERM, shutting sessions down")
         sup.shutdown_all()
         sup.exit_event.set()
