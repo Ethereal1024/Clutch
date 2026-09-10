@@ -24,12 +24,7 @@ echo "==> building bundled server (PyInstaller onefile)"
 bash scripts/build-server-bundle.sh "$VERSION" "$ROOT/dist/agent-server"
 
 # 3. exec-chunk limit must not drift between agent/ and ui/
-echo "==> checking transport_defaults.json drift guard"
-cmp -s agent/transport_defaults.json ui/transport_defaults.json || {
-  echo "FATAL: ui/transport_defaults.json drifted from agent/transport_defaults.json" >&2
-  echo "       refresh the committed copy: cp agent/transport_defaults.json ui/transport_defaults.json" >&2
-  exit 1
-}
+bash "$ROOT/scripts/check-transport-defaults.sh"
 
 # 4. deb
 echo "==> building deb"

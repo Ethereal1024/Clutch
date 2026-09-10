@@ -21,6 +21,8 @@ directories:
 # exclude dev-only files from the app bundle
 files:
   - "!dev.sh"
+  # the asset survey doc next to the vendored fonts is for the repo, not runtime
+  - "!vendor/fonts/README.md"
 
 # The bundled backend binaries (built by scripts/build-server-bundle.sh; both
 # live in dist/ — agent-server and agent-supervisor) are declared per platform

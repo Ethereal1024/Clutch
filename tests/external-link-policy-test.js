@@ -4,11 +4,7 @@
 // Mirrors the real handlers with stub webContents/shell, like mermaid-logic-test.
 "use strict";
 
-let failures = 0;
-const check = (cond, name) => {
-  if (cond) console.log("ok   " + name);
-  else { failures++; console.log("FAIL " + name); }
-};
+const { check, summary } = require("./harness");
 
 // ---- the exact policy from ui/main.js (keep in sync) ----
 // returns "open" (system browser) | "block" | "allow" (same-URL reload)
@@ -91,4 +87,4 @@ function makeWindow() {
 
 }
 
-process.exit(failures ? 1 : 0);
+summary("external-link-policy");

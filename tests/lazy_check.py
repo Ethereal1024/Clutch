@@ -42,14 +42,9 @@ from agent.events import (
     event_to_json,
 )
 from agent.project import open_project_lazy
+from tests.testsupport import collecting_check
 
-failures = []
-
-
-def check(cond: bool, label: str) -> None:
-    print(f"{'ok:  ' if cond else 'FAIL: '}{label}")
-    if not cond:
-        failures.append(label)
+check, failures = collecting_check()
 
 
 class FakeLlm:

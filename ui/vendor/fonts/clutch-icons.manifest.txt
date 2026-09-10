@@ -1,0 +1,19 @@
+# clutch-icons.woff2 contents — written by scripts/build-icon-font.py, checked by tests/ui_fonts_check.py
+font: clutch-icons.woff2
+sha256: 532bb7761a47866ef7152d8b0ebdb4a69328a253a5d0d5e86cd7ca70cc7d1d69
+U+2192
+U+2193
+U+21B6
+U+25A0
+U+25A3
+U+25A6
+U+25B6
+U+25B8
+U+25BE
+U+2699
+U+26A0
+U+270E
+U+2713
+U+27E6
+U+27E7
+U+FF0B

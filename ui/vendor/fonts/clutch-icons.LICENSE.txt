@@ -1,0 +1,9 @@
+clutch-icons.woff2 — a 16-glyph subset of Symbola
+
+Source: Symbola, Copyright (C) 2007-2015 George Douros <g1951d@teilar.gr>
+        (Debian package fonts-symbola 2.60-1.1, http://mirrors.tuna.tsinghua.edu.cn/ubuntu/pool/universe/t/ttf-ancient-fonts/fonts-symbola_2.60-1.1_all.deb)
+License: "Fonts are free for any use; they may be opened, edited, modified,
+          regenerated, packaged and redistributed."
+Subset: the 16 symbol codepoints listed in scripts/build-icon-font.py; the
+        font was renamed to "Clutch Icons" and its ASCII "+" outline remapped
+        to U+FF0B. Rebuild with: uv run --with fonttools --with brotli python3 scripts/build-icon-font.py

@@ -1,6 +1,17 @@
 #!/usr/bin/env node
-// Guards electron-builder.yml against a silent packaging trap: platform
-// sections do NOT override the root list. fileMatcher.js getFileMatchers() runs
+// Guards electron-builder.yml against two silent packaging traps.
+//
+// (2) The app's own files go in through the `files` glob. ui/electron-builder.yml
+// carries only an ignore ("!dev.sh"), and when a `files` list holds nothing but
+// ignores electron-builder PREPENDS "**/*" (fileMatcher.js getMainFileMatchers)
+// before appending its default excludes — so today everything under ui/ ships.
+// Narrowing that list later (e.g. listing "**/*.js") would drop an asset the UI
+// loads at runtime from file://…, and NOTHING fails: the app starts and just
+// renders in the OS fallback face. The vendored fonts are asserted against the
+// real matcher below.
+//
+// (1) Platform sections do NOT override the root list: fileMatcher.js
+// getFileMatchers() runs
 // addPatterns(config[name]) and then addPatterns(customBuildOptions[name]), so a
 // root-level `extraResources` leaks into EVERY platform bundle and is only
 // skipped at copy time with a "file source doesn't exist" warning.
@@ -12,7 +23,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { getConfig, validateConfiguration } = require("app-builder-lib/out/util/config/config.js");
-const { getFileMatchers } = require("app-builder-lib/out/fileMatcher.js");
+const { getFileMatchers, getMainFileMatchers } = require("app-builder-lib/out/fileMatcher.js");
 
 const PROJECT_DIR = __dirname;
 const SRC_DIR = path.resolve(PROJECT_DIR, ".."); // extraResources `from` is relative to the project dir
@@ -58,6 +69,59 @@ function checkIco(file) {
   check(has256, `${file}: no 256x256 entry (electron-builder requires one)`);
 }
 
+// Assets the renderer loads at runtime from file://… . A missing webfont is not
+// an error anywhere in the build: the UI silently renders in the platform's own
+// fallback face, which is exactly the cross-platform drift the vendored fonts
+// exist to remove. Each entry is asserted present in the packaged file set.
+const REQUIRED_ASSETS = [
+  "vendor/fonts/archivo-var.woff2",
+  "vendor/fonts/jetbrains-mono-400.woff2",
+  "vendor/fonts/clutch-icons.woff2", // the 16-glyph symbol subset (tests/ui_fonts_check.py)
+  "vendor/fonts/clutch-icons.LICENSE.txt",
+  "vendor/fonts/clutch-icons.manifest.txt",
+  "index.html",
+  "app.js",
+  "style.css",
+];
+// …and files that must NOT ship. They prove the filter below really filters
+// (a filter that says "yes" to everything would pass the list above vacuously).
+const EXCLUDED_FILES = [
+  "dev.sh",
+  "package-lock.json",
+  "vendor/fonts/README.md", // survey/licence rationale lives in the repo, not in the app
+];
+
+const FILE = { isDirectory: () => false, isFile: () => true };
+
+// The app-dir matcher exactly as the packager builds it: real config, real
+// getMainFileMatchers, real filter.
+function appFileFilter(config) {
+  const packager = {
+    info: {
+      projectDir: PROJECT_DIR,
+      buildResourcesDir: "build",
+      config,
+      isPrepackedAppAsar: false,
+      debugLogger: { isEnabled: false, add() {} },
+    },
+  };
+  const [matcher] = getMainFileMatchers(PROJECT_DIR, "/app", (it) => it, {}, packager, path.join(PROJECT_DIR, "dist"), false);
+  return (rel) => matcher.createFilter()(path.join(PROJECT_DIR, rel), FILE);
+}
+
+function checkAppFiles(config) {
+  const included = appFileFilter(config);
+  const unpackaged = REQUIRED_ASSETS.filter((rel) => !included(rel));
+  check(unpackaged.length === 0, `app files: not packaged -> ${JSON.stringify(unpackaged)}`);
+  // the glob decides what is copied; it cannot know whether the file is there,
+  // so a typo'd path would sail through the check above
+  const absent = REQUIRED_ASSETS.filter((rel) => !fs.existsSync(path.join(PROJECT_DIR, rel)));
+  check(absent.length === 0, `app files: listed but missing on disk -> ${JSON.stringify(absent)}`);
+  const leaked = EXCLUDED_FILES.filter((rel) => included(rel));
+  check(leaked.length === 0, `app files: packaged but should not be -> ${JSON.stringify(leaked)}`);
+  console.log(`  app   ${REQUIRED_ASSETS.length} runtime assets packaged (incl. 3 woff2), dev-only files excluded`);
+}
+
 (async () => {
   const config = await getConfig(PROJECT_DIR);
   // real schema validation: catches e.g. extraResources placed where the scheme
@@ -84,6 +148,7 @@ function checkIco(file) {
   }
 
   checkIco(path.join(PROJECT_DIR, config.win.icon));
+  checkAppFiles(config);
 
   if (failures.length > 0) {
     console.error("\nverify-build-config FAILED:");

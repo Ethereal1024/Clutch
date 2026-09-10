@@ -151,9 +151,11 @@ agent/                 后端
   tools/               工具定义与本地执行：read_file / write_file / edit_file /
                        grep / run_command
   llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）
+  browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
   server.py            HTTP + SSE 服务（会话入口）
   supervisor.py        会话进程管理
-  skills/              按需加载的领域知识
+  skills/              按需加载的领域知识（随包发布 4 个；本机 dev-only 的写作
+                       技能不入库、也不进安装包）
 ui/                    Electron 前端（设置、SSH 隧道、LLM 反代）
 eval/                  评测场景（落地页 / 修 bug / 重构）
 tests/                 测试
@@ -169,6 +171,7 @@ uv run python -m tests.server_test      # HTTP + SSE 端到端
 uv run python -m tests.lazy_check       # 历史分页与惰性加载
 uv run python -m tests.supervisor_test  # 会话生命周期与跨进程锁
 uv run python -m tests.transport_test   # 传输层与远程工作区往返
+uv run python -m tests.ui_fonts_check   # 字体/图标跨平台一致（含 mermaid 标签字体）
 uv run python -m eval.harness           # 三个评测场景
 ```
 

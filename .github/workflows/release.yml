@@ -56,6 +56,12 @@ jobs:
         working-directory: ui
         run: node verify-build-config.js
 
+      # font wiring guard: a root-absolute @font-face url resolves to file:///… and
+      # fails silently, which is how every platform ended up in its own OS face
+      # (tests/ui_fonts_check.py docstring). Offline, no browser, no deps.
+      - name: Verify UI fonts
+        run: .venv/bin/python -m tests.ui_fonts_check
+
       - name: Build deb
         working-directory: ui
         run: npm run dist

@@ -69,9 +69,7 @@ jobs:
       # same guard as `predist`, which vite/npm does not run for dist:win
       - name: Check transport_defaults drift
         shell: bash
-        run: |
-          cmp -s agent/transport_defaults.json ui/transport_defaults.json \
-            || { echo "transport_defaults.json drifted — cp agent/transport_defaults.json ui/"; exit 1; }
+        run: bash scripts/check-transport-defaults.sh
 
       # platform extraResources/icon guard (no build): see ui/verify-build-config.js
       - name: Verify builder config

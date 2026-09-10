@@ -28,3 +28,18 @@ docs/
 
 # third-party writing skills (humanizer-zh etc.) — local tooling, not part of the submission
 .claude/skills/
+
+# local release-ops scratch scripts (machine-local: hardcoded run ids, PAT access);
+# readme.txt is the plain-text submission deliverable, kept out of the repo on purpose
+/poll_ci.py
+/readme.txt
+/verify_release.py
+/verify_win_artifact.py
+/watch_ci.sh
+
+# dev-only skills: usable by a local `uv run` agent, but neither committed nor
+# shipped — scripts/build-server-bundle.sh packages an explicit skill whitelist
+/agent/skills/humanize-writing/
+/agent/skills/humanizer-document-zh/
+/agent/skills/humanizer-zh/
+/agent/skills/wudao-humanize/

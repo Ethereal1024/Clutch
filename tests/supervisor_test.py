@@ -18,36 +18,12 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from agent.supervisor import Supervisor, _SafeStdStream, build_server
-from tests.testsupport import check
+from tests.testsupport import check, http_get, http_post
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def http_get(url: str) -> tuple[int, str]:
-    try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            return r.status, r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", errors="replace")
-
-
-def http_post(url: str, body: dict | None = None) -> tuple[int, str]:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body or {}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
 
 
 def wait_until(pred, timeout_s: float = 10.0, what: str = "condition") -> bool:

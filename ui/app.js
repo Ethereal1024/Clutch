@@ -29,6 +29,28 @@ async function resolveApiBase() {
 
 const $ = (s) => document.querySelector(s);
 
+// single JSON request path: base URL, Content-Type header and error unwrapping
+// live here instead of being re-written at every call site. Errors are thrown
+// as `Error` with `.status` (HTTP status, absent for network failures — callers
+// use it to tell "backend said no" from "backend unreachable") and `.code`
+// (server error code, e.g. project_open_conflict). Throws on non-2xx and on a
+// 200 body that carries an error (only /api/fs/list does that).
+async function apiFetch(path, { method = "GET", body, base = API_BASE } = {}) {
+  const r = await fetch(base + path, body === undefined ? { method } : {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.error) {
+    const e = new Error(data.error || r.status);
+    e.code = data.code || null;
+    e.status = r.status;
+    throw e;
+  }
+  return data;
+}
+
 const els = {
   task: $("#task-input"),
   run: $("#run-btn"),
@@ -470,12 +492,36 @@ function addEvent(ev) {
   if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
     toolGroupEl = null;
   }
+  if (applyStreamEvent(ev)) return;
+
+  const el = renderEvent(ev);
+  if (el) {
+    (pageSink || eventsEl).appendChild(el);
+    // user tasks render markdown too; replay hits this path as well.
+    // NOTE: className is "event user" (two tokens) — classList.contains("event.user")
+    // would be a single-token lookup and ALWAYS false (live math never typeset);
+    // use CSS selector semantics like the replay path's ".event.user .body".
+    if (el.matches(".event.user")) highlightCode(el);
+    // user tasks may carry LaTeX; live path only (replay batches it after insertion)
+    if (el.matches(".event.user") && !pageSink) typesetMath(el);
+    autoScroll();
+  }
+}
+
+// the live event layer: every event type whose handling depends on streaming
+// state — coalesced text/thinking buffers, the live compaction block, retry
+// chips, tool-call grouping, plus the durable renders that coordinate that
+// state (compaction, assistant_message, final). Returns true when the event is
+// fully handled; false means "plain durable render" and addEvent falls through
+// to renderEvent() (user_message, tool_result, state_update, permission_request,
+// step_start — which only resets the stream blocks above — and unknown types).
+function applyStreamEvent(ev) {
   if (ev.type === "compaction_delta") {
     // live progress of an in-flight compaction (transient, not stored)
     if (ev.done) {
       if (compactionEl) { compactionEl.remove(); compactionEl = null; }
       clearRetryNote();
-      return;
+      return true;
     }
     if (!compactionEl) {
       compactionEl = document.createElement("div");
@@ -493,13 +539,13 @@ function addEvent(ev) {
         ? `summarizing earlier turns… ${ev.chars} chars streamed`
         : "compressing context — rolling earlier turns into a summary…";
     autoScroll();
-    return;
+    return true;
   }
   if (ev.type === "llm_retry") {
     // transient: an LLM stream attempt failed; the client is reconnecting with
     // backoff (transient, never stored; the next delta removes the chip)
     setRetryNote(ev);
-    return;
+    return true;
   }
   if (ev.type === "compaction") {
     // the durable compaction record: replace the live block with the final notice
@@ -516,7 +562,7 @@ function addEvent(ev) {
     el.appendChild(p);
     (pageSink || eventsEl).appendChild(el);
     autoScroll();
-    return;
+    return true;
   }
   if (ev.type === "assistant_message") {
     toolGroupEl = null;
@@ -524,7 +570,7 @@ function addEvent(ev) {
     if (lastTextEl && lastTextEl.isConnected) {
       lastTextEl = null;
       lastTextContent = "";
-      return;
+      return true;
     }
     // thinking renders above the agent text; skip if a live reasoning stream already
     // rendered this turn
@@ -535,7 +581,7 @@ function addEvent(ev) {
       highlightCode(wrap);
       (pageSink || eventsEl).appendChild(wrap);
     }
-    return;
+    return true;
   }
   if (ev.type === "final") {
     // the run is over: dismiss any stale permission prompt
@@ -547,7 +593,7 @@ function addEvent(ev) {
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree
-    return;
+    return true;
   }
   if (ev.type === "tool_call" && ev.tool_call_id) {
     let args = {};
@@ -565,12 +611,12 @@ function addEvent(ev) {
     } else {
       addToolCallRow(ev); // replay (no deltas) renders the final row directly
     }
-    return;
+    return true;
   }
   if (ev.type === "tool_call_delta" && ev.tool_call_id) {
     clearRetryNote(); // args are flowing again: the reconnect landed
     handleToolCallDelta(ev);
-    return;
+    return true;
   }
 
   // read results merge into their group; look it up by call id (the collector
@@ -589,7 +635,7 @@ function addEvent(ev) {
         const el = renderEvent(ev);
         if (el) { (pageSink || eventsEl).appendChild(el); autoScroll(); }
       }
-      return;
+      return true;
     }
   }
 
@@ -602,7 +648,7 @@ function addEvent(ev) {
     }
     lastTextContent += ev.content;
     scheduleTextRender();
-    return;
+    return true;
   }
 
   // streaming reasoning: compact row while streaming, expandable on click
@@ -622,11 +668,13 @@ function addEvent(ev) {
     const fold = thinkingEl.querySelector(".fold");
     if (fold && !fold.classList.contains("hidden")) full.textContent = full._content;
     autoScroll();
-    return;
+    return true;
   }
 
   if (ev.type === "step_start") {
-    // a new LLM turn begins: reset the streaming blocks (and any stale chip)
+    // a new LLM turn begins: reset the streaming blocks (and any stale chip);
+    // nothing to draw itself — step_start falls through to renderEvent (no case,
+    // so no node) after the reset
     lastTextEl = null;
     lastTextContent = "";
     thinkingEl = null;
@@ -634,18 +682,7 @@ function addEvent(ev) {
     clearRetryNote();
   }
 
-  const el = renderEvent(ev);
-  if (el) {
-    (pageSink || eventsEl).appendChild(el);
-    // user tasks render markdown too; replay hits this path as well.
-    // NOTE: className is "event user" (two tokens) — classList.contains("event.user")
-    // would be a single-token lookup and ALWAYS false (live math never typeset);
-    // use CSS selector semantics like the replay path's ".event.user .body".
-    if (el.matches(".event.user")) highlightCode(el);
-    // user tasks may carry LaTeX; live path only (replay batches it after insertion)
-    if (el.matches(".event.user") && !pageSink) typesetMath(el);
-    autoScroll();
-  }
+  return false;
 }
 
 function createAgentTextBlock() {
@@ -887,89 +924,113 @@ function isLastElement(pre) {
   return true;
 }
 
+// one-time mermaid initialization: bridge the :root custom properties (accent
+// palette, --font-display stack) into mermaid's themeVariables. Returns false
+// when initialize() threw — the caller keeps mermaidInitialized set anyway so a
+// broken environment is not retried on every frame.
+function initMermaidTheme() {
+  try {
+    // :root custom properties are handed over verbatim, and --font-display is
+    // written with inline /* comments */ and newlines for readability. A
+    // comment is legal inside a CSS font list but not something to hand to
+    // mermaid (it re-emits the value into a <style> block and into inline
+    // style attributes), so flatten every value the same way.
+    const cssValue = (name) =>
+      (getComputedStyle(document.documentElement).getPropertyValue(name) || "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    // palette follows the UI: accent red strokes/lines, neutral dark fills
+    const accent = cssValue("--accent") || "#EF4444";
+    // diagram labels must not fall back to mermaid's own default font ("Arial"
+    // in the bundle), which each OS resolves with a different face — the same
+    // cross-platform drift the CSS stacks fix for the rest of the UI. Read the
+    // computed stack so the diagrams follow it instead of duplicating it here.
+    const diagramFont = cssValue("--font-display") || "sans-serif";
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "dark",
+      securityLevel: "strict",
+      themeVariables: {
+        fontFamily: diagramFont,
+        // strokes & lines: accent red
+        lineColor: accent,
+        primaryBorderColor: accent,
+        secondaryBorderColor: accent,
+        tertiaryBorderColor: accent,
+        // sequence diagram
+        actorBorder: accent,
+        actorLineColor: accent,
+        signalColor: accent,
+        labelBoxBorderColor: accent,
+        noteBorderColor: accent,
+        activationBorderColor: accent,
+        // gantt: active = red fill, planned = grey, done = darker grey
+        taskBorderColor: accent,
+        taskBkgColor: "#2d2d33",
+        taskBkg: "#2d2d33", // harmless alias for any theme that reads it
+        taskTextColor: "#d4d4d8",
+        taskTextLightColor: "#d4d4d8",
+        activeTaskBorderColor: accent,
+        activeTaskBkgColor: accent,
+        activeTaskBkg: accent,
+        activeTaskTextColor: "#0F0F10",
+        doneTaskBorderColor: "#52525b",
+        doneTaskBkgColor: "#1c1c1f",
+        doneTaskBkg: "#1c1c1f",
+        doneTaskTextColor: "#a1a1aa",
+        todayLineColor: accent,
+        // clusters / subgraphs
+        clusterBorder: accent,
+        // state diagrams: also override the outer container's legacy border1
+        stateBorder: accent,
+        border1: accent,
+        // fills & labels: neutral dark greys
+        noteBkgColor: "#1c1c1f",
+        noteTextColor: "#d4d4d8",
+        edgeLabelBackground: "#1c1c1f",
+        clusterBkg: "#1c1c1f",
+        taskTextOutsideColor: "#a1a1aa",
+        activationBkgColor: "#27272a",
+        // pie: first slice red, rest grayscale (pie0 unused)
+        pie1: accent,
+        pie2: "#27272a",
+        pie3: "#3f3f46",
+        pie4: "#52525b",
+        pie5: "#71717a",
+        pie6: "#8b8b94",
+        pie7: "#a1a1aa",
+        pie8: "#b8b8c0",
+        pie9: "#c9c9d0",
+        pie10: "#d4d4d8",
+        pie11: "#e0e0e4",
+        pie12: "#ededf0",
+        // git graphs: grayscale + red (git0-git7)
+        git0: accent,
+        git1: "#71717a",
+        git2: "#d4d4d8",
+        git3: "#3f3f46",
+        git4: "#a1a1aa",
+        git5: "#27272a",
+        git6: "#b8b8c0",
+        git7: "#52525b",
+      },
+    });
+    // never let the parser's error path paint its giant error diagram
+    mermaid.parseError = (err) => console.warn("[mermaid]", err);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // render mermaid: skip a last-element block mid-stream (open fence), keep
 // broken source literal (async parse gate)
 async function renderMermaid(root, streaming = false) {
   if (typeof mermaid === "undefined" || !root) return;
   if (!mermaidInitialized) {
     mermaidInitialized = true;
-    try {
-      // palette follows the UI: accent red strokes/lines, neutral dark fills
-      const accent =
-        (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#EF4444";
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: "dark",
-        securityLevel: "strict",
-        themeVariables: {
-          // strokes & lines: accent red
-          lineColor: accent,
-          primaryBorderColor: accent,
-          secondaryBorderColor: accent,
-          tertiaryBorderColor: accent,
-          // sequence diagram
-          actorBorder: accent,
-          actorLineColor: accent,
-          signalColor: accent,
-          labelBoxBorderColor: accent,
-          noteBorderColor: accent,
-          activationBorderColor: accent,
-          // gantt: active = red fill, planned = grey, done = darker grey
-          taskBorderColor: accent,
-          taskBkgColor: "#2d2d33",
-          taskBkg: "#2d2d33", // harmless alias for any theme that reads it
-          taskTextColor: "#d4d4d8",
-          taskTextLightColor: "#d4d4d8",
-          activeTaskBorderColor: accent,
-          activeTaskBkgColor: accent,
-          activeTaskBkg: accent,
-          activeTaskTextColor: "#0F0F10",
-          doneTaskBorderColor: "#52525b",
-          doneTaskBkgColor: "#1c1c1f",
-          doneTaskBkg: "#1c1c1f",
-          doneTaskTextColor: "#a1a1aa",
-          todayLineColor: accent,
-          // clusters / subgraphs
-          clusterBorder: accent,
-          // state diagrams: also override the outer container's legacy border1
-          stateBorder: accent,
-          border1: accent,
-          // fills & labels: neutral dark greys
-          noteBkgColor: "#1c1c1f",
-          noteTextColor: "#d4d4d8",
-          edgeLabelBackground: "#1c1c1f",
-          clusterBkg: "#1c1c1f",
-          taskTextOutsideColor: "#a1a1aa",
-          activationBkgColor: "#27272a",
-          // pie: first slice red, rest grayscale (pie0 unused)
-          pie1: accent,
-          pie2: "#27272a",
-          pie3: "#3f3f46",
-          pie4: "#52525b",
-          pie5: "#71717a",
-          pie6: "#8b8b94",
-          pie7: "#a1a1aa",
-          pie8: "#b8b8c0",
-          pie9: "#c9c9d0",
-          pie10: "#d4d4d8",
-          pie11: "#e0e0e4",
-          pie12: "#ededf0",
-          // git graphs: grayscale + red (git0-git7)
-          git0: accent,
-          git1: "#71717a",
-          git2: "#d4d4d8",
-          git3: "#3f3f46",
-          git4: "#a1a1aa",
-          git5: "#27272a",
-          git6: "#b8b8c0",
-          git7: "#52525b",
-        },
-      });
-      // never let the parser's error path paint its giant error diagram
-      mermaid.parseError = (err) => console.warn("[mermaid]", err);
-    } catch (e) {
-      return;
-    }
+    if (!initMermaidTheme()) return;
   }
   const pending = [];
   for (const code of root.querySelectorAll("pre code.language-mermaid")) {
@@ -1170,13 +1231,11 @@ function renderEvent(ev) {
         undoBtn.textContent = "↶ undo";
         undoBtn.onclick = async () => {
           try {
-            const res = await fetch(API_BASE + "/api/workspace/revert", {
+            const data = await apiFetch("/api/workspace/revert", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ path: call.args.path }),
+              body: { path: call.args.path },
             });
-            const data = await res.json();
-            if (res.ok && data && data.status === "ok") {
+            if (data && data.status === "ok") {
               undoBtn.textContent = "↶ undone";
               undoBtn.disabled = true;
               refreshTree();
@@ -1185,7 +1244,8 @@ function renderEvent(ev) {
               undoBtn.disabled = true;
             }
           } catch (e) {
-            undoBtn.textContent = "↶ failed";
+            // an HTTP rejection means the backend answered: no snapshot exists
+            undoBtn.textContent = e.status ? "↶ no snapshot" : "↶ failed";
             undoBtn.disabled = true;
           }
         };
@@ -1274,13 +1334,7 @@ async function run() {
   // runs append to the active project; the mode travels with the request
   const payload = { task, mode: agentMode, project: currentProject };
   try {
-    const r = await fetch(API_BASE + "/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || r.status);
+    const data = await apiFetch("/api/run", { method: "POST", body: payload });
     if (data.workspace) els.workspace.textContent = data.workspace;
     refreshTree();
   } catch (e) {
@@ -1289,7 +1343,9 @@ async function run() {
 }
 
 async function stop() {
-  await fetch(API_BASE + "/api/stop", { method: "POST" });
+  try {
+    await apiFetch("/api/stop", { method: "POST" }); // bodyless; best effort
+  } catch (e) {}
 }
 
 els.run.addEventListener("click", () => (busy ? stop() : run()));
@@ -1571,13 +1627,7 @@ async function pushSettings() {
   };
   if (key) payload.api_key = key;
   try {
-    const r = await fetch(API_BASE + "/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || r.status);
+    await apiFetch("/api/settings", { method: "POST", body: payload });
     if (key) localStorage.setItem("clutch_api_key", key);
     localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
     // keep the client-side LLM proxy in sync (it reads the local settings file)
@@ -1733,10 +1783,9 @@ async function reapplyDegradeIfNeeded() {
     return;
   }
   try {
-    await fetch(API_BASE + "/api/backend", {
+    await apiFetch("/api/backend", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "ssh", bridge, workspace: "~" }),
+      body: { mode: "ssh", bridge, workspace: "~" },
     });
   } catch (e) {
     /* best effort: the next re-apply retries */
@@ -1756,14 +1805,15 @@ async function tryDegradeToSshTools() {
   const url = await window.clutchApi.baseUrl();
   if (!url) return "not running";
   try {
-    const r = await fetch(url + "/api/backend", {
+    await apiFetch("/api/backend", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "ssh", bridge: s.execBridge, workspace: "~" }),
+      body: { mode: "ssh", bridge: s.execBridge, workspace: "~" },
+      base: url,
     });
-    if (!r.ok) return "not running";
   } catch (e) {
-    return "unreachable";
+    // .status = the backend answered but refused the mode (session gone);
+    // no .status = the request itself failed (backend unreachable)
+    return e.status ? "not running" : "unreachable";
   }
   // persist the mode: the session process may be re-created later
   localStorage.setItem("clutch_degrade", JSON.stringify({ bridge: s.execBridge }));
@@ -1772,11 +1822,9 @@ async function tryDegradeToSshTools() {
 
 async function resetBackendLocal() {
   try {
-    await fetch(DEFAULT_BASE + "/api/backend", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "local" }),
-    });
+    // DEFAULT_BASE, not API_BASE: the local supervisor port answers even while
+    // no session has claimed the renderer yet
+    await apiFetch("/api/backend", { method: "POST", body: { mode: "local" }, base: DEFAULT_BASE });
   } catch (e) {
     /* the local server may be down; the renderer still falls back in place */
   }
@@ -2098,10 +2146,9 @@ async function respondPerm(allow) {
   closePerm();
   setStatus("running");
   try {
-    await fetch(API_BASE + "/api/permission/respond", {
+    await apiFetch("/api/permission/respond", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request_id: rid, allow }),
+      body: { request_id: rid, allow },
     });
   } catch (e) {}
 }
@@ -2146,8 +2193,7 @@ async function refreshTree() {
     if (showHidden) params.set("hidden", "1");
     for (const p of expandedDirs) params.append("expanded", p);
     const qs = params.toString() ? "?" + params : "";
-    const r = await fetch(API_BASE + "/api/workspace/tree" + qs);
-    const data = await r.json();
+    const data = await apiFetch("/api/workspace/tree" + qs);
     if (data.root) els.workspace.textContent = data.root;
     // include expansion state in the signature so a toggle always re-renders
     const sig = JSON.stringify([...expandedDirs]) + "|" + JSON.stringify(data.tree || []);
@@ -2296,9 +2342,7 @@ async function loadOlder() {
   paging = true;
   try {
     const anchor = eventsEl.firstElementChild; // identity survives the prepend
-    const res = await fetch(API_BASE + `/api/history?before=${oldestOffset}&limit=262144`);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) throw new Error(data.error || res.status);
+    const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=262144`);
     const page = data.events || [];
     if (!page.length) { setOlderPill(0); return; }
     const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;
@@ -2370,6 +2414,9 @@ async function openProject(path, readOnly = false) {
     label.textContent = Math.round(pct) + "%";
   };
   try {
+    // NOT apiFetch: this endpoint streams NDJSON (meta/progress/event/done), so
+    // the body must stay a stream; only the error unwrap below shares apiFetch's
+    // contract (Error with .code/.status)
     const r = await fetch(API_BASE + "/api/project/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2467,13 +2514,7 @@ async function openProject(path, readOnly = false) {
 async function createProject(dir, name) {
   if (busy) return;
   try {
-    const r = await fetch(API_BASE + "/api/project/new", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dir, name }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || r.status);
+    const data = await apiFetch("/api/project/new", { method: "POST", body: { dir, name } });
     clearStream();
     setProjectInfo(data);
     hideWelcome();
@@ -2553,11 +2594,9 @@ async function loadDir(path, remember = true) {
   }
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
   try {
-    const r = await fetch(
-      API_BASE + "/api/fs/list?path=" + encodeURIComponent(path) + (showHidden ? "&hidden=1" : "")
+    const data = await apiFetch(
+      "/api/fs/list?path=" + encodeURIComponent(path) + (showHidden ? "&hidden=1" : "")
     );
-    const data = await r.json();
-    if (!r.ok || data.error) throw new Error(data.error || r.status);
     fsPath = data.path;
     fsParent = data.parent;
     // remember the last browsed directory (re-lists pass remember=false)

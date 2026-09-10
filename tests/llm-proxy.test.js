@@ -10,12 +10,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { joinUpstream, getUpstream, getApiKey } = require("../ui/llm-proxy");
-
-let failures = 0;
-function check(ok, label) {
-  console.log((ok ? "ok:   " : "FAIL: ") + label);
-  if (!ok) failures++;
-}
+const { check, summary } = require("./harness");
 
 // 1. deepseek-style upstream without a path: /v1 is stripped, URL is correct
 check(
@@ -99,8 +94,4 @@ try {
   else process.env.CLUTCH_LLM_UPSTREAM = origEnv;
 }
 
-if (failures) {
-  console.log(`\n${failures} FAILED`);
-  process.exit(1);
-}
-console.log("\nall passed");
+summary("llm-proxy");

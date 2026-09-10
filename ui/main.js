@@ -167,11 +167,6 @@ process.on("unhandledRejection", (e) => {
   tunnelLog("[fatal] unhandledRejection: " + ((e && e.stack) || e));
 });
 
-// One Electron process per machine: a second `npm start` opens a NEW WINDOW in
-// the running instance. Two processes would race the supervisor AND (fatally
-// for saved state) the loser cannot open the profile's LevelDB lock, so its
-// localStorage — saved SSH connections, last dir, mode — reads EMPTY and every
-// write is silently lost (the "device list only shows localhost" bug).
 // external URLs (model-provided links etc.) must open in the SYSTEM browser;
 // an in-window navigation would replace the whole app UI with the target page
 // and leave no way back (no back button), forcing the user to restart the session
@@ -221,6 +216,11 @@ function createWindow() {
   return win;
 }
 
+// One Electron process per machine: a second `npm start` opens a NEW WINDOW in
+// the running instance. Two processes would race the supervisor AND (fatally
+// for saved state) the loser cannot open the profile's LevelDB lock, so its
+// localStorage — saved SSH connections, last dir, mode — reads EMPTY and every
+// write is silently lost (the "device list only shows localhost" bug).
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // the running instance opens the new window
 } else {

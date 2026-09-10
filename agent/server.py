@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from . import browsing
 from .base import BaseServer, Broadcaster, RunState
 from .config import REASONING_EFFORT_LEVELS, Config, flatten_settings
 from .core.project_lock import ProjectLock, ProjectOpenConflict
@@ -42,8 +43,7 @@ from .events import (
     event_to_json,
 )
 from .project import Project, create_project, open_project_lazy
-from .tools.transport import SshTransport
-from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
+from .tools.workspace import Workspace
 
 # a client hanging up mid-SSE surfaces as one of these on the socket write;
 # end cleanly, never let socketserver print a traceback. The class is host
@@ -478,11 +478,7 @@ class Handler(BaseHTTPRequestHandler):
         sb = self._state.workspace
         if sb is None:
             return self._json({"tree": [], "root": None})
-        if isinstance(sb, RemoteWorkspace):
-            tree = _walk_remote(sb, expanded, show_hidden)
-        else:
-            tree = _walk(sb.root, sb, expanded, show_hidden)
-        self._json({"tree": tree, "root": str(sb.root)})
+        self._json({"tree": browsing.tree(sb, expanded, show_hidden), "root": str(sb.root)})
 
     def _workspace_revert(self) -> None:
         """User-side undo: restore the last snapshot of a file in the workspace
@@ -508,72 +504,15 @@ class Handler(BaseHTTPRequestHandler):
     def _fs_list(self) -> None:
         """Server-side directory browser (the UI picks projects from here).
 
-        One level, starts at the server user's home (or the SSH remote's home in
+        One level, starting at the server user's home (or the SSH remote's home in
         degradation mode). Reachable only via the local bind or the SSH tunnel, so
-        no auth is needed.
+        no auth is needed. The payload contract and both transports live in
+        agent.browsing so the local and remote shapes cannot drift.
         """
         qs = parse_qs(urlparse(self.path).query)
         raw = (qs.get("path") or [""])[0]
         show_hidden = qs.get("hidden", ["0"])[0] == "1"
-        if self._state.backend_mode == "ssh" and self._state.bridge_url:
-            return self._fs_list_remote(raw, show_hidden)
-        if raw:
-            p = Path(raw).expanduser()
-            if not p.is_absolute():
-                p = Path.home() / p
-            root = p.resolve()
-        else:
-            root = Path.home().resolve()
-        if not root.is_dir():
-            return self._json({"error": f"not a directory: {root}"})
-        try:
-            entries = sorted(root.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
-        except OSError as e:
-            return self._json({"error": f"cannot list directory: {e}"})
-        if not show_hidden:
-            entries = [e for e in entries if not e.name.startswith(".")]
-        parent = str(root.parent) if root.parent != root else None
-        self._json(
-            {
-                "path": str(root),
-                "parent": parent,
-                "entries": [
-                    {
-                        "name": e.name,
-                        "path": str(e),
-                        "dir": e.is_dir(),
-                        "link": str(e.resolve()) if e.is_symlink() else None,
-                    }
-                    for e in entries
-                ],
-                "error": None,
-            }
-        )
-
-    def _fs_list_remote(self, raw: str, show_hidden: bool) -> None:
-        """One-level remote directory listing via a single ls exec over the bridge."""
-        transport = SshTransport(self._state.bridge_url)
-        base = self._state.remote_root or "~"
-        if raw:
-            target = raw if raw.startswith("/") else base.rstrip("/") + "/" + raw
-        else:
-            target = base
-        if target == "~" or target.startswith("~/"):
-            home = transport.run("echo $HOME", _FS_LIST_TIMEOUT).stdout.strip() or base
-            target = home if target == "~" else home + target[1:]
-        r = transport.run(f"ls -1AF {shq(target)}", _FS_LIST_TIMEOUT)
-        if r.code != 0:
-            return self._json({"error": f"not a directory: {target}"})
-        entries = []
-        for name, is_dir in parse_ls_entries(r.stdout):
-            # dirs are always shown even when hidden (the browser needs a way
-            # into dot-directories); hidden files are filtered like _walk
-            if not is_dir and not show_hidden and name.startswith("."):
-                continue
-            # link targets need an extra readlink exec per symlink; skip (P2 MVP)
-            entries.append({"name": name, "path": target.rstrip("/") + "/" + name, "dir": is_dir, "link": None})
-        parent = target.rsplit("/", 1)[0] if target != "/" else None
-        self._json({"path": target, "parent": parent, "entries": entries, "error": None})
+        self._json(browsing.fs_list(self._state, raw, show_hidden))
 
     def _project_new(self) -> None:
         if self._state.busy:
@@ -741,97 +680,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def _replace(config: Config, **kw: Any) -> Config:
     return dataclasses.replace(config, **kw)
-
-
-# per-exec timeout for remote directory browsing (one ls / echo $HOME over the bridge)
-_FS_LIST_TIMEOUT = 30.0
-
-
-def _tree_node(name: str, child_rel: str, is_dir: bool) -> dict[str, Any]:
-    """One workspace-tree node: {name, path, dir, link} (link resolved by the
-    local walk, which has the file system at hand)."""
-    return {"name": name, "path": child_rel, "dir": is_dir, "link": None}
-
-
-def _should_list(rel: str, child_rel: str, expanded: set[str]) -> bool:
-    """Whether a child dir gets listed now: the root, an explicitly expanded
-    dir, or a dir directly under an expanded one (the one-level lookahead)."""
-    return rel == "" or child_rel in expanded or rel in expanded
-
-
-def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
-    """Remote counterpart of _walk: same lazy partial walk (root + expanded dirs +
-    one-level lookahead), but every level lists all its directories in ONE exec
-    (RemoteWorkspace.list_many), so a tree costs ~depth round trips instead of one
-    per directory. Entries come from the shared parse_ls_entries parser."""
-    expanded = set(expanded)
-    children: dict[str, list[dict[str, Any]]] = {}
-    by_path: dict[str, dict[str, Any]] = {}
-
-    frontier: list[str] = [""]
-    while frontier:
-        listed = ws.list_many(frontier)  # one SSH round trip per tree level
-        next_frontier: list[str] = []
-        for rel in frontier:
-            out: list[dict[str, Any]] = []
-            for name, is_dir in parse_ls_entries("\n".join(listed.get(rel, []))):
-                if not show_hidden and name.startswith("."):
-                    continue
-                child_rel = name if rel == "" else f"{rel}/{name}"
-                node = _tree_node(name, child_rel, is_dir)
-                out.append(node)
-                if is_dir:
-                    by_path[child_rel] = node
-                    if _should_list(rel, child_rel, expanded):
-                        next_frontier.append(child_rel)
-            children[rel] = out
-        frontier = next_frontier
-
-    # attach each listed level under its parent dir node
-    for rel, out in children.items():
-        if rel == "":
-            continue
-        parent = by_path.get(rel)
-        if parent is not None:
-            parent["children"] = out
-    return children[""]
-
-
-def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hidden: bool) -> list:
-    """Lazy partial tree walk: list children only for the root, the currently
-    expanded dirs, and their direct children (one level of lookahead). Deeper
-    levels are fetched as they get expanded, so opening a big project never walks
-    the whole tree up front. show_hidden keeps dotfiles out of every level."""
-    expanded = set(expanded)
-
-    def list_entries(p: Path) -> list[Path]:
-        if workspace is not None:
-            entries = workspace.visible_entries(p)
-        else:
-            try:
-                entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
-            except OSError:
-                return []
-        if not show_hidden:
-            entries = [e for e in entries if not e.name.startswith(".")]
-        return entries
-
-    def build(p: Path, rel: str) -> list:
-        out = []
-        for e in list_entries(p):
-            child_rel = str(e.relative_to(root))
-            node = _tree_node(e.name, child_rel, e.is_dir())
-            node["link"] = str(e.resolve()) if e.is_symlink() else None
-            # symlinked dirs are shown as leaves: prevents escaping into system
-            # trees and symlink cycles; the agent's tools still follow links, so
-            # only the UI is affected
-            if e.is_dir() and not e.is_symlink():
-                if _should_list(rel, child_rel, expanded):
-                    node["children"] = build(e, child_rel)
-            out.append(node)
-        return out
-
-    return build(root, "")
 
 
 class ClutchServer(ThreadingHTTPServer):

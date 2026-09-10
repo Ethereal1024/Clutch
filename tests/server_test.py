@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - Windows
 
 from agent.config import Config
 from agent.server import Broadcaster, RunState, build
-from tests.testsupport import check
+from tests.testsupport import check, http_get, http_post
 
 
 def _saved_api_key() -> str:
@@ -150,28 +150,6 @@ def _saved_endpoint() -> tuple[str, str]:
         return d.get("base_url") or "", d.get("model") or ""
     except (OSError, json.JSONDecodeError):
         return "", ""
-
-
-def http_get(url: str) -> tuple[int, str]:
-    try:
-        with urllib.request.urlopen(url, timeout=15) as r:
-            return r.status, r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", errors="replace")
-
-
-def http_post(url: str, body: dict) -> tuple[int, str]:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
 
 
 def main() -> int:

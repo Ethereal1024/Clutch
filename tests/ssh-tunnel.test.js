@@ -12,12 +12,7 @@ const os = require("os");
 const path = require("path");
 const { exec: shExec, execFile: shExecFile, execFileSync } = require("child_process");
 const { uploadFileViaExec } = require("../ui/ssh-tunnel");
-
-let failures = 0;
-function check(ok, label) {
-  console.log((ok ? "ok:   " : "FAIL: ") + label);
-  if (!ok) failures++;
-}
+const { check, summary } = require("./harness");
 
 // The mock remote is a POSIX shell: the real remote's exec bridge runs `sh -c`
 // there. On Windows child_process.exec is cmd.exe, which cannot run printf /
@@ -118,8 +113,7 @@ async function main() {
   check(maxCmdLen <= cap, `all exec commands under the chunk cap (max ${maxCmdLen} bytes)`);
 
   fs.rmSync(tmp, { recursive: true, force: true });
-  console.log(failures ? `\n${failures} FAILURES` : "\nall passed");
-  process.exit(failures ? 1 : 0);
+  summary("ssh-tunnel");
 }
 
 main();

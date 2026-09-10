@@ -12,9 +12,33 @@ OUT="${2:?output path required}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Skills shipped inside the agent-server binary. Local-only skills (gitignored:
+# the writing humanizers) stay out of the release on purpose — .gitignore records
+# them, and hatchling's wheel already excludes them via VCS rules. A tracked skill
+# missing from this list would silently miss the release, hence the guard below.
+SHIPPED_SKILLS="readme-crafter readme-doctor refactor web-design"
+SKILL_ARGS=()
+for s in $SHIPPED_SKILLS; do
+  SKILL_ARGS+=(--add-data "agent/skills/$s:agent/skills/$s")
+done
+MISSING=""
+for d in agent/skills/*/; do
+  name="$(basename "$d")"
+  case " $SHIPPED_SKILLS " in *" $name "*) continue ;; esac
+  # a tracked skill dir that is not whitelisted is a packaging gap
+  if git ls-files --error-unmatched "agent/skills/$name/SKILL.md" >/dev/null 2>&1; then
+    MISSING="$MISSING $name"
+  fi
+done
+if [ -n "$MISSING" ]; then
+  echo "FATAL: tracked skill(s) missing from SHIPPED_SKILLS:$MISSING" >&2
+  echo "       add them to SHIPPED_SKILLS above, or gitignore them as local-only" >&2
+  exit 1
+fi
+
 "$ROOT/.venv/bin/python" -m PyInstaller --noconfirm --onefile --name agent-server \
   --add-data "agent/prompts:agent/prompts" \
-  --add-data "agent/skills:agent/skills" \
+  "${SKILL_ARGS[@]}" \
   --add-data "agent/transport_defaults.json:agent/" \
   scripts/server_entry.py
 

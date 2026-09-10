@@ -1,14 +1,48 @@
+/* URLS ARE RELATIVE ON PURPOSE — the app is loaded from file:// (Electron
+   `win.loadFile` in main.js), where a root-absolute "/vendor/…" resolves
+   against the filesystem root (file:///vendor/…) and 404s. Both webfonts then
+   fail silently and EVERY element drops to the OS fallback chain, which is a
+   different font per platform (Microsoft YaHei on Windows, whatever fontconfig
+   hands back for a generic family on Linux) — i.e. the whole UI renders in a
+   platform-specific face instead of Archivo/JetBrains Mono. */
 @font-face {
   font-family: "Archivo";
-  src: url("/vendor/fonts/archivo-var.woff2") format("woff2");
+  src: url("vendor/fonts/archivo-var.woff2") format("woff2");
   font-weight: 400 900;
   font-display: swap;
 }
 @font-face {
   font-family: "JetBrains Mono";
-  src: url("/vendor/fonts/jetbrains-mono-400.woff2") format("woff2");
+  src: url("vendor/fonts/jetbrains-mono-400.woff2") format("woff2");
   font-weight: 400;
   font-display: swap;
+}
+/* The UI's chrome icons (▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■) are NOT in Archivo
+   or JetBrains Mono (both are latin subsets; see the cmap check in
+   tests/ui_fonts_check.py), so each platform used to draw them from its own
+   symbol font — Segoe UI Symbol on Windows, Apple Symbols on macOS, whatever
+   fontconfig picks on Linux — i.e. a different size and shape per OS.
+   clutch-icons.woff2 is a 16-codepoint subset of Symbola (see its
+   LICENSE.txt) that ships with the app, so the icons are pixel-identical
+   everywhere. It is listed FIRST in both stacks, which is safe *because* its
+   cmap holds exactly those 16 codepoints: it can never shadow a text
+   character, and anything new that is added to ui/ without a matching glyph
+   fails loudly in tests/ui_fonts_check.py instead of silently falling back to
+   the OS font. `font-display: block` (not swap) so an icon is never briefly
+   drawn in the OS face before the bundled one arrives.
+   `unicode-range` is the same 16 codepoints written out in CSS. It is what
+   makes "cannot shadow text" a property of the declaration instead of a
+   promise about the font's cmap: the browser will not even consider this face
+   for a codepoint outside the list. The test pins it to the font's own
+   codepoint manifest, so the two cannot drift apart. */
+@font-face {
+  font-family: "Clutch Icons";
+  src: url("vendor/fonts/clutch-icons.woff2") format("woff2");
+  font-weight: 400 900; /* one outline for all weights: no synthetic emboldening */
+  font-display: block;
+  unicode-range:
+    U+2192, U+2193, U+21B6, U+25A0, U+25A3, U+25A6, U+25B6, U+25B8,
+    U+25BE, U+2699, U+26A0, U+270E, U+2713, U+27E6, U+27E7, U+FF0B;
 }
 
 :root {
@@ -20,8 +54,31 @@
   --muted: #8b8b92;
   --accent: #EF4444;
   --green: #6FBF8F; /* diff additions only — the single non-B&W+red exception */
-  --font-display: "Archivo", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-mono: "JetBrains Mono", "PingFang SC", "Microsoft YaHei", monospace;
+  /* Font stacks are spelled out per platform on purpose. Archivo / JetBrains
+     Mono carry latin only, so every CJK glyph is resolved by the NEXT family
+     in the list: naming the macOS and Windows faces but leaving Linux to the
+     generic keyword means fontconfig picks a third face (Noto/DejaVu/WenQuanYi)
+     and the same text renders in a different font on each OS. */
+  --font-display:
+    "Clutch Icons",                                                           /* bundled icon glyphs */
+    "Archivo",
+    "PingFang SC", "Hiragino Sans GB",                                        /* macOS */
+    "Microsoft YaHei", "Segoe UI",                                            /* Windows */
+    "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", /* Linux */
+    sans-serif;
+  /* mono stack: the CJK tail is *monospaced* families first (Sarasa Mono SC is
+     the JetBrains-Mono-compatible CJK face; MS Gothic ships with Windows), so
+     CJK inside code, diffs and the file tree keeps a fixed advance instead of
+     falling back to a proportional face, and the resolution order is identical
+     on every platform. Proportional CJK faces stay as the last resort. */
+  --font-mono:
+    "Clutch Icons",                                                           /* bundled icon glyphs */
+    "JetBrains Mono",
+    "Sarasa Mono SC", "Sarasa Fixed SC",
+    "Noto Sans Mono CJK SC", "Noto Sans Mono SC", "WenQuanYi Zen Hei Mono",
+    "MS Gothic",                                                              /* Windows CJK mono */
+    "PingFang SC", "Microsoft YaHei",
+    monospace;
   --code-bg: #0b0b0c; /* deeper than --bg, gives scroll/code blocks a visible edge */
   /* 4px-base spacing scale: 4/8/12/16/20/24 */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
@@ -393,7 +450,7 @@ main { display: flex; flex: 1; min-height: 0; }
 .event .body li { margin: 4px 0; }
 .event .body code {
   background: var(--code-bg); padding: 1px 5px; border-radius: 0;
-  font-family: monospace; font-size: 13px;
+  font-family: var(--font-mono); font-size: 13px;
 }
 .event .body pre {
   background: var(--code-bg); padding: 8px 10px; border-radius: 0;
@@ -837,7 +894,10 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .readonly-badge {
   margin-left: 8px;
   font-size: 10px;
-  font-family: var(--font-ui);
+  /* was var(--font-ui) — a variable that is defined NOWHERE: an unknown
+     var() makes the declaration invalid, so this silently inherited from body
+     instead of using an intended stack. */
+  font-family: var(--font-display);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;

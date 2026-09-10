@@ -20,6 +20,23 @@ const mermaid = {
   },
 };
 
+// ui/app.js reads the theme off the live CSS (:root custom properties) instead
+// of duplicating the palette and the font stack in JS; the stub shims the two
+// globals it touches so the mirror stays honest. The font stack is deliberately
+// spelled the way ui/style.css spells it — multiline, with inline comments.
+const CSS_VARS = {
+  "--accent": "#EF4444",
+  "--font-display": `"Clutch Icons",                                    /* bundled icon glyphs */
+    "Archivo",
+    "PingFang SC", "Microsoft YaHei",                                  /* mac + windows */
+    "Noto Sans CJK SC",                                                /* linux */
+    sans-serif`,
+};
+const document = { documentElement: {} };
+const getComputedStyle = () => ({
+  getPropertyValue: (name) => CSS_VARS[name] || "",
+});
+
 function makeEl() {
   const e = {
     nodeType: 1, // element node — real DOM nodes carry this, isLastElement depends on it
@@ -68,12 +85,22 @@ function renderMermaid(root, streaming = false) {
   if (typeof mermaid === "undefined" || !root) return;
   if (!mermaidInitialized) {
     mermaidInitialized = true;
-    const accent = "#EF4444";
+    // same helper as ui/app.js: read the live values, keep one copy of the font
+    // stack in CSS (a second copy here is exactly what drifts), and flatten the
+    // inline /* comments */ before mermaid re-emits the value into a <style>
+    const cssValue = (name) =>
+      (getComputedStyle(document.documentElement).getPropertyValue(name) || "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const accent = cssValue("--accent") || "#EF4444";
+    const diagramFont = cssValue("--font-display") || "sans-serif";
     mermaid.initialize({
       startOnLoad: false,
       theme: "dark",
       securityLevel: "strict",
       themeVariables: {
+        fontFamily: diagramFont,
         lineColor: accent,
         primaryBorderColor: accent,
         secondaryBorderColor: accent,
@@ -179,8 +206,10 @@ function renderMermaid(root, streaming = false) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
-  let fail = 0;
-  const ok = (name, cond) => { console.log((cond ? "PASS" : "FAIL") + " " + name); if (!cond) fail++; };
+  // label-first ok(name, cond) reads better in this runner; the failure count and
+  // the final verdict come from the shared harness
+  const { check, summary } = require("./harness");
+  const ok = (name, cond) => check(cond, name);
 
   const srcA = "graph TD\nA-->B";
   const srcB = "sequenceDiagram\nA->>B: hi";
@@ -245,6 +274,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok("pie first slice is the red accent", tv.pie1 === "#EF4444" && tv.pie2 === "#27272a" && tv.pie12 === "#ededf0");
   ok("pie has no unused pie0", tv.pie0 === undefined);
   ok("git palette grayscale + red", tv.git0 === "#EF4444" && tv.git3 === "#3f3f46");
+  // diagram labels are text: mermaid's own default is a bare "Arial", which each
+  // OS resolves with a different face, so the charts drifted like the rest of the UI
+  ok("diagram labels use the UI font stack (not mermaid's Arial default)",
+    typeof tv.fontFamily === "string" && tv.fontFamily.includes("Clutch Icons") && tv.fontFamily.includes("Archivo"));
+  // --font-display carries inline /* comments */ and newlines; mermaid re-emits
+  // the raw string into a <style> block and inline styles, so it must be flat
+  ok("diagram font starts with the bundled icon face (icons inside labels too)",
+    typeof tv.fontFamily === "string" && tv.fontFamily.startsWith('"Clutch Icons"'));
+  ok("diagram font handed to mermaid is flattened (no comment, no newline)",
+    typeof tv.fontFamily === "string" && !tv.fontFamily.includes("/*") && !tv.fontFamily.includes("*")
+      && !tv.fontFamily.includes("\n") && !tv.fontFamily.includes("  "));
 
   // 8. cache cap: overflow clears and re-renders (use a fresh uncached source)
   for (let i = 0; i < 110; i++) mermaidCache.set("k" + i, "v");
@@ -255,6 +295,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok("cache overflow clears and re-renders", renderCalls === 4);
   ok("overflow dropped stale entries, new one cached", mermaidCache.size === 1 && mermaidCache.has(srcNew));
 
-  console.log(fail ? "FAILED" : "ALL PASS");
-  process.exit(fail ? 1 : 0);
+  // 9. a missing --font-display must fall back to a generic keyword, not to ""
+  // (an empty font-family leaves mermaid's own Arial in charge of the diagram)
+  delete CSS_VARS["--font-display"];
+  mermaidInitialized = false;
+  renderMermaid(makeRoot(["graph TD\nH-->I"]), false);
+  await sleep(10);
+  ok("missing --font-display falls back to sans-serif",
+    initOptions[1] !== undefined && initOptions[1].themeVariables.fontFamily === "sans-serif");
+
+  summary("mermaid-logic", "ALL PASS");
 })();
