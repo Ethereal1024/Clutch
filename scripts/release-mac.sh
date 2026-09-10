@@ -12,9 +12,9 @@
 #   the script runs on (arm64 for Apple Silicon, x64 for Intel) because the
 #   PyInstaller backend cannot be cross-compiled.
 #
-# Unsigned build (mac.identity: null): Gatekeeper blocks the first launch.
-# Bypass once, either way works:
-#   right-click /Applications/Clutch.app -> Open -> Open
+# Unsigned build (mac.identity: null): Gatekeeper blocks the first launch —
+# on macOS 15+ with a misleading "damaged" notice (the right-click -> Open
+# bypass was removed). Clear it once:
 #   xattr -cr /Applications/Clutch.app
 #
 # Env overrides: ELECTRON_MIRROR / ELECTRON_BUILDER_BINARIES_MIRROR (default
@@ -100,6 +100,7 @@ if [[ "$INSTALL" -eq 1 ]]; then
   echo "==> installed. Launch Clutch from Applications (first launch may take a few seconds)."
 else
   echo "==> install it with:  open $DMG   (then drag Clutch.app to Applications)"
-  echo "==> first launch (unsigned): right-click Clutch.app -> Open, or run"
+  echo "==> first launch (unsigned): macOS may say \"damaged\" — it isn't. Run:"
   echo "    xattr -cr /Applications/Clutch.app"
+  echo "    (or 系统设置 -> 隐私与安全性 -> 仍要打开)"
 fi

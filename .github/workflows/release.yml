@@ -3,8 +3,10 @@
 # backend + Electron GUI, click-to-use with no python/pip on the target machine.
 #  - deb  : Linux x86_64 (ubuntu-latest)
 #  - dmg  : macOS arm64 / Apple Silicon (macos-latest), UNSIGNED — first launch
-#           needs a right-click -> Open or `xattr -cr /Applications/Clutch.app`
-#           until the project picks up Developer ID signing + notarization.
+#           is blocked by Gatekeeper with a misleading "damaged" notice (macOS 15
+#           removed the right-click -> Open bypass); clear it with
+#           `xattr -cr /Applications/Clutch.app` until the project picks up
+#           Developer ID signing + notarization.
 name: release
 
 on:

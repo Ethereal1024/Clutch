@@ -71,12 +71,19 @@ sudo dpkg -i clutch-ui_<版本>_amd64.deb
 ```
 
 **macOS（Apple Silicon）**：下载 `Clutch-<版本>-arm64.dmg`，打开后把 Clutch.app 拖进
-Applications。安装包未签名，首次打开会被 Gatekeeper 拦截，任选一种方式放行：
+Applications。安装包未签名，首次打开会被 Gatekeeper 拦——**提示"已损坏，无法打开"
+并不是文件真的坏了**，只是 macOS 对无签名 + 隔离标记应用的统一说辞（macOS 15 起连
+右键 → 打开的入口也移除了）。任选一种方式放行：
 
 ```bash
-# 方式一：在 Finder 里右键 Clutch.app -> 打开 -> 打开
-# 方式二：清除隔离标记
+# 方式一（推荐）：清除隔离标记后直接打开
 xattr -cr /Applications/Clutch.app
+
+# 方式二：先双击 Clutch 触发拦截，然后 系统设置 -> 隐私与安全性 ->
+#         底部"安全性"里点 Clutch 的"仍要打开"
+
+# 若上面之后仍提示损坏（少数机器），补一次 ad-hoc 重签：
+codesign --force --deep --sign - /Applications/Clutch.app
 ```
 
 构建：Linux 上 `bash scripts/release.sh`（deb）；Mac 上
