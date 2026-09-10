@@ -58,23 +58,32 @@ flowchart LR
     S -- "读写 / 执行" --> WS["远端工作目录"]
 ```
 
-## 桌面版（Linux）
+## 桌面版（Linux / macOS）
 
 安装包发布在 GitHub Releases（顶部 Release 徽章直通最新版）：
 
 **[https://github.com/Ethereal1024/Clutch/releases](https://github.com/Ethereal1024/Clutch/releases)**
 
-在 Release 页面下载 `clutch-ui_<版本>_amd64.deb`（例：v0.1.1 →
-`clutch-ui_0.1.1_amd64.deb`），目标机器不需要 Python / Node / 网络：
+**Linux**：下载 `clutch-ui_<版本>_amd64.deb`，目标机器不需要 Python / Node / 网络：
 
 ```bash
 sudo dpkg -i clutch-ui_<版本>_amd64.deb
 ```
 
-`scripts/release.sh` 把后端打成 PyInstaller 二进制，连同 Electron 界面打包成 deb。
-推送 vX.Y.Z 的 tag 会触发 CI 自动构建并附加到 Release（见
-`.github/workflows/release.yml`）。deb 内的后端绑定构建机的系统与架构，跨平台场景
-建议用上面的 SSH 路径。
+**macOS（Apple Silicon）**：下载 `Clutch-<版本>-arm64.dmg`，打开后把 Clutch.app 拖进
+Applications。安装包未签名，首次打开会被 Gatekeeper 拦截，任选一种方式放行：
+
+```bash
+# 方式一：在 Finder 里右键 Clutch.app -> 打开 -> 打开
+# 方式二：清除隔离标记
+xattr -cr /Applications/Clutch.app
+```
+
+构建：Linux 上 `bash scripts/release.sh`（deb）；Mac 上
+`bash scripts/release-mac.sh [--install]`（dmg，`--install` 顺带装进
+/Applications 并放行 Gatekeeper）。推送 vX.Y.Z 的 tag 会触发 CI 同时构建两者并
+附加到 Release（见 `.github/workflows/release.yml`）。安装包内的后端绑定构建机的
+系统与架构（mac 为 arm64），跨平台场景建议用上面的 SSH 路径。
 
 ## 工作原理
 
