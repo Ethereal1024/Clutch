@@ -24,6 +24,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path, PurePath, PurePosixPath
 
+from .localshell import LocalShell, local_shell
 from .transport import CommandResult, LocalTransport, SshTransport, Transport, TransportError
 
 
@@ -179,6 +180,15 @@ class Workspace(ABC):
         Local: the app user's home; remote: the REMOTE user's home — a `~` in
         a remote path must never expand to the app host's home."""
         return Path.home()
+
+    def exec_shell(self) -> LocalShell:
+        """The shell run_command text executes under (see tools.localshell):
+        LOCAL workspaces follow the app host's decision (posix sh / Git Bash /
+        cmd). Everyone who reasons about command TEXT — the shell guard's
+        tokenizer, the permission engine's escape parser, the context platform
+        hint — must agree with the shell that actually parses the command, so
+        they read the flavor from here instead of guessing from the OS."""
+        return local_shell()
 
     def resolve(self, rel_path: str) -> Path:
         """Resolve a path to inside the workspace (or a user-approved external
@@ -425,6 +435,13 @@ class RemoteWorkspace(Workspace):
             r = self._transport.run("echo $HOME", _REMOTE_IO_TIMEOUT)
             self._remote_home = r.stdout.strip() if (r.code == 0 and r.stdout.strip()) else "~"
         return PurePosixPath(self._remote_home)
+
+    def exec_shell(self) -> LocalShell:
+        """The remote host runs the POSIX shell stack regardless of the app
+        host's OS: even on a Windows machine behind the UI, run_command text
+        parses as POSIX sh on the REMOTE — never tokenize it with the local
+        (cmd) rules. posix=True, argv=None (spawn decisions stay localshell's)."""
+        return LocalShell(argv=None, posix=True, name="posix-sh")
 
     def run(self, command: str, timeout: float) -> CommandResult:
         cmd = f"cd {shq(str(self.root))} && {command}"

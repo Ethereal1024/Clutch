@@ -12,7 +12,7 @@ the only budget guard, matching opencode / Claude Code):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..config import Config
 from ..events import (
@@ -25,6 +25,9 @@ from ..events import (
 from ..prompts import render
 from ..skills import cached_library
 from .lazy import LazyEventLog
+
+if TYPE_CHECKING:  # type hints only: core must not import tools at runtime
+    from ..tools.workspace import Workspace
 
 
 def _recent_working_files(tail_events: list[Any], cap: int = 6) -> list[str]:
@@ -116,11 +119,18 @@ def _repair_dangling(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def derive_messages(log: LazyEventLog, config: Config, task: str, memories: Any | None = None) -> list[dict[str, Any]]:
+def derive_messages(
+    log: LazyEventLog,
+    config: Config,
+    task: str,
+    memories: Any | None = None,
+    workspace: Workspace | None = None,
+) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying the compaction head.
 
-    memories contributes a resident title list to the system prompt. Tool
-    output is not folded here; it accumulates until compaction.
+    memories contributes a resident title list to the system prompt; workspace
+    contributes the local-environment hint (which shell run_command speaks on
+    this host). Tool output is not folded here; it accumulates until compaction.
     """
     full_events = log.events()
     # a never-compacted file has the raw task at index 0; skip it (task.md
@@ -161,6 +171,16 @@ def derive_messages(log: LazyEventLog, config: Config, task: str, memories: Any 
         catalog = cached_library(config.skills_dir).to_catalog_section()
         if catalog:
             system += "\n\n" + catalog
+    if workspace is not None:
+        # local shell the model's commands will execute under: on a Windows
+        # host say so up front so the first command already speaks the right
+        # dialect. posix-sh (POSIX hosts, and remote/SSH workspaces whose
+        # exec_shell is the POSIX constant) adds nothing — zero prompt diff.
+        sh = workspace.exec_shell()
+        if sh.name == "bash":
+            system += "\n\n" + render("env_windows_bash.md")
+        elif sh.name == "cmd":
+            system += "\n\n" + render("env_windows_cmd.md")
     if memories is not None:
         items = memories.items()
         if items:

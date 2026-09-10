@@ -174,7 +174,9 @@ class Agent:
                         render("budget_exceeded.md", max_turns=self.config.max_turns),
                     )
                 # derive once per turn; compaction check and LLM call share it
-                msgs = context.derive_messages(self.log, self.config, task, memories=self.memories)
+                msgs = context.derive_messages(
+                    self.log, self.config, task, memories=self.memories, workspace=self.workspace
+                )
                 # near the window: compact and continue instead of dropping/aborting
                 if self.compactor.should_compact():
                     if self.compactor.compact():

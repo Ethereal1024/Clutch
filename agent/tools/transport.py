@@ -15,6 +15,8 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import NamedTuple
 
+from .localshell import local_shell
+
 
 class CommandResult(NamedTuple):
     code: int
@@ -40,19 +42,30 @@ class Transport(ABC):
 
 
 class LocalTransport(Transport):
-    """Run commands via subprocess in a fixed cwd (the workspace root)."""
+    """Run commands via subprocess in a fixed cwd (the workspace root).
+
+    The shell comes from local_shell(): a POSIX host's /bin/sh via shell=True;
+    on Windows a detected Git Bash via `bash -c <cmd>` (the agent speaks POSIX)
+    or, absent any bash, cmd.exe via shell=True — see localshell's module
+    docstring. Text mode is pinned to utf-8/replace: a Chinese Windows box
+    would otherwise decode command output as GBK and hand the model mojibake.
+    """
 
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
 
     def run(self, command: str, timeout: float, *, binary: bool = False) -> CommandResult:
+        shell = local_shell()
+        text = not binary
         try:
             r = subprocess.run(
-                command,
-                shell=True,
+                [*shell.argv, command] if shell.argv else command,
+                shell=shell.argv is None,
                 cwd=self.cwd,
                 capture_output=True,
-                text=not binary,
+                text=text,
+                encoding="utf-8" if text else None,
+                errors="replace" if text else None,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:

@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..tools.localshell import split_command
 from ..tools.workspace import Workspace
 
 Action = str  # "allow" | "ask" | "deny"
@@ -112,9 +112,14 @@ class PermissionEvaluator:
             return frozenset()
         args = _parse_args(args_repr)
         if tool == "run_command":
-            try:
-                tokens = shlex.split((args.get("command") or "").strip())
-            except ValueError:
+            # tokenize in the flavor of the shell that will RUN the text:
+            # cmd's lexer keeps backslashes literal, so shlex would corrupt
+            # C:\ paths on a cmd-flavored host; a remote (SSH) workspace is
+            # always POSIX no matter what the app host is
+            tokens = split_command(
+                (args.get("command") or "").strip(), workspace.exec_shell().posix
+            )
+            if tokens is None:
                 return frozenset()
         else:
             path = args.get("path")

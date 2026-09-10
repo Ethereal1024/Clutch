@@ -12,11 +12,13 @@ Poka-yoke (make it hard for the model to misuse):
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 
 from ..config import Config
 from ..prompts import render
+from .localshell import split_command
 from .transport import TransportError
 from .workspace import Workspace
 
@@ -31,6 +33,10 @@ _READ_ONLY_CMDS = frozenset(
         "sort", "uniq", "head", "tail", "wc", "diff", "stat", "file",
         "basename", "dirname", "realpath", "readlink", "seq", "cut", "tr",
         "getent", "history", "git", "sed", "curl",
+        # cmd.exe / Windows names (harmless where they don't exist: the command
+        # then fails with not-found instead of writing anything)
+        "dir", "tree", "where", "findstr", "ver", "systeminfo", "ipconfig",
+        "tasklist", "fc",
     }
 )
 
@@ -45,6 +51,9 @@ _WRITE_CMDS = frozenset(
         "rustc", "javac", "tar", "zip", "unzip", "gzip", "gunzip", "xz",
         "bzip2", "patch", "kill", "pkill", "killall", "systemctl", "service",
         "docker", "podman", "git", "sed", "curl", "find",
+        # cmd.exe / Windows names
+        "del", "erase", "rd", "copy", "xcopy", "robocopy", "move", "ren",
+        "rename", "md", "taskkill", "setx", "reg", "netsh", "sc",
     }
 )
 
@@ -72,10 +81,25 @@ _GIT_WRITE = frozenset(
 # separator tokens: split the command into segments, each judged on its own
 _SEPARATORS = frozenset({";", "&&", "||", "|", "|&", "&"})
 
+# cmd.exe has no shlex: its separators are split out of the raw tokens after
+# the Windows-style tokenize (over-splitting inside a quoted "a&&b" only ever
+# produces segments that classify unknown -> chat mode denies -> safe)
+_CMD_SEPARATOR_RE = re.compile(r"&&|\|\||[|&;]")
 
-def _tokenize(command: str) -> list[str] | None:
-    """Split a command into shell tokens (quotes honored, separators split out).
-    Returns None when the command cannot be tokenized (unbalanced quotes)."""
+
+def _tokenize(command: str, posix: bool = True) -> list[str] | None:
+    """Split a command into shell tokens (quotes honored, separators split out),
+    in the flavor of the shell that will run it (``workspace.exec_shell()``,
+    passed in by the caller). Returns None when the command cannot be tokenized
+    (unbalanced quotes)."""
+    if not posix:
+        toks = split_command(command, posix=False)
+        if toks is None:
+            return None
+        out: list[str] = []
+        for t in toks:
+            out.extend(p for p in _CMD_SEPARATOR_RE.split(t) if p)
+        return out
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars="|;&")
         lex.whitespace_split = True
@@ -138,7 +162,7 @@ def _classify_segment(seg: list[str]) -> str:
     return "unknown"
 
 
-def classify_command(command: str) -> tuple[str, str]:
+def classify_command(command: str, posix: bool = True) -> tuple[str, str]:
     """Static read-only check for chat mode.
 
     Returns (verdict, detail) where verdict is "read", "write" or "unknown".
@@ -150,13 +174,13 @@ def classify_command(command: str) -> tuple[str, str]:
     if "\n" in command:
         # newline-separated commands run sequentially: every line must be read-only
         for line in command.splitlines():
-            verdict, detail = classify_command(line)
+            verdict, detail = classify_command(line, posix)
             if verdict != "read":
                 return verdict, f"{detail} (line: {line.strip()!r})"
         return "read", "multi-line command"
     if "$(" in command or "`" in command:
         return "unknown", "command substitution ($(...) or backticks) cannot be statically analyzed"
-    tokens = _tokenize(command)
+    tokens = _tokenize(command, posix)
     if tokens is None:
         return "unknown", "command cannot be parsed (unbalanced quotes?)"
     # command-separator segments: each one must be read-only
@@ -180,13 +204,16 @@ def classify_command(command: str) -> tuple[str, str]:
 
 
 def run_command(workspace: Workspace, config: Config, command: str) -> dict:
-    reason = _blocked_reason(config, command)
+    # the flavor of the shell that will PARSE this text: local host's decision
+    # for local workspaces, always POSIX for a remote (SSH) workspace
+    posix = workspace.exec_shell().posix
+    reason = _blocked_reason(config, command, posix)
     if reason:
         return {"content": f"ERROR: {reason}", "error": True}
 
     # chat mode: only provably read-only commands may run (default deny)
     if config.mode == "chat":
-        verdict, detail = classify_command(command)
+        verdict, detail = classify_command(command, posix)
         if verdict != "read":
             return {
                 "content": render("errors/read_only_command.md", verdict=verdict, detail=detail, command=command[:300]),
@@ -196,8 +223,13 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     if not command.strip():
         return {"content": render("errors/empty_command.md"), "error": True}
 
-    # Path escape guard: reject tokens resolving outside the workspace
-    for tok in shlex.split(command):
+    # Path escape guard: reject tokens resolving outside the workspace.
+    # split_command (not raw shlex): on a cmd-flavored host the POSIX lexer
+    # would eat the backslashes out of C:\ paths and mis-judge every verdict.
+    args = split_command(command, posix)
+    if args is None:
+        return {"content": "ERROR: command cannot be parsed (unbalanced quotes?)", "error": True}
+    for tok in args:
         try:
             p = workspace.resolve(tok)
         except ValueError:
@@ -206,7 +238,6 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
         if workspace.is_protected(p):
             return {"content": render("errors/protected_command.md", token=repr(tok)), "error": True}
 
-    args = shlex.split(command)
     if args and args[0] in ("python", "python3"):
         file_arg = next((a for a in args[1:] if not a.startswith("-") and a.endswith(".py")), None)
         if file_arg:
@@ -248,14 +279,15 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
     return {"content": "OK: command succeeded\n" + "\n".join(parts)}
 
 
-def _blocked_reason(config: Config, command: str) -> str | None:
+def _blocked_reason(config: Config, command: str, posix: bool = True) -> str | None:
     stripped = command.strip()
     parts = stripped.split(maxsplit=1)
     first = parts[0] if parts else ""
 
     # bare python/python3 (no file, -m module, or -c code arg) would drop into a REPL and hang
     if first in ("python", "python3"):
-        rest = shlex.split(parts[1]) if len(parts) > 1 else []
+        rest = split_command(parts[1], posix) if len(parts) > 1 else None
+        rest = rest or []  # unparseable -> conservative: looks interactive
         # safe non-interactive forms: `python3 file.py`, `python3 -m module`, `python3 -c code`
         has_file = any(a.endswith(".py") for a in rest if not a.startswith("-"))
         if not (has_file or "-m" in rest or "-c" in rest):
