@@ -133,10 +133,17 @@ def test_remote_home_is_the_remote_user() -> None:
 
 
 def test_create_project_sends_remote_paths() -> None:
-    """The exact user flow that failed: create a project over ssh."""
+    """The exact user flow that failed: create a project over ssh.
+
+    The input is POSIX-flavored because that is what the ssh path reaches
+    create_project with, on every app host: the server normalizes client paths
+    through Handler._project_path, which returns PurePosixPath in ssh mode. A
+    host Path would be wrong here — Path("/home/u/proj/demo") on a Windows app
+    host IS WindowsPath('\\home\\u\\proj\\demo'), whose str() joins under the
+    root as '/home/u/proj/\\home\\u\\proj\\demo.clc'."""
     with mock.patch.object(Path, "resolve", _mac_resolve):
         ws, bridge = _remote_ws("/home/u/proj")
-        project = create_project(Path("/home/u/proj/demo"), "demo", model="m", workspace=ws)
+        project = create_project(PurePosixPath("/home/u/proj/demo"), "demo", model="m", workspace=ws)
         check(str(project.path) == "/home/u/proj/demo.clc", "project path keeps the remote spelling")
         check(any("'/home/u/proj/demo.clc'" in c for c in bridge.commands), "header written to the remote path")
         check(all("/System" not in c for c in bridge.commands), "create_project sends no /System")

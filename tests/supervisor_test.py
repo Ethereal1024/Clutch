@@ -4,7 +4,8 @@ exercises lifecycle + the cross-process lock semantics the architecture relies o
 Run: uv run python -m tests.supervisor_test
 
 The lock test is the important one: two SESSION CHILDREN (separate processes,
-each with its own _held cache) flock the same .clc on this machine's tmp dir —
+each with its own _held cache) take the same .clc's kernel lock on this
+machine's tmp dir —
 the second open must get 409 via the kernel, exactly like the remote-supervisor
 case. This is what the shared-process architecture could never provide.
 """
@@ -112,7 +113,7 @@ def main() -> int:
         check(st == 200, "child 1 opens project (holds flock)")
 
         st, body = http_post(f"{s2}/api/project/open", {"path": str(clc)})
-        check(st == 409, "child 2 gets 409 on same project (kernel flock)")
+        check(st == 409, "child 2 gets 409 on same project (kernel lock)")
         check("project_open_conflict" in body, "409 carries conflict code")
 
         # different projects never conflict
@@ -207,7 +208,7 @@ def main() -> int:
     with _m.patch.object(sys, "frozen", True, create=True):
         cmd_frozen = _agent_cmd_default()
     check(
-        len(cmd_frozen) == 1 and cmd_frozen[0].endswith("agent-server"),
+        len(cmd_frozen) == 1 and cmd_frozen[0].endswith("agent-server.exe" if os.name == "nt" else "agent-server"),
         "frozen build spawns the sibling agent-server binary",
     )
     with _m.patch.object(sys, "frozen", False, create=True):
@@ -217,14 +218,17 @@ def main() -> int:
         "dev build spawns python -m agent.server",
     )
 
-    # ---- 9. dead-parent resilience (orphaned supervisor: stdout is a dead socket) ----
+    # ---- 9. dead-parent resilience (orphaned supervisor: stdout is a dead stream) ----
     # prints on the dead stream must not kill the handler / reaper
     import os as _os
-    import socket as _sock
 
-    a, _b = _sock.socketpair()
-    _b.close()  # peer gone: writes to `a` raise BrokenPipeError
-    dead_out = _os.fdopen(a.fileno(), "w")  # text stream over the dead socket
+    # a pipe whose read end is already closed: writing raises (BrokenPipeError
+    # on POSIX, OSError [Errno 22] on Windows). Portable where the old
+    # `fdopen(socket.fileno())` was not — a Windows socket handle is not a CRT
+    # fd, so fdopen there fails with [WinError 6] before the test even starts.
+    _r, _w = _os.pipe()
+    _os.close(_r)  # peer gone
+    dead_out = _os.fdopen(_w, "w")  # text stream over the dead pipe
     _orig_out, _orig_err = sys.stdout, sys.stderr
     try:
         sys.stdout = _SafeStdStream(dead_out)
@@ -273,6 +277,104 @@ def main() -> int:
     ok = wait_until(lambda: sup8.exit_event.is_set(), 6.0, "exit after last session (shutdown flag)")
     check(ok, "shutdown supervisor exits as soon as its sessions are gone")
     sup8.shutdown_all()
+
+    # ---- 11. stop when the graceful signal is UNDELIVERABLE (W2) ----
+    # A packaged supervisor is spawned by Electron with windowsHide: it has NO
+    # console, so CTRL_BREAK_EVENT cannot be delivered and os.kill raises
+    # OSError (WinError 6) instead. That must not escape _kill: /api/session/stop
+    # has already unregistered the session by then, so an exception answers
+    # nothing AND leaks the child (an orphan keeps the port). _kill_hard must
+    # still reap it.
+    import agent.supervisor as _sv
+
+    class _NoConsole:
+        """A live Popen whose graceful stop is unavailable (rest delegates)."""
+
+        def __init__(self, proc) -> None:
+            self._p = proc
+            self.pid = proc.pid
+
+        def poll(self):
+            return self._p.poll()
+
+        def wait(self, timeout=None):
+            return self._p.wait(timeout)
+
+        def kill(self):
+            return self._p.kill()
+
+        def send_signal(self, sig):
+            if os.name == "nt":
+                raise OSError(6, "The handle is invalid")  # WinError 6: no console
+            return self._p.send_signal(sig)
+
+    grace = _sp.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=_sp.DEVNULL,
+        stderr=_sp.DEVNULL,
+        creationflags=getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0),
+        start_new_session=(os.name != "nt"),  # POSIX: own group, so killpg hits only it
+    )
+    with _m.patch.object(_sv, "KILL_GRACE_S", 0.5):
+        t0 = time.time()
+        Supervisor._kill(_NoConsole(grace))  # the old code raised here
+        took = time.time() - t0
+    check(grace.poll() is not None, "an undeliverable graceful signal still reaps the child")
+    check(took < 5.0, "kill returns promptly (no unbounded wait on a dead signal)")
+    grace.kill()
+
+    # ---- 12. the WHOLE tree goes down, not just the direct child (W2) ----
+    # A session child runs commands through a shell; stopping only the direct
+    # child leaves that shell — and whatever it started — behind as an orphan
+    # holding the port. The grandchild's heartbeat is the witness: it must stop
+    # beating the moment the session child is stopped.
+    with tempfile.TemporaryDirectory() as tdir:
+        hb = Path(tdir) / "beat.txt"
+        hb_py = Path(tdir) / "beat.py"
+        hb_py.write_text(
+            "import os, sys, time\n"
+            "p = sys.argv[1]\n"
+            "for _ in range(300):  # never outlives the test, even if leaked\n"
+            "    open(p, 'w').write(str(os.getpid()))\n"
+            "    time.sleep(0.1)\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        parent_py = Path(tdir) / "parent.py"
+        parent_py.write_text(
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        tree = _sp.Popen(
+            [sys.executable, str(parent_py), str(hb_py), str(hb)],
+            stdout=_sp.DEVNULL,
+            stderr=_sp.DEVNULL,
+            creationflags=getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0),
+            start_new_session=(os.name != "nt"),
+        )
+        check(wait_until(hb.exists, 10.0, "grandchild heartbeat"), "the shell's child is running")
+        check(tree.poll() is None, "the session child is running")
+        Supervisor._kill(tree)
+        check(tree.poll() is not None, "direct session child reaped")
+        time.sleep(0.8)  # let the last in-flight heartbeat land
+        first = hb.stat().st_mtime_ns
+        time.sleep(1.2)
+        check(hb.stat().st_mtime_ns == first, "the shell's child went down with the tree (no orphan)")
+        # safety net: if a failure above leaked the witness, stop it directly
+        try:
+            leaked = int(hb.read_text().strip() or "0")
+            beat = hb.stat().st_mtime_ns
+            time.sleep(0.4)
+            if leaked and hb.stat().st_mtime_ns != beat:
+                if os.name == "nt":
+                    _sp.run(["taskkill", "/F", "/PID", str(leaked)], capture_output=True)
+                else:
+                    os.kill(leaked, 9)
+        except (OSError, ValueError):
+            pass
 
     print("\nSUPERVISOR TESTS PASSED")
     return 0

@@ -90,7 +90,10 @@ def build_clc(path: Path, recent: int = 9) -> dict:
     ]
     for ev in events:
         lines.append(event_to_json(ev))
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n": the .clc is BYTE-addressed (offsets above are counted in LF
+    # bytes) — Windows text mode would write CRLF and shift every offset by one
+    # byte per line, so the fixture must match what the product writes.
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return {
         "total": len(events),
         "comp_off": comp_off,
@@ -112,7 +115,7 @@ def main() -> None:
         p3.write_text("\n".join([
             "# clutch project v1", "name: tiny", "model: fake-model", "---",
             event_to_json(UserMessageEvent(content="hi")),
-        ]) + "\n", encoding="utf-8")
+        ]) + "\n", encoding="utf-8", newline="\n")
         proj = open_project_lazy(p3, workspace=None)
         check(isinstance(proj.log, LazyEventLog), "tiny history opens through the lazy path")
         check([e.content for e in proj.events()] == ["hi"], "tiny history events intact")
@@ -206,7 +209,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         text2 = p2.read_text(encoding="utf-8").replace(
             f"cpr_start={b2['comp_off']:010d}", "cpr_start=9999999999"
         )
-        p2.write_text(text2, encoding="utf-8")
+        p2.write_text(text2, encoding="utf-8", newline="\n")
         proj = open_project_lazy(p2, workspace=None)
         check(proj.log.cpr_start() == 0, "out-of-range cpr_start clamps to 0 (full window)")
         check(len(proj.log.items()) == b2["total"], "clamped file materializes everything")
@@ -223,6 +226,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         before = p3.read_bytes()
         proj = open_project_lazy(p3, workspace=None)
@@ -235,6 +239,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             "# clutch project v1\nname: ro\nmodel: m\n---\n"
             + event_to_json(UserMessageEvent(content="hi")) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         before = ro.read_bytes()
         proj_ro = open_project_lazy(ro, workspace=None, read_only=True)
@@ -256,6 +261,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",
         )
         proj2 = open_project_lazy(l2, workspace=None)
         check(proj2.log.cpr_start() > 0, "legacy file with a compaction derives the boundary")

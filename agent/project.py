@@ -385,7 +385,11 @@ def _index_line_offset(meta: ProjectMeta) -> int:
 
 
 def _write_header(path: Path, meta: ProjectMeta) -> None:
-    path.write_text(_header_text(meta), encoding="utf-8")
+    # newline="\n": the header is BYTE-addressed (the fixed-width cpr_start /
+    # index lines are located by offset). Windows text mode would write \r\n and
+    # push every modeled offset one byte short per line, so an in-place
+    # cpr_start/index update would overwrite the wrong bytes.
+    path.write_text(_header_text(meta), encoding="utf-8", newline="\n")
 
 
 def _apply_meta(meta: ProjectMeta, line: str) -> None:

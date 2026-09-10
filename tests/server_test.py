@@ -9,7 +9,11 @@ real task through /api/run, collects SSE events, and checks the workspace tree a
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -17,6 +21,11 @@ import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote
+
+try:  # POSIX; Windows locks a byte range instead (see project_lock._acquire_local)
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 from agent.config import Config
 from agent.server import Broadcaster, RunState, build
@@ -30,6 +39,107 @@ def _saved_api_key() -> str:
         return d.get("api_key") or ""
     except (OSError, json.JSONDecodeError):
         return ""
+
+
+@contextlib.contextmanager
+def _lock_held_elsewhere(clc_path: str, lock_path: str):
+    """Another window (process) holding this .clc's write lock, while the block
+    runs. POSIX: a flock on a fresh fd of the lock file. Windows: the product
+    locks a byte range (LockFileEx), which no in-process trick can imitate, so a
+    real holder PROCESS is the only faithful stand-in."""
+    if fcntl is not None:
+        with open(lock_path, "a+") as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                yield
+            finally:
+                fcntl.flock(other, fcntl.LOCK_UN)
+        return
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_CHILD, str(Path(__file__).resolve().parents[1]), clc_path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        line = child.stdout.readline().strip()
+        if line != "held":
+            raise RuntimeError(f"lock-holder child did not take the lock: {line!r}")
+        yield
+    finally:
+        if child.stdin is not None:
+            child.stdin.close()
+        try:
+            child.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            child.kill()
+
+
+# a second "window": acquire the .clc lock exactly like the app does, then hold
+# it until the parent closes our stdin (exit releases it — the OS drops the
+# kernel lock either way)
+_HOLDER_CHILD = (
+    "import sys; sys.path.insert(0, sys.argv[1]);"
+    "from agent.core.project_lock import ProjectLock;"
+    "h = ProjectLock.acquire(sys.argv[2]);"
+    "print('held' if h is not None else 'refused', flush=True);"
+    "sys.stdin.readline() if h is None else sys.stdin.read();"
+    "ProjectLock.release(h)"
+)
+
+
+def _symlinks_supported(dir_path: Path) -> bool:
+    """Whether this host can create symlinks at all: Windows without Developer
+    Mode / SeCreateSymbolicLinkPrivilege fails os.symlink with WinError 1314,
+    which is an environment limit, not a server bug."""
+    probe = dir_path / ".clutch-symlink-probe"
+    try:
+        probe.symlink_to(dir_path)
+    except OSError:
+        return False
+    try:
+        probe.unlink()
+    except OSError:
+        pass
+    return True
+
+
+def _check_symlink_marking(base_url: str, proj_dir: Path, clc: Path) -> None:
+    """Symlinks must be marked with their resolved target, and a symlinked dir
+    must not be recursed into (the tree walker follows entries, not links)."""
+    symf = proj_dir / "demo_link"
+    symf.symlink_to(clc)
+    _, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
+    data = json.loads(body)
+    link_ent = next((e for e in data["entries"] if e["name"] == "demo_link"), None)
+    check(link_ent is not None and link_ent.get("link") == str(clc.resolve()), "fs list marks symlink target")
+
+    linked = proj_dir / "linked"
+    linked.mkdir()
+    (linked / "inner.txt").write_text("x")
+    symd = proj_dir / "linkdir"
+    symd.symlink_to(linked, target_is_directory=True)
+    _, body = http_get(f"{base_url}/api/workspace/tree")
+    data = json.loads(body)
+    lnode = next((n for n in data.get("tree", []) if n["name"] == "linkdir"), None)
+    check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
+    check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a spawned holder process AND its children. On Windows a venv's
+    python.exe is a redirector that re-executes the real interpreter as a CHILD
+    (Popen's pid is only the launcher), so a plain kill leaves the true lock
+    holder — the process the OS would have to reap for the lock to drop — alive."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.kill(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+    proc.wait(timeout=15)
 
 
 def _saved_endpoint() -> tuple[str, str]:
@@ -204,23 +314,13 @@ def _run_server_test() -> int:
         check(data.get("error"), "fs list reports a bad path")
 
         # 3d. symlinks are marked with their resolved target in the browser + tree
-        symf = proj_dir / "demo_link"
-        symf.symlink_to(clc)
-        st, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
-        data = json.loads(body)
-        link_ent = next((e for e in data["entries"] if e["name"] == "demo_link"), None)
-        check(link_ent is not None and link_ent.get("link") == str(clc.resolve()), "fs list marks symlink target")
-
-        linked = proj_dir / "linked"
-        linked.mkdir()
-        (linked / "inner.txt").write_text("x")
-        symd = proj_dir / "linkdir"
-        symd.symlink_to(linked, target_is_directory=True)
-        st, body = http_get(f"{base_url}/api/workspace/tree")
-        data = json.loads(body)
-        lnode = next((n for n in data.get("tree", []) if n["name"] == "linkdir"), None)
-        check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
-        check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
+        if not _symlinks_supported(proj_dir):
+            # Windows without Developer Mode / SeCreateSymbolicLinkPrivilege
+            # (a non-admin shell): os.symlink raises WinError 1314. The server's
+            # symlink marking is already covered on hosts that can create them.
+            print("skip: symlink checks (this host cannot create symlinks)")
+        else:
+            _check_symlink_marking(base_url, proj_dir, clc)
 
         # 3e. lazy .clc: open reports older bytes; history pages by byte range
         from agent.events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, _line_bytes, event_to_json
@@ -242,7 +342,8 @@ def _run_server_test() -> int:
         ]
         for ev in levents:
             lazy_lines.append(event_to_json(ev))
-        lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8")
+        # newline="\n": byte-addressed .clc — CRLF would shift every offset
+        lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8", newline="\n")
 
         # every open is lazy now (one code path)
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
@@ -379,9 +480,7 @@ def _run_server_test() -> int:
         check(st == 200, "switched back to the demo project after isolation")
 
         # ---- 3f. per-window write lock: one writer per .clc ----
-        # flock a fresh fd: exclusive even within one process
-        import fcntl
-
+        # the server under test released its own lock first...
         from agent.core.project_lock import ProjectLock, _local_lock_path
 
         lock_path = _local_lock_path(str(clc))
@@ -389,8 +488,8 @@ def _run_server_test() -> int:
         check(handle is not None, "open project holds a local lock")
         ProjectLock.release(handle)
 
-        with open(lock_path, "a+") as other:
-            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # ...and ANOTHER window (process) now holds it
+        with _lock_held_elsewhere(str(clc), lock_path):
             st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
             check(st == 409, "second window open -> 409")
             err = json.loads(body)
@@ -414,14 +513,12 @@ def _run_server_test() -> int:
             st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
             check(st == 200, "different project opens while another holds demo's lock")
 
-            fcntl.flock(other, fcntl.LOCK_UN)  # the "other window" closes
-
         # the other window released -> the demo project opens normally again
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "open works after the other window released")
         check(state.project is not None and not state.project.read_only, "reopen is writable again")
 
-        # ---- 3g. remote workspaces lock locally (flock keyed by .clc path) ----
+        # ---- 3g. remote workspaces lock locally (kernel lock keyed by .clc path) ----
         from agent.core.project_lock import ProjectLock, _local_lock_path
 
         with tempfile.TemporaryDirectory() as rdir:
@@ -430,11 +527,11 @@ def _run_server_test() -> int:
             (root / "remote.clc").write_text("x\n")
 
             h1 = ProjectLock.acquire(rclc)
-            check(h1 is not None, "remote-path lock acquired (local flock)")
+            check(h1 is not None, "remote-path lock acquired (local kernel lock)")
             check(not (root / ".clc.lock").exists(), "no lock file is written on the remote host")
             check(Path(_local_lock_path(rclc)).exists(), "lock file lives in the local temp dir")
 
-            # a second window (fresh process state) is refused — the flock is held
+            # a second window (fresh process state) is refused — the lock is held
             saved_held = dict(ProjectLock._held)
             ProjectLock._held.clear()
             try:
@@ -459,11 +556,11 @@ def _run_server_test() -> int:
             finally:
                 ro.chmod(0o700)  # restore so the temp dir cleans up
 
-        # ---- 3h. a dying holder frees the lock via the kernel ----
-        import os
-        import signal
-        import subprocess
-
+        # ---- 3h. a dying holder frees the lock ----
+        # Both backends are KERNEL locks (flock / LockFileEx), so the OS drops the
+        # lock when the holder dies — no pid check, no reclaim. Killing the holder
+        # is therefore enough, but it does have to be the TRUE holder: see
+        # _kill_tree (the venv python.exe is a redirector).
         with tempfile.TemporaryDirectory() as rdir:
             root = Path(rdir)
             rclc = str(root / "remote2.clc")
@@ -491,14 +588,18 @@ def _run_server_test() -> int:
                     time.sleep(0.1)
                 check(locked, "holder subprocess took the lock")
                 check(ProjectLock.acquire(rclc) is None, "lock held by the live holder")
-                os.kill(holder.pid, signal.SIGTERM)
-                holder.wait(timeout=15)
-                check(ProjectLock.acquire(rclc) is not None, "kernel released the flock on process death")
+                _kill_tree(holder)
+                freed = None
+                for _ in range(50):  # the kernel drops the lock at process death
+                    freed = ProjectLock.acquire(rclc)
+                    if freed is not None:
+                        break
+                    time.sleep(0.1)
+                check(freed is not None, "lock freed when the holder died")
                 ProjectLock.release_all()
             finally:
                 if holder.poll() is None:
-                    os.kill(holder.pid, signal.SIGTERM)
-                    holder.wait(timeout=15)
+                    _kill_tree(holder)
 
         # 4. real run (only with a key saved in ~/.clutch/settings.json)
         key = _saved_api_key()

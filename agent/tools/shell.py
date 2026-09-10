@@ -231,7 +231,9 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
         return {"content": "ERROR: command cannot be parsed (unbalanced quotes?)", "error": True}
     for tok in args:
         try:
-            p = workspace.resolve(tok)
+            # shell_path: the token is shell text, not a plain path — on a
+            # Git-Bash host /tmp and /dev/null mean %TEMP% and the NUL device
+            p = workspace.resolve(workspace.shell_path(tok))
         except ValueError:
             return {"content": render("errors/path_escape.md", token=repr(tok)), "error": True}
         # protected files (the .clc project file) are off-limits to commands too

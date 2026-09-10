@@ -99,13 +99,19 @@ def _make_reader(path, workspace: Workspace | None) -> tuple[Callable[[int, int]
             return workspace.read_range(str(path), lo, hi)
 
         return read, total
-    f = open(path, "rb")
+    total = os.path.getsize(path)
 
     def read(lo: int, hi: int) -> bytes:
-        f.seek(lo)
-        return f.read(hi - lo)
+        # one open per range read: the project file must NOT stay locked for the
+        # process lifetime (Windows refuses to rename/delete an open file, so a
+        # held handle breaks moving/closing a project and the temp-dir cleanup
+        # of tests). Reads happen at open (header + window) and per history page
+        # — both rare, and a fresh handle can never observe a stale size.
+        with open(path, "rb") as f:
+            f.seek(lo)
+            return f.read(hi - lo)
 
-    return read, os.path.getsize(path)
+    return read, total
 
 
 class LazyEventLog:

@@ -8,6 +8,7 @@ doom-loop detection.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 
@@ -32,6 +33,11 @@ from agent.skills import load_skill_library
 from agent.tools.registry import ToolRegistry, build_default_tools
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
+
+# The interpreter a real command may invoke: Windows ships python.exe only
+# (the WindowsApps `python3` alias is a Store stub, not an interpreter), while
+# POSIX hosts expose python3. The guard itself accepts both spellings.
+PY = "python" if os.name == "nt" else "python3"
 
 
 def main() -> None:
@@ -301,10 +307,10 @@ def main() -> None:
         r = reg.execute(sb, config, "run_command", {"command": "ls -la"})
         check(not r["error"], "run_command allows normal relative commands")
         reg.execute(sb, config, "write_file", {"path": "good.py", "content": "print(1)\n"})
-        r = reg.execute(sb, config, "run_command", {"command": "python3 good.py"})
+        r = reg.execute(sb, config, "run_command", {"command": f"{PY} good.py"})
         check(not r["error"] and "1" in r["content"], "syntax check passes good python")
         reg.execute(sb, config, "write_file", {"path": "bad.py", "content": "if True print(1)\n"})
-        r = reg.execute(sb, config, "run_command", {"command": "python3 bad.py"})
+        r = reg.execute(sb, config, "run_command", {"command": f"{PY} bad.py"})
         check(r["error"] and "syntax check failed" in r["content"], "syntax check rejects bad python")
 
         # 5. doom-loop detection: warn on first detection, escalate on repeat
@@ -517,18 +523,55 @@ def main() -> None:
                 == frozenset(),
                 "scratch redirect targets (/tmp, /dev/null) are not escapes",
             )
+            # a `..` that climbs back out of the scratch dir is still an escape,
+            # reported at the path the token really denotes: on a Git-Bash host
+            # /tmp is %TEMP%, so the target is %TEMP%/../etc/hack, not /etc/hack
+            out_esc = pe.escaped_paths("run_command", '{"command": "echo hi > /tmp/../etc/hack"}', home_ws)
+            expect = home_ws.norm_join(str(home_ws.root), home_ws.shell_path("/tmp/../etc/hack"))
             check(
-                pe.escaped_paths("run_command", '{"command": "echo hi > /tmp/../etc/hack"}', home_ws)
-                == frozenset({Path("/etc/hack")}),
+                out_esc == frozenset({expect}),
                 "a '..' that walks out of a scratch dir is still an escape",
+            )
+            # W1: the whole POSIX scratch surface, not just /tmp + /dev/null.
+            # Under Git Bash (MSYS) /dev/* and /var/tmp are exactly as harmless
+            # as they are on Linux, so an ordinary command that redirects there
+            # must not be rejected; under cmd.exe those very tokens ARE
+            # drive-relative paths and stay escapes. The verdict follows the
+            # shell that will parse the text (workspace.shell_path).
+            posix_shell = home_ws.exec_shell().posix
+            for cmd in (
+                "head -c 16 /dev/urandom | xxd",  # /dev/zero, /dev/fd/N, /dev/tty too
+                "some-cmd 2>/dev/stderr",
+                "echo hi > /var/tmp/x.log",
+            ):
+                esc = pe.escaped_paths("run_command", json.dumps({"command": cmd}), home_ws)
+                if posix_shell:  # POSIX sh (any OS): scratch, so not an escape
+                    check(esc == frozenset(), f"POSIX scratch is not an escape: {cmd}")
+                else:  # cmd dialect: the same token is literally C:\dev\..., an escape
+                    check(esc != frozenset(), f"cmd dialect judges the same token literally: {cmd}")
+            # the shell guard asks the same question through resolve(): a scratch
+            # token the verdict accepts must not be rejected at execution either
+            try:
+                home_ws.resolve(home_ws.shell_path("/dev/urandom"))
+                guard_ok = True
+            except ValueError:
+                guard_ok = False
+            check(guard_ok == posix_shell, "run_command's guard agrees with the escape verdict on /dev/*")
+            # and the boundary still holds: `..` climbs OUT of /dev into a real dir
+            check(
+                pe.escaped_paths("run_command", '{"command": "cat /dev/../etc/passwd"}', home_ws) != frozenset(),
+                "a '..' that walks out of /dev is still an escape",
             )
         check(
             pe.escaped_paths("write_file", '{"content": "/etc/passwd ~ ../x", "path": "a.txt"}', ws) == frozenset(),
             "content is not scanned for escapes",
         )
         ext = ws.root.parent / "approved.txt"
+        # json.dumps, not an f-string: a Windows path is full of backslashes,
+        # which in raw JSON are escape sequences ("\U", "\t", ...) and make the
+        # argument string unparseable
         check(
-            pe.escaped_paths("write_file", f'{{"path": "{ext}"}}', ws) == frozenset({ext}),
+            pe.escaped_paths("write_file", json.dumps({"path": str(ext)}), ws) == frozenset({ext}),
             "escaped_paths flags an external write target",
         )
 
@@ -539,7 +582,7 @@ def main() -> None:
 
         def _require_escape() -> None:
             try:
-                approving.require("write_file", f'{{"path": "{ext}"}}', ws3)
+                approving.require("write_file", json.dumps({"path": str(ext)}), ws3)
                 got["ok"] = True
             except PermissionRequired as e:
                 got["err"] = e.reason
@@ -676,6 +719,7 @@ def main() -> None:
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",  # .clc is BYTE-addressed: text mode CRLF would shift offsets
         )
         legacy_before = legacy.read_bytes()
         mig = open_project_lazy(legacy)
@@ -698,6 +742,7 @@ def main() -> None:
         corrupt.write_text(
             cproj.path.read_text(encoding="utf-8").replace(_MEMORY_INDEX_PREFIX, _MEMORY_INDEX_PREFIX + "ZZ", 1),
             encoding="utf-8",
+            newline="\n",  # .clc is BYTE-addressed (offsets), never CRLF
         )
         corrupt_before = corrupt.read_bytes()
         creopened = open_project_lazy(corrupt)
@@ -711,6 +756,7 @@ def main() -> None:
             + event_to_json(UserMessageEvent(content="task")) + "\n"
             + "[memories]\n" + '{"title": "ro1", "content": "readonly", "updated": 0}\n',
             encoding="utf-8",
+            newline="\n",  # .clc is BYTE-addressed (offsets), never CRLF
         )
         before = ro.read_bytes()
         roproj = open_project_lazy(ro, read_only=True)
@@ -742,7 +788,7 @@ def main() -> None:
         lines.append(event_to_json(CompactionEvent(summary="old work summarized")))
         for i in range(101, 121):
             lines.append(event_to_json(AssistantMessageEvent(content=f"recent {i}")))
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
         proj = open_project_lazy(p, workspace=None)
         log = proj.log
@@ -791,6 +837,7 @@ def main() -> None:
             )
             + "\n",
             encoding="utf-8",
+            newline="\n",  # .clc is BYTE-addressed (offsets), never CRLF
         )
         legacy_before = legacy.read_bytes()
         up = open_project_lazy(legacy, workspace=None)
@@ -830,7 +877,7 @@ def main() -> None:
         lines.append("[memories]")
         lines.append('{"title": "a durable fact", "content": "the detail", "updated": 0}')
         lines.append(event_to_json(AssistantMessageEvent(content="after memory")))
-        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
         proj = open_project_lazy(p, workspace=None)
         check(

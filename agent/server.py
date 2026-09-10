@@ -46,8 +46,13 @@ from .tools.transport import SshTransport
 from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
 
 # a client hanging up mid-SSE surfaces as one of these on the socket write;
-# end cleanly, never let socketserver print a BrokenPipeError traceback
-_SSE_ERR = (BrokenPipeError, ConnectionResetError, ValueError)
+# end cleanly, never let socketserver print a traceback. The class is host
+# dependent: POSIX gives BrokenPipeError (EPIPE) or ConnectionResetError
+# (ECONNRESET) when the peer is gone, Windows gives ConnectionAbortedError
+# (WSAECONNABORTED/WSAECONNRESET), so leaving it out spams one traceback per
+# closed window on Windows. ValueError covers a write on an already-closed
+# stream.
+_SSE_ERR = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ValueError)
 
 
 def _settings_path() -> Path:
@@ -104,6 +109,22 @@ class Handler(BaseHTTPRequestHandler):
     # ---- routing ----
     # Handlers raise on unexpected errors: ThreadingHTTPServer prints the full
     # traceback (handle_error) and closes the connection, exposing bugs loudly.
+
+    # A client that vanishes mid-request — window closed, or the UI's health
+    # probe aborted by its timeout (server-bootstrap.js) — leaves the next
+    # read/write on a dead socket. Windows reports WSAECONNABORTED/WSAECONNRESET
+    # (ConnectionAbortedError/ConnectionResetError) where POSIX usually just
+    # returns EOF, so without this socketserver prints a full traceback once per
+    # closed window (the failure happens in handle_one_request's request-line
+    # read, before any of our code runs). Real handler bugs are not
+    # ConnectionErrors and still print.
+    _PEER_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except self._PEER_GONE:
+            self.close_connection = True
 
     def _cors(self) -> None:
         # the UI runs on its own origin/host; every response must be readable there
@@ -889,8 +910,9 @@ def main() -> int:
         flush=True,
     )
     print(f"[clutch-server] http://127.0.0.1:{bound_port}  (API only; start the UI separately)", flush=True)
-    # No lock cleanup on exit is needed: every project lock is a flock in the
-    # local OS temp dir, and the kernel releases it when this process dies.
+    # No lock cleanup on exit is needed: every project lock is a kernel lock
+    # (flock / LockFileEx) in the local OS temp dir, and the OS releases it when
+    # this process dies.
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

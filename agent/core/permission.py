@@ -142,11 +142,12 @@ class PermissionEvaluator:
                     base = cwd if cwd is not None else workspace.realpath(workspace.root)
                     # norm_join, not os.path: in ssh mode the token is judged
                     # against the remote layout (ntpath on Windows would
-                    # backslash-rewrite it)
-                    cwd = workspace.norm_join(str(base), nxt)
+                    # backslash-rewrite it). shell_path first: the token is
+                    # shell text, so /tmp on a Git-Bash host is %TEMP%
+                    cwd = workspace.norm_join(str(base), workspace.shell_path(nxt))
                     i += 2
                     continue
-                p = workspace.escape_path(tok, cwd)
+                p = workspace.escape_path(workspace.shell_path(tok), cwd)
                 if p is not None:
                     out.add(p)
                 i += 1

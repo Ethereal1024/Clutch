@@ -12,6 +12,7 @@ timeout -> TransportError(timeout=True) surface.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,8 +21,32 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.tools.transport import SshTransport, TransportError
-from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
-from tests.testsupport import check
+from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace, shq
+from tests.testsupport import check, posix_shell_argv
+
+# the mock "remote" parses commands with a POSIX shell, exactly like the real
+# remote's exec bridge (/bin/sh on POSIX, Git Bash / MSYS2 bash on Windows)
+SH = posix_shell_argv()
+
+
+def remote_root(path: str) -> str:
+    """A local directory in the spelling the mock's POSIX shell resolves.
+
+    The mock remote IS this machine's directory tree, seen through a POSIX
+    shell: on Windows that shell (Git Bash) answers `/tmp` for %TEMP% (its own
+    mount point) and keeps POSIX spellings in every path it prints, so the
+    "remote" root must be spelled the way that shell spells it — the real
+    remote is POSIX and only the mock needs the translation."""
+    if os.name != "nt":
+        return path
+    return shell_pwd(path.replace("\\", "/"))
+
+
+def shell_pwd(path: str) -> str:
+    """How the mock's shell prints that directory (`pwd` under Git Bash answers
+    /c/Users/... for C:\\Users\\... — the same directory, other spelling)."""
+    r = subprocess.run([*SH, f"cd {shq(path)} && pwd"], capture_output=True, text=True, timeout=30)
+    return r.stdout.strip()
 
 
 class MockBridge(BaseHTTPRequestHandler):
@@ -44,7 +69,13 @@ class MockBridge(BaseHTTPRequestHandler):
         MockBridge.post_count += 1
         timeout_ms = body.get("timeout", 60000)
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_ms / 1000)
+            r = subprocess.run(
+                [*SH, cmd] if SH else cmd,
+                shell=SH is None,
+                capture_output=True,
+                text=True,
+                timeout=timeout_ms / 1000,
+            )
             code, stdout, stderr = r.returncode, r.stdout or "", r.stderr or ""
         except subprocess.TimeoutExpired:
             code, stdout, stderr = -1, "", ""
@@ -56,6 +87,11 @@ class MockBridge(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    if SH is None:
+        print("SKIP: no POSIX shell on this host (Windows without Git Bash / MSYS2)")
+        print("      the mock remote runs `sh -c` like exec-bridge.js on a real remote;")
+        print("      cmd.exe cannot run heredocs/printf/base64, so this check needs one.")
+        return 0
     with tempfile.TemporaryDirectory() as rtmp:
         srv = ThreadingHTTPServer(("127.0.0.1", 0), MockBridge)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -86,7 +122,7 @@ def main() -> int:
         _ = LocalWorkspace(str(made))
         check(made.is_dir(), "LocalWorkspace still creates its root (behavior kept)")
 
-        ws = RemoteWorkspace(rtmp, bridge)
+        ws = RemoteWorkspace(remote_root(rtmp), bridge)
 
         # heredoc round trip: $, backticks, single/double quotes, tab, newline
         tricky = "l1\nwith $VAR `bt` 'sq' \"dq\"\n\ttab\tend\n"
@@ -130,7 +166,7 @@ def main() -> int:
         except NotADirectoryError:
             check(True, "remote list raises NotADirectoryError")
         r = ws.run("pwd", 30.0)
-        check(r.code == 0 and r.stdout.strip() == rtmp, "remote run cwd = root")
+        check(r.code == 0 and r.stdout.strip() == str(ws.root), "remote run cwd = root")
 
         # oversized run_command: rejected up front, never reaches the bridge
         try:
@@ -142,7 +178,7 @@ def main() -> int:
             MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200,
             f"rejected command never reached the bridge (max {MockBridge.max_cmd_len} bytes)",
         )
-        ws.protect(Path(rtmp) / "sub" / "secret.txt")
+        ws.protect(Path(str(ws.root)) / "sub" / "secret.txt")
         ws.write("sub/secret.txt", "x")
         check("secret.txt" not in ws.list("sub"), "remote list hides protected files")
 

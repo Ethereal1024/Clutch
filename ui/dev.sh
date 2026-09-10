@@ -6,16 +6,39 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$DIR")"
-LOG="/tmp/clutch-server.log"
+LOG="/tmp/clutch-server.log" # Git Bash maps /tmp to %TEMP%, so this works on Windows too
 
-# a stale server on 8890 would serve old code and block our bind; kill only
-# the LISTENER — lsof would also match the Electron client.
+# the venv interpreter: a POSIX venv keeps it in bin/, a Windows venv puts
+# python.exe in Scripts/ — `npm run dev` has to start on both
+VENV_PY="$ROOT/.venv/bin/python"
+if [ ! -x "$VENV_PY" ]; then
+  VENV_PY="$ROOT/.venv/Scripts/python.exe"
+fi
+
+# pids LISTENING on $1. POSIX: ss -ltnp (reading the listener state, not lsof's
+# process name, which would also match the Electron client). Windows/Git Bash
+# has neither ss nor fuser but ships netstat.exe, whose LISTENING rows end with
+# the owning pid.
+listener_pids() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | awk -F'pid=' '/:'"$1"' /{split($2,a,","); print a[1]}' | sort -u
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ano 2>/dev/null | awk -v p=":$1" '$1 == "TCP" && $4 == "LISTENING" && $2 ~ p"$" {print $5}' | sort -u
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser "$1/tcp" 2>/dev/null | tr -s ' ' '\n' | sort -u
+  fi
+}
+
+# a stale server on 8890 would serve old code and block our bind; kill only the
+# LISTENER.
 if curl -sf "http://127.0.0.1:8890/api/health" >/dev/null 2>&1; then
   echo "[clutch-ui] clearing existing clutch-server on 8890 (stale?)"
-  PIDS=$(ss -ltnp 2>/dev/null | awk -F'pid=' '/:8890 /{split($2,a,","); print a[1]}' | sort -u)
-  if [ -z "$PIDS" ]; then PIDS=$(fuser 8890/tcp 2>/dev/null || true); fi
+  PIDS=$(listener_pids 8890 || true)
   if [ -n "$PIDS" ]; then
-    kill $PIDS 2>/dev/null || true
+    # MSYS `kill` accepts Windows pids as well; taskkill is the native fallback
+    for pid in $PIDS; do
+      kill "$pid" 2>/dev/null || taskkill //PID "$pid" //F >/dev/null 2>&1 || true
+    done
     sleep 0.3
   else
     echo "[clutch-ui] warning: could not identify the pid on 8890; our server may fail to bind"
@@ -23,7 +46,7 @@ if curl -sf "http://127.0.0.1:8890/api/health" >/dev/null 2>&1; then
 fi
 
 # start the API server in the background (cwd = repo root so `agent` imports)
-( cd "$ROOT" && exec "$ROOT/.venv/bin/python" -m agent.server >"$LOG" 2>&1 ) &
+( cd "$ROOT" && exec "$VENV_PY" -m agent.server >"$LOG" 2>&1 ) &
 SERVER=$!
 trap 'kill "$SERVER" 2>/dev/null || true' EXIT INT TERM
 

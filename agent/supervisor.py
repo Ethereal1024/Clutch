@@ -19,8 +19,9 @@ Lifecycle (per product decision):
     window crashed (heartbeat stops).
 
 Locking: each session child is an independent process, so the .clc write lock
-is plain flock on the machine's tmp dir — process-level mutual exclusion,
-freed by the kernel on exit, no TTL needed. (noclobber+TTL remains only for
+is a kernel file lock (flock / LockFileEx) on the machine's tmp dir —
+process-level mutual exclusion, released by the OS on exit, no TTL needed.
+(noclobber+TTL remains only for
 the execBridge-degraded path, where the agent process and the project files
 live on different machines.)
 """
@@ -152,6 +153,55 @@ class Session:
     proc: subprocess.Popen
     port: int
     last_beat: float = field(default_factory=time.time)
+
+
+def _signal_soft(proc: subprocess.Popen) -> None:
+    """Ask a session child to stop: SIGTERM to its process group (POSIX), or
+    CTRL_BREAK_EVENT on Windows (the child is spawned with
+    CREATE_NEW_PROCESS_GROUP).
+
+    Best effort, and on Windows normally unavailable: CTRL_BREAK reaches only a
+    process group that shares OUR console, while a packaged supervisor is
+    spawned by Electron with windowsHide and has no console at all — so this
+    raises OSError(WinError 6) instead of delivering anything. Every OSError
+    (that one, ProcessLookupError, PermissionError) is left to _kill_hard.
+    """
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        else:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+    except OSError:
+        return
+
+
+def _kill_hard(proc: subprocess.Popen) -> None:
+    """Stop of last resort, when the child ignored (or never got) the soft
+    signal: SIGKILL to the group (POSIX), or taskkill /T on Windows.
+
+    taskkill rather than proc.kill(): TerminateProcess reaps only the direct
+    child, so the shell it ran commands in — and whatever that shell started —
+    stays behind as an orphan holding its port. /T walks the tree.
+    """
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True,
+            timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()  # taskkill missing or denied: still drop the direct child
+    except OSError:
+        pass
 
 
 class Supervisor:
@@ -320,30 +370,29 @@ class Supervisor:
 
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
+        """Best effort stop of one session child. Never raises.
+
+        A failed kill must not escape into the caller: /api/session/stop has
+        already unregistered the session by then, so an exception answered
+        nothing AND leaked the child (the reaper could only bury it in a log
+        line). Losing the graceful signal is survivable — _kill_hard reaps the
+        tree — losing the stop is not.
+        """
         if proc.poll() is not None:
             return
-        try:
-            if os.name == "posix":
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            else:
-                # Windows: no killpg; CTRL_BREAK is the graceful stop (the
-                # child is spawned with CREATE_NEW_PROCESS_GROUP)
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
-        except (ProcessLookupError, PermissionError):
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                return
+        _signal_soft(proc)
         try:
             proc.wait(timeout=KILL_GRACE_S)
+            return
         except subprocess.TimeoutExpired:
-            try:
-                if os.name == "posix":
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                else:
-                    proc.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
+            pass
+        except OSError:  # pragma: no cover - child vanished while waiting
+            return
+        _kill_hard(proc)
+        try:
+            proc.wait(timeout=KILL_GRACE_S)  # reap, and let the port go
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
 
 # ---- HTTP layer (thin: only session lifecycle endpoints) ----

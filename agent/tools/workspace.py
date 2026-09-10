@@ -64,6 +64,23 @@ _DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / "transport_defa
 POSIX_SCRATCH_DIRS = ("/tmp", "/var/tmp", "/dev")
 
 
+def posix_scratch_tail(token: str) -> str | None:
+    """The part of a POSIX-shell path token below a scratch dir ("" for a scratch
+    dir itself), or None when the token is not in the scratch surface at all.
+
+    Lexical, and normalized exactly like the POSIX verdict (posixpath), so a
+    ``..`` that climbs back OUT of the scratch dir yields None and stays the
+    escape it is on Linux — the caller then judges the token in host flavor.
+    """
+    norm = posixpath.normpath(token)
+    for scratch in POSIX_SCRATCH_DIRS:
+        if norm == scratch:
+            return ""
+        if norm.startswith(scratch + "/"):
+            return norm[len(scratch) + 1:]
+    return None
+
+
 def _inside_or_scratch(p: PurePath, root: PurePath, scratches: tuple[PurePath, ...]) -> bool:
     """SINGLE containment verdict: ``p`` is inside the workspace ``root``, or
     inside one of the workspace's harmless scratch dirs (test logs, /dev/null)
@@ -157,6 +174,19 @@ class Workspace(ABC):
         if os.name == "nt":
             return (Path(tempfile.gettempdir()),)
         return (Path("/tmp"), Path("/var/tmp"), Path("/dev"))
+
+    def shell_path(self, token: str) -> str:
+        """The local path a SHELL token denotes (identity by default).
+
+        Command text is parsed by the shell, not by us, so its spelling can
+        denote something the host's own path rules never produce: on Windows
+        under Git Bash (the POSIX flavor the agent speaks) `/tmp` IS %TEMP% and
+        `/dev/null` IS the NUL device — both as harmless as on Linux. Everyone
+        who reasons about command TEXT (the permission engine's escape parser,
+        the shell guard's token rejection) asks here, so the verdict follows the
+        shell that will run the text instead of guessing from the OS. A tool's
+        `path` argument is NOT a shell token and keeps the plain spelling."""
+        return token
 
     def norm_join(self, base: str, token: str) -> PurePath:
         """Lexical base+token join for escape verdicts and the `cd` tracker, in
@@ -283,6 +313,31 @@ class LocalWorkspace(Workspace):
         super().__init__(root, transport)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def shell_path(self, token: str) -> str:
+        """Windows + Git Bash: translate the POSIX scratch spellings the agent
+        writes (`> /tmp/out.log 2>&1`, `2> /dev/null`, `head -c 8 /dev/urandom`)
+        to what bash itself resolves them to — /tmp is %TEMP% under MSYS
+        (`cygpath -w /tmp`), /dev/null is the NUL device, and the REST of the
+        POSIX scratch surface (/dev/* device nodes, /var/tmp) is MSYS-internal,
+        so it is mapped into the host scratch dir too. Without this the verdict
+        engine joins the token with ntpath instead, lands on `C:\\tmp\\out.log`
+        or `C:\\dev\\urandom`, and rejects an ordinary redirect as a workspace
+        escape — which it is not on the POSIX side, where all those dirs are
+        scratch. Only reached when the local shell is the POSIX flavor: under
+        cmd.exe the very same token is a drive-relative path and must be judged
+        literally."""
+        if os.name != "nt" or not local_shell().posix:
+            return token
+        tmp = tempfile.gettempdir()
+        if token == "/dev/null":
+            return os.devnull
+        tail = posix_scratch_tail(token)
+        if tail is None:
+            # not scratch — or a `..` climbed back out of it (an escape on
+            # POSIX too): judge the token as the host would, so it stays one
+            return token
+        return os.path.join(tmp, *tail.split("/")) if tail else tmp
+
     def read(self, path: str) -> str:
         p = self.resolve(path)
         if not p.is_file():
@@ -301,7 +356,11 @@ class LocalWorkspace(Workspace):
     def write(self, path: str, content: str) -> None:
         p = self.resolve(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        # newline="\n": byte-exact on every host. The .clc project file is
+        # byte-addressed (offsets + in-place header updates), and the SSH bridge
+        # writes LF, so the local backend must not let Windows text mode expand
+        # every \n into \r\n (that desynchronizes every stored offset).
+        p.write_text(content, encoding="utf-8", newline="\n")
 
     def list(self, path: str) -> list[str]:
         p = self.resolve(path)
@@ -311,7 +370,9 @@ class LocalWorkspace(Workspace):
 
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
-        with open(p, "a", encoding="utf-8") as f:
+        # one LF terminator per line (the remote bridge's `printf '%s\n'` shape):
+        # the .clc JSONL offsets count exactly one newline byte per event
+        with open(p, "a", encoding="utf-8", newline="\n") as f:
             f.write(line + "\n")
 
     def write_at(self, path: str, offset: int, data: bytes) -> None:
