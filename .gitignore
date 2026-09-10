@@ -21,3 +21,9 @@ scripts/convert-clc-to-cpr.py
 # local debug/scratch workspaces (mermaid render repro, jsdom repro) — keep out
 .mermaid-test/
 mj-repro/
+
+# internal planning docs (video script, optimization plans) — keep out of the repo
+docs/
+
+# third-party writing skills (humanizer-zh etc.) — local tooling, not part of the submission
+.claude/skills/
