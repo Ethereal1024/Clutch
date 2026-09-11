@@ -299,13 +299,16 @@ function parseProbe(out) {
 
 function startCommand(strategy, home) {
   // remote supervisor runs on 8890 like local; session children get --base-url later
-  const args = "--port " + REMOTE_API_PORT + " --idle-timeout 8";
+  const args = "--port " + REMOTE_API_PORT + " --idle-timeout 25";
   const nohup = "nohup setsid ";
   if (strategy === "bundle") {
     // explicit: a onefile's sys.executable cannot locate the sibling agent-server
     return `${nohup}${home}/.clutch-server/agent-supervisor ${args} --agent-cmd ${home}/.clutch-server/agent-server >/tmp/clutch-server.log 2>&1 </dev/null &`;
   }
-  // pylibs
+  // pylibs: the remote imports the whole wheel stack before binding (cold
+  // start can take several seconds on slow disks), so keep the idle reaper
+  // at 25s (> the 20s start poll). NOTE: argparse takes the LAST --idle-timeout,
+  // so never append a second one after ${args}.
   return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} >/tmp/clutch-server.log 2>&1 </dev/null &`;
 }
 
@@ -316,11 +319,27 @@ function remoteRunningCmd(probe) {
   return `(command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ':${REMOTE_API_PORT} ' && echo UP) || echo DOWN`;
 }
 
+// The bundle strategy ships binaries built for THIS host, so it is only valid
+// when the remote runs the same OS *and* CPU arch — arch alone is not enough
+// (a Windows client must not ship its .exe to a Linux remote, and vice versa).
+// Cross-platform remotes use pylibs: exact wheels for the target are fetched
+// client-side and the remote runs them with its own python3.
+function chooseStrategy(probe, localTag = platformTag()) {
+  const [localOs, localArch] = localTag.split("-");
+  if (String(probe.os || "").toLowerCase() === localOs && probe.arch === localArch) {
+    // same-platform: self-contained bundle (remote python3 has segfaulted on a NAS)
+    return "bundle";
+  }
+  if (probe.python) return "pylibs";
+  return null;
+}
+
 // force is for tests; auto-decides when omitted. progress(stage) drives the UI progress bar.
 async function installServer(probe, { force, progress } = {}) {
-  const sameArch = probe.arch === platformTag().split("-")[1];
+  const localTag = platformTag();
   tunnelLog(
-    `[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} py=${probe.python || "none"} sameArch=${sameArch}`
+    `[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} py=${probe.python || "none"} ` +
+      `local=${localTag}`
   );
 
   let strategy;
@@ -328,26 +347,20 @@ async function installServer(probe, { force, progress } = {}) {
     strategy = force;
   } else if (process.env.CLUTCH_TUNNEL_FORCE) {
     strategy = process.env.CLUTCH_TUNNEL_FORCE;
-  } else if (sameArch) {
-    // same-arch: self-contained bundle (remote python3 has segfaulted on a NAS)
-    strategy = "bundle";
-  } else if (probe.python) {
-    // cross-arch: client downloads exact wheels; remote never runs pip
-    strategy = "pylibs";
   } else {
-    // no python3: no deterministic install path — reject, renderer falls to SSH-tools
+    strategy = chooseStrategy(probe, localTag);
+  }
+  if (strategy !== "bundle" && strategy !== "pylibs") {
+    // e.g. no python3 (no deterministic install path — reject, renderer falls to
+    // SSH-tools), or an explicit CLUTCH_TUNNEL_FORCE=assist
     return {
       ok: false,
       error:
         `target runs ${probe.os}/${probe.arch} without python3 (${probe.libc || "?"} libc) and no ` +
-        "matching-architecture bundle is available, so the server cannot be installed. " +
+        "bundle for this platform is available, so the server cannot be installed. " +
         "Falling back to SSH-tools: file and command access over the tunnel still work; " +
         "install python3 on the device to enable the full server experience.",
     };
-  }
-  if (strategy !== "bundle" && strategy !== "pylibs") {
-    // e.g. an explicit CLUTCH_TUNNEL_FORCE=assist
-    return { ok: false, error: `no install strategy '${strategy}'; falling back to SSH-tools` };
   }
   // content-hash version is the only install gate: installed iff the remote's
   // VERSION equals our binaries' hash
@@ -428,8 +441,10 @@ async function installServer(probe, { force, progress } = {}) {
     if (progress) progress("install:start");
     // short timeout: the start command backgrounds the server
     await remoteExec(startCommand(strategy, home), 10000);
-    // wait for it to bind; on failure surface the remote log
-    for (let i = 0; i < 12; i++) {
+    // wait for it to bind; pylibs cold-start imports the whole wheel stack and
+    // can take >10s on slow servers, so poll for up to 20s (vs the old 6s
+    // window that reported a healthy install as "did not come up")
+    for (let i = 0; i < 40; i++) {
       const chk = await remoteExec(remoteRunningCmd(probe));
       if (chk.stdout.includes("UP")) break;
       await new Promise((r) => setTimeout(r, 500));
@@ -779,4 +794,5 @@ module.exports = {
   uploadFileViaExec,
   openSessionForward,
   restartRemoteServer,
+  chooseStrategy,
 };
