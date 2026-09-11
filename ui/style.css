@@ -638,8 +638,12 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .read-row:hover { color: var(--text); }
 .read-toggle {
-  display: inline-block; width: 14px; text-align: center;
-  font-size: 11px; color: var(--muted);
+  /* no fixed-width glyph box: a glyph centered inside a 14px inline-block
+     leaves dead air before the label, and baseline math drifts the icon off
+     the row's optical center; flex centering fixes both */
+  display: flex; align-items: center;
+  font-size: 12px; /* = .tool-args-btn: one glyph size across all rows */
+  color: var(--muted);
 }
 
 /* write results are the meaningful "output" steps: a red-filled header chip */
