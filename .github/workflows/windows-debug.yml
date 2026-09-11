@@ -8,8 +8,8 @@
 # Install your way: installer (per-user, changeable dir), SmartScreen warns on
 # first run -> "More info" -> "Run anyway" (unsigned).
 #
-# release.yml stays untouched; when Windows ships for real its job is the same
-# `npm run dist:win` plus the softprops release step.
+# The release twin is release.yml's `win` job: this pipeline plus the font
+# guard and the softprops release step (first shipped in v0.1.7).
 name: windows-debug
 
 on:
@@ -56,7 +56,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 

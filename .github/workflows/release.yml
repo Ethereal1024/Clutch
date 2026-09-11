@@ -7,6 +7,10 @@
 #           removed the right-click -> Open bypass); clear it with
 #           `xattr -cr /Applications/Clutch.app` until the project picks up
 #           Developer ID signing + notarization.
+#  - win  : Windows x64 NSIS (windows-latest), UNSIGNED — SmartScreen warns on
+#           the first run ("Windows protected your PC" -> More info -> Run
+#           anyway). This job must run on Windows: the bundled backend is a
+#           PyInstaller onefile .exe and PyInstaller cannot cross-compile.
 name: release
 
 on:
@@ -41,7 +45,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -82,7 +86,7 @@ jobs:
 
   # macOS build must run on macOS (no cross-compiling mac targets from Linux).
   # needs: deb -> the deb job creates the release, this one only adds files
-  # (avoids both jobs racing to create it).
+  # (avoids the jobs racing to create it).
   dmg:
     runs-on: macos-latest
     needs: deb
@@ -107,7 +111,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
@@ -139,3 +143,92 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ui/dist/*.dmg
+
+  # Windows build must run on Windows: the bundled backend is a PyInstaller
+  # onefile .exe and PyInstaller cannot cross-compile (this is why the mac job's
+  # "no cross-compiling" caveat does NOT apply the other way — NSIS itself is
+  # portable, the .exe backend is the hard dependency). Pipeline is the proven
+  # windows-debug.yml one plus the font guard and the release attachment.
+  win:
+    runs-on: windows-latest
+    needs: deb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync python deps (PyInstaller, etc.)
+        run: uv sync
+
+      # Windows PyInstaller wants ';' as the --add-data separator (':' would be
+      # taken literally) and the venv interpreter lives in Scripts\python.exe.
+      # Output: dist/agent-server.exe + dist/agent-supervisor.exe.
+      # agent/skills is bundled whole: on CI only the 4 shipped skills are
+      # tracked (build-server-bundle.sh's SHIPPED_SKILLS whitelist guards the
+      # local-POSIX path, where dev-only skills exist on disk).
+      - name: Build bundled server + supervisor (PyInstaller onefile)
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-server \
+            --add-data "agent/prompts;agent/prompts" \
+            --add-data "agent/skills;agent/skills" \
+            --add-data "agent/transport_defaults.json;agent/" \
+            scripts/server_entry.py
+          .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-supervisor \
+            scripts/supervisor_entry.py
+          ls -l dist/
+
+      - name: Generate app icon (png/svg + win ico)
+        shell: bash
+        run: .venv/Scripts/python scripts/make-icon.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install UI deps
+        working-directory: ui
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      # same guard as `predist`, which vite/npm does not run for dist:win
+      - name: Check transport_defaults drift
+        shell: bash
+        run: bash scripts/check-transport-defaults.sh
+
+      # platform extraResources/icon guard (no build): see ui/verify-build-config.js
+      - name: Verify builder config
+        working-directory: ui
+        run: node verify-build-config.js
+
+      # font wiring guard: the deb job runs it; windows-debug.yml omits it
+      - name: Verify UI fonts
+        shell: bash
+        run: .venv/Scripts/python -m tests.ui_fonts_check
+
+      - name: Build unsigned NSIS installer
+        working-directory: ui
+        run: npm run dist:win
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clutch-win
+          path: ui/dist/*.exe
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ui/dist/*.exe
