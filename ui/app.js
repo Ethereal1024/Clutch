@@ -35,12 +35,23 @@ const $ = (s) => document.querySelector(s);
 // use it to tell "backend said no" from "backend unreachable") and `.code`
 // (server error code, e.g. project_open_conflict). Throws on non-2xx and on a
 // 200 body that carries an error (only /api/fs/list does that).
-async function apiFetch(path, { method = "GET", body, base = API_BASE } = {}) {
-  const r = await fetch(base + path, body === undefined ? { method } : {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+async function apiFetch(path, { method = "GET", body, base = API_BASE, timeout = 30000 } = {}) {
+  // bounded: a hung backend must surface as a failed button, not a forever-
+  // pending one (AbortError carries no .status -> callers treat it as
+  // "backend unreachable", the same path as a refused connection)
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
+  let r;
+  try {
+    r = await fetch(base + path, body === undefined ? { method, signal: ctl.signal } : {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data.error) {
     const e = new Error(data.error || r.status);
@@ -693,25 +704,53 @@ function createAgentTextBlock() {
 }
 
 // coalesced streaming render: one full-block render per frame, flushed by the
-// next non-text event so a superseded block is always complete
+// next non-text event so a superseded block is always complete.
+//
+// THROTTLED to ~8fps: each render is a FULL marked+DOMPurify re-parse of the
+// whole accumulated block plus a DOM rebuild — at 60fps on a long answer that
+// is O(n²) work that starves the main thread, and a starved renderer is the
+// whole-window freeze (clicks queue, Stop included). Math is deferred to the
+// flush render: typesetting the whole block per frame for a stray "$…$" pair
+// was the single most expensive frame cost.
 let textRenderRaf = 0;
-function renderTextBlock() {
+let textRenderLast = 0;
+const TEXT_RENDER_MIN_MS = 120;
+function renderTextBlock(force = false) {
   textRenderRaf = 0;
+  const now = performance.now();
+  if (!force && now - textRenderLast < TEXT_RENDER_MIN_MS) {
+    // too soon since the last full render: skip this frame (cheap no-op), a
+    // later frame renders once with every delta that arrived in between
+    textRenderRaf = requestAnimationFrame(() => renderTextBlock(false));
+    return;
+  }
+  textRenderLast = now;
   if (!lastTextEl) return;
   const bodyEl = lastTextEl.querySelector(".body");
   bodyEl.innerHTML = renderMarkdown(lastTextContent);
+  lastTextEl._mathDone = false; // fresh content: the flush owes a math pass
   highlightCode(lastTextEl, true);
-  if (!stream.classList.contains("loading")) typesetMath(lastTextEl); // deferred during load
+  if (force && !stream.classList.contains("loading")) {
+    typesetMath(lastTextEl);
+    lastTextEl._mathDone = true;
+  }
   autoScroll();
 }
 function scheduleTextRender() {
   if (textRenderRaf) return;
-  textRenderRaf = requestAnimationFrame(renderTextBlock);
+  textRenderRaf = requestAnimationFrame(() => renderTextBlock(false));
 }
 function flushTextRender() {
   if (textRenderRaf) {
     cancelAnimationFrame(textRenderRaf);
-    renderTextBlock();
+    renderTextBlock(true);
+  } else if (lastTextEl && !lastTextEl._mathDone && !stream.classList.contains("loading")) {
+    // content is current (a render landed within the throttle window) but the
+    // math pass was deferred while streaming: run it exactly once here — the
+    // _mathDone flag keeps bursty non-text events (tool_call_delta chunks)
+    // from re-typesetting an unchanged block over and over
+    typesetMath(lastTextEl);
+    lastTextEl._mathDone = true;
   }
 }
 
@@ -901,10 +940,34 @@ async function typesetProgressively(root, onPct) {
 
 // syntax-highlight a freshly rendered block; streaming skips a last-element
 // diagram (its fence may still be open)
+//
+// CACHED by code source: the streaming render rebuilds the block's DOM every
+// frame, so re-running hljs over every COMPLETED fence each frame is O(n²)
+// (this is what pegged the renderer and froze the window mid-answer).
+// textContent is invariant under highlighting, so the source string is a
+// stable key; cached fences just get their HTML re-assigned.
+const hlCache = new Map();
+const HL_CACHE_MAX = 64; // bounded LRU (insertion-ordered FIFO is fine here)
+const HL_STREAM_MAX = 16384; // while streaming, fences bigger than this wait for the flush render
+const HL_CACHE_MAX_SRC = 131072; // never cache giants; they re-highlight on flush only
+
 function highlightCode(root, streaming = false) {
   if (typeof hljs === "undefined" || !root) return;
   root.querySelectorAll("pre code").forEach((el) => {
-    try { hljs.highlightElement(el); } catch (e) {}
+    const src = el.textContent;
+    const cached = hlCache.get(src);
+    if (cached !== undefined) {
+      if (el.innerHTML !== cached) el.innerHTML = cached; // compare: skip needless DOM rebuilds
+      return;
+    }
+    if (streaming && src.length > HL_STREAM_MAX) return; // the flush render highlights it
+    try {
+      hljs.highlightElement(el);
+      if (src.length <= HL_CACHE_MAX_SRC) {
+        if (hlCache.size >= HL_CACHE_MAX) hlCache.delete(hlCache.keys().next().value);
+        hlCache.set(src, el.innerHTML);
+      }
+    } catch (e) {}
   });
   renderMermaid(root, streaming).catch((e) => console.warn("[mermaid]", e));
 }
@@ -2342,7 +2405,7 @@ async function loadOlder() {
   paging = true;
   try {
     const anchor = eventsEl.firstElementChild; // identity survives the prepend
-    const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=262144`);
+    const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=262144`, { timeout: 60000 });
     const page = data.events || [];
     if (!page.length) { setOlderPill(0); return; }
     const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;
