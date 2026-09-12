@@ -1,10 +1,10 @@
 /* URLS ARE RELATIVE ON PURPOSE — the app is loaded from file:// (Electron
    `win.loadFile` in main.js), where a root-absolute "/vendor/…" resolves
-   against the filesystem root (file:///vendor/…) and 404s. Both webfonts then
-   fail silently and EVERY element drops to the OS fallback chain, which is a
+   against the filesystem root (file:///vendor/…) and 404s. Every webfont then
+   fails silently and EVERY element drops to the OS fallback chain, which is a
    different font per platform (Microsoft YaHei on Windows, whatever fontconfig
    hands back for a generic family on Linux) — i.e. the whole UI renders in a
-   platform-specific face instead of Archivo/JetBrains Mono. */
+   platform-specific face instead of Archivo/JetBrains Mono/Noto Sans SC. */
 @font-face {
   font-family: "Archivo";
   src: url("vendor/fonts/archivo-var.woff2") format("woff2");
@@ -15,6 +15,19 @@
   font-family: "JetBrains Mono";
   src: url("vendor/fonts/jetbrains-mono-400.woff2") format("woff2");
   font-weight: 400;
+  font-display: swap;
+}
+/* CJK prose: the two faces above are latin-only, so every Han glyph used to
+   fall through to the platform tail — "Microsoft YaHei" on Windows, whatever
+   fontconfig picks on Linux — and the same chat rendered in a different face
+   per OS. Noto Sans SC (variable, wght 100-900, SIL OFL — see OFL.txt) ships
+   with the app and sits BEFORE the OS faces in both stacks, so Chinese text
+   comes from one bundled face everywhere. It is loaded from disk, so
+   subsetting would save nothing at runtime — hence the 7.4 MB file. */
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("vendor/fonts/noto-sans-sc-vf.woff2") format("woff2");
+  font-weight: 100 900;
   font-display: swap;
 }
 /* The UI's chrome icons (▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■) are NOT in Archivo
@@ -54,28 +67,33 @@
   --muted: #8b8b92;
   --accent: #EF4444;
   --green: #6FBF8F; /* diff additions only — the single non-B&W+red exception */
-  /* Font stacks are spelled out per platform on purpose. Archivo / JetBrains
-     Mono carry latin only, so every CJK glyph is resolved by the NEXT family
-     in the list: naming the macOS and Windows faces but leaving Linux to the
-     generic keyword means fontconfig picks a third face (Noto/DejaVu/WenQuanYi)
+  /* Font stacks are spelled out per platform on purpose. The bundled latin
+     faces carry no CJK, so Han glyphs are resolved by the bundled Noto Sans SC
+     (identical on every OS); the per-platform families below stay only as a
+     safety net should the webfont fail to load. Naming the macOS and Windows
+     faces but leaving Linux to the generic keyword means fontconfig picks a
+     third face (Noto/DejaVu/WenQuanYi)
      and the same text renders in a different font on each OS. */
   --font-display:
     "Clutch Icons",                                                           /* bundled icon glyphs */
     "Archivo",
+    "Noto Sans SC",                                                           /* bundled CJK — same Han glyphs on every OS */
     "PingFang SC", "Hiragino Sans GB",                                        /* macOS */
     "Microsoft YaHei", "Segoe UI",                                            /* Windows */
     "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", /* Linux */
     sans-serif;
-  /* mono stack: the CJK tail is *monospaced* families first (Sarasa Mono SC is
-     the JetBrains-Mono-compatible CJK face; MS Gothic ships with Windows), so
-     CJK inside code, diffs and the file tree keeps a fixed advance instead of
-     falling back to a proportional face, and the resolution order is identical
-     on every platform. Proportional CJK faces stay as the last resort. */
+  /* mono stack: true *monospaced* CJK faces first (Sarasa Mono SC is the
+     JetBrains-Mono-compatible CJK face), so CJK inside code, diffs and the
+     file tree keeps a fixed advance where such a face exists. The bundled
+     proportional Noto Sans SC sits BEFORE "MS Gothic": MS Gothic is the only
+     CJK face stock Windows has beyond the ones above, and its JIS glyph shapes
+     are wrong for Chinese. Proportional OS faces stay as the last resort. */
   --font-mono:
     "Clutch Icons",                                                           /* bundled icon glyphs */
     "JetBrains Mono",
     "Sarasa Mono SC", "Sarasa Fixed SC",
     "Noto Sans Mono CJK SC", "Noto Sans Mono SC", "WenQuanYi Zen Hei Mono",
+    "Noto Sans SC",                                                           /* bundled CJK — beats the Japanese-shaped MS Gothic for zh text */
     "MS Gothic",                                                              /* Windows CJK mono */
     "PingFang SC", "Microsoft YaHei",
     monospace;

@@ -10,9 +10,22 @@ Electron 渲染层用 `file://` 装载（`ui/main.js` 的 `win.loadFile`），�
 | --- | --- | --- | --- |
 | `archivo-var.woff2` | Archivo (variable) | 正文/标题（`--font-display`） | SIL OFL 1.1 |
 | `jetbrains-mono-400.woff2` | JetBrains Mono | 代码/等宽（`--font-mono`） | SIL OFL 1.1 |
+| `noto-sans-sc-vf.woff2` | Noto Sans SC (variable) | CJK 正文：双栈里排在系统字体前，中文三平台同源 | SIL OFL 1.1（`OFL.txt`） |
 | `clutch-icons.woff2` | Clutch Icons | 16 个界面图标的 Symbola 子集 | 见 `clutch-icons.LICENSE.txt` |
 | `clutch-icons.LICENSE.txt` | — | Symbola 归属与"任意用途免费"条款 | — |
 | `clutch-icons.manifest.txt` | — | 字体 sha256 + 内置码位，供测试比对 | — |
+
+## 为什么 CJK 正文也要自带字体
+
+Archivo / JetBrains Mono 只有拉丁字形，没有自带 CJK 字体时，每个汉字都会掉进
+栈尾的系统字体：zh-CN Windows 是微软雅黑（等宽栈甚至是日文字形 MS Gothic），
+Linux 是 fontconfig 挑的 Noto/WenQuanYi——中文界面三平台三种长相。`Noto Sans SC`
+（可变字重 100-900，SIL OFL 1.1）整个打包（7.4 MB，从磁盘加载，子集化省不了
+运行时开销），在 `--font-display` / `--font-mono` 里都排在系统字体**之前**：
+等宽栈里真等宽 CJK（Sarasa 等）仍然优先，但对没有装这些的 Windows，自带的比例
+Noto 也好过日文 JIS 字形的 MS Gothic。
+`tests/ui_fonts_check.py` 钉死"两个栈都有 Noto Sans SC 且在 YaHei / MS Gothic 之前"，
+这条曾经回归过一次（字体只存在于一个 stash 里，发出去的版本退回雅黑）。
 
 ## 为什么图标要自带字体
 

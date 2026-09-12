@@ -7,6 +7,9 @@
   <link rel="stylesheet" href="style.css" />
   <link rel="preload" href="vendor/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="preload" href="vendor/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin />
+  <!-- CJK prose face: Archivo/JetBrains Mono are latin-only, so without this
+       every Han glyph drops to the OS tail (Microsoft YaHei on Windows) -->
+  <link rel="preload" href="vendor/fonts/noto-sans-sc-vf.woff2" as="font" type="font/woff2" crossorigin />
   <!-- the chrome icons (▣ logo above is one of them) come from this bundled
        16-glyph font; preload it so no frame is ever painted without it -->
   <link rel="preload" href="vendor/fonts/clutch-icons.woff2" as="font" type="font/woff2" crossorigin />

@@ -76,6 +76,8 @@ function checkIco(file) {
 const REQUIRED_ASSETS = [
   "vendor/fonts/archivo-var.woff2",
   "vendor/fonts/jetbrains-mono-400.woff2",
+  "vendor/fonts/noto-sans-sc-vf.woff2", // the bundled CJK prose face (tests/ui_fonts_check.py)
+  "vendor/fonts/OFL.txt", // Noto Sans SC licence — SIL OFL requires it to ship
   "vendor/fonts/clutch-icons.woff2", // the 16-glyph symbol subset (tests/ui_fonts_check.py)
   "vendor/fonts/clutch-icons.LICENSE.txt",
   "vendor/fonts/clutch-icons.manifest.txt",

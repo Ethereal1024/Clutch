@@ -45,7 +45,7 @@ CSS = UI / "style.css"
 HTML = UI / "index.html"
 BUILDER = ROOT / "scripts" / "build-icon-font.py"
 
-WEBFONTS = {"archivo", "jetbrains mono"}
+WEBFONTS = {"archivo", "jetbrains mono", "noto sans sc"}
 ICON_FAMILY = "Clutch Icons"
 ICON_FONT = UI / "vendor" / "fonts" / "clutch-icons.woff2"
 ICON_LICENSE = UI / "vendor" / "fonts" / "clutch-icons.LICENSE.txt"
@@ -66,9 +66,9 @@ MONO_CJK = ("sarasa mono", "sarasa fixed", "noto sans mono cjk", "noto sans mono
 #     vendored; extend this string together with the fonts).
 #   * U+FF0B ＋ is a UI button symbol, not punctuation, so it is required in the
 #     bundled icon font even though it sits in the fullwidth block.
-#   * CJK_RANGES — deliberately left to the per-platform CJK families named in
-#     --font-display / --font-mono (that is a documented trade-off of the CJK
-#     stacks, not an accident of the OS fallback chain).
+#   * CJK_RANGES — drawn by the bundled Noto Sans SC webfont (both stacks name
+#     it ahead of the OS faces; the exclusion here only means clutch-icons need
+#     not carry Han glyphs, not that the OS may draw them)
 #   * everything else (▣ ▦ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■, and any symbol added
 #     later) MUST be baked into clutch-icons.woff2.
 LATIN_COVERED = "²·×—…"
@@ -116,8 +116,8 @@ def check_font_face_urls(css: str) -> None:
     faces = parse_font_faces(css)
     families = [f.strip('"').lower() for f, _ in faces]
     check(sorted(families) == sorted(WEBFONTS | {ICON_FAMILY.lower()}),
-          f"@font-face families: {families} (expected Archivo + JetBrains Mono + {ICON_FAMILY})")
-    check(len(faces) == 3, f"@font-face count: {len(faces)} (one per family, no duplicates)")
+          f"@font-face families: {families} (expected Archivo + JetBrains Mono + Noto Sans SC + {ICON_FAMILY})")
+    check(len(faces) == 4, f"@font-face count: {len(faces)} (one per family, no duplicates)")
     refs: list[str] = []
     for _family, body in faces:
         refs += url_targets(body)
@@ -342,6 +342,18 @@ def check_stack_coverage(css: str) -> None:
     check(any(f in display for f in LINUX_CJK), "--font-display names a Linux CJK family (not mac+win only)")
     check('"jetbrains mono"' in mono, "--font-mono keeps the bundled webfont (JetBrains Mono)")
     check(any(f in mono for f in MONO_CJK), "--font-mono names a monospaced CJK family")
+    # the bundled CJK face is what makes Han glyphs identical on every OS; it
+    # must also come BEFORE the OS faces, or e.g. zh-CN Windows quietly drifts
+    # back to Microsoft YaHei / MS Gothic (this regressed once: the Noto face
+    # lived only in a stash, and the released app fell back to YaHei)
+    check('"noto sans sc"' in display and '"noto sans sc"' in mono,
+          "both stacks keep the bundled CJK face (Noto Sans SC)")
+    if '"noto sans sc"' in display and '"microsoft yahei"' in display:
+        check(display.index('"noto sans sc"') < display.index('"microsoft yahei"'),
+              "--font-display resolves CJK from the bundled Noto before Microsoft YaHei")
+    if '"noto sans sc"' in mono and '"ms gothic"' in mono:
+        check(mono.index('"noto sans sc"') < mono.index('"ms gothic"'),
+              "--font-mono resolves CJK from the bundled Noto before MS Gothic (JIS shapes)")
 
 
 def main() -> int:
