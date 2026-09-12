@@ -472,6 +472,45 @@ def main() -> int:
                 "the grandchild went down with the Job (no orphan holding resources)",
             )
 
+    # ---- 14. no Job, no session (fail-fast, never a silent orphan) ----
+    # The old policy quietly RAN sessions whose kill guarantee was missing —
+    # an orphan-in-waiting indistinguishable from a healthy one until the day
+    # the .clc stuck read-only. The contract is now absolute: a session is
+    # either guaranteed killable (Job) or is never started. _job_assign is
+    # stubbed to None to force the refusal path; the child below prints no
+    # banner, which also proves start_session returns BEFORE _wait_port.
+    if os.name == "nt":
+        import agent.supervisor as _svmod
+
+        with tempfile.TemporaryDirectory() as tdir:
+            hb = Path(tdir) / "hb"
+            child_src = (
+                "import time\n"
+                f"end = time.time() + 120\n"
+                "while time.time() < end:\n"
+                f"    open({str(hb)!r}, 'a').write('x')\n"
+                "    time.sleep(0.2)\n"
+            )
+            sup14 = Supervisor(
+                agent_cmd=[sys.executable, "-c", child_src],
+                cwd=str(ROOT),
+                stale_s=60,
+                idle_timeout_s=60,
+            )
+            orig_assign = _svmod._job_assign
+            _svmod._job_assign = lambda pid: None  # simulate an unavailable Job
+            try:
+                sess14 = sup14.start_session()
+            finally:
+                _svmod._job_assign = orig_assign
+            check(sess14 is None, "a session with no kill guarantee is REFUSED, not run")
+            check(not sup14.sessions, "the refused session registered nothing")
+            time.sleep(1.0)  # let the refusal's explicit kill land
+            beat1 = hb.stat().st_mtime_ns if hb.exists() else 0
+            time.sleep(0.8)
+            beat2 = hb.stat().st_mtime_ns if hb.exists() else 0
+            check(beat1 == beat2, "the refused session's child was killed (no orphan-in-waiting)")
+
     print("\nSUPERVISOR TESTS PASSED")
     return 0
 

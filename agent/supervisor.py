@@ -311,13 +311,15 @@ def _descendant_pids(pid: int) -> list[int]:
     if os.name != "nt":
         return []
     try:
-        k32 = ctypes.windll.kernel32
+        # use_last_error=True so the failure log's WinError is the real one
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         k32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
         k32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ProcEntry)]
         k32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ProcEntry)]
         snap = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if not snap or snap == _INVALID_HANDLE_VALUE:
+            _log(f"[supervisor] descendant walk: snapshot failed (WinError {ctypes.get_last_error()})")
             return []
         pairs: list[tuple[int, int]] = []
         entry = _ProcEntry()
@@ -327,7 +329,8 @@ def _descendant_pids(pid: int) -> list[int]:
             pairs.append((entry.th32ProcessID, entry.th32ParentProcessID))
             more = k32.Process32NextW(snap, ctypes.byref(entry))
         k32.CloseHandle(snap)
-    except Exception:  # noqa: BLE001 - never fatal
+    except Exception as e:  # noqa: BLE001 - logged: net-widening only, the
+        _log(f"[supervisor] descendant walk failed: {e!r}")  # core Job holds
         return []
     children: dict[int, list[int]] = {}
     for p, pp in pairs:
@@ -349,14 +352,18 @@ def _descendant_pids(pid: int) -> list[int]:
 def _job_assign(pid: int) -> int | None:
     """Put a fresh session child into a kill-on-close Job (Windows only).
 
-    Returns the Job handle for _kill to close, or None when Jobs are
-    unavailable — a Job is a safety net, never a requirement, so every
-    failure degrades to the previous behavior.
+    Returns the Job handle for _kill to close, or None when the guarantee is
+    unavailable. None is NOT a degenerate "keep going" answer: a session we
+    cannot guarantee to kill is a session we must not run, so the caller
+    REFUSES to start it (see start_session). POSIX always gets None — there
+    the process group is the guarantee.
     """
     if os.name != "nt":
         return None
     try:
-        k32 = ctypes.windll.kernel32
+        # use_last_error=True: ctypes' own Win32 traffic would otherwise
+        # clobber the real GetLastError value before we can read it
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateJobObjectW.restype = ctypes.c_void_p
         k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         k32.SetInformationJobObject.argtypes = [
@@ -372,21 +379,25 @@ def _job_assign(pid: int) -> int | None:
 
         job = k32.CreateJobObjectW(None, None)
         if not job:
+            _log(f"[supervisor] Job assign failed: CreateJobObjectW (WinError {ctypes.get_last_error()})")
             return None
         limits = _JobLimits()
         limits.BasicLimitInformation.LimitFlags = _JOB_KILL_ON_JOB_CLOSE
         if not k32.SetInformationJobObject(
             job, _JOB_EXTENDED_LIMIT_INFO, ctypes.byref(limits), ctypes.sizeof(limits)
         ):
+            _log(f"[supervisor] Job assign failed: SetInformationJobObject (WinError {ctypes.get_last_error()})")
             k32.CloseHandle(job)
             return None
         proc = k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
         if not proc:
+            _log(f"[supervisor] Job assign failed: OpenProcess({pid}) (WinError {ctypes.get_last_error()})")
             k32.CloseHandle(job)
             return None
         ok = k32.AssignProcessToJobObject(job, proc)
         k32.CloseHandle(proc)
         if not ok:
+            _log(f"[supervisor] Job assign failed: AssignProcessToJobObject (WinError {ctypes.get_last_error()})")
             k32.CloseHandle(job)
             return None
         # Job membership is NOT retroactive: a fast launcher (the venv stub
@@ -405,7 +416,8 @@ def _job_assign(pid: int) -> int | None:
                     k32.AssignProcessToJobObject(job, h)  # same-job re-assign is a no-op
                     k32.CloseHandle(h)
         return job
-    except Exception:  # noqa: BLE001 - never fatal
+    except Exception as e:  # noqa: BLE001 - logged, then refused by the caller
+        _log(f"[supervisor] Job assign failed: {e!r}")
         return None
 
 
@@ -484,6 +496,14 @@ class Supervisor:
         # interpreter within milliseconds, and that interpreter must be born
         # inside the Job (membership is inherited from the launcher)
         job = _job_assign(proc.pid)
+        if os.name == "nt" and job is None:
+            # No Job = no guarantee this session can ever be killed. We do not
+            # run sessions we cannot kill: refuse loudly instead of silently
+            # degrading into an orphan-in-waiting (the exact failure mode that
+            # kept a .clc locked read-only in the wild).
+            _log("[supervisor] kill-on-close Job unavailable - refusing an unkillable session")
+            self._kill(proc, None)
+            return None
         port = self._wait_port(proc)
         if port is None:
             _log("[supervisor] session child never printed its port")
