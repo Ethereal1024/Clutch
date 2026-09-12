@@ -36,6 +36,19 @@ def wait_until(pred, timeout_s: float = 10.0, what: str = "condition") -> bool:
     return False
 
 
+def shutdown_post(base: str) -> tuple[int, str]:
+    """POST /api/shutdown, tolerating a reply torn by self-teardown.
+
+    Arming the exit flag can beat the HTTP response on the wire: the
+    supervisor may already be gone when the answer would arrive, so the
+    reply is best-effort — the exit event is the real verdict.
+    """
+    try:
+        return http_post(f"{base}/api/shutdown")
+    except OSError:
+        return 0, ""
+
+
 def start_supervisor(**kwargs) -> tuple[Supervisor, int, threading.Thread]:
     sup = Supervisor(
         agent_cmd=[sys.executable, "-m", "agent.server"],
@@ -226,8 +239,8 @@ def main() -> int:
     # ---- 10. /api/shutdown (normal app close: exit when empty, never in-use) ----
     sup7, port7, _ = start_supervisor(stale_s=60, idle_timeout_s=30)
     base7 = f"http://127.0.0.1:{port7}"
-    st, body = http_post(f"{base7}/api/shutdown")
-    check(st == 200, "shutdown accepted")
+    st, body = shutdown_post(base7)
+    check(st in (200, 0), "shutdown accepted (reply may be torn by self-teardown)")
     time.sleep(2)
     check(sup7.exit_event.is_set(), "shutdown with no sessions exits promptly (no idle grace)")
     sup7.shutdown_all()
@@ -248,8 +261,8 @@ def main() -> int:
     time.sleep(3)
     check(not sup8.exit_event.is_set(), "ignored in-use shutdown leaves no sticky flag")
     # the real last-window path: shutdown POST at n==0 arms and exits promptly
-    st, _ = http_post(f"{base8}/api/shutdown")
-    check(st == 200, "shutdown accepted at n==0")
+    st, _ = shutdown_post(base8)
+    check(st in (200, 0), "shutdown accepted at n==0 (reply may be torn by self-teardown)")
     ok = wait_until(lambda: sup8.exit_event.is_set(), 6.0, "exit after last session (shutdown flag)")
     check(ok, "shutdown supervisor exits as soon as its sessions are gone")
     sup8.shutdown_all()
@@ -351,6 +364,113 @@ def main() -> int:
                     os.kill(leaked, 9)
         except (OSError, ValueError):
             pass
+
+    # ---- 13. a supervisor that DIES must not orphan the session (Windows Job) ----
+    # The reaper only runs while the supervisor lives; a supervisor killed
+    # without walking its children (crash, TerminateProcess, Electron's tree
+    # going down first) used to leave the session child alive forever — an
+    # invisible zombie still holding its .clc write lock, so reopening the
+    # project landed read-only with no visible other window. The kill-on-close
+    # Job hands that to the kernel: the OS closes a dying process's handles,
+    # and the Job's last handle closing terminates every member. The witness
+    # here is a grandchild holding a real LISTENING port (the stand-in for the
+    # .clc lock): launcher + grandchild must BOTH die when the Job handle does.
+    if os.name == "nt":
+        import ctypes
+        import socket as _socket
+
+        with tempfile.TemporaryDirectory() as tdir:
+            grandchild_py = Path(tdir) / "server.py"
+            grandchild_py.write_text(
+                "import socket, sys, time\n"
+                "s = socket.socket()\n"
+                "s.bind(('127.0.0.1', 0))\n"
+                "s.listen(1)\n"
+                "print(f'[clutch-server] http://127.0.0.1:{s.getsockname()[1]}', flush=True)\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            launcher_py = Path(tdir) / "launcher.py"
+            launcher_py.write_text(
+                "import subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "# the supervisor appends its own CLI (e.g. '--port 0') AFTER the\n"
+                "# command; forward it untouched, like the real agent launcher does\n"
+                "sib = Path(sys.argv[0]).resolve().parent / 'server.py'\n"
+                "subprocess.Popen([sys.executable, str(sib), *sys.argv[1:]])  # stdout inherited\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            sup9 = Supervisor(
+                agent_cmd=[sys.executable, str(launcher_py)],
+                cwd=str(ROOT),
+                stale_s=60,
+                idle_timeout_s=60,
+            )
+            sess9 = sup9.start_session()
+            check(sess9 is not None, "job: session started")
+            check(sess9.job is not None, "session child assigned to a kill-on-close Job")
+            check(sess9.port and sess9.port > 0, "job: grandchild banner parsed through the launcher")
+
+            # Job membership must already cover the GRANDCHILD (the venv/onefile
+            # launcher spawns its real interpreter as a child; a Job missing it
+            # is exactly the leak this guards against)
+            class _PidList(ctypes.Structure):
+                # JOBOBJECT_BASIC_PROCESS_ID_LIST with headroom for 64 pids.
+                # (Class 1 / accounting is NOT portable for this: its struct
+                # must match the build's exact size — 40 classic, 48 on newer
+                # Win11 — anything else fails with ERROR_BAD_LENGTH.)
+                _fields_ = [
+                    ("NumberOfAssignedProcesses", ctypes.c_uint32),
+                    ("NumberOfProcessIdsInList", ctypes.c_uint32),
+                    ("ProcessIdList", ctypes.c_size_t * 64),
+                ]
+
+            pids = _PidList()
+            k32 = ctypes.windll.kernel32
+            k32.QueryInformationJobObject.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.POINTER(_PidList),
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint32),
+            ]
+            rl = ctypes.c_uint32(0)
+            ok = k32.QueryInformationJobObject(
+                sess9.job, 3, ctypes.byref(pids), ctypes.sizeof(pids), ctypes.byref(rl)
+            )  # 3 = JobObjectBasicProcessIdList
+            listed = {pids.ProcessIdList[i] for i in range(pids.NumberOfProcessIdsInList)}
+            check(
+                bool(ok) and len(listed) >= 2 and sess9.proc.pid in listed,
+                "the launcher's child is inside the Job",
+            )
+
+            def _port_open() -> bool:
+                s = _socket.socket()
+                s.settimeout(0.5)
+                try:
+                    s.connect(("127.0.0.1", sess9.port))
+                    return True
+                except OSError:
+                    return False
+                finally:
+                    s.close()
+
+            check(_port_open(), "the grandchild's port is serving before the supervisor dies")
+            # simulate the supervisor DYING with no cleanup: the OS closes every
+            # handle it owns — the Job's (last) handle among them
+            k32.CloseHandle(ctypes.c_void_p(sess9.job))
+            sess9.job = None  # a double close could hit a recycled handle
+            check(
+                wait_until(lambda: sess9.proc.poll() is not None, 10.0, "launcher death"),
+                "the launcher died with the Job",
+            )
+            check(
+                wait_until(lambda: not _port_open(), 10.0, "grandchild port close"),
+                "the grandchild went down with the Job (no orphan holding resources)",
+            )
 
     print("\nSUPERVISOR TESTS PASSED")
     return 0

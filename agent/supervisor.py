@@ -17,6 +17,14 @@ Lifecycle (per product decision):
     its session on close, and the supervisor self-exits after an idle grace
     once no sessions remain. A stale-session reaper also clears sessions whose
     window crashed (heartbeat stops).
+  - on Windows each session child is assigned to a kill-on-close Job
+    (_job_assign): the stale reaper needs THIS process alive, so a supervisor
+    that dies without reaping (crash, TerminateProcess, Electron's tree going
+    down with it) would orphan the session — the Job makes the kernel kill the
+    whole session tree the moment this process's Job handles die with it. An
+    orphaned session is not cosmetic: it keeps holding its .clc write lock,
+    and reopening that project then lands read-only with no visible other
+    window.
 
 Locking: each session child is an independent process, so the .clc write lock
 is a kernel file lock (flock / LockFileEx) on the machine's tmp dir —
@@ -29,6 +37,7 @@ live on different machines.)
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import queue
@@ -153,6 +162,9 @@ class Session:
     proc: subprocess.Popen
     port: int
     last_beat: float = field(default_factory=time.time)
+    # Windows: kill-on-close Job holding the whole session tree; its handle
+    # dies with this supervisor, and so does the session (None = unavailable)
+    job: int | None = None
 
 
 def _signal_soft(proc: subprocess.Popen) -> None:
@@ -200,6 +212,212 @@ def _kill_hard(proc: subprocess.Popen) -> None:
         pass
     try:
         proc.kill()  # taskkill missing or denied: still drop the direct child
+    except OSError:
+        pass
+
+
+# ---- Windows: a session child must not outlive this supervisor ----
+#
+# POSIX kills a session through its process group, and the group's reaper (this
+# supervisor) sits in the UI's process tree, so a dead window means a dead
+# reaper AND a dead group. Windows has no process group to lean on: a
+# supervisor that dies without walking its children (crash, TerminateProcess,
+# Electron's tree dying first) leaves the session child alive forever — an
+# invisible zombie that still holds the .clc write lock, so every later open of
+# that project lands read-only with no visible other window (observed in the
+# wild: two leftover `python.exe` from a dev supervisor kept a project locked
+# for good). The kernel answer is a Job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE:
+# the session belongs to the Job, and when THIS process dies its handles close
+# with it, so the kernel terminates the whole session tree — the venv/onefile
+# launcher AND the real interpreter it spawned, plus anything they start. That
+# also covers the kill path: TerminateProcess on a launcher reaps only the
+# launcher, while the interpreter inside the Job dies with the Job's handle.
+
+_JOB_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_EXTENDED_LIMIT_INFO = 9  # JobObjectExtendedLimitInformation
+_JOB_BASIC_ACCOUNTING_INFO = 1  # JobObjectBasicAccountingInformation
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
+_TH32CS_SNAPPROCESS = 0x2
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class _JobBasicLimits(ctypes.Structure):
+    """JOBOBJECT_BASIC_LIMIT_INFORMATION (only LimitFlags is ever set)."""
+
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _JobIoCounters(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_ulonglong)
+        for name in (
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        )
+    ]
+
+
+class _JobLimits(ctypes.Structure):
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION."""
+
+    _fields_ = [
+        ("BasicLimitInformation", _JobBasicLimits),
+        ("IoInfo", _JobIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _ProcEntry(ctypes.Structure):
+    """PROCESSENTRY32W (Toolhelp32 snapshot row: pid + parent pid)."""
+
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    """Live descendants of `pid`, nearest first (Toolhelp32 snapshot).
+
+    Empty on any failure — the walk only widens the Job's net, so a
+    missed snapshot must never fail a session start.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        k32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+        k32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ProcEntry)]
+        k32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_ProcEntry)]
+        snap = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == _INVALID_HANDLE_VALUE:
+            return []
+        pairs: list[tuple[int, int]] = []
+        entry = _ProcEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        more = k32.Process32FirstW(snap, ctypes.byref(entry))
+        while more:
+            pairs.append((entry.th32ProcessID, entry.th32ParentProcessID))
+            more = k32.Process32NextW(snap, ctypes.byref(entry))
+        k32.CloseHandle(snap)
+    except Exception:  # noqa: BLE001 - never fatal
+        return []
+    children: dict[int, list[int]] = {}
+    for p, pp in pairs:
+        children.setdefault(pp, []).append(p)
+    out: list[int] = []
+    frontier, seen = [pid], {pid}
+    while frontier:
+        nxt: list[int] = []
+        for f in frontier:
+            for c in children.get(f, ()):
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
+                    nxt.append(c)
+        frontier = nxt
+    return out
+
+
+def _job_assign(pid: int) -> int | None:
+    """Put a fresh session child into a kill-on-close Job (Windows only).
+
+    Returns the Job handle for _kill to close, or None when Jobs are
+    unavailable — a Job is a safety net, never a requirement, so every
+    failure degrades to the previous behavior.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.SetInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        limits = _JobLimits()
+        limits.BasicLimitInformation.LimitFlags = _JOB_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(
+            job, _JOB_EXTENDED_LIMIT_INFO, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            k32.CloseHandle(job)
+            return None
+        proc = k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        if not proc:
+            k32.CloseHandle(job)
+            return None
+        ok = k32.AssignProcessToJobObject(job, proc)
+        k32.CloseHandle(proc)
+        if not ok:
+            k32.CloseHandle(job)
+            return None
+        # Job membership is NOT retroactive: a fast launcher (the venv stub
+        # CreateProcess'es its real interpreter the instant it starts) can
+        # spawn its child BEFORE we get here, and that child inherits no Job
+        # and escapes the kill-on-close net — precisely the orphan that kept
+        # a .clc locked in the wild. Pull every already-live descendant in,
+        # re-walking briefly for children born in the race window; a member's
+        # own later children inherit the Job for free.
+        for wait in (0.0, 0.05, 0.1):
+            if wait:
+                time.sleep(wait)
+            for d in _descendant_pids(pid):
+                h = k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, d)
+                if h:
+                    k32.AssignProcessToJobObject(job, h)  # same-job re-assign is a no-op
+                    k32.CloseHandle(h)
+        return job
+    except Exception:  # noqa: BLE001 - never fatal
+        return None
+
+
+def _job_close(job: int | None) -> None:
+    """Close the session's Job handle. With KILL_ON_JOB_CLOSE the kernel
+    terminates every process still in the Job — the last line of defense when
+    a kill missed a member (a launcher that died before its interpreter, a
+    tree-walk that skipped a grandchild). Never raises."""
+    if os.name != "nt" or not job:
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(job)
     except OSError:
         pass
 
@@ -262,12 +480,16 @@ class Supervisor:
         except OSError as e:  # pragma: no cover - venv/bundle missing
             _log(f"[supervisor] spawn failed: {e}")
             return None
+        # assign BEFORE anything else: the venv/onefile launcher spawns its real
+        # interpreter within milliseconds, and that interpreter must be born
+        # inside the Job (membership is inherited from the launcher)
+        job = _job_assign(proc.pid)
         port = self._wait_port(proc)
         if port is None:
             _log("[supervisor] session child never printed its port")
-            self._kill(proc)
+            self._kill(proc, job)
             return None
-        sess = Session(session_id=uuid.uuid4().hex[:12], proc=proc, port=port)
+        sess = Session(session_id=uuid.uuid4().hex[:12], proc=proc, port=port, job=job)
         with self._lock:
             self.sessions[sess.session_id] = sess
             self.last_activity = time.time()
@@ -282,7 +504,7 @@ class Supervisor:
             self.last_activity = time.time()
         if sess is None:
             return False
-        self._kill(sess.proc)
+        self._kill(sess.proc, sess.job)
         _log(f"[supervisor] session {session_id} stopped")
         return True
 
@@ -369,7 +591,7 @@ class Supervisor:
             return None
 
     @staticmethod
-    def _kill(proc: subprocess.Popen) -> None:
+    def _kill(proc: subprocess.Popen, job: int | None = None) -> None:
         """Best effort stop of one session child. Never raises.
 
         A failed kill must not escape into the caller: /api/session/stop has
@@ -377,22 +599,30 @@ class Supervisor:
         nothing AND leaked the child (the reaper could only bury it in a log
         line). Losing the graceful signal is survivable — _kill_hard reaps the
         tree — losing the stop is not.
+
+        ``job`` (Windows) is the session's kill-on-close Job: closing its
+        handle below is the last line of defense that terminates anything the
+        attempts above missed — e.g. a venv/onefile launcher killed while its
+        real interpreter lived on (proc.kill() reaps only the launcher).
         """
-        if proc.poll() is not None:
-            return
-        _signal_soft(proc)
         try:
-            proc.wait(timeout=KILL_GRACE_S)
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        except OSError:  # pragma: no cover - child vanished while waiting
-            return
-        _kill_hard(proc)
-        try:
-            proc.wait(timeout=KILL_GRACE_S)  # reap, and let the port go
-        except (subprocess.TimeoutExpired, OSError):
-            pass
+            if proc.poll() is not None:
+                return  # already exited; only the Job cleanup below remains
+            _signal_soft(proc)
+            try:
+                proc.wait(timeout=KILL_GRACE_S)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            except OSError:  # pragma: no cover - child vanished while waiting
+                return
+            _kill_hard(proc)
+            try:
+                proc.wait(timeout=KILL_GRACE_S)  # reap, and let the port go
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        finally:
+            _job_close(job)
 
 
 # ---- HTTP layer (thin: only session lifecycle endpoints) ----
