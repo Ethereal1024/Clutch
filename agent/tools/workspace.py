@@ -20,6 +20,7 @@ import os
 import posixpath
 import re
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path, PurePath, PurePosixPath
@@ -262,9 +263,10 @@ class Workspace(ABC):
             return None
         return p
 
-    def run(self, command: str, timeout: float) -> CommandResult:
-        """Run a shell command in the workspace; transport-specific cwd handling."""
-        return self._transport.run(command, timeout)
+    def run(self, command: str, timeout: float, cancel: threading.Event | None = None) -> CommandResult:
+        """Run a shell command in the workspace; transport-specific cwd handling.
+        ``cancel`` is Stop: the transport kills the command tree promptly."""
+        return self._transport.run(command, timeout, cancel=cancel)
 
     @abstractmethod
     def read(self, path: str) -> str:
@@ -504,7 +506,7 @@ class RemoteWorkspace(Workspace):
         (cmd) rules. posix=True, argv=None (spawn decisions stay localshell's)."""
         return LocalShell(argv=None, posix=True, name="posix-sh")
 
-    def run(self, command: str, timeout: float) -> CommandResult:
+    def run(self, command: str, timeout: float, cancel: threading.Event | None = None) -> CommandResult:
         cmd = f"cd {shq(str(self.root))} && {command}"
         # oversized exec commands drop a minimal sshd: fail cleanly up front
         size = len(cmd.encode("utf-8"))
@@ -513,7 +515,7 @@ class RemoteWorkspace(Workspace):
                 f"command too long to send over the remote transport ({size} bytes); "
                 "write large content with write_file and run it"
             )
-        return self._transport.run(cmd, timeout)
+        return self._transport.run(cmd, timeout, cancel=cancel)
 
     def read(self, path: str) -> str:
         p = self.resolve(path)

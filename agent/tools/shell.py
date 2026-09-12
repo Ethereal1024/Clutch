@@ -6,6 +6,8 @@ Poka-yoke (make it hard for the model to misuse):
 - syntax pre-check: py_compile Python files before running
 - blocked list: commands that hang in a non-TTY pipe (bare python, vim, less, ...)
 - timeout: kill long-running commands
+- Stop: a set cancel event kills the whole command tree within ~0.2s — the
+  user never waits out a long build after pressing Stop
 - truncation: cap output to protect context
 - explicit empty-output message: no ambiguity about whether the command ran
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import threading
 from pathlib import Path
 
 from ..config import Config
@@ -203,7 +206,7 @@ def classify_command(command: str, posix: bool = True) -> tuple[str, str]:
     return "unknown", f"'{name}' cannot be proven read-only"
 
 
-def run_command(workspace: Workspace, config: Config, command: str) -> dict:
+def run_command(workspace: Workspace, config: Config, command: str, cancel: threading.Event | None = None) -> dict:
     # the flavor of the shell that will PARSE this text: local host's decision
     # for local workspaces, always POSIX for a remote (SSH) workspace
     posix = workspace.exec_shell().posix
@@ -252,8 +255,11 @@ def run_command(workspace: Workspace, config: Config, command: str) -> dict:
                 return {"content": f"ERROR: {err}", "error": True}
 
     try:
-        r = workspace.run(command, config.command_timeout)
+        r = workspace.run(command, config.command_timeout, cancel=cancel)
     except TransportError as e:
+        if e.aborted:
+            # the user pressed Stop while the command ran; the tree is dead
+            return {"content": render("errors/command_aborted.md"), "error": True}
         if e.timeout:
             return {
                 "content": render(

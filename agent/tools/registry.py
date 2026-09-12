@@ -7,6 +7,8 @@ error texts live in agent/prompts/.
 
 from __future__ import annotations
 
+import inspect
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -133,7 +135,7 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 },
                 "required": ["command"],
             },
-            func=lambda sb, cfg, **kw: shell.run_command(sb, cfg, **kw),
+            func=lambda sb, cfg, cancel=None, **kw: shell.run_command(sb, cfg, cancel=cancel, **kw),
         )
     )
 
@@ -270,6 +272,11 @@ def _load_skill(_workspace: Workspace, config: Config, name: str, file: str = "S
 class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
         self._tools = {t.name: t for t in tools}
+        # a tool opts into Stop by declaring a `cancel` parameter on its func
+        # (run_command does); the rest get the exact same call as before
+        self._cancelable = {
+            name: "cancel" in inspect.signature(t.func).parameters for name, t in self._tools.items()
+        }
 
     def schemas(self) -> list[dict[str, Any]]:
         return [t.to_openai_schema() for t in self._tools.values()]
@@ -277,7 +284,14 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
-    def execute(self, workspace: Workspace, config: Config, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def execute(
+        self,
+        workspace: Workspace,
+        config: Config,
+        name: str,
+        args: dict[str, Any],
+        cancel: threading.Event | None = None,
+    ) -> dict[str, Any]:
         tool = self._tools.get(name)
         if tool is None:
             return {
@@ -286,7 +300,10 @@ class ToolRegistry:
             }
         try:
             args = self._coerce_types(tool, args)
-            result = tool.func(workspace, config, **args)
+            if self._cancelable.get(name):
+                result = tool.func(workspace, config, cancel=cancel, **args)
+            else:
+                result = tool.func(workspace, config, **args)
         except TypeError as e:
             result = {"content": render("errors/invalid_arguments.md", error=e), "error": True}
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model

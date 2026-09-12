@@ -287,7 +287,9 @@ class Agent:
             except PermissionRequired as e:
                 return {"content": f"ERROR: {e.reason}", "error": True}
         try:
-            return self.registry.execute(self.workspace, self.config, ev.name, args)
+            # Stop reaches the tool: run_command polls this event while its
+            # command is in flight and kills the tree the moment it is set
+            return self.registry.execute(self.workspace, self.config, ev.name, args, cancel=self.cancel)
         finally:
             # a user-approved escape is scoped to the one call it was granted for
             self.workspace.clear_allowed()

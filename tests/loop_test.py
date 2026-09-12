@@ -27,7 +27,7 @@ from agent.events import (
 from agent.loop import Agent
 from agent.tools.registry import ToolRegistry, build_default_tools
 from agent.tools.workspace import LocalWorkspace, Workspace, shq
-from tests.testsupport import check
+from tests.testsupport import check, posix_shell_argv
 
 
 class FakeLLM:
@@ -870,6 +870,64 @@ def main() -> int:
     ]:
         got, _ = classify_command(cmd)
         check(got == exp, f"classify {cmd!r} == {exp!r} (got {got!r})")
+
+    # 16. Stop during a tool call: the cancel event reaches the RUNNING
+    # run_command and kills the command tree, so the run aborts promptly —
+    # it must NOT wait out the command. (The Stop-latency bug: cancel was
+    # only checked between tools, so a long build ignored Stop until it
+    # finished; the click landed but nothing happened for minutes.)
+    import threading
+    import time as _time
+
+    if posix_shell_argv() is None:
+        print("SKIP: no POSIX shell — section 16 needs one to run `sleep`")
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            sb = LocalWorkspace(tmp)
+            cancel = threading.Event()
+
+            class ToolThenStopLlm:
+                """First call: a run_command that would sleep far longer than
+                any sane test. Second call (only reached if Stop failed)."""
+
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def stream(self, messages, tools):
+                    self.calls += 1
+                    if self.calls == 1:
+                        args = json.dumps({"command": "sleep 120"})
+                        yield {"type": "tool_call_start", "index": 0, "id": "c1", "name": "run_command"}
+                        for i in range(0, len(args), 4):  # the loop accumulates from deltas
+                            yield {"type": "tool_call_delta", "index": 0, "delta": args[i : i + 4]}
+                        yield {"type": "finish", "reason": "tool_calls", "content": "", "tool_calls": []}
+                        return
+                    yield {"type": "text", "delta": "kept going"}
+                    yield {"type": "finish", "reason": "stop", "content": "kept going", "tool_calls": []}
+
+            fake = ToolThenStopLlm()
+            cfg = Config()
+            agent = Agent(
+                llm=fake,  # type: ignore[arg-type]
+                registry=ToolRegistry(build_default_tools(cfg)),
+                workspace=sb,
+                config=cfg,
+                cancel=cancel,
+            )
+            threading.Timer(1.0, cancel.set).start()  # Stop lands while sleep 120 runs
+            t0 = _time.monotonic()
+            result = agent.run("t")
+            elapsed = _time.monotonic() - t0
+            check(result == "ABORTED", "Stop during run_command aborts the run")
+            check(fake.calls == 1, "no LLM call happens after the abort")
+            check(elapsed < 10, f"abort is prompt, not after the command (took {elapsed:.1f}s)")
+            finals = [e for e in agent.log.events() if isinstance(e, FinalEvent)]
+            check(bool(finals) and finals[-1].status == "aborted", "aborted final")
+            aborted_result = [e for e in agent.log.events() if getattr(e, "type", "") == "tool_result"]
+            check(
+                bool(aborted_result) and "Stop" in aborted_result[-1].content,
+                "the killed command says it was aborted by Stop",
+            )
 
     print("\nall passed")
     return 0

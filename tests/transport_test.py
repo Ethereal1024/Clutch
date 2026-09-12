@@ -17,10 +17,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent.tools.transport import SshTransport, TransportError
+from agent.tools.transport import LocalTransport, SshTransport, TransportError
 from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace, shq
 from tests.testsupport import check, posix_shell_argv
 
@@ -233,6 +234,53 @@ def main() -> int:
             check(False, "remote timeout raises TransportError")
         except TransportError as e:
             check(e.timeout, "remote timeout -> TransportError(timeout=True)")
+
+        # ---- Stop during a command: the cancel event kills the wait promptly ----
+        import time as _time
+
+        lt = LocalTransport(rtmp)
+
+        # baseline: the rewritten path still runs plain commands
+        r = lt.run("echo hi", 30.0)
+        check(r.code == 0 and r.stdout.strip() == "hi", "LocalTransport plain run after the rewrite")
+
+        # Stop mid-command: TransportError(aborted=True) in ~1s, not after the
+        # command; the `touch` after the sleep also proves the TREE died (no
+        # late write from a survivor — taskkill /T locally, killpg on POSIX)
+        late = Path(rtmp) / "late.txt"
+        cancel = threading.Event()
+        threading.Timer(0.7, cancel.set).start()
+        t0 = _time.monotonic()
+        try:
+            lt.run(f"sleep 120 && touch {shq(remote_root(str(late)))}", 300.0, cancel=cancel)
+            check(False, "cancelled local command raises TransportError")
+        except TransportError as e:
+            elapsed = _time.monotonic() - t0
+            check(e.aborted and not e.timeout, f"local cancel -> TransportError(aborted=True) (timeout={e.timeout})")
+            check(elapsed < 10, f"local cancel aborts promptly (took {elapsed:.1f}s)")
+        time.sleep(1.0)  # a survivor would write its marker within this window
+        check(not late.exists(), "the killed tree never ran its tail (no late writes)")
+
+        # the deadline path still surfaces as TransportError(timeout=True)
+        t0 = _time.monotonic()
+        try:
+            lt.run("sleep 120", 1.0)
+            check(False, "local timeout raises TransportError")
+        except TransportError as e:
+            check(e.timeout and not e.aborted, "local deadline -> TransportError(timeout=True)")
+            check(_time.monotonic() - t0 < 10, "local timeout is prompt")
+
+        # Stop on the remote path: the agent's WAIT ends promptly (the bridge's
+        # own short deadline below reaps the abandoned remote exec)
+        cancel = threading.Event()
+        threading.Timer(0.7, cancel.set).start()
+        t0 = _time.monotonic()
+        try:
+            SshTransport(bridge).run("sleep 30", 2.0, cancel=cancel)
+            check(False, "cancelled remote exec raises TransportError")
+        except TransportError as e:
+            check(e.aborted and not e.timeout, "remote cancel -> TransportError(aborted=True)")
+            check(_time.monotonic() - t0 < 10, f"remote cancel abandons the wait promptly (took {_time.monotonic() - t0:.1f}s)")
 
         srv.shutdown()
 
