@@ -120,7 +120,6 @@ class LocalTransport(Transport):
         self, command: str, timeout: float, *, binary: bool = False, cancel: threading.Event | None = None
     ) -> CommandResult:
         shell = local_shell()
-        text = not binary
         try:
             proc = subprocess.Popen(
                 [*shell.argv, command] if shell.argv else command,
