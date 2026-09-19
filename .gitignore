@@ -43,3 +43,8 @@ docs/
 /agent/skills/humanizer-document-zh/
 /agent/skills/humanizer-zh/
 /agent/skills/wudao-humanize/
+
+# local scratch scripts/logs from ad-hoc testing sessions
+/scratch-*.py
+/scratch_*.py
+/scratch_*.log
