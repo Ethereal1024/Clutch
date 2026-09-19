@@ -17,6 +17,7 @@ def create_llm_client(*, api_key: str, base_url: str, model: str, **kwargs) -> L
         base_url=base_url,
         model=model,
         request_timeout=kwargs.pop("request_timeout", 60),
+        read_timeout=kwargs.pop("read_timeout", 240),
         max_retries=kwargs.pop("max_retries", 3),
         retryable_status=kwargs.pop("retryable_status", frozenset({429, 500, 502, 503, 504})),
         reasoning_effort=kwargs.pop("reasoning_effort", None),

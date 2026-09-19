@@ -84,9 +84,23 @@ class LlmError(Exception):
             )
         # httpx2 transport errors raised mid-stream (read timeout / reset / EOF /
         # remote protocol error). TimeoutException is itself a TransportError
-        # subclass, so check it first to keep the more specific code.
+        # subclass, so check it first to keep the more specific code. The phase
+        # matters to the user: connect points at routing/proxy/base_url, read
+        # at the provider stalling or buffering a streaming reply.
         if isinstance(e, httpx2.TimeoutException):
-            return LlmError(code="timeout", retryable=True, message="Request timed out.")
+            if isinstance(e, httpx2.ConnectTimeout):
+                return LlmError(
+                    code="timeout",
+                    retryable=True,
+                    message="Connect timed out: no route to the API endpoint (network to the provider, a proxy, or the base_url).",
+                )
+            if isinstance(e, httpx2.PoolTimeout):
+                return LlmError(code="timeout", retryable=True, message="Timed out waiting for a free connection slot.")
+            return LlmError(
+                code="timeout",
+                retryable=True,
+                message="Read timed out: the API sent no data for a long stretch (provider stall or a buffering relay).",
+            )
         if isinstance(e, httpx2.TransportError):
             return LlmError(
                 code="connection",

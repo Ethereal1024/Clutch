@@ -112,7 +112,17 @@ def main() -> int:
     # 1. classify: raw httpx2 transport errors -> retryable structured codes
     err = LlmError.classify(httpx2.ReadTimeout("timed out"), retryable_status)
     check(err.code == "timeout" and err.retryable, "read timeout -> retryable timeout")
-    check(err.message == "Request timed out.", "read timeout -> clean message")
+    check("Read timed out" in err.message, "read timeout -> clean message")
+    err = LlmError.classify(httpx2.ConnectTimeout("timed out"), retryable_status)
+    check(err.code == "timeout" and err.retryable, "connect timeout -> retryable timeout")
+    check("Connect timed out" in err.message, "connect timeout names its phase")
+    err = LlmError.classify(httpx2.PoolTimeout("pool exhausted"), retryable_status)
+    check("connection slot" in err.message, "pool timeout names its phase")
+    built = OpenaiLlmClient(api_key="sk-test", base_url="http://localhost/v1", model="m")
+    check(
+        built.timeout.connect == 15.0 and built.timeout.read == 240.0 and built.timeout.write == 60.0,
+        "timeout budgets split: tight connect, generous streaming read",
+    )
     err = LlmError.classify(httpx2.ConnectError("refused"), retryable_status)
     check(err.code == "connection" and err.retryable, "connect error -> retryable connection")
     err = LlmError.classify(httpx2.ReadError("reset"), retryable_status)

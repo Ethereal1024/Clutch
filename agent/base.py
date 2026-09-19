@@ -136,6 +136,7 @@ class BaseServer(ABC):
             model=model,
             base_url=cfg.base_url,
             request_timeout=cfg.llm_request_timeout,
+        read_timeout=cfg.llm_read_timeout,
             max_retries=cfg.llm_max_retries,
             retryable_status=cfg.llm_retryable_status,
             reasoning_effort=cfg.llm_reasoning_effort,
