@@ -73,9 +73,6 @@ DEFAULT_RULES: list[Rule] = [
     Rule("ask", "run_command", r"(\.\./|^/)", escape=True),
 ]
 
-# how much of the args JSON to surface in an ask reason
-_ARGS_REPR_MAX = 120
-
 
 @dataclass
 class PermissionEvaluator:
@@ -210,7 +207,10 @@ class PermissionGate:
         if escapes:
             reason = f"access outside the workspace: {', '.join(sorted(str(p) for p in escapes))}"
         else:
-            reason = f"permission {action}: {tool} with args {args_repr[:_ARGS_REPR_MAX]}"
+            # no args here: the UI renders args_repr in a dedicated args box,
+            # and the tool is already in the dialog's "Tool:" header — embedding
+            # either here produced brace soup and duplicated names
+            reason = f"permission {action}"
         # ask (by rule) or escape (by resolution)
         if self.auto_allow:
             if escapes:
