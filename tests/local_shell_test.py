@@ -19,6 +19,7 @@ Run: uv run python3 -m tests.local_shell_test
 
 from __future__ import annotations
 
+import io
 import subprocess
 import tempfile
 import threading
@@ -37,7 +38,7 @@ from agent.tools.transport import LocalTransport
 from agent.tools.workspace import LocalWorkspace, RemoteWorkspace
 
 # pinned decisions (argv here is never spawned except in the recorder test,
-# which intercepts subprocess.run)
+# which intercepts subprocess.Popen)
 POSIX = LocalShell(argv=None, posix=True, name="posix-sh")
 BASH = LocalShell(argv=(r"C:\Program Files\Git\bin\bash.exe", "-c"), posix=True, name="bash")
 CMD = LocalShell(argv=None, posix=False, name="cmd")
@@ -118,34 +119,45 @@ def test_transport_spawn() -> None:
     # ---- 5. spawn shape follows the pinned shell (recorder, nothing exec'd) ----
     calls: list[dict] = []
 
-    def fake_run(args, **kw):
-        calls.append({"args": args, **kw})
-        return subprocess.CompletedProcess(args, 0, "spawned", "")
+    class _FakeProc:
+        # pipe-like readers: _drain() reads until b""; wait() never times out.
+        # The payload mixes utf-8 CJK with an invalid byte so the assertions
+        # pin the decode contract (utf-8, errors=replace) where it now lives:
+        # run()'s manual .decode(), not Popen kwargs.
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO("孵化".encode("utf-8") + b"\xff-ok")
+            self.stderr = io.BytesIO(b"")
 
-    orig = subprocess.run
-    subprocess.run = fake_run
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def fake_popen(args, **kw):
+        calls.append({"args": args, **kw})
+        return _FakeProc()
+
+    # LocalTransport spawns via Popen (not run): Stop must be able to kill the
+    # process tree, and run() has no handle to kill
+    orig = subprocess.Popen
+    subprocess.Popen = fake_popen
     try:
         reset_cache(BASH)
         with tempfile.TemporaryDirectory() as tmp:
-            LocalTransport(tmp).run("echo hi", 5)
+            r = LocalTransport(tmp).run("echo hi", 5)
         check(
             calls[-1]["args"] == [BASH.argv[0], "-c", "echo hi"],
             "bash: spawned as an argv list through bash -c",
         )
         check(calls[-1]["shell"] is False, "bash: shell=False")
-        check(
-            calls[-1]["encoding"] == "utf-8" and calls[-1]["errors"] == "replace",
-            "bash: text decoded utf-8/replace",
-        )
+        check(r.code == 0 and r.stdout == "孵化\ufffd-ok", "bash: bytes decoded utf-8, errors replaced")
 
         reset_cache(CMD)
         with tempfile.TemporaryDirectory() as tmp:
-            LocalTransport(tmp).run("echo hi", 5)
+            r = LocalTransport(tmp).run("echo hi", 5)
         check(isinstance(calls[-1]["args"], str) and calls[-1]["args"] == "echo hi", "cmd: spawned as a bare string")
         check(calls[-1]["shell"] is True, "cmd: shell=True")
-        check(calls[-1]["encoding"] == "utf-8", "cmd: text decoded utf-8")
+        check(r.stdout == "孵化\ufffd-ok", "cmd: bytes decoded utf-8, errors replaced")
     finally:
-        subprocess.run = orig
+        subprocess.Popen = orig
 
     # ---- 6. a REAL posix spawn end-to-end (incl. non-ascii decode) ----
     reset_cache(POSIX)

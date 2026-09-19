@@ -53,7 +53,11 @@ class FakeBridge:
         self.commands: list[str] = []
         self.files: dict[str, str] = {}
 
-    def run(self, command: str, timeout: float, *, binary: bool = False) -> CommandResult:
+    def run(
+        self, command: str, timeout: float, cancel=None, *, binary: bool = False
+    ) -> CommandResult:
+        """`cancel` accepted for parity with the real transports (Stop kills the
+        in-flight command locally; a remote exec just finishes on its own)."""
         """Exec the command, splitting sh `&&` groups like the real remote sh
         would sequence them; stop at the first failing group."""
         result = CommandResult(0, "", "")
