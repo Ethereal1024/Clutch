@@ -27,6 +27,14 @@ Noto 也好过日文 JIS 字形的 MS Gothic。
 `tests/ui_fonts_check.py` 钉死"两个栈都有 Noto Sans SC 且在 YaHei / MS Gothic 之前"，
 这条曾经回归过一次（字体只存在于一个 stash 里，发出去的版本退回雅黑）。
 
+另一个只会缺字的坑：Chromium 的 UA 样式表把 `pre`/`code`/`kbd`/`samp`/`tt` 钉在
+裸 `monospace` 上，而 **UA 声明赢过继承值**——字体栈设在包装器（`.read-detail`、
+`.event .body pre`）上时，JS 塞进里面的 `<code>`（`highlightPreByPath`）照样执行
+UA 的 `monospace`；裸 monospace 没有汉字字形，中文掉进 Chromium 的系统回退
+（zh-CN Windows = 宋体）。style.css 里的全局 `pre, code, kbd, samp, tt` 规则把
+这些元素直接钉到 `--font-mono`，`tests/ui_fonts_check.py` 钉死"每个 UA monospace
+元素都有自己的作者 font-family 规则"。
+
 ## 为什么图标要自带字体
 
 界面图标是**文本节点里的字符**（▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■），不是
@@ -132,7 +140,8 @@ mermaid 会把拿到的字符串原样写进 `<style>` 和内联样式），作�
 uv run --with fonttools --with brotli python3 scripts/build-icon-font.py
 
 # 字体接线：相对 URL、preload、var(--font-*) 定义、16 个字符全部被内置 face 覆盖、
-# manifest sha256、unicode-range == 字体码位、mermaid 标签字体
+# manifest sha256、unicode-range == 字体码位、mermaid 标签字体、UA monospace 元素
+# (pre/code/kbd/samp/tt) 自带作者字体规则
 uv run python -m tests.ui_fonts_check
 
 # mermaid 主题逻辑镜像（含图表字体为 UI 栈、注释已压平、缺失时退回 sans-serif）

@@ -26,6 +26,12 @@ Checks (all offline, no browser):
   8. mermaid labels do not fall back to the bundle's own "Arial" default: the
      diagram font is read from --font-display (one copy of the stack), with the
      inline /* comments */ flattened before the value is handed over
+  9. every element the UA stylesheet pins to generic `monospace` (pre, code,
+     kbd, samp, tt) carries an author font-family rule DIRECTLY on the element:
+     a UA declaration beats an inherited one, so a font stack on the wrapper
+     (.read-detail, .event .body pre) never reaches the <code> highlightPreByPath
+     inserts inside it — and generic monospace has no Han glyphs, so Chinese
+     fell to Chromium's system fallback = SimSun (宋体) on zh-CN Windows
 
 Run: uv run python3 -m tests.ui_fonts_check
 """
@@ -335,6 +341,35 @@ def check_no_bare_generic(css: str) -> None:
     check(not bad, f"no platform-resolved generic font-family ({bad})")
 
 
+# Elements the Chromium UA stylesheet pins to generic `monospace`. A UA
+# declaration on an element beats an inherited value, so no wrapper rule
+# (.read-detail, .event .body pre, …) can style the <code> that JS inserts
+# inside it; and generic monospace resolves Han glyphs through the OS fallback
+# chain — SimSun (宋体) on zh-CN Windows. Each tag therefore needs an author
+# rule whose selector is the bare element, setting a var(--font-*) stack.
+UA_MONO_TAGS = ("pre", "code", "kbd", "samp", "tt")
+
+
+def check_ua_mono_elements(css: str) -> None:
+    covered: dict[str, str] = {}
+    for sel, body in rules(css):
+        if "font-family" not in body:
+            continue
+        for part in sel.split(","):
+            tag = part.strip().lower()
+            if tag in UA_MONO_TAGS and tag not in covered:
+                covered[tag] = " ".join(body.split())[:60]
+    missing = [t for t in UA_MONO_TAGS if t not in covered]
+    check(not missing,
+          "every UA-monospace element carries its own author font-family "
+          f"(uncovered: {missing} — a wrapper's font-family does not inherit "
+          "into them, Chinese then falls back to SimSun on zh-CN Windows)")
+    for tag in UA_MONO_TAGS:
+        if tag in covered:
+            check("var(--font-" in covered[tag],
+                  f"{tag} uses the app's mono stack, not a hardcoded list ({covered[tag]})")
+
+
 def check_stack_coverage(css: str) -> None:
     display = var_value(css, "--font-display")
     mono = var_value(css, "--font-mono")
@@ -366,6 +401,7 @@ def main() -> int:
     check_preload_hrefs(html, css)
     check_font_vars(css)
     check_no_bare_generic(css)
+    check_ua_mono_elements(css)
     check_stack_coverage(css)
     print("bundled icon font:")
     check_icon_font(css)

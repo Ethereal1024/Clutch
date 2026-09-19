@@ -123,6 +123,18 @@ html, body {
   font-size: 14px;
 }
 
+/* Chromium's UA stylesheet pins pre/code/kbd/samp/tt to generic `monospace`,
+   and a UA declaration on an element BEATS an inherited one — so a
+   font-family set on the *wrapper* (e.g. .read-detail) never reaches the
+   <code> that highlightPreByPath inserts inside it, nor any bare text node
+   under an unstyled <pre> (mermaid error tips). Generic monospace carries no
+   Han glyphs, so every Chinese character fell through to Chromium's system
+   fallback = SimSun (宋体) on zh-CN Windows. Pin them to the mono stack once,
+   globally; every <pre>/<code> in this UI is code, so nothing else is affected. */
+pre, code, kbd, samp, tt {
+  font-family: var(--font-mono);
+}
+
 body { display: flex; flex-direction: column; }
 
 #topbar {
@@ -689,6 +701,8 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 
 .args {
+  font-family: var(--font-mono); /* <pre> otherwise falls back to the browser's
+                                    default fixed font = SimSun on zh-CN Windows */
   font-size: 13px; color: var(--muted);
   background: var(--code-bg); border: 1px solid var(--border);
   padding: 8px 10px; border-radius: 0;
