@@ -32,6 +32,13 @@ class Config:
     api_key: str | None = field(default_factory=lambda: os.environ.get("CLUTCH_API_KEY"))
     # LLM request tuning
     llm_request_timeout: float = 60.0
+    # Streaming read budget. httpx's read timeout bounds the GAP between two
+    # chunks, not the total response time, so reusing request_timeout for it
+    # kills any stream whose provider stalls (or whose buffering relay flushes
+    # only at the end) for over 60s — the classic "network is fine yet request
+    # timed out". Connect stays tight (fail fast on dead routes) and reads get
+    # their own generous budget; see llm_clients/openai_client.py.
+    llm_read_timeout: float = 240.0
     llm_max_retries: int = 3
     llm_retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
     # None = leave the request unset (server default); otherwise one of REASONING_EFFORT_LEVELS
@@ -59,6 +66,26 @@ class Config:
     output_head: int = 2500
     output_tail: int = 2500
     read_max_chars: int = 20000
+
+    # Web access (tools/websearch.py): keyless out of the box (Bing RSS -> DDG
+    # HTML); better backends activate automatically once their env is present
+    web_search_timeout: float = 15.0
+    web_search_max_results: int = 8
+    # Tavily (https://tavily.com, LLM-first search API, free tier)
+    tavily_api_key: str | None = field(
+        default_factory=lambda: os.environ.get("CLUTCH_TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY")
+    )
+    # Self-hosted SearXNG instance exposing format=json (searxng/searxng)
+    searxng_url: str = field(
+        default_factory=lambda: (
+            os.environ.get("CLUTCH_SEARXNG_URL") or os.environ.get("SEARXNG_URL") or ""
+        ).rstrip("/")
+    )
+    # Optional MCP tool servers doubling as search backends, keyed by provider
+    # name (see tools/mcpprovider.py), e.g. {"xiaohongshu": "http://localhost:18060/mcp"}.
+    # Populated from settings.json keys mcp_<name> or CLUTCH_MCP_<NAME>_URL;
+    # empty means the backend does not exist on this machine at all.
+    mcp_urls: dict[str, str] = field(default_factory=dict)
 
     # Agent mode: "work" = full toolset, "chat" = read-only (whitelist + memory + skills)
     mode: str = "work"

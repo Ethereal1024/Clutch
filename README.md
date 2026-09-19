@@ -33,6 +33,15 @@ npm start                    # 启动界面，后端由应用自动拉起
 模型、接口地址和 key 在界面的设置弹窗里填，也可以用环境变量 `CLUTCH_MODEL`、
 `CLUTCH_BASE_URL`、`CLUTCH_API_KEY` 提供。
 
+联网搜索工具 `web_search` / `web_fetch` 开箱即用（内置 Bing RSS 免 key 后端）；可选
+后端优先：`CLUTCH_TAVILY_API_KEY` 启用 Tavily，`CLUTCH_SEARXNG_URL` 指向自建 SearXNG。
+抓取只支持文本页面，带 SSRF 防护（拒绝内网地址与重定向）。
+
+外部 MCP 服务也可以接入为搜索后端（如 xiaohongshu-mcp）：在设置弹窗的
+Web services 区填入服务地址即可（存于 `~/.clutch/settings.json` 的 `mcp_<名字>`
+键，或环境变量 `CLUTCH_MCP_<名字>_URL`）。没配置的机器上对应后端不存在——
+工具、提示词、报错信息里都不会出现它的名字，也不会出现任何"请安装"的提示。
+
 ## 跨设备使用
 
 在设置的 SSH 里填远端 host / user / port 即可连接，隧道由程序化 ssh2 建立（密码在
@@ -149,7 +158,7 @@ agent/                 后端
   core/                上下文管理（context.py）、输出解析（parse.py）、
                        终止条件（terminate.py）、错误处理（errors.py）
   tools/               工具定义与本地执行：read_file / write_file / edit_file /
-                       grep / run_command
+                       grep / run_command / web_search / web_fetch
   llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）
   browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
   server.py            HTTP + SSE 服务（会话入口）
@@ -171,6 +180,7 @@ uv run python -m tests.server_test      # HTTP + SSE 端到端
 uv run python -m tests.lazy_check       # 历史分页与惰性加载
 uv run python -m tests.supervisor_test  # 会话生命周期与跨进程锁
 uv run python -m tests.transport_test   # 传输层与远程工作区往返
+uv run python -m tests.websearch_test   # web_search / web_fetch（--live 走真实网络）
 uv run python -m tests.ui_fonts_check   # 字体/图标跨平台一致（含 mermaid 标签字体）
 uv run python -m eval.harness           # 三个评测场景
 ```

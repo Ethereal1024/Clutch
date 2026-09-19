@@ -303,6 +303,36 @@ function makeToolRowBase(name) {
   return row;
 }
 
+// Pull the shell command out of a run_command args payload. The schema is
+// {command: "..."} but models in the wild also double-encode the envelope
+// ({"command": "{\"command\": \"ls\"}"}), nest it ({"command": {"command": "…"}})
+// or send a bare JSON string ("ls -la"). Unwrap every such layer and return the
+// plain command; null means "not a command payload" (caller shows a JSON view).
+function extractCommand(txt) {
+  let s = txt;
+  for (let depth = 0; depth < 3; depth++) {
+    let parsed;
+    try { parsed = JSON.parse(s); }
+    catch (e) { return typeof s === "string" && s !== txt ? s : null; }
+    if (typeof parsed === "string") { s = parsed; continue; }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (typeof parsed.command === "string") { s = parsed.command; continue; }
+      if (parsed.command && typeof parsed.command === "object" && !Array.isArray(parsed.command)) {
+        s = JSON.stringify(parsed.command); continue; // re-stringify: the next pass unwraps it
+      }
+      return null; // JSON object without a usable command field
+    }
+    return null; // array / number / bool payload
+  }
+  return typeof s === "string" ? s : null;
+}
+
+// ask reasons must stay a reason: the args box below the header shows args_repr,
+// so strip the legacy "... with args {...}" dump older backends still send
+function permReason(reason) {
+  return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
+}
+
 // one tool_call row (name + expandable args)
 function makeToolRow(ev) {
   const row = makeToolRowBase(ev.name);
@@ -310,8 +340,8 @@ function makeToolRow(ev) {
   try {
     if (ev.name === "run_command") {
       // the command itself, not the JSON envelope / {comment: ...} wrapper
-      const parsed = JSON.parse(ev.arguments);
-      argsTxt = parsed && typeof parsed.command === "string" ? "$ " + parsed.command : ev.arguments;
+      const cmd = extractCommand(ev.arguments);
+      argsTxt = cmd !== null ? "$ " + cmd : ev.arguments;
     } else {
       argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1);
     }
@@ -2172,16 +2202,16 @@ const permModal = $("#perm-modal");
 let pendingPerm = null;
 function openPerm(ev) {
   pendingPerm = ev;
-  $("#perm-tool").textContent = `Tool: ${ev.tool} — ${ev.reason || ""}`;
+  const reason = permReason(ev.reason);
+  $("#perm-tool").textContent = `Tool: ${ev.tool} — ${reason}`;
   const argsEl = $("#perm-args");
   let txt = ev.args_repr || "";
   let isJson = false;
   if (ev.tool === "run_command") {
     // permission prompts show the command itself, not the {comment: ...} envelope
-    try {
-      const parsed = JSON.parse(txt);
-      if (parsed && typeof parsed.command === "string") txt = "$ " + parsed.command;
-    } catch (e) {}
+    const cmd = extractCommand(txt);
+    if (cmd !== null) txt = "$ " + cmd;
+    else { try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {} }
   } else {
     try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {}
   }
@@ -2778,4 +2808,101 @@ function healSettingsMirror() {
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
+})();
+
+// ---- MCP web services (settings modal section) -------------------------------
+// Rendered from GET /api/settings mcp_providers metadata: a host without a
+// service configured just sees an empty optional row — nothing here prompts
+// anyone to install anything.
+(function initMcpServices() {
+  const box = document.getElementById("mcp-services");
+  if (!box) return;
+
+  function render(providers, statusByProvider) {
+    box.textContent = "";
+    if (!providers.length) return;
+    const title = document.createElement("label");
+    title.textContent = "Web services (optional)";
+    title.style.marginTop = "16px";
+    box.appendChild(title);
+    for (const p of providers) {
+      const row = document.createElement("div");
+      row.className = "fs-conn-row";
+      row.style.marginBottom = "8px";
+      const input = document.createElement("input");
+      input.id = "mcp-input-" + p.key;
+      input.type = "text";
+      input.autocomplete = "off";
+      input.placeholder = p.placeholder || "http://localhost:port/mcp";
+      input.value = p.value || "";
+      const status = document.createElement("span");
+      status.className = "dim";
+      status.dataset.mcpStatus = p.key;
+      const st = statusByProvider[p.key];
+      status.textContent =
+        st === undefined ? "" :
+        !st.configured ? "" :
+        st.reachable === false ? "unreachable" :
+        st.login === true ? "connected · logged in" :
+        st.login === false ? "connected · not logged in" :
+        "connected";
+      row.append(input, status);
+      box.appendChild(row);
+    }
+    const actions = document.createElement("div");
+    actions.className = "fs-conn-row";
+    const save = document.createElement("button");
+    save.id = "mcp-services-save";
+    save.className = "primary";
+    save.textContent = "Save web services";
+    const hint = document.createElement("span");
+    hint.className = "dim";
+    actions.append(save, hint);
+    box.appendChild(actions);
+
+    save.addEventListener("click", async () => {
+      const payload = {};
+      for (const p of providers) {
+        const el = document.getElementById("mcp-input-" + p.key);
+        if (el) payload[p.key] = el.value.trim();
+      }
+      try {
+        await apiFetch("/api/settings", { method: "POST", body: payload });
+        hint.textContent = "saved";
+        refreshStatus();
+      } catch (e) {
+        hint.textContent = "save failed: " + ((e && e.message) || e);
+      }
+    });
+  }
+
+  async function refreshStatus() {
+    try {
+      const st = await apiFetch("/api/mcp_status");
+      const byKey = {};
+      for (const row of (st && st.providers) || []) byKey["mcp_" + row.name] = row;
+      box.querySelectorAll("[data-mcp-status]").forEach((el) => {
+        const row = byKey[el.dataset.mcpStatus];
+        el.textContent =
+          !row || !row.configured ? "" :
+          row.reachable === false ? "unreachable" :
+          row.login === true ? "connected · logged in" :
+          row.login === false ? "connected · not logged in" :
+          "connected";
+      });
+    } catch (e) {
+      /* status is best-effort */
+    }
+  }
+
+  // (re)render every time the settings modal opens, so values stay fresh
+  $("#settings-btn").addEventListener("click", async () => {
+    try {
+      const s = await apiFetch("/api/settings");
+      render(s.mcp_providers || [], {});
+      refreshStatus();
+    } catch (e) {
+      /* settings API down: the section stays empty */
+    }
+  });
 })();

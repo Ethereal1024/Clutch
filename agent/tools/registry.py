@@ -16,7 +16,7 @@ from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
-from . import filesystem, shell
+from . import filesystem, shell, websearch
 from .workspace import Workspace
 
 # (workspace, config, **args) -> dict{content, error?}
@@ -136,6 +136,55 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["command"],
             },
             func=lambda sb, cfg, cancel=None, **kw: shell.run_command(sb, cfg, cancel=cancel, **kw),
+        )
+    )
+
+    # web access: read-only network tools in BOTH modes — chat's read-only
+    # contract is about the workspace; a GET touches nothing local
+    tools.append(
+        Tool(
+            name="web_search",
+            description=render(
+                "tools/web_search.md",
+                max_results=config.web_search_max_results,
+                backends=" or ".join(websearch.available_backends(config)),
+            ),
+            parameters={
+                "properties": {
+                    "query": _str_param("search string (engine syntax like site: and quoted phrases works)"),
+                    "max_results": {
+                        "type": "integer",
+                        "description": f"cap on returned entries (default {config.web_search_max_results})",
+                    },
+                    "backend": _str_param(
+                        f"pin one backend: {' | '.join(websearch.available_backends(config))}"
+                        " (default: fall through the chain)"
+                    ),
+                },
+                "required": ["query"],
+            },
+            func=lambda sb, cfg, cancel=None, **kw: websearch.web_search(sb, cfg, cancel=cancel, **kw),
+        )
+    )
+    tools.append(
+        Tool(
+            name="web_fetch",
+            description=render("tools/web_fetch.md", max=config.read_max_chars),
+            parameters={
+                "properties": {
+                    "url": _str_param("http(s) URL to fetch"),
+                    "max_chars": {
+                        "type": "integer",
+                        "description": f"max chars of extracted text to return (default {config.read_max_chars})",
+                    },
+                    "start": {
+                        "type": "integer",
+                        "description": "0-based char offset to continue a truncated fetch",
+                    },
+                },
+                "required": ["url"],
+            },
+            func=lambda sb, cfg, cancel=None, **kw: websearch.web_fetch(sb, cfg, cancel=cancel, **kw),
         )
     )
 
