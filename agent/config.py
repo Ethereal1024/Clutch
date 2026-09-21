@@ -81,12 +81,6 @@ class Config:
             os.environ.get("CLUTCH_SEARXNG_URL") or os.environ.get("SEARXNG_URL") or ""
         ).rstrip("/")
     )
-    # Optional MCP tool servers doubling as search backends, keyed by provider
-    # name (see tools/mcpprovider.py), e.g. {"xiaohongshu": "http://localhost:18060/mcp"}.
-    # Populated from settings.json keys mcp_<name> or CLUTCH_MCP_<NAME>_URL;
-    # empty means the backend does not exist on this machine at all.
-    mcp_urls: dict[str, str] = field(default_factory=dict)
-
     # Agent mode: "work" = full toolset, "chat" = read-only (whitelist + memory + skills)
     mode: str = "work"
 

@@ -37,11 +37,6 @@ npm start                    # 启动界面，后端由应用自动拉起
 后端优先：`CLUTCH_TAVILY_API_KEY` 启用 Tavily，`CLUTCH_SEARXNG_URL` 指向自建 SearXNG。
 抓取只支持文本页面，带 SSRF 防护（拒绝内网地址与重定向）。
 
-外部 MCP 服务也可以接入为搜索后端（如 xiaohongshu-mcp）：在设置弹窗的
-Web services 区填入服务地址即可（存于 `~/.clutch/settings.json` 的 `mcp_<名字>`
-键，或环境变量 `CLUTCH_MCP_<名字>_URL`）。没配置的机器上对应后端不存在——
-工具、提示词、报错信息里都不会出现它的名字，也不会出现任何"请安装"的提示。
-
 ## 跨设备使用
 
 在设置的 SSH 里填远端 host / user / port 即可连接，隧道由程序化 ssh2 建立（密码在

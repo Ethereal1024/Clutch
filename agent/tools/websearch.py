@@ -39,7 +39,6 @@ from html.parser import HTMLParser
 from typing import Any, Callable
 
 from ..config import Config
-from .mcpprovider import McpProvider, MCP_PROVIDERS
 from .workspace import Workspace
 
 # browser-shaped but honest about the product; several CDNs 403 blank UAs
@@ -408,125 +407,9 @@ def _ddg(query: str, limit: int, config: Config, get: Callable[..., HttpResp]) -
     return out
 
 
-# ---- HTTP MCP client (JSON-RPC over POST) ------------------------------------
-
-
-_MCP_PROTO = "2025-03-26"  # protocol version announced in the initialize call
-
-
-def _mcp_rpc(
-    url: str,
-    payload: dict,
-    session: str | None,
-    timeout: float,
-    cancel: Any = None,
-) -> tuple[dict, str | None]:
-    """One JSON-RPC POST to an HTTP MCP server; returns (response, session id).
-
-    Deliberately NOT routed through _http_get: the private-network guard exists
-    for model-controlled URLs, while this endpoint comes from operator config
-    and is typically loopback. Every failure surfaces as WebError so callers
-    treat MCP problems like any other backend failure.
-    """
-    if cancel is not None and cancel.is_set():
-        raise WebError("aborted by user")
-    body = json.dumps(payload).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
-    if session:
-        headers["Mcp-Session-Id"] = session
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        resp = urllib.request.urlopen(request, timeout=timeout)
-    except urllib.error.HTTPError as e:
-        raise WebError(f"HTTP {e.code} from MCP server {url}") from e
-    except urllib.error.URLError as e:
-        reason = getattr(e, "reason", e)
-        if isinstance(reason, (socket.timeout, TimeoutError)):
-            raise WebError(f"MCP server timed out after {timeout:.0f}s: {url}")
-        raise WebError(f"MCP server unreachable ({reason}): {url}") from e
-    except (ValueError, OSError) as e:
-        raise WebError(f"MCP request failed ({e}): {url}") from e
-    with resp:
-        raw = _drain(resp, cancel, _MAX_BYTES)
-    sid = resp.headers.get("Mcp-Session-Id") or session
-    text = _decode_body(raw, resp.headers.get("Content-Type", ""))
-    if text.startswith("event:") or text.startswith("data:") or "\ndata:" in text[:2048]:
-        # SSE-framed reply: keep the last data frame (the JSON-RPC response)
-        frames = [ln[5:].strip() for ln in text.splitlines() if ln.startswith("data:")]
-        text = frames[-1] if frames else ""
-    if not text.strip():
-        return {}, sid  # e.g. 202 Accepted for a notification
-    try:
-        data = json.loads(text)
-    except ValueError as e:
-        raise WebError(f"MCP server returned non-JSON: {_short(e)}") from e
-    if isinstance(data, dict) and data.get("error") is not None:
-        err = data["error"]
-        msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-        raise WebError(f"MCP error: {_short(msg)}")
-    return (data if isinstance(data, dict) else {}), sid
-
-
-def _mcp_call(
-    url: str,
-    tool: str,
-    args: dict,
-    timeout: float,
-    cancel: Any = None,
-) -> Any:
-    """initialize -> tools/call against an HTTP MCP server; returns the parsed
-    tool output (JSON when it parses, else the plain text)."""
-    hello = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": _MCP_PROTO,
-            "capabilities": {},
-            "clientInfo": {"name": "clutch", "version": "0.1"},
-        },
-    }
-    _, session = _mcp_rpc(url, hello, None, timeout, cancel)
-    if session:
-        _mcp_rpc(
-            url,
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            session,
-            timeout,
-            cancel,
-        )
-    resp, _ = _mcp_rpc(
-        url,
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": args},
-        },
-        session,
-        timeout,
-        cancel,
-    )
-    result = resp.get("result") or {}
-    parts = result.get("content") or []
-    text = "\n".join(
-        p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text"
-    ).strip()
-    if result.get("isError") and text:
-        raise WebError(f"MCP tool error: {_short(text)}")
-    try:
-        return json.loads(text)
-    except ValueError:
-        return text
-
-
 # ---- registry ---------------------------------------------------------------
 # One protocol for every source: a Backend knows how to search and whether it
-# exists on this machine. web_search only ever sees this shape, so adding a
-# source (e.g. an MCP service) touches nothing else in this module.
+# exists on this machine. web_search only ever sees this shape.
 
 
 @dataclass(frozen=True)
@@ -546,28 +429,9 @@ _BACKENDS: dict[str, Backend] = {
 _DEFAULT_CHAIN = tuple(_BACKENDS)
 
 
-def _mcp_backend(provider: McpProvider) -> Backend:
-    """Adapt an MCP provider to the uniform Backend shape."""
-
-    def search(q: str, limit: int, config: Config, get: Callable[..., HttpResp]) -> list[dict[str, str]]:
-        cancel = (getattr(get, "keywords", None) or {}).get("cancel")
-        data = _mcp_call(
-            provider.url_for(config),
-            provider.search_tool,
-            provider.search_args(q, limit),
-            config.web_search_timeout,
-            cancel=cancel,
-        )
-        rows = provider.map_results(data)
-        if not rows:
-            raise BackendError(f"no results for {q!r} (empty feed or unmapped payload)")
-        return rows[:limit]
-
-    return Backend(provider.name, search, lambda c, p=provider: bool(p.url_for(c)))
-
-
-for _p in MCP_PROVIDERS.values():
-    _BACKENDS[_p.name] = _mcp_backend(_p)
+def _all_backends(config: Config) -> dict[str, Backend]:
+    """Every registered backend, in chain order."""
+    return dict(_BACKENDS)
 
 
 def _available_backends(config: Config) -> tuple[str, ...]:
@@ -576,22 +440,11 @@ def _available_backends(config: Config) -> tuple[str, ...]:
     Rendered into prompts and error texts, so an unconfigured service simply
     does not exist here — no name, no install advice.
     """
-    return tuple(b.name for b in _BACKENDS.values() if b.available(config))
+    return tuple(name for name, backend in _all_backends(config).items() if backend.available(config))
 
 
 # Public alias: server and registry render UI/prompt text from this too.
 available_backends = _available_backends
-
-
-def mcp_status(url: str, provider: McpProvider, timeout: float = 3.0) -> Any:
-    """Query a provider's status tool (e.g. login state); raw parsed payload.
-
-    Raises WebError on any failure — the caller turns that into a status row,
-    never into user-facing advice.
-    """
-    if not provider.status_tool:
-        return None
-    return _mcp_call(url, provider.status_tool, {}, timeout)
 
 
 def _short(reason: object) -> str:
@@ -611,7 +464,8 @@ def web_search(
     if not q:
         return {"content": "ERROR: query is required", "error": True}
     limit = max(1, min(int(max_results or config.web_search_max_results), 20))
-    available = _available_backends(config)
+    backends = _all_backends(config)
+    available = tuple(name for name, backend in backends.items() if backend.available(config))
     if backend:
         # one factual gate for every source: not on the available list -> not
         # named in the error either. No install/setup advice, ever.
@@ -628,7 +482,7 @@ def web_search(
     failures: list[str] = []
     for name in chain:
         try:
-            results = _BACKENDS[name].search(q, limit, config, get)
+            results = backends[name].search(q, limit, config, get)
         except (BackendError, WebError) as e:
             failures.append(f"- {name}: {_short(e)}")
             continue

@@ -154,6 +154,12 @@ class Workspace(ABC):
         except OSError:
             return False
 
+    def protected(self) -> set[Path]:
+        """Snapshot of the protected set: the tool subprocess (tools/cli.py)
+        rebuilds a bare Workspace in the child, and the parent ships these so
+        the child re-applies protect() before running the tool."""
+        return set(self._protected)
+
     def visible_entries(self, root: Path) -> list[Path]:
         """Directory entries excluding protected files."""
         out = []

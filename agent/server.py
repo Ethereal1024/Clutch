@@ -43,8 +43,6 @@ from .events import (
     event_to_json,
 )
 from .project import Project, create_project, open_project_lazy
-from .tools.mcpprovider import MCP_PROVIDERS as _MCP_PROVIDER_REGISTRY
-from .tools.websearch import mcp_status as _mcp_status_probe
 from .tools.workspace import Workspace
 
 # a client hanging up mid-SSE surfaces as one of these on the socket write;
@@ -78,50 +76,6 @@ def save_settings(data: dict) -> None:
         p.chmod(0o600)  # owner-only, the file holds a credential
     except OSError as e:
         print(f"[clutch-server] cannot persist settings: {e}", file=sys.stderr)
-
-
-def mcp_providers() -> list:
-    """Registered MCP web-search providers (stable order for the UI)."""
-    return list(_MCP_PROVIDER_REGISTRY.values())
-
-
-def _split_mcp_fields(body: dict) -> dict[str, str]:
-    """Pull mcp_<provider> URL fields out of a settings POST body.
-
-    Values must be http(s) URLs, or '' to clear the entry; names are free-form
-    so a newer UI can configure providers this build does not know.
-    """
-    out: dict[str, str] = {}
-    for key, value in body.items():
-        if not key.startswith("mcp_") or not isinstance(value, str):
-            continue
-        value = value.strip().rstrip("/")
-        if value and not value.startswith(("http://", "https://")):
-            raise ValueError(f"{key} must be an http(s) URL")
-        out[key] = value
-    return out
-
-
-def _mcp_keys_from(raw: dict) -> dict[str, str]:
-    """mcp_<provider> entries persisted in the settings file (flatten drops them)."""
-    return {k: v for k, v in raw.items() if k.startswith("mcp_") and isinstance(v, str) and v}
-
-
-def _login_state(state: Any) -> bool | None:
-    """Best-effort normalization of a provider's login-status payload."""
-    truthy = ("logged_in", "logged in", "true", "yes", "ok", "success")
-    if isinstance(state, bool):
-        return state
-    if isinstance(state, str):
-        return state.strip().lower() in truthy
-    if isinstance(state, dict):
-        for key in ("login", "logged_in", "is_logged_in", "logged_in_status", "status"):
-            v = state.get(key)
-            if isinstance(v, bool):
-                return v
-            if isinstance(v, str):
-                return v.strip().lower() in truthy
-    return None
 
 
 class HttpAgentServer(BaseServer):
@@ -203,8 +157,6 @@ class Handler(BaseHTTPRequestHandler):
             self._fs_list()
         elif path == "/api/settings":
             self._settings_get()
-        elif path == "/api/mcp_status":
-            self._mcp_status()
         else:
             self._json({"error": "not found"}, status=404)
 
@@ -364,15 +316,7 @@ class Handler(BaseHTTPRequestHandler):
         base_url = (body.get("base_url") or "").strip()
         model = (body.get("model") or "").strip()
         api_key = (body.get("api_key") or "").strip()
-        try:
-            mcp_updates = _split_mcp_fields(body)
-        except ValueError as e:
-            return self._json({"error": str(e)}, status=400)
-        if (
-            not any((base_url, model, api_key))
-            and "reasoning_effort" not in body
-            and not mcp_updates
-        ):
+        if not any((base_url, model, api_key)) and "reasoning_effort" not in body:
             return self._json({"error": "nothing to save"}, status=400)
 
         with self._state.lock:
@@ -385,15 +329,8 @@ class Handler(BaseHTTPRequestHandler):
             # empty value clears the knob (provider default); None = unset
             if "reasoning_effort" in body:
                 self._cfg.llm_reasoning_effort = reasoning_effort or None
-            for key, value in mcp_updates.items():
-                if value:
-                    self._cfg.mcp_urls[key[4:]] = value
-                else:
-                    self._cfg.mcp_urls.pop(key[4:], None)
-        # flatten migrates legacy profile maps but only knows the LLM fields;
-        # carry the mcp_<provider> keys across so a settings save never wipes
-        # configured web services
-        saved = {**_mcp_keys_from(load_settings()), **flatten_settings(load_settings())}
+        # flatten migrates legacy profile maps but only knows the LLM fields
+        saved = flatten_settings(load_settings())
         if base_url:
             saved["base_url"] = base_url
         if model:
@@ -405,64 +342,20 @@ class Handler(BaseHTTPRequestHandler):
                 saved["reasoning_effort"] = reasoning_effort
             else:
                 saved.pop("reasoning_effort", None)  # empty = clear the knob
-        for key, value in mcp_updates.items():
-            if value:
-                saved[key] = value
-            else:
-                saved.pop(key, None)  # empty = clear the service
         save_settings(saved)
         self._json({"status": "ok"})
 
     def _settings_get(self) -> None:
         """Current LLM endpoint config for the settings modal (no credentials)."""
         saved = flatten_settings(load_settings())
-        raw = load_settings()
         self._json(
             {
                 "base_url": self._cfg.base_url or saved.get("base_url", ""),
                 "model": self._cfg.model or saved.get("model", ""),
                 "reasoning_effort": self._cfg.llm_reasoning_effort or saved.get("reasoning_effort", ""),
                 "has_api_key": bool(self._state.api_key or self._cfg.api_key or saved.get("api_key")),
-                # MCP web-search services: rendered dynamically by the UI; a
-                # host without a service configured just gets an empty value
-                "mcp_providers": [
-                    {
-                        "key": f"mcp_{p.name}",
-                        "label": p.label,
-                        "placeholder": p.placeholder,
-                        "value": self._cfg.mcp_urls.get(p.name) or raw.get(f"mcp_{p.name}", ""),
-                    }
-                    for p in mcp_providers()
-                ],
             }
         )
-
-    def _mcp_status(self) -> None:
-        """Per-provider MCP reachability + login state, for the settings modal.
-
-        Purely informational and only about services this machine's user chose
-        to configure: unconfigured providers report configured=False and the UI
-        leaves the row blank — nothing here suggests installing anything.
-        """
-        out = []
-        for p in mcp_providers():
-            url = p.url_for(self._cfg)
-            row: dict[str, Any] = {
-                "name": p.name,
-                "configured": bool(url),
-                "reachable": None,
-                "login": None,
-            }
-            if url:
-                try:
-                    state = _mcp_status_probe(url, p) if p.status_tool else None
-                    row["reachable"] = True
-                    row["login"] = _login_state(state)
-                except Exception as e:  # noqa: BLE001 — any failure is a status, not a crash
-                    row["reachable"] = False
-                    row["detail"] = str(e)[:160]
-            out.append(row)
-        self._json({"providers": out})
 
     def _permission_respond(self) -> None:
         body = self._read_body()
@@ -842,10 +735,6 @@ def main() -> int:
     # reasoning_effort: env-less; saved settings only
     if not config.llm_reasoning_effort:
         config.llm_reasoning_effort = saved.get("reasoning_effort") or None
-    # MCP web-search services (settings.json keys mcp_<provider>); the env-only
-    # CLUTCH_MCP_<NAME>_URL is resolved by the provider itself at call time
-    for _key, _value in _mcp_keys_from(load_settings()).items():
-        config.mcp_urls[_key[4:]] = _value.rstrip("/")
     api_key = config.api_key
     if args.base_url and not api_key:
         # the client-side proxy injects the real key; the server only needs a

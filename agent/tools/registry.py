@@ -8,8 +8,14 @@ error texts live in agent/prompts/.
 from __future__ import annotations
 
 import inspect
+import json
+import os
+import subprocess
+import sys
 import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from ..config import Config
@@ -17,7 +23,8 @@ from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
 from . import filesystem, shell, websearch
-from .workspace import Workspace
+from .transport import _drain, _kill_tree
+from .workspace import LocalWorkspace, Workspace
 
 # (workspace, config, **args) -> dict{content, error?}
 ToolImpl = Callable[..., dict[str, Any]]
@@ -29,6 +36,11 @@ class Tool:
     description: str
     parameters: dict[str, Any]  # JSON Schema (properties + required)
     func: ToolImpl
+    # True = run func in a child process (tools/cli.py) instead of in-process;
+    # opt-in per tool so migration is gradual. execute() ignores it for remote
+    # workspaces (the child would hit the LOCAL disk) and under frozen builds
+    # (sys.executable is the bundle, not python).
+    subprocess: bool = False
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -74,6 +86,7 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["path"],
             },
             func=lambda sb, cfg, **kw: filesystem.read_file(sb, cfg, **kw),
+            subprocess=True,  # pilot: first tool migrated to child execution
         ),
         Tool(
             name="grep",
@@ -349,7 +362,17 @@ class ToolRegistry:
             }
         try:
             args = self._coerce_types(tool, args)
-            if self._cancelable.get(name):
+            # subprocess tools run in a child process — but only where that is
+            # meaningful (see Tool.subprocess): frozen builds and remote
+            # workspaces fall back to the plain in-process call
+            use_child = (
+                tool.subprocess
+                and not getattr(sys, "frozen", False)
+                and isinstance(workspace, LocalWorkspace)
+            )
+            if use_child:
+                result = self._exec_subprocess(workspace, config, name, args, cancel)
+            elif self._cancelable.get(name):
                 result = tool.func(workspace, config, cancel=cancel, **args)
             else:
                 result = tool.func(workspace, config, **args)
@@ -361,6 +384,89 @@ class ToolRegistry:
         result.setdefault("error", False)
         result.setdefault("diff", "")
         return result
+
+    def _exec_subprocess(
+        self,
+        workspace: Workspace,
+        config: Config,
+        name: str,
+        args: dict[str, Any],
+        cancel: threading.Event | None,
+    ) -> dict[str, Any]:
+        """Run the tool function in a child process (tools/cli.py).
+
+        Same {content, error, diff} contract, one JSON serialization hop: args
+        go in as stdin JSON, the child's result dict comes back as stdout JSON.
+        Crash / timeout / cancel produce the same error-as-data dict the
+        in-process boundary would. Platform notes: pipes stay BINARY (no
+        text=True — Windows would translate newlines); the payload rides stdin
+        (no argv 32K limit, no console codepage); on POSIX the child gets its
+        own session/process group so the tree kill cannot take the agent down.
+        """
+        payload = json.dumps(
+            {
+                "name": name,
+                "args": args,
+                "workspace_root": str(workspace.root),
+                "mode": config.mode,
+                "read_max_chars": config.read_max_chars,
+                "protected": [str(p) for p in workspace.protected()],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        # -m resolves `agent` via cwd; parents[2] is the repo root
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "PYTHONUTF8": "1"}  # child tracebacks in utf-8 too
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent.tools.cli"],
+            cwd=str(repo_root),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=os.name == "posix",
+        )
+        out: list[bytes] = []
+        err: list[bytes] = []
+        # drain threads start BEFORE the stdin write: a child blocked writing
+        # stdout while we block writing stdin would deadlock both pipes
+        readers = [
+            threading.Thread(target=_drain, args=(proc.stdout, out), daemon=True),
+            threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True),
+        ]
+        for t in readers:
+            t.start()
+        try:
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except OSError:
+            pass  # child died early; its stderr surfaces below
+        deadline = time.monotonic() + config.command_timeout
+        code: int | None = None
+        while True:
+            if cancel is not None and cancel.is_set():
+                _kill_tree(proc)
+                return {"content": "ERROR: tool call canceled", "error": True}
+            try:
+                code = proc.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() > deadline:
+                    _kill_tree(proc)
+                    return {
+                        "content": f"ERROR: tool timed out after {config.command_timeout}s",
+                        "error": True,
+                    }
+        for t in readers:
+            t.join(timeout=5)
+        try:
+            return json.loads(b"".join(out).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            tail = b"".join(err).decode("utf-8", "replace")[-2000:]
+            return {
+                "content": f"ERROR: tool subprocess crashed (exit {code}): {tail}",
+                "error": True,
+            }
 
     @staticmethod
     def _coerce_types(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
