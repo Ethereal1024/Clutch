@@ -63,8 +63,18 @@ function sourceFingerprint() {
       h.update(path.relative(REPO, p)).update("\0").update(fs.readFileSync(p));
     }
   };
-  for (const root of ["agent", "scripts/server_entry.py", "scripts/supervisor_entry.py", "scripts/build-server-bundle.sh"]) {
-    visit(path.join(REPO, root));
+  for (const root of [
+    "agent",
+    "scripts/server_entry.py",
+    "scripts/supervisor_entry.py",
+    "scripts/build-server-bundle.sh",
+    // the bundle ships the skills library out of the clutch-skills module, so a
+    // changed skill has to invalidate a dev build like changed agent code does
+    "clutch-skills/skills",
+  ]) {
+    const p = path.join(REPO, root);
+    if (!fs.existsSync(p)) continue; // a module that is not checked out
+    visit(p);
   }
   return h.digest("hex");
 }
