@@ -155,9 +155,9 @@ class Workspace(ABC):
             return False
 
     def protected(self) -> set[Path]:
-        """Snapshot of the protected set: the tool subprocess (tools/cli.py)
-        rebuilds a bare Workspace in the child, and the parent ships these so
-        the child re-applies protect() before running the tool."""
+        """Snapshot of the protected set: the workspace daemon is spawned with
+        these as its fence globs (it hides them from broad sweeps and refuses
+        mutations), and every tool call re-checks them host-side."""
         return set(self._protected)
 
     def visible_entries(self, root: Path) -> list[Path]:

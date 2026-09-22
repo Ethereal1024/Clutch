@@ -8,39 +8,63 @@ error texts live in agent/prompts/.
 from __future__ import annotations
 
 import inspect
-import json
-import os
-import subprocess
-import sys
 import threading
-import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 
 from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
-from . import filesystem, shell, websearch
-from .transport import _drain, _kill_tree
+from . import filesystem, inst, modules, rendezvous, shell, websearch
+from .inst import InstError
+from .transport import TransportError, failure_envelope
 from .workspace import LocalWorkspace, Workspace
 
 # (workspace, config, **args) -> dict{content, error?}
 ToolImpl = Callable[..., dict[str, Any]]
+# (workspace, config, args) -> dict{content, error?} | None -- a refusal, or None to proceed
+GuardImpl = Callable[[Workspace, Config, dict[str, Any]], dict[str, Any] | None]
 
 
 @dataclass
 class Tool:
+    """One tool: the statement that satisfies a call, plus the host's own take.
+
+    `inst` is the terminal command a call becomes (tools/inst.py): placeholders
+    filled from the model's arguments, run through the workspace's transport,
+    its output unwrapped back into the {content, error, diff} envelope. A
+    statement that drives a standalone module's service names it in `module`,
+    and that path is taken only while the module is actually there — R2 of the
+    tool constitution: a deleted module degrades to `func`, the host's own
+    implementation, instead of taking the host down with it.
+
+    `guard` is host policy a module deliberately does not carry: the workspace
+    module's fence refuses mutations and hides broad sweeps but still serves a
+    path named explicitly, while the project's .clc must stay unreadable even
+    then (see filesystem._refuse_protected). `defaults` rides the statement
+    payload UNDER the model's own arguments: an argument the model left out
+    gets the host's default instead of a hole in the request.
+
+    `snapshot` marks the statements that OVERWRITE the file named in their
+    `path` argument. The module that performs such a write keeps its own undo
+    stack (the daemon's /undo pops its newest write, for its CLI), but the
+    per-file "undo" the UI offers on a change result is served by THIS process
+    — so the content the write is about to replace is recorded here too,
+    exactly as the host's in-process implementation records it (and, like that
+    implementation, only for a write that actually happened).
+    """
+
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema (properties + required)
-    func: ToolImpl
-    # True = run func in a child process (tools/cli.py) instead of in-process;
-    # opt-in per tool so migration is gradual. execute() ignores it for remote
-    # workspaces (the child would hit the LOCAL disk) and under frozen builds
-    # (sys.executable is the bundle, not python).
-    subprocess: bool = False
+    func: ToolImpl | None = None  # the host's own implementation (fallback)
+    inst: str | None = None  # the terminal statement (module-served path)
+    module: str | None = None  # which standalone module serves the statement
+    guard: GuardImpl | None = None  # host policy the module does not make
+    defaults: Mapping[str, Any] | None = None  # statement payload defaults
+    snapshot: bool = False  # the statement overwrites args["path"]
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -55,6 +79,79 @@ class Tool:
                 },
             },
         }
+
+
+def _daemon(command: str) -> str:
+    """One statement against a standalone module daemon's HTTP surface.
+
+    Every part of this line is the host's half of a frozen contract (R4): the
+    path, the JSON body, the token header, the status trailer. The host imports
+    nothing from the module — it only knows how to speak to it. --noproxy keeps
+    a configured proxy away from 127.0.0.1; -w prints the HTTP status, which
+    unwrap() reads as the TRANSPORT's verdict (the command's own verdict rides
+    the 200 body, so a 200 that says "file not found" stays a command verdict).
+    """
+    return (
+        "curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' "
+        f"-H {{auth}} --data-binary {{*}} -w {{status}} http://127.0.0.1:{{port}}{command}"
+    )
+
+
+_READ_FILE = _daemon("/read_file")
+_GREP = _daemon("/grep")
+_WRITE_FILE = _daemon("/write_file")
+_EDIT_FILE = _daemon("/edit_file")
+
+# A CLI module is one process per call, driven on the APP host (its subject is
+# the project file / the network / the skill library, never the workspace's
+# machine), so its line names the interpreter and the module's own entry point.
+# `--envelope` asks for the host's {content, code} object instead of the
+# module's own machine output; a package module needs its checkout on
+# PYTHONPATH. The module owns its flags — the host only knows the line (R4).
+_MEMORY_CLI = "{py} {script} --endpoint {base} --envelope"
+_WEBSEARCH_CLI = "{py} {script}"
+_SKILLS_CLI = "PYTHONPATH={dir} {py} -m clutch_skills --envelope"
+
+
+def module_ready(workspace: Workspace, module: str | None) -> bool:
+    """True when this host can actually run `module`'s statements for this call.
+
+    Three facts, all local: the module is on disk and drivable
+    (`rendezvous.available` — R2's star acceptance: a deleted module degrades
+    the call, never the host); a DAEMON module additionally needs a LOCAL
+    workspace, because it serves the filesystem of the machine it runs on (a
+    remote workspace keeps the host's transport-based implementation, which
+    speaks to the remote side over the SSH bridge); a CLI module runs on the
+    APP host whatever kind of workspace the call came from — its subject is the
+    project file / the network / the skill library, never the workspace's
+    machine.
+    """
+    if module is None or not rendezvous.available(module):
+        return False
+    return not rendezvous.is_local(module) or isinstance(workspace, LocalWorkspace)
+
+
+def _previous_content(workspace: Workspace, args: dict[str, Any]) -> tuple[Any, str] | None:
+    """(resolved path, content) of the file a module-served write is about to
+    replace — the host's own undo bookkeeping for the statement path.
+
+    The module performs the write, and its daemon keeps its own undo stack (the
+    /undo its CLI pops: the newest write, whoever made it). The per-file revert
+    the UI offers on a change result is answered by THIS process, so the content
+    the write is about to replace has to be recorded here too, exactly as
+    filesystem.write_file/edit_file record it when they do the writing. None
+    means there is nothing to remember: a file that does not exist yet has no
+    previous content, and the host's own implementation does not remember it
+    either (a creation is not a change the UI can revert)."""
+    try:
+        p = workspace.resolve(str(args.get("path", "")))
+        old = workspace.read(str(p))
+    except (OSError, ValueError):
+        return None
+    return (p, old) if old else None
+
+
+
 
 
 def _str_param(desc: str) -> dict[str, Any]:
@@ -86,7 +183,10 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["path"],
             },
             func=lambda sb, cfg, **kw: filesystem.read_file(sb, cfg, **kw),
-            subprocess=True,  # pilot: first tool migrated to child execution
+            inst=_READ_FILE,
+            module=modules.WORKSPACE,
+            guard=filesystem.guard_read,
+            defaults={"max_chars": config.read_max_chars},
         ),
         Tool(
             name="grep",
@@ -100,6 +200,10 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["pattern"],
             },
             func=lambda sb, cfg, **kw: filesystem.grep(sb, cfg, **kw),
+            inst=_GREP,
+            module=modules.WORKSPACE,
+            guard=filesystem.guard_grep,
+            defaults={"path": ".", "include": ""},
         ),
     ]
 
@@ -118,6 +222,10 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                     "required": ["path", "content"],
                 },
                 func=lambda sb, cfg, **kw: filesystem.write_file(sb, cfg, **kw),
+                inst=_WRITE_FILE,
+                module=modules.WORKSPACE,
+                guard=filesystem.guard_write,
+                snapshot=True,
             )
         )
         tools.append(
@@ -133,11 +241,19 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                     "required": ["path", "old_string", "new_string"],
                 },
                 func=lambda sb, cfg, **kw: filesystem.edit_file(sb, cfg, **kw),
+                inst=_EDIT_FILE,
+                module=modules.WORKSPACE,
+                guard=filesystem.guard_write,
+                snapshot=True,
             )
         )
 
     # run_command exists in both modes; in chat mode its description advertises the
     # read-only restriction and the tool rejects anything not provably read-only.
+    # Deliberately NOT a statement with a module behind it: the command IS the
+    # statement, and the host's permission engine (read-only classifier, escape
+    # and protected-path guard, Stop) is the boundary it runs inside — host
+    # policy, not a module's business (a module would only re-say "run this").
     tools.append(
         Tool(
             name="run_command",
@@ -177,6 +293,9 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["query"],
             },
             func=lambda sb, cfg, cancel=None, **kw: websearch.web_search(sb, cfg, cancel=cancel, **kw),
+            inst=_WEBSEARCH_CLI + " search --envelope [--max-results {max_results}] [--backend {backend}] {query}",
+            module=modules.WEBSEARCH,
+            defaults={"max_results": config.web_search_max_results},
         )
     )
     tools.append(
@@ -198,6 +317,9 @@ def build_default_tools(config: Config, memories: MemoryStore | None = None) -> 
                 "required": ["url"],
             },
             func=lambda sb, cfg, cancel=None, **kw: websearch.web_fetch(sb, cfg, cancel=cancel, **kw),
+            inst=_WEBSEARCH_CLI + " fetch --envelope [--max-chars {max_chars}] [--start {start}] {url}",
+            module=modules.WEBSEARCH,
+            defaults={"max_chars": config.read_max_chars},
         )
     )
 
@@ -254,6 +376,8 @@ def _build_memory_tools(memories: MemoryStore) -> list[Tool]:
                 "required": ["title", "content"],
             },
             func=save,
+            inst=_MEMORY_CLI + " save --title {title} --content {content}",
+            module=modules.MEMORY,
         ),
         Tool(
             name="load_memory",
@@ -263,6 +387,8 @@ def _build_memory_tools(memories: MemoryStore) -> list[Tool]:
                 "required": ["name"],
             },
             func=load,
+            inst=_MEMORY_CLI + " load --title {name}",
+            module=modules.MEMORY,
         ),
         Tool(
             name="search_memory",
@@ -276,6 +402,8 @@ def _build_memory_tools(memories: MemoryStore) -> list[Tool]:
                 "required": [],
             },
             func=search,
+            inst=_MEMORY_CLI + " search [--query {query}]",
+            module=modules.MEMORY,
         ),
     ]
 
@@ -304,6 +432,8 @@ def _build_load_skill(config: Config) -> Tool | None:
             "required": ["name"],
         },
         func=_load_skill,
+        inst=_SKILLS_CLI + " [--root {root}] show {name} [--file {file}]",
+        module=modules.SKILLS,
     )
 
 
@@ -337,7 +467,8 @@ class ToolRegistry:
         # a tool opts into Stop by declaring a `cancel` parameter on its func
         # (run_command does); the rest get the exact same call as before
         self._cancelable = {
-            name: "cancel" in inspect.signature(t.func).parameters for name, t in self._tools.items()
+            name: t.func is not None and "cancel" in inspect.signature(t.func).parameters
+            for name, t in self._tools.items()
         }
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -345,6 +476,12 @@ class ToolRegistry:
 
     def names(self) -> list[str]:
         return list(self._tools)
+
+    def tool(self, name: str) -> Tool | None:
+        """One tool's definition (its statement, guard and fallback), for callers
+        that need the wiring rather than a call — the statement tests, the
+        session's schema export."""
+        return self._tools.get(name)
 
     def execute(
         self,
@@ -362,20 +499,7 @@ class ToolRegistry:
             }
         try:
             args = self._coerce_types(tool, args)
-            # subprocess tools run in a child process — but only where that is
-            # meaningful (see Tool.subprocess): frozen builds and remote
-            # workspaces fall back to the plain in-process call
-            use_child = (
-                tool.subprocess
-                and not getattr(sys, "frozen", False)
-                and isinstance(workspace, LocalWorkspace)
-            )
-            if use_child:
-                result = self._exec_subprocess(workspace, config, name, args, cancel)
-            elif self._cancelable.get(name):
-                result = tool.func(workspace, config, cancel=cancel, **args)
-            else:
-                result = tool.func(workspace, config, **args)
+            result = self._invoke(workspace, config, tool, args, cancel)
         except TypeError as e:
             result = {"content": render("errors/invalid_arguments.md", error=e), "error": True}
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
@@ -385,88 +509,63 @@ class ToolRegistry:
         result.setdefault("diff", "")
         return result
 
-    def _exec_subprocess(
+    def _invoke(
         self,
         workspace: Workspace,
         config: Config,
-        name: str,
+        tool: Tool,
         args: dict[str, Any],
         cancel: threading.Event | None,
     ) -> dict[str, Any]:
-        """Run the tool function in a child process (tools/cli.py).
+        """One call, in precedence order: the host's guard, the module's
+        statement, the host's own implementation (see Tool)."""
+        if tool.guard is not None:
+            refused = tool.guard(workspace, config, args)
+            if refused is not None:
+                return refused
+        if tool.inst is not None and module_ready(workspace, tool.module):
+            # the module performs the write; the host keeps the undo record, but
+            # only once the statement has actually overwritten something — a
+            # refused or failed edit must not leave a snapshot the UI could
+            # "restore" (the host's own implementation records after validating
+            # for the same reason)
+            remembered = _previous_content(workspace, args) if tool.snapshot else None
+            result = self._exec_statement(workspace, config, tool, args, cancel)
+            if remembered is not None and not result.get("error"):
+                workspace.snapshot(remembered[0], remembered[1])
+            return result
+        if tool.func is None:  # statement-only tool, module gone: say so, don't crash
+            return {"content": f"ERROR: tool {tool.name} has no implementation on this host", "error": True}
+        if self._cancelable.get(tool.name):
+            return tool.func(workspace, config, cancel=cancel, **args)
+        return tool.func(workspace, config, **args)
 
-        Same {content, error, diff} contract, one JSON serialization hop: args
-        go in as stdin JSON, the child's result dict comes back as stdout JSON.
-        Crash / timeout / cancel produce the same error-as-data dict the
-        in-process boundary would. Platform notes: pipes stay BINARY (no
-        text=True — Windows would translate newlines); the payload rides stdin
-        (no argv 32K limit, no console codepage); on POSIX the child gets its
-        own session/process group so the tree kill cannot take the agent down.
-        """
-        payload = json.dumps(
-            {
-                "name": name,
-                "args": args,
-                "workspace_root": str(workspace.root),
-                "mode": config.mode,
-                "read_max_chars": config.read_max_chars,
-                "protected": [str(p) for p in workspace.protected()],
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        # -m resolves `agent` via cwd; parents[2] is the repo root
-        repo_root = Path(__file__).resolve().parents[2]
-        env = {**os.environ, "PYTHONUTF8": "1"}  # child tracebacks in utf-8 too
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "agent.tools.cli"],
-            cwd=str(repo_root),
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=os.name == "posix",
-        )
-        out: list[bytes] = []
-        err: list[bytes] = []
-        # drain threads start BEFORE the stdin write: a child blocked writing
-        # stdout while we block writing stdin would deadlock both pipes
-        readers = [
-            threading.Thread(target=_drain, args=(proc.stdout, out), daemon=True),
-            threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True),
-        ]
-        for t in readers:
-            t.start()
+    def _exec_statement(
+        self,
+        workspace: Workspace,
+        config: Config,
+        tool: Tool,
+        args: dict[str, Any],
+        cancel: threading.Event | None,
+    ) -> dict[str, Any]:
+        """Run one tool statement: render -> the statement's transport -> the
+        module's envelope (tools/inst.py owns both translations, so the model's
+        argument values arrive at the service byte-for-byte whichever transport
+        carried the line). Which transport that is — and which host placeholders
+        the template gets — is the module's own kind: a daemon module is spoken
+        to on the workspace's machine, a CLI module on the app host."""
         try:
-            proc.stdin.write(payload)
-            proc.stdin.close()
-        except OSError:
-            pass  # child died early; its stderr surfaces below
-        deadline = time.monotonic() + config.command_timeout
-        code: int | None = None
-        while True:
-            if cancel is not None and cancel.is_set():
-                _kill_tree(proc)
-                return {"content": "ERROR: tool call canceled", "error": True}
-            try:
-                code = proc.wait(timeout=0.1)
-                break
-            except subprocess.TimeoutExpired:
-                if time.monotonic() > deadline:
-                    _kill_tree(proc)
-                    return {
-                        "content": f"ERROR: tool timed out after {config.command_timeout}s",
-                        "error": True,
-                    }
-        for t in readers:
-            t.join(timeout=5)
+            statement = rendezvous.prepare(tool.module, workspace, config)
+            command = inst.render(tool.inst, args, vars=statement.vars, defaults=tool.defaults or {})
+        except rendezvous.RendezvousError as e:
+            return {"content": f"ERROR: {e}", "error": True}
+        except InstError as e:
+            return {"content": render("errors/invalid_arguments.md", error=e), "error": True}
         try:
-            return json.loads(b"".join(out).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            tail = b"".join(err).decode("utf-8", "replace")[-2000:]
-            return {
-                "content": f"ERROR: tool subprocess crashed (exit {code}): {tail}",
-                "error": True,
-            }
+            result = statement.runner.run(command, config.command_timeout, cancel=cancel)
+        except TransportError as e:
+            return failure_envelope(e, timeout_seconds=config.command_timeout)
+        return inst.unwrap(result, service=f"the {tool.module} service")
 
     @staticmethod
     def _coerce_types(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:

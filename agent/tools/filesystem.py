@@ -18,6 +18,50 @@ def _result(content: str, error: bool = False, diff: str = "") -> dict:
     return {"content": content, "error": error, "diff": diff}
 
 
+def _refuse_protected(workspace: Workspace, path: str, *, write: bool) -> dict | None:
+    """The host's own protected-path refusal, or None when it does not apply.
+
+    Protection is HOST POLICY, and it has to be checked on both faces of a file
+    tool because the workspace module's fence deliberately covers only some of
+    it: the fence refuses a mutation and hides a path from broad sweeps, but
+    still serves a path the caller names explicitly (that is its stated rule).
+    A read of the project's .clc is exactly the case it leaves open, so the
+    refusal lives here and both the in-process implementation and the statement
+    path (registry.Tool.guard) ask the same function.
+    """
+    try:
+        p = workspace.resolve(path)
+    except (OSError, ValueError):
+        return None  # not a containment question: the implementation decides
+    if not workspace.is_protected(p):
+        return None
+    template = "errors/protected_write.md" if write else "errors/protected_read.md"
+    return _result(render(template, path=path), error=True)
+
+
+def guard_read(workspace: Workspace, _config: Config, args: dict) -> dict | None:
+    """registry guard: a protected path is not readable, named or not."""
+    return _refuse_protected(workspace, str(args.get("path", "")), write=False)
+
+
+def guard_write(workspace: Workspace, _config: Config, args: dict) -> dict | None:
+    """registry guard: a protected path is not writable/editable."""
+    return _refuse_protected(workspace, str(args.get("path", "")), write=True)
+
+
+def guard_grep(workspace: Workspace, _config: Config, args: dict) -> dict | None:
+    """registry guard: grep never searches a protected file — a walk skips it,
+    and naming it explicitly yields the same empty result the walk produces."""
+    path = str(args.get("path") or ".")
+    try:
+        p = workspace.resolve(path)
+    except (OSError, ValueError):
+        return None
+    if workspace.is_protected(p):
+        return _result("(no matches)")
+    return None
+
+
 def read_file(
     workspace: Workspace,
     config: Config,
@@ -28,9 +72,10 @@ def read_file(
 ) -> dict:
     limit_chars = max_chars or config.read_max_chars
     try:
+        refused = _refuse_protected(workspace, path, write=False)
+        if refused is not None:
+            return refused
         p: Path = workspace.resolve(path)
-        if workspace.is_protected(p):
-            return _result(render("errors/protected_read.md", path=path), error=True)
         # a directory reads as its entry listing; workspace.list raises
         # NotADirectoryError for a file or missing path
         try:
@@ -83,9 +128,10 @@ def _read_range(text: str, offset: int, limit: int, limit_chars: int) -> dict:
 
 def write_file(workspace: Workspace, config: Config, path: str, content: str) -> dict:
     try:
+        refused = _refuse_protected(workspace, path, write=True)
+        if refused is not None:
+            return refused
         p: Path = workspace.resolve(path)
-        if workspace.is_protected(p):
-            return _result(render("errors/protected_write.md", path=path), error=True)
         # capture the previous content (if any) to build a unified diff
         old = ""
         try:
@@ -103,7 +149,11 @@ def write_file(workspace: Workspace, config: Config, path: str, content: str) ->
         diff = _unified_diff(old, content, rel=rel)
         adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
         dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
-        summary = f"OK: wrote {p} (+{adds} -{dels} lines)" if old else f"OK: wrote {p} ({len(content)} chars)"
+        # the path is echoed AS GIVEN (never absolutized): the model asked for
+        # "notes.md" and is told about "notes.md". The workspace daemon's
+        # write_file says the same thing, so both faces of this tool read
+        # identically to the model (the module is the byte-level contract).
+        summary = f"OK: wrote {path} (+{adds} -{dels} lines)" if old else f"OK: wrote {path} ({len(content)} chars)"
         return _result(summary, diff=diff)
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
@@ -115,9 +165,10 @@ def edit_file(workspace: Workspace, config: Config, path: str, old_string: str, 
     """Targeted string replacement: one occurrence of old_string becomes new_string
     (tiny diffs keep the context small instead of re-emitting the whole file)."""
     try:
+        refused = _refuse_protected(workspace, path, write=True)
+        if refused is not None:
+            return refused
         p: Path = workspace.resolve(path)
-        if workspace.is_protected(p):
-            return _result(render("errors/protected_write.md", path=path), error=True)
         try:
             text = workspace.read(str(p))
         except FileNotFoundError:
@@ -147,7 +198,7 @@ def edit_file(workspace: Workspace, config: Config, path: str, old_string: str, 
         diff = _unified_diff(text, new, rel=rel)
         adds = sum(1 for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
         dels = sum(1 for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---"))
-        return _result(f"OK: edited {p} (+{adds} -{dels} lines)", diff=diff)
+        return _result(f"OK: edited {path} (+{adds} -{dels} lines)", diff=diff)
     except ValueError as e:
         return _result(f"ERROR: {e}", error=True)
     except Exception as e:  # noqa: BLE001

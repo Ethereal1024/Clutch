@@ -17,6 +17,7 @@ tool-calling 接口调用（DeepSeek 等均可），需要自备 API key。
 需要 Python ≥ 3.10 和 Node.js，包管理用 uv。
 
 ```bash
+git submodule update --init --recursive   # 四个工具模块（工具实现都在子模块里）
 pip install uv && uv sync    # 后端依赖
 cd ui && npm install         # 前端依赖
 export CLUTCH_API_KEY=...    # API key
@@ -151,22 +152,33 @@ sequenceDiagram
 ## 项目结构
 
 ```
-agent/                 后端
+agent/                 宿主后端（会话循环 + 模型调用 + registry + 传输层）
   core/                上下文管理（context.py）、输出解析（parse.py）、
                        终止条件（terminate.py）、错误处理（errors.py）
-  tools/               工具定义与本地执行：read_file / write_file / edit_file /
-                       grep / run_command / web_search / web_fetch
+  tools/               工具定义与调用：registry.py（inst 模板：一次调用 = 一条
+                       终端命令）、rendezvous.py（模块 daemon/CLI 寻址与启动）、
+                       transport.py、modules.py，以及各工具的宿主侧兜底实现
   llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）
   browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
-  server.py            HTTP + SSE 服务（会话入口）
+  server.py            HTTP + SSE 服务（会话入口，含 .clc 内容服务端点）
   supervisor.py        会话进程管理
-  skills/              按需加载的领域知识（随包发布 4 个；本机 dev-only 的写作
-                       技能不入库、也不进安装包）
 ui/                    Electron 前端（设置、SSH 隧道、LLM 反代）
+clutch-workspace/      文件工具模块（子模块）：read_file / grep / write_file /
+                       edit_file 与 undo，per-workspace daemon
+clutch-memory/         记忆模块（子模块）：save_memory / load_memory /
+                       search_memory，消费宿主的 .clc 内容服务
+clutch-websearch/      联网模块（子模块）：web_search / web_fetch，自带后端链
+clutch-skills/         技能模块（子模块）：load_skill 与技能库（随包发布 4 个，
+                       本机 dev-only 的写作技能不入库、也不进安装包）
 eval/                  评测场景（落地页 / 修 bug / 重构）
 tests/                 测试
 scripts/               打包与构建脚本
 ```
+
+四个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
+宿主不 import 它们的代码，只依赖它们发布的接口（HTTP 表面或 CLI 的 stdout 契约）：
+`clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起。删掉任何一个模块，
+宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响。
 
 ## 测试
 
@@ -177,10 +189,15 @@ uv run python -m tests.server_test      # HTTP + SSE 端到端
 uv run python -m tests.lazy_check       # 历史分页与惰性加载
 uv run python -m tests.supervisor_test  # 会话生命周期与跨进程锁
 uv run python -m tests.transport_test   # 传输层与远程工作区往返
+uv run python -m tests.rendezvous_test  # 模块 daemon/CLI 寻址、兜底与权限围栏
+uv run python -m tests.tools_inst_test  # 工具调用的命令契约（--live 走真实模块）
 uv run python -m tests.websearch_test   # web_search / web_fetch（--live 走真实网络）
 uv run python -m tests.ui_fonts_check   # 字体/图标跨平台一致（含 mermaid 标签字体）
 uv run python -m eval.harness           # 三个评测场景
 ```
+
+模块自己的套件在模块目录里跑：`cd clutch-skills && python3 -m pytest`（memory /
+websearch 同理）。
 
 ## 安全
 

@@ -52,6 +52,30 @@ class TransportError(RuntimeError):
         self.aborted = aborted
 
 
+def failure_envelope(err: TransportError, *, timeout_seconds: float) -> dict[str, Any]:
+    """One rendering of a transport failure as the model's envelope.
+
+    A transport verdict is not the command's: an abort is the user's Stop, a
+    timeout is the budget, anything else means the command never ran. Every
+    caller that turns one into a tool result (run_command, the statement layer)
+    asks here, so the model reads the same prose wherever the command came from.
+    """
+    from ..prompts import render  # local: the transport stays a leaf module
+
+    if err.aborted:
+        return {"content": render("errors/command_aborted.md"), "error": True}
+    if err.timeout:
+        return {
+            "content": render(
+                "errors/command_timeout.md",
+                seconds=f"{timeout_seconds:.0f}s",
+                hint=render("errors/interactive_hint.md"),
+            ),
+            "error": True,
+        }
+    return {"content": render("errors/execution_failed.md", error=err), "error": True}
+
+
 class Transport(ABC):
     @abstractmethod
     def run(

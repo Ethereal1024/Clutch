@@ -31,6 +31,7 @@ from agent.events import (
     event_to_json,
 )
 from agent.skills import load_skill_library
+from agent.tools import inst, modules, rendezvous
 from agent.tools.registry import ToolRegistry, build_default_tools
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
@@ -42,9 +43,9 @@ PY = "python" if os.name == "nt" else "python3"
 
 
 def check_skills(config: Config) -> None:
-    # 7. skills: catalog + load_skill
-    lib = load_skill_library(Path(__file__).resolve().parents[1] / "agent" / "skills")
-    check(len(lib.skills) >= 1, "skill library loads at least one skill")
+    # 7. skills: the host's catalog (the fallback face) + the statement it drives
+    lib = load_skill_library(config.skills_dir)
+    check(len(lib.skills) >= 1, f"skill library loads at least one skill (from {config.skills_dir})")
     first = lib.names()[0]
     check(lib.get(first) is not None and bool(lib.get(first).content), "skill content retrievable by name")
     check(lib.get("no-such-skill") is None, "unknown skill name returns None")
@@ -56,15 +57,31 @@ def check_skills(config: Config) -> None:
     check("Available skills (call load_skill" not in sys_off, "no catalog when skills disabled")
     check("load_skill" not in ToolRegistry(build_default_tools(disabled)).names(), "no load_skill tool when disabled")
 
+    reg = ToolRegistry(build_default_tools(config))
+    tool = reg.tool("load_skill")
+    assert tool is not None and tool.inst is not None  # the registry always carries one
+    check(first in tool.parameters["properties"]["name"]["enum"], "the tool's enum carries the catalog")
+
+    # The call the model makes is one terminal command: the module's CLI on the
+    # APP host. Its bytes are pinned here; that the module ANSWERS (a skill, or
+    # the 404 verdict for an unknown name) is pinned by clutch-skills' own suite
+    # and driven live by tests/tools_inst_test --live.
+    if rendezvous.available(modules.SKILLS):
+        line = inst.render(tool.inst, {"name": first}, vars=rendezvous.cli_vars(modules.SKILLS, config))
+        check("clutch_skills" in line and "show" in line, "load_skill renders the skills CLI")
+        check(first in line and "--envelope" in line, "the statement carries the skill and the envelope flag")
+    # the host's own face (the module gone) still serves the file and refuses an
+    # escape out of the skill directory
     with tempfile.TemporaryDirectory() as stmp:
-        sws = LocalWorkspace(stmp)
-        reg = ToolRegistry(build_default_tools(config))
-        r = reg.execute(sws, config, "load_skill", {"name": first})
-        check(not r["error"] and bool(r.get("content")), "load_skill returns skill content")
-        r = reg.execute(sws, config, "load_skill", {"name": "no-such-skill"})
-        check(r["error"], "load_skill rejects unknown skill")
-        r = reg.execute(sws, config, "load_skill", {"name": first, "file": "../escape.txt"})
-        check(r["error"], "load_skill blocks path escape from skill dir")
+        ws = LocalWorkspace(stmp)
+        # a bare func call is the fallback, before the registry's error/diff
+        # normalization, so success is an ABSENT error key here
+        served = tool.func(ws, config, first)
+        check(not served.get("error") and bool(served["content"]), "load_skill (host face) returns skill content")
+        bad = tool.func(ws, config, "no-such-skill")
+        check(bad["error"], "load_skill (host face) rejects an unknown skill")
+        escaped = tool.func(ws, config, first, "../escape.txt")
+        check(escaped["error"], "load_skill (host face) blocks a path escape")
 
 
 def check_permission() -> None:
@@ -323,15 +340,34 @@ def check_project_file(config: Config) -> None:
         )
         check(len(reloaded.memories.search("flask")) == 1, "memory search matches content")
 
-        # memory tools (registered when a MemoryStore is provided)
+        # memory tools (registered when a MemoryStore is provided). The model's
+        # call is one terminal command: the memory module's CLI on the APP host
+        # (its subject is the project file), pointed at the .clc content
+        # endpoint this process publishes. Its bytes are pinned here; that the
+        # module ANSWERS (a hit, or the "no such memory" verdict) is pinned by
+        # clutch-memory's own suite and driven live by tests/tools_inst_test.
         ws = LocalWorkspace(str(ptmp))
         mreg = ToolRegistry(build_default_tools(config, memories=reloaded.memories))
-        r = mreg.execute(ws, config, "load_memory", {"name": "stack is flask"})
-        check(not r["error"] and "Flask" in r["content"], "load_memory returns content")
-        r = mreg.execute(ws, config, "search_memory", {"query": "theme"})
-        check(not r["error"] and "dark theme" in r["content"], "search_memory finds by title")
-        r = mreg.execute(ws, config, "save_memory", {"title": "new fact", "content": "keep it"})
-        check(not r["error"], "save_memory tool works")
+        mvars = rendezvous.cli_vars(modules.MEMORY, config)
+        check(mvars.get("base") == f"http://127.0.0.1:{config.port}", "the memory CLI is pointed at this process")
+        for name, sample, carried in (
+            ("save_memory", {"title": "new fact", "content": "keep it"}, "keep it"),
+            ("load_memory", {"name": "stack is flask"}, "stack is flask"),
+            ("search_memory", {"query": "theme"}, "theme"),
+        ):
+            tool = mreg.tool(name)
+            assert tool is not None and tool.inst is not None  # the registry always carries one
+            line = inst.render(tool.inst, sample, vars=mvars)
+            check("memory.py" in line and "--envelope" in line, f"{name} renders the memory CLI")
+            check("--endpoint" in line and str(config.port) in line, f"{name} names the .clc endpoint")
+            check(carried in line, f"{name} carries the model's argument verbatim")
+        # the host's own face (the module gone) still serves the store
+        r = mreg.tool("load_memory").func(ws, config, name="stack is flask")
+        check(not r.get("error") and "Flask" in r["content"], "load_memory (host face) returns content")
+        r = mreg.tool("search_memory").func(ws, config, query="theme")
+        check(not r.get("error") and "dark theme" in r["content"], "search_memory (host face) finds by title")
+        r = mreg.tool("save_memory").func(ws, config, title="new fact", content="keep it")
+        check(not r.get("error"), "save_memory (host face) works")
         check(reloaded.memories.get("new fact") is not None, "save_memory updated the store")
         # without a store there are no memory tools
         check(

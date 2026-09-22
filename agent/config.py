@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .tools import modules
+
 # Reasoning effort knob (extra_body thinking.reasoning_effort); ignored by models without thinking
 REASONING_EFFORT_LEVELS = ("low", "medium", "max")
 
@@ -112,9 +114,12 @@ class Config:
     # Runtime
     port: int = 8890
     host: str = "127.0.0.1"  # bind address; 0.0.0.0 exposes the API to other devices
-    # Skills: catalog in the system prompt; loaded on demand via load_skill
+    # Skills: catalog in the system prompt; loaded on demand via load_skill.
+    # The library belongs to the clutch-skills module, which ships its own
+    # (bundled) root next to the package; the host only reads that directory and
+    # servers it through the module's daemon (see agent/tools/rendezvous.py).
     enable_skills: bool = True
-    skills_dir: Path = Path(__file__).resolve().parent / "skills"
+    skills_dir: Path = field(default_factory=lambda: modules.module_dir(modules.SKILLS) / "skills")
     # Permission: confirm risky actions with the user, not a sandbox
     non_interactive: bool = False  # auto-allow (used by eval harness / unattended runs)
 

@@ -22,7 +22,7 @@ from pathlib import Path
 from ..config import Config
 from ..prompts import render
 from .localshell import split_command
-from .transport import TransportError
+from .transport import TransportError, failure_envelope
 from .workspace import Workspace
 
 # ---- chat-mode read-only classification ----
@@ -257,19 +257,8 @@ def run_command(workspace: Workspace, config: Config, command: str, cancel: thre
     try:
         r = workspace.run(command, config.command_timeout, cancel=cancel)
     except TransportError as e:
-        if e.aborted:
-            # the user pressed Stop while the command ran; the tree is dead
-            return {"content": render("errors/command_aborted.md"), "error": True}
-        if e.timeout:
-            return {
-                "content": render(
-                    "errors/command_timeout.md",
-                    seconds=f"{config.command_timeout:.0f}s",
-                    hint=render("errors/interactive_hint.md"),
-                ),
-                "error": True,
-            }
-        return {"content": render("errors/execution_failed.md", error=e), "error": True}
+        # one mapping, shared with the statement layer (transport.failure_envelope)
+        return failure_envelope(e, timeout_seconds=config.command_timeout)
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
         return {"content": render("errors/execution_failed.md", error=e), "error": True}
 

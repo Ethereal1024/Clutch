@@ -37,12 +37,9 @@ docs/
 /verify_win_artifact.py
 /watch_ci.sh
 
-# dev-only skills: usable by a local `uv run` agent, but neither committed nor
-# shipped — scripts/build-server-bundle.sh packages an explicit skill whitelist
-/agent/skills/humanize-writing/
-/agent/skills/humanizer-document-zh/
-/agent/skills/humanizer-zh/
-/agent/skills/wudao-humanize/
+# dev-only skills used to live here (/agent/skills/<name>/), gitignored; the
+# library has moved into the clutch-skills module, which ignores its own
+# local-only skills (see clutch-skills/.gitignore)
 
 # local scratch scripts/logs from ad-hoc testing sessions
 /scratch-*.py
