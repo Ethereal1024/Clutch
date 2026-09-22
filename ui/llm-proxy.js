@@ -1,8 +1,9 @@
-// Client-side LLM reverse proxy (Electron main process): accepts
-// OpenAI-compatible /chat/completions, injects the client API key, forwards to
-// the upstream provider, and streams the response back. The remote backend
-// reaches it via the SSH -R tunnel (no remote internet/key needed). Honors the
-// machine's HTTP proxy and surfaces the real upstream error.
+// Client-side LLM reverse proxy (Electron main process): accepts the OpenAI
+// wire protocols the client can speak (/chat/completions and /responses),
+// injects the client API key, forwards to the upstream provider, and streams
+// the response back. The remote backend reaches it via the SSH -R tunnel (no
+// remote internet/key needed). Honors the machine's HTTP proxy and surfaces the
+// real upstream error.
 const http = require("http");
 const https = require("https");
 const os = require("os");
@@ -87,9 +88,18 @@ function joinUpstream(upstream, reqUrl) {
   return u.href;
 }
 
+// Which request paths this proxy serves: the two OpenAI wire protocols the
+// client can be configured for. The SDK appends the resource to the configured
+// base URL, so the path ends with the resource name however the base URL is
+// shaped (/v1/responses, /api/paas/v4/chat/completions, …).
+function isLlmPath(reqUrl) {
+  const path = (reqUrl || "").split("?")[0];
+  return path.endsWith("/chat/completions") || path.endsWith("/responses");
+}
+
 function startLlmProxy(upstream) {
   server = http.createServer((req, res) => {
-    if (req.method !== "POST" || !req.url.includes("/chat/completions")) {
+    if (req.method !== "POST" || !isLlmPath(req.url)) {
       res.writeHead(404).end("not found");
       return;
     }
@@ -150,4 +160,4 @@ function stopLlmProxy() {
   }
 }
 
-module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, getUpstream, getApiKey };
+module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, isLlmPath, getUpstream, getApiKey };

@@ -40,6 +40,19 @@ def _clean_provider_message(raw: str, status: int | None) -> str:
     return f"{tidied} ({', '.join(extra)})" if extra else tidied
 
 
+def is_context_overflow(*texts: str | None) -> bool:
+    """True when a provider failure says the history no longer fits its window.
+
+    Shared by BOTH wire protocols, because it is the one failure the loop
+    answers by compacting and retrying instead of aborting the run. Providers
+    word it differently — a chat-completions HTTP 400 whose message says
+    "maximum context length", a failed Responses turn carrying
+    code "context_length_exceeded" — so the check keys on the word itself
+    rather than on a code, and every caller sees the same verdict.
+    """
+    return any("context" in t.lower() for t in texts if t)
+
+
 @dataclass
 class LlmError(Exception):
     code: str = "unknown"
@@ -69,7 +82,7 @@ class LlmError(Exception):
             return LlmError(code="connection", retryable=True, message=str(e))
         if isinstance(e, openai.APIStatusError):
             status = e.status_code
-            if status == 400 and "context" in str(e).lower():
+            if status == 400 and is_context_overflow(str(e)):
                 return LlmError(
                     code="context_window_exceeded",
                     status=400,

@@ -918,8 +918,15 @@ def main() -> None:
     # 13. LLM endpoint configurability: one flat settings surface + legacy migration
     from agent.config import flatten_settings
     from agent.llm import create_llm_client
+    from agent.llm.llm_clients import OpenaiLlmClient, OpenaiResponsesLlmClient
 
-    flat = {"base_url": "https://x.example/v1", "model": "m1", "api_key": "k1", "reasoning_effort": "low"}
+    flat = {
+        "base_url": "https://x.example/v1",
+        "model": "m1",
+        "api_key": "k1",
+        "reasoning_effort": "low",
+        "api_protocol": "responses",
+    }
     check(flatten_settings(dict(flat)) == flat, "flat settings read through verbatim")
     check(
         flatten_settings(
@@ -939,6 +946,17 @@ def main() -> None:
         model="glm-5.3",
     )
     check(client.model == "glm-5.3" and client.api_key == "sk-test", "factory builds a client from url+key+model")
+    check(type(client) is OpenaiLlmClient, "unset api_protocol = the chat-completions client")
+    check(
+        type(create_llm_client(api_key="k", base_url="u", model="m", protocol="responses"))
+        is OpenaiResponsesLlmClient,
+        "api_protocol=responses builds the responses client",
+    )
+    try:
+        create_llm_client(api_key="k", base_url="u", model="m", protocol="carrier-pigeon")
+        check(False, "factory rejects an unknown protocol")
+    except RuntimeError as e:
+        check("unknown LLM protocol" in str(e), "factory rejects an unknown protocol")
     try:
         create_llm_client(api_key="", base_url="u", model="m")
         check(False, "factory rejects missing api_key")

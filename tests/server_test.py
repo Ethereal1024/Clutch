@@ -153,6 +153,16 @@ def _saved_endpoint() -> tuple[str, str]:
         return "", ""
 
 
+def _saved_knob(name: str) -> str | None:
+    """A knob's value in the PERSISTED settings store (None = not stored), read
+    through the server's own loader — the test patches it onto a temp file, so
+    this is the same view the next server start would see."""
+    import agent.server as server_mod
+    from agent.config import flatten_settings
+
+    return flatten_settings(server_mod.load_settings()).get(name) or None
+
+
 def main() -> int:
     # isolate settings persistence to a temp file so the test never touches ~/.clutch
     from unittest import mock
@@ -249,6 +259,22 @@ def _run_server_test() -> int:
         st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": ""})
         check(st == 200, "empty reasoning_effort accepted (clears the knob)")
         check(config.llm_reasoning_effort is None, "empty reasoning_effort clears live config")
+
+        # 2d3. api_protocol knob: same shape (applied live, validated, clearable)
+        check(json.loads(http_get(f"{base_url}/api/settings")[1]).get("api_protocol") == "",
+              "GET reports an unset api_protocol")
+        st, body = http_post(f"{base_url}/api/settings", {"api_protocol": "responses"})
+        check(st == 200, "api_protocol save accepted")
+        check(config.llm_api_protocol == "responses", "api_protocol applied to live config")
+        st, body = http_get(f"{base_url}/api/settings")
+        check(json.loads(body).get("api_protocol") == "responses", "GET reports the saved api_protocol")
+        check(_saved_knob("api_protocol") == "responses", "api_protocol persisted to the settings file")
+        st, body = http_post(f"{base_url}/api/settings", {"api_protocol": "carrier-pigeon"})
+        check(st == 400, "invalid api_protocol rejected")
+        st, body = http_post(f"{base_url}/api/settings", {"api_protocol": ""})
+        check(st == 200, "empty api_protocol accepted (clears the knob)")
+        check(config.llm_api_protocol is None, "empty api_protocol clears live config")
+        check(_saved_knob("api_protocol") is None, "cleared api_protocol leaves the settings file")
 
         # partial save: sending only the model keeps the saved base_url
         st, body = http_post(f"{base_url}/api/settings", {"model": "glm-5.3"})

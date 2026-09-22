@@ -31,7 +31,9 @@ npm start                    # 启动界面，后端由应用自动拉起
 `.clc` 文件，工作目录就是文件所在目录，重新打开即恢复整个对话。
 
 模型、接口地址和 key 在界面的设置弹窗里填，也可以用环境变量 `CLUTCH_MODEL`、
-`CLUTCH_BASE_URL`、`CLUTCH_API_KEY` 提供。
+`CLUTCH_BASE_URL`、`CLUTCH_API_KEY` 提供。默认走 chat completions；同一个 base URL
+同时提供 Responses API 的服务（如 DeepSeek 的 Codex 兼容端点）可在设置里把
+「API protocol」切到 responses，工具调用与思考流不变。
 
 联网搜索工具 `web_search` / `web_fetch` 开箱即用（内置 Bing RSS 免 key 后端）；可选
 后端优先：`CLUTCH_TAVILY_API_KEY` 启用 Tavily，`CLUTCH_SEARXNG_URL` 指向自建 SearXNG。

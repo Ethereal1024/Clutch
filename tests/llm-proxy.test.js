@@ -9,7 +9,7 @@
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const { joinUpstream, getUpstream, getApiKey } = require("../ui/llm-proxy");
+const { joinUpstream, isLlmPath, getUpstream, getApiKey } = require("../ui/llm-proxy");
 const { check, summary } = require("./harness");
 
 // 1. deepseek-style upstream without a path: /v1 is stripped, URL is correct
@@ -38,6 +38,21 @@ check(
   joinUpstream("https://open.bigmodel.cn/api/paas/v4", "/models") ===
     "https://open.bigmodel.cn/api/paas/v4/models",
   "non-v1 path appended to upstream"
+);
+
+// 4b. the proxy serves both wire protocols (and only those): the responses
+// client must reach the upstream through the tunnel too, or the SSH-mode
+// responses setup 404s from our own proxy
+check(isLlmPath("/v1/chat/completions"), "chat completions path is served");
+check(isLlmPath("/api/paas/v4/chat/completions"), "chat path served under a provider prefix");
+check(isLlmPath("/v1/responses"), "responses path is served");
+check(isLlmPath("/responses?stream=true"), "query string does not hide the path");
+check(!isLlmPath("/v1/models"), "other API paths are still refused");
+check(!isLlmPath("/v1/chat/completions/extra"), "only the exact resource path is served");
+check(
+  joinUpstream("https://open.bigmodel.cn/api/paas/v4", "/v1/responses") ===
+    "https://open.bigmodel.cn/api/paas/v4/responses",
+  "responses request joins the upstream the same way"
 );
 
 // 5. getUpstream(): env wins, then the settings file, then the deepseek default

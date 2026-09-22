@@ -1547,6 +1547,20 @@ for (const [v, t] of [["", "default"], ["low", "low"], ["medium", "medium"], ["m
   reasoningEffortInput.appendChild(o);
 }
 reasoningEffortInput.value = "";
+// wire protocol: empty = the endpoint's default (chat completions); providers
+// serving the Responses API on the same base URL need the explicit choice
+const apiProtocolInput = customSelect($("#api-protocol-input"));
+for (const [v, t] of [["", "chat completions (default)"], ["responses", "responses API"]]) {
+  const o = document.createElement("option");
+  o.value = v;
+  o.textContent = t;
+  apiProtocolInput.appendChild(o);
+}
+apiProtocolInput.value = "";
+// "chat" in the settings file IS the default choice, so show it as such
+function setApiProtocol(v) {
+  apiProtocolInput.value = v === "chat" ? "" : v || "";
+}
 const llmUrlInput = $("#llm-url-input");
 const profileSelect = customSelect($("#llm-profile-select"));
 
@@ -1588,6 +1602,7 @@ async function applyLlmProfile(name) {
   llmUrlInput.value = p.base_url || "";
   modelInput.value = p.model || "";
   reasoningEffortInput.value = p.reasoning_effort || "";
+  setApiProtocol(p.api_protocol);
   localStorage.setItem("clutch_llm_active", name);
   renderLlmProfiles(name);
   await pushSettings();
@@ -1609,6 +1624,7 @@ function saveProfileAs(name, oldName) {
     model: modelInput.value.trim(),
     api_key: keyInput.value.trim(),
     reasoning_effort: reasoningEffortInput.value.trim(),
+    api_protocol: apiProtocolInput.value.trim(),
   };
   saveLlmProfiles(profiles);
   localStorage.setItem("clutch_llm_active", name);
@@ -1643,6 +1659,7 @@ function openLlmProfileEditor(name) {
   keyInput.value = (p && p.api_key) || "";
   modelInput.value = (p && p.model) || "";
   reasoningEffortInput.value = (p && p.reasoning_effort) || "";
+  setApiProtocol(p && p.api_protocol);
   clearLlmProfileError();
   llmProfileModal.classList.remove("hidden", "closing");
   profileNameInput.focus();
@@ -1715,8 +1732,9 @@ async function pushSettings() {
   const payload = {
     base_url: llmUrl,
     model,
-    // always sent: empty value clears the knob on the backend
+    // always sent: empty values clear the knobs on the backend
     reasoning_effort: reasoningEffortInput.value.trim(),
+    api_protocol: apiProtocolInput.value.trim(),
   };
   if (key) payload.api_key = key;
   try {
@@ -2776,6 +2794,7 @@ function storedLlmConfig() {
         model: p.model || "",
         api_key: p.api_key || "",
         reasoning_effort: p.reasoning_effort || "",
+        api_protocol: p.api_protocol || "",
       };
     }
   } catch (e) {}
@@ -2783,7 +2802,13 @@ function storedLlmConfig() {
     const legacy = JSON.parse(localStorage.getItem("clutch_llm") || "null");
     const key = localStorage.getItem("clutch_api_key") || "";
     if (legacy && (legacy.base_url || legacy.model || key)) {
-      return { base_url: legacy.base_url || "", model: legacy.model || "", api_key: key, reasoning_effort: "" };
+      return {
+        base_url: legacy.base_url || "",
+        model: legacy.model || "",
+        api_key: key,
+        reasoning_effort: "",
+        api_protocol: "",
+      };
     }
   } catch (e) {}
   return null;

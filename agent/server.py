@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import browsing
 from .base import BaseServer, Broadcaster, RunState
-from .config import REASONING_EFFORT_LEVELS, Config, flatten_settings
+from .config import API_PROTOCOLS, REASONING_EFFORT_LEVELS, Config, flatten_settings
 from .core.project_lock import ProjectLock, ProjectOpenConflict
 from .events import (
     Event,
@@ -314,21 +314,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings_post(self) -> None:
         """Save the flat LLM settings (base_url / model / api_key /
-        reasoning_effort) and apply them to the live server config."""
+        reasoning_effort / api_protocol) and apply them to the live server
+        config."""
         body = self._read_body()
         if body is None:
             return self._json({"error": "bad json body"}, status=400)
 
-        reasoning_effort = (body.get("reasoning_effort") or "").strip()
-        if reasoning_effort and reasoning_effort not in REASONING_EFFORT_LEVELS:
-            return self._json(
-                {"error": f"reasoning_effort must be one of {', '.join(REASONING_EFFORT_LEVELS)}"},
-                status=400,
-            )
+        # the two "knobs" share one shape: a bare string, empty = back to the
+        # provider/protocol default (stored as None, dropped from the file)
+        knobs = {}
+        for field, allowed in (
+            ("reasoning_effort", REASONING_EFFORT_LEVELS),
+            ("api_protocol", API_PROTOCOLS),
+        ):
+            value = (body.get(field) or "").strip()
+            if value and value not in allowed:
+                return self._json({"error": f"{field} must be one of {', '.join(allowed)}"}, status=400)
+            knobs[field] = value or None
         base_url = (body.get("base_url") or "").strip()
         model = (body.get("model") or "").strip()
         api_key = (body.get("api_key") or "").strip()
-        if not any((base_url, model, api_key)) and "reasoning_effort" not in body:
+        if not any((base_url, model, api_key)) and not set(knobs) & set(body):
             return self._json({"error": "nothing to save"}, status=400)
 
         with self._state.lock:
@@ -338,9 +344,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._cfg.base_url = base_url
             if model:
                 self._cfg.model = model
-            # empty value clears the knob (provider default); None = unset
+            # a knob present in the body is applied (empty clears it)
             if "reasoning_effort" in body:
-                self._cfg.llm_reasoning_effort = reasoning_effort or None
+                self._cfg.llm_reasoning_effort = knobs["reasoning_effort"]
+            if "api_protocol" in body:
+                self._cfg.llm_api_protocol = knobs["api_protocol"]
         # flatten migrates legacy profile maps but only knows the LLM fields
         saved = flatten_settings(load_settings())
         if base_url:
@@ -349,11 +357,13 @@ class Handler(BaseHTTPRequestHandler):
             saved["model"] = model
         if api_key:
             saved["api_key"] = api_key
-        if "reasoning_effort" in body:
-            if reasoning_effort:
-                saved["reasoning_effort"] = reasoning_effort
+        for field, value in knobs.items():
+            if field not in body:
+                continue
+            if value:
+                saved[field] = value
             else:
-                saved.pop("reasoning_effort", None)  # empty = clear the knob
+                saved.pop(field, None)  # empty = clear the knob
         save_settings(saved)
         self._json({"status": "ok"})
 
@@ -365,6 +375,7 @@ class Handler(BaseHTTPRequestHandler):
                 "base_url": self._cfg.base_url or saved.get("base_url", ""),
                 "model": self._cfg.model or saved.get("model", ""),
                 "reasoning_effort": self._cfg.llm_reasoning_effort or saved.get("reasoning_effort", ""),
+                "api_protocol": self._cfg.llm_api_protocol or saved.get("api_protocol", ""),
                 "has_api_key": bool(self._state.api_key or self._cfg.api_key or saved.get("api_key")),
             }
         )
@@ -848,9 +859,11 @@ def main() -> int:
         config.model = saved.get("model", "")
     # API key: env > saved settings > config default
     config.api_key = config.api_key or saved.get("api_key")
-    # reasoning_effort: env-less; saved settings only
+    # reasoning_effort / api_protocol: env-less; saved settings only
     if not config.llm_reasoning_effort:
         config.llm_reasoning_effort = saved.get("reasoning_effort") or None
+    if not config.llm_api_protocol:
+        config.llm_api_protocol = saved.get("api_protocol") or None
     api_key = config.api_key
     if args.base_url and not api_key:
         # the client-side proxy injects the real key; the server only needs a
@@ -871,7 +884,8 @@ def main() -> int:
     # resolved LLM endpoint, for diagnosing which endpoint a session targets;
     # the label keeps the line from ever matching the port banner regex
     print(
-        f"[clutch-server] LLM: model={config.model} base_url={config.base_url}",
+        f"[clutch-server] LLM: model={config.model} base_url={config.base_url} "
+        f"protocol={config.llm_api_protocol or 'chat'}",
         flush=True,
     )
     print(f"[clutch-server] http://127.0.0.1:{bound_port}  (API only; start the UI separately)", flush=True)

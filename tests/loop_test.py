@@ -24,6 +24,7 @@ from agent.events import (
     ToolResultEvent,
     UserMessageEvent,
 )
+from agent.llm.client import LlmError
 from agent.loop import Agent
 from agent.tools.registry import ToolRegistry, build_default_tools
 from agent.tools.workspace import LocalWorkspace, Workspace, shq
@@ -928,6 +929,52 @@ def main() -> int:
                 bool(aborted_result) and "Stop" in aborted_result[-1].content,
                 "the killed command says it was aborted by Stop",
             )
+
+    # 17. window overflow: the loop compacts the overflowing window and retries
+    #     the same turn once instead of aborting. Both wire protocols normalize
+    #     the provider's own wording onto context_window_exceeded for exactly
+    #     this path (see llm_client_test 1b / 5g.2); here it arrives as the
+    #     client contract raises it, through the loop's own LlmError mapping.
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        cfg = Config(llm_context_window_bytes=10_000_000)  # the byte trigger never fires: only the error does
+        log = LazyEventLog.in_memory()
+        log.append(UserMessageEvent(content="earlier task"))
+        log.append(AssistantMessageEvent(content="earlier answer " + "x" * 200))
+
+        class OverflowOnceLlm:
+            """Call 1 overflows; call 2 is the summarizer; call 3 is the retry."""
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.seen: list[list[dict[str, Any]]] = []
+
+            def stream(self, messages, tools=None):
+                self.calls += 1
+                self.seen.append(messages)
+                if self.calls == 1:
+                    raise LlmError(
+                        code="context_window_exceeded",
+                        message="This model's maximum context length is 128000 tokens",
+                    )
+                yield {"type": "text", "delta": "SUMMARY" if self.calls == 2 else "recovered"}
+                yield {"type": "finish", "reason": "stop", "tool_calls": []}
+
+        fake17 = OverflowOnceLlm()
+        agent = Agent(
+            llm=fake17,  # type: ignore[arg-type]
+            registry=ToolRegistry(build_default_tools(cfg)),
+            workspace=sb,
+            config=cfg,
+            log=log,
+        )
+        result = agent.run("t")
+        check(result == "recovered", "an overflowed turn compacts and continues")
+        check(fake17.calls == 3, "the turn was retried exactly once after the summary")
+        comps17 = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
+        check(len(comps17) == 1 and comps17[0].summary == "SUMMARY", "the overflow forced one compaction")
+        check(agent.log.cpr_start() > 0, "the window slid to the summary: the overflowed history is gone")
+        check("earlier answer" in str(fake17.seen[1]), "the summarizer saw the window that overflowed")
 
     print("\nall passed")
     return 0

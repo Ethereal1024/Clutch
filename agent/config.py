@@ -12,8 +12,13 @@ from pathlib import Path
 # Reasoning effort knob (extra_body thinking.reasoning_effort); ignored by models without thinking
 REASONING_EFFORT_LEVELS = ("low", "medium", "max")
 
+# Wire protocol of the configured endpoint: "chat" = POST /chat/completions (the
+# default; nearly every OpenAI-compatible endpoint speaks it), "responses" =
+# POST /responses (providers that serve both do so on the SAME base_url).
+API_PROTOCOLS = ("chat", "responses")
+
 # Persisted settings fields: flat, no provider presets
-_SETTING_FIELDS = ("base_url", "model", "api_key", "reasoning_effort")
+_SETTING_FIELDS = ("base_url", "model", "api_key", "reasoning_effort", "api_protocol")
 
 
 def flatten_settings(saved: dict) -> dict:
@@ -43,6 +48,10 @@ class Config:
     llm_retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
     # None = leave the request unset (server default); otherwise one of REASONING_EFFORT_LEVELS
     llm_reasoning_effort: str | None = None
+    # Which wire protocol the endpoint speaks; None = "chat" (the default).
+    # Like the reasoning knob it is env-less: it describes this endpoint
+    # pairing, which the settings surface already owns.
+    llm_api_protocol: str | None = None
     # model context window in BYTES (compaction compares against it)
     llm_context_window_bytes: int = 500_000
 

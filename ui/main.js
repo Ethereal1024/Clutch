@@ -266,6 +266,7 @@ if (!app.requestSingleInstanceLock()) {
       if (data && data.api_key) upd.api_key = data.api_key;
       // empty string clears the knob (provider default), undefined keeps it
       if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
+      if (data && data.api_protocol !== undefined) upd.api_protocol = data.api_protocol;
       const flat = Object.assign({}, cur, upd);
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, JSON.stringify(flat, null, 2), { mode: 0o600 });

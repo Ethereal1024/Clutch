@@ -43,7 +43,13 @@ Module._load = function (request, ...rest) {
   return origLoad.call(this, request, ...rest);
 };
 
-const CFG = { base_url: "https://api.example.com", model: "m1", api_key: "sk-test", reasoning_effort: "" };
+const CFG = {
+  base_url: "https://api.example.com",
+  model: "m1",
+  api_key: "sk-test",
+  reasoning_effort: "",
+  api_protocol: "responses",
+};
 
 async function main() {
   delete require.cache[require.resolve("../ui/main")];
@@ -61,6 +67,7 @@ async function main() {
   const onDisk = JSON.parse(fs.readFileSync(SETTINGS, "utf-8"));
   assert.strictEqual(onDisk.api_key, "sk-test", "healed file carries the key");
   assert.strictEqual(onDisk.base_url, "https://api.example.com", "healed file carries the upstream");
+  assert.strictEqual(onDisk.api_protocol, "responses", "healed file carries the wire protocol knob");
 
   // 2. existing healthy file -> untouched (manual edits preserved)
   fs.writeFileSync(SETTINGS, JSON.stringify({ base_url: "https://manual.example", custom: "keep" }));
