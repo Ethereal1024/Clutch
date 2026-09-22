@@ -78,6 +78,11 @@ class RunState:
         self.backend_mode: str = "local"  # "local" | "ssh"
         self.bridge_url: str | None = None
         self.remote_root: str | None = None  # initial browse root on the remote
+        # serializes .clc appends/in-place writes from the /api/clc* endpoints:
+        # the size-then-append offset handoff and the event log's
+        # note_bytes_written bookkeeping both need writes to be race-free.
+        # Host housekeeping — invisible to the endpoint contract.
+        self.clc_lock = threading.Lock()
 
     def build_workspace(self, root: str) -> Workspace:
         """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
