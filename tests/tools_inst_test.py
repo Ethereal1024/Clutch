@@ -169,6 +169,16 @@ def check_table(reg: ToolRegistry, cfg: Config) -> None:
         check(tool.func is not None, f"{name}: the host keeps its own implementation (R2)")
     check(reg.tool("nope") is None, "an unknown tool has no definition")
 
+    # R2 for the one thing that is DATA, not code: the library ships with the
+    # clutch-skills module, so a host that cannot see it (module not checked out
+    # / an empty root) loses the loader and keeps every other tool. The store is
+    # handed in for the same reason the real registry gets one — memory.py's
+    # tools exist only when a project is loaded; its file is never touched.
+    bare_cfg = Config(skills_dir=cfg.skills_dir / "no-such-library")
+    bare = ToolRegistry(build_default_tools(bare_cfg, memories=MemoryStore(str(cfg.skills_dir / "no-such.clc"))))
+    check("load_skill" not in bare.names(), "a missing skill library drops the loader, not the host")
+    check(sorted(bare.names()) == sorted(set(TABLE) - {"load_skill"}), "and every other tool is still there")
+
 
 # ------------------------------------------- 2. the daemon line (curl, frozen)
 
@@ -372,6 +382,16 @@ def check_guards_and_fallback(reg: ToolRegistry, cfg: Config) -> None:
             and r["diff"].replace("b.txt", "f") == host["diff"].replace("h.txt", "f"),
             "write_file degrades with its summary and diff",
         )
+        # the library itself belongs to clutch-skills, but the host still serves
+        # the file it read at session start when that module is gone
+        from agent.skills import load_skill_library
+
+        names = load_skill_library(cfg.skills_dir).names()
+        if names:
+            r, stub = _call(reg, ws, cfg, "load_skill", {"name": names[0]}, available=False)
+            check(stub.calls == [] and not r["error"] and bool(r["content"]), "load_skill degrades to the host's library")
+        else:
+            print(f"SKIP: no skills under {cfg.skills_dir}")
 
 
 # --------------------------------------- 6. the model's arguments themselves
