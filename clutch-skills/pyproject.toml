@@ -1,0 +1,32 @@
+[project]
+name = "clutch-skills"
+version = "0.1.0"
+description = "Standalone skill-library service: the catalog and one skill file at a time, served over loopback HTTP by a per-root daemon (stdlib only)."
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+
+[project.scripts]
+clutch-skills = "clutch_skills.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["clutch_skills"]
+
+# the bundled root sits next to the package (BUNDLED_ROOT = <package>.parent/"skills"),
+# so it lands at the wheel root
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "skills"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I"]
