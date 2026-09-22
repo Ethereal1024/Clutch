@@ -25,7 +25,11 @@ jobs:
   deb:
     runs-on: ubuntu-latest
     steps:
+      # the tool modules are submodules and the skills library now lives in one
+      # of them (clutch-skills), which the bundle ships whole
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -91,7 +95,10 @@ jobs:
     runs-on: macos-latest
     needs: deb
     steps:
+      # submodules: the bundled backend carries the skills library it ships
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -153,7 +160,10 @@ jobs:
     runs-on: windows-latest
     needs: deb
     steps:
+      # submodules: the bundled backend carries the skills library it ships
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -168,7 +178,8 @@ jobs:
       # Windows PyInstaller wants ';' as the --add-data separator (':' would be
       # taken literally) and the venv interpreter lives in Scripts\python.exe.
       # Output: dist/agent-server.exe + dist/agent-supervisor.exe.
-      # agent/skills is bundled whole: on CI only the 4 shipped skills are
+      # clutch-skills/skills is bundled whole — that is the root the host reads
+      # (agent/config.py's skills_dir) and on CI only the 4 shipped skills are
       # tracked (build-server-bundle.sh's SHIPPED_SKILLS whitelist guards the
       # local-POSIX path, where dev-only skills exist on disk).
       - name: Build bundled server + supervisor (PyInstaller onefile)
@@ -177,7 +188,7 @@ jobs:
           set -euo pipefail
           .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-server \
             --add-data "agent/prompts;agent/prompts" \
-            --add-data "agent/skills;agent/skills" \
+            --add-data "clutch-skills/skills;clutch-skills/skills" \
             --add-data "agent/transport_defaults.json;agent/" \
             scripts/server_entry.py
           .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-supervisor \

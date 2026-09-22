@@ -36,7 +36,7 @@ for d in "$SKILLS_REL"/*/; do
   case " $SHIPPED_SKILLS " in *" $name "*) continue ;; esac
   # a tracked skill dir that is not whitelisted is a packaging gap; the library
   # is versioned by the module, so ask that repo what it tracks
-  if git -C "$ROOT/clutch-skills" ls-files --error-unmatched "skills/$name/SKILL.md" >/dev/null 2>&1; then
+  if git -C "$ROOT/clutch-skills" ls-files --error-unmatch "skills/$name/SKILL.md" >/dev/null 2>&1; then
     MISSING="$MISSING $name"
   fi
 done
