@@ -1,7 +1,8 @@
-"""Standalone test runners for clutch (run via `uv run python -m tests.<name>`).
+"""Standalone test runners for clutch: no test framework, each has its own main().
 
-Entry points: selfcheck / loop_test / lazy_check / server_test /
-supervisor_test / transport_test (Python) plus the JS logic tests
-(latch-regression-test.js, mermaid-logic-test.js, llm-proxy.test.js,
-server-bootstrap.test.js, ssh-tunnel.test.js).
+  Python   `uv run python -m tests.<name>`   assertions via tests/testsupport.py
+  JS       `node tests/<name>.test.js`       assertions via tests/harness.js
+
+The canonical list of suites lives in README.md's 测试 section — deliberately not
+repeated here, so it cannot drift from what actually runs.
 """

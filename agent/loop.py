@@ -125,7 +125,14 @@ class Agent:
                 elif t == "tool_call_start":
                     tool_accum.setdefault(ev["index"], {"id": ev["id"], "name": ev["name"], "args": ""})
                     # live tool-call row: name arrives first, args stream after
-                    self._emit(ToolCallDeltaEvent(tool_call_id=ev["id"], name=ev["name"], delta=""))
+                    self._emit(
+                        ToolCallDeltaEvent(
+                            tool_call_id=ev["id"],
+                            name=ev["name"],
+                            delta="",
+                            ui=self.registry.ui(ev["name"]),
+                        )
+                    )
                 elif t == "tool_call_delta":
                     entry = tool_accum.setdefault(ev["index"], {"id": "", "name": "", "args": ""})
                     entry["args"] += ev["delta"]
@@ -210,6 +217,7 @@ class Agent:
                                 name=tc["name"],
                                 arguments=tc["arguments"],
                                 tool_call_id=tc["id"],
+                                ui=self.registry.ui(tc["name"]),
                             )
                         )
 

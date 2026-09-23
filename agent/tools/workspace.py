@@ -14,24 +14,17 @@ so local and remote behave identically.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import posixpath
-import re
 import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path, PurePath, PurePosixPath
 
-from .localshell import LocalShell, local_shell
+from .localshell import LocalShell, local_shell, shq
 from .transport import CommandResult, LocalTransport, SshTransport, Transport, TransportError
-
-
-def shq(s: str) -> str:
-    """Single-quote a path for sh: `'` -> `'\\''` (works on any POSIX shell)."""
-    return "'" + s.replace("'", "'\\''") + "'"
 
 
 def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
@@ -310,11 +303,6 @@ class Workspace(ABC):
         round the raw bytes losslessly (remote: the transport's binary mode keeps bytes
         exact without a remote base64)."""
 
-    @abstractmethod
-    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
-        """Regex search over workspace files (skips hidden/binary/protected).
-        Returns [(root-relative path, 1-based line, text)], capped at 100 hits."""
-
 
 class LocalWorkspace(Workspace):
     def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
@@ -388,49 +376,6 @@ class LocalWorkspace(Workspace):
         with open(p, "r+b") as f:
             f.seek(offset)
             f.write(data)
-
-    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
-        rx = re.compile(pattern)
-        root = self.resolve(path)
-        files = [root] if root.is_file() else self._grep_files(root)
-        out: list[tuple[str, int, str]] = []
-        for f in files:
-            if self.is_protected(f):
-                continue
-            rel = str(f.relative_to(self.root))
-            if include and not (fnmatch.fnmatch(f.name, include) or fnmatch.fnmatch(rel, include)):
-                continue
-            if self._is_binary(f):
-                continue
-            try:
-                with open(f, encoding="utf-8", errors="replace") as fh:
-                    for i, line in enumerate(fh, 1):
-                        if rx.search(line):
-                            out.append((rel, i, line.rstrip("\n")))
-                            if len(out) >= 100:
-                                return out
-            except OSError:
-                continue
-        return out
-
-    def _grep_files(self, dirpath: Path) -> list[Path]:
-        files: list[Path] = []
-        for ent in sorted(dirpath.iterdir()):
-            if ent.name.startswith(".") or ent.name == "__pycache__":
-                continue
-            if ent.is_dir():
-                files.extend(self._grep_files(ent))
-            elif ent.is_file():
-                files.append(ent)
-        return files
-
-    @staticmethod
-    def _is_binary(p: Path) -> bool:
-        try:
-            with open(p, "rb") as f:
-                return b"\x00" in f.read(1024)
-        except OSError:
-            return True
 
 
 # Minimal sshd drops a single exec over ~8KB: writes are chunked below it;
@@ -675,41 +620,3 @@ class RemoteWorkspace(Workspace):
         r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
         if r.code != 0:
             raise OSError(f"cannot write_at {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
-
-    def grep(self, pattern: str, path: str = ".", include: str | None = None) -> list[tuple[str, int, str]]:
-        # busybox grep lacks --include/dotfile awareness: use find, skip hidden
-        # files/dirs and the protected .clc
-        p = self.resolve(path)
-        find_cmd = f"find {shq(str(p))} -type f ! -path '*/.*' ! -path '*/.*/*'"
-        for prot in self._protected:
-            find_cmd += f" ! -name {shq(prot.name)}"
-        if include:
-            find_cmd += f" -name {shq(include)}"
-        cmd = f"{find_cmd} -print0 | xargs -0 grep -HnE {shq(pattern)} | head -n 100"
-        r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
-        if r.code != 0 and not r.stdout:
-            return []
-        out: list[tuple[str, int, str]] = []
-        for line in r.stdout.splitlines():
-            first = line.find(":")
-            if first < 0:
-                continue
-            rest = line[first + 1 :]
-            second = rest.find(":")
-            if second < 0:
-                continue
-            try:
-                lineno = int(rest[:second])
-            except ValueError:
-                continue
-            fpath = line[:first]
-            try:
-                # PurePosixPath: the remote prints POSIX paths; the host's Path
-                # flavor must not re-separator them (WindowsPath on Windows)
-                rel = str(PurePosixPath(fpath).relative_to(self.root))
-            except ValueError:
-                rel = fpath
-            out.append((rel, lineno, rest[second + 1 :]))
-            if len(out) >= 100:
-                break
-        return out

@@ -22,7 +22,7 @@ from .core.permission import PermissionEvaluator, PermissionGate
 from .llm import LlmClient, create_llm_client
 from .loop import Agent
 from .project import Project
-from .tools.registry import ToolRegistry, build_default_tools
+from .tools.registry import ToolRegistry, build_tools
 from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
 
 
@@ -156,7 +156,7 @@ class BaseServer(ABC):
         """Tools for a run; config overrides self.config for a per-run mode
         (chat read-only toolset vs work's full set)."""
         cfg = config or self.config
-        return ToolRegistry(build_default_tools(cfg, memories=project.memories if project else None))
+        return ToolRegistry(build_tools(cfg, memories=project.memories if project else None))
 
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:

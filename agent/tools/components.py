@@ -35,7 +35,6 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
@@ -359,17 +358,6 @@ def _prune(name: str, keep: Path) -> None:
     for child in component_root(name).iterdir():
         if child != keep:
             shutil.rmtree(child, ignore_errors=True)
-
-
-def uninstall(name: str, version: str | None = None) -> None:
-    """Remove one installed version, or every version of a component."""
-    base = component_root(name)
-    if version is None:
-        shutil.rmtree(base, ignore_errors=True)
-        return
-    if not _VERSION_RE.match(version):
-        raise ValueError(f"bad component version: {version!r}")
-    shutil.rmtree(base / version, ignore_errors=True)
 
 
 def _unpack(archive: Path, into: Path) -> None:

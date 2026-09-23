@@ -41,8 +41,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from .localshell import shq
 from .transport import CommandResult
-from .workspace import shq
 
 __all__ = ["InstError", "jarg", "render", "unwrap", "shq"]
 

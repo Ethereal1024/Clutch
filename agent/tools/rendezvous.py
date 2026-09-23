@@ -1,27 +1,25 @@
-"""Rendezvous: how the host reaches a standalone tool module.
+"""Rendezvous: how the host reaches a component's process, once it has one.
 
-The tool constitution (R1/R2) makes every tool its own module and keeps the
-host's dependency graph a star: modules may point at the host's generic
-services, the host may point at nothing but a module's PUBLISHED interface.
-This file is the host's half of that contract, in the two shapes a published
-interface comes in: a per-workspace daemon discovered through a record and
-spoken to over loopback HTTP, and a one-process command line the app host runs
-itself. `prepare()` returns whichever one a statement needs.
+catalog.py declares WHAT a component is and what it publishes; this file is the
+mechanics of getting to it. The host imports NOTHING from a component — it may
+point at nothing but the component's PUBLISHED interface, in the two shapes that
+comes in: a per-workspace daemon discovered through a record and spoken to over
+loopback HTTP, and a one-process command line the app host runs itself.
+`prepare()` returns whichever one a statement needs.
 
-Everything duplicated here is deliberate and frozen (R4): the module directory,
-the discovery file name, the record's shape and the token header. The host
-imports NOTHING from a module — deleting a checkout must degrade to the host's
-own implementation, never break it (see `available()` and Tool.func).
+A component that is not on this machine is not an error to be papered over: it
+has no tools (registry.build_tools) and `unavailable_reason()` is the sentence a
+client can show. Nothing here answers on a component's behalf.
 
-Three facts describe a component and they are independent (see Module): WHAT a
-statement is spoken to as (interface: a per-workspace daemon over loopback HTTP,
-or one process per call), WHERE its process runs relative to the host being
-asked (runs_on), and WHOSE resources it serves (subject). Today every component
-in the table runs on the host that asks (runs_on=SELF) — which makes the axis
-invisible, and that is the point: a component that serves ANOTHER machine's
-filesystem (an ssh workspace), or one that is called FROM another host (a
-client-side component behind a reverse channel), adds an ENTRY to this table,
-never a branch to a tool.
+Three facts describe a component and they are independent (see
+catalog.Component): WHAT a statement is spoken to as (interface: a per-workspace
+daemon over loopback HTTP, or one process per call), WHERE its process runs
+relative to the host being asked (runs_on), and WHOSE resources it serves
+(subject). Today every component in the table runs on the host that asks
+(runs_on=SELF) — which makes the axis invisible, and that is the point: a
+component that serves ANOTHER machine's filesystem (an ssh workspace), or one
+that is called FROM another host (a client-side component behind a reverse
+channel), adds an ENTRY to the table, never a branch to a tool.
 
 Where a component's artifact comes from is a different question again, and
 tools/components.py answers it: the host runs the component installed on ITS own
@@ -50,8 +48,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import components, modules
-from .localshell import local_shell
+from . import catalog, components, modules
+from .localshell import local_shell, shq
 from .transport import LocalTransport
 
 TOKEN_HEADER = "X-Clutch-Token"  # the module daemons' auth header (frozen contract)
@@ -60,139 +58,40 @@ READY_SECONDS = 10.0  # how long a daemon we just spawned has to publish itself
 PROBE_SECONDS = 2.0  # /health budget — a live daemon answers at once
 DEFAULT_IDLE = 600.0  # the daemon's own idle default; CLUTCH_RENDEZVOUS_IDLE overrides
 
-DAEMON = "daemon"  # spoken to as a per-workspace HTTP service over loopback
-CLI = "cli"  # driven as one command line per call
-
-# Where a component's process runs, RELATIVE TO THE HOST BEING ASKED.
-SELF = "self"  # on this host (the one answering the statement)
-OTHER = "other"  # on another host, reached through a channel (none yet: see Module)
-
-# What a component serves — the machine or resource its answers concern. This is
-# the axis that decides whether a statement may run for a given workspace: a
-# component that serves the WORKSPACE root's own filesystem can only do that on
-# the machine the root lives on.
-WORKSPACE_FS = "workspace-fs"
-FOREIGN_FS = "foreign-fs"  # another machine's filesystem, over a channel it owns
-NETWORK = "network"
-PROJECT_FILE = "project-file"
-SKILL_LIB = "skill-library"
-
+# The vocabulary (interface / runs_on / subject — catalog.py's constants) is the
+# DECLARATION's, and this file reads it from there rather than restating it: two
+# spellings of "cli" would be two things to keep in step.
 
 class RendezvousError(RuntimeError):
     """No usable service for this workspace and none could be started."""
 
 
 @dataclass(frozen=True)
-class Launch:
-    """How this host STARTS one component process — the artifact's shape, never
-    its interface.
-
-    `argv` is a template in argv words (not a shell line: these are handed to
-    Popen as separate words, so nothing here is quoted — shell quoting belongs
-    to the statement layer, tools/inst.py): `{py}` is the interpreter that can
-    run the component, `{dir}` the component's directory on this host, `{script}`
-    its entry-point file (`entry`). A `binary` names an executable INSIDE the
-    component directory that supersedes the template when it is installed: that
-    is how a PyInstaller onefile needs no interpreter and no checkout at all.
-    `importable` says the component is a package driven by `-m`, so its own
-    directory has to be on PYTHONPATH.
-
-    Nothing above is a restriction on what a component MAY be — a onefile, a
-    script, a package, an executable of any language, as long as it accepts the
-    invocation contract (--workspace/--idle/--protect for a daemon, --envelope
-    for a CLI).
-    """
-
-    argv: tuple[str, ...] = ()
-    entry: str = ""  # the entry-point FILE inside the component ({script})
-    binary: str = ""  # an installed executable that supersedes argv
-    importable: bool = False
-
-
-@dataclass(frozen=True)
-class Module:
-    """A standalone component's published coordinates (the host's side of R4).
-
-    `name` is the component's identity: the install name of its artifact, and by
-    convention the directory name of its dev checkout next to the repo (one
-    string, so a rename is one edit).
-
-    `interface` is how the host talks to it (a loopback daemon discovered through
-    a published record, or one process per call); `runs_on` is whose machine its
-    process runs on; `subject` is whose resources it serves. `launch` is how it
-    is started (whatever shape the artifact has). `requires` names the host
-    facilities it needs, so an unavailable component can say WHY instead of
-    silently disappearing.
-    """
-
-    name: str
-    interface: str = DAEMON
-    runs_on: str = SELF
-    subject: str = WORKSPACE_FS
-    launch: Launch = Launch()
-    discovery_env: str = ""  # env var that repoints the discovery directory
-    app_dir: str = ""  # directory under %LOCALAPPDATA% / ~ holding the records
-    prefix: str = ""  # discovery file name prefix
-    requires: tuple[str, ...] = ()
-
-
-_WORKSPACE = Module(
-    name=modules.WORKSPACE,
-    subject=WORKSPACE_FS,
-    launch=Launch(argv=("{py}", "-m", "clutch_workspace.daemon"), importable=True),
-    discovery_env="CLUTCH_WORKSPACE_DISCOVERY_DIR",
-    app_dir="clutch-workspace",
-    prefix="d-",
-    requires=("python", "posix-shell", "curl"),
-)
-_MEMORY = Module(
-    name=modules.MEMORY,
-    interface=CLI,
-    subject=PROJECT_FILE,
-    launch=Launch(argv=("{py}", "{script}"), entry="memory.py"),
-    requires=("python",),
-)
-_WEBSEARCH = Module(
-    name=modules.WEBSEARCH,
-    interface=CLI,
-    subject=NETWORK,
-    launch=Launch(argv=("{py}", "{script}"), entry="websearch.py"),
-    requires=("python",),
-)
-_SKILLS = Module(
-    name=modules.SKILLS,
-    interface=CLI,
-    subject=SKILL_LIB,
-    launch=Launch(argv=("{py}", "-m", "clutch_skills"), importable=True),
-    requires=("python",),
-)
-_TABLE = {mod.name: mod for mod in (_WORKSPACE, _MEMORY, _WEBSEARCH, _SKILLS)}
-
-
-@dataclass(frozen=True)
 class Resolved:
     """A component found ON THIS HOST: where its code is and how one process of
-    it starts. The launch, never the interface — see Module."""
+    it starts. The launch, never the interface — see catalog.Component."""
 
-    module: Module
+    module: catalog.Component
     directory: Path
     argv: tuple[str, ...]  # the words to execute, before the component's own flags
     installed: bool  # a real install for this host, not the dev checkout
-    template: bool  # argv came from the table's template, not the artifact's own executable
+    template: bool  # argv came from the declaration's template, not the artifact's own executable
 
 
 def resolve(module: str) -> Resolved | None:
     """This host's copy of `module`, or None when it has none it could run.
 
-    One lookup for every consumer (`available`, `cli_vars`, `_start`), so
+    One lookup for every consumer (`available`, `launch_prefix`, `_start`), so
     "installed" and "checked out" can never be read two different ways: the host
     runs the artifact installed on ITS own machine, and falls back to the dev
     checkout beside the host repo (modules.component_dir, components.installed).
+    A registration may name the code's own directory for an out-of-tree
+    component, and that is used instead.
     """
-    mod = _TABLE.get(module)
+    mod = catalog.table().get(module)
     if mod is None:
         return None
-    directory = modules.component_dir(mod.name)
+    directory = Path(mod.directory) if mod.directory else modules.component_dir(mod.name)
     if not directory.is_dir():
         return None
     manifest = components.read_manifest(directory)
@@ -210,22 +109,22 @@ def resolve(module: str) -> Resolved | None:
 
 
 def render_launch(
-    mod: Module, directory: Path, manifest: dict | None = None
+    mod: catalog.Component, directory: Path, manifest: dict | None = None
 ) -> tuple[tuple[str, ...], bool] | None:
-    """(argv words, they came from the table's template) for one process of
+    """(argv words, they came from the declaration's template) for one process of
     `mod` inside `directory`, or None when nothing there can be started.
 
     An INSTALLED component may ship its own executable, and that supersedes the
     template — the artifact's shape is the installer's business, and this is how
     a onefile needs neither interpreter nor checkout. Two names are honoured:
-    the one its manifest declares, then the one its table entry declares, then —
+    the one its manifest declares, then the one its declaration declares, then —
     for an install only — the install layer's own convention, an executable
     named after the component (components.install lays a single-file artifact
     down exactly so).
 
-    Otherwise the table's TEMPLATE is rendered with what only the host knows:
-    `{py}` the interpreter, `{dir}` this directory, `{name}` the component's
-    name, `{script}` its entry-point file.
+    Otherwise the declaration's TEMPLATE is rendered with what only the host
+    knows: `{py}` the interpreter, `{dir}` this directory, `{name}` the
+    component's name, `{script}` its entry-point file.
 
     Nothing here is a shell: the words go to Popen as they are, so a component
     whose name contains a space needs no quoting and a template word cannot
@@ -257,8 +156,8 @@ def render_launch(
 
 def _fill(template: str, variables: dict[str, str]) -> str:
     """Substitute the host placeholders a template word names. An unknown
-    placeholder is left standing rather than crashing the host (R2): it is
-    visible in the command line, which is where a template bug belongs."""
+    placeholder is left standing rather than crashing the host: it is visible in
+    the command line, which is where a template bug belongs."""
     for key, value in variables.items():
         template = template.replace("{" + key + "}", value)
     return template
@@ -305,10 +204,9 @@ def available(module: str) -> bool:
     """True when this host could actually drive `module`'s statements.
 
     Facts, all of them local and cheap: the artifact is here (installed for this
-    host, or checked out beside the repo — R2's star acceptance, a deleted
-    component must not take the host down) and this host has the facilities the
-    component declares it needs (`requires`). When it is not, the sentence to
-    show comes from `unavailable_reason()`.
+    host, or checked out beside the repo) and this host has the facilities the
+    component declares it needs (`requires`). When it is not, the component has
+    no tools — `unavailable_reason()` is the sentence to show.
     """
     return not unavailable_reason(module)
 
@@ -322,15 +220,12 @@ def unavailable_reason(module: str) -> str:
     missing one is named here rather than left to be inferred from a mysterious
     failure later.
     """
-    mod = _TABLE.get(module)
+    mod = catalog.table().get(module)
     if mod is None:
         return f"unknown component: {module}"
     resolved = resolve(module)
     if resolved is None:
-        return (
-            f"{mod.name} is neither installed on this host nor checked out "
-            f"beside the host repo"
-        )
+        return f"{mod.name} is not installed on this host"
     if "posix-shell" in mod.requires and not local_shell().posix:
         return (
             f"{mod.name} needs a POSIX shell to be driven, and this host's "
@@ -346,19 +241,6 @@ def unavailable_reason(module: str) -> str:
             f"{mod.name} runs under Python and this host has no interpreter that "
             f"can run it (CLUTCH_PYTHON unset, no python on PATH)"
         )
-    if mod.interface == CLI and not resolved.template:
-        # The artifact is a standalone executable. That is fine for a daemon (its
-        # flags are appended to whatever argv says), but not for a CLI: those
-        # statements still render `{py} {script}` — an interpreter plus an
-        # entry-point file — so the host could only build a line it knows is
-        # wrong. It says so and answers from its own implementation (R2) instead
-        # of guessing; carrying the statement on the artifact's own argv is the
-        # launch-contract step.
-        return (
-            f"{mod.name} is installed as a standalone executable "
-            f"({resolved.argv[0]}), which the host's CLI statement contract "
-            f"cannot launch yet"
-        )
     return ""
 
 
@@ -366,63 +248,80 @@ def serves_workspace_fs(module: str) -> bool:
     """True when the component serves the WORKSPACE root's own filesystem.
 
     Its subject is the machine the root lives on, so a statement may only be
-    spoken to it while the workspace IS that machine (registry.module_ready); a
+    spoken to it while the workspace IS that machine (registry.module_blocked_reason); a
     component serving anything else — the app's project file, the network, the
     skill library — is unaffected by where the workspace lives. Keyed on the
     subject and not on the interface: a daemon serving a foreign filesystem over
     a channel it owns is a daemon too, and it is not this.
     """
-    mod = _TABLE.get(module)
-    return mod is not None and mod.subject == WORKSPACE_FS
+    mod = catalog.table().get(module)
+    return mod is not None and mod.subject == catalog.WORKSPACE_FS
 
 
-def cli_vars(module: str, config) -> dict[str, str]:
-    """The host placeholders a CLI component's statement renders with.
+def host_vars(mod: catalog.Component, config) -> dict[str, str]:
+    """The host facts a component's declaration asks for, by their published
+    names (catalog.Component.vars: "host.port_url" -> {base}).
 
-    Three are universal: {py} is the interpreter that runs the component, {dir}
-    the directory this host found it in (which a package component gets as
-    PYTHONPATH), and {script} its entry-point file when it is one
-    (`clutch-memory/memory.py`). The rest are what only the host knows and only
-    a particular component needs: the project file's content service, and the
-    skills root when the session pointed at one of its own.
+    These are the values only the host knows and only a particular component
+    needs: the project file's content service, and the skills root. The prefix
+    of a CLI line is NOT here — that is the artifact's own launch, rendered by
+    launch_prefix() so a checkout, a package and an installed onefile all drive
+    the same declaration.
     """
-    resolved = resolve(module)
-    if resolved is None:
-        raise RendezvousError(f"the {module} component is not available on this host")
     # NB: a key here must never be one of a tool's own argument names — the
     # renderer fills {name} from the CALL's arguments, and a host var of the
     # same name would silently overwrite the model's value (clutch-memory's
     # `--title {name}` is exactly that).
-    out = {
-        "py": modules.python_exe(),
-        "dir": str(resolved.directory),
+    facts = {
+        "host.port_url": lambda: f"http://127.0.0.1:{config.port}",
+        "config.skills_dir": lambda: str(getattr(config, "skills_dir", "") or ""),
     }
-    if resolved.module.launch.entry:
-        # the entry point as one path, so a statement names it without gluing a
-        # quoted directory to a bare file name
-        out["script"] = str(resolved.directory / resolved.module.launch.entry)
-    if module == modules.MEMORY:
-        # the .clc content service IS this process: the module writes the
-        # project file through the endpoint the server publishes on loopback
-        out["base"] = f"http://127.0.0.1:{config.port}"
-    elif module == modules.SKILLS and getattr(config, "skills_dir", None) is not None:
-        out["root"] = str(config.skills_dir)
+    out: dict[str, str] = {}
+    for name, fact in mod.vars.items():
+        make = facts.get(fact)
+        if make is not None:
+            out[name] = make()
     return out
+
+
+def launch_prefix(module: str) -> str:
+    """How one CLI component process STARTS, as a line prefix ("" for a daemon,
+    whose process this file starts itself when a statement needs a service).
+
+    This is the launch contract: the artifact's shape decides the prefix — an
+    interpreter plus an entry-point file for a checkout, `-m <package>` with its
+    directory on PYTHONPATH for a package, a bare executable for an installed
+    onefile — and the declaration only says which flags follow it. A component
+    therefore needs no second implementation to be installed as a binary.
+    """
+    mod = catalog.table().get(module)
+    if mod is None or mod.interface != catalog.CLI:
+        return ""
+    resolved = resolve(module)
+    if resolved is None:
+        raise RendezvousError(unavailable_reason(module))
+    words = [shq(word) for word in resolved.argv]
+    if resolved.module.launch.importable:
+        words.insert(0, f"PYTHONPATH={shq(str(resolved.directory))}")
+    return " ".join(words)
 
 
 @dataclass(frozen=True)
 class Statement:
     """One statement, ready to render and run: where it runs and what fills it.
 
-    `vars` are the host placeholders its template names (a daemon's port/token/
-    status, a CLI's interpreter and checkout); `runner` is the transport that
-    carries the rendered line (the workspace's own for a daemon module — the
-    filesystem it serves is its machine's — the app host's for a CLI, whose
-    subject is the app's project file / the network / the skill library).
+    `prefix` is how the component's process starts (a CLI's launch; "" for a
+    daemon, whose line is the whole loopback call); `vars` are the host
+    placeholders the template names (a daemon's port/token/status, a CLI's
+    endpoint/root facts); `runner` is the transport that carries the rendered
+    line (the workspace's own for a daemon module — the filesystem it serves is
+    its machine's — the app host's for a CLI, whose subject is the app's project
+    file / the network / the skill library).
     """
 
     vars: dict[str, str]
     runner: Any
+    prefix: str = ""
 
 
 def prepare(module: str, workspace: Any, config) -> Statement:
@@ -432,11 +331,15 @@ def prepare(module: str, workspace: Any, config) -> Statement:
     from the machine that owns the files); a CLI module is reached through the
     app host's, whatever kind of workspace the call came from.
     """
-    mod = _TABLE.get(module)
+    mod = catalog.table().get(module)
     if mod is None:
         raise RendezvousError(f"unknown module: {module}")
-    if mod.interface == CLI:
-        return Statement(vars=cli_vars(module, config), runner=LocalTransport(str(modules.repo_root())))
+    if mod.interface == catalog.CLI:
+        return Statement(
+            vars=host_vars(mod, config),
+            runner=LocalTransport(str(modules.repo_root())),
+            prefix=launch_prefix(module),
+        )
     service_ = service(workspace.root, module, protect=workspace.protected())
     return Statement(vars=service_.vars(), runner=workspace)
 
@@ -469,7 +372,7 @@ def service(root: str | Path, module: str, protect: Iterable[Path | str] = ()) -
     Raises RendezvousError when the module is not available or the daemon never
     became ready — callers report that as error-as-data, never as a crash.
     """
-    mod = _TABLE.get(module)
+    mod = catalog.table().get(module)
     if mod is None:
         raise RendezvousError(f"unknown module: {module}")
     resolved = str(Path(root).resolve())
@@ -520,7 +423,7 @@ atexit.register(release_all)
 # -- discovery: the record a daemon publishes, and its readiness ---------------
 
 
-def _record_path(root: str, mod: Module) -> Path:
+def _record_path(root: str, mod: catalog.Component) -> Path:
     """The discovery file a module daemon for this workspace publishes."""
     override = os.environ.get(mod.discovery_env)
     if override:
@@ -532,7 +435,7 @@ def _record_path(root: str, mod: Module) -> Path:
     return base / f"{mod.prefix}{digest}.json"
 
 
-def _read_record(root: str, mod: Module) -> dict | None:
+def _read_record(root: str, mod: catalog.Component) -> dict | None:
     """The published record, or None when it is missing, corrupt, or dead."""
     try:
         payload = json.loads(_record_path(root, mod).read_text(encoding="utf-8"))
@@ -633,11 +536,13 @@ def _reap(pid: int) -> None:
 def _import_dirs(resolved: Resolved) -> list[Path]:
     """The roots to put on a spawned daemon's PYTHONPATH: the component's own,
     and only when its launch says it is a package that has to be imported
-    (`-m <package>`), never a sibling's (R2's graph is a star)."""
+    (`-m <package>`), never a sibling's (the dependency graph is a star)."""
     return [resolved.directory] if resolved.module.launch.importable else []
 
 
-def _start(root: str, mod: Module, fences: tuple[str, ...], key: tuple[str, str, tuple[str, ...]]) -> Service:
+def _start(
+    root: str, mod: catalog.Component, fences: tuple[str, ...], key: tuple[str, str, tuple[str, ...]]
+) -> Service:
     resolved = resolve(mod.name)
     if resolved is None:
         raise RendezvousError(unavailable_reason(mod.name))
@@ -645,7 +550,8 @@ def _start(root: str, mod: Module, fences: tuple[str, ...], key: tuple[str, str,
     for glob in fences:
         cmd += ["--protect", glob]
     try:
-        proc = subprocess.Popen(cmd, cwd=str(resolved.directory), env=modules.module_env(_import_dirs(resolved)), **_detach())
+        env = modules.module_env(_import_dirs(resolved))
+        proc = subprocess.Popen(cmd, cwd=str(resolved.directory), env=env, **_detach())
     except OSError as err:
         raise RendezvousError(f"could not start the {mod.name} daemon: {err}") from None
     deadline = time.monotonic() + READY_SECONDS

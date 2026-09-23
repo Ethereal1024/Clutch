@@ -247,7 +247,8 @@ class SshTransport(Transport):
         err = result.get("error")
         if err is not None:
             if isinstance(err, urllib.error.HTTPError):
-                raise TransportError(f"bridge error {err.code}: {err.read().decode('utf-8', errors='replace')}") from err
+                detail = err.read().decode("utf-8", errors="replace")
+                raise TransportError(f"bridge error {err.code}: {detail}") from err
             raise TransportError(f"bridge unreachable: {err}") from err
         payload = result["payload"]
         if payload.get("code") == -1:

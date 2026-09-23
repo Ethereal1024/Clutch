@@ -25,8 +25,6 @@ import tempfile
 import threading
 import time
 
-from tests.testsupport import check
-
 from agent.config import Config
 from agent.core.context import derive_messages
 from agent.core.lazy import LazyEventLog
@@ -36,6 +34,7 @@ from agent.tools import shell as shell_mod
 from agent.tools.localshell import LocalShell, local_shell, reset_cache, split_command
 from agent.tools.transport import LocalTransport
 from agent.tools.workspace import LocalWorkspace, RemoteWorkspace
+from tests.testsupport import check
 
 # pinned decisions (argv here is never spawned except in the recorder test,
 # which intercepts subprocess.Popen)

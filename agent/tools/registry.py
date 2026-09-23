@@ -1,23 +1,42 @@
-"""Declarative tool registry.
+"""Declarative tool registry: the catalog's declarations, wired for the model.
 
-Single source of truth: one Tool definition yields both the OpenAI function-calling
-schema and the local execution entry. Tool descriptions live here as schema data;
-error texts live in agent/prompts/.
+One source of truth: a component's declaration in tools/catalog.py. From it this
+module builds the OpenAI function-calling schema the model sees AND the
+statement that satisfies a call — there is no second, host-side implementation
+of any tool. A tool the catalog does not describe does not exist for the model,
+and a component this host does not have contributes no tools at all: with
+nothing installed the host's surface is run_command and nothing else, and every
+tool call it cannot serve is answered with the component's own name and reason.
+
+What the host owns, and only the host owns:
+
+  * the statement layer and its transport (tools/inst.py, tools/transport.py):
+    arguments -> one terminal command, output -> the {content, error, diff}
+    envelope the loop consumes;
+  * the policy a component deliberately does not carry (`guard`: a path the
+    workspace protects is not readable even when it is named explicitly);
+  * the per-file undo the UI offers on a change result (`snapshot`);
+  * the gates and modes under which a tool is offered at all.
+
+Everything else — what a tool is called, what it means, how its events look in
+the UI — is the declaration's, and the declaration belongs to the component.
 """
 
 from __future__ import annotations
 
+import copy
 import inspect
+import re
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
-from . import filesystem, inst, modules, rendezvous, shell, websearch
+from . import catalog, filesystem, inst, rendezvous, shell
 from .inst import InstError
 from .transport import TransportError, failure_envelope
 from .workspace import LocalWorkspace, Workspace
@@ -27,44 +46,61 @@ ToolImpl = Callable[..., dict[str, Any]]
 # (workspace, config, args) -> dict{content, error?} | None -- a refusal, or None to proceed
 GuardImpl = Callable[[Workspace, Config, dict[str, Any]], dict[str, Any] | None]
 
+# The host POLICY a declaration may put a tool under, by the name it is declared
+# with (catalog.Tool.access). Keeping the names in the declaration and the
+# implementations here is the split: a component says "this names a path the
+# workspace may protect", the host decides what protection means.
+GUARDS: dict[str, GuardImpl] = {
+    "read": filesystem.guard_read,
+    "sweep": filesystem.guard_grep,
+    "write": filesystem.guard_write,
+}
+
 
 @dataclass
 class Tool:
-    """One tool: the statement that satisfies a call, plus the host's own take.
+    """One tool, wired: the statement that satisfies a call, plus the host's take.
 
-    `inst` is the terminal command a call becomes (tools/inst.py): placeholders
-    filled from the model's arguments, run through the workspace's transport,
-    its output unwrapped back into the {content, error, diff} envelope. A
-    statement that drives a standalone module's service names it in `module`,
-    and that path is taken only while the module is actually there — R2 of the
-    tool constitution: a deleted module degrades to `func`, the host's own
-    implementation, instead of taking the host down with it.
+    `inst` is the component's own part of the terminal command (tools/inst.py):
+    placeholders filled from the model's arguments, prefixed with the launch
+    rendezvous renders from the artifact's shape, run through the workspace's
+    transport, its output unwrapped back into {content, error, diff}. A daemon
+    component's `inst` is the whole line — the loopback call IS its interface.
 
-    `guard` is host policy a module deliberately does not carry: the workspace
-    module's fence refuses mutations and hides broad sweeps but still serves a
-    path named explicitly, while the project's .clc must stay unreadable even
-    then (see filesystem._refuse_protected). `defaults` rides the statement
-    payload UNDER the model's own arguments: an argument the model left out
-    gets the host's default instead of a hole in the request.
+    `host` is the one other kind of tool: one the HOST owns and no component
+    implements (run_command — the command IS the statement, and the host's
+    permission engine is the boundary it runs inside). It is not a fallback for
+    anything: a tool with neither `inst` nor `host` cannot exist, because a
+    declaration without a command never becomes a Tool (see build_tools).
+
+    `guard` is host policy a component deliberately does not carry: the
+    workspace module's fence refuses mutations and hides broad sweeps but still
+    serves a path named explicitly, while the project's .clc must stay
+    unreadable even then (see filesystem._refuse_protected). `defaults` rides
+    the statement payload UNDER the model's own arguments: an argument the model
+    left out gets the host's default instead of a hole in the request.
 
     `snapshot` marks the statements that OVERWRITE the file named in their
-    `path` argument. The module that performs such a write keeps its own undo
+    `path` argument. The component that performs such a write keeps its own undo
     stack (the daemon's /undo pops its newest write, for its CLI), but the
-    per-file "undo" the UI offers on a change result is served by THIS process
-    — so the content the write is about to replace is recorded here too,
-    exactly as the host's in-process implementation records it (and, like that
-    implementation, only for a write that actually happened).
+    per-file "undo" the UI offers on a change result is served by THIS process —
+    so the content the write is about to replace is recorded here too, and only
+    for a write that actually happened.
+
+    `ui` is the component's presentation declaration (catalog.DEFAULTS), already
+    defaulted: the UI renders a tool it did not design from this block alone.
     """
 
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema (properties + required)
-    func: ToolImpl | None = None  # the host's own implementation (fallback)
-    inst: str | None = None  # the terminal statement (module-served path)
-    module: str | None = None  # which standalone module serves the statement
-    guard: GuardImpl | None = None  # host policy the module does not make
+    inst: str | None = None  # the component's own part of the statement
+    module: str | None = None  # which component serves the statement
+    host: ToolImpl | None = None  # the host's own tool (no component behind it)
+    guard: GuardImpl | None = None  # host policy the component does not make
     defaults: Mapping[str, Any] | None = None  # statement payload defaults
     snapshot: bool = False  # the statement overwrites args["path"]
+    ui: Mapping[str, Any] = field(default_factory=dict)
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -81,70 +117,191 @@ class Tool:
         }
 
 
-def _daemon(command: str) -> str:
-    """One statement against a standalone module daemon's HTTP surface.
+# -- declaration -> the schema the model sees ---------------------------------
 
-    Every part of this line is the host's half of a frozen contract (R4): the
-    path, the JSON body, the token header, the status trailer. The host imports
-    nothing from the module — it only knows how to speak to it. --noproxy keeps
-    a configured proxy away from 127.0.0.1; -w prints the HTTP status, which
-    unwrap() reads as the TRANSPORT's verdict (the command's own verdict rides
-    the 200 body, so a 200 that says "file not found" stays a command verdict).
+
+_PLACEHOLDER = re.compile(r"\$(config\.[a-z_]+|skills|backends)\b")
+
+
+def _resolve(value: Any, config: Config) -> Any:
+    """A declaration's schema value with the host's own facts filled in.
+
+    Two placeholders, both of them things only this host knows when it builds
+    the schema: `$config.<field>` (a knob the user set) and the two computed
+    lists `$skills` (the skill names on this machine) and `$backends` (the
+    search backends it is configured for). A value that IS `$skills` stays a
+    list — an enum — while the same token inside a sentence reads as the list;
+    likewise a value that IS `$config.<field>` keeps the knob's own type (a
+    default of `$config.read_max_chars` is the integer the statement sends), and
+    the same placeholder inside a sentence is spelled out.
     """
-    return (
-        "curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' "
-        f"-H {{auth}} --data-binary {{*}} -w {{status}} http://127.0.0.1:{{port}}{command}"
+    if isinstance(value, str):
+        if value == "$skills":
+            return list(_skills(config))
+        if value.startswith("$config."):  # a whole value: the host's own type
+            return getattr(config, value.split(".", 1)[1], "")
+        return _PLACEHOLDER.sub(lambda m: _fact(m.group(1), config), value)
+    if isinstance(value, list):
+        return [_resolve(v, config) for v in value]
+    if isinstance(value, dict):
+        return {k: _resolve(v, config) for k, v in value.items()}
+    return value
+
+
+def _fact(token: str, config: Config) -> str:
+    if token == "skills":
+        return ", ".join(_skills(config)) or "none"
+    if token == "backends":
+        return " or ".join(catalog.available_backends(config)) or "none"
+    return str(getattr(config, token.split(".", 1)[1], ""))
+
+
+def _skills(config: Config) -> tuple[str, ...]:
+    """The skill names THIS machine has (the host's fact, not the component's
+    work): the model picks a name from the enum before anything runs, so the
+    host must be able to answer it without asking the skill component."""
+    return cached_library(config.skills_dir).names()
+
+
+def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
+    """Whether a tool's declared host-side condition holds at all (see
+    catalog.Tool.gate). A tool whose gate is shut is not offered — it is not
+    offered-with-an-error, because the model would only learn to stop trying."""
+    if gate in ("", "always"):
+        return True
+    if gate == "project":
+        return memories is not None
+    if gate == "skills":
+        # skills off entirely, or nothing to load: an enum over an empty library
+        # is a schema that offers the model nothing to pick
+        return config.enable_skills and bool(_skills(config))
+    return False
+
+
+def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> Tool:
+    """One declaration -> the tool the model sees and the host runs."""
+    description = spec.description
+    if isinstance(description, tuple):
+        name, variables = description
+        description = render(name, **_resolve(dict(variables), config))
+    return Tool(
+        name=spec.name,
+        description=description,
+        parameters=copy.deepcopy(_resolve(dict(spec.parameters), config)),
+        inst=spec.command,
+        module=component.name,
+        guard=GUARDS.get(spec.access),
+        defaults=_resolve(dict(spec.defaults), config),
+        snapshot=spec.snapshot,
+        ui=catalog.ui_of(spec),
     )
 
 
-_READ_FILE = _daemon("/read_file")
-_GREP = _daemon("/grep")
-_WRITE_FILE = _daemon("/write_file")
-_EDIT_FILE = _daemon("/edit_file")
+def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Tool]:
+    """Every tool this host can offer right now, in one pass over the catalog.
 
-# A CLI module is one process per call, driven on the APP host (its subject is
-# the project file / the network / the skill library, never the workspace's
-# machine), so its line names the interpreter and the module's own entry point.
-# `--envelope` asks for the host's {content, code} object instead of the
-# module's own machine output; a package module needs its checkout on
-# PYTHONPATH. The module owns its flags — the host only knows the line (R4).
-_MEMORY_CLI = "{py} {script} --endpoint {base} --envelope"
-_WEBSEARCH_CLI = "{py} {script}"
-_SKILLS_CLI = "PYTHONPATH={dir} {py} -m clutch_skills --envelope"
-
-
-def module_ready(workspace: Workspace, module: str | None) -> bool:
-    """True when this host can actually run `module`'s statements for this call.
-
-    Three facts, all local: the component is on disk and drivable
-    (`rendezvous.available` — R2's star acceptance: a deleted component degrades
-    the call, never the host); a component whose SUBJECT is the workspace's own
-    filesystem additionally needs a LOCAL workspace, because it serves the
-    filesystem of the machine it runs on (a remote workspace keeps the host's
-    transport-based implementation, which speaks to the remote side over the SSH
-    bridge); a component serving anything else runs on the APP host whatever
-    kind of workspace the call came from — its subject is the project file / the
-    network / the skill library, never the workspace's machine.
+    A component that is not installed contributes nothing here: no schema, no
+    "not installed" stub, no host-side stand-in. The client shows the user
+    `unavailable_reason()` instead (components_unavailable), because a tool the
+    model cannot call is not a thing the model should see.
     """
-    if module is None or not rendezvous.available(module):
-        return False
-    # TODO(ssh-workspace): this isinstance disappears with the component that
-    # serves a foreign filesystem over a channel of its own.
-    return not rendezvous.serves_workspace_fs(module) or isinstance(workspace, LocalWorkspace)
+    tools: list[Tool] = [_run_command(config)]
+    for component in catalog.table().values():
+        if not rendezvous.available(component.name):
+            continue
+        for spec in component.tools:
+            if config.mode not in spec.modes:
+                continue
+            if not _gate_ok(spec.gate, config, memories):
+                continue
+            tools.append(_wire(component, spec, config))
+    return tools
+
+
+def components_unavailable(config: Config) -> list[dict[str, str]]:
+    """The components this host is MISSING, for the UI to explain — and only the
+    ones whose declaration asks to be explained (catalog Component.ui.status).
+
+    A component that says `status: True` declares that its absence is something
+    the user should be told about, in the words its own declaration chooses
+    (`ui.label`). One that says nothing about its state disappears quietly, which
+    is the right default for an optional extra.
+    """
+    out: list[dict[str, str]] = []
+    for component in catalog.table().values():
+        if not component.ui.get("status"):
+            continue
+        reason = rendezvous.unavailable_reason(component.name)
+        if reason:
+            out.append(
+                {
+                    "name": component.name,
+                    "label": str(component.ui.get("label", component.name)),
+                    "reason": reason,
+                }
+            )
+    return out
+
+
+def _run_command(config: Config) -> Tool:
+    """The host's own tool — the one statement that is not a component's.
+
+    Deliberately not a component: the command IS the statement, and the host's
+    permission engine (read-only classifier, escape and protected-path guard,
+    Stop) is the boundary it runs inside. A component would only re-say "run
+    this" while the decision stayed here.
+    """
+    chat_mode = config.mode == "chat"
+    return Tool(
+        name="run_command",
+        description=render("tools/run_command_chat.md" if chat_mode else "tools/run_command.md"),
+        parameters={
+            "properties": {"command": {"type": "string", "description": "shell command string to run"}},
+            "required": ["command"],
+        },
+        host=lambda workspace, cfg, cancel=None, **kw: shell.run_command(workspace, cfg, cancel=cancel, **kw),
+        ui={"preview": "command", "summary": "$ {command}"},
+    )
+
+
+def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
+    """Why this host cannot run `module`'s statements for THIS call ("" = it can).
+
+    Two facts, both local. The component has to be here and drivable
+    (`rendezvous.unavailable_reason` — nothing on the host's side can stand in
+    for it), and a component whose SUBJECT is the workspace root's own
+    filesystem additionally needs the root to live HERE, because it serves the
+    filesystem of the machine it runs on. A component serving anything else runs
+    on the app host whatever kind of workspace the call came from — its subject
+    is the project file / the network / the skill library, never the workspace's
+    machine.
+    """
+    if module is None:
+        return "no component serves this tool"
+    missing = rendezvous.unavailable_reason(module)
+    if missing:
+        return missing
+    # TODO(ssh-workspace): this branch disappears with the component that serves
+    # a foreign filesystem over a channel of its own — that component's subject
+    # is FOREIGN_FS and it is driven from here, so the root's home stops mattering.
+    if rendezvous.serves_workspace_fs(module) and not isinstance(workspace, LocalWorkspace):
+        return (
+            f"{module} serves the filesystem of the machine this workspace root lives on, "
+            f"and this root is another machine's"
+        )
+    return ""
 
 
 def _previous_content(workspace: Workspace, args: dict[str, Any]) -> tuple[Any, str] | None:
-    """(resolved path, content) of the file a module-served write is about to
+    """(resolved path, content) of the file a component's write is about to
     replace — the host's own undo bookkeeping for the statement path.
 
-    The module performs the write, and its daemon keeps its own undo stack (the
-    /undo its CLI pops: the newest write, whoever made it). The per-file revert
-    the UI offers on a change result is answered by THIS process, so the content
-    the write is about to replace has to be recorded here too, exactly as
-    filesystem.write_file/edit_file record it when they do the writing. None
+    The component performs the write, and its daemon keeps its own undo stack
+    (the /undo its CLI pops: the newest write, whoever made it). The per-file
+    revert the UI offers on a change result is answered by THIS process, so the
+    content the write is about to replace has to be recorded here too. None
     means there is nothing to remember: a file that does not exist yet has no
-    previous content, and the host's own implementation does not remember it
-    either (a creation is not a change the UI can revert)."""
+    previous content, and a creation is not a change the UI can revert."""
     try:
         p = workspace.resolve(str(args.get("path", "")))
         old = workspace.read(str(p))
@@ -153,323 +310,13 @@ def _previous_content(workspace: Workspace, args: dict[str, Any]) -> tuple[Any, 
     return (p, old) if old else None
 
 
-
-
-
-def _str_param(desc: str) -> dict[str, Any]:
-    return {"type": "string", "description": desc}
-
-
-def build_default_tools(config: Config, memories: MemoryStore | None = None) -> list[Tool]:
-    chat_mode = config.mode == "chat"
-    tools = [
-        Tool(
-            name="read_file",
-            description=render("tools/read_file.md", read_max_chars=config.read_max_chars),
-            parameters={
-                "properties": {
-                    "path": _str_param("file path OR directory path, relative to the workspace root"),
-                    "max_chars": {
-                        "type": "integer",
-                        "description": f"max chars to read (default {config.read_max_chars})",
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "1-based start line for a line-range read",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "max lines to read when offset is given",
-                    },
-                },
-                "required": ["path"],
-            },
-            func=lambda sb, cfg, **kw: filesystem.read_file(sb, cfg, **kw),
-            inst=_READ_FILE,
-            module=modules.WORKSPACE,
-            guard=filesystem.guard_read,
-            defaults={"max_chars": config.read_max_chars},
-        ),
-        Tool(
-            name="grep",
-            description=render("tools/grep.md"),
-            parameters={
-                "properties": {
-                    "pattern": _str_param("regex to search for"),
-                    "path": _str_param("subdirectory or file to search (default: whole workspace)"),
-                    "include": _str_param("filename glob filter (e.g. '*.py')"),
-                },
-                "required": ["pattern"],
-            },
-            func=lambda sb, cfg, **kw: filesystem.grep(sb, cfg, **kw),
-            inst=_GREP,
-            module=modules.WORKSPACE,
-            guard=filesystem.guard_grep,
-            defaults={"path": ".", "include": ""},
-        ),
-    ]
-
-    # chat mode: no write tools. The model never sees write_file/edit_file — the
-    # schema is the hard boundary, the system prompt the soft guide (prompts/).
-    if not chat_mode:
-        tools.append(
-            Tool(
-                name="write_file",
-                description=render("tools/write_file.md"),
-                parameters={
-                    "properties": {
-                        "path": _str_param("file path, relative to the workspace root"),
-                        "content": _str_param("full file content"),
-                    },
-                    "required": ["path", "content"],
-                },
-                func=lambda sb, cfg, **kw: filesystem.write_file(sb, cfg, **kw),
-                inst=_WRITE_FILE,
-                module=modules.WORKSPACE,
-                guard=filesystem.guard_write,
-                snapshot=True,
-            )
-        )
-        tools.append(
-            Tool(
-                name="edit_file",
-                description=render("tools/edit_file.md"),
-                parameters={
-                    "properties": {
-                        "path": _str_param("file path, relative to the workspace root"),
-                        "old_string": _str_param("exact text to replace (must appear exactly once)"),
-                        "new_string": _str_param("replacement text"),
-                    },
-                    "required": ["path", "old_string", "new_string"],
-                },
-                func=lambda sb, cfg, **kw: filesystem.edit_file(sb, cfg, **kw),
-                inst=_EDIT_FILE,
-                module=modules.WORKSPACE,
-                guard=filesystem.guard_write,
-                snapshot=True,
-            )
-        )
-
-    # run_command exists in both modes; in chat mode its description advertises the
-    # read-only restriction and the tool rejects anything not provably read-only.
-    # Deliberately NOT a statement with a module behind it: the command IS the
-    # statement, and the host's permission engine (read-only classifier, escape
-    # and protected-path guard, Stop) is the boundary it runs inside — host
-    # policy, not a module's business (a module would only re-say "run this").
-    tools.append(
-        Tool(
-            name="run_command",
-            description=render("tools/run_command_chat.md" if chat_mode else "tools/run_command.md"),
-            parameters={
-                "properties": {
-                    "command": _str_param("shell command string to run"),
-                },
-                "required": ["command"],
-            },
-            func=lambda sb, cfg, cancel=None, **kw: shell.run_command(sb, cfg, cancel=cancel, **kw),
-        )
-    )
-
-    # web access: read-only network tools in BOTH modes — chat's read-only
-    # contract is about the workspace; a GET touches nothing local
-    tools.append(
-        Tool(
-            name="web_search",
-            description=render(
-                "tools/web_search.md",
-                max_results=config.web_search_max_results,
-                backends=" or ".join(websearch.available_backends(config)),
-            ),
-            parameters={
-                "properties": {
-                    "query": _str_param("search string (engine syntax like site: and quoted phrases works)"),
-                    "max_results": {
-                        "type": "integer",
-                        "description": f"cap on returned entries (default {config.web_search_max_results})",
-                    },
-                    "backend": _str_param(
-                        f"pin one backend: {' | '.join(websearch.available_backends(config))}"
-                        " (default: fall through the chain)"
-                    ),
-                },
-                "required": ["query"],
-            },
-            func=lambda sb, cfg, cancel=None, **kw: websearch.web_search(sb, cfg, cancel=cancel, **kw),
-            inst=_WEBSEARCH_CLI + " search --envelope [--max-results {max_results}] [--backend {backend}] {query}",
-            module=modules.WEBSEARCH,
-            defaults={"max_results": config.web_search_max_results},
-        )
-    )
-    tools.append(
-        Tool(
-            name="web_fetch",
-            description=render("tools/web_fetch.md", max=config.read_max_chars),
-            parameters={
-                "properties": {
-                    "url": _str_param("http(s) URL to fetch"),
-                    "max_chars": {
-                        "type": "integer",
-                        "description": f"max chars of extracted text to return (default {config.read_max_chars})",
-                    },
-                    "start": {
-                        "type": "integer",
-                        "description": "0-based char offset to continue a truncated fetch",
-                    },
-                },
-                "required": ["url"],
-            },
-            func=lambda sb, cfg, cancel=None, **kw: websearch.web_fetch(sb, cfg, cancel=cancel, **kw),
-            inst=_WEBSEARCH_CLI + " fetch --envelope [--max-chars {max_chars}] [--start {start}] {url}",
-            module=modules.WEBSEARCH,
-            defaults={"max_chars": config.read_max_chars},
-        )
-    )
-
-    if config.enable_skills:
-        skill_tool = _build_load_skill(config)
-        if skill_tool is not None:
-            tools.append(skill_tool)
-    if memories is not None:
-        tools.extend(_build_memory_tools(memories))
-    return tools
-
-
-def _build_memory_tools(memories: MemoryStore) -> list[Tool]:
-    """Project memory tools: save/load/search durable facts in the .clc."""
-
-    def save(ws, cfg, title: str, content: str) -> dict:
-        title = (title or "").strip()
-        content = (content or "").strip()
-        if not title:
-            return {"content": "ERROR: title is required", "error": True}
-        if not content:
-            return {"content": "ERROR: content is required", "error": True}
-        memories.save(title, content)
-        return {"content": f"OK: saved memory '{title}'"}
-
-    def load(ws, cfg, name: str) -> dict:
-        m = memories.get((name or "").strip())
-        if m is None:
-            return {"content": f"ERROR: no memory named {name!r}", "error": True}
-        return {"content": f"[{m.title}]\n{m.content}"}
-
-    def search(ws, cfg, query: str) -> dict:
-        q = (query or "").strip()
-        hits = memories.search(q) if q else sorted(memories.items().values(), key=lambda m: -m.updated)
-        if not hits:
-            return {"content": "(no memories found)"}
-        lines = [f"- {m.title}: {m.content[:200].replace(chr(10), ' ')}" for m in hits[:10]]
-        return {"content": "\n".join(lines)}
-
-    return [
-        Tool(
-            name="save_memory",
-            description=(
-                "Save a durable fact from this conversation to project memory — a key "
-                "decision, a user preference, or an important detail worth remembering "
-                "across sessions. title must be a very short one-line summary (<=80 chars); "
-                "content is the full detail. Saving the same title again overwrites it."
-            ),
-            parameters={
-                "properties": {
-                    "title": _str_param("very short one-line summary of the memory"),
-                    "content": _str_param("full detail to remember"),
-                },
-                "required": ["title", "content"],
-            },
-            func=save,
-            inst=_MEMORY_CLI + " save --title {title} --content {content}",
-            module=modules.MEMORY,
-        ),
-        Tool(
-            name="load_memory",
-            description="Read one stored memory's full content by its exact title.",
-            parameters={
-                "properties": {"name": _str_param("the memory title to load")},
-                "required": ["name"],
-            },
-            func=load,
-            inst=_MEMORY_CLI + " load --title {name}",
-            module=modules.MEMORY,
-        ),
-        Tool(
-            name="search_memory",
-            description=(
-                "Search stored project memories by title or content; returns matching "
-                "titles with snippets. Call with a topic to recall relevant long-term "
-                "facts; an empty query lists the most recent memories."
-            ),
-            parameters={
-                "properties": {"query": _str_param("topic to search for; empty lists recent")},
-                "required": [],
-            },
-            func=search,
-            inst=_MEMORY_CLI + " search [--query {query}]",
-            module=modules.MEMORY,
-        ),
-    ]
-
-
-def _build_load_skill(config: Config) -> Tool | None:
-    """Model-chosen skill loader: enum of available skills; content pulled on demand."""
-    lib = cached_library(config.skills_dir)
-    if not lib.skills:
-        return None
-    names = lib.names()
-    return Tool(
-        name="load_skill",
-        description=render("tools/load_skill.md"),
-        parameters={
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "enum": names,
-                    "description": "skill to load, one of: " + ", ".join(names),
-                },
-                "file": _str_param(
-                    "optional file inside the skill directory to read instead of SKILL.md "
-                    "(e.g. resources/template.html)"
-                ),
-            },
-            "required": ["name"],
-        },
-        func=_load_skill,
-        inst=_SKILLS_CLI + " [--root {root}] show {name} [--file {file}]",
-        module=modules.SKILLS,
-    )
-
-
-def _load_skill(_workspace: Workspace, config: Config, name: str, file: str = "SKILL.md") -> dict:
-    """Serve SKILL.md (or a sub-file) from the skill's directory; error-as-data."""
-    lib = cached_library(config.skills_dir)
-    skill = lib.get(name)
-    if skill is None:
-        return {
-            "content": render("errors/skill_unknown.md", skill=repr(name), available=", ".join(lib.names()) or "none"),
-            "error": True,
-        }
-    root = skill.dir.resolve()
-    path = (skill.dir / file).resolve()
-    if not path.is_relative_to(root):
-        return {"content": render("errors/skill_escape.md", file=repr(file)), "error": True}
-    if not path.is_file():
-        return {
-            "content": render("errors/skill_missing.md", skill=repr(name), file=repr(file)),
-            "error": True,
-        }
-    try:
-        return {"content": path.read_text(encoding="utf-8", errors="replace")}
-    except OSError as e:
-        return {"content": render("errors/skill_read_failed.md", error=e), "error": True}
-
-
 class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
         self._tools = {t.name: t for t in tools}
-        # a tool opts into Stop by declaring a `cancel` parameter on its func
-        # (run_command does); the rest get the exact same call as before
+        # a host tool opts into Stop by declaring a `cancel` parameter
+        # (run_command does); component statements get Stop from their transport
         self._cancelable = {
-            name: t.func is not None and "cancel" in inspect.signature(t.func).parameters
+            name: t.host is not None and "cancel" in inspect.signature(t.host).parameters
             for name, t in self._tools.items()
         }
 
@@ -479,10 +326,29 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
+    def ui(self, name: str) -> dict[str, Any]:
+        """One tool's presentation block, for the call events the UI renders from.
+
+        The component's declaration with its defaults filled in (catalog.ui_of),
+        plus the two facts only THIS process can answer and a declaration
+        therefore does not have to: whether the host holds an undo record for the
+        call (`undo`), and whether the call may change what the file tree the UI
+        shows (`mutates` — a component's write, or the host's own command; a
+        declaration that knows better can say so itself).
+        """
+        tool = self._tools.get(name)
+        if tool is None:
+            return {**catalog.DEFAULTS, "mutates": True, "undo": False}
+        return {
+            **tool.ui,
+            "mutates": bool(tool.ui.get("mutates", tool.snapshot or tool.host is not None)),
+            "undo": bool(tool.snapshot),
+        }
+
     def tool(self, name: str) -> Tool | None:
-        """One tool's definition (its statement, guard and fallback), for callers
-        that need the wiring rather than a call — the statement tests, the
-        session's schema export."""
+        """One tool's definition (its statement, policy and presentation), for
+        callers that need the wiring rather than a call — the statement tests,
+        the session's schema export."""
         return self._tools.get(name)
 
     def execute(
@@ -519,28 +385,34 @@ class ToolRegistry:
         args: dict[str, Any],
         cancel: threading.Event | None,
     ) -> dict[str, Any]:
-        """One call, in precedence order: the host's guard, the module's
-        statement, the host's own implementation (see Tool)."""
+        """One call: the host's policy, then the one implementation of it.
+
+        There is no precedence to speak of any more — a tool's implementation is
+        exactly one of two things (the component's statement, or the host's own
+        command) and the wiring says which. A statement whose component is not
+        runnable for this call is answered with the reason, never with a stand-in.
+        """
         if tool.guard is not None:
             refused = tool.guard(workspace, config, args)
             if refused is not None:
                 return refused
-        if tool.inst is not None and module_ready(workspace, tool.module):
-            # the module performs the write; the host keeps the undo record, but
-            # only once the statement has actually overwritten something — a
-            # refused or failed edit must not leave a snapshot the UI could
-            # "restore" (the host's own implementation records after validating
-            # for the same reason)
-            remembered = _previous_content(workspace, args) if tool.snapshot else None
-            result = self._exec_statement(workspace, config, tool, args, cancel)
-            if remembered is not None and not result.get("error"):
-                workspace.snapshot(remembered[0], remembered[1])
-            return result
-        if tool.func is None:  # statement-only tool, module gone: say so, don't crash
-            return {"content": f"ERROR: tool {tool.name} has no implementation on this host", "error": True}
-        if self._cancelable.get(tool.name):
-            return tool.func(workspace, config, cancel=cancel, **args)
-        return tool.func(workspace, config, **args)
+        if tool.inst is None:
+            if tool.host is None:  # unreachable: build_tools never wires one
+                return {"content": f"ERROR: tool {tool.name} has no implementation", "error": True}
+            if self._cancelable.get(tool.name):
+                return tool.host(workspace, config, cancel=cancel, **args)
+            return tool.host(workspace, config, **args)
+        blocked = module_blocked_reason(workspace, tool.module)
+        if blocked:
+            return {"content": f"ERROR: {blocked}", "error": True}
+        # the component performs the write; the host keeps the undo record, but
+        # only once the statement has actually overwritten something — a refused
+        # or failed edit must not leave a snapshot the UI could "restore"
+        remembered = _previous_content(workspace, args) if tool.snapshot else None
+        result = self._exec_statement(workspace, config, tool, args, cancel)
+        if remembered is not None and not result.get("error"):
+            workspace.snapshot(remembered[0], remembered[1])
+        return result
 
     def _exec_statement(
         self,
@@ -550,12 +422,13 @@ class ToolRegistry:
         args: dict[str, Any],
         cancel: threading.Event | None,
     ) -> dict[str, Any]:
-        """Run one tool statement: render -> the statement's transport -> the
-        module's envelope (tools/inst.py owns both translations, so the model's
-        argument values arrive at the service byte-for-byte whichever transport
-        carried the line). Which transport that is — and which host placeholders
-        the template gets — is the module's own kind: a daemon module is spoken
-        to on the workspace's machine, a CLI module on the app host."""
+        """Run one tool statement: the launch, then the component's own flags.
+
+        Which transport carries the line — and which host placeholders the
+        template gets — is the component's kind: a daemon is spoken to on the
+        workspace's machine through the service it publishes, a CLI on the app
+        host through whatever the artifact's launch turns out to be (an
+        interpreter and a checkout, or an installed executable)."""
         try:
             statement = rendezvous.prepare(tool.module, workspace, config)
             command = inst.render(tool.inst, args, vars=statement.vars, defaults=tool.defaults or {})
@@ -563,6 +436,8 @@ class ToolRegistry:
             return {"content": f"ERROR: {e}", "error": True}
         except InstError as e:
             return {"content": render("errors/invalid_arguments.md", error=e), "error": True}
+        if statement.prefix:
+            command = f"{statement.prefix} {command}".rstrip()
         try:
             result = statement.runner.run(command, config.command_timeout, cancel=cancel)
         except TransportError as e:

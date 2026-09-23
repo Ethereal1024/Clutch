@@ -99,8 +99,8 @@ async function main() {
   check(again.current.includes("clutch-memory"), "what the host already holds is reported current");
   check(again.errors.length === 0, "and the pass is clean");
 
-  // 5. a host that cannot be reached is reported, never thrown: a component is an
-  //    optimization, and a session must start without one (R2)
+  // 5. a host that cannot be reached is reported, never thrown: the pass runs
+  //    in the background, so a session starts without waiting for it
   const dead = await components.ensureComponents("http://127.0.0.1:1");
   check(dead.errors.length === 1 && dead.installed.length === 0, "an unreachable host is a report, not a crash");
 

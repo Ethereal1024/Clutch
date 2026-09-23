@@ -11,9 +11,9 @@
 //      is installed under and the digest the host compares, so an unchanged
 //      artifact uploads nothing and a changed one always lands.
 //
-// Failure is never fatal: a component is an optimization. A host without one
-// answers from its own implementation (R2), so every error here is reported and
-// the session proceeds.
+// Failure here is never fatal to a session: the pass runs in the background and
+// a tool whose component has not landed is simply not offered (the host keeps
+// no stand-in for it), so every error is reported and the session proceeds.
 //
 // Where an artifact comes from:
 //   - packaged app: resources/components/<name>-<platform>  (shipped by the release)
@@ -194,8 +194,8 @@ async function upload(base, spec, timeoutMs) {
 
 // Make sure `base`'s machine holds every component this client can give it.
 // Never throws: the returned summary is what the caller logs, and components
-// that were deferred or refused simply stay absent (the host then answers from
-// its own implementation — R2).
+// that were deferred or refused simply stay absent — the host then offers no
+// tool for them, because it has no implementation of its own to fall back to.
 async function ensureComponents(base, { checkout = true, progress = null, budgetMs = BUDGET_MS } = {}) {
   const out = { current: [], installed: [], skipped: [], deferred: [], errors: [] };
   const say = (msg) => {

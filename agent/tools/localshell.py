@@ -24,6 +24,11 @@ Windows install locations, then PATH — except System32's bash.exe, which is
 the WSL launcher: it executes in the LINUX filesystem, a different machine as
 far as a C:\\ workspace is concerned. A candidate is accepted only after a
 `bash -c echo` probe succeeds.
+
+This module also owns `shq`, the host's one spelling of POSIX-shell quoting:
+every layer that builds command text quotes through it, so a workspace's remote
+command, a tool's statement and a component's launch prefix are escaped the same
+way.
 """
 
 from __future__ import annotations
@@ -33,6 +38,18 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
+
+
+def shq(s: str) -> str:
+    """One word as a POSIX shell's INPUT: `'` -> `'\\''`, always quoted.
+
+    The host's only spelling of shell quoting, so the layers that build command
+    text (a workspace's remote command, a tool's statement, a component's
+    launch prefix) cannot drift apart: a value like `; rm -rf /` stays one
+    literal word instead of becoming a second command. Always quoting — even a
+    word of safe characters — keeps a path that starts with `-` a path.
+    """
+    return "'" + s.replace("'", "'\\''") + "'"
 
 
 @dataclass(frozen=True)

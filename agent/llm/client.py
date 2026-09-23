@@ -105,14 +105,22 @@ class LlmError(Exception):
                 return LlmError(
                     code="timeout",
                     retryable=True,
-                    message="Connect timed out: no route to the API endpoint (network to the provider, a proxy, or the base_url).",
+                    message=(
+                        "Connect timed out: no route to the API endpoint "
+                        "(network to the provider, a proxy, or the base_url)."
+                    ),
                 )
             if isinstance(e, httpx2.PoolTimeout):
-                return LlmError(code="timeout", retryable=True, message="Timed out waiting for a free connection slot.")
+                return LlmError(
+                    code="timeout", retryable=True, message="Timed out waiting for a free connection slot."
+                )
             return LlmError(
                 code="timeout",
                 retryable=True,
-                message="Read timed out: the API sent no data for a long stretch (provider stall or a buffering relay).",
+                message=(
+                    "Read timed out: the API sent no data for a long stretch "
+                    "(provider stall or a buffering relay)."
+                ),
             )
         if isinstance(e, httpx2.TransportError):
             return LlmError(

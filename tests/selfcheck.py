@@ -32,7 +32,7 @@ from agent.events import (
 )
 from agent.skills import load_skill_library
 from agent.tools import inst, modules, rendezvous
-from agent.tools.registry import ToolRegistry, build_default_tools
+from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
@@ -43,7 +43,8 @@ PY = "python" if os.name == "nt" else "python3"
 
 
 def check_skills(config: Config) -> None:
-    # 7. skills: the host's catalog (the fallback face) + the statement it drives
+    # 7. skills: the host's own catalog section (the enum the model picks from) +
+    #    the statement it drives
     lib = load_skill_library(config.skills_dir)
     check(len(lib.skills) >= 1, f"skill library loads at least one skill (from {config.skills_dir})")
     first = lib.names()[0]
@@ -55,9 +56,9 @@ def check_skills(config: Config) -> None:
     disabled = Config(enable_skills=False)
     sys_off = derive_messages(LazyEventLog.in_memory(), disabled, "t")[0]["content"]
     check("Available skills (call load_skill" not in sys_off, "no catalog when skills disabled")
-    check("load_skill" not in ToolRegistry(build_default_tools(disabled)).names(), "no load_skill tool when disabled")
+    check("load_skill" not in ToolRegistry(build_tools(disabled)).names(), "no load_skill tool when disabled")
 
-    reg = ToolRegistry(build_default_tools(config))
+    reg = ToolRegistry(build_tools(config))
     tool = reg.tool("load_skill")
     assert tool is not None and tool.inst is not None  # the registry always carries one
     check(first in tool.parameters["properties"]["name"]["enum"], "the tool's enum carries the catalog")
@@ -65,23 +66,15 @@ def check_skills(config: Config) -> None:
     # The call the model makes is one terminal command: the module's CLI on the
     # APP host. Its bytes are pinned here; that the module ANSWERS (a skill, or
     # the 404 verdict for an unknown name) is pinned by clutch-skills' own suite
-    # and driven live by tests/tools_inst_test --live.
-    if rendezvous.available(modules.SKILLS):
-        line = inst.render(tool.inst, {"name": first}, vars=rendezvous.cli_vars(modules.SKILLS, config))
-        check("clutch_skills" in line and "show" in line, "load_skill renders the skills CLI")
-        check(first in line and "--envelope" in line, "the statement carries the skill and the envelope flag")
-    # the host's own face (the module gone) still serves the file and refuses an
-    # escape out of the skill directory
+    # and driven live by tests/tools_inst_test --live. The prefix is the
+    # artifact's own shape (a checkout, a package, an installed onefile), so the
+    # declaration only carries the flags that follow it.
     with tempfile.TemporaryDirectory() as stmp:
-        ws = LocalWorkspace(stmp)
-        # a bare func call is the fallback, before the registry's error/diff
-        # normalization, so success is an ABSENT error key here
-        served = tool.func(ws, config, first)
-        check(not served.get("error") and bool(served["content"]), "load_skill (host face) returns skill content")
-        bad = tool.func(ws, config, "no-such-skill")
-        check(bad["error"], "load_skill (host face) rejects an unknown skill")
-        escaped = tool.func(ws, config, first, "../escape.txt")
-        check(escaped["error"], "load_skill (host face) blocks a path escape")
+        if rendezvous.available(modules.SKILLS):
+            statement = rendezvous.prepare(modules.SKILLS, LocalWorkspace(stmp), config)
+            line = inst.render(tool.inst, {"name": first}, vars=statement.vars, defaults=tool.defaults or {})
+            check("clutch_skills" in statement.prefix and "show" in line, "load_skill renders the skills CLI")
+            check(first in line and "--envelope" in line, "the statement carries the skill and the envelope flag")
 
 
 def check_permission() -> None:
@@ -317,7 +310,7 @@ def check_project_file(config: Config) -> None:
         ws = LocalWorkspace(str(ptmp))
         ws.protect(proj.path)
         check(ws.is_protected(proj.path), "workspace protects .clc")
-        reg = ToolRegistry(build_default_tools(config))
+        reg = ToolRegistry(build_tools(config))
         r = reg.execute(ws, config, "read_file", {"path": proj.path.name})
         check(r["error"], "read_file refuses protected .clc")
         r = reg.execute(ws, config, "read_file", {"path": "."})
@@ -347,8 +340,9 @@ def check_project_file(config: Config) -> None:
         # module ANSWERS (a hit, or the "no such memory" verdict) is pinned by
         # clutch-memory's own suite and driven live by tests/tools_inst_test.
         ws = LocalWorkspace(str(ptmp))
-        mreg = ToolRegistry(build_default_tools(config, memories=reloaded.memories))
-        mvars = rendezvous.cli_vars(modules.MEMORY, config)
+        mreg = ToolRegistry(build_tools(config, memories=reloaded.memories))
+        statement = rendezvous.prepare(modules.MEMORY, ws, config)
+        mvars = statement.vars
         check(mvars.get("base") == f"http://127.0.0.1:{config.port}", "the memory CLI is pointed at this process")
         for name, sample, carried in (
             ("save_memory", {"title": "new fact", "content": "keep it"}, "keep it"),
@@ -357,21 +351,13 @@ def check_project_file(config: Config) -> None:
         ):
             tool = mreg.tool(name)
             assert tool is not None and tool.inst is not None  # the registry always carries one
-            line = inst.render(tool.inst, sample, vars=mvars)
+            line = f"{statement.prefix} {inst.render(tool.inst, sample, vars=mvars)}".strip()
             check("memory.py" in line and "--envelope" in line, f"{name} renders the memory CLI")
             check("--endpoint" in line and str(config.port) in line, f"{name} names the .clc endpoint")
             check(carried in line, f"{name} carries the model's argument verbatim")
-        # the host's own face (the module gone) still serves the store
-        r = mreg.tool("load_memory").func(ws, config, name="stack is flask")
-        check(not r.get("error") and "Flask" in r["content"], "load_memory (host face) returns content")
-        r = mreg.tool("search_memory").func(ws, config, query="theme")
-        check(not r.get("error") and "dark theme" in r["content"], "search_memory (host face) finds by title")
-        r = mreg.tool("save_memory").func(ws, config, title="new fact", content="keep it")
-        check(not r.get("error"), "save_memory (host face) works")
-        check(reloaded.memories.get("new fact") is not None, "save_memory updated the store")
         # without a store there are no memory tools
         check(
-            "save_memory" not in ToolRegistry(build_default_tools(config)).names(),
+            "save_memory" not in ToolRegistry(build_tools(config)).names(),
             "no memory tools without a MemoryStore",
         )
 
@@ -790,7 +776,7 @@ def main() -> None:
             check(True, "workspace.resolve rejects outside path")
 
         # 4. tool execution + write/read roundtrip
-        reg = ToolRegistry(build_default_tools(config))
+        reg = ToolRegistry(build_tools(config))
         r = reg.execute(sb, config, "write_file", {"path": "a.txt", "content": "hello"})
         check(not r["error"], "write_file ok")
         r = reg.execute(sb, config, "read_file", {"path": "a.txt"})

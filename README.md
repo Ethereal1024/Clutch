@@ -155,9 +155,11 @@ sequenceDiagram
 agent/                 宿主后端（会话循环 + 模型调用 + registry + 传输层）
   core/                上下文管理（context.py）、输出解析（parse.py）、
                        终止条件（terminate.py）、错误处理（errors.py）
-  tools/               工具定义与调用：registry.py（inst 模板：一次调用 = 一条
-                       终端命令）、rendezvous.py（模块 daemon/CLI 寻址与启动）、
-                       transport.py、modules.py，以及各工具的宿主侧兜底实现
+  tools/               工具定义与调用：catalog.py（组件声明：工具名、参数、命令
+                       模板、它在界面里的样子）、registry.py（声明 -> 模型可见的
+                       工具，宿主只保留策略）、components.py（安装层：把组件落到
+                       运行它的那台机器）、rendezvous.py（daemon/CLI 寻址与启动）、
+                       inst.py（一次调用 = 一条终端命令）、transport.py、modules.py
   llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）
   browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
   server.py            HTTP + SSE 服务（会话入口，含 .clc 内容服务端点）
@@ -177,8 +179,24 @@ scripts/               打包与构建脚本
 
 四个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
 宿主不 import 它们的代码，只依赖它们发布的接口（HTTP 表面或 CLI 的 stdout 契约）：
-`clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起。删掉任何一个模块，
-宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响。
+`clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起。宿主里没有任何工具的第
+二份实现——工具的名字、参数、命令模板，以及它在界面里的呈现方式，全部来自
+`agent/tools/catalog.py` 里那份声明（或组件自己的 `component.json`）。因此删掉任何
+一个模块，宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响；
+一个组件都没装时，宿主只有 AI 聊天本身，没有可调用的文件/联网/记忆/技能工具。
+
+组件由客户端上传到"要运行它的那台机器"的 supervisor（`POST /api/components/install`，
+工件摘要对内容负责），落在该机器的用户目录里；宿主每次调用工具时按需解析，所以后台
+晚装上的组件会被后续调用看到。第三方组件不必进主仓库：把一份声明 JSON 放进
+`~/.clutch/components/catalog.d/`（或用同一个安装接口上传工件），声明里 `directory`
+指向代码、`tools` 列出它发布的工具，它就会出现在工具表里。
+
+工具在界面里的样子也是声明的一部分：每个工具事件都带上它组件声明的 `ui` 块，前端里
+没有任何工具名。`ui` 可声明 `group`（同一组的调用密集合并成一块，所以一串 read/grep
+扫成一列单行，而 write 不会被打包进去）、`body`（结果正文是文本 / diff / 不显示）、
+`collapse`（折叠块怎么收）、`preview`（调用流式进行时那行显示什么）与 `summary`
+（单行标签），宿主再补上它才知道的 `mutates` / `undo`。协议的定义与默认值见
+`agent/tools/catalog.py` 顶部的说明，消费方是 `ui/app.js`。
 
 ## 测试
 
@@ -189,12 +207,17 @@ uv run python -m tests.server_test      # HTTP + SSE 端到端
 uv run python -m tests.lazy_check       # 历史分页与惰性加载
 uv run python -m tests.supervisor_test  # 会话生命周期与跨进程锁
 uv run python -m tests.transport_test   # 传输层与远程工作区往返
-uv run python -m tests.rendezvous_test  # 模块 daemon/CLI 寻址、兜底与权限围栏
+uv run python -m tests.rendezvous_test  # 模块 daemon/CLI 寻址与权限围栏
 uv run python -m tests.tools_inst_test  # 工具调用的命令契约（--live 走真实模块）
-uv run python -m tests.websearch_test   # web_search / web_fetch（--live 走真实网络）
+uv run python -m tests.catalog_test     # 组件声明：UI 协议 + 第三方注册（R4）
+uv run python -m tests.components_api_test  # 组件安装层：客户端上传 + 宿主落地
 uv run python -m tests.ui_fonts_check   # 字体/图标跨平台一致（含 mermaid 标签字体）
 uv run python -m eval.harness           # 三个评测场景
 ```
+
+界面侧（事件流渲染 / 组件声明的 `ui` 协议 / SSH 隧道 / LLM 反代）同样无框架，
+逐个 `node tests/<name>.test.js` 跑，断言共享 `tests/harness.js`；清单就是
+`tests/*test*.js`。上面没列的都是不需联网、不需密钥的本地套件，改动后建议全跑。
 
 模块自己的套件在模块目录里跑：`cd clutch-skills && python3 -m pytest`（memory /
 websearch 同理）。

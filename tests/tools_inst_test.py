@@ -22,8 +22,10 @@ that carries it, and the envelope its output becomes:
     {content, error, diff}: a module verdict rides a 200 body, an HTTP status is
     a transport fact, a non-zero exit is a failure whatever the body says, and a
     transport error (timeout / Stop / unreachable) is the prose the model reads.
-  * R2, the star's acceptance: with a module gone, `func` — the host's own
-    implementation — answers the very same call, and no tool is a dead end.
+  * the ABSENCE of a fallback. A tool whose component is not on this host does
+    not exist: build_tools drops its schema and no host-side implementation
+    stands in for it. A call that still arrives is answered with the component's
+    own name, so a missing component can never be mistaken for a working tool.
 
 `--live` then drives the same definitions through the real modules instead of the
 stub: the workspace daemon over loopback HTTP, clutch-skills' CLI (which lazily
@@ -51,8 +53,8 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.memory import MemoryStore
-from agent.tools import filesystem, modules, rendezvous
-from agent.tools.registry import ToolRegistry, build_default_tools
+from agent.tools import catalog, components, modules, rendezvous
+from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import CommandResult, Transport, TransportError
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check, http_post
@@ -61,7 +63,6 @@ from tests.testsupport import check, http_post
 # listens on (the stub never dials it) and a token the line must carry
 FAKE_PORT = 51234
 FAKE_TOKEN = "tok-0ff5e"
-FAKE_SERVICE = rendezvous.Service(modules.WORKSPACE, FAKE_PORT, FAKE_TOKEN, os.getpid())
 
 # one value that must survive every escaping layer: quoth the shell, quote the
 # JSON body, CJK, a newline, a backslash
@@ -96,21 +97,21 @@ class Stub(Transport):
 
 @contextlib.contextmanager
 def _offline(stub: Stub, *, available: bool = True):
-    """Pin the rendezvous seam: `module_ready` answers with `available`, and
+    """Pin the rendezvous seam: `available` answers with `available`, and
     `prepare` hands back the stub as the statement's transport.
 
     Only the two questions the executor asks are replaced — the host vars are
-    still built by the real code (`cli_vars`, `Service.vars()`), so the line
+    still built by the real code (`host_vars`, `Service.vars()`), so the line
     under test is the line a real call renders."""
     real_available, real_prepare = rendezvous.available, rendezvous.prepare
 
     def fake_prepare(module: str, workspace, config) -> rendezvous.Statement:
-        mod = rendezvous._TABLE[module]
-        if mod.interface == rendezvous.DAEMON:
+        mod = catalog.table()[module]
+        if mod.interface == catalog.DAEMON:
             vars_ = rendezvous.Service(module, FAKE_PORT, FAKE_TOKEN, os.getpid()).vars()
         else:
-            vars_ = rendezvous.cli_vars(module, config)
-        return rendezvous.Statement(vars=vars_, runner=stub)
+            vars_ = rendezvous.host_vars(mod, config)
+        return rendezvous.Statement(vars=vars_, runner=stub, prefix=rendezvous.launch_prefix(module))
 
     rendezvous.available = lambda module: available
     rendezvous.prepare = fake_prepare
@@ -162,22 +163,31 @@ def check_table(reg: ToolRegistry, cfg: Config) -> None:
         tool = reg.tool(name)
         assert tool is not None
         if module is None:
-            check(tool.inst is None and tool.func is not None, f"{name}: the command IS the statement")
+            check(tool.inst is None and tool.host is not None, f"{name}: the command IS the statement, and the host's")
+            check(name == "run_command", f"{name}: the one host-owned tool, with no component behind it")
             continue
         check(tool.inst is not None and tool.module == module, f"{name}: one statement against {module}")
-        # R2: whatever a module serves, the host can still answer alone
-        check(tool.func is not None, f"{name}: the host keeps its own implementation (R2)")
+        check(tool.host is None, f"{name}: no host-side stand-in (the component IS the implementation)")
     check(reg.tool("nope") is None, "an unknown tool has no definition")
 
-    # R2 for the one thing that is DATA, not code: the library ships with the
-    # clutch-skills module, so a host that cannot see it (module not checked out
-    # / an empty root) loses the loader and keeps every other tool. The store is
-    # handed in for the same reason the real registry gets one — memory.py's
-    # tools exist only when a project is loaded; its file is never touched.
-    bare_cfg = Config(skills_dir=cfg.skills_dir / "no-such-library")
-    bare = ToolRegistry(build_default_tools(bare_cfg, memories=MemoryStore(str(cfg.skills_dir / "no-such.clc"))))
-    check("load_skill" not in bare.names(), "a missing skill library drops the loader, not the host")
-    check(sorted(bare.names()) == sorted(set(TABLE) - {"load_skill"}), "and every other tool is still there")
+    # The absence of a fallback, as a whole-surface fact: point the host at a
+    # tree with no component checkouts and an empty install root, and the tool
+    # set collapses to the host's one command — not to a stand-in per missing
+    # tool. A host with nothing installed can chat and run commands, nothing more.
+    with tempfile.TemporaryDirectory() as empty:
+        real_root = modules.repo_root
+        previous = os.environ.get(components.ROOT_ENV)
+        modules.repo_root = lambda: Path(empty)
+        os.environ[components.ROOT_ENV] = empty
+        try:
+            bare = ToolRegistry(build_tools(Config(), memories=MemoryStore(str(Path(empty) / "x.clc"))))
+        finally:
+            modules.repo_root = real_root
+            if previous is None:
+                os.environ.pop(components.ROOT_ENV, None)
+            else:
+                os.environ[components.ROOT_ENV] = previous
+    check(bare.names() == ["run_command"], "with nothing installed the host can only chat and run commands")
 
 
 # ------------------------------------------- 2. the daemon line (curl, frozen)
@@ -342,56 +352,44 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
     check(r["error"] and "spawn failed" in r["content"], "an executor failure names itself")
 
 
-# ------------------------------------------- 5. guards + R2 (no module)
+# ------------------------------- 5. the guard, in front of any statement
 
 
-def check_guards_and_fallback(reg: ToolRegistry, cfg: Config) -> None:
-    with tempfile.TemporaryDirectory() as tmp:
+def check_guards(reg: ToolRegistry, cfg: Config) -> None:
+    """Host policy rides in FRONT of the statement, so the refusal costs no call.
+
+    The workspace component's own fence refuses a mutation and hides a path from
+    a broad sweep, but it still serves a path the caller names explicitly — the
+    project's protection therefore cannot live in the component. Here the stub is
+    the statement that would have been rendered: a guard that refuses means the
+    component is never asked at all (rendezvous_test asserts the same against a
+    live daemon, and that the refused file really is untouched).
+    """
+    with tempfile.TemporaryDirectory(prefix="clutch-guard-") as tmp:
         ws = LocalWorkspace(tmp)
         (Path(tmp) / "hello.txt").write_text("hello\n", encoding="utf-8")
         protected = Path(tmp) / "school.clc"
         protected.write_text("secret\n", encoding="utf-8")
         ws.protect(protected)
 
-        # host policy rides in FRONT of the statement: no command is run at all
         r, stub = _call(reg, ws, cfg, "read_file", {"path": "school.clc"}, CommandResult(0, "leak\n200", ""))
         check(r["error"] and "protected" in r["content"], "read_file refuses a protected path")
-        check(stub.calls == [], "the refusal happens before the module is ever asked")
+        check(stub.calls == [], "the refusal happens before the component is ever asked")
         r, stub = _call(reg, ws, cfg, "write_file", {"path": "school.clc", "content": "x"})
         check(r["error"] and "protected" in r["content"] and stub.calls == [], "write_file refuses a protected path first")
         r, stub = _call(reg, ws, cfg, "edit_file", {"path": "school.clc", "old_string": "a", "new_string": "b"})
         check(r["error"] and stub.calls == [], "edit_file refuses a protected path first")
         r, stub = _call(reg, ws, cfg, "grep", {"pattern": "secret", "path": "school.clc"})
         check(not r["error"] and r["content"] == "(no matches)", "grep answers a protected path with the empty sweep")
-        check(stub.calls == [], "grep never asks the module about a protected file")
+        check(stub.calls == [], "grep never asks the component about a protected file")
         check(protected.read_text(encoding="utf-8") == "secret\n", "nothing was written")
 
-        # R2: the module is gone -> the host's own implementation answers, and
-        # the statement is not even rendered
-        r, stub = _call(reg, ws, cfg, "read_file", {"path": "hello.txt"}, available=False)
-        host = filesystem.read_file(ws, cfg, path="hello.txt")
-        check(stub.calls == [], "with the module gone no command is rendered")
-        check(not r["error"] and r["content"] == host["content"], "read_file degrades to the host byte for byte")
-        r, stub = _call(reg, ws, cfg, "search_memory", {"query": "x"}, available=False)
-        check(stub.calls == [], "a CLI module that is gone is not invoked either")
-        check(not r["error"] and r["content"] == "(no memories found)", "search_memory degrades to the host's store")
-        r, _ = _call(reg, ws, cfg, "write_file", {"path": "b.txt", "content": "hi\n"}, available=False)
-        host = filesystem.write_file(ws, cfg, path="h.txt", content="hi\n")
-        check(
-            r["content"].replace("b.txt", "f") == host["content"].replace("h.txt", "f")
-            and r["diff"].replace("b.txt", "f") == host["diff"].replace("h.txt", "f"),
-            "write_file degrades with its summary and diff",
+        # the guard is a refusal, not a shadow implementation: a path that is
+        # NOT protected is the model's own value, and the statement goes out
+        r, stub = _call(
+            reg, ws, cfg, "read_file", {"path": "hello.txt"}, CommandResult(0, _envelope("hello") + "\n200", "")
         )
-        # the library itself belongs to clutch-skills, but the host still serves
-        # the file it read at session start when that module is gone
-        from agent.skills import load_skill_library
-
-        names = load_skill_library(cfg.skills_dir).names()
-        if names:
-            r, stub = _call(reg, ws, cfg, "load_skill", {"name": names[0]}, available=False)
-            check(stub.calls == [] and not r["error"] and bool(r["content"]), "load_skill degrades to the host's library")
-        else:
-            print(f"SKIP: no skills under {cfg.skills_dir}")
+        check(len(stub.calls) == 1 and not r["error"], "an unprotected path is not the guard's business")
 
 
 # --------------------------------------- 6. the model's arguments themselves
@@ -448,7 +446,7 @@ def live_workspace(cfg: Config) -> None:
         with tempfile.TemporaryDirectory(prefix="clutch-inst-ws-") as tmp:
             (Path(tmp) / "hello.txt").write_text("hello\n", encoding="utf-8")
             ws = LocalWorkspace(tmp)
-            reg = ToolRegistry(build_default_tools(cfg))
+            reg = ToolRegistry(build_tools(cfg))
             r = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
             check(not r["error"] and r["content"].strip() == "hello", "live: read_file answers through the daemon")
             service = rendezvous.service(tmp, modules.WORKSPACE)
@@ -480,7 +478,7 @@ def live_skills(cfg: Config) -> None:
     try:
         with tempfile.TemporaryDirectory(prefix="clutch-inst-ws-") as tmp:
             ws = LocalWorkspace(tmp)
-            reg = ToolRegistry(build_default_tools(cfg))
+            reg = ToolRegistry(build_tools(cfg))
             r = reg.execute(ws, cfg, "load_skill", {"name": first})
             served = (lib.get(first).dir / "SKILL.md").read_text(encoding="utf-8")
             check(not r["error"] and r["content"] == served, "live: load_skill serves the skill file byte for byte")
@@ -525,7 +523,7 @@ def live_memory() -> None:
             check(st == 200, "live: the test server created a project")
             clc = Path(json.loads(body)["project"])
             ws = LocalWorkspace(tmp)
-            reg = ToolRegistry(build_default_tools(cfg, memories=state.project.memories))
+            reg = ToolRegistry(build_tools(cfg, memories=state.project.memories))
 
             r = reg.execute(ws, cfg, "save_memory", {"title": "live fact", "content": "a durable 中文 fact"})
             check(not r["error"] and "live fact" in r["content"], "live: save_memory writes through the real server")
@@ -550,7 +548,7 @@ def live_web() -> None:
     cfg = Config()
     with tempfile.TemporaryDirectory(prefix="clutch-inst-ws-") as tmp:
         ws = LocalWorkspace(tmp)
-        reg = ToolRegistry(build_default_tools(cfg))
+        reg = ToolRegistry(build_tools(cfg))
         r = reg.execute(ws, cfg, "web_search", {"query": "python shlex split", "max_results": 3})
         check("could not reach" not in r["content"], "live: the websearch CLI answered (not a transport failure)")
         if r["error"]:
@@ -586,13 +584,13 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         # a real (empty) store, so the memory tools exist and their host face is
         # the actual closure; the store's file is never touched offline
-        reg = ToolRegistry(build_default_tools(cfg, memories=MemoryStore(str(Path(tmp) / "offline.clc"))))
+        reg = ToolRegistry(build_tools(cfg, memories=MemoryStore(str(Path(tmp) / "offline.clc"))))
         ws = LocalWorkspace(tmp)
         check_table(reg, cfg)
         check_daemon_lines(reg, ws, cfg)
         check_cli_lines(reg, ws, cfg)
         check_envelopes(reg, ws, cfg)
-        check_guards_and_fallback(reg, cfg)
+        check_guards(reg, cfg)
         check_arguments(reg, ws, cfg)
         if "--live" in argv:
             live(cfg)

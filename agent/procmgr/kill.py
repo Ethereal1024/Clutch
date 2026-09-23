@@ -128,7 +128,6 @@ def stop_process(proc: subprocess.Popen, guarantee: int | None = None) -> None:
 
 _JOB_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_EXTENDED_LIMIT_INFO = 9  # JobObjectExtendedLimitInformation
-_JOB_BASIC_ACCOUNTING_INFO = 1  # JobObjectBasicAccountingInformation
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _TH32CS_SNAPPROCESS = 0x2

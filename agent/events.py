@@ -76,6 +76,11 @@ class ToolCallEvent(Event):
     name: str = ""
     arguments: str = ""  # raw JSON string
     tool_call_id: str = ""
+    # The tool's presentation declaration (catalog.DEFAULTS filled in): the host
+    # renders tools it did not design, so how a call LOOKS is the component's
+    # own statement, carried here rather than looked up by the UI, which knows
+    # no tool name. Durable, because a replayed session must render the same way.
+    ui: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,6 +96,7 @@ class ToolCallDeltaEvent(Event):
     tool_call_id: str = ""
     name: str = ""  # set on the first (start) delta only
     delta: str = ""
+    ui: dict[str, Any] = field(default_factory=dict)  # the call's presentation block
 
 
 @dataclass

@@ -86,9 +86,6 @@ class FakeBridge:
             chunk, op, path = _unshq(m.group(2)), m.group(3), _unshq(m.group(4))
             self.files[path] = chunk if op == ">" else self.files.get(path, "") + chunk
             return CommandResult(0, "", "")
-        if "-print0 | xargs -0 grep -HnE" in command:
-            # find|xargs|grep pipeline: one canned hit inside the workspace
-            return CommandResult(0, "/home/u/proj/src/main.py:7:needle\n", "")
         return CommandResult(0, "", "")
 
 
@@ -191,21 +188,10 @@ def test_remote_paths_stay_in_posix_flavor() -> None:
     check(str(ws.realpath("C:\\Users\\x\\y.clc")) == "C:/Users/x/y.clc", "realpath tolerates backslash-mangled input")
 
 
-def test_remote_grep_keeps_posix_paths() -> None:
-    """grep's output paths go through PurePosixPath: a host Path (WindowsPath on
-    a Windows client) would re-separate them AND fail relative_to against the
-    PurePosixPath root (flavor mismatch), mangling every reported path."""
-    ws, _ = _remote_ws()
-    hits = ws.grep("needle", "src")
-    check(hits == [("src/main.py", 7, "needle")], "grep reports root-relative POSIX paths")
-    check(all("\\" not in rel for rel, _, _ in hits), "no backslash reaches the reported paths")
-
-
 if __name__ == "__main__":
     test_remote_paths_ignore_the_local_filesystem()
     test_remote_home_is_the_remote_user()
     test_create_project_sends_remote_paths()
     test_lexical_behavior_needs_no_rewrite_to_kick_in()
     test_remote_paths_stay_in_posix_flavor()
-    test_remote_grep_keeps_posix_paths()
     print("remote_path_test: all checks passed")

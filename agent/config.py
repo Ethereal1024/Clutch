@@ -78,8 +78,9 @@ class Config:
     output_tail: int = 2500
     read_max_chars: int = 20000
 
-    # Web access (tools/websearch.py): keyless out of the box (Bing RSS -> DDG
-    # HTML); better backends activate automatically once their env is present
+    # Web access (the clutch-websearch component, declared in tools/catalog.py):
+    # keyless out of the box (Bing RSS -> DDG HTML); better backends activate
+    # automatically once their env is present
     web_search_timeout: float = 15.0
     web_search_max_results: int = 8
     # Tavily (https://tavily.com, LLM-first search API, free tier)

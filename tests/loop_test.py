@@ -26,8 +26,9 @@ from agent.events import (
 )
 from agent.llm.client import LlmError
 from agent.loop import Agent
-from agent.tools.registry import ToolRegistry, build_default_tools
-from agent.tools.workspace import LocalWorkspace, Workspace, shq
+from agent.tools.registry import ToolRegistry, build_tools
+from agent.tools.localshell import shq
+from agent.tools.workspace import LocalWorkspace, Workspace
 from tests.testsupport import check, posix_shell_argv
 
 
@@ -95,7 +96,7 @@ def _tool_call(name: str, arguments: str, cid: str = "call_1") -> dict[str, Any]
 def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: LazyEventLog | None = None) -> Agent:
     return Agent(
         llm=fake,  # type: ignore[arg-type] -- duck-typed chat()
-        registry=ToolRegistry(build_default_tools(config)),
+        registry=ToolRegistry(build_tools(config)),
         workspace=workspace,
         config=config,
         log=log or LazyEventLog.in_memory(),
@@ -209,7 +210,7 @@ def main() -> int:
 
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             sink=bad_sink,
@@ -227,7 +228,7 @@ def main() -> int:
         cancel.set()
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             cancel=cancel,
@@ -252,7 +253,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             gate=gate,
@@ -275,7 +276,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             gate=gate,
@@ -300,7 +301,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             gate=gate,
@@ -331,7 +332,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             gate=gate,
@@ -362,7 +363,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             gate=gate,
@@ -394,7 +395,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             gate=gate,
@@ -427,7 +428,7 @@ def main() -> int:
         seen: list[Any] = []
         agent = Agent(
             llm=BoomLLM(),  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             sink=seen.append,
@@ -463,7 +464,7 @@ def main() -> int:
         cfg = Config()
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(cfg)),
+            registry=ToolRegistry(build_tools(cfg)),
             workspace=sb,
             config=cfg,
             cancel=cancel,
@@ -503,7 +504,7 @@ def main() -> int:
 
         agent = Agent(
             llm=ReconnectingLlm(),  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             sink=live.append,
@@ -539,7 +540,7 @@ def main() -> int:
             ],
             fallback=_resp(content="fallback"),
         )
-        agent = Agent(llm=fake, registry=ToolRegistry(build_default_tools(cfg)), workspace=sb, config=cfg)
+        agent = Agent(llm=fake, registry=ToolRegistry(build_tools(cfg)), workspace=sb, config=cfg)
         result = agent.run("t")
         check(result == "final answer", "run completes after compaction")
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
@@ -733,7 +734,7 @@ def main() -> int:
             responses=[_resp(content="SUMMARY"), _resp(content="resumed answer")],
             fallback=_resp(content="fallback"),
         )
-        agent = Agent(llm=fake, registry=ToolRegistry(build_default_tools(cfg)), workspace=sb, config=cfg, log=log)
+        agent = Agent(llm=fake, registry=ToolRegistry(build_tools(cfg)), workspace=sb, config=cfg, log=log)
         result = agent.run("t")
         check(result == "resumed answer", "resumed run completes")
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
@@ -755,7 +756,7 @@ def main() -> int:
         )
         agent = Agent(
             llm=fake,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(config)),
+            registry=ToolRegistry(build_tools(config)),
             workspace=sb,
             config=config,
             sink=lambda ev: streamed.append(ev) if isinstance(ev, ToolCallDeltaEvent) else None,
@@ -773,7 +774,7 @@ def main() -> int:
     chat_cfg = Config(mode="chat")
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
-        chat_names = [t.name for t in build_default_tools(chat_cfg)]
+        chat_names = [t.name for t in build_tools(chat_cfg)]
         check("write_file" not in chat_names and "edit_file" not in chat_names, "chat mode prunes write tools")
         check("run_command" in chat_names and "read_file" in chat_names, "chat mode keeps read tools")
         log = LazyEventLog.in_memory()
@@ -910,7 +911,7 @@ def main() -> int:
             cfg = Config()
             agent = Agent(
                 llm=fake,  # type: ignore[arg-type]
-                registry=ToolRegistry(build_default_tools(cfg)),
+                registry=ToolRegistry(build_tools(cfg)),
                 workspace=sb,
                 config=cfg,
                 cancel=cancel,
@@ -963,7 +964,7 @@ def main() -> int:
         fake17 = OverflowOnceLlm()
         agent = Agent(
             llm=fake17,  # type: ignore[arg-type]
-            registry=ToolRegistry(build_default_tools(cfg)),
+            registry=ToolRegistry(build_tools(cfg)),
             workspace=sb,
             config=cfg,
             log=log,

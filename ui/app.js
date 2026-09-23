@@ -260,24 +260,127 @@ let thinkingContent = "";
 let compactionEl = null; // live "compressing context" block (compaction_delta)
 let retryNoteEl = null; // live "reconnecting…" chip (llm_retry), removed once the stream resumes
 
-// map tool_call_id -> {name, args} so a tool_result knows which tool produced it
+// map tool_call_id -> {name, args, ui} so a tool_result knows which tool
+// produced it and how its component said it looks
 const toolCalls = {};
-// the group block currently collecting consecutive tool_calls (for merging)
+// the block currently collecting consecutive tool_calls (for merging)
 let toolGroupEl = null;
-// tool_call_id -> owning group: results land next to their own call row
+// tool_call_id -> owning block: results land next to their own call row
 const toolCallGroups = new Map();
+// tool_call_id -> the row the call put in its block (the streaming preview and
+// the finished row are the same row: a result fills it instead of adding another)
+const toolRows = new Map();
 
-function isReadTool(name) {
-  return name === "read_file" || name === "grep";
+// ---- the component UI protocol (agent/tools/catalog.py) ---------------------
+// The host renders tool events it did not design, so NO TOOL NAME appears in
+// this file: every tool event carries the declaration its component made about
+// how a call is presented, and everything below reads that declaration.
+//
+//   group     calls naming the same group collect into ONE dense block — each
+//             call's row, with its result filled into that row, in one place, so
+//             a batch of reads scans as a column of one-liners. None: the call
+//             is its own row and its result its own block (a write must never be
+//             swallowed by the reads around it).
+//   summary   the one-line label; {argname} from the call's arguments, {lines}
+//             the result's line count, {name} the tool's own name.
+//   preview   the live row while the call streams.
+//   body      what the result shows: "text" its content, "diff", "none".
+//   collapse  "always" folded, "long" folded past RESULT_FOLD_LINES, "never" whole.
+//   mutates   the call may change the file tree (host-derived when undeclared).
+//   undo      the host holds an undo record for this call (host-derived).
+const UI_DEFAULTS = {
+  group: null,
+  body: "text",
+  collapse: "never",
+  preview: "args",
+  summary: "{name}",
+  mutates: true,
+  undo: false,
+};
+const CALL_BLOCK = "__calls__"; // the block calls that declared no group share
+const RESULT_FOLD_LINES = 60; // "long": fold a body past this many lines
+
+function uiOf(ev) {
+  return Object.assign({}, UI_DEFAULTS, (ev && ev.ui) || {});
 }
 
-// ensure a tool_group container exists for read/non-read rows
-function ensureToolGroup(readGroup) {
-  if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.readGroup !== readGroup) {
+// the declaration of the call a result belongs to: the tool_call event that
+// produced it carries it, and a tool_result whose call is not in memory (an
+// older log page) renders from its own copy
+function uiOfResult(ev) {
+  const call = toolCalls[ev.tool_call_id];
+  if (call && call.ui) return Object.assign({}, UI_DEFAULTS, call.ui);
+  return uiOf(ev);
+}
+
+// the summary template filled from the call's arguments plus the two facts the
+// renderer has: how many lines came back, and the tool's own name
+function summaryText(ui, name, args, content) {
+  const lines = content ? String(content).split("\n").length : 0;
+  // a call that is still streaming has only its JSON text: parse it here, so a
+  // caller may pass either the payload or what the model has sent so far
+  if (typeof args === "string") {
+    try { args = JSON.parse(args || "{}"); } catch (e) { args = {}; }
+  }
+  return String(ui.summary || "{name}").replace(/\{([A-Za-z_]+)\}/g, (match, key) => {
+    if (key === "name") return name;
+    if (key === "lines") return String(lines);
+    const v = args ? args[key] : undefined;
+    if (v === undefined || v === null) return "";
+    return typeof v === "string" ? v : JSON.stringify(v);
+  });
+}
+
+// one argument out of a JSON payload that may still be arriving (hence invalid)
+function partialArg(raw, key) {
+  try {
+    const p = JSON.parse(raw);
+    if (p && typeof p === "object" && p[key] !== undefined) {
+      return typeof p[key] === "string" ? p[key] : JSON.stringify(p[key]);
+    }
+  } catch (e) {
+    /* mid-stream: fall through to the tolerant scan */
+  }
+  const m = new RegExp('"' + key + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)').exec(raw || "");
+  if (!m) return null;
+  return m[1].replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+}
+
+// the live preview the declaration asks for, from arguments that may still be
+// arriving. "content" prints argument VALUES: `keys` names which ones, in order,
+// and a leading "-", "+" or "✎" on a key is a mark printed before its value.
+function previewText(ui, name, raw) {
+  const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
+  const mode = spec.mode || "args";
+  if (mode === "none") return "";
+  if (mode === "command") {
+    const cmd = extractCommand(raw);
+    return cmd !== null ? "$ " + cmd : raw || "";
+  }
+  if (mode === "content" && spec.keys && spec.keys.length) {
+    const parts = [];
+    for (const key of spec.keys) {
+      const mark = /^[-+✎]/.test(key) ? key[0] + " " : "";
+      const value = partialArg(raw, mark ? key.slice(1) : key);
+      if (value !== null) parts.push(mark + value);
+    }
+    if (parts.length) return parts.join("\n");
+  }
+  if (mode === "content") {
+    // mid-stream before the first key landed: strip the JSON scaffolding so the
+    // text still reads as what the model is writing
+    return String(raw || "").replace(/^\{/, "").replace(/\}$/, "").replace(/\\n/g, "\n").replace(/\\"/g, '"');
+  }
+  return raw || ""; // "args"
+}
+
+// ensure the collection block for one group key exists
+function ensureToolGroup(key) {
+  if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.key !== key) {
     toolGroupEl = {
       el: document.createElement("div"),
       ids: new Set(),
-      readGroup,
+      key,
       closed: false,
     };
     toolGroupEl.el.className = "event tool_group";
@@ -287,27 +390,62 @@ function ensureToolGroup(readGroup) {
   return toolGroupEl;
 }
 
-// reserve a call row in its group; shared by the finished and streaming paths
-function toolGroupFor(id, name) {
-  const group = ensureToolGroup(isReadTool(name));
+// reserve a call row in its block: the declaration's group, or the generic call
+// block when it declared none. Shared by the finished and streaming paths.
+function toolGroupFor(id, ui) {
+  const group = ensureToolGroup(ui.group || CALL_BLOCK);
   group.ids.add(id);
   toolCallGroups.set(id, group);
   return group;
 }
 
-// shared tool-row skeleton: name chip + caller-specific tail
-function makeToolRowBase(name) {
+// shared tool-row skeleton: the call's label (its declaration's summary) plus a
+// caller-specific tail
+function makeToolRowBase(label) {
   const row = document.createElement("div");
   row.className = "tool-row";
-  row.innerHTML = `<span class="tool-name">${escapeHtml(name)}</span>`;
+  const text = document.createElement("span");
+  text.className = "tool-label";
+  text.textContent = label;
+  row.appendChild(text);
   return row;
 }
 
-// Pull the shell command out of a run_command args payload. The schema is
+// the raw arguments, one click away: the declaration decides how a call LOOKS,
+// never what it is — a summary is not a substitute for the payload
+function argsButton(raw) {
+  const btn = document.createElement("span");
+  btn.className = "tool-args-btn";
+  btn.textContent = "args ▸";
+  btn.onclick = () => {
+    const row = btn.parentElement;
+    const existing = row.querySelector(".fold.args-fold");
+    if (existing) {
+      foldCollapse(existing, () => existing.remove());
+      btn.textContent = "args ▸";
+    } else {
+      btn.textContent = "args ▾";
+      const pre = document.createElement("pre");
+      pre.className = "tool-args-detail";
+      let pretty = raw || "";
+      try { pretty = JSON.stringify(JSON.parse(raw || "{}"), null, 1); } catch (e) {}
+      pre.textContent = pretty;
+      const fold = wrapFold(pre);
+      fold.classList.add("args-fold");
+      row.appendChild(fold);
+      foldExpand(fold);
+    }
+  };
+  return btn;
+}
+
+// Pull a shell command out of a command-shaped args payload. The schema is
 // {command: "..."} but models in the wild also double-encode the envelope
 // ({"command": "{\"command\": \"ls\"}"}), nest it ({"command": {"command": "…"}})
 // or send a bare JSON string ("ls -la"). Unwrap every such layer and return the
-// plain command; null means "not a command payload" (caller shows a JSON view).
+// plain command; null means "this payload is not a command" (caller shows JSON).
+// Which tools are command-shaped is the declaration's business (preview:
+// "command"), never this file's: no tool name appears here.
 function extractCommand(txt) {
   let s = txt;
   for (let depth = 0; depth < 3; depth++) {
@@ -333,119 +471,188 @@ function permReason(reason) {
   return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
 }
 
-// one tool_call row (name + expandable args)
+// one tool_call row: the declaration's summary as the label (the call's own
+// arguments carry the {placeholders}), the raw payload one click away
 function makeToolRow(ev) {
-  const row = makeToolRowBase(ev.name);
-  let argsTxt = ev.arguments;
-  try {
-    if (ev.name === "run_command") {
-      // the command itself, not the JSON envelope / {comment: ...} wrapper
-      const cmd = extractCommand(ev.arguments);
-      argsTxt = cmd !== null ? "$ " + cmd : ev.arguments;
-    } else {
-      argsTxt = JSON.stringify(JSON.parse(ev.arguments), null, 1);
-    }
-  } catch (e) {}
-  const argsBtn = document.createElement("span");
-  argsBtn.className = "tool-args-btn";
-  argsBtn.textContent = "args ▸";
-  argsBtn.onclick = () => {
-    const existing = row.querySelector(".fold");
-    if (existing) {
-      foldCollapse(existing, () => existing.remove());
-      argsBtn.textContent = "args ▸";
-    } else {
-      argsBtn.textContent = "args ▾";
-      const pre = document.createElement("pre");
-      pre.className = "tool-args-detail";
-      pre.textContent = argsTxt;
-      const fold = wrapFold(pre);
-      row.appendChild(fold);
-      foldExpand(fold);
-    }
-  };
-  row.appendChild(argsBtn);
+  const ui = uiOf(ev);
+  let args = {};
+  try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
+  const row = makeToolRowBase(summaryText(ui, ev.name, args, ""));
+  row.appendChild(argsButton(ev.arguments));
   return row;
 }
 
-// render one tool_call row; consecutive calls append to the same group block
+// render one tool_call row; consecutive calls append to the same block
 function addToolCallRow(ev) {
-  const group = toolGroupFor(ev.tool_call_id, ev.name);
-  group.el.appendChild(makeToolRow(ev));
+  const group = toolGroupFor(ev.tool_call_id, uiOf(ev));
+  const row = makeToolRow(ev);
+  toolRows.set(ev.tool_call_id, row);
+  group.el.appendChild(row);
   autoScroll();
 }
 
-// append a read tool's result as a collapsible row inside the tool group
-function addReadResultRow(ev) {
-  const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
-  const { row, full } = buildReadRow(call, ev.content);
-  toolGroupEl.el.appendChild(row);
-  toolGroupEl.el.appendChild(full);
+// Fill a call's row with its result, per the declaration: the summary becomes
+// the row's label and the body folds under it, so a batch of reads is a column
+// of one-liners that expand in place. Returns false when the row is gone (an
+// older log page whose call line is not in memory): the caller then renders the
+// result as its own block.
+function fillRow(row, ui, name, args, result) {
+  if (!row || !row.isConnected) return false;
+  const label = row.querySelector(".tool-label");
+  if (label) label.textContent = summaryText(ui, name, args, result.content);
+  const body = buildResultBody(ui, result, args);
+  if (!body) return true; // "none": the row IS the result
+  if (foldAtRest(ui, result)) {
+    const fold = wrapFold(body);
+    row.appendChild(fold);
+    const toggle = document.createElement("span");
+    toggle.className = "read-toggle";
+    toggle.textContent = "▸";
+    row.onclick = (event) => {
+      if (event.target.closest(".tool-args-btn")) return; // the args box has its own toggle
+      toggle.textContent = toggleFold(fold) ? "▾" : "▸";
+    };
+    row.insertBefore(toggle, label);
+  } else {
+    row.appendChild(body);
+  }
   autoScroll();
+  return true;
 }
 
-// live tool-call previews: callId -> {name, text, row, body, group}; reads stay
-// collapsed, run_command shows just the command
-const streamRows = {};
-
-function friendlyArgs(name, raw) {
-  if (name === "run_command") {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.command === "string") return "$ " + parsed.command;
-    } catch (e) {}
-    let t = raw;
-    const prefix = '{"command": "';
-    if (t.startsWith(prefix)) t = t.slice(prefix.length);
-    // mid-stream: cut at the closing quote so trailing fields never leak into the preview
-    let end = -1;
-    for (let i = 0; i < t.length; i++) {
-      if (t[i] === '"' && t[i - 1] !== "\\") { end = i; break; }
+// A result that is its own block: the header is the declaration's summary under
+// the component's own verdict ("✓" for a change, "result ⚠" for an error), and
+// the body is what the declaration says it is.
+function buildResultBlock(ui, name, args, result) {
+  const wrap = document.createElement("div");
+  wrap.className = "event tool_result" + (result.is_error ? " error" : "")
+    + (ui.group ? " read" : "") + (ui.body === "diff" ? " write" : "");
+  const changed = !result.is_error && ui.body === "diff";
+  const hdr = changed ? "✓ " + summaryText(ui, name, args, result.content)
+    : result.is_error ? "result ⚠" : "result";
+  wrap.innerHTML = `<div class="hdr">${escapeHtml(hdr)}</div>`;
+  const body = buildResultBody(ui, result, args);
+  if (body) {
+    if (ui.body === "diff") {
+      const note = document.createElement("div");
+      note.className = "body md-plain";
+      note.textContent = result.content; // the component's one-line verdict
+      if ((result.content || "").trim()) wrap.appendChild(note);
+      wrap.appendChild(body);
+    } else if (foldAtRest(ui, result)) {
+      const fold = wrapFold(body);
+      const toggle = document.createElement("span");
+      toggle.className = "read-toggle";
+      toggle.textContent = "▸";
+      toggle.onclick = () => { toggle.textContent = toggleFold(fold) ? "▾" : "▸"; };
+      wrap.appendChild(toggle);
+      wrap.appendChild(fold);
+    } else {
+      const plain = document.createElement("div");
+      plain.className = "body md-plain";
+      plain.appendChild(body);
+      wrap.appendChild(plain);
     }
-    if (end >= 0) t = t.slice(0, end);
-    return "$ " + t.replace(/\\"/g, '"').replace(/\\n/g, "\n");
   }
-  if (name === "write_file" || name === "edit_file") {
-    try {
-      const p = JSON.parse(raw);
-      if (p && typeof p === "object") {
-        const lines = [];
-        if (p.path) lines.push(`✎ ${p.path}`);
-        if (name === "write_file" && typeof p.content === "string") lines.push(p.content);
-        if (name === "edit_file") {
-          if (typeof p.old_string === "string") lines.push("- " + p.old_string);
-          if (typeof p.new_string === "string") lines.push("+ " + p.new_string);
+  // a diff past the threshold gets the host's expand control; a diff is the one
+  // body the host folds itself (its own CSS cap), not the declaration's fold
+  if (ui.body === "diff" && body && (result.diff || "").split("\n").length > RESULT_FOLD_LINES) {
+    body.classList.add("diff-collapsed");
+    const expand = document.createElement("button");
+    expand.className = "diff-expand";
+    const setLabel = () => {
+      expand.textContent = body.classList.contains("diff-collapsed") ? "Show full diff" : "Hide diff";
+    };
+    setLabel();
+    expand.onclick = () => {
+      if (body.classList.contains("diff-collapsed")) expandDiff(body);
+      else collapseDiff(body);
+      setLabel();
+    };
+    wrap.appendChild(expand);
+  }
+  // the host's per-file undo: offered exactly when it holds a record for this
+  // call (the declaration that overwrote a path reached the host's snapshot)
+  if (ui.undo && !result.is_error) {
+    const undoBtn = document.createElement("button");
+    undoBtn.className = "diff-expand undo-btn";
+    undoBtn.textContent = "↶ undo";
+    undoBtn.onclick = async () => {
+      try {
+        const data = await apiFetch("/api/workspace/revert", {
+          method: "POST",
+          body: { path: (args && args.path) || "" },
+        });
+        if (data && data.status === "ok") {
+          undoBtn.textContent = "↶ undone";
+          undoBtn.disabled = true;
+          refreshTree();
+        } else {
+          undoBtn.textContent = "↶ no snapshot";
+          undoBtn.disabled = true;
         }
-        if (lines.length) return lines.join("\n");
+      } catch (e) {
+        // an HTTP rejection means the backend answered: no snapshot exists
+        undoBtn.textContent = e.status ? "↶ no snapshot" : "↶ failed";
+        undoBtn.disabled = true;
       }
-    } catch (e) {}
-    // mid-stream: strip JSON braces/escapes so it reads as plain text
-    return raw.replace(/^\{/, "").replace(/\}$/, "").replace(/\\n/g, "\n").replace(/\\"/g, '"');
+    };
+    wrap.appendChild(undoBtn);
   }
-  return raw;
+  return wrap;
 }
+
+// the result body node per the declaration: "text" the component's own content,
+// "diff" the unified diff it returned, "none" nothing but the row itself
+function buildResultBody(ui, result, args) {
+  if (ui.body === "none") return null;
+  if (ui.body === "diff" && result.diff) return renderDiff(result.diff);
+  if (ui.body === "diff") return null;
+  const pre = document.createElement("pre");
+  pre.className = "read-detail";
+  pre.textContent = result.content || "";
+  highlightPreByPath(pre, (args && args.path) || "");
+  return pre;
+}
+
+// whether the declaration wants this body folded at rest
+function foldAtRest(ui, result) {
+  if (ui.collapse === "always") return true;
+  if (ui.collapse !== "long") return false;
+  const text = ui.body === "diff" ? result.diff || "" : result.content || "";
+  return String(text).split("\n").length > RESULT_FOLD_LINES;
+}
+
+// live tool-call previews: callId -> {name, ui, text, row, body, group}; the
+// declaration decides what the row shows while the call is generated
+const streamRows = {};
 
 function handleToolCallDelta(ev) {
   let st = streamRows[ev.tool_call_id];
   if (!st) {
     if (!ev.name) return; // the start delta carries the name
-    const group = toolGroupFor(ev.tool_call_id, ev.name);
-    st = streamRows[ev.tool_call_id] = { name: ev.name, text: "", row: null, body: null, group };
-    st.row = makeToolRowBase(ev.name);
+    const ui = uiOf(ev);
+    const group = toolGroupFor(ev.tool_call_id, ui);
+    st = streamRows[ev.tool_call_id] = { name: ev.name, ui, text: "", row: null, body: null, group };
+    st.row = makeToolRowBase(summaryText(ui, ev.name, {}, ""));
     st.row.classList.add("stream");
-    if (isReadTool(ev.name)) {
-      // reads are large; the preview stays collapsed to just the name
-      st.row.innerHTML += ` <span class="muted">…</span>`;
+    if (ui.preview === "none" || (ui.preview && ui.preview.mode === "none")) {
+      // nothing to stream: the row stays just its label, the result fills it later
+      const dots = document.createElement("span");
+      dots.className = "muted";
+      dots.textContent = "…";
+      st.row.appendChild(dots);
     } else {
       st.body = document.createElement("pre");
       st.body.className = "tool-args-detail stream-pre";
       st.row.appendChild(st.body);
     }
+    toolRows.set(ev.tool_call_id, st.row);
     group.el.appendChild(st.row);
     autoScroll();
   }
   st.text += ev.delta;
-  if (st.body) st.body.textContent = friendlyArgs(st.name, st.text);
+  if (st.body) st.body.textContent = previewText(st.ui, st.name, st.text);
   // the preview grows in place (no scroll event): re-pin while latched
   autoScroll();
 }
@@ -456,34 +663,6 @@ function clearStreamPreviews() {
     if (streamRows[id]) streamRows[id].row.remove();
     delete streamRows[id];
   }
-}
-
-// one collapsible read row (toggle + summary + hidden code panel)
-function buildReadRow(call, content) {
-  const toolName = call.name || "";
-  const path = (call.args && call.args.path) || "";
-  const summary = toolName === "grep"
-    ? `grep '${(call.args && call.args.pattern) || ""}' (${content ? content.split("\n").length : 0} lines)`
-    : `read ${path || "file"} (${content ? content.split("\n").length : 0} lines)`;
-  const row = document.createElement("div");
-  row.className = "read-row";
-  const toggle = document.createElement("span");
-  toggle.className = "read-toggle";
-  toggle.textContent = "▸";
-  const lbl = document.createElement("span");
-  lbl.textContent = summary;
-  row.appendChild(toggle);
-  row.appendChild(lbl);
-  const full = document.createElement("pre");
-  full.className = "read-detail"; // the wrapper carries the hidden state
-  full.textContent = content;
-  highlightPreByPath(full, path);
-  const fold = wrapFold(full);
-  row.onclick = () => {
-    const wasHidden = toggleFold(fold);
-    toggle.textContent = wasHidden ? "▾" : "▸";
-  };
-  return { row, full: fold };
 }
 
 // transient "connection lost — retrying…" chip. Shown when an LLM stream
@@ -639,15 +818,22 @@ function applyStreamEvent(ev) {
   if (ev.type === "tool_call" && ev.tool_call_id) {
     let args = {};
     try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
-    toolCalls[ev.tool_call_id] = { name: ev.name, args };
+    toolCalls[ev.tool_call_id] = { name: ev.name, args, ui: ev.ui || {} };
     const st = streamRows[ev.tool_call_id];
     if (st) {
-      // the call finished: swap the live preview for the final row in the same group
-      st.row.remove();
+      // the call finished: keep the same row (its result will fill it), drop the
+      // live preview's streaming marker and settle the label on the call's own
+      // arguments
+      st.row.classList.remove("stream");
+      const label = st.row.querySelector(".tool-label");
+      if (label) label.textContent = summaryText(uiOf(ev), ev.name, args, "");
+      const preview = st.row.querySelector(".stream-pre");
+      if (preview) preview.remove();
+      const dots = st.row.querySelector(".muted");
+      if (dots) dots.remove();
+      st.row.appendChild(argsButton(ev.arguments));
+      st.body = null;
       streamRows[ev.tool_call_id] = undefined;
-      toolGroupEl = st.group;
-      toolGroupEl.ids.add(ev.tool_call_id);
-      toolGroupEl.el.appendChild(makeToolRow(ev));
       autoScroll();
     } else {
       addToolCallRow(ev); // replay (no deltas) renders the final row directly
@@ -660,22 +846,20 @@ function applyStreamEvent(ev) {
     return true;
   }
 
-  // read results merge into their group; look it up by call id (the collector
-  // may have moved elsewhere)
+  // a result whose declaration collected it into a group fills its own row
+  // there; a call that declared no group renders its result as its own block
   if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
     const call = toolCalls[ev.tool_call_id];
-    if (isReadTool(call.name)) {
-      const group = toolCallGroups.get(ev.tool_call_id);
-      if (group) {
-        const prev = toolGroupEl;
-        toolGroupEl = group; // addReadResultRow appends into the current collector
-        addReadResultRow(ev);
+    const ui = uiOfResult(ev);
+    const group = ui.group ? toolCallGroups.get(ev.tool_call_id) : null;
+    if (group) {
+      const row = toolRows.get(ev.tool_call_id);
+      if (fillRow(row, ui, call.name, call.args || {}, ev)) {
         group.closed = true; // this group's calls have completed
-        toolGroupEl = prev;
-      } else {
-        const el = renderEvent(ev);
-        if (el) { (pageSink || eventsEl).appendChild(el); autoScroll(); }
+        return true;
       }
+      const el = renderEvent(ev);
+      if (el) { (pageSink || eventsEl).appendChild(el); autoScroll(); }
       return true;
     }
   }
@@ -1273,81 +1457,12 @@ function renderEvent(ev) {
       break;
     }
     case "tool_result": {
-      const call = toolCalls[ev.tool_call_id] || { name: "", args: {} };
-      const toolName = call.name || "";
-      const isRead = isReadTool(toolName);
-      const isWrite = toolName === "write_file" || toolName === "edit_file";
-      // any tool that could change the filesystem (blacklist of read-only tools)
-      if (toolName && !isRead && toolName !== "load_skill") scheduleTreeRefresh();
-
-      wrap.className = "event tool_result" + (ev.is_error ? " error" : "")
-        + (isRead ? " read" : "") + (isWrite ? " write" : "");
-      const hdr = isWrite ? (toolName === "edit_file" ? "✎ edited" : "✓ wrote") : (ev.is_error ? "result ⚠" : "result");
-      wrap.innerHTML = `<div class="hdr">${hdr}</div>`;
-      body.className = "body md-plain";
-
-      if (isRead) {
-        const { row, full } = buildReadRow(call, ev.content);
-        wrap.appendChild(row);
-        wrap.appendChild(full);
-        appendedBody = true; // the read content lives in the panel, not body
-        break;
-      }
-
-      if (isWrite && ev.diff) {
-        // show the file change as a unified diff
-        const path = call.args.path || "";
-        wrap.innerHTML = `<div class="hdr">✓ wrote <span class="diff-file">${escapeHtml(path)}</span></div>`;
-        body.textContent = ev.content; // summary line (e.g. OK: wrote /x (+5 -2 lines))
-        wrap.appendChild(body);
-        appendedBody = true;
-        const pre = renderDiff(ev.diff);
-        wrap.appendChild(pre);
-        if (ev.diff.split("\n").length > 60) {
-          pre.classList.add("diff-collapsed");
-          const expand = document.createElement("button");
-          expand.className = "diff-expand";
-          const setLabel = () => {
-            expand.textContent = pre.classList.contains("diff-collapsed") ? "Show full diff" : "Hide diff";
-          };
-          setLabel();
-          expand.onclick = () => {
-            if (pre.classList.contains("diff-collapsed")) expandDiff(pre);
-            else collapseDiff(pre);
-            setLabel();
-          };
-          wrap.appendChild(expand);
-        }
-        // user-side undo: reverts the last snapshot of this file on the server
-        const undoBtn = document.createElement("button");
-        undoBtn.className = "diff-expand undo-btn";
-        undoBtn.textContent = "↶ undo";
-        undoBtn.onclick = async () => {
-          try {
-            const data = await apiFetch("/api/workspace/revert", {
-              method: "POST",
-              body: { path: call.args.path },
-            });
-            if (data && data.status === "ok") {
-              undoBtn.textContent = "↶ undone";
-              undoBtn.disabled = true;
-              refreshTree();
-            } else {
-              undoBtn.textContent = "↶ no snapshot";
-              undoBtn.disabled = true;
-            }
-          } catch (e) {
-            // an HTTP rejection means the backend answered: no snapshot exists
-            undoBtn.textContent = e.status ? "↶ no snapshot" : "↶ failed";
-            undoBtn.disabled = true;
-          }
-        };
-        wrap.appendChild(undoBtn);
-        break;
-      }
-
-      body.textContent = ev.content;
-      break;
+      const call = toolCalls[ev.tool_call_id] || { name: "", args: {}, ui: {} };
+      const ui = uiOfResult(ev);
+      // a call that may change the tree asks for a fresh one (the declaration
+      // says whether it can — the host derives it when it declares nothing)
+      if (ui.mutates) scheduleTreeRefresh();
+      return buildResultBlock(ui, call.name || "", call.args || {}, ev);
     }
     case "state_update": {
       if (ev.key === "execution_status" && ev.value) setStatus(ev.value);
@@ -2225,14 +2340,11 @@ function openPerm(ev) {
   const argsEl = $("#perm-args");
   let txt = ev.args_repr || "";
   let isJson = false;
-  if (ev.tool === "run_command") {
-    // permission prompts show the command itself, not the {comment: ...} envelope
-    const cmd = extractCommand(txt);
-    if (cmd !== null) txt = "$ " + cmd;
-    else { try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {} }
-  } else {
-    try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {}
-  }
+  // the payload is unwrapped generically: a command-shaped one shows as the
+  // command the user is being asked about, anything else as formatted JSON
+  const cmd = extractCommand(txt);
+  if (cmd !== null) txt = "$ " + cmd;
+  else { try { txt = JSON.stringify(JSON.parse(txt), null, 2); isJson = true; } catch (e) {} }
   argsEl.textContent = "";
   if (typeof hljs !== "undefined" && isJson) {
     const code = document.createElement("code");

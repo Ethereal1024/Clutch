@@ -6,9 +6,9 @@ This is the one host-side test that starts REAL module daemons: it pins the
 frozen discovery contract (record shape, token header, health), the statement
 shape a curl-driven tool relies on, the spawn-time fence, and — the discipline
 every leak in this repo came from — that release() really stops what we started.
-It then drives the same statements through the registry, so the executor's
-precedence (guard -> module statement -> host implementation), the byte-parity
-of the two faces and R2's degradation are pinned too, not just asserted in prose.
+It then drives the same statements through the registry, so the executor's path
+(guard -> the component's statement, and nothing else) is pinned too: with the
+component gone the host has no tool, only the component's name in a refusal.
 
 Isolation: CLUTCH_WORKSPACE_DISCOVERY_DIR points at a temp dir, so the run
 never reads or writes the user's ~/.clutch-workspace, and
@@ -24,12 +24,12 @@ import time
 from pathlib import Path
 
 from agent.config import Config
-from agent.tools import components, filesystem, modules, rendezvous
+from agent.tools import catalog, components, modules, rendezvous
 from agent.tools.inst import render, unwrap
-from agent.tools.registry import ToolRegistry, build_default_tools
+from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import LocalTransport
 from agent.tools.workspace import LocalWorkspace
-from tests.testsupport import check, posix_shell_argv
+from tests.testsupport import check
 
 # the statement shape the registry's four-file tools use (see registry.py)
 READ_FILE = (
@@ -37,8 +37,9 @@ READ_FILE = (
     "--data-binary {*} -w {status} http://127.0.0.1:{port}/read_file"
 )
 WRITE_FILE = READ_FILE.replace("/read_file", "/write_file")
-# the workspace module's frozen rendezvous table entry (the host's side of R4)
-WS = rendezvous._TABLE[modules.WORKSPACE]
+# the workspace component's declaration (catalog.py), which carries the
+# discovery coordinates a daemon publishes and the host reads back
+WS = catalog.table()[modules.WORKSPACE]
 
 
 def _call(root: str, template: str, args: dict, defaults: dict | None = None) -> dict:
@@ -72,7 +73,7 @@ def _install_probe() -> None:
             )
             version = components.install(
                 artifact,
-                {"name": modules.WORKSPACE, "version": "9.9.9", "interface": rendezvous.DAEMON},
+                {"name": modules.WORKSPACE, "version": "9.9.9", "interface": catalog.DAEMON},
             )
             check(components.installed(modules.WORKSPACE) == version, "the install layer finds what it just laid down")
             resolved = rendezvous.resolve(modules.WORKSPACE)
@@ -101,15 +102,19 @@ def _install_probe() -> None:
 
             cli = Path(host_root) / "cli-artifact"
             cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            memdir = components.install(cli, {"name": modules.MEMORY, "version": "1.0.0", "interface": rendezvous.CLI})
-            reason = rendezvous.unavailable_reason(modules.MEMORY)
+            memdir = components.install(cli, {"name": modules.MEMORY, "version": "1.0.0", "interface": catalog.CLI})
+            resolved_cli = rendezvous.resolve(modules.MEMORY)
             check(
-                "standalone executable" in reason,
-                "an installed CLI onefile is refused with a reason, not run as {py} {script}",
+                resolved_cli is not None and resolved_cli.installed and not resolved_cli.template,
+                "an installed CLI onefile supersedes the checkout template",
             )
-            check(not rendezvous.available(modules.MEMORY), "so a CLI component answers from the host implementation (R2)")
             check(
-                components.verify(memdir, name=modules.MEMORY, interface=rendezvous.DAEMON) != "",
+                resolved_cli is not None and resolved_cli.argv == (str(memdir / modules.MEMORY),),
+                "a CLI onefile is driven by its own executable, not {py} {script}",
+            )
+            check(rendezvous.available(modules.MEMORY), "so an installed CLI component IS the implementation")
+            check(
+                components.verify(memdir, name=modules.MEMORY, interface=catalog.DAEMON) != "",
                 "a manifest contradicting the host's table is refused before use",
             )
             stray = components.component_root(modules.MEMORY) / "0.0.0-garbage"
@@ -163,14 +168,14 @@ def main() -> int:
     # 2b. the axes a component is described by, and the one lookup that decides
     #     where it is. WHAT it is spoken to as (interface) is a separate fact
     #     from WHOSE resources it serves (subject), which is what makes a
-    #     statement legal for a given workspace at all (registry.module_ready).
+    #     statement legal for a given workspace at all (registry.module_blocked_reason).
     check(rendezvous.serves_workspace_fs(modules.WORKSPACE), "the workspace component serves the workspace filesystem")
     for other in (modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
-    check(all(mod.runs_on == rendezvous.SELF for mod in rendezvous._TABLE.values()),
+    check(all(mod.runs_on == catalog.SELF for mod in catalog.table().values()),
           "every component in the table runs on the host that asks (the OTHER axis is unused)")
-    check(all(mod.requires for mod in rendezvous._TABLE.values()), "every component declares what it stands on")
+    check(all(mod.requires for mod in catalog.table().values()), "every component declares what it stands on")
     check(
         rendezvous.unavailable_reason("clutch-nope") == "unknown component: clutch-nope",
         "an unknown component says so in one sentence",
@@ -251,49 +256,35 @@ def main() -> int:
         #     as its envelope. Nothing below re-implements the wiring: this is
         #     the path a real tool call takes.
         cfg = Config()
-        reg = ToolRegistry(build_default_tools(cfg))
+        reg = ToolRegistry(build_tools(cfg))
         ws = LocalWorkspace(workspace)
         live = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
         check(not live["error"] and live["content"].strip() == "hello", "the registry reads through the daemon")
         check(rendezvous._read_record(workspace, WS) is not None, "the registry started the daemon it needed")
 
-        # 11. parity: the module face and the host face must say the same thing
-        #     about the same call — the module's summary/diff is the byte-level
-        #     contract (R4), and the host implementation mirrors it on purpose
+        # 11. the calls really land where the assertion says they do: written
+        #     and rewritten through the daemon, read back from the disk.
         fresh = "one\ntwo\n"
         mod = reg.execute(ws, cfg, "write_file", {"path": "m1.txt", "content": fresh})
-        host = filesystem.write_file(ws, cfg, "h1.txt", fresh)
-        check(
-            not mod["error"] and mod["content"].replace("m1.txt", "f") == host["content"].replace("h1.txt", "f"),
-            "write_file (new file): the module's summary is the host's",
-        )
-        mod = reg.execute(ws, cfg, "write_file", {"path": "m1.txt", "content": fresh + "three\n"})
-        host = filesystem.write_file(ws, cfg, "h1.txt", fresh + "three\n")
-        check(
-            mod["content"].replace("m1.txt", "f") == host["content"].replace("h1.txt", "f"),
-            "write_file (overwrite): the module's summary is the host's",
-        )
-        check(
-            mod["diff"].replace("m1.txt", "f") == host["diff"].replace("h1.txt", "f"),
-            "write_file: the module's diff is the host's",
-        )
+        check(not mod["error"] and (Path(workspace) / "m1.txt").read_text() == fresh,
+              "write_file lands through the daemon")
         mod = reg.execute(ws, cfg, "edit_file", {"path": "m1.txt", "old_string": "two", "new_string": "TWO"})
-        host = filesystem.edit_file(ws, cfg, "h1.txt", old_string="two", new_string="TWO")
-        check(
-            mod["content"].replace("m1.txt", "f") == host["content"].replace("h1.txt", "f")
-            and mod["diff"].replace("m1.txt", "f") == host["diff"].replace("h1.txt", "f"),
-            "edit_file: the module's summary + diff are the host's",
-        )
+        check(not mod["error"] and "TWO" in (Path(workspace) / "m1.txt").read_text(),
+              "edit_file rewrites through the daemon")
 
-        # 12. R2, the star's acceptance: make the module checkout vanish and the
-        #     very same call still answers — from the host, indistinguishably
+        # 12. no component, no tool. The workspace component gone means the host
+        #     has no read_file AT ALL — not a degraded one: build_tools drops the
+        #     schema, and a call that still arrives is answered with the
+        #     component's own name, never with a host-side stand-in.
         real_dir = modules.module_dir
         modules.module_dir = lambda name: Path(workspace) / "no-such-module" / name
         try:
-            check(not rendezvous.available(modules.WORKSPACE), "a deleted module is not available")
+            check(not rendezvous.available(modules.WORKSPACE), "a deleted component is not available")
+            check("read_file" not in [t.name for t in build_tools(cfg)],
+                  "the host offers no read_file with the component gone")
             gone = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
-            check(not gone["error"], "read_file still answers with the module gone")
-            check(gone["content"] == live["content"], "the degraded answer is byte-identical")
+            check(gone["error"] and modules.WORKSPACE in gone["content"],
+                  "the call is answered with the component's name, never a stand-in")
         finally:
             modules.module_dir = real_dir
 

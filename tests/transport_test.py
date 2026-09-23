@@ -22,7 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.tools.transport import LocalTransport, SshTransport, TransportError
-from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace, shq
+from agent.tools.localshell import shq
+from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
 from tests.testsupport import check, posix_shell_argv
 
 # the mock "remote" parses commands with a POSIX shell, exactly like the real
@@ -207,26 +208,20 @@ def main() -> int:
         ws.append_line("log.txt", "second")
         check(ws.read("log.txt") == '{"a": "$x"}\nsecond\n', "remote append_line")
 
-        # remote grep: shell grep on the far side, paths root-relative, include filter
-        hits = ws.grep("VAR", path="sub")
-        check(
-            any(f == "sub/deep/f.txt" for f, _, _ in hits) and all(f.startswith("sub/") for f, _, _ in hits),
-            "remote grep finds hits with root-relative paths",
-        )
-        check(ws.grep("VAR", path="sub", include="*.log") == [], "remote grep include filter excludes")
-        check(ws.grep("no_such_token_zzz") == [], "remote grep no matches -> []")
-        # find-based file list (busybox-safe) skips hidden files and the protected .clc
-        ws.write(".hidden.py", "SECRET_TOKEN hidden\n")
-        ws.write("open.txt", "SECRET_TOKEN open\n")
-        prot = Path(rtmp) / "secret.clc"
-        ws.protect(prot)
-        ws.write("secret.clc", "SECRET_TOKEN protected\n")
-        hit_names = {f for f, _, _ in ws.grep("SECRET_TOKEN")}
-        check("open.txt" in hit_names, "remote grep searches normal files")
-        check(
-            "secret.clc" not in hit_names and ".hidden.py" not in hit_names,
-            "remote grep skips hidden + protected files",
-        )
+        # The file tools belong to the workspace COMPONENT, and that component
+        # serves the workspace root's own filesystem — the machine the root lives
+        # on. This root is another machine's, so the component cannot serve it:
+        # the call is refused rather than quietly answered by the app host's own
+        # filesystem (which would be a different file). The tools come back with
+        # a component that runs over there (registry.module_blocked_reason).
+        from agent.config import Config
+        from agent.tools.registry import ToolRegistry, build_tools
+
+        cfg = Config()
+        reg = ToolRegistry(build_tools(cfg))
+        refused = reg.execute(ws, cfg, "read_file", {"path": "log.txt"})
+        check(refused["error"], "a remote root refuses the file tools instead of serving the wrong machine")
+        check("clutch-workspace" in refused["content"], "and the refusal names the component that would serve it")
 
         # SshTransport surfaces a remote timeout as TransportError(timeout=True)
         try:

@@ -27,7 +27,7 @@ import urllib.request
 from pathlib import Path
 
 from agent.supervisor import Supervisor, build_server
-from agent.tools import components, modules, rendezvous
+from agent.tools import catalog, components, modules, rendezvous
 from tests.testsupport import check, http_get
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +70,7 @@ def _tar_checkout(name: str, into: Path) -> Path:
 def main() -> int:
     root = tempfile.mkdtemp(prefix="clutch-components-")
     os.environ[components.ROOT_ENV] = root
-    sup, port = None, 0
+    sup = None
     try:
         # 1. nothing installed, so nothing to report and nothing current
         check(components.inventory() == [], "a fresh host has no components installed")
@@ -161,7 +161,7 @@ def main() -> int:
             {
                 "name": modules.MEMORY,
                 "version": digest_ws[:16],
-                "interface": rendezvous.CLI,
+                "interface": catalog.CLI,
                 "digest": digest_ws,
                 "artifact": tar.name,
             },

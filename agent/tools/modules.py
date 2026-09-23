@@ -2,9 +2,9 @@
 
 Each decoupled tool is its own module directory next to the host repo
 (clutch-workspace / clutch-memory / clutch-websearch / clutch-skills). The host
-never imports them — R2 of the tool constitution: the dependency graph is a
-star, modules point at the host's generic services, the host points at nothing
-but their published interfaces (an HTTP surface, a CLI's stdout contract).
+never imports them: the dependency graph is a star, modules point at the host's
+generic services, the host points at nothing but their published interfaces (an
+HTTP surface, a CLI's stdout contract).
 
 Three things every consumer of a module needs, kept in one place:
 
@@ -97,9 +97,9 @@ def module_env(import_dirs: Iterable[Path | str] = (), extra: dict[str, str] | N
 
     `import_dirs` are the roots the child has to be able to `import` from — a
     component's OWN directory, and only when its launch says it is importable.
-    Never a sibling's: R2's graph is a star, so no component is put next to
-    another one to import it. A source checkout is not an installed package, so
-    without this even the child's own `-m` package would not be found.
+    Never a sibling's: the dependency graph is a star, so no component is put
+    next to another one to import it. A source checkout is not an installed
+    package, so without this even the child's own `-m` package is not found.
     """
     env = dict(os.environ)
     parts = [str(Path(d)) for d in import_dirs]

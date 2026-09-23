@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from .base import RunState
+from .tools.localshell import shq
 from .tools.transport import SshTransport
-from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries, shq
+from .tools.workspace import RemoteWorkspace, Workspace, parse_ls_entries
 
 # per-exec timeout for remote directory browsing (one ls / echo $HOME over the bridge)
 _FS_LIST_TIMEOUT = 30.0
