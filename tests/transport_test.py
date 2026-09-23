@@ -155,18 +155,13 @@ def main() -> int:
         )
 
         # ls parsing + cd semantics + protected hiding + error mapping
-        entries = ws.list(".")
-        check("sub/" in entries and "no-nl.txt" in entries, "remote list dirs end with '/'")
+        entries = ws.list_many(["."])["."]
+        check("sub/" in entries and "no-nl.txt" in entries, "remote listing marks dirs with '/'")
         try:
             ws.read("missing.txt")
             check(False, "remote read raises FileNotFoundError")
         except FileNotFoundError:
             check(True, "remote read raises FileNotFoundError")
-        try:
-            ws.list("no-nl.txt")
-            check(False, "remote list raises NotADirectoryError")
-        except NotADirectoryError:
-            check(True, "remote list raises NotADirectoryError")
         r = ws.run("pwd", 30.0)
         check(r.code == 0 and r.stdout.strip() == str(ws.root), "remote run cwd = root")
 
@@ -182,7 +177,7 @@ def main() -> int:
         )
         ws.protect(Path(str(ws.root)) / "sub" / "secret.txt")
         ws.write("sub/secret.txt", "x")
-        check("secret.txt" not in ws.list("sub"), "remote list hides protected files")
+        check("secret.txt" not in ws.list_many(["sub"])["sub"], "remote listing hides protected files")
 
         # list_many: one exec lists a level; hidden entries not pre-filtered
         (Path(rtmp) / "a").mkdir()
@@ -190,17 +185,21 @@ def main() -> int:
         (Path(rtmp) / "b").mkdir()
         (Path(rtmp) / "b" / "f.txt").write_text("x")
         MockBridge.post_count = 0
-        many = ws.list_many([".", "a", "b", "missing"])
+        many = ws.list_many([".", "a", "b", "missing", "no-nl.txt"])
         check(
             MockBridge.post_count == 1,
             f"list_many batches the whole level into one exec (got {MockBridge.post_count})",
         )
         check(
-            many["."] == ws.list(".") and many["a"] == ws.list("a") and many["b"] == ws.list("b"),
-            "list_many matches per-dir list()",
+            {"sub/", "no-nl.txt", "a/", "b/"} <= set(many["."])
+            and many["a"] == ["inner/"]
+            and many["b"] == ["f.txt"],
+            "list_many lists each named dir, dirs marked with '/'",
         )
-        check(many["missing"] == [], "list_many maps a missing dir to []")
-        check("inner/" in many["a"] and "f.txt" in many["b"], "list_many parses dirs/files")
+        check(
+            many["missing"] == [] and many["no-nl.txt"] == [],
+            "list_many maps a missing or non-dir path to []",
+        )
         check(MockBridge.max_cmd_len <= _EXEC_CHUNK_BYTES + 200, "list_many command stays under the exec cap")
 
         # append_line -> quoted heredoc >>, round trips special chars too

@@ -788,10 +788,12 @@ async function establishForwardAndHealth(localPort) {
 
 // The far side's server is up, and components are code IT runs on ITS machine —
 // so handing them over belongs here, right after the health probe says the host
-// is the one we think it is. Deliberately not awaited: a component is an
-// optimization (until one lands the host answers from its own implementation,
-// R2) and connecting must not wait on a 30 MB upload. A dev run ships its own
-// checkout, which is the one artifact this side has and the far side cannot.
+// is the one we think it is. Deliberately not awaited: connecting must not wait
+// on a 30 MB upload. There is no second implementation on that side to cover for
+// a component that has not landed — an absent component simply takes its tools
+// with it — so a failed pass is logged and the far side keeps the surface it has.
+// A dev run ships its own checkout, which is the one artifact this side has and
+// the far side cannot.
 function installComponents(base) {
   Promise.resolve()
     .then(() => components.ensureComponents(base, { progress: (m) => tunnelLog("[components] " + m) }))

@@ -7,9 +7,17 @@ the agent cannot read, write, or even list them.
 
 Workspace is the base class: it owns root/path-safety/transport and lets
 subclasses define how files are actually touched. LocalWorkspace uses Path
-operations; RemoteWorkspace (SSH degradation layer) maps read/write/list to sh
-commands executed through the transport. Tools only see the Workspace interface,
-so local and remote behave identically.
+operations; RemoteWorkspace (SSH degradation layer) maps the same calls to sh
+commands executed through the transport.
+
+What it carries is the HOST's own bookkeeping, not the file tools: the .clc
+project file (byte offsets, the fixed-width memory index line), the per-file
+snapshot the UI's undo restores, the lazy indexed log reads, the transport every
+statement runs through, and the entries browsing.py walks into the UI's tree.
+The read_file / grep / write_file / edit_file tools are the workspace
+COMPONENT's and are spoken to directly (tools/filesystem.py keeps only the
+host's protected-path policy), so nothing here is a second implementation of
+them.
 """
 
 from __future__ import annotations
@@ -288,10 +296,6 @@ class Workspace(ABC):
         """Create or overwrite a file (parents created as needed)."""
 
     @abstractmethod
-    def list(self, path: str) -> list[str]:
-        """Directory entries (dirs end with '/'), protected files excluded; raise NotADirectoryError."""
-
-    @abstractmethod
     def append_line(self, path: str, line: str) -> None:
         """Append one line to a file (the remote .clc writer)."""
 
@@ -357,12 +361,6 @@ class LocalWorkspace(Workspace):
         # writes LF, so the local backend must not let Windows text mode expand
         # every \n into \r\n (that desynchronizes every stored offset).
         p.write_text(content, encoding="utf-8", newline="\n")
-
-    def list(self, path: str) -> list[str]:
-        p = self.resolve(path)
-        if not p.is_dir():
-            raise NotADirectoryError(path)
-        return sorted(f.name + ("/" if f.is_dir() else "") for f in self.visible_entries(p))
 
     def append_line(self, path: str, line: str) -> None:
         p = self.resolve(path)
@@ -545,14 +543,6 @@ class RemoteWorkspace(Workspace):
     def write(self, path: str, content: str) -> None:
         p = self.resolve(path)
         self._exec_append(p, content, first_op=">", add_trailing_nl=False, ensure_dir=True)
-
-    def list(self, path: str) -> list[str]:
-        p = self.resolve(path)
-        # test -d first: ls alone succeeds on a plain file
-        r = self._transport.run(f"test -d {shq(str(p))} && ls -1AF {shq(str(p))}", _REMOTE_IO_TIMEOUT)
-        if r.code != 0:
-            raise NotADirectoryError(str(p))
-        return self._parse_list_output(p, r.stdout)
 
     def _parse_list_output(self, p: Path, stdout: str) -> list[str]:
         """One shared ls parser + the protected-file filter (protected dirs stay
