@@ -192,10 +192,14 @@ scripts/               打包与构建脚本
 指向代码、`tools` 列出它发布的工具，它就会出现在工具表里。
 
 工具在界面里的样子也是声明的一部分：每个工具事件都带上它组件声明的 `ui` 块，前端里
-没有任何工具名。`ui` 可声明 `group`（同一组的调用密集合并成一块，所以一串 read/grep
-扫成一列单行，而 write 不会被打包进去）、`body`（结果正文是文本 / diff / 不显示）、
-`collapse`（折叠块怎么收）、`preview`（调用流式进行时那行显示什么）与 `summary`
-（单行标签），宿主再补上它才知道的 `mutates` / `undo`。协议的定义与默认值见
+没有任何工具名。`ui` 的每个键只负责那一个部件：`chip`（行首那个工具名，默认打；
+summary 已经把这次调用说清楚的 read/grep 把它关掉）、`summary`（那行的一行标签，
+`{参数名}` / `{lines}` / `{name}` 由调用自己填，默认空 —— 行首的名字就是它）、
+`header`（结果自成一块时那块的标题，空则退回 summary，再退回 `result`）、`style`
+（结果怎么上色：plain / read / write）、`group`（同一组的调用密集合并成一块，所以
+一串 read/grep 扫成一列单行，而 write 不会被打包进去）、`preview`（调用流式进行时
+那行显示什么）、`body`（结果正文是文本 / diff / 不显示）与 `collapse`（折叠块怎么
+收），宿主再补上它才知道的 `mutates` / `undo`。协议的定义与默认值见
 `agent/tools/catalog.py` 顶部的说明，消费方是 `ui/app.js`。
 
 ## 测试

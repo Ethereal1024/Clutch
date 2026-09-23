@@ -193,17 +193,19 @@ def test_permission_flavor() -> None:
     reset_cache(CMD)
     with tempfile.TemporaryDirectory() as tmp:
         lws = LocalWorkspace(tmp)
-        esc = pe.escaped_paths("run_command", '{"command": "type \'/etc/hostname\'"}', lws)
+        # the guarded argument comes from the DECLARED access ("command" =
+        # the shell text), never from a tool name: permission.GUARDED_ARG
+        esc = pe.escaped_paths('{"command": "type \'/etc/hostname\'"}', lws, access="command")
         check(
             esc == frozenset(),
             "cmd flavor: a single-quoted token is not a sh quote (kept literal, reads relative)",
         )
-        esc3 = pe.escaped_paths("run_command", '{"command": "cat \\"unbalanced"}', lws)
+        esc3 = pe.escaped_paths('{"command": "cat \\"unbalanced"}', lws, access="command")
         check(esc3 == frozenset(), "unparseable command -> conservative empty escape set")
     # the remote shell is POSIX even though the HOST is cmd-pinned: the same
     # quoting must parse as sh and flag the escape (the ssh-from-Windows case)
     rws = RemoteWorkspace("/srv/proj", "http://127.0.0.1:9")
-    esc2 = pe.escaped_paths("run_command", '{"command": "grep \'a b\' /etc/hosts"}', rws)
+    esc2 = pe.escaped_paths('{"command": "grep \'a b\' /etc/hosts"}', rws, access="command")
     check(
         len(esc2) == 1 and any("hosts" in str(p) for p in esc2),
         "remote workspace tokenizes POSIX despite the cmd-pinned host",

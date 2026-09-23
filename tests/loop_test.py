@@ -530,7 +530,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
         (sb.root / "a.txt").write_text("some content\n" * 30)
-        cfg = Config(llm_context_window_bytes=1200)
+        # one read (~1.2 kB of window: the call event carries the tool's ui block,
+        # the result its 390 chars) must fit and two must not, so the run is forced
+        # through exactly one compaction with room to spare on either side — a
+        # threshold at the crossing point would make this fixture a byte-count
+        # hostage of the protocol's own size.
+        cfg = Config(llm_context_window_bytes=1800)
         fake = FakeLLM(
             responses=[
                 _resp(tool_calls=[_tool_call("read_file", '{"path": "a.txt"}')]),

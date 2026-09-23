@@ -276,24 +276,43 @@ const toolRows = new Map();
 // this file: every tool event carries the declaration its component made about
 // how a call is presented, and everything below reads that declaration.
 //
+// A declaration COMPOSES the row and the result out of named parts, each with a
+// default that reproduces the plain look: the tool's own name as the row's chip,
+// its arguments one click away, its result its own block.
+//
 //   group     calls naming the same group collect into ONE dense block — each
 //             call's row, with its result filled into that row, in one place, so
 //             a batch of reads scans as a column of one-liners. None: the call
 //             is its own row and its result its own block (a write must never be
 //             swallowed by the reads around it).
-//   summary   the one-line label; {argname} from the call's arguments, {lines}
-//             the result's line count, {name} the tool's own name.
-//   preview   the live row while the call streams.
+//   chip      "name" the row leads with the tool's own name; "none" it does not
+//             (a row whose summary already says what the call is reads better
+//             without the name repeated).
+//   summary   the row's one-line label: {argname} from the call's arguments,
+//             {lines} the result's line count (… until the result lands), {name}
+//             the tool's own name. "" = no label.
+//   preview   the live row while the call streams; "command" takes a `mark`
+//             (default "$ ") — the shell prompt a command reads under, which is
+//             also what the raw-arguments panel unwraps a command payload with.
+//   header    a result BLOCK's header label ({argname} as in summary). "" = the
+//             row's summary (the label this call would wear in a group), else
+//             "result". The host keeps the one verdict it owns: a failed call
+//             reads "result ⚠" whatever the declaration asked for.
+//   style     how the result is chromed: "plain", "read" (an exploration row),
+//             "write" (a change: the block's header is the accent chip).
 //   body      what the result shows: "text" its content, "diff", "none".
 //   collapse  "always" folded, "long" folded past RESULT_FOLD_LINES, "never" whole.
 //   mutates   the call may change the file tree (host-derived when undeclared).
 //   undo      the host holds an undo record for this call (host-derived).
 const UI_DEFAULTS = {
   group: null,
+  chip: "name",
+  summary: "",
+  preview: "args",
+  header: "",
+  style: "plain",
   body: "text",
   collapse: "never",
-  preview: "args",
-  summary: "{name}",
   mutates: true,
   undo: false,
 };
@@ -313,22 +332,29 @@ function uiOfResult(ev) {
   return uiOf(ev);
 }
 
-// the summary template filled from the call's arguments plus the two facts the
-// renderer has: how many lines came back, and the tool's own name
-function summaryText(ui, name, args, content) {
-  const lines = content ? String(content).split("\n").length : 0;
+// A declaration's template filled from the call's arguments plus the two facts
+// the renderer has: the tool's own name and how many lines came back (… while
+// the result is still on its way — the row must not claim "0 lines" it does not
+// know yet). `content === null` is "no result yet", "" is an empty one.
+function templateText(tpl, name, args, content) {
+  const lines = content === null || content === undefined ? "…" : String(content).split("\n").length;
   // a call that is still streaming has only its JSON text: parse it here, so a
   // caller may pass either the payload or what the model has sent so far
   if (typeof args === "string") {
     try { args = JSON.parse(args || "{}"); } catch (e) { args = {}; }
   }
-  return String(ui.summary || "{name}").replace(/\{([A-Za-z_]+)\}/g, (match, key) => {
+  return String(tpl || "").replace(/\{([A-Za-z_]+)\}/g, (match, key) => {
     if (key === "name") return name;
     if (key === "lines") return String(lines);
     const v = args ? args[key] : undefined;
     if (v === undefined || v === null) return "";
     return typeof v === "string" ? v : JSON.stringify(v);
   });
+}
+
+// the row's one-line label, and (through it) a result block's default header
+function summaryText(ui, name, args, content) {
+  return templateText(ui.summary, name, args, content);
 }
 
 // one argument out of a JSON payload that may still be arriving (hence invalid)
@@ -349,13 +375,15 @@ function partialArg(raw, key) {
 // the live preview the declaration asks for, from arguments that may still be
 // arriving. "content" prints argument VALUES: `keys` names which ones, in order,
 // and a leading "-", "+" or "✎" on a key is a mark printed before its value.
+// "command" prints the unwrapped command under its `mark` ("$ " by default) —
+// the component's choice, not this file's.
 function previewText(ui, name, raw) {
   const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
   const mode = spec.mode || "args";
   if (mode === "none") return "";
   if (mode === "command") {
     const cmd = extractCommand(raw);
-    return cmd !== null ? "$ " + cmd : raw || "";
+    return cmd !== null ? (spec.mark || "$ ") + cmd : raw || "";
   }
   if (mode === "content" && spec.keys && spec.keys.length) {
     const parts = [];
@@ -399,11 +427,17 @@ function toolGroupFor(id, ui) {
   return group;
 }
 
-// shared tool-row skeleton: the call's label (its declaration's summary) plus a
-// caller-specific tail
-function makeToolRowBase(label) {
+// shared tool-row skeleton: the declaration's own parts — its name as the row's
+// chip (unless it asked for none), then the row's label — plus the caller's tail
+function makeToolRowBase(ui, name, label) {
   const row = document.createElement("div");
   row.className = "tool-row";
+  if (ui.chip !== "none") {
+    const chip = document.createElement("span");
+    chip.className = "tool-name";
+    chip.textContent = name;
+    row.appendChild(chip);
+  }
   const text = document.createElement("span");
   text.className = "tool-label";
   text.textContent = label;
@@ -413,7 +447,7 @@ function makeToolRowBase(label) {
 
 // the raw arguments, one click away: the declaration decides how a call LOOKS,
 // never what it is — a summary is not a substitute for the payload
-function argsButton(raw) {
+function argsButton(raw, ui) {
   const btn = document.createElement("span");
   btn.className = "tool-args-btn";
   btn.textContent = "args ▸";
@@ -427,9 +461,7 @@ function argsButton(raw) {
       btn.textContent = "args ▾";
       const pre = document.createElement("pre");
       pre.className = "tool-args-detail";
-      let pretty = raw || "";
-      try { pretty = JSON.stringify(JSON.parse(raw || "{}"), null, 1); } catch (e) {}
-      pre.textContent = pretty;
+      pre.textContent = argsDetail(ui, raw);
       const fold = wrapFold(pre);
       fold.classList.add("args-fold");
       row.appendChild(fold);
@@ -437,6 +469,17 @@ function argsButton(raw) {
     }
   };
   return btn;
+}
+
+// the payload as the args panel shows it: a command-shaped declaration gets its
+// command unwrapped under its own prompt mark, everything else is pretty JSON
+function argsDetail(ui, raw) {
+  const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
+  if (spec.mode === "command") {
+    const cmd = extractCommand(raw);
+    if (cmd !== null) return (spec.mark || "$ ") + cmd;
+  }
+  try { return JSON.stringify(JSON.parse(raw || "{}"), null, 1); } catch (e) { return raw || ""; }
 }
 
 // Pull a shell command out of a command-shaped args payload. The schema is
@@ -471,14 +514,12 @@ function permReason(reason) {
   return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
 }
 
-// one tool_call row: the declaration's summary as the label (the call's own
-// arguments carry the {placeholders}), the raw payload one click away
+// one tool_call row: the declaration's chip and summary as the label (the call's
+// own arguments carry the {placeholders}), the raw payload one click away
 function makeToolRow(ev) {
   const ui = uiOf(ev);
-  let args = {};
-  try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
-  const row = makeToolRowBase(summaryText(ui, ev.name, args, ""));
-  row.appendChild(argsButton(ev.arguments));
+  const row = makeToolRowBase(ui, ev.name, summaryText(ui, ev.name, ev.arguments, null));
+  row.appendChild(argsButton(ev.arguments, ui));
   return row;
 }
 
@@ -505,6 +546,7 @@ function fillRow(row, ui, name, args, result) {
   if (foldAtRest(ui, result)) {
     const fold = wrapFold(body);
     row.appendChild(fold);
+    row.classList.add("folded"); // the whole row is the control (style.css)
     const toggle = document.createElement("span");
     toggle.className = "read-toggle";
     toggle.textContent = "▸";
@@ -512,7 +554,7 @@ function fillRow(row, ui, name, args, result) {
       if (event.target.closest(".tool-args-btn")) return; // the args box has its own toggle
       toggle.textContent = toggleFold(fold) ? "▾" : "▸";
     };
-    row.insertBefore(toggle, label);
+    row.insertBefore(toggle, label || row.firstChild);
   } else {
     row.appendChild(body);
   }
@@ -520,17 +562,21 @@ function fillRow(row, ui, name, args, result) {
   return true;
 }
 
-// A result that is its own block: the header is the declaration's summary under
-// the component's own verdict ("✓" for a change, "result ⚠" for an error), and
-// the body is what the declaration says it is.
+// A result that is its own block: the header is the declaration's own label
+// (falling back to the summary it would wear in a group, then to the plain
+// "result" the host shows for anything that says nothing), and the body is what
+// the declaration says it is, chromed by the declaration's style.
 function buildResultBlock(ui, name, args, result) {
   const wrap = document.createElement("div");
   wrap.className = "event tool_result" + (result.is_error ? " error" : "")
-    + (ui.group ? " read" : "") + (ui.body === "diff" ? " write" : "");
-  const changed = !result.is_error && ui.body === "diff";
-  const hdr = changed ? "✓ " + summaryText(ui, name, args, result.content)
-    : result.is_error ? "result ⚠" : "result";
-  wrap.innerHTML = `<div class="hdr">${escapeHtml(hdr)}</div>`;
+    + (ui.style !== "plain" ? " " + ui.style : "");
+  const tpl = ui.header || ui.summary;
+  const hdr = result.is_error ? "result ⚠" // the one verdict the host owns
+    : tpl ? templateText(tpl, name, args, result.content) : "result";
+  const head = document.createElement("div");
+  head.className = "hdr";
+  head.textContent = hdr; // a header is a label, never markup
+  wrap.appendChild(head);
   const body = buildResultBody(ui, result, args);
   if (body) {
     if (ui.body === "diff") {
@@ -548,10 +594,7 @@ function buildResultBlock(ui, name, args, result) {
       wrap.appendChild(toggle);
       wrap.appendChild(fold);
     } else {
-      const plain = document.createElement("div");
-      plain.className = "body md-plain";
-      plain.appendChild(body);
-      wrap.appendChild(plain);
+      wrap.appendChild(body);
     }
   }
   // a diff past the threshold gets the host's expand control; a diff is the one
@@ -603,16 +646,23 @@ function buildResultBlock(ui, name, args, result) {
 }
 
 // the result body node per the declaration: "text" the component's own content,
-// "diff" the unified diff it returned, "none" nothing but the row itself
+// "diff" the unified diff it returned, "none" nothing but the row itself. An
+// exploration result ("read") keeps its own code panel — highlighted by the path
+// it read — where a plain one is text in the block's body.
 function buildResultBody(ui, result, args) {
   if (ui.body === "none") return null;
-  if (ui.body === "diff" && result.diff) return renderDiff(result.diff);
-  if (ui.body === "diff") return null;
-  const pre = document.createElement("pre");
-  pre.className = "read-detail";
-  pre.textContent = result.content || "";
-  highlightPreByPath(pre, (args && args.path) || "");
-  return pre;
+  if (ui.body === "diff") return result.diff ? renderDiff(result.diff) : null;
+  if (ui.style === "read") {
+    const pre = document.createElement("pre");
+    pre.className = "read-detail";
+    pre.textContent = result.content || "";
+    highlightPreByPath(pre, (args && args.path) || "");
+    return pre;
+  }
+  const plain = document.createElement("div");
+  plain.className = "body md-plain";
+  plain.textContent = result.content || "";
+  return plain;
 }
 
 // whether the declaration wants this body folded at rest
@@ -634,7 +684,7 @@ function handleToolCallDelta(ev) {
     const ui = uiOf(ev);
     const group = toolGroupFor(ev.tool_call_id, ui);
     st = streamRows[ev.tool_call_id] = { name: ev.name, ui, text: "", row: null, body: null, group };
-    st.row = makeToolRowBase(summaryText(ui, ev.name, {}, ""));
+    st.row = makeToolRowBase(ui, ev.name, summaryText(ui, ev.name, {}, null));
     st.row.classList.add("stream");
     if (ui.preview === "none" || (ui.preview && ui.preview.mode === "none")) {
       // nothing to stream: the row stays just its label, the result fills it later
@@ -826,12 +876,12 @@ function applyStreamEvent(ev) {
       // arguments
       st.row.classList.remove("stream");
       const label = st.row.querySelector(".tool-label");
-      if (label) label.textContent = summaryText(uiOf(ev), ev.name, args, "");
+      if (label) label.textContent = summaryText(uiOf(ev), ev.name, args, null);
       const preview = st.row.querySelector(".stream-pre");
       if (preview) preview.remove();
       const dots = st.row.querySelector(".muted");
       if (dots) dots.remove();
-      st.row.appendChild(argsButton(ev.arguments));
+      st.row.appendChild(argsButton(ev.arguments, uiOf(ev)));
       st.body = null;
       streamRows[ev.tool_call_id] = undefined;
       autoScroll();

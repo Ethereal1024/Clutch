@@ -73,6 +73,10 @@ class Tool:
     anything: a tool with neither `inst` nor `host` cannot exist, because a
     declaration without a command never becomes a Tool (see build_tools).
 
+    `access` is the policy the tool's DECLARATION put it under (catalog.Tool.access)
+    — the one thing permission.evaluate and permission.escaped_paths read to decide
+    what a call may touch.
+
     `guard` is host policy a component deliberately does not carry: the
     workspace module's fence refuses mutations and hides broad sweeps but still
     serves a path named explicitly, while the project's .clc must stay
@@ -97,6 +101,7 @@ class Tool:
     inst: str | None = None  # the component's own part of the statement
     module: str | None = None  # which component serves the statement
     host: ToolImpl | None = None  # the host's own tool (no component behind it)
+    access: str = ""  # the policy its declaration put it under ("" = unguarded)
     guard: GuardImpl | None = None  # host policy the component does not make
     defaults: Mapping[str, Any] | None = None  # statement payload defaults
     snapshot: bool = False  # the statement overwrites args["path"]
@@ -190,6 +195,7 @@ def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> T
         parameters=copy.deepcopy(_resolve(dict(spec.parameters), config)),
         inst=spec.command,
         module=component.name,
+        access=spec.access,
         guard=GUARDS.get(spec.access),
         defaults=_resolve(dict(spec.defaults), config),
         snapshot=spec.snapshot,
@@ -260,7 +266,8 @@ def _run_command(config: Config) -> Tool:
             "required": ["command"],
         },
         host=lambda workspace, cfg, cancel=None, **kw: shell.run_command(workspace, cfg, cancel=cancel, **kw),
-        ui={"preview": "command", "summary": "$ {command}"},
+        access="command",
+        ui={"preview": "command"},
     )
 
 
@@ -325,6 +332,17 @@ class ToolRegistry:
 
     def names(self) -> list[str]:
         return list(self._tools)
+
+    def access(self, name: str) -> str:
+        """The policy this tool's declaration put it under ("" = unguarded).
+
+        What a call may touch is decided by this string and the guarded argument
+        it names (permission.GUARDED_ARG) — the evaluator never sees a tool name,
+        so a component installed later is subject to the same policy as one the
+        host shipped.
+        """
+        tool = self._tools.get(name)
+        return tool.access if tool is not None else ""
 
     def ui(self, name: str) -> dict[str, Any]:
         """One tool's presentation block, for the call events the UI renders from.

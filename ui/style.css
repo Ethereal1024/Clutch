@@ -559,6 +559,13 @@ main { display: flex; flex: 1; min-height: 0; }
   padding: 3px 0; font-size: 13px;
 }
 .tool-name { color: var(--text); font-family: var(--font-mono); }
+/* the row's one-line label — a declaration's summary ("read /x (12 lines)",
+   "grep y (3 lines)"): the muted, monospace weight the exploration rows carried */
+.tool-label { color: var(--muted); font-family: var(--font-mono); }
+/* a row whose result folds under it: the toggle lives IN the row, so the whole
+   row is the control — exactly what a collapsed read row was */
+.tool-row.folded { cursor: pointer; user-select: none; }
+.tool-row.folded:hover .tool-label { color: var(--text); }
 .tool-args-btn { color: var(--muted); cursor: pointer; font-size: 12px; user-select: none; }
 .tool-args-btn:hover { color: var(--text); }
 .tool-args-detail {
@@ -966,7 +973,6 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .welcome-actions button.primary { background: var(--text); border-color: var(--text); color: #0F0F10; font-weight: 600; }
 
 /* unified diff view: additions keep green, removals red — the single red/green pair */
-.diff-file { color: var(--text); font-weight: 600; }
 .diff-view {
   background: var(--code-bg); padding: 6px 0; border-radius: 0;
   border: 1px solid var(--border);

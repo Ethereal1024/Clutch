@@ -35,6 +35,10 @@ const { UI_DEFAULTS, uiOf, summaryText, previewText } = factory((raw) => {
 // ---- 1) a tool event's declaration, with the defaults filled in ----
 check(uiOf({}).group === null && uiOf({}).body === "text", "a missing declaration is the protocol's defaults");
 check(uiOf({}).preview === "args" && uiOf({}).collapse === "never", "and every default is a value the renderer knows");
+check(
+  uiOf({}).chip === "name" && uiOf({}).summary === "" && uiOf({}).header === "" && uiOf({}).style === "plain",
+  "a plain row is the tool's own name with no label, plain block and no declared header"
+);
 const w = uiOf({ ui: { body: "diff", collapse: "long" } });
 check(w.body === "diff" && w.collapse === "long", "a declaration overrides only the keys it names");
 check(w.group === null && w.preview === "args", "the keys it leaves out stay the default");
@@ -49,7 +53,14 @@ check(
   summaryText({ summary: "grep {pattern} ({lines} lines)" }, "grep", args, "one") === "grep def  (1 lines)",
   "and reads each argument by name"
 );
-check(summaryText({ summary: "{name}" }, "web_search", "{}", "") === "web_search", "the default summary is the tool's own name");
+check(
+  summaryText(uiOf({}), "web_search", args, "") === "",
+  "the plain row carries no label: the chip on its left is the tool's own name"
+);
+check(
+  summaryText({ summary: "{name}" }, "web_search", "{}", "") === "web_search",
+  "a declaration that wants the tool's own name in a label still spells {name}"
+);
 
 // ---- 3) the live preview: the mode the declaration asks for ----
 check(previewText(uiOf({}), "read_file", '{"path":"a.py"}') === '{"path":"a.py"}', 'the default preview is the raw arguments');

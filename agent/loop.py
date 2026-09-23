@@ -291,7 +291,9 @@ class Agent:
         args_repr = ev.arguments
         if self.gate is not None:
             try:
-                self.gate.require(ev.name, args_repr, self.workspace)
+                # the policy comes from the tool's own declaration: the loop only
+                # reports what the registry says this tool is subject to
+                self.gate.require(ev.name, args_repr, self.workspace, self.registry.access(ev.name))
             except PermissionRequired as e:
                 return {"content": f"ERROR: {e.reason}", "error": True}
         try:

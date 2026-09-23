@@ -85,32 +85,32 @@ def check_permission() -> None:
         ws = LocalWorkspace(wtmp)
         pe = PermissionEvaluator()
         check(
-            pe.evaluate("run_command", '{"command": "rm old.txt"}', ws) == "ask",
+            pe.evaluate('{"command": "rm old.txt"}', ws, access="command") == "ask",
             "permission asks on rm",
         )
         check(
-            pe.evaluate("run_command", '{"command": "rm -rf /tmp/x"}', ws) == "ask",
+            pe.evaluate('{"command": "rm -rf /tmp/x"}', ws, access="command") == "ask",
             "permission asks on rm -rf",
         )
         check(
-            pe.evaluate("run_command", '{"command": "echo hi"}', ws) == "allow",
+            pe.evaluate('{"command": "echo hi"}', ws, access="command") == "allow",
             "permission allows harmless command",
         )
         check(
-            pe.evaluate("write_file", '{"path": "a.txt"}', ws) == "allow",
+            pe.evaluate('{"path": "a.txt"}', ws, access="write") == "allow",
             "permission allows in-workspace write",
         )
         check(
-            pe.evaluate("write_file", '{"path": "../x.txt"}', ws) == "ask",
+            pe.evaluate('{"path": "../x.txt"}', ws, access="write") == "ask",
             "permission asks on escaping write",
         )
         # write_file rules match the PATH, not the content ("~" in a report must not ask)
         check(
-            pe.evaluate("write_file", '{"content": "16:07 UTC ~ 16:09 UTC", "path": "report.md"}', ws) == "allow",
+            pe.evaluate('{"content": "16:07 UTC ~ 16:09 UTC", "path": "report.md"}', ws, access="write") == "allow",
             "write_file content with ~ does not prompt (path-only matching)",
         )
         check(
-            pe.evaluate("write_file", '{"content": "x", "path": "~/x"}', ws) == "ask",
+            pe.evaluate('{"content": "x", "path": "~/x"}', ws, access="write") == "ask",
             "write_file path with ~ still asks",
         )
 
@@ -118,23 +118,23 @@ def check_permission() -> None:
         sub = Path(wtmp) / "sub"
         sub.mkdir()
         check(
-            pe.evaluate("write_file", f'{{"path": "{sub}/new.py"}}', ws) == "allow",
+            pe.evaluate(f'{{"path": "{sub}/new.py"}}', ws, access="write") == "allow",
             "write_file on an absolute path inside the workspace does not prompt",
         )
         check(
-            pe.evaluate("run_command", f'{{"command": "cat {sub}/a.txt"}}', ws) == "allow",
+            pe.evaluate(f'{{"command": "cat {sub}/a.txt"}}', ws, access="command") == "allow",
             "run_command on an inside absolute path does not prompt",
         )
         check(
-            pe.evaluate("run_command", f'{{"command": "cd {wtmp} && ls"}}', ws) == "allow",
+            pe.evaluate(f'{{"command": "cd {wtmp} && ls"}}', ws, access="command") == "allow",
             "run_command with the workdir as cwd does not prompt",
         )
         check(
-            bool(pe.escaped_paths("run_command", '{"command": "cat /etc/passwd"}', ws)),
+            bool(pe.escaped_paths('{"command": "cat /etc/passwd"}', ws, access="command")),
             "external absolute path still surfaces an escape",
         )
         check(
-            pe.evaluate("write_file", '{"path": "/etc/x"}', ws) == "ask",
+            pe.evaluate('{"path": "/etc/x"}', ws, access="write") == "ask",
             "write_file on an absolute path outside still asks",
         )
 
@@ -148,7 +148,7 @@ def check_permission() -> None:
 
         def _require() -> None:
             try:
-                gate.require("run_command", '{"command": "rm -rf /tmp/x"}', ws)
+                gate.require("run_command", '{"command": "rm -rf /tmp/x"}', ws, "command")
                 outcome["raised"] = None
             except PermissionRequired as e:
                 outcome["raised"] = e.reason
@@ -166,7 +166,7 @@ def check_permission() -> None:
         # 9c. no UI attached (on_ask returns False): the gate denies instead of hanging
         gate2 = PermissionGate(evaluator=pe, on_ask=lambda *a: False)
         try:
-            gate2.require("run_command", '{"command": "rm -rf /tmp/x"}', ws)
+            gate2.require("run_command", '{"command": "rm -rf /tmp/x"}', ws, "command")
             check(False, "no-UI ask is denied, not executed")
         except PermissionRequired as e:
             check(
@@ -177,15 +177,16 @@ def check_permission() -> None:
 
         # 9d. sandbox escapes: real resolution flags external paths for an ask
         check(
-            pe.escaped_paths("read_file", '{"path": "/etc/passwd"}', ws) == frozenset({Path("/etc/passwd").resolve()}),
+            pe.escaped_paths('{"path": "/etc/passwd"}', ws, access="read")
+            == frozenset({Path("/etc/passwd").resolve()}),
             "escaped_paths flags an external read",
         )
         check(
-            pe.escaped_paths("run_command", '{"command": "cat /etc/passwd"}', ws)
+            pe.escaped_paths('{"command": "cat /etc/passwd"}', ws, access="command")
             == frozenset({Path("/etc/passwd").resolve()}),
             "escaped_paths flags external tokens in run_command",
         )
-        check(pe.escaped_paths("read_file", '{"path": "a.txt"}', ws) == frozenset(), "in-sandbox path has no escapes")
+        check(pe.escaped_paths('{"path": "a.txt"}', ws, access="read") == frozenset(), "in-sandbox path has no escapes")
         # scratch exemption: the workspace must not itself be inside /tmp
         with tempfile.TemporaryDirectory(dir=Path.home()) as home_tmp:
             home_ws = LocalWorkspace(home_tmp)
@@ -201,7 +202,7 @@ def check_permission() -> None:
             # a `..` that climbs back out of the scratch dir is still an escape,
             # reported at the path the token really denotes: on a Git-Bash host
             # /tmp is %TEMP%, so the target is %TEMP%/../etc/hack, not /etc/hack
-            out_esc = pe.escaped_paths("run_command", '{"command": "echo hi > /tmp/../etc/hack"}', home_ws)
+            out_esc = pe.escaped_paths('{"command": "echo hi > /tmp/../etc/hack"}', home_ws, access="command")
             expect = home_ws.norm_join(str(home_ws.root), home_ws.shell_path("/tmp/../etc/hack"))
             check(
                 out_esc == frozenset({expect}),
@@ -219,7 +220,7 @@ def check_permission() -> None:
                 "some-cmd 2>/dev/stderr",
                 "echo hi > /var/tmp/x.log",
             ):
-                esc = pe.escaped_paths("run_command", json.dumps({"command": cmd}), home_ws)
+                esc = pe.escaped_paths(json.dumps({"command": cmd}), home_ws, access="command")
                 if posix_shell:  # POSIX sh (any OS): scratch, so not an escape
                     check(esc == frozenset(), f"POSIX scratch is not an escape: {cmd}")
                 else:  # cmd dialect: the same token is literally C:\dev\..., an escape
@@ -234,11 +235,11 @@ def check_permission() -> None:
             check(guard_ok == posix_shell, "run_command's guard agrees with the escape verdict on /dev/*")
             # and the boundary still holds: `..` climbs OUT of /dev into a real dir
             check(
-                pe.escaped_paths("run_command", '{"command": "cat /dev/../etc/passwd"}', home_ws) != frozenset(),
+                pe.escaped_paths('{"command": "cat /dev/../etc/passwd"}', home_ws, access="command") != frozenset(),
                 "a '..' that walks out of /dev is still an escape",
             )
         check(
-            pe.escaped_paths("write_file", '{"content": "/etc/passwd ~ ../x", "path": "a.txt"}', ws) == frozenset(),
+            pe.escaped_paths('{"content": "/etc/passwd ~ ../x", "path": "a.txt"}', ws, access="write") == frozenset(),
             "content is not scanned for escapes",
         )
         ext = ws.root.parent / "approved.txt"
@@ -246,7 +247,7 @@ def check_permission() -> None:
         # which in raw JSON are escape sequences ("\U", "\t", ...) and make the
         # argument string unparseable
         check(
-            pe.escaped_paths("write_file", json.dumps({"path": str(ext)}), ws) == frozenset({ext}),
+            pe.escaped_paths(json.dumps({"path": str(ext)}), ws, access="write") == frozenset({ext}),
             "escaped_paths flags an external write target",
         )
 
@@ -257,7 +258,7 @@ def check_permission() -> None:
 
         def _require_escape() -> None:
             try:
-                approving.require("write_file", json.dumps({"path": str(ext)}), ws3)
+                approving.require("write_file", json.dumps({"path": str(ext)}), ws3, "write")
                 got["ok"] = True
             except PermissionRequired as e:
                 got["err"] = e.reason
@@ -280,12 +281,12 @@ def check_permission() -> None:
         # 9f. auto-allow fails closed on escapes; rule asks stay auto-allowed
         unattended = PermissionGate(evaluator=pe, auto_allow=True)
         try:
-            unattended.require("read_file", '{"path": "/etc/passwd"}', ws)
+            unattended.require("read_file", '{"path": "/etc/passwd"}', ws, "read")
             check(False, "auto-allow refuses a sandbox escape")
         except PermissionRequired as e:
             check("user approval" in e.reason, f"auto-allow fails closed on escapes ({e.reason!r})")
         try:
-            unattended.require("run_command", '{"command": "rm old.txt"}', ws)
+            unattended.require("run_command", '{"command": "rm old.txt"}', ws, "command")
             check(True, "auto-allow still permits non-escape rule asks")
         except PermissionRequired:
             check(False, "auto-allow still permits non-escape rule asks")

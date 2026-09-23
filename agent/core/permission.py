@@ -6,13 +6,15 @@ hide": the agent works in the user's directory, and risky actions prompt the use
 instead of being sandboxed away.
 
 Decision flow for one tool call:
-  evaluate(tool, args, workspace) -> Action
+  evaluate(args, workspace, access) -> Action
     allow  -> execute
     ask    -> publish a permission request, block until the user replies
     deny   -> feed an error back to the model
 
 Rules are evaluated in order; the LAST matching rule wins (opencode findLast).
-The default action is allow for anything inside the workspace.
+A rule matches the access a tool's DECLARATION names (GUARDED_ARG) — never the
+tool's name, so a component's tools enter this policy the moment they are
+declared. The default action is allow for anything inside the workspace.
 """
 
 from __future__ import annotations
@@ -22,32 +24,38 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from ..tools.localshell import split_command
 from ..tools.workspace import Workspace
 
 Action = str  # "allow" | "ask" | "deny"
 
-# tools whose path/command args can reference the filesystem
-_PATH_TOOLS = {"read_file", "write_file", "edit_file", "grep", "run_command"}
+# The host POLICY a declaration may put a tool under (catalog.Tool.access) and the
+# argument that policy judges. "read"/"sweep"/"write" name a `path` the workspace
+# may protect, "command" the shell text of the host's own tool. A tool that
+# declares no access is unguarded: nothing here judges it. Note what is NOT here —
+# a tool NAME. What a call is allowed to touch is the declaration's business, so
+# installing a component adds its tools to this policy without touching this file.
+GUARDED_ARG: dict[str, str] = {"read": "path", "sweep": "path", "write": "path", "command": "command"}
 
 
 @dataclass
 class Rule:
     action: Action
-    tool: str = "*"  # tool name or "*"
-    pattern: str = ""  # regex on the args; empty = match any args
+    access: str = "*"  # the access the tool DECLARED, or "*" for any
+    pattern: str = ""  # regex on the guarded argument; empty = match any
     # True = only fires when the guarded paths really leave the workspace
     escape: bool = False
 
-    def matches(self, tool: str, args_repr: str) -> bool:
-        if self.tool != "*" and self.tool != tool:
+    def matches(self, guarded: Any, access: str) -> bool:
+        if self.access != "*" and self.access != access:
             return False
         if not self.pattern:
             return True
+        text = guarded if isinstance(guarded, str) else json.dumps(guarded)
         try:
-            return re.search(self.pattern, args_repr, re.IGNORECASE) is not None
+            return re.search(self.pattern, text, re.IGNORECASE) is not None
         except re.error:
             return False
 
@@ -64,13 +72,15 @@ class PermissionRequired(Exception):
 
 DEFAULT_RULES: list[Rule] = [
     # danger: destructive/irreversible commands always ask
-    Rule("ask", "run_command", r"\brm\s+-rf\b|\bsudo\b|\bshutdown\b|\breboot\b|\bmkfs\b|\bdd\b\s"),
+    Rule("ask", "command", r"\brm\s+-rf\b|\bsudo\b|\bshutdown\b|\breboot\b|\bmkfs\b|\bdd\b\s"),
     # commands that delete anything ask
-    Rule("ask", "run_command", r"^\s*rm\b"),
-    # writing/running outside the workspace asks — only when it really escapes
-    Rule("ask", "run_command", r"\bmv\s+.*\s/\s", escape=True),
-    Rule("ask", "write_file", r"(\.\./|^/|~)", escape=True),
-    Rule("ask", "run_command", r"(\.\./|^/)", escape=True),
+    Rule("ask", "command", r"^\s*rm\b"),
+    # running outside the workspace asks — only when it really escapes (an
+    # absolute path INSIDE the root is not an escape)
+    Rule("ask", "command", r"\bmv\s+.*\s/\s", escape=True),
+    Rule("ask", "command", r"(\.\./|^/)", escape=True),
+    # and so does a write that names a path outside it
+    Rule("ask", "write", r"(\.\./|^/|~)", escape=True),
 ]
 
 
@@ -78,37 +88,40 @@ DEFAULT_RULES: list[Rule] = [
 class PermissionEvaluator:
     rules: list[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
-    def evaluate(self, tool: str, args_repr: str, workspace: Workspace) -> Action:
-        # match the guarded argument (command/path), not the whole JSON: content
-        # is data, not a path, and must never prompt a write it doesn't touch
-        match_text = args_repr
-        if tool in ("run_command", "write_file"):
-            key = "command" if tool == "run_command" else "path"
-            try:
-                parsed = json.loads(args_repr)
-                if isinstance(parsed, dict) and key in parsed:
-                    match_text = parsed[key]
-            except (ValueError, TypeError):
-                pass
+    def evaluate(self, args_repr: str, workspace: Workspace, access: str) -> Action:
+        # Judge the guarded argument (the command, the path) rather than the whole
+        # JSON: content is data, not a path, and must never prompt a write it does
+        # not touch. WHICH argument that is comes from the tool's own declaration
+        # (GUARDED_ARG), never from its name.
+        key = GUARDED_ARG.get(access)
+        guarded: Any = args_repr
+        if key:
+            value = _parse_args(args_repr).get(key)
+            if value is not None:
+                guarded = value
         # last matching rule wins
         decision: Rule | None = None
         for rule in self.rules:
-            if rule.matches(tool, match_text):
+            if rule.matches(guarded, access):
                 decision = rule
         if decision is not None:
             # escape rule: allow when no referenced path really leaves the workspace
-            if decision.escape and not self.escaped_paths(tool, args_repr, workspace):
+            if decision.escape and not self.escaped_paths(args_repr, workspace, access):
                 return "allow"
             return decision.action
         return "allow"
 
-    def escaped_paths(self, tool: str, args_repr: str, workspace: Workspace) -> frozenset[Path]:
+    def escaped_paths(self, args_repr: str, workspace: Workspace, access: str) -> frozenset[Path]:
         """Resolved absolute paths outside the workspace root this call references;
-        empty means the call stays in the sandbox."""
-        if tool not in _PATH_TOOLS:
+        empty means the call stays in the sandbox.
+
+        ``access`` decides how to read the payload: a "command" names its paths in
+        shell text, every other guarded access names one in ``path``. A tool the
+        declaration leaves unguarded references nothing this can judge."""
+        if access not in GUARDED_ARG:
             return frozenset()
         args = _parse_args(args_repr)
-        if tool == "run_command":
+        if access == "command":
             # tokenize in the flavor of the shell that will RUN the text:
             # cmd's lexer keeps backslashes literal, so shlex would corrupt
             # C:\ paths on a cmd-flavored host; a remote (SSH) workspace is
@@ -124,7 +137,7 @@ class PermissionEvaluator:
                 return frozenset()
             tokens = [path]
         out: set[Path] = set()
-        if tool == "run_command":
+        if access == "command":
             # track `cd <dir>` so a following `../` is judged against that subdir
             cwd: Path | None = None  # None => anchor at the workspace root
             i = 0
@@ -167,13 +180,14 @@ def _parse_args(args_repr: str) -> dict:
 class PermissionGate:
     """Bridge between the agent thread and the UI.
 
-    The agent calls `require(tool, args, workspace)`: it evaluates permission and,
-    if the action is "ask", blocks on a threading.Event until the UI responds via
-    `resolve(request_id, allow)` — it waits as long as the user needs (no timeout,
-    so the model never sees a spurious "permission request timed out"). The only
-    ways out of the wait: the user allows/denies, the server's Stop resolves every
-    pending ask as denied, or `on_ask` reports that no UI is attached (returns
-    False), in which case the action is denied rather than left hanging.
+    The agent calls `require(tool, args, workspace, access)`: it evaluates
+    permission and, if the action is "ask", blocks on a threading.Event until the
+    UI responds via `resolve(request_id, allow)` — it waits as long as the user
+    needs (no timeout, so the model never sees a spurious "permission request
+    timed out"). The only ways out of the wait: the user allows/denies, the
+    server's Stop resolves every pending ask as denied, or `on_ask` reports that
+    no UI is attached (returns False), in which case the action is denied rather
+    than left hanging.
     """
 
     def __init__(
@@ -192,14 +206,17 @@ class PermissionGate:
         self._lock = threading.Lock()
         self._counter = 0
 
-    def require(self, tool: str, args_repr: str, workspace: Workspace) -> None:
+    def require(self, tool: str, args_repr: str, workspace: Workspace, access: str) -> None:
         """Raise PermissionRequired if the user must confirm (or deny).
 
-        Approved escapes are recorded on the workspace for the call; auto_allow
+        `tool` is only what the prompt calls the call; the POLICY reads `access`,
+        the access the tool's own declaration is under (registry.access) — so a
+        component installed later is subject to it without an edit here. Approved
+        escapes are recorded on the workspace for the call; auto_allow
         (unattended/eval) denies escapes rather than silently opening the sandbox.
         """
-        action = self.evaluator.evaluate(tool, args_repr, workspace)
-        escapes = self.evaluator.escaped_paths(tool, args_repr, workspace)
+        action = self.evaluator.evaluate(args_repr, workspace, access)
+        escapes = self.evaluator.escaped_paths(args_repr, workspace, access)
         if action == "deny":
             raise PermissionRequired("", tool, args_repr, "denied by permission rules")
         if action == "allow" and not escapes:

@@ -34,28 +34,42 @@ events look — and ui/app.js contains no tool name at all. Every tool event
 carries this block (events.ToolCallEvent.ui), so a replayed session renders the
 same way and a component installed later is rendered without a UI change.
 
-Keys, all optional; DEFAULTS applies to a key the declaration leaves out:
+Keys, all optional; DEFAULTS applies to a key the declaration leaves out. Each
+key composes ONE named part of the row or the result, and every default
+reproduces the plain look: the tool's name as the row's chip, its arguments one
+click away, its result its own whole block.
 
     group     calls naming the same group collect into ONE dense block: each
               call's row, with its result folded into that row, in one place —
               so a run of reads scans as a column of one-liners. None = the call
               is its own row and its result is its own block (a write must not be
               swallowed by the reads around it).
-    body      "text" the result content, "diff" the unified diff it returned,
-              "none" nothing but the status line.
-    collapse  "always" the body starts folded, "long" folded past a size
-              threshold, "never" shown whole.
+    chip      "name" the row leads with the tool's own name, "none" it does not —
+              a row whose summary already says what the call is reads better
+              without the name repeated beside it.
+    summary   the row's one-line label; {placeholders} are the call's argument
+              names plus the computed facts {lines} (result lines; "…" until the
+              result lands) and {name} (the tool's own name). "" = no label.
     preview   the LIVE row while the call streams, either a mode or
               {mode, keys}: "args" the raw argument JSON, "content" the
-              arguments' own text, "command" the unwrapped command argument,
-              "none" just the tool name. Under "content", `keys` names the
+              arguments' own text, "command" the unwrapped command argument
+              under its `mark` (the shell prompt it reads as, "$ " by default),
+              "none" nothing to stream. Under "content", `keys` names the
               arguments to print, in order, and a leading "-"/"+"/"✎" on a key
               is a mark printed before its value — that is how a write declares
               "the file being written, with its content", and an edit declares
               "- old / + new".
-    summary   the one-line label of a folded/dense row; {placeholders} are the
-              call's argument names plus the computed facts {lines} (result
-              lines) and {name} (the tool's own name).
+    header    the label of a result that is its own block ({placeholders} as in
+              summary); "" = the summary this call would wear in a group, else
+              "result". The host keeps the one verdict it owns: a failed call
+              reads "result ⚠" whatever the declaration asked for.
+    style     how the result is chromed: "plain", "read" (an exploration result:
+              its content as a collapsible code panel), "write" (a change: the
+              header is the accent chip over the diff).
+    body      "text" the result content, "diff" the unified diff it returned,
+              "none" nothing but the status line.
+    collapse  "always" the body starts folded, "long" folded past a size
+              threshold, "never" shown whole.
     mutates   the call may change what the file tree shows. Optional: the host
               derives it from what it knows (a statement that overwrites a path,
               or the host's own command), and a component that changes the tree
@@ -99,16 +113,19 @@ PROJECT_FILE = "project-file"
 SKILL_LIB = "skill-library"
 
 # What the UI does with a tool that declares no `ui` block: a plain block, its
-# arguments streamed, its result shown whole. Any tool works out of the box; a
-# component only has to speak up when it looks different. `mutates` is a key the
-# HOST derives when the declaration leaves it out (registry.ui), which is why it
-# has no default here.
+# name as the row's chip, its arguments streamed, its result shown whole. Any
+# tool works out of the box; a component only has to speak up when it looks
+# different. `mutates` is a key the HOST derives when the declaration leaves it
+# out (registry.ui), which is why it has no default here.
 DEFAULTS: dict[str, Any] = {
     "group": None,
+    "chip": "name",
+    "summary": "",
+    "preview": "args",
+    "header": "",
+    "style": "plain",
     "body": "text",
     "collapse": "never",
-    "preview": "args",
-    "summary": "{name}",
 }
 UI_KEYS = tuple(DEFAULTS) + ("mutates",)
 
@@ -158,9 +175,13 @@ class Tool:
     declaration drives a checkout under an interpreter and an installed onefile.
     `defaults` rides the payload UNDER the model's arguments.
 
-    `access` is the host POLICY this tool is subject to — "read" / "write" /
-    "sweep" name a `path` argument that the workspace may protect, "" nothing.
-    snapshot` marks a statement that OVERWRITES `path`, so the host can keep the
+    `access` is the host POLICY this tool is subject to — the vocabulary the host
+    defines and no declaration invents: "read" / "write" / "sweep" name a `path`
+    argument the workspace may protect, "command" names the shell text a
+    command-shaped tool runs, "" nothing. It is what the host's permission
+    engine and guards judge a call by (permission.GUARDED_ARG), so a component
+    installed later enters that policy without an edit to the host.
+    `snapshot` marks a statement that OVERWRITES `path`, so the host can keep the
     per-file undo the UI offers (the module keeps its own stack; this is the
     host's). `modes` are the agent modes the tool is offered in. `gate` names a
     host-side condition that must hold — "project" (a project memory store is
@@ -278,6 +299,8 @@ _WORKSPACE = Component(
             access="read",
             ui={
                 "group": "read",
+                "chip": "none",
+                "style": "read",
                 "body": "text",
                 "collapse": "always",
                 "preview": "none",
@@ -300,6 +323,8 @@ _WORKSPACE = Component(
             access="sweep",
             ui={
                 "group": "read",
+                "chip": "none",
+                "style": "read",
                 "body": "text",
                 "collapse": "always",
                 "preview": "none",
@@ -321,10 +346,11 @@ _WORKSPACE = Component(
             snapshot=True,
             modes=("work",),
             ui={
+                "style": "write",
+                "header": "✓ wrote {path}",
                 "body": "diff",
                 "collapse": "long",
                 "preview": {"mode": "content", "keys": ["✎path", "content"]},
-                "summary": "wrote {path}",
             },
         ),
         Tool(
@@ -343,10 +369,11 @@ _WORKSPACE = Component(
             snapshot=True,
             modes=("work",),
             ui={
+                "style": "write",
+                "header": "✎ edited {path}",
                 "body": "diff",
                 "collapse": "long",
                 "preview": {"mode": "content", "keys": ["✎path", "-old_string", "+new_string"]},
-                "summary": "edited {path}",
             },
         ),
     ),
@@ -378,7 +405,6 @@ _MEMORY = Component(
             },
             command="--endpoint {base} --envelope save --title {title} --content {content}",
             gate="project",
-            ui={"summary": "remember {title}"},
         ),
         Tool(
             name="load_memory",
@@ -390,7 +416,6 @@ _MEMORY = Component(
             command="--endpoint {base} --envelope load --title {name}",
             gate="project",
             access="read",
-            ui={"summary": "recall {name}"},
         ),
         Tool(
             name="search_memory",
@@ -405,7 +430,6 @@ _MEMORY = Component(
             },
             command="--endpoint {base} --envelope search [--query {query}]",
             gate="project",
-            ui={"summary": "search memory {query}"},
         ),
     ),
 )
@@ -437,7 +461,6 @@ _WEBSEARCH = Component(
             },
             command="search --envelope [--max-results {max_results}] [--backend {backend}] {query}",
             defaults={"max_results": "$config.web_search_max_results"},
-            ui={"summary": "search {query}"},
         ),
         Tool(
             name="web_fetch",
@@ -455,7 +478,6 @@ _WEBSEARCH = Component(
             },
             command="fetch --envelope [--max-chars {max_chars}] [--start {start}] {url}",
             defaults={"max_chars": "$config.read_max_chars"},
-            ui={"summary": "fetch {url}"},
         ),
     ),
 )
@@ -488,7 +510,6 @@ _SKILLS = Component(
             },
             command="--envelope [--root {root}] show {name} [--file {file}]",
             gate="skills",
-            ui={"summary": "skill {name}"},
         ),
     ),
 )
