@@ -33,13 +33,24 @@ import os
 import re
 import shutil
 import tarfile
+import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 MANIFEST = "component.json"
 ROOT_ENV = "CLUTCH_COMPONENTS_DIR"  # repoints the whole root (tests, unusual layouts)
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
+
+# The wire contract between a client and the host it installs FOR: the manifest
+# rides in a header (JSON, ASCII), the artifact is the request body. The host's
+# side of it is this module; the client's is ui/components.js.
+MANIFEST_HEADER = "X-Clutch-Component"
+DIGEST_FIELD = "digest"  # the manifest's record of the artifact's content hash
+ARTIFACT_FIELD = "artifact"  # the artifact's own file name (its shape, by suffix)
+SCRATCH = ".incoming"  # where a body lands while it is being received
+CHUNK = 1 << 20  # bytes read from a body per pass
 
 # A component's identity and its version string both end up in a path, so both
 # are restricted to the shapes an install may name. The version may carry a
@@ -119,6 +130,138 @@ def installed_version(name: str) -> str:
     return str(manifest.get("version", ""))
 
 
+# -- the receiving half: what a client ships, and the gate it is measured by ---
+
+
+def inventory() -> list[dict[str, Any]]:
+    """Every component installed for THIS host, one record per name.
+
+    This is what a client reads before it uploads anything: which components the
+    host already holds, and at which version + digest. The gate is answered by
+    the machine that would RUN the code, never assumed by the machine that ships
+    it. A directory without a usable manifest is not an install and is not listed.
+    """
+    base = root()
+    if not base.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for child in sorted(base.iterdir()):
+        if not child.is_dir() or child.name == SCRATCH:
+            continue
+        directory = installed(child.name)
+        if directory is None:
+            continue
+        manifest = read_manifest(directory) or {}
+        out.append(
+            {
+                "name": child.name,
+                "version": str(manifest.get("version", "")),
+                "interface": str(manifest.get("interface", "")),
+                "digest": str(manifest.get(DIGEST_FIELD, "")),
+            }
+        )
+    return out
+
+
+def installed_digest(name: str) -> str:
+    """The content digest recorded for the resolved install ("" when unknown).
+
+    The client's half of the version gate: `current()` compares this against the
+    digest of the artifact it holds, so a rebuild of the same version is not
+    mistaken for the same artifact.
+    """
+    directory = installed(name)
+    if directory is None:
+        return ""
+    manifest = read_manifest(directory) or {}
+    return str(manifest.get(DIGEST_FIELD, ""))
+
+
+def current(name: str, version: str, digest: str) -> bool:
+    """True when this host already holds exactly that artifact.
+
+    The version gate, keyed on CONTENT and not on the version string: the
+    version is the client's claim, the digest is the bytes it would send, and
+    only the pair means "nothing to upload". A component re-installed under the
+    same version but different bytes (a rebuilt 0.2.0, a dev checkout that
+    changed) is not current, so a stale install is replaced rather than kept.
+    """
+    if not digest:
+        return False
+    directory = installed(name)
+    if directory is None:
+        return False
+    manifest = read_manifest(directory) or {}
+    return str(manifest.get("version", "")) == str(version) and str(manifest.get(DIGEST_FIELD, "")) == digest
+
+
+def spool(stream: IO[bytes], length: int, name: str = "") -> Path:
+    """Write an incoming body to a scratch file in the install root; the caller
+    deletes it.
+
+    Streamed in chunks rather than read whole: an artifact is a PyInstaller
+    onefile (tens of megabytes) and the receiving host needs no more of it in
+    memory than the hashing pass touches. `name` is the artifact's own file name
+    when the uploader declared one — the shape of an artifact is read from its
+    suffix (an archive is unpacked, anything else is one executable), so that
+    name has to survive being spooled under a scratch name.
+
+    A body that ends early is not an error here: `accept` refuses it on its
+    digest, which is the same verdict a body that lied would get.
+    """
+    scratch = root() / SCRATCH
+    scratch.mkdir(parents=True, exist_ok=True)
+    suffixes = "".join(Path(name).suffixes) if name else ""
+    fd, path = tempfile.mkstemp(dir=str(scratch), prefix="artifact-", suffix=suffixes)
+    with os.fdopen(fd, "wb") as fh:
+        remaining = max(int(length), 0)
+        while remaining > 0:
+            chunk = stream.read(min(CHUNK, remaining))
+            if not chunk:
+                break
+            fh.write(chunk)
+            remaining -= len(chunk)
+    return Path(path)
+
+
+def accept(artifact: Path | str, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Take one uploaded artifact into this host's install root, or refuse it.
+
+    `manifest` is what the uploader CLAIMS (name, version, interface, the
+    artifact's digest, plus whatever launch shape the artifact has); the
+    artifact's bytes are what is true. Two verdicts, and a ValueError carrying
+    the reason the caller reports as error-as-data:
+
+      - this version + digest is already installed -> "current" (the version
+        gate, so a reconnect does not re-upload 30 MB)
+      - otherwise -> "installed", and the host resolves the component to it from
+        now on (modules.component_dir prefers a resolvable install)
+
+    The digest is checked FIRST and against the received bytes, because the
+    manifest is what the host later resolves the component BY: installing bytes
+    whose identity is only a claim would make every later launch a guess.
+    """
+    manifest = dict(manifest)
+    name = str(manifest.get("name", ""))
+    version = str(manifest.get("version", ""))
+    declared = str(manifest.get(DIGEST_FIELD, ""))
+    if not declared:
+        raise ValueError(f"the install request declares no {DIGEST_FIELD}")
+    if current(name, version, declared):
+        return {"status": "current", "name": name, "version": version, "digest": declared}
+    actual = digest(artifact)
+    if actual != declared:
+        raise ValueError(f"the artifact hashes to {actual}, not the declared {declared}")
+    directory = install(artifact, manifest, version=version)
+    return {
+        "status": "installed",
+        "name": name,
+        "version": version,
+        "digest": declared,
+        "path": str(directory),
+    }
+
+
 def verify(directory: Path | str, *, name: str, interface: str) -> str:
     """Why this host must NOT use the component installed at `directory` ("" when
     it may).
@@ -151,6 +294,12 @@ def digest(path: Path | str) -> str:
     return h.hexdigest()
 
 
+def digest_of(data: bytes) -> str:
+    """The sha256 of bytes held in memory — what a client hashes before it
+    uploads, and what the host checks the received body against."""
+    return hashlib.sha256(data).hexdigest()
+
+
 def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | None = None) -> Path:
     """Lay one component artifact down for this host, atomically.
 
@@ -163,7 +312,10 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
     The install happens in a sibling `.installing` directory that is renamed into
     place at the end, so a version directory is either complete or absent — a
     reader never resolves a half-written component. Running installs of the same
-    version replace each other.
+    version replace each other, and every OTHER version of that component is
+    dropped: a host runs one version, so a leftover could only be something
+    resolution might pick instead (installed() takes the newest by version string,
+    which is arbitrary for the content-hash versions a client installs).
     """
     artifact = Path(artifact)
     name = str(manifest.get("name", ""))
@@ -195,10 +347,18 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
         (staging / MANIFEST).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         shutil.rmtree(target, ignore_errors=True)
         staging.rename(target)
+        _prune(name, keep=target)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return target
+
+
+def _prune(name: str, keep: Path) -> None:
+    """Remove every installed version of `name` except `keep` (best effort)."""
+    for child in component_root(name).iterdir():
+        if child != keep:
+            shutil.rmtree(child, ignore_errors=True)
 
 
 def uninstall(name: str, version: str | None = None) -> None:

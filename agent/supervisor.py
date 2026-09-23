@@ -11,6 +11,15 @@ the lifecycle:
     POST /api/session/heartbeat  -> keep the session alive (stale ones die)
     GET  /api/health             -> ok
 
+Component install (the install layer's receiving half — a component always
+belongs to the machine its server runs on, so this process is who a client
+installs ONTO, whether it is this desktop or a device behind a tunnel):
+
+    GET  /api/components         -> {components: [{name, version, interface, digest}]}
+    POST /api/components/install -> take one artifact; the manifest rides in the
+                                    X-Clutch-Component header, the artifact is the
+                                    body -> {status: "installed"|"current", ...}
+
 Lifecycle (per product decision):
   - the FIRST window starts the supervisor (Electron probes /api/health and
     spawns it when down); the LAST window's exit ends it — each window stops
@@ -62,6 +71,7 @@ from agent.procmgr.supervise import (
     ProcessSupervisor,
     SpawnSpec,
 )
+from agent.tools import components
 
 DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
@@ -201,8 +211,41 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/api/health":
             self._json({"status": "ok"})
+        elif self.path == "/api/components":
+            # the version gate, host-side: what this machine already runs
+            self._json({"components": components.inventory()})
         else:
             self._json({"error": "not found"}, 404)
+
+    def _install_component(self) -> None:
+        """Take one component artifact onto THIS machine.
+
+        The install layer's HTTP face (agent/tools/components.py owns the logic):
+        the manifest rides in a header as JSON, the artifact IS the body, and the
+        answer is a verdict — the client never gets to assume its upload landed.
+        A component belongs to the machine its server runs on, so the supervisor
+        is where a client installs it: this process IS that machine's resident
+        server, and it knows its own install root.
+        """
+        try:
+            manifest = json.loads(self.headers.get(components.MANIFEST_HEADER) or "")
+        except ValueError:
+            self._json({"error": f"{components.MANIFEST_HEADER} must be a JSON object"}, 400)
+            return
+        if not isinstance(manifest, dict):
+            self._json({"error": f"{components.MANIFEST_HEADER} must be a JSON object"}, 400)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            self._json({"error": "no artifact in the request body"}, 400)
+            return
+        artifact = components.spool(self.rfile, length, name=str(manifest.get(components.ARTIFACT_FIELD) or ""))
+        try:
+            self._json(components.accept(artifact, manifest))
+        except (ValueError, OSError) as err:
+            self._json({"error": str(err)}, 400)
+        finally:
+            artifact.unlink(missing_ok=True)
 
     def do_POST(self) -> None:
         sup = self.supervisor
@@ -221,6 +264,8 @@ class _Handler(BaseHTTPRequestHandler):
             sid = self._read_body().get("session_id")
             ok = sup.heartbeat(sid)
             self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
+        elif self.path == "/api/components/install":
+            self._install_component()
         elif self.path == "/api/shutdown":
             # normal close: exit once no sessions remain (arm-only-when-empty
             # lives in the generic layer: a sticky flag could kill a re-claim)

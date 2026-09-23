@@ -12,6 +12,7 @@ const { Client } = require("ssh2");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
 const { platformTag, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
+const components = require("./components");
 
 const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
 const REMOTE_API_PORT = 8890;
@@ -781,7 +782,26 @@ async function establishForwardAndHealth(localPort) {
   currentUrl = "http://127.0.0.1:" + localPort;
   wasDisconnected = false;
   startHealing();
+  installComponents(currentUrl);
   return { ok: true, url: currentUrl };
+}
+
+// The far side's server is up, and components are code IT runs on ITS machine —
+// so handing them over belongs here, right after the health probe says the host
+// is the one we think it is. Deliberately not awaited: a component is an
+// optimization (until one lands the host answers from its own implementation,
+// R2) and connecting must not wait on a 30 MB upload. A dev run ships its own
+// checkout, which is the one artifact this side has and the far side cannot.
+function installComponents(base) {
+  Promise.resolve()
+    .then(() => components.ensureComponents(base, { progress: (m) => tunnelLog("[components] " + m) }))
+    .then((r) =>
+      tunnelLog(
+        `[components] current=${r.current.length} installed=${r.installed.length} ` +
+          `skipped=${r.skipped.length} deferred=${r.deferred.length} errors=${r.errors.length}`
+      )
+    )
+    .catch((e) => tunnelLog("[components] pass failed: " + ((e && e.message) || e)));
 }
 
 module.exports = {
