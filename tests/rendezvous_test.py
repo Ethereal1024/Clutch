@@ -24,12 +24,12 @@ import time
 from pathlib import Path
 
 from agent.config import Config
-from agent.tools import filesystem, modules, rendezvous
+from agent.tools import components, filesystem, modules, rendezvous
 from agent.tools.inst import render, unwrap
 from agent.tools.registry import ToolRegistry, build_default_tools
 from agent.tools.transport import LocalTransport
 from agent.tools.workspace import LocalWorkspace
-from tests.testsupport import check
+from tests.testsupport import check, posix_shell_argv
 
 # the statement shape the registry's four-file tools use (see registry.py)
 READ_FILE = (
@@ -48,6 +48,84 @@ def _call(root: str, template: str, args: dict, defaults: dict | None = None) ->
     command = render(template, args, vars=svc.vars(), defaults=defaults or {})
     result = LocalTransport(root).run(command, 30)
     return unwrap(result, service="the workspace service")
+
+
+def _install_probe() -> None:
+    """2b. A component INSTALLED for this host wins over the dev checkout, and
+    its own executable wins over the table's argv template.
+
+    The install layer (tools/components.py) lays an artifact in this host's own
+    root; resolution must then run THAT, whatever shape it has — an executable
+    needs neither interpreter nor checkout. Driven with a fake `#!/bin/sh` daemon
+    so the words the host hands the process are observable instead of assumed
+    (the flags a daemon gets are part of the launch contract, not a convention).
+    """
+    with tempfile.TemporaryDirectory() as host_root:
+        previous = os.environ.get(components.ROOT_ENV)
+        os.environ[components.ROOT_ENV] = host_root
+        os.environ["CLUTCH_PROBE_ARGV"] = str(Path(host_root) / "argv.txt")
+        try:
+            artifact = Path(host_root) / "artifact"
+            artifact.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CLUTCH_PROBE_ARGV\"\nexit 7\n",
+                encoding="utf-8",
+            )
+            version = components.install(
+                artifact,
+                {"name": modules.WORKSPACE, "version": "9.9.9", "interface": rendezvous.DAEMON},
+            )
+            check(components.installed(modules.WORKSPACE) == version, "the install layer finds what it just laid down")
+            resolved = rendezvous.resolve(modules.WORKSPACE)
+            check(
+                resolved is not None and resolved.installed and not resolved.template,
+                "an installed component supersedes the checkout",
+            )
+            check(
+                resolved.argv == (str(version / modules.WORKSPACE),),
+                "the artifact's own executable supersedes the argv template",
+            )
+
+            workspace = tempfile.mkdtemp(prefix="clutch-install-probe-")
+            root = str(Path(workspace).resolve())
+            try:
+                try:
+                    rendezvous.service(workspace, modules.WORKSPACE)
+                    check(False, "a daemon artifact that dies during startup is reported")
+                except rendezvous.RendezvousError as err:
+                    check("status 7" in str(err), "the failure carries the artifact's own exit status")
+            finally:
+                shutil.rmtree(workspace, ignore_errors=True)
+            argv = (Path(host_root) / "argv.txt").read_text(encoding="utf-8").splitlines()
+            check(argv == ["--workspace", root, "--idle", os.environ.get("CLUTCH_RENDEZVOUS_IDLE") or "600"],
+                  "an installed artifact is handed the component's own flags, as words")
+
+            cli = Path(host_root) / "cli-artifact"
+            cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            memdir = components.install(cli, {"name": modules.MEMORY, "version": "1.0.0", "interface": rendezvous.CLI})
+            reason = rendezvous.unavailable_reason(modules.MEMORY)
+            check(
+                "standalone executable" in reason,
+                "an installed CLI onefile is refused with a reason, not run as {py} {script}",
+            )
+            check(not rendezvous.available(modules.MEMORY), "so a CLI component answers from the host implementation (R2)")
+            check(
+                components.verify(memdir, name=modules.MEMORY, interface=rendezvous.DAEMON) != "",
+                "a manifest contradicting the host's table is refused before use",
+            )
+            stray = components.component_root(modules.MEMORY) / "0.0.0-garbage"
+            stray.mkdir(parents=True)
+            (stray / modules.MEMORY).write_text("", encoding="utf-8")
+            check(components.installed(modules.MEMORY) == memdir, "a version directory without a manifest is not an install")
+        finally:
+            if previous is None:
+                os.environ.pop(components.ROOT_ENV, None)
+            else:
+                os.environ[components.ROOT_ENV] = previous
+            os.environ.pop("CLUTCH_PROBE_ARGV", None)
+    check(
+        modules.component_dir(modules.WORKSPACE) == modules.module_dir(modules.WORKSPACE),
+        "the install root is host-scoped: the checkout is back once it is unset",
+    )
 
 
 def _dead(pid: int, seconds: float = 5.0) -> bool:
@@ -81,6 +159,33 @@ def main() -> int:
         check(False, "an unknown module raises")
     except rendezvous.RendezvousError:
         check(True, "an unknown module raises")
+
+    # 2b. the axes a component is described by, and the one lookup that decides
+    #     where it is. WHAT it is spoken to as (interface) is a separate fact
+    #     from WHOSE resources it serves (subject), which is what makes a
+    #     statement legal for a given workspace at all (registry.module_ready).
+    check(rendezvous.serves_workspace_fs(modules.WORKSPACE), "the workspace component serves the workspace filesystem")
+    for other in (modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
+        check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
+    check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
+    check(all(mod.runs_on == rendezvous.SELF for mod in rendezvous._TABLE.values()),
+          "every component in the table runs on the host that asks (the OTHER axis is unused)")
+    check(all(mod.requires for mod in rendezvous._TABLE.values()), "every component declares what it stands on")
+    check(
+        rendezvous.unavailable_reason("clutch-nope") == "unknown component: clutch-nope",
+        "an unknown component says so in one sentence",
+    )
+    check(rendezvous.unavailable_reason(modules.WORKSPACE) == "", "the workspace component is available here")
+
+    checkout = rendezvous.resolve(modules.MEMORY)
+    if checkout is not None:  # the memory checkout may be absent on a bare host
+        check(not checkout.installed and checkout.template, "the dev checkout is a template launch, not an install")
+        check(
+            checkout.argv == (modules.python_exe(), str(checkout.directory / "memory.py")),
+            "the CLI template is the interpreter plus the checkout's entry point",
+        )
+        check(rendezvous.unavailable_reason(modules.MEMORY) == "", "a checked-out CLI with an interpreter is available")
+    _install_probe()
 
     state = tempfile.mkdtemp(prefix="clutch-rendezvous-")
     workspace = tempfile.mkdtemp(prefix="clutch-ws-")

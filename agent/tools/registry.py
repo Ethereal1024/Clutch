@@ -116,19 +116,21 @@ _SKILLS_CLI = "PYTHONPATH={dir} {py} -m clutch_skills --envelope"
 def module_ready(workspace: Workspace, module: str | None) -> bool:
     """True when this host can actually run `module`'s statements for this call.
 
-    Three facts, all local: the module is on disk and drivable
-    (`rendezvous.available` — R2's star acceptance: a deleted module degrades
-    the call, never the host); a DAEMON module additionally needs a LOCAL
-    workspace, because it serves the filesystem of the machine it runs on (a
-    remote workspace keeps the host's transport-based implementation, which
-    speaks to the remote side over the SSH bridge); a CLI module runs on the
-    APP host whatever kind of workspace the call came from — its subject is the
-    project file / the network / the skill library, never the workspace's
-    machine.
+    Three facts, all local: the component is on disk and drivable
+    (`rendezvous.available` — R2's star acceptance: a deleted component degrades
+    the call, never the host); a component whose SUBJECT is the workspace's own
+    filesystem additionally needs a LOCAL workspace, because it serves the
+    filesystem of the machine it runs on (a remote workspace keeps the host's
+    transport-based implementation, which speaks to the remote side over the SSH
+    bridge); a component serving anything else runs on the APP host whatever
+    kind of workspace the call came from — its subject is the project file / the
+    network / the skill library, never the workspace's machine.
     """
     if module is None or not rendezvous.available(module):
         return False
-    return not rendezvous.is_local(module) or isinstance(workspace, LocalWorkspace)
+    # TODO(ssh-workspace): this isinstance disappears with the component that
+    # serves a foreign filesystem over a channel of its own.
+    return not rendezvous.serves_workspace_fs(module) or isinstance(workspace, LocalWorkspace)
 
 
 def _previous_content(workspace: Workspace, args: dict[str, Any]) -> tuple[Any, str] | None:

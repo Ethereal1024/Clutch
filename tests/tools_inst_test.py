@@ -106,7 +106,7 @@ def _offline(stub: Stub, *, available: bool = True):
 
     def fake_prepare(module: str, workspace, config) -> rendezvous.Statement:
         mod = rendezvous._TABLE[module]
-        if mod.kind == rendezvous.DAEMON:
+        if mod.interface == rendezvous.DAEMON:
             vars_ = rendezvous.Service(module, FAKE_PORT, FAKE_TOKEN, os.getpid()).vars()
         else:
             vars_ = rendezvous.cli_vars(module, config)

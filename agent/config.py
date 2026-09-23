@@ -119,7 +119,7 @@ class Config:
     # (bundled) root next to the package; the host only reads that directory and
     # servers it through the module's daemon (see agent/tools/rendezvous.py).
     enable_skills: bool = True
-    skills_dir: Path = field(default_factory=lambda: modules.module_dir(modules.SKILLS) / "skills")
+    skills_dir: Path = field(default_factory=lambda: modules.component_dir(modules.SKILLS) / "skills")
     # Permission: confirm risky actions with the user, not a sandbox
     non_interactive: bool = False  # auto-allow (used by eval harness / unattended runs)
 
