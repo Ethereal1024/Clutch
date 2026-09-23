@@ -20,7 +20,6 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
 
 from agent.config import Config
@@ -29,7 +28,7 @@ from agent.tools.inst import render, unwrap
 from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import LocalTransport
 from agent.tools.workspace import LocalWorkspace
-from tests.testsupport import check
+from tests.testsupport import check, wait_gone
 
 # the statement shape the registry's four-file tools use (see registry.py)
 READ_FILE = (
@@ -120,7 +119,10 @@ def _install_probe() -> None:
             stray = components.component_root(modules.MEMORY) / "0.0.0-garbage"
             stray.mkdir(parents=True)
             (stray / modules.MEMORY).write_text("", encoding="utf-8")
-            check(components.installed(modules.MEMORY) == memdir, "a version directory without a manifest is not an install")
+            check(
+                components.installed(modules.MEMORY) == memdir,
+                "a version directory without a manifest is not an install",
+            )
         finally:
             if previous is None:
                 os.environ.pop(components.ROOT_ENV, None)
@@ -131,15 +133,6 @@ def _install_probe() -> None:
         modules.component_dir(modules.WORKSPACE) == modules.module_dir(modules.WORKSPACE),
         "the install root is host-scoped: the checkout is back once it is unset",
     )
-
-
-def _dead(pid: int, seconds: float = 5.0) -> bool:
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if not rendezvous._pid_alive(pid):
-            return True
-        time.sleep(0.05)
-    return False
 
 
 def main() -> int:
@@ -236,7 +229,10 @@ def main() -> int:
         check(kept == "secret\n", "the refused write did not happen")
         command = render(READ_FILE, {"path": "."}, vars=fenced.vars(), defaults={"max_chars": 20000})
         r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
-        check("school.clc" not in r["content"] and "hello.txt" in r["content"], "a fenced file is hidden from a listing")
+        check(
+            "school.clc" not in r["content"] and "hello.txt" in r["content"],
+            "a fenced file is hidden from a listing",
+        )
         again = rendezvous.service(workspace, modules.WORKSPACE, protect=fence)
         check(again.pid == fenced.pid, "the fence is remembered")
 
@@ -248,7 +244,7 @@ def main() -> int:
 
         # 9. release: what this process started, this process stops
         rendezvous.release(workspace, modules.WORKSPACE)
-        check(_dead(fenced.pid), "release() stops the daemon (no leaked process)")
+        check(wait_gone(fenced.pid), "release() stops the daemon (no leaked process)")
         check(rendezvous._read_record(workspace, WS) is None, "the daemon unpublished its record")
 
         # 10. the registry: the SAME Tool definition the model sees, executed by

@@ -21,8 +21,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent.tools.transport import LocalTransport, SshTransport, TransportError
 from agent.tools.localshell import shq
+from agent.tools.transport import LocalTransport, SshTransport, TransportError
 from agent.tools.workspace import _EXEC_CHUNK_BYTES, LocalWorkspace, RemoteWorkspace
 from tests.testsupport import check, posix_shell_argv
 
@@ -275,7 +275,10 @@ def main() -> int:
             check(False, "cancelled remote exec raises TransportError")
         except TransportError as e:
             check(e.aborted and not e.timeout, "remote cancel -> TransportError(aborted=True)")
-            check(_time.monotonic() - t0 < 10, f"remote cancel abandons the wait promptly (took {_time.monotonic() - t0:.1f}s)")
+            check(
+                _time.monotonic() - t0 < 10,
+                f"remote cancel abandons the wait promptly (took {_time.monotonic() - t0:.1f}s)",
+            )
 
         srv.shutdown()
 

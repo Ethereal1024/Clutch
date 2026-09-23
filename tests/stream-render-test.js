@@ -13,42 +13,11 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary } = require("./harness.js");
+const { check, summary, slicer } = require("./harness.js");
 
 const APP = path.join(__dirname, "..", "ui", "app.js");
 const src = fs.readFileSync(APP, "utf8");
-
-// ---- extraction helpers (parameter-list aware: find the body brace AFTER the
-// signature's closing paren, so destructured params don't fool the scan) ----
-function bodyEnd(open) {
-  let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (depth === 0) return i + 1; }
-  }
-  throw new Error("unbalanced braces after offset " + open);
-}
-function sigBodyOpen(start) {
-  let paren = 0, seen = false;
-  for (let i = start; i < src.length; i++) {
-    if (src[i] === "(") { paren++; seen = true; }
-    else if (src[i] === ")") paren--;
-    else if (seen && paren === 0 && src[i] === "{") return i;
-  }
-  throw new Error("no function body found at offset " + start);
-}
-function fnBody(name) {
-  let start = src.indexOf("function " + name + "(");
-  if (start < 0) throw new Error("missing function: " + name);
-  if (src.slice(Math.max(0, start - 6), start) === "async ") start -= 6; // keep the async keyword
-  return src.slice(start, bodyEnd(sigBodyOpen(start)));
-}
-function region(startMark, endName) {
-  const a = src.indexOf(startMark);
-  if (a < 0) throw new Error("missing marker: " + startMark);
-  const b = src.indexOf("function " + endName + "(");
-  return src.slice(a, bodyEnd(sigBodyOpen(b)));
-}
+const { fnBody, region } = slicer(src);
 
 // ---- stub environment ----
 let rafQ = [];

@@ -26,11 +26,10 @@
 "use strict";
 
 const { spawnSync } = require("child_process");
-const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { resolveBash, platformTag } = require("./server-bundle");
+const { resolveBash, platformTag, isPackagedApp, fileHash, treeHash } = require("./server-bundle");
 
 const REPO = path.join(__dirname, "..");
 const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
@@ -51,23 +50,6 @@ const COMPONENTS = [
 ];
 
 const SKIP_DIRS = new Set([".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules"]);
-
-// Only the Electron main process has a packaged app to ask. Guard on
-// `process.versions.electron` BEFORE requiring: under plain node (every test,
-// any node-run script) the electron npm package *downloads* a binary when
-// required, so a lazy "require and catch" is not lazy at all.
-function isPackagedApp() {
-  if (!process.versions.electron) return false; // plain node: no app, no resourcesPath
-  try {
-    return require("electron").app.isPackaged;
-  } catch (e) {
-    return false; // electron present but not ready: treat as dev
-  }
-}
-
-function fileHash(p) {
-  return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
-}
 
 // A prebuilt artifact: the app's own resources, or a dev build. Both are single
 // files the release produced (a PyInstaller onefile), so nothing is built here.
@@ -93,20 +75,11 @@ function shippedArtifact(name) {
 // The checkout, fingerprinted: an edited source has to produce a new artifact
 // (and so pass the host's gate), an untouched one has to upload nothing.
 function sourceFingerprint(dir) {
-  const h = crypto.createHash("sha256");
-  const visit = (p) => {
-    const st = fs.statSync(p);
-    if (st.isDirectory()) {
-      for (const name of fs.readdirSync(p).sort()) {
-        if (SKIP_DIRS.has(name)) continue;
-        visit(path.join(p, name));
-      }
-    } else if (!p.endsWith(".pyc")) {
-      h.update(path.relative(dir, p)).update("\0").update(fs.readFileSync(p));
-    }
-  };
-  visit(dir);
-  return h.digest("hex");
+  return treeHash([dir], {
+    base: dir,
+    skipDirs: SKIP_DIRS,
+    skipFile: (p) => p.endsWith(".pyc"),
+  });
 }
 
 // The dev fallback artifact: the checkout as a tar, members at its top level (the

@@ -20,12 +20,11 @@ Pins the conventions a tool definition relies on, all of them fail-closed:
 from __future__ import annotations
 
 import json
-import shlex
 import subprocess
 
 from agent.tools.inst import InstError, jarg, render, shq, unwrap
 from agent.tools.transport import CommandResult
-from tests.testsupport import check, posix_shell_argv
+from tests.testsupport import check, posix_shell_argv, shell_words
 
 # shell metacharacters a value must never be able to spring: quote break, command
 # separator, substitution, expansion, redirect, newline, CJK, empty
@@ -43,11 +42,6 @@ HOSTILE = [
 ]
 
 
-def _words(command: str) -> list[str]:
-    """How the SHELL will see the command line (argv, quotes resolved)."""
-    return shlex.split(command, posix=True)
-
-
 def main() -> int:
     # 1. {name} is one quoted word — through the real shell, not just shlex
     check(shq("plain") == "'plain'", "shq wraps in single quotes")
@@ -56,7 +50,7 @@ def main() -> int:
 
     for value in HOSTILE:
         cmd = render("printf %s {v}", {"v": value})
-        check(_words(cmd) == ["printf", "%s", value], f"shlex sees one word: {value!r}")
+        check(shell_words(cmd) == ["printf", "%s", value], f"shlex sees one word: {value!r}")
         shell = posix_shell_argv()
         if shell is None:
             continue
@@ -67,9 +61,9 @@ def main() -> int:
     # 2. {*} is one quoted JSON object carrying exactly the model's values
     args = {"path": "数据.txt", "old_string": "it's \"quoted\"", "new_string": "line\nbreak", "empty": ""}
     cmd = render("curl --data-binary {*}", args)
-    check(len(_words(cmd)) == 3, "{*} stays one word")
-    check(json.loads(_words(cmd)[2]) == args, "{*} round-trips every value byte-for-byte, including CJK")
-    check("\\u" not in _words(cmd)[2], "{*} keeps CJK unescaped (ensure_ascii=False)")
+    check(len(shell_words(cmd)) == 3, "{*} stays one word")
+    check(json.loads(shell_words(cmd)[2]) == args, "{*} round-trips every value byte-for-byte, including CJK")
+    check("\\u" not in shell_words(cmd)[2], "{*} keeps CJK unescaped (ensure_ascii=False)")
 
     # 3. host vars shadow model args; defaults fill the model's omissions
     cmd = render(
@@ -77,14 +71,17 @@ def main() -> int:
         {"token": "model-supplied", "path": "a.txt"},
         vars={"token": "host-token", "port": "51234"},
     )
-    check(_words(cmd)[1] == "X-Clutch-Token:host-token", "a host var shadows a model arg of the same name")
-    payload = json.loads(_words(cmd)[-1])
+    check(shell_words(cmd)[1] == "X-Clutch-Token:host-token", "a host var shadows a model arg of the same name")
+    payload = json.loads(shell_words(cmd)[-1])
     check(payload == {"token": "model-supplied", "path": "a.txt"}, "{*} still carries the model's own keys")
     cmd = render("read {max_chars} {*}", {"path": "x"}, defaults={"max_chars": 20000})
-    check(_words(cmd)[1] == "20000", "a default fills an omitted argument for {name}")
-    check(json.loads(_words(cmd)[2]) == {"max_chars": 20000, "path": "x"}, "defaults ride {*} under the model's values")
+    check(shell_words(cmd)[1] == "20000", "a default fills an omitted argument for {name}")
+    check(
+        json.loads(shell_words(cmd)[2]) == {"max_chars": 20000, "path": "x"},
+        "defaults ride {*} under the model's values",
+    )
     cmd = render("read {max_chars}", {"max_chars": 5}, defaults={"max_chars": 20000})
-    check(_words(cmd)[1] == "5", "the model's value wins over the default")
+    check(shell_words(cmd)[1] == "5", "the model's value wins over the default")
 
     # 4. optional groups: dropped WHOLE (flag and value) when the value is absent
     tmpl = "search {query} [--max-results {max_results}] [--backend {backend}]"

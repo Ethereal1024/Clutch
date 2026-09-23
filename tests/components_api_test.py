@@ -117,7 +117,10 @@ def main() -> int:
             {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": components.digest_of(blob2)},
         )
         check(second["status"] == "installed", "the same version with different bytes is replaced")
-        check(components.installed_digest("clutch-memory") == components.digest_of(blob2), "the digest follows the bytes")
+        check(
+            components.installed_digest("clutch-memory") == components.digest_of(blob2),
+            "the digest follows the bytes",
+        )
         check(
             (Path(second["path"]) / "clutch-memory").read_bytes() == blob2,
             "a single-file artifact lands named after its component",
@@ -130,7 +133,12 @@ def main() -> int:
         try:
             components.accept(
                 artifact,
-                {"name": "clutch-memory", "version": "2.0.0", "interface": "telepathy", "digest": components.digest_of(blob2)},
+                {
+                    "name": "clutch-memory",
+                    "version": "2.0.0",
+                    "interface": "telepathy",
+                    "digest": components.digest_of(blob2),
+                },
             )
             check(False, "a manifest with an unknown interface is refused")
         except ValueError as err:
@@ -186,23 +194,34 @@ def main() -> int:
 
         st, body_json = http_get(f"{base}/api/components")
         listed = json.loads(body_json)["components"]
-        check(st == 200 and {c["name"] for c in listed} == {modules.MEMORY}, "GET /api/components lists the host's installs")
+        check(
+            st == 200 and {c["name"] for c in listed} == {modules.MEMORY},
+            "GET /api/components lists the host's installs",
+        )
         check(
             all(c["digest"] for c in listed),
             "every listed component carries the digest the client's gate compares",
         )
 
         st, body_json = _post_artifact(base, "clutch-memory", blob, digest=digest)
-        check(st == 200 and json.loads(body_json)["status"] == "installed", "an upload is taken and answered with a verdict")
+        check(
+            st == 200 and json.loads(body_json)["status"] == "installed",
+            "an upload is taken and answered with a verdict",
+        )
         st, body_json = _post_artifact(base, "clutch-memory", blob, digest=digest)
         check(st == 200 and json.loads(body_json)["status"] == "current", "re-uploading what is installed is a no-op")
         check(
             [d.name for d in components.component_root(modules.MEMORY).iterdir()] == [digest[:16]],
             "one component, one version: the replaced install is dropped, not piled up",
         )
-        st, body_json = _post_artifact(base, "clutch-websearch", blob2, digest=components.digest_of(blob2), artifact="clutch-websearch")
+        st, body_json = _post_artifact(
+            base, "clutch-websearch", blob2, digest=components.digest_of(blob2), artifact="clutch-websearch"
+        )
         check(st == 200 and json.loads(body_json)["status"] == "installed", "a second component installs the same way")
-        check(components.installed_version("clutch-websearch") == components.digest_of(blob2)[:16], "the version is the client's")
+        check(
+            components.installed_version("clutch-websearch") == components.digest_of(blob2)[:16],
+            "the version is the client's",
+        )
         st, body_json = _post_artifact(base, "clutch-websearch", blob2, digest=components.digest_of(blob2))
         check(st == 200 and json.loads(body_json)["status"] == "current", "the second upload is gated out")
 
@@ -211,7 +230,10 @@ def main() -> int:
         check(components.installed("clutch-skills") is None, "and it landed nothing")
 
         req = urllib.request.Request(
-            f"{base}/api/components/install", data=blob, headers={"Content-Type": "application/octet-stream"}, method="POST"
+            f"{base}/api/components/install",
+            data=blob,
+            headers={"Content-Type": "application/octet-stream"},
+            method="POST",
         )
         try:
             urllib.request.urlopen(req, timeout=15)

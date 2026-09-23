@@ -11,30 +11,14 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary } = require("./harness.js");
+const { check, summary, slicer } = require("./harness.js");
 
 const APP = path.join(__dirname, "..", "ui", "app.js");
 const src = fs.readFileSync(APP, "utf8");
+const { bodyEnd, sigBodyOpen } = slicer(src);
 
 // extract the protocol region: the defaults + the functions that read a call's
 // declaration (from UI_DEFAULTS through the end of previewText)
-function bodyEnd(open) {
-  let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (depth === 0) return i + 1; }
-  }
-  throw new Error("unbalanced braces after offset " + open);
-}
-function sigBodyOpen(start) {
-  let paren = 0, seen = false;
-  for (let i = start; i < src.length; i++) {
-    if (src[i] === "(") { paren++; seen = true; }
-    else if (src[i] === ")") paren--;
-    else if (seen && paren === 0 && src[i] === "{") return i;
-  }
-  throw new Error("no function body found at offset " + start);
-}
 const from = src.indexOf("const UI_DEFAULTS = {");
 const toFn = src.indexOf("function previewText(");
 if (from < 0 || toFn < 0) throw new Error("protocol region not found in ui/app.js");

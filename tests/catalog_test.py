@@ -62,7 +62,10 @@ def check_no_components_is_chat_only() -> None:
         try:
             names = [t.name for t in build_tools(cfg)]
             check(names == ["run_command"], "with no component installed the host offers only run_command")
-            check(not rendezvous.available(modules.WORKSPACE), "the workspace component is not available on a bare host")
+            check(
+                not rendezvous.available(modules.WORKSPACE),
+                "the workspace component is not available on a bare host",
+            )
         finally:
             modules.module_dir = real_dir
             if previous is None:
@@ -78,7 +81,10 @@ def check_ui_protocol() -> None:
     grep = catalog.ui_of(_spec(modules.WORKSPACE, "grep"))
     check(read["group"] == grep["group"] == "read", "reads and greps share one dense group")
     check(read["collapse"] == "always" and read["preview"] == "none", "a read starts folded with no live preview")
-    check("{path}" in read["summary"] and "{lines}" in read["summary"], "the summary names its argument and the result's size")
+    check(
+        "{path}" in read["summary"] and "{lines}" in read["summary"],
+        "the summary names its argument and the result's size",
+    )
 
     # a write is its OWN row with its own block: it must not be swallowed by the
     # reads around it, and its diff is a folding block

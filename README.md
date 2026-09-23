@@ -200,27 +200,39 @@ scripts/               打包与构建脚本
 
 ## 测试
 
+无框架，逐个模块跑；断言共享 `tests/testsupport.py`。下面就是全部套件（每个文件头部写明
+它钉住的约定）：
+
 ```bash
-uv run python -m tests.selfcheck        # 核心逻辑自检
-uv run python -m tests.loop_test        # 循环路径（假模型驱动，不消耗 API）
-uv run python -m tests.server_test      # HTTP + SSE 端到端
-uv run python -m tests.lazy_check       # 历史分页与惰性加载
-uv run python -m tests.supervisor_test  # 会话生命周期与跨进程锁
-uv run python -m tests.transport_test   # 传输层与远程工作区往返
-uv run python -m tests.rendezvous_test  # 模块 daemon/CLI 寻址与权限围栏
-uv run python -m tests.tools_inst_test  # 工具调用的命令契约（--live 走真实模块）
-uv run python -m tests.catalog_test     # 组件声明：UI 协议 + 第三方注册（R4）
+# 离线：不联网、不要密钥、不花 API 额度
+uv run python -m tests.selfcheck            # 核心逻辑自检
+uv run python -m tests.loop_test            # 循环路径（假模型驱动）
+uv run python -m tests.server_test          # HTTP + SSE 端到端
+uv run python -m tests.lazy_check           # 历史分页与惰性加载
+uv run python -m tests.supervisor_test      # 会话生命周期与跨进程锁
+uv run python -m tests.transport_test       # 传输层与远程工作区往返
+uv run python -m tests.remote_path_test     # 远端路径不得落到本机文件系统（macOS 回归）
+uv run python -m tests.project_lock_test    # 只读项目锁：第二个进程抢锁会被拒 / 被杀死后能释放
+uv run python -m tests.llm_client_test      # 两种线协议的流式错误与重试
+uv run python -m tests.local_shell_test     # 本机 shell 决策（POSIX sh / Git Bash / cmd）
+uv run python -m tests.inst_test            # 工具语句：参数 -> 命令 -> 信封
+uv run python -m tests.rendezvous_test      # 模块 daemon/CLI 寻址与权限围栏（需 checkout）
+uv run python -m tests.tools_inst_test      # 每个工具的命令契约（--live 走真实模块）
+uv run python -m tests.catalog_test         # 组件声明：UI 协议 + 第三方注册（R4）
 uv run python -m tests.components_api_test  # 组件安装层：客户端上传 + 宿主落地
-uv run python -m tests.ui_fonts_check   # 字体/图标跨平台一致（含 mermaid 标签字体）
-uv run python -m eval.harness           # 三个评测场景
+uv run python -m tests.ui_fonts_check       # 字体/图标跨平台一致（含 mermaid 标签字体）
+uv run python -m eval.harness               # 三个评测场景
+
+# 需要一台真远端（见文件头：CLUTCH_E2E_HOST / _PORT / _USER / _PASS）
+CLUTCH_E2E_HOST=10.x.x.x CLUTCH_E2E_USER=me CLUTCH_E2E_PASS=… node tests/remote-bootstrap-e2e.js
 ```
 
 界面侧（事件流渲染 / 组件声明的 `ui` 协议 / SSH 隧道 / LLM 反代）同样无框架，
-逐个 `node tests/<name>.test.js` 跑，断言共享 `tests/harness.js`；清单就是
-`tests/*test*.js`。上面没列的都是不需联网、不需密钥的本地套件，改动后建议全跑。
+`node tests/<name>.test.js`，断言共享 `tests/harness.js`；清单就是 `tests/*test*.js`
+（`remote-bootstrap-e2e.js` 需要真远端，其余离线）。
 
 模块自己的套件在模块目录里跑：`cd clutch-skills && python3 -m pytest`（memory /
-websearch 同理）。
+websearch / workspace 同理）。
 
 ## 安全
 

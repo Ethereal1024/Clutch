@@ -403,7 +403,10 @@ def _run_server_test() -> int:
         check(st == 200 and a.get("offset") == disk0, "append returns the pre-append size as offset")
         check(a.get("size") == disk0 + len(mem_line) + 1, "append size counts the newline")
         st, body = http_get(f"{base_url}/api/clc?lo={a['offset']}&hi={a['size']}")
-        check(base64.b64decode(json.loads(body)["b64"]) == (mem_line + "\n").encode(), "append lands at the returned offset")
+        check(
+            base64.b64decode(json.loads(body)["b64"]) == (mem_line + "\n").encode(),
+            "append lands at the returned offset",
+        )
         st, body = http_post(f"{base_url}/api/clc/append", {"line": "two\nlines"})
         check(st == 400, "append rejects embedded newlines")
 
@@ -432,7 +435,9 @@ def _run_server_test() -> int:
         check(again is not None and a["offset"] in again[2], "patched index points at the appended line")
         st, body = http_post(f"{base_url}/api/clc/patch", {"offset": a["size"], "b64": base64.b64encode(b"x").decode()})
         check(st == 400, "patch refuses to grow the file")
-        st, body = http_post(f"{base_url}/api/clc/patch", {"offset": a["size"] - 1, "b64": base64.b64encode(b"xy").decode()})
+        st, body = http_post(
+            f"{base_url}/api/clc/patch", {"offset": a["size"] - 1, "b64": base64.b64encode(b"xy").decode()}
+        )
         check(st == 400, "patch refuses an overwrite past EOF")
         st, body = http_post(f"{base_url}/api/clc/patch", {"offset": -1, "b64": ""})
         check(st == 400, "patch rejects a negative offset")
@@ -441,7 +446,10 @@ def _run_server_test() -> int:
 
         # note_bytes_written kept the lazy log's window math exact: its byte
         # total still equals the on-disk size after the endpoint appends
-        check(state.project.log._file_bytes == os.path.getsize(lclc), "endpoint appends are bookkept into the event log")
+        check(
+            state.project.log._file_bytes == os.path.getsize(lclc),
+            "endpoint appends are bookkept into the event log",
+        )
 
 
         evs2: list[dict] = []

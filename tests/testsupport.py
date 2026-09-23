@@ -1,27 +1,29 @@
-"""Shared helpers for the standalone test runners.
-
-Every runner (selfcheck / loop_test / server_test / supervisor_test / transport_test /
-lazy_check / ui_fonts_check) is a plain `python -m tests.X` module with no test
-framework. Two assertion styles live here:
+"""Shared helpers for the standalone test runners: no test framework, each runner
+is a plain `python -m tests.X` module. What is shared here is only what more than
+one runner needs — the canonical list of suites lives in README.md, not here.
 
 - check()            fails fast: prints and exits non-zero on the first broken
-                     assertion (the default for the runners above)
+                     assertion (the default)
 - collecting_check() returns (check, failures) for runners that report every
                      broken assertion at the end (lazy_check, ui_fonts_check)
-
-http_get() / http_post() drive the local HTTP API; both styles need them.
+- http_get() / http_post()   drive the local HTTP API
+- wait_gone()        prove a process did not leak (poll the pid until it is gone)
+- posix_shell_argv() run POSIX sh text on this host for the mock "remote"
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 
 from agent.tools.localshell import local_shell
+from agent.tools.rendezvous import _pid_alive
 
 
 def posix_shell_argv() -> list[str] | None:
@@ -39,6 +41,26 @@ def posix_shell_argv() -> list[str] | None:
         return ["/bin/sh", "-c"]
     shell = local_shell()  # the app's own detection (CLUTCH_BASH, Git dirs, PATH)
     return list(shell.argv) if shell.posix and shell.argv else None
+
+
+def shell_words(command: str) -> list[str]:
+    """How the SHELL will see a rendered command line: the argv a POSIX sh hands
+    the child, with quoting resolved. Both statement suites assert on the words the
+    module receives, so the reading is defined once."""
+    return shlex.split(command, posix=True)
+
+
+def wait_gone(pid: int, seconds: float = 5.0) -> bool:
+    """True once `pid` is no longer alive, polling — a killed process is not reaped
+    instantly, so a single liveness probe races the OS. Runners use this to prove a
+    process did NOT leak (a daemon that dies with its parent, one that stops on
+    release, one that survives a detach)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def check(cond: bool, name: str) -> None:

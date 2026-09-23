@@ -83,7 +83,10 @@ def test_classify_cmd() -> None:
     check(shell_mod.classify_command("dir", posix=False)[0] == "read", "cmd: dir is read-only")
     check(shell_mod.classify_command("type a.txt", posix=False)[0] == "read", "cmd: type is read-only")
     check(shell_mod.classify_command("del x.txt", posix=False)[0] == "write", "cmd: del is a write")
-    check(shell_mod.classify_command("dir>a.txt", posix=False)[0] == "write", "cmd: redirect marker inside a token -> write")
+    check(
+        shell_mod.classify_command("dir>a.txt", posix=False)[0] == "write",
+        "cmd: redirect marker inside a token -> write",
+    )
     check(
         shell_mod.classify_command("echo hi && type a.txt", posix=False)[0] == "read",
         "cmd: && chain of read-only segments",
@@ -109,9 +112,15 @@ def test_run_command_guard() -> None:
             "cmd: unparseable command is rejected before any execution",
         )
     cfg = Config()
-    check(shell_mod._blocked_reason(cfg, 'python -c "print(1)"', posix=False) is None, "cmd: python -c is non-interactive")
+    check(
+        shell_mod._blocked_reason(cfg, 'python -c "print(1)"', posix=False) is None,
+        "cmd: python -c is non-interactive",
+    )
     check(shell_mod._blocked_reason(cfg, "python", posix=False) is not None, "cmd: bare python is still blocked")
-    check(shell_mod._blocked_reason(cfg, "python -m json.tool", posix=True) is None, "posix: python -m is non-interactive")
+    check(
+        shell_mod._blocked_reason(cfg, "python -m json.tool", posix=True) is None,
+        "posix: python -m is non-interactive",
+    )
 
 
 def test_transport_spawn() -> None:

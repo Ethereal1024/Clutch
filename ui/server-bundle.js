@@ -49,34 +49,50 @@ function fileHash(p) {
   return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
 }
 
-// Dev build gate: fingerprint the source so PyInstaller only reruns on changes
-function sourceFingerprint() {
+// Content fingerprint of a set of files/directories: every path it holds (relative
+// to `base`) plus its bytes, so an edit anywhere in the set changes the digest and
+// an untouched set does not. Directories and files that never affect the artifact
+// are skipped — __pycache__, .pyc, and (for a checkout) the repo's own test files.
+//
+// Two callers hash two different sets (server-bundle and components.js), which is
+// why the skip rules are parameters: the walk itself is the shared part.
+function treeHash(roots, { base, skipDirs = new Set(), skipFile = () => false }) {
   const h = crypto.createHash("sha256");
   const visit = (p) => {
     const st = fs.statSync(p);
     if (st.isDirectory()) {
       for (const name of fs.readdirSync(p).sort()) {
-        if (name === "__pycache__") continue;
+        if (skipDirs.has(name)) continue;
         visit(path.join(p, name));
       }
-    } else if (!p.endsWith(".pyc") && !p.endsWith("_test.py")) {
-      h.update(path.relative(REPO, p)).update("\0").update(fs.readFileSync(p));
+    } else if (!skipFile(p)) {
+      h.update(path.relative(base, p)).update("\0").update(fs.readFileSync(p));
     }
   };
-  for (const root of [
-    "agent",
-    "scripts/server_entry.py",
-    "scripts/supervisor_entry.py",
-    "scripts/build-server-bundle.sh",
-    // the bundle ships the skills library out of the clutch-skills module, so a
-    // changed skill has to invalidate a dev build like changed agent code does
-    "clutch-skills/skills",
-  ]) {
-    const p = path.join(REPO, root);
-    if (!fs.existsSync(p)) continue; // a module that is not checked out
-    visit(p);
+  for (const root of roots) {
+    if (fs.existsSync(root)) visit(root); // a module that is not checked out
   }
   return h.digest("hex");
+}
+
+// Dev build gate: fingerprint the source so PyInstaller only reruns on changes
+function sourceFingerprint() {
+  return treeHash(
+    [
+      path.join(REPO, "agent"),
+      path.join(REPO, "scripts", "server_entry.py"),
+      path.join(REPO, "scripts", "supervisor_entry.py"),
+      path.join(REPO, "scripts", "build-server-bundle.sh"),
+      // the bundle ships the skills library out of the clutch-skills module, so a
+      // changed skill has to invalidate a dev build like changed agent code does
+      path.join(REPO, "clutch-skills", "skills"),
+    ],
+    {
+      base: REPO,
+      skipDirs: new Set(["__pycache__"]),
+      skipFile: (p) => p.endsWith(".pyc") || p.endsWith("_test.py"),
+    }
+  );
 }
 
 function buildIfStale() {
@@ -97,13 +113,16 @@ function buildIfStale() {
 }
 
 // app.isPackaged is the signal: resourcesPath also exists in dev mode, and in
-// plain node require("electron") yields the binary path (so .app is undefined
-// and we fall back to the dev build).
+// plain node (.app undefined) we fall back to the dev build. The
+// `process.versions.electron` guard comes FIRST on purpose: under plain node
+// (every test, any node-run script) requiring the electron npm package
+// *downloads* a binary, so a lazy "require and catch" would not be lazy at all.
 function isPackagedApp() {
+  if (!process.versions.electron) return false; // plain node: no app, no resourcesPath
   try {
     return require("electron").app.isPackaged;
   } catch (e) {
-    return false;
+    return false; // electron present but not ready: treat as dev
   }
 }
 
@@ -180,4 +199,4 @@ function ensurePyLibsTar(target) {
   return { path: out, version: fileHash(out).slice(0, 16) };
 }
 
-module.exports = { platformTag, ensureBundle, ensurePyLibsTar, resolveBash };
+module.exports = { platformTag, ensureBundle, ensurePyLibsTar, resolveBash, isPackagedApp, fileHash, treeHash };

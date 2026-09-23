@@ -187,7 +187,10 @@ def _full_turn_events():
     yield _ev("response.output_text.delta", delta="!")
     yield _ev("response.output_item.added", output_index=1, item=_call_item())
     yield _ev("response.function_call_arguments.delta", output_index=1, delta='{"path": "."}')
-    yield _ev("response.completed", response=SimpleNamespace(output=[_text_item("hi!"), _call_item(arguments='{"path": "."}')]))
+    yield _ev(
+        "response.completed",
+        response=SimpleNamespace(output=[_text_item("hi!"), _call_item(arguments='{"path": "."}')]),
+    )
 
 
 def _responses_fail_stream():
@@ -392,7 +395,10 @@ def _check_responses_protocol() -> None:
     client, fake = _responses_client(3, [_responses_partial_then_fail])
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
     check([e["type"] for e in evs] == ["text"], "partial text is delivered once")
-    check(err is not None and err.code == "timeout" and fake.calls == 1, "mid-stream failure raises instead of duplicating")
+    check(
+        err is not None and err.code == "timeout" and fake.calls == 1,
+        "mid-stream failure raises instead of duplicating",
+    )
     client, fake = _responses_client(2, [_responses_fail_stream, _responses_fail_stream])
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
     check(err is not None and "after 2 attempts" in err.message, "exhaustion states the attempt count")

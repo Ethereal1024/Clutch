@@ -1,14 +1,45 @@
 // Logic test for renderMermaid: streaming/parse gates, cache restore, dedupe.
-// Mirrors ui/app.js (the real mermaid UMD touches `document` at top level).
+//
+// Like its siblings (stream-render / perm-args / tool-ui-protocol) this runner
+// does NOT re-implement what it tests: it extracts the real isLastElement /
+// initMermaidTheme / renderMermaid / showMermaidError out of ui/app.js and
+// drives them against stubs. It used to carry a hand-copied mirror of that code,
+// which had already drifted (no showMermaidError, no render-side parse-error
+// gate, missing theme keys) — a green mirror said nothing about app.js.
 "use strict";
 
-let mermaidInitialized = false;
-const mermaidCache = new Map();
+const fs = require("fs");
+const path = require("path");
+const { check, summary, slicer } = require("./harness.js");
+
+const APP = path.join(__dirname, "..", "ui", "app.js");
+const src = fs.readFileSync(APP, "utf8");
+const { fnBody, region } = slicer(src);
+
+// ---- stub environment ----
+// app.js reads the theme off the live CSS (:root custom properties) instead of
+// duplicating the palette and the font stack in JS; the stub shims the two
+// globals it touches. The font stack is deliberately spelled the way
+// ui/style.css spells it — multiline, with inline comments.
+const CSS_VARS = {
+  "--accent": "#EF4444",
+  "--font-display": `"Clutch Icons",                                    /* bundled icon glyphs */
+    "Archivo",
+    "PingFang SC", "Microsoft YaHei",                                  /* mac + windows */
+    "Noto Sans CJK SC",                                                /* linux */
+    sans-serif`,
+};
+global.document = { documentElement: {}, createElement: () => makeEl() };
+global.getComputedStyle = () => ({
+  getPropertyValue: (name) => CSS_VARS[name] || "",
+});
+global.autoScroll = () => {};
+global.followTail = false;
+
 let renderCalls = 0;
 let parseFail = false;
 const initOptions = [];
-
-const mermaid = {
+global.mermaid = {
   initialize(opts) { initOptions.push(opts); },
   parse() {
     if (parseFail) throw new Error("parse error");
@@ -20,33 +51,23 @@ const mermaid = {
   },
 };
 
-// ui/app.js reads the theme off the live CSS (:root custom properties) instead
-// of duplicating the palette and the font stack in JS; the stub shims the two
-// globals it touches so the mirror stays honest. The font stack is deliberately
-// spelled the way ui/style.css spells it — multiline, with inline comments.
-const CSS_VARS = {
-  "--accent": "#EF4444",
-  "--font-display": `"Clutch Icons",                                    /* bundled icon glyphs */
-    "Archivo",
-    "PingFang SC", "Microsoft YaHei",                                  /* mac + windows */
-    "Noto Sans CJK SC",                                                /* linux */
-    sans-serif`,
-};
-const document = { documentElement: {} };
-const getComputedStyle = () => ({
-  getPropertyValue: (name) => CSS_VARS[name] || "",
-});
-
+// a stub element good enough for showMermaidError (classList + querySelector +
+// appendChild) and for the insertAdjacentHTML the render path uses
 function makeEl() {
+  const classes = new Set();
   const e = {
     nodeType: 1, // element node — real DOM nodes carry this, isLastElement depends on it
     dataset: {},
     textContent: "",
     isConnected: true,
     nextSibling: null,
-    classList: { add() {} },
+    classList: { add: (c) => classes.add(c), has: (c) => classes.has(c) },
+    classes,
     parentElement: null,
     innerHTML: "",
+    child: null,
+    appendChild(node) { e.child = node; },
+    querySelector: () => e.child,
     insertAdjacentHTML(_p, h) { e.innerHTML = h; },
   };
   return e;
@@ -71,144 +92,23 @@ function makeRoot(sources) {
   return root;
 }
 
-function isLastElement(pre) {
-  let n = pre.nextSibling;
-  while (n) {
-    if (n.nodeType === 1) return false;
-    if (n.nodeType === 3 && n.textContent.trim()) return false;
-    n = n.nextSibling;
-  }
-  return true;
-}
-
-function renderMermaid(root, streaming = false) {
-  if (typeof mermaid === "undefined" || !root) return;
-  if (!mermaidInitialized) {
-    mermaidInitialized = true;
-    // same helper as ui/app.js: read the live values, keep one copy of the font
-    // stack in CSS (a second copy here is exactly what drifts), and flatten the
-    // inline /* comments */ before mermaid re-emits the value into a <style>
-    const cssValue = (name) =>
-      (getComputedStyle(document.documentElement).getPropertyValue(name) || "")
-        .replace(/\/\*[\s\S]*?\*\//g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-    const accent = cssValue("--accent") || "#EF4444";
-    const diagramFont = cssValue("--font-display") || "sans-serif";
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: "dark",
-      securityLevel: "strict",
-      themeVariables: {
-        fontFamily: diagramFont,
-        lineColor: accent,
-        primaryBorderColor: accent,
-        secondaryBorderColor: accent,
-        tertiaryBorderColor: accent,
-        actorBorder: accent,
-        actorLineColor: accent,
-        signalColor: accent,
-        labelBoxBorderColor: accent,
-        noteBorderColor: accent,
-        activationBorderColor: accent,
-        taskBorderColor: accent,
-        taskBkgColor: "#2d2d33",
-        taskBkg: "#2d2d33",
-        taskTextColor: "#d4d4d8",
-        taskTextLightColor: "#d4d4d8",
-        activeTaskBorderColor: accent,
-        activeTaskBkgColor: accent,
-        activeTaskBkg: accent,
-        activeTaskTextColor: "#0F0F10",
-        doneTaskBorderColor: "#52525b",
-        doneTaskBkgColor: "#1c1c1f",
-        doneTaskBkg: "#1c1c1f",
-        doneTaskTextColor: "#a1a1aa",
-        todayLineColor: accent,
-        clusterBorder: accent,
-        noteBkgColor: "#1c1c1f",
-        noteTextColor: "#d4d4d8",
-        edgeLabelBackground: "#1c1c1f",
-        clusterBkg: "#1c1c1f",
-        taskBkg: "#2d2d33",
-        taskTextOutsideColor: "#a1a1aa",
-        activationBkgColor: "#27272a",
-        pie1: accent,
-        pie2: "#27272a",
-        pie3: "#3f3f46",
-        pie4: "#52525b",
-        pie5: "#71717a",
-        pie6: "#8b8b94",
-        pie7: "#a1a1aa",
-        pie8: "#b8b8c0",
-        pie9: "#c9c9d0",
-        pie10: "#d4d4d8",
-        pie11: "#e0e0e4",
-        pie12: "#ededf0",
-        git0: accent,
-        git1: "#71717a",
-        git2: "#d4d4d8",
-        git3: "#3f3f46",
-        git4: "#a1a1aa",
-        git5: "#27272a",
-        git6: "#b8b8c0",
-        git7: "#52525b",
-      },
-    });
-  }
-  const pending = [];
-  root.querySelectorAll("pre code.language-mermaid").forEach((code) => {
-    const pre = code.parentElement;
-    if (!pre) return;
-    const src = code.textContent;
-    if (pre.dataset.mermaidSrc === src) return;
-    const cached = mermaidCache.get(src);
-    if (cached) {
-      pre.classList.add("mermaid-rendered");
-      pre.textContent = "";
-      pre.insertAdjacentHTML("beforeend", cached);
-      pre.dataset.mermaidSrc = src;
-      return;
-    }
-    if (streaming && isLastElement(pre)) return;
-    let parsed = false;
-    try { mermaid.parse(src); parsed = true; } catch (e) {}
-    if (!parsed) {
-      pre.dataset.mermaidSrc = src;
-      return;
-    }
-    pre.dataset.mermaidSrc = src;
-    pending.push({ pre, src });
-  });
-  for (const { pre, src } of pending) {
-    mermaid.render("mmd-" + Math.random().toString(36).slice(2), src).then(
-      ({ svg }) => {
-        if (mermaidCache.size > 100) mermaidCache.clear();
-        mermaidCache.set(src, svg);
-        let target = null;
-        for (const el of root.querySelectorAll("pre code.language-mermaid")) {
-          if (el.textContent === src) { target = el.parentElement; break; }
-        }
-        if (target) {
-          target.classList.add("mermaid-rendered");
-          target.textContent = "";
-          target.insertAdjacentHTML("beforeend", svg);
-          target.dataset.mermaidSrc = src;
-        }
-      },
-      () => {
-        if (pre.isConnected) delete pre.dataset.mermaidSrc;
-      }
-    );
-  }
-}
+// ---- load the real code ----
+// One eval: the module state (mermaidInitialized / mermaidCache) and the
+// functions that close over it must land in the same scope. The two globals the
+// test itself has to poke are re-exported through a handle.
+(0, eval)(region("let mermaidInitialized = false;", "showMermaidError") + `
+globalThis.__mermaid = {
+  cache: mermaidCache,
+  resetInit: () => { mermaidInitialized = false; },
+};`);
+const mermaidCache = globalThis.__mermaid.cache;
+const resetMermaidInit = globalThis.__mermaid.resetInit;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
   // label-first ok(name, cond) reads better in this runner; the failure count and
   // the final verdict come from the shared harness
-  const { check, summary } = require("./harness");
   const ok = (name, cond) => check(cond, name);
 
   const srcA = "graph TD\nA-->B";
@@ -251,6 +151,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok("parse gate: broken source marked done (no re-parse loop)", root5.pres[0].dataset.mermaidSrc === srcBad);
   ok("parse gate: literal source kept", root5.pres[0].textContent === srcBad);
   ok("parse gate: broken source not cached", mermaidCache.has(srcBad) === false);
+  ok("parse gate: the failure is reported to the user", root5.pres[0].classes.has("mermaid-failed")
+    && root5.pres[0].child && /Invalid diagram syntax/.test(root5.pres[0].child.textContent));
   parseFail = false;
 
   // 6. different valid diagram after fix renders
@@ -285,6 +187,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ok("diagram font handed to mermaid is flattened (no comment, no newline)",
     typeof tv.fontFamily === "string" && !tv.fontFamily.includes("/*") && !tv.fontFamily.includes("*")
       && !tv.fontFamily.includes("\n") && !tv.fontFamily.includes("  "));
+  // the parser's own error path would paint its giant error diagram into the page
+  ok("mermaid.parseError is overridden to a warning", typeof mermaid.parseError === "function");
 
   // 8. cache cap: overflow clears and re-renders (use a fresh uncached source)
   for (let i = 0; i < 110; i++) mermaidCache.set("k" + i, "v");
@@ -298,11 +202,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 9. a missing --font-display must fall back to a generic keyword, not to ""
   // (an empty font-family leaves mermaid's own Arial in charge of the diagram)
   delete CSS_VARS["--font-display"];
-  mermaidInitialized = false;
+  resetMermaidInit();
   renderMermaid(makeRoot(["graph TD\nH-->I"]), false);
   await sleep(10);
   ok("missing --font-display falls back to sans-serif",
     initOptions[1] !== undefined && initOptions[1].themeVariables.fontFamily === "sans-serif");
 
   summary("mermaid-logic", "ALL PASS");
-})();
+})().catch((e) => { console.error(e); process.exit(1); });

@@ -16,36 +16,14 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary } = require("./harness.js");
+const { check, summary, slicer } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const src = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf8");
 const css = fs.readFileSync(path.join(ROOT, "ui", "style.css"), "utf8");
 const permPy = fs.readFileSync(path.join(ROOT, "agent", "core", "permission.py"), "utf8");
 
-// ---- extraction helpers (same as stream-render-test.js) ----
-function bodyEnd(open) {
-  let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (depth === 0) return i + 1; }
-  }
-  throw new Error("unbalanced braces after offset " + open);
-}
-function sigBodyOpen(start) {
-  let paren = 0, seen = false;
-  for (let i = start; i < src.length; i++) {
-    if (src[i] === "(") { paren++; seen = true; }
-    else if (src[i] === ")") paren--;
-    else if (seen && paren === 0 && src[i] === "{") return i;
-  }
-  throw new Error("no function body found at offset " + start);
-}
-function fnBody(name) {
-  const start = src.indexOf("function " + name + "(");
-  if (start < 0) throw new Error("missing function: " + name);
-  return src.slice(start, bodyEnd(sigBodyOpen(start)));
-}
+const { fnBody } = slicer(src);
 
 const extractCommand = new Function(
   "return (" + fnBody("extractCommand") + ");",

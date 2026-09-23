@@ -26,8 +26,8 @@ from agent.events import (
 )
 from agent.llm.client import LlmError
 from agent.loop import Agent
-from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.localshell import shq
+from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.workspace import LocalWorkspace, Workspace
 from tests.testsupport import check, posix_shell_argv
 

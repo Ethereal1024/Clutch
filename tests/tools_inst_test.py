@@ -42,7 +42,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shlex
 import signal
 import socket
 import sys
@@ -57,7 +56,7 @@ from agent.tools import catalog, components, modules, rendezvous
 from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import CommandResult, Transport, TransportError
 from agent.tools.workspace import LocalWorkspace
-from tests.testsupport import check, http_post
+from tests.testsupport import check, http_post, shell_words, wait_gone
 
 # the daemon coordinates a stub statement is rendered with: a port nothing
 # listens on (the stub never dials it) and a token the line must carry
@@ -67,11 +66,6 @@ FAKE_TOKEN = "tok-0ff5e"
 # one value that must survive every escaping layer: quoth the shell, quote the
 # JSON body, CJK, a newline, a backslash
 HOSTILE = "中文 'single' \"double\" \\ back\nsecond line\n"
-
-# a shell-free view of a rendered line (the words the shell would hand the child)
-def _words(command: str) -> list[str]:
-    return shlex.split(command, posix=True)
-
 
 # --------------------------------------------------------------- the harness
 
@@ -212,7 +206,7 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
         payload = {**defaults, **args}
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         check(
-            _words(stub.line)
+            shell_words(stub.line)
             == [
                 "curl",
                 "-sS",
@@ -230,12 +224,15 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
             ],
             f"{name}: the curl statement is byte-for-byte the frozen contract",
         )
-        check(_payload(_words(stub.line)) == payload, f"{name}: {{*}} carries the model's values + the host's defaults")
+        check(
+            _payload(shell_words(stub.line)) == payload,
+            f"{name}: {{*}} carries the model's values + the host's defaults",
+        )
         check(not result["error"] and result["content"] == "fine", f"{name}: a 200 verdict is the result")
     # the payload is JSON, not a second escaping pass: the hostile value arrives
     # with its quotes, backslash and newline intact
     _, stub = _call(reg, ws, cfg, "write_file", {"path": "a.txt", "content": HOSTILE}, CommandResult(0, "", ""))
-    check(_payload(_words(stub.line))["content"] == HOSTILE, "{*} round-trips a hostile value byte for byte")
+    check(_payload(shell_words(stub.line))["content"] == HOSTILE, "{*} round-trips a hostile value byte for byte")
     check("\\u" not in stub.line, "the payload keeps CJK unescaped")
 
 
@@ -298,7 +295,7 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     for name, args, expected in cases:
         result, stub = _call(reg, ws, cfg, name, args, CommandResult(0, _envelope("answered"), ""))
         check(len(stub.calls) == 1, f"{name}: exactly one command per call ({args})")
-        check(_words(stub.line) == expected, f"{name}: the module's argv is byte-for-byte the contract ({args})")
+        check(shell_words(stub.line) == expected, f"{name}: the module's argv is byte-for-byte the contract ({args})")
         check(not result["error"] and result["content"] == "answered", f"{name}: the module's envelope is the result")
 
 
@@ -329,9 +326,13 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
     # a CLI module's {content, code} envelope (choice a): code != 0 is a refusal
     r, _ = _call(reg, ws, cfg, "search_memory", {"query": "x"}, CommandResult(1, _envelope("ERROR: boom", 1), ""))
     check(r["error"] and r["content"] == "ERROR: boom", "a CLI refusal ({content, code:1}) is error-as-data")
-    r, _ = _call(reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(1, _envelope("ERROR: unknown skill: 'x'", 1), ""))
+    r, _ = _call(
+        reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(1, _envelope("ERROR: unknown skill: 'x'", 1), "")
+    )
     check(r["error"] and "unknown skill" in r["content"], "the skills CLI's refusal reaches the model verbatim")
-    r, _ = _call(reg, ws, cfg, "save_memory", {"title": "t", "content": "c"}, CommandResult(0, _envelope("OK: saved"), ""))
+    r, _ = _call(
+        reg, ws, cfg, "save_memory", {"title": "t", "content": "c"}, CommandResult(0, _envelope("OK: saved"), "")
+    )
     check(not r["error"] and r["content"] == "OK: saved", "a CLI success ({content, code:0}) is a plain result")
 
     # a service bug cannot hide behind an optimistic envelope
@@ -376,7 +377,10 @@ def check_guards(reg: ToolRegistry, cfg: Config) -> None:
         check(r["error"] and "protected" in r["content"], "read_file refuses a protected path")
         check(stub.calls == [], "the refusal happens before the component is ever asked")
         r, stub = _call(reg, ws, cfg, "write_file", {"path": "school.clc", "content": "x"})
-        check(r["error"] and "protected" in r["content"] and stub.calls == [], "write_file refuses a protected path first")
+        check(
+            r["error"] and "protected" in r["content"] and stub.calls == [],
+            "write_file refuses a protected path first",
+        )
         r, stub = _call(reg, ws, cfg, "edit_file", {"path": "school.clc", "old_string": "a", "new_string": "b"})
         check(r["error"] and stub.calls == [], "edit_file refuses a protected path first")
         r, stub = _call(reg, ws, cfg, "grep", {"pattern": "secret", "path": "school.clc"})
@@ -398,7 +402,10 @@ def check_guards(reg: ToolRegistry, cfg: Config) -> None:
 def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
     # a missing required argument is error-as-data, and no command is rendered
     r, stub = _call(reg, ws, cfg, "load_memory", {}, CommandResult(0, "x", ""))
-    check(r["error"] and "name" in r["content"] and stub.calls == [], "a missing argument fails closed, before any line")
+    check(
+        r["error"] and "name" in r["content"] and stub.calls == [],
+        "a missing argument fails closed, before any line",
+    )
     r, stub = _call(reg, ws, cfg, "web_search", {}, CommandResult(0, "x", ""))
     check(r["error"] and stub.calls == [], "a missing query fails closed too")
 
@@ -406,13 +413,18 @@ def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
     result, stub = _call(
         reg, ws, cfg, "web_search", {"query": "'; rm -rf / #"}, CommandResult(0, _envelope("ok"), "")
     )
-    check(_words(stub.line)[-1] == "'; rm -rf / #", "a shell-metacharacter query stays one word")
-    check("rm -rf" in _words(stub.line)[-1], "and it is still the model's own text")
+    check(shell_words(stub.line)[-1] == "'; rm -rf / #", "a shell-metacharacter query stays one word")
+    check("rm -rf" in shell_words(stub.line)[-1], "and it is still the model's own text")
     check(not result["error"], "the call itself is unaffected")
 
     # string-typed numbers are coerced to the schema's integer before rendering
-    _, stub = _call(reg, ws, cfg, "web_search", {"query": "q", "max_results": "3"}, CommandResult(0, _envelope("ok"), ""))
-    check(_words(stub.line)[_words(stub.line).index("--max-results") + 1] == "3", "a numeric argument is rendered as the schema's integer")
+    _, stub = _call(
+        reg, ws, cfg, "web_search", {"query": "q", "max_results": "3"}, CommandResult(0, _envelope("ok"), "")
+    )
+    check(
+        shell_words(stub.line)[shell_words(stub.line).index("--max-results") + 1] == "3",
+        "a numeric argument is rendered as the schema's integer",
+    )
 
     # unknown tool: the registry says so instead of crashing
     r = reg.execute(ws, cfg, "nope", {})
@@ -420,15 +432,6 @@ def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
 
 
 # ------------------------------------------------------------- the live half
-
-
-def _wait_dead(pid: int, seconds: float = 10.0) -> bool:
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if not rendezvous._pid_alive(pid):
-            return True
-        time.sleep(0.05)
-    return False
 
 
 def _free_port() -> int:
@@ -452,11 +455,14 @@ def live_workspace(cfg: Config) -> None:
             service = rendezvous.service(tmp, modules.WORKSPACE)
             check(rendezvous._healthy(service), "live: the daemon this call started is healthy")
             r = reg.execute(ws, cfg, "write_file", {"path": "made.txt", "content": HOSTILE})
-            check(not r["error"] and (Path(tmp) / "made.txt").read_text(encoding="utf-8") == HOSTILE, "live: a hostile payload lands byte for byte")
+            check(
+                not r["error"] and (Path(tmp) / "made.txt").read_text(encoding="utf-8") == HOSTILE,
+                "live: a hostile payload lands byte for byte",
+            )
             r = reg.execute(ws, cfg, "grep", {"pattern": "back"})
             check(not r["error"] and "made.txt" in r["content"], "live: grep sweeps through the daemon")
             rendezvous.release_all()
-            check(_wait_dead(service.pid), "live: release_all() stopped the daemon (no leak)")
+            check(wait_gone(service.pid, 10.0), "live: release_all() stopped the daemon (no leak)")
     finally:
         rendezvous.release_all()
         os.environ.pop("CLUTCH_WORKSPACE_DISCOVERY_DIR", None)
@@ -487,8 +493,14 @@ def live_skills(cfg: Config) -> None:
             record = None
             for f in Path(state).glob("s-*.json"):
                 record = json.loads(f.read_text(encoding="utf-8"))
-            check(record is not None and rendezvous._pid_alive(record["pid"]), "live: the skills CLI started its daemon")
-            check(record is not None and record["root"] == str(Path(cfg.skills_dir).resolve()), "live: it serves this session's root")
+            check(
+                record is not None and rendezvous._pid_alive(record["pid"]),
+                "live: the skills CLI started its daemon",
+            )
+            check(
+                record is not None and record["root"] == str(Path(cfg.skills_dir).resolve()),
+                "live: it serves this session's root",
+            )
             daemon_pid = int(record["pid"]) if record else 0
 
             r = reg.execute(ws, cfg, "load_skill", {"name": "no-such-skill-xyz"})
@@ -500,7 +512,7 @@ def live_skills(cfg: Config) -> None:
         if daemon_pid:
             with contextlib.suppress(OSError):
                 os.kill(daemon_pid, signal.SIGTERM)
-            check(_wait_dead(daemon_pid), "live: the skills daemon exits on SIGTERM (no leak)")
+            check(wait_gone(daemon_pid, 10.0), "live: the skills daemon exits on SIGTERM (no leak)")
         os.environ.pop("CLUTCH_SKILLS_DISCOVERY_DIR", None)
 
 
