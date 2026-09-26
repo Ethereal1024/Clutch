@@ -299,7 +299,6 @@ _WORKSPACE = Component(
             access="read",
             ui={
                 "group": "read",
-                "chip": "none",
                 "style": "read",
                 "body": "text",
                 "collapse": "always",
@@ -323,7 +322,6 @@ _WORKSPACE = Component(
             access="sweep",
             ui={
                 "group": "read",
-                "chip": "none",
                 "style": "read",
                 "body": "text",
                 "collapse": "always",

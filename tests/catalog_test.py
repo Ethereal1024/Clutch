@@ -86,9 +86,9 @@ def check_ui_protocol() -> None:
         "{path}" in read["summary"] and "{lines}" in read["summary"],
         "the summary names its argument and the result's size",
     )
-    # its summary already says what the call is, so the row does not repeat the
-    # tool's own name beside it
-    check(read["chip"] == "none" and read["style"] == "read", "a read declares no chip and an exploration style")
+    # the call row keeps the tool's own name as its title; the summary labels
+    # the exploration row the result lands in
+    check(read["chip"] == catalog.DEFAULTS["chip"] and read["style"] == "read", "a read keeps its name chip and the exploration style")
 
     # a write is its OWN row with its own block: it must not be swallowed by the
     # reads around it, and its diff is a folding block

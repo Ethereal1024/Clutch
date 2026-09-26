@@ -268,41 +268,47 @@ const toolCalls = {};
 let toolGroupEl = null;
 // tool_call_id -> owning block: results land next to their own call row
 const toolCallGroups = new Map();
-// tool_call_id -> the row the call put in its block (the streaming preview and
-// the finished row are the same row: a result fills it instead of adding another)
-const toolRows = new Map();
 
 // ---- the component UI protocol (agent/tools/catalog.py) ---------------------
 // The host renders tool events it did not design, so NO TOOL NAME appears in
 // this file: every tool event carries the declaration its component made about
-// how a call is presented, and everything below reads that declaration.
+// how a call and its result are presented, and everything below reads that
+// declaration. The vocabulary IS the abstraction of the forms this UI has
+// always drawn — a declaration composes them; it may not remove one.
 //
-// A declaration COMPOSES the row and the result out of named parts, each with a
-// default that reproduces the plain look: the tool's own name as the row's chip,
-// its arguments one click away, its result its own block.
+// The CALL ROW: the tool's own name as the chip (the row's title), the raw
+// arguments one click away, and while the args stream the declaration's live
+// preview body.
+//   chip      "name" the row leads with the tool's own name; "none" it does
+//             not (a row whose preview already says what the call is).
+//   preview   the live body while the call is generated: "args" the raw
+//             payload; "command" a `mark`ed shell line (default "$ "), which
+//             is also what the args panel unwraps a command payload with;
+//             "content" prints argument VALUES (`keys` in order, a leading
+//             "-", "+" or "✎" printed as a mark before the value); "none" the
+//             chip alone — a read is too large to preview.
 //
-//   group     calls naming the same group collect into ONE dense block — each
-//             call's row, with its result filled into that row, in one place, so
-//             a batch of reads scans as a column of one-liners. None: the call
-//             is its own row and its result its own block (a write must never be
-//             swallowed by the reads around it).
-//   chip      "name" the row leads with the tool's own name; "none" it does not
-//             (a row whose summary already says what the call is reads better
-//             without the name repeated).
-//   summary   the row's one-line label: {argname} from the call's arguments,
-//             {lines} the result's line count (… until the result lands), {name}
-//             the tool's own name. "" = no label.
-//   preview   the live row while the call streams; "command" takes a `mark`
-//             (default "$ ") — the shell prompt a command reads under, which is
-//             also what the raw-arguments panel unwraps a command payload with.
-//   header    a result BLOCK's header label ({argname} as in summary). "" = the
-//             row's summary (the label this call would wear in a group), else
-//             "result". The host keeps the one verdict it owns: a failed call
-//             reads "result ⚠" whatever the declaration asked for.
-//   style     how the result is chromed: "plain", "read" (an exploration row),
-//             "write" (a change: the block's header is the accent chip).
-//   body      what the result shows: "text" its content, "diff", "none".
-//   collapse  "always" folded, "long" folded past RESULT_FOLD_LINES, "never" whole.
+// The RESULT: `style` picks the form.
+//   "read"    an exploration row of its own beside the call, inside the block
+//             the calls collect in: one collapsible line — `summary` filled
+//             from the call ({argname} from the arguments, {lines} the
+//             result's line count (… until the result lands), {name} the
+//             tool's own name) — with the content folding under it,
+//             highlighted by the path the call read.
+//   "write"   a change block: `header` as the accent chip, the component's
+//             verdict line, its `diff` body with the host's expand control
+//             past the fold threshold, and the host's ↶ undo when it holds a
+//             snapshot.
+//   "plain"   the default: a "result" block ("result ⚠" when the call failed —
+//             the one verdict the host owns) whose body is what `body` says:
+//             "text" the content, "diff", "none".
+//
+//   group     calls naming the same group collect into ONE dense block; a
+//             read's result row lands there beside its call. A call that
+//             declares no group is its own row and its result its own block
+//             (a write must never be swallowed by the reads around it).
+//   collapse  "always" folded, "long" folded past RESULT_FOLD_LINES, "never"
+//             whole (a block body's rest state).
 //   mutates   the call may change the file tree (host-derived when undeclared).
 //   undo      the host holds an undo record for this call (host-derived).
 const UI_DEFAULTS = {
@@ -354,10 +360,6 @@ function templateText(tpl, name, args, content) {
 }
 
 // the row's one-line label, and (through it) a result block's default header
-function summaryText(ui, name, args, content) {
-  return templateText(ui.summary, name, args, content);
-}
-
 // one argument out of a JSON payload that may still be arriving (hence invalid)
 function partialArg(raw, key) {
   try {
@@ -428,9 +430,10 @@ function toolGroupFor(id, ui) {
   return group;
 }
 
-// shared tool-row skeleton: the declaration's own parts — its name as the row's
-// chip (unless it asked for none), then the row's label — plus the caller's tail
-function makeToolRowBase(ui, name, label) {
+// shared tool-row skeleton: the declaration's own part — the tool's own name
+// as the row's chip (its title), unless the declaration asked for none — plus
+// the caller's tail (the live preview body, then the args expander)
+function makeToolRowBase(ui, name) {
   const row = document.createElement("div");
   row.className = "tool-row";
   if (ui.chip !== "none") {
@@ -439,10 +442,6 @@ function makeToolRowBase(ui, name, label) {
     chip.textContent = name;
     row.appendChild(chip);
   }
-  const text = document.createElement("span");
-  text.className = "tool-label";
-  text.textContent = label;
-  row.appendChild(text);
   return row;
 }
 
@@ -515,52 +514,70 @@ function permReason(reason) {
   return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
 }
 
-// one tool_call row: the declaration's chip and summary as the label (the call's
-// own arguments carry the {placeholders}), the raw payload one click away
+// one tool_call row: the declaration's chip — the tool's own name leading the
+// row — and the raw payload one click away; the call says what it is, its
+// result speaks for the outcome
 function makeToolRow(ev) {
-  const ui = uiOf(ev);
-  const row = makeToolRowBase(ui, ev.name, summaryText(ui, ev.name, ev.arguments, null));
-  row.appendChild(argsButton(ev.arguments, ui));
+  const row = makeToolRowBase(uiOf(ev), ev.name);
+  row.appendChild(argsButton(ev.arguments, uiOf(ev)));
   return row;
 }
 
 // render one tool_call row; consecutive calls append to the same block
 function addToolCallRow(ev) {
   const group = toolGroupFor(ev.tool_call_id, uiOf(ev));
-  const row = makeToolRow(ev);
-  toolRows.set(ev.tool_call_id, row);
-  group.el.appendChild(row);
+  group.el.appendChild(makeToolRow(ev));
   autoScroll();
 }
 
-// Fill a call's row with its result, per the declaration: the summary becomes
-// the row's label and the body folds under it, so a batch of reads is a column
-// of one-liners that expand in place. Returns false when the row is gone (an
-// older log page whose call line is not in memory): the caller then renders the
-// result as its own block.
-function fillRow(row, ui, name, args, result) {
-  if (!row || !row.isConnected) return false;
-  const label = row.querySelector(".tool-label");
-  if (label) label.textContent = summaryText(ui, name, args, result.content);
-  const body = buildResultBody(ui, result, args);
-  if (!body) return true; // "none": the row IS the result
-  if (foldAtRest(ui, result)) {
-    const fold = wrapFold(body);
-    row.appendChild(fold);
-    row.classList.add("folded"); // the whole row is the control (style.css)
-    const toggle = document.createElement("span");
-    toggle.className = "read-toggle";
-    toggle.textContent = "▸";
-    row.onclick = (event) => {
-      if (event.target.closest(".tool-args-btn")) return; // the args box has its own toggle
-      toggle.textContent = toggleFold(fold) ? "▾" : "▸";
-    };
-    row.insertBefore(toggle, label || row.firstChild);
-  } else {
-    row.appendChild(body);
-  }
+// one collapsible read row (toggle + summary + hidden code panel): the
+// declaration's summary as the label, the panel highlighted by the path the
+// call read — the exploration form, drawn from the declaration, not the name
+function buildReadRow(ui, call, content) {
+  const summary = templateText(ui.summary, call.name, call.args || {}, content);
+  const path = (call.args && call.args.path) || "";
+  const row = document.createElement("div");
+  row.className = "read-row";
+  const toggle = document.createElement("span");
+  toggle.className = "read-toggle";
+  toggle.textContent = "▸";
+  const lbl = document.createElement("span");
+  lbl.textContent = summary;
+  row.appendChild(toggle);
+  row.appendChild(lbl);
+  const full = document.createElement("pre");
+  full.className = "read-detail"; // the wrapper carries the hidden state
+  full.textContent = content;
+  highlightPreByPath(full, path);
+  const fold = wrapFold(full);
+  row.onclick = () => {
+    const wasHidden = toggleFold(fold);
+    toggle.textContent = wasHidden ? "▾" : "▸";
+  };
+  return { row, full: fold };
+}
+
+// the read result lands beside its call, in the block their calls collect in
+function appendReadRow(group, ui, call, ev) {
+  const { row, full } = buildReadRow(ui, call, ev.content);
+  group.el.appendChild(row);
+  group.el.appendChild(full);
   autoScroll();
-  return true;
+}
+
+// a read whose call row is gone (an older log page) shows the same collapsible
+// row inside its own durable block
+function buildReadBlock(ui, call, ev) {
+  const wrap = document.createElement("div");
+  wrap.className = "event tool_result" + (ev.is_error ? " error" : "") + " read";
+  const hdr = document.createElement("div");
+  hdr.className = "hdr";
+  hdr.textContent = ev.is_error ? "result ⚠" : "result"; // the host's verdict
+  wrap.appendChild(hdr);
+  const { row, full } = buildReadRow(ui, call, ev.content);
+  wrap.appendChild(row);
+  wrap.appendChild(full);
+  return wrap;
 }
 
 // A result that is its own block: the header is the declaration's own label
@@ -685,10 +702,11 @@ function handleToolCallDelta(ev) {
     const ui = uiOf(ev);
     const group = toolGroupFor(ev.tool_call_id, ui);
     st = streamRows[ev.tool_call_id] = { name: ev.name, ui, text: "", row: null, body: null, group };
-    st.row = makeToolRowBase(ui, ev.name, summaryText(ui, ev.name, {}, null));
+    st.row = makeToolRowBase(ui, ev.name);
     st.row.classList.add("stream");
     if (ui.preview === "none" || (ui.preview && ui.preview.mode === "none")) {
-      // nothing to stream: the row stays just its label, the result fills it later
+      // nothing to stream: the row stays just its name (a read is too large to
+      // preview), its result speaks when it lands
       const dots = document.createElement("span");
       dots.className = "muted";
       dots.textContent = "…";
@@ -698,7 +716,6 @@ function handleToolCallDelta(ev) {
       st.body.className = "tool-args-detail stream-pre";
       st.row.appendChild(st.body);
     }
-    toolRows.set(ev.tool_call_id, st.row);
     group.el.appendChild(st.row);
     autoScroll();
   }
@@ -872,12 +889,9 @@ function applyStreamEvent(ev) {
     toolCalls[ev.tool_call_id] = { name: ev.name, args, ui: ev.ui || {} };
     const st = streamRows[ev.tool_call_id];
     if (st) {
-      // the call finished: keep the same row (its result will fill it), drop the
-      // live preview's streaming marker and settle the label on the call's own
-      // arguments
+      // the call finished: the live row settles to its final form in place —
+      // chip and args expander, the preview body gone
       st.row.classList.remove("stream");
-      const label = st.row.querySelector(".tool-label");
-      if (label) label.textContent = summaryText(uiOf(ev), ev.name, args, null);
       const preview = st.row.querySelector(".stream-pre");
       if (preview) preview.remove();
       const dots = st.row.querySelector(".muted");
@@ -897,20 +911,15 @@ function applyStreamEvent(ev) {
     return true;
   }
 
-  // a result whose declaration collected it into a group fills its own row
-  // there; a call that declared no group renders its result as its own block
+  // a read's result lands beside its call, in the block their calls collect
+  // in; every other result is its own block after the calls (renderEvent)
   if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
     const call = toolCalls[ev.tool_call_id];
     const ui = uiOfResult(ev);
     const group = ui.group ? toolCallGroups.get(ev.tool_call_id) : null;
-    if (group) {
-      const row = toolRows.get(ev.tool_call_id);
-      if (fillRow(row, ui, call.name, call.args || {}, ev)) {
-        group.closed = true; // this group's calls have completed
-        return true;
-      }
-      const el = renderEvent(ev);
-      if (el) { (pageSink || eventsEl).appendChild(el); autoScroll(); }
+    if (group && ui.style === "read") {
+      appendReadRow(group, ui, call, ev);
+      group.closed = true; // this group's calls have completed
       return true;
     }
   }
@@ -1513,6 +1522,7 @@ function renderEvent(ev) {
       // a call that may change the tree asks for a fresh one (the declaration
       // says whether it can — the host derives it when it declares nothing)
       if (ui.mutates) scheduleTreeRefresh();
+      if (ui.style === "read") return buildReadBlock(ui, call, ev);
       return buildResultBlock(ui, call.name || "", call.args || {}, ev);
     }
     case "state_update": {
