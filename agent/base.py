@@ -19,6 +19,7 @@ from typing import Any
 
 from .config import Config
 from .core.permission import PermissionEvaluator, PermissionGate
+from .core.project_lock import LockHandle, ProjectLock
 from .llm import LlmClient, create_llm_client
 from .loop import Agent
 from .project import Project
@@ -98,17 +99,42 @@ class RunState:
             self.bridge_url = bridge_url
             self.remote_root = remote_root
             # a mode switch invalidates any previously-opened project's workspace
+            prev = self.project
             self.project = None
             self.workspace = None
             self.gate = None
+            self._retire_lock(prev)
 
     def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
+        """Make `project` the active one, retiring the project it REPLACES.
+
+        The retire is here, at the single choke point where a project stops being
+        the active one, so no caller can forget it: a window holds the write lock
+        on at most its currently-open project, and a lock outliving its project
+        would be unreachable — no project keeps the handle, so nothing could ever
+        hand it back and every other window would be locked out of that .clc
+        until this server exits."""
         with self.lock:
+            prev = self.project
             self.project = project
             if workspace is None:
                 workspace = self.build_workspace(str(project.workdir))
             self.workspace = workspace
+            self._retire_lock(prev, keep=project.lock)
             return self.workspace
+
+    def _retire_lock(self, prev: Project | None, keep: LockHandle | None = None) -> None:
+        """Hand back the write lock of a project that stops being the active one.
+
+        `keep` is the handle the INCOMING project already owns: re-opening the
+        SAME .clc for write reuses the held lock (see ProjectLock.acquire), and
+        releasing it would unlock the file this window just (re)claimed. A
+        read-only open passes no keep — it gives up the write claim on purpose —
+        and so does a project replaced by another path."""
+        if prev is None or prev.lock is None or prev.lock is keep:
+            return
+        ProjectLock.release(prev.lock)
+        prev.lock = None
 
     def start(self, task: str, workspace: Workspace, cancel: threading.Event) -> bool:
         with self.lock:

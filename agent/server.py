@@ -231,6 +231,11 @@ class Handler(BaseHTTPRequestHandler):
         project = self._state.project
         req_project = (body.get("project") or "").strip()
         if req_project and (project is None or str(project.path) != req_project):
+            if self._state.busy:
+                # never replace (and thereby unlock) the active project while a
+                # run is using it: the run appends to that .clc's log, so its
+                # write lock has to stay held for as long as it lasts
+                return self._json({"error": "a run is already active"}, status=409)
             # a different window's project: switch the active project to this
             # window's file so each UI window's runs append to its own .clc
             full = self._project_path(req_project)
@@ -662,6 +667,13 @@ class Handler(BaseHTTPRequestHandler):
                 project = create_project(root / name, name, model=self._cfg.model, workspace=ws)
             else:
                 project = create_project(Path(dirname) / name, name, model=self._cfg.model)
+        except ProjectOpenConflict:
+            # the file this create would write is another window's project: same
+            # answer as an open conflict, so the UI can say what actually happened
+            return self._json(
+                {"error": "project is open in another window", "code": "project_open_conflict"},
+                status=409,
+            )
         except OSError as e:
             return self._json({"error": f"cannot create project: {e}"}, status=400)
         self._state.set_project(project, workspace=ws)
@@ -700,16 +712,11 @@ class Handler(BaseHTTPRequestHandler):
         ws = self._state.build_workspace(str(full.parent))
         # write lock: the window that opens a project for write is its only
         # writer. Conflict -> HTTP 409 + code so the UI can offer read-only
-        # without parsing the NDJSON stream for the error line.
+        # without parsing the NDJSON stream for the error line. The lock of the
+        # project this open REPLACES is handed back by set_project (below), the
+        # choke point where a project stops being the active one.
         lock = None
         if not read_only:
-            # one window holds the write lock on at most its CURRENTLY-open
-            # project: opening a different project releases the previous one so
-            # it never lingers behind a moved-away window
-            prev = self._state.project
-            if prev is not None and prev.lock is not None and str(prev.path) != str(full):
-                ProjectLock.release(prev.lock)
-                prev.lock = None
             lock = ProjectLock.acquire(str(full))
             if lock is None:
                 return self._json(

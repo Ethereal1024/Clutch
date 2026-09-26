@@ -47,6 +47,13 @@ The same process re-opening the same project (reopen within one window) must
 not conflict with itself: an flock and a byte-range lock are both exclusive even
 between two handles of one process, so acquired handles are cached by path and
 reused.
+
+A lock's lifetime is the ACTIVE project's lifetime: a window holds the write
+lock on at most its currently-open project, so replacing it (RunState.set_project
+/ set_backend, the choke point) hands the old handle back. Nothing else keeps
+that handle, so a lock outliving its project would be unreachable: never
+released, it would lock every other window out of that .clc until this server
+exits.
 """
 
 from __future__ import annotations
@@ -91,6 +98,7 @@ class LockHandle:
     clc_path: str
     fd: int | None = None  # POSIX: the flock fd; None on Windows
     file: IO[bytes] | None = None  # Windows: the locked file (its CRT fd holds the region)
+    released: bool = False  # release() is idempotent: see below
 
 
 def _local_lock_path(clc_path: str) -> str:
@@ -162,9 +170,15 @@ class ProjectLock:
         """Drop a lock: unlock+close the fd (POSIX) or the file holding the
         byte-range lock (Windows). The OS also frees either one if this process
         dies while holding it, so no stale lock survives a crash — which is what
-        lets both backends skip any liveness/TTL recovery."""
-        if handle is None:
+        lets both backends skip any liveness/TTL recovery.
+
+        Idempotent per HANDLE, not just per path: a caller that already dropped a
+        handle (and left it referenced somewhere) must not close it a second time
+        — by then the fd NUMBER can belong to an unrelated open file, and closing
+        it would pull that file, socket or pipe out from under its owner."""
+        if handle is None or handle.released:
             return
+        handle.released = True
         cls._held.pop(handle.clc_path, None)
         if handle.file is not None:
             if msvcrt is not None:

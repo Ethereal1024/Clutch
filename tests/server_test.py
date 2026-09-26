@@ -546,12 +546,20 @@ def _run_server_test() -> int:
         # a run carrying project=<path> switches the active project before starting
         state.run_project = None
         state.api_key = "sk-fake"  # let start_task reach the busy check without LLM init
-        state.busy = True  # busy -> 409, but the switch already happened
+        state.busy = True  # busy -> 409, and the project of the live run is left alone
         st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
         check(st == 409, "busy run rejected during switch test")
-        check(str(state.project.path) == str(clc2.resolve()), "run with project= switched the active project")
+        check(
+            str(state.project.path) == str(clc.resolve()),
+            "a busy server never switches away from (and unlocks) the project of the live run",
+        )
         state.busy = False
         state.api_key = None
+        # not busy: the switch happens (the run itself fails without a key, which
+        # is the part the lock section below builds on)
+        st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
+        check(st == 500, "run without an LLM key fails")
+        check(str(state.project.path) == str(clc2.resolve()), "run with project= switched the active project")
         # restore the demo project so the real-run section stays untouched
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "switched back to the demo project after isolation")
@@ -594,6 +602,80 @@ def _run_server_test() -> int:
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "open works after the other window released")
         check(state.project is not None and not state.project.read_only, "reopen is writable again")
+
+        # ---- 3f-bis. the write lock FOLLOWS the active project ----
+        # A window holds the write lock on at most its CURRENTLY-open project:
+        # the moment the active project is replaced — by another project opened
+        # for write or read-only, by a created one, by a run that switches — the
+        # lock of the project left behind goes back to the pool. A lock that
+        # outlives its project is unreachable (nothing keeps the handle, so
+        # nothing could ever release it) and locks every other window out of that
+        # .clc until this server exits.
+        def lock_free(path: Path) -> bool:
+            """Whether a second INDEPENDENT claim on this .clc still succeeds —
+            the kernel truth, not the server's bookkeeping. The probe claims and
+            immediately releases, so it leaves nothing held."""
+            h = ProjectLock._acquire_local(str(path))
+            if h is None:
+                return False
+            ProjectLock.release(h)
+            return True
+
+        def open_project(path: Path, read_only: bool = False) -> int:
+            body = {"path": str(path)}
+            if read_only:
+                body["read_only"] = True
+            st, _ = http_post(f"{base_url}/api/project/open", body)
+            return st
+
+        st = open_project(clc)
+        check(st == 200 and state.project.lock is not None, "demo is open for write (lock held)")
+        check(not lock_free(clc), "another window cannot claim the open project")
+
+        # a read-only open gives the write claim up: the project left behind is
+        # free again (and the read-only one never claims anything)
+        st = open_project(clc2, read_only=True)
+        check(st == 200, "b opens read-only")
+        check(state.project.read_only and state.project.lock is None, "a read-only project holds no lock")
+        check(lock_free(clc), "the project left for a read-only one hands its write lock back")
+
+        # a WRITE reopen of the same project keeps the lock (it is reused, never
+        # dropped and re-taken: another window's claim during that window would
+        # be a spurious conflict)
+        check(open_project(clc) == 200 and open_project(clc) == 200, "demo reopened for write twice")
+        check(not lock_free(clc), "reopening the same project for write keeps the lock")
+
+        # a created project is write-locked like an opened one (the window that
+        # created it is its only writer from the first byte)
+        lkdir = Path(sdir) / "lockwork"
+        lkdir.mkdir()
+        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "created"})
+        check(st == 200, "project created")
+        created = Path(json.loads(body)["project"])
+        check(state.project.lock is not None, "a created project holds a write lock")
+        check(not lock_free(created), "a second window cannot claim a created project")
+        check(open_project(clc) == 200, "moved on to another project")
+        check(lock_free(created), "the created project hands its lock back when left")
+
+        # a create must never TAKE a path another window holds
+        victim = lkdir / "taken.clc"
+        with _lock_held_elsewhere(str(victim), _local_lock_path(str(victim))):
+            st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "taken"})
+            check(st == 409, "create over another window's path is refused")
+            check(json.loads(body).get("code") == "project_open_conflict", "the create conflict carries the code")
+            check(not victim.exists(), "the refused create wrote nothing at all")
+
+        # a run that switches the active project hands the old lock back too
+        check(open_project(clc) == 200, "demo open for write again")
+        state.api_key = None  # no key: the run fails, the switch is what is under test
+        st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
+        check(st == 500, "run without a key fails (switch only)")
+        check(str(state.project.path) == str(clc2.resolve()), "the run switched the active project")
+        check(not lock_free(clc2), "the switched-to project holds the write lock")
+        check(lock_free(clc), "the switched-away project hands its write lock back")
+
+        st = open_project(clc)
+        check(st == 200, "demo reopened for the real-run section")
 
         # ---- 3g. remote workspaces lock locally (kernel lock keyed by .clc path) ----
         from agent.core.project_lock import ProjectLock, _local_lock_path

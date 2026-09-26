@@ -91,8 +91,25 @@ def _acquire_lock(path: Path, read_only: bool) -> LockHandle | None:
 
 def create_project(path: Path, name: str, model: str = "", workspace=None) -> Project:
     """Create a new .clc file and return the Project. With a workspace (SSH
-    degradation layer) the file is written on the remote host."""
+    degradation layer) the file is written on the remote host.
+
+    A created project is opened for WRITE like any other, so it takes the same
+    exclusive lock — BEFORE the header lands: from its first byte the file
+    belongs to the window that created it. Without that lock the brand-new .clc
+    is a writable project nobody claims, and a second window opening it for write
+    would append to it concurrently with its creator (the one writer the lock
+    exists to prevent). Raises ProjectOpenConflict when another window already
+    holds the path (it has that .clc open, or created it first)."""
     path = path.with_suffix(".clc")
+    lock = _acquire_lock(path, read_only=False)
+    try:
+        return _create_project_locked(path, name, model, workspace, lock)
+    except Exception:
+        ProjectLock.release(lock)
+        raise
+
+
+def _create_project_locked(path: Path, name: str, model: str, workspace, lock: LockHandle) -> Project:
     meta = ProjectMeta(name=name, model=model)
     writer = _writer_for(workspace)
     if workspace is not None:
@@ -116,7 +133,7 @@ def create_project(path: Path, name: str, model: str = "", workspace=None) -> Pr
         write_at=_make_write_at(path, workspace),
     )
     memories = MemoryStore(str(path), writer=writer, index_offset=index_off, workspace=workspace, log=log)
-    return Project(path=path, meta=meta, log=log, memories=memories)
+    return Project(path=path, meta=meta, log=log, memories=memories, lock=lock)
 
 
 def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
