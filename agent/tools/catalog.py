@@ -41,9 +41,11 @@ click away, its result its own whole block.
 
     group     calls naming the same group collect into ONE dense block: each
               call's row, with its result folded into that row, in one place —
-              so a run of reads scans as a column of one-liners. None = the call
-              is its own row and its result is its own block (a write must not be
-              swallowed by the reads around it).
+              so a run of small results scans as a column of one-liners. None =
+              the call is its own row and its result is its own block (a call
+              that lands changes must not be swallowed by the read-only ones
+              around it). The value is an opaque namespace: the renderer groups
+              by equality and never interprets it.
     chip      "name" the row leads with the tool's own name, "none" it does not —
               a row whose summary already says what the call is reads better
               without the name repeated beside it.
@@ -63,11 +65,20 @@ click away, its result its own whole block.
               summary); "" = the summary this call would wear in a group, else
               "result". The host keeps the one verdict it owns: a failed call
               reads "result ⚠" whatever the declaration asked for.
-    style     how the result is chromed: "plain", "read" (an exploration result:
-              its content as a collapsible code panel), "write" (a change: the
-              header is the accent chip over the diff).
-    body      "text" the result content, "diff" the unified diff it returned,
-              "none" nothing but the status line.
+    form      what the result IS — the one shape the renderer routes on, and a
+              composition of the parts below, never a tool's purpose:
+              "block" (the default) a header line over its body; "row" a
+              one-line collapsible row, `summary` as the label and the body
+              folding under it — landing beside its call inside the group's
+              block, or in a quiet block of its own when the call collected
+              nowhere (a replayed log page).
+    body      what the result renders as: "text" the content, "code" a code
+              panel, "diff" the unified diff it returned, "none" nothing but
+              the status line.
+    highlight decoration painted onto a code body: "path" highlights it by the
+              call's `path` argument.
+    chrome    extra chrome on the block: "accent" turns the header into the
+              accent chip.
     collapse  "always" the body starts folded, "long" folded past a size
               threshold, "never" shown whole.
     mutates   the call may change what the file tree shows. Optional: the host
@@ -123,9 +134,11 @@ DEFAULTS: dict[str, Any] = {
     "summary": "",
     "preview": "args",
     "header": "",
-    "style": "plain",
+    "form": "block",
     "body": "text",
     "collapse": "never",
+    "highlight": "",
+    "chrome": "",
 }
 UI_KEYS = tuple(DEFAULTS) + ("mutates",)
 
@@ -299,9 +312,10 @@ _WORKSPACE = Component(
             access="read",
             ui={
                 "group": "read",
-                "style": "read",
-                "body": "text",
+                "form": "row",
+                "body": "code",
                 "collapse": "always",
+                "highlight": "path",
                 "preview": "none",
                 "summary": "read {path} ({lines} lines)",
             },
@@ -322,9 +336,10 @@ _WORKSPACE = Component(
             access="sweep",
             ui={
                 "group": "read",
-                "style": "read",
-                "body": "text",
+                "form": "row",
+                "body": "code",
                 "collapse": "always",
+                "highlight": "path",
                 "preview": "none",
                 "summary": "grep {pattern} ({lines} lines)",
             },
@@ -344,7 +359,7 @@ _WORKSPACE = Component(
             snapshot=True,
             modes=("work",),
             ui={
-                "style": "write",
+                "chrome": "accent",
                 "header": "✓ wrote {path}",
                 "body": "diff",
                 "collapse": "long",
@@ -367,7 +382,7 @@ _WORKSPACE = Component(
             snapshot=True,
             modes=("work",),
             ui={
-                "style": "write",
+                "chrome": "accent",
                 "header": "✎ edited {path}",
                 "body": "diff",
                 "collapse": "long",

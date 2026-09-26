@@ -286,27 +286,35 @@ const toolCallGroups = new Map();
 //             is also what the args panel unwraps a command payload with;
 //             "content" prints argument VALUES (`keys` in order, a leading
 //             "-", "+" or "✎" printed as a mark before the value); "none" the
-//             chip alone — a read is too large to preview.
+//             chip alone — a body too large to preview.
 //
-// The RESULT: `style` picks the form.
-//   "read"    an exploration row of its own beside the call, inside the block
-//             the calls collect in: one collapsible line — `summary` filled
-//             from the call ({argname} from the arguments, {lines} the
-//             result's line count (… until the result lands), {name} the
-//             tool's own name) — with the content folding under it,
-//             highlighted by the path the call read.
-//   "write"   a change block: `header` as the accent chip, the component's
-//             verdict line, its `diff` body with the host's expand control
-//             past the fold threshold, and the host's ↶ undo when it holds a
-//             snapshot.
-//   "plain"   the default: a "result" block ("result ⚠" when the call failed —
-//             the one verdict the host owns) whose body is what `body` says:
-//             "text" the content, "diff", "none".
+// The RESULT: `form` picks the shape — the one routing the renderer does, on
+// a structural word, never on a tool's purpose; both shapes compose the same
+// parts (label template, body, fold, highlight).
+//   "row"     the result is a one-line collapsible row: `summary` filled from
+//             the call ({argname} from the arguments, {lines} the result's
+//             line count (… until the result lands), {name} the tool's own
+//             name) as the label, the body folding under it. It lands beside
+//             its call inside the block the calls collect in; a call that
+//             collected nowhere (an older log page) shows the same row in a
+//             quiet block of its own.
+//   "block"   the default: a "result" block ("result ⚠" when the call failed —
+//             the one verdict the host owns) — `header` as the label, the
+//             body under it.
+//   body      "text" the content, "code" a code panel, "diff" the unified
+//             diff (the host's expand control past the fold threshold, and
+//             the host's ↶ undo when it holds a snapshot), "none" nothing but
+//             the status line.
+//   highlight decoration on a code body: "path" highlights it by the call's
+//             `path` argument.
+//   chrome    extra block chrome: "accent" the header as the accent chip.
 //
 //   group     calls naming the same group collect into ONE dense block; a
-//             read's result row lands there beside its call. A call that
+//             row-form result lands there beside its call. A call that
 //             declares no group is its own row and its result its own block
-//             (a write must never be swallowed by the reads around it).
+//             (a landing change must never be swallowed by the read-only
+//             calls around it). The value is an opaque namespace: grouped by
+//             equality, never interpreted.
 //   collapse  "always" folded, "long" folded past RESULT_FOLD_LINES, "never"
 //             whole (a block body's rest state).
 //   mutates   the call may change the file tree (host-derived when undeclared).
@@ -317,9 +325,11 @@ const UI_DEFAULTS = {
   summary: "",
   preview: "args",
   header: "",
-  style: "plain",
+  form: "block",
   body: "text",
   collapse: "never",
+  highlight: "",
+  chrome: "",
   mutates: true,
   undo: false,
 };
@@ -530,53 +540,49 @@ function addToolCallRow(ev) {
   autoScroll();
 }
 
-// one collapsible read row (toggle + summary + hidden code panel): the
-// declaration's summary as the label, the panel highlighted by the path the
-// call read — the exploration form, drawn from the declaration, not the name
-function buildReadRow(ui, call, content) {
-  const summary = templateText(ui.summary, call.name, call.args || {}, content);
-  const path = (call.args && call.args.path) || "";
+// one collapsible result row (toggle + label + hidden body): the declaration's
+// summary as the label, whatever body it declares folding under it — the
+// "row" form, composed entirely from the declaration
+function buildResultRow(ui, call, result) {
+  const summary = templateText(ui.summary, call.name, call.args || {}, result.content);
   const row = document.createElement("div");
-  row.className = "read-row";
+  row.className = "result-row";
   const toggle = document.createElement("span");
-  toggle.className = "read-toggle";
+  toggle.className = "fold-toggle";
   toggle.textContent = "▸";
   const lbl = document.createElement("span");
   lbl.textContent = summary;
   row.appendChild(toggle);
   row.appendChild(lbl);
-  const full = document.createElement("pre");
-  full.className = "read-detail"; // the wrapper carries the hidden state
-  full.textContent = content;
-  highlightPreByPath(full, path);
-  const fold = wrapFold(full);
-  row.onclick = () => {
-    const wasHidden = toggleFold(fold);
+  const body = buildResultBody(ui, result, call.args || {});
+  const full = body ? wrapFold(body) : null;
+  if (full) row.onclick = () => {
+    const wasHidden = toggleFold(full);
     toggle.textContent = wasHidden ? "▾" : "▸";
   };
-  return { row, full: fold };
+  return { row, full };
 }
 
-// the read result lands beside its call, in the block their calls collect in
-function appendReadRow(group, ui, call, ev) {
-  const { row, full } = buildReadRow(ui, call, ev.content);
+// the row lands beside its call, in the block their calls collect in
+function appendResultRow(group, ui, call, ev) {
+  const { row, full } = buildResultRow(ui, call, ev);
   group.el.appendChild(row);
-  group.el.appendChild(full);
+  if (full) group.el.appendChild(full);
   autoScroll();
 }
 
-// a read whose call row is gone (an older log page) shows the same collapsible
+// a row whose call row is gone (an older log page) shows the same collapsible
 // row inside its own durable block
-function buildReadBlock(ui, call, ev) {
+function buildResultRowBlock(ui, call, ev) {
   const wrap = document.createElement("div");
-  wrap.className = "event tool_result" + (ev.is_error ? " error" : "") + " read";
+  wrap.className = "event tool_result" + (ev.is_error ? " error" : "") + " form-row";
   const hdr = document.createElement("div");
   hdr.className = "hdr";
   hdr.textContent = ev.is_error ? "result ⚠" : "result"; // the host's verdict
   wrap.appendChild(hdr);
-  const { row, full } = buildReadRow(ui, call, ev.content);
+  const { row, full } = buildResultRow(ui, call, ev);
   wrap.appendChild(row);
-  wrap.appendChild(full);
+  if (full) wrap.appendChild(full);
   return wrap;
 }
 
@@ -587,7 +593,7 @@ function buildReadBlock(ui, call, ev) {
 function buildResultBlock(ui, name, args, result) {
   const wrap = document.createElement("div");
   wrap.className = "event tool_result" + (result.is_error ? " error" : "")
-    + (ui.style !== "plain" ? " " + ui.style : "");
+    + (ui.chrome ? " " + ui.chrome : "");
   const tpl = ui.header || ui.summary;
   const hdr = result.is_error ? "result ⚠" // the one verdict the host owns
     : tpl ? templateText(tpl, name, args, result.content) : "result";
@@ -606,7 +612,7 @@ function buildResultBlock(ui, name, args, result) {
     } else if (foldAtRest(ui, result)) {
       const fold = wrapFold(body);
       const toggle = document.createElement("span");
-      toggle.className = "read-toggle";
+      toggle.className = "fold-toggle";
       toggle.textContent = "▸";
       toggle.onclick = () => { toggle.textContent = toggleFold(fold) ? "▾" : "▸"; };
       wrap.appendChild(toggle);
@@ -664,17 +670,17 @@ function buildResultBlock(ui, name, args, result) {
 }
 
 // the result body node per the declaration: "text" the component's own content,
-// "diff" the unified diff it returned, "none" nothing but the row itself. An
-// exploration result ("read") keeps its own code panel — highlighted by the path
-// it read — where a plain one is text in the block's body.
+// "code" a code panel, "diff" the unified diff it returned, "none" nothing but
+// the status line. A code panel takes the declared decoration ("path":
+// highlighted by the call's path argument).
 function buildResultBody(ui, result, args) {
   if (ui.body === "none") return null;
   if (ui.body === "diff") return result.diff ? renderDiff(result.diff) : null;
-  if (ui.style === "read") {
+  if (ui.body === "code") {
     const pre = document.createElement("pre");
-    pre.className = "read-detail";
+    pre.className = "result-detail";
     pre.textContent = result.content || "";
-    highlightPreByPath(pre, (args && args.path) || "");
+    if (ui.highlight === "path") highlightPreByPath(pre, (args && args.path) || "");
     return pre;
   }
   const plain = document.createElement("div");
@@ -705,7 +711,7 @@ function handleToolCallDelta(ev) {
     st.row = makeToolRowBase(ui, ev.name);
     st.row.classList.add("stream");
     if (ui.preview === "none" || (ui.preview && ui.preview.mode === "none")) {
-      // nothing to stream: the row stays just its name (a read is too large to
+      // nothing to stream: the row stays just its name (a body too large to
       // preview), its result speaks when it lands
       const dots = document.createElement("span");
       dots.className = "muted";
@@ -911,14 +917,14 @@ function applyStreamEvent(ev) {
     return true;
   }
 
-  // a read's result lands beside its call, in the block their calls collect
+  // a row-form result lands beside its call, in the block their calls collect
   // in; every other result is its own block after the calls (renderEvent)
   if (ev.type === "tool_result" && toolCalls[ev.tool_call_id]) {
     const call = toolCalls[ev.tool_call_id];
     const ui = uiOfResult(ev);
     const group = ui.group ? toolCallGroups.get(ev.tool_call_id) : null;
-    if (group && ui.style === "read") {
-      appendReadRow(group, ui, call, ev);
+    if (group && ui.form === "row") {
+      appendResultRow(group, ui, call, ev);
       group.closed = true; // this group's calls have completed
       return true;
     }
@@ -1155,7 +1161,7 @@ function buildThinkingBlock(initialLabel, initialContent) {
   const row = document.createElement("div");
   row.className = "thinking-row";
   const toggle = document.createElement("span");
-  toggle.className = "read-toggle";
+  toggle.className = "fold-toggle";
   toggle.textContent = "▸";
   const lbl = document.createElement("span");
   lbl.className = "thinking-label";
@@ -1522,7 +1528,7 @@ function renderEvent(ev) {
       // a call that may change the tree asks for a fresh one (the declaration
       // says whether it can — the host derives it when it declares nothing)
       if (ui.mutates) scheduleTreeRefresh();
-      if (ui.style === "read") return buildReadBlock(ui, call, ev);
+      if (ui.form === "row") return buildResultRowBlock(ui, call, ev);
       return buildResultBlock(ui, call.name || "", call.args || {}, ev);
     }
     case "state_update": {

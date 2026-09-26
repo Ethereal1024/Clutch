@@ -126,7 +126,7 @@ html, body {
 
 /* Chromium's UA stylesheet pins pre/code/kbd/samp/tt to generic `monospace`,
    and a UA declaration on an element BEATS an inherited one — so a
-   font-family set on the *wrapper* (e.g. .read-detail) never reaches the
+   font-family set on the *wrapper* (e.g. .result-detail) never reaches the
    <code> that highlightPreByPath inserts inside it, nor any bare text node
    under an unstyled <pre> (mermaid error tips). Generic monospace carries no
    Han glyphs, so every Chinese character fell through to Chromium's system
@@ -611,8 +611,8 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
 /* error results share the accent with success — the "⚠" in the hdr text is the
    distinction, so no separate error rule is needed */
-.event.tool_result.read::before { background: var(--muted); }
-.event.tool_result.read .hdr { color: var(--muted); font-weight: 400; }
+.event.tool_result.form-row::before { background: var(--muted); }
+.event.tool_result.form-row .hdr { color: var(--muted); font-weight: 400; }
 
 /* thinking (reasoning): compact muted row, expandable full text */
 .event.thinking::before { background: var(--muted); }
@@ -654,8 +654,8 @@ main { display: flex; flex: 1; min-height: 0; }
   animation: fadeIn .26s ease-out;
 }
 
-/* exploration reads: collapsed summary, expand on click */
-.read-detail {
+/* a row form's folded body: collapsed label, expand on click */
+.result-detail {
   background: var(--code-bg); padding: 8px 10px; border-radius: 0;
   border: 1px solid var(--border);
   overflow-x: auto; margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
@@ -673,13 +673,13 @@ main { display: flex; flex: 1; min-height: 0; }
 .fold.open { grid-template-rows: 1fr; }
 .fold-inner { overflow: hidden; min-height: 0; }
 
-.read-row {
+.result-row {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
   color: var(--muted); font-size: 13px; cursor: pointer;
   user-select: none;
 }
-.read-row:hover { color: var(--text); }
-.read-toggle {
+.result-row:hover { color: var(--text); }
+.fold-toggle {
   /* no fixed-width glyph box: a glyph centered inside a 14px inline-block
      leaves dead air before the label, and baseline math drifts the icon off
      the row's optical center; flex centering fixes both */
@@ -688,13 +688,14 @@ main { display: flex; flex: 1; min-height: 0; }
   color: var(--muted);
 }
 
-/* write results are the meaningful "output" steps: a red-filled header chip */
-.event.tool_result.write .hdr {
+/* accent chrome: the block the declaration flags as the run's meaningful
+   "output" steps — a red-filled header chip */
+.event.tool_result.accent .hdr {
   display: inline-block;
   background: var(--accent); color: #0F0F10; font-weight: 600;
   padding: 1px 8px; border-radius: 0;
 }
-.event.tool_result.write::before { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px rgba(239, 68, 68, 0.5); }
+.event.tool_result.accent::before { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px rgba(239, 68, 68, 0.5); }
 
 /* command output: a bordered code panel, capped with a scrollbar */
 .event.tool_result .body {
@@ -705,7 +706,7 @@ main { display: flex; flex: 1; min-height: 0; }
   max-height: 320px;
   overflow-y: auto;
 }
-.event.tool_result.write .body {
+.event.tool_result.accent .body {
   max-height: none;
   background: none;
   border: none;

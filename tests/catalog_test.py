@@ -86,9 +86,16 @@ def check_ui_protocol() -> None:
         "{path}" in read["summary"] and "{lines}" in read["summary"],
         "the summary names its argument and the result's size",
     )
-    # the call row keeps the tool's own name as its title; the summary labels
-    # the exploration row the result lands in
-    check(read["chip"] == catalog.DEFAULTS["chip"] and read["style"] == "read", "a read keeps its name chip and the exploration style")
+    # the call row keeps the tool's own name as its title; the row form is a
+    # composition of parts — code body, path highlight — not a purpose word
+    check(
+        read["chip"] == catalog.DEFAULTS["chip"]
+        and read["form"] == "row"
+        and read["body"] == "code"
+        and read["highlight"] == "path",
+        "a read composes the row form: name chip, code body, path highlight",
+    )
+    check("style" not in read and "style" not in catalog.DEFAULTS, "the vocabulary has no purpose-word style key")
 
     # a write is its OWN row with its own block: it must not be swallowed by the
     # reads around it, and its diff is a folding block
@@ -97,8 +104,9 @@ def check_ui_protocol() -> None:
     check(write["body"] == "diff", "a write shows its diff")
     check(write["collapse"] == "long", "a long diff folds")
     check(
-        write["style"] == "write" and "{path}" in write["header"],
-        "a write's own block is chromed as a change, titled by its declaration",
+        write["chrome"] == "accent" and write["form"] == catalog.DEFAULTS["form"]
+        and "{path}" in write["header"],
+        "a write's own block wears accent chrome, titled by its declaration",
     )
     check(
         isinstance(write["preview"], dict) and write["preview"]["mode"] == "content",
