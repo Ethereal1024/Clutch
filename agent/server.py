@@ -830,6 +830,14 @@ def build(
     app = HttpAgentServer(config, broadcaster, state)
     srv = ClutchServer((config.host, config.port), Handler)
     srv.app = app
+    # Publish the port the socket ACTUALLY got. With --port 0 — how the
+    # supervisor spawns every session child — the OS picks it, and the host facts
+    # a component's statement renders from (host.port_url, i.e.
+    # clutch-memory's --endpoint) have to name the port that is listening. Left
+    # at 0, a component is pointed at http://127.0.0.1:0 and its first read dies
+    # with "Connection refused": the tool is in the model's surface but can never
+    # reach this process.
+    config.port = srv.server_address[1]
     return srv
 
 
@@ -887,7 +895,7 @@ def main() -> int:
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.
-    bound_port = srv.server_address[1]
+    bound_port = config.port  # build() published what the socket got, not the 0
     # resolved LLM endpoint, for diagnosing which endpoint a session targets;
     # the label keeps the line from ever matching the port banner regex
     print(

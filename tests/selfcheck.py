@@ -345,6 +345,25 @@ def check_project_file(config: Config) -> None:
         statement = rendezvous.prepare(modules.MEMORY, ws, config)
         mvars = statement.vars
         check(mvars.get("base") == f"http://127.0.0.1:{config.port}", "the memory CLI is pointed at this process")
+        # ...and that has to be the port the socket really got. A session child is
+        # spawned with --port 0 (agent/supervisor.py), so a config left at 0 would
+        # point the module at http://127.0.0.1:0 — the tool would be in the model's
+        # surface and refuse every call with "Connection refused".
+        from agent.base import RunState
+        from agent.server import Broadcaster, build
+
+        zero = Config()
+        zero.port = 0
+        probe = build(zero, Broadcaster(), RunState())
+        try:
+            bound = probe.server_address[1]
+            check(bound > 0 and zero.port == bound, "a --port 0 bind publishes the port the OS chose")
+            check(
+                rendezvous.prepare(modules.MEMORY, ws, zero).vars["base"] == f"http://127.0.0.1:{bound}",
+                "the memory endpoint names the BOUND port, never 0",
+            )
+        finally:
+            probe.server_close()
         for name, sample, carried in (
             ("save_memory", {"title": "new fact", "content": "keep it"}, "keep it"),
             ("load_memory", {"name": "stack is flask"}, "stack is flask"),
