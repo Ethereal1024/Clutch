@@ -22,7 +22,7 @@ function summary(name, okMsg) {
 
 // ---- slicing real code out of a source file ----
 //
-// Some runners (stream-render / perm-args / tool-ui-protocol) deliberately do NOT
+// Some runners (stream-render / perm-args) deliberately do NOT
 // re-implement what they test: they pull the REAL functions out of ui/app.js and
 // drive them against stubs, so a silent edit to app.js cannot regress them
 // unnoticed. Locating a function's body inside a text is the one piece of that

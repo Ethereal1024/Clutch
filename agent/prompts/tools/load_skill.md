@@ -1,1 +1,0 @@
-Load a skill's instructions into context. Available skills are listed in the system prompt; call this ONLY when the task falls in a skill's domain, otherwise ignore them. The loaded instructions then guide how you work.

@@ -14,18 +14,26 @@ a tool this catalog does not describe does not exist for the model, and a
 component that is absent takes its tools with it and nothing else (see
 registry.build_tools). A host with nothing installed can chat and nothing more.
 
-Two sources, one shape
-----------------------
-  * the SHIPPED catalog below — the components this distribution knows about;
-  * a REGISTRATION — the `component.json` of an installed artifact
-    (tools/components.py lands it), or a JSON file in the user's catalog
-    directory. A registration with a name the shipped catalog does not carry
-    enters the table with its own tools: that is how a third-party component
-    makes itself available, and it is the whole of R4.
+Zero built-ins, three sources
+-----------------------------
+The host ships NO component declaration — not even for the components its own
+repo develops. A component is declared by the component, in a `component.json`
+manifest that travels WITH it (the same shape at every stop, like an editor
+extension's package manifest), and this module only DISCOVERS and MERGES:
+
+  * a dev CHECKOUT beside the host repo — any sibling directory carrying a
+    component.json (the whole of the development path: edit the manifest, the
+    host picks it up, nothing to install);
+  * an INSTALLED artifact — the manifest tools/components.py laid down in this
+    host's install root, which is the package's own manifest plus the install
+    facts (version, digest);
+  * a REGISTRATION in the user's catalog directory — the out-of-tree escape
+    hatch, one JSON file per component, and the last word.
 
 The declaration is data. Nothing here executes a tool; `registry` turns a
 declaration into the Tool the model sees, `rendezvous` turns its coordinates
 into a running process, and `ui/app.js` turns its `ui` block into pixels.
+The full manifest spec is COMPONENTS.md at the repo root.
 
 The UI protocol (declared per tool, consumed by ui/app.js)
 ----------------------------------------------------------
@@ -174,11 +182,10 @@ class Launch:
 class Tool:
     """One tool a component publishes — its whole host-visible surface.
 
-    `description` is either literal text (a third-party manifest) or `(prompt
-    name, variables)` (the shipped catalog's markdown, rendered with the host's
-    config). `parameters` is JSON Schema; a string value in it may be the
-    placeholder `$config.<field>` or the list placeholder `$skills`, resolved by
-    the registry from what only the host knows.
+    `description` is the model-facing text. `parameters` is JSON Schema; a
+    string value anywhere in the declaration may carry the host-fact
+    placeholders `$config.<field>`, `$skills` and `$backends`, resolved by the
+    registry from what only the host knows.
 
     `command` is the statement template `inst.render` fills — the part of the
     line that is the COMPONENT's own business, never how its process starts
@@ -203,7 +210,7 @@ class Tool:
     """
 
     name: str
-    description: str | tuple[str, Mapping[str, Any]]
+    description: str
     parameters: Mapping[str, Any]
     command: str | None = None
     defaults: Mapping[str, Any] = field(default_factory=dict)
@@ -246,33 +253,14 @@ class Component:
     directory: str = ""  # explicit code directory (a registration, not a checkout)
 
 
-# ------------------------------------------------ the shipped catalog ---------
+# --------------------------------------------- host facts a schema may ask for -
 
 
-def _daemon(path: str) -> str:
-    """One statement against a standalone module daemon's HTTP surface.
-
-    Every part of this line is the host's half of a frozen contract (R4): the
-    path, the JSON body, the token header, the status trailer. The host imports
-    nothing from the module — it only knows how to speak to it. --noproxy keeps
-    a configured proxy away from 127.0.0.1; -w prints the HTTP status, which
-    unwrap() reads as the TRANSPORT's verdict (the command's own verdict rides
-    the 200 body, so a 200 that says "file not found" stays a command verdict).
-    """
-    return (
-        "curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' "
-        f"-H {{auth}} --data-binary {{*}} -w {{status}} http://127.0.0.1:{{port}}{path}"
-    )
-
-
-def _str(desc: str) -> dict[str, Any]:
-    return {"type": "string", "description": desc}
-
-
-# Web search backends the shipped websearch component speaks, in chain order,
-# with the config field that enables each ("" = always available). Declaration
-# only: the host does not search, it renders the component's options into the
-# model-facing description.
+# The backends this host's own config can switch on for network search, in chain
+# order, with the config field that enables each ("" = always available). This
+# is a HOST fact — which knobs this machine's config has — not a declaration:
+# any component may spend `$backends` in its schema text and the host renders
+# what it knows, exactly as it does `$config.<field>` and `$skills`.
 _BACKENDS = (("tavily", "tavily_api_key"), ("searxng", "searxng_url"), ("bing", ""), ("ddg", ""))
 
 
@@ -280,254 +268,6 @@ def available_backends(config) -> tuple[str, ...]:
     """The backends this machine has configured, in chain order (prompt text).
     An unconfigured service does not exist here — no name, no install advice."""
     return tuple(name for name, field in _BACKENDS if not field or getattr(config, field, ""))
-
-
-_WORKSPACE = Component(
-    name=modules.WORKSPACE,
-    subject=WORKSPACE_FS,
-    launch=Launch(argv=("{py}", "-m", "clutch_workspace.daemon"), importable=True),
-    discovery_env="CLUTCH_WORKSPACE_DISCOVERY_DIR",
-    app_dir="clutch-workspace",
-    prefix="d-",
-    requires=("python", "posix-shell", "curl"),
-    ui={"label": "workspace files", "status": True},
-    tools=(
-        Tool(
-            name="read_file",
-            description=("tools/read_file.md", {"read_max_chars": "$config.read_max_chars"}),
-            parameters={
-                "properties": {
-                    "path": _str("file path OR directory path, relative to the workspace root"),
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "max chars to read (default $config.read_max_chars)",
-                    },
-                    "offset": {"type": "integer", "description": "1-based start line for a line-range read"},
-                    "limit": {"type": "integer", "description": "max lines to read when offset is given"},
-                },
-                "required": ["path"],
-            },
-            command=_daemon("/read_file"),
-            defaults={"max_chars": "$config.read_max_chars"},
-            access="read",
-            ui={
-                "group": "read",
-                "form": "row",
-                "body": "code",
-                "collapse": "always",
-                "highlight": "path",
-                "preview": "none",
-                "summary": "read {path} ({lines} lines)",
-            },
-        ),
-        Tool(
-            name="grep",
-            description=("tools/grep.md", {}),
-            parameters={
-                "properties": {
-                    "pattern": _str("regex to search for"),
-                    "path": _str("subdirectory or file to search (default: whole workspace)"),
-                    "include": _str("filename glob filter (e.g. '*.py')"),
-                },
-                "required": ["pattern"],
-            },
-            command=_daemon("/grep"),
-            defaults={"path": ".", "include": ""},
-            access="sweep",
-            ui={
-                "group": "read",
-                "form": "row",
-                "body": "code",
-                "collapse": "always",
-                "highlight": "path",
-                "preview": "none",
-                "summary": "grep {pattern} ({lines} lines)",
-            },
-        ),
-        Tool(
-            name="write_file",
-            description=("tools/write_file.md", {}),
-            parameters={
-                "properties": {
-                    "path": _str("file path, relative to the workspace root"),
-                    "content": _str("full file content"),
-                },
-                "required": ["path", "content"],
-            },
-            command=_daemon("/write_file"),
-            access="write",
-            snapshot=True,
-            modes=("work",),
-            ui={
-                "chrome": "accent",
-                "header": "✓ wrote {path}",
-                "body": "diff",
-                "collapse": "long",
-                "preview": {"mode": "content", "keys": ["✎path", "content"]},
-            },
-        ),
-        Tool(
-            name="edit_file",
-            description=("tools/edit_file.md", {}),
-            parameters={
-                "properties": {
-                    "path": _str("file path, relative to the workspace root"),
-                    "old_string": _str("exact text to replace (must appear exactly once)"),
-                    "new_string": _str("replacement text"),
-                },
-                "required": ["path", "old_string", "new_string"],
-            },
-            command=_daemon("/edit_file"),
-            access="write",
-            snapshot=True,
-            modes=("work",),
-            ui={
-                "chrome": "accent",
-                "header": "✎ edited {path}",
-                "body": "diff",
-                "collapse": "long",
-                "preview": {"mode": "content", "keys": ["✎path", "-old_string", "+new_string"]},
-            },
-        ),
-    ),
-)
-
-_MEMORY = Component(
-    name=modules.MEMORY,
-    interface=CLI,
-    subject=PROJECT_FILE,
-    launch=Launch(argv=("{py}", "{script}"), entry="memory.py"),
-    requires=("python",),
-    vars={"base": "host.port_url"},
-    ui={"label": "project memory", "status": True},
-    tools=(
-        Tool(
-            name="save_memory",
-            description=(
-                "Save a durable fact from this conversation to project memory — a key "
-                "decision, a user preference, or an important detail worth remembering "
-                "across sessions. title must be a very short one-line summary (<=80 chars); "
-                "content is the full detail. Saving the same title again overwrites it."
-            ),
-            parameters={
-                "properties": {
-                    "title": _str("very short one-line summary of the memory"),
-                    "content": _str("full detail to remember"),
-                },
-                "required": ["title", "content"],
-            },
-            command="--endpoint {base} --envelope save --title {title} --content {content}",
-            gate="project",
-        ),
-        Tool(
-            name="load_memory",
-            description="Read one stored memory's full content by its exact title.",
-            parameters={
-                "properties": {"name": _str("the memory title to load")},
-                "required": ["name"],
-            },
-            command="--endpoint {base} --envelope load --title {name}",
-            gate="project",
-            access="read",
-        ),
-        Tool(
-            name="search_memory",
-            description=(
-                "Search stored project memories by title or content; returns matching "
-                "titles with snippets. Call with a topic to recall relevant long-term "
-                "facts; an empty query lists the most recent memories."
-            ),
-            parameters={
-                "properties": {"query": _str("topic to search for; empty lists recent")},
-                "required": [],
-            },
-            command="--endpoint {base} --envelope search [--query {query}]",
-            gate="project",
-        ),
-    ),
-)
-
-_WEBSEARCH = Component(
-    name=modules.WEBSEARCH,
-    interface=CLI,
-    subject=NETWORK,
-    launch=Launch(argv=("{py}", "{script}"), entry="websearch.py"),
-    requires=("python",),
-    ui={"label": "web access", "status": True},
-    tools=(
-        Tool(
-            name="web_search",
-            description=(
-                "tools/web_search.md",
-                {"max_results": "$config.web_search_max_results", "backends": "$backends"},
-            ),
-            parameters={
-                "properties": {
-                    "query": _str("search string (engine syntax like site: and quoted phrases works)"),
-                    "max_results": {
-                        "type": "integer",
-                        "description": "cap on returned entries (default $config.web_search_max_results)",
-                    },
-                    "backend": _str("pin one backend: $backends (default: fall through the chain)"),
-                },
-                "required": ["query"],
-            },
-            command="search --envelope [--max-results {max_results}] [--backend {backend}] {query}",
-            defaults={"max_results": "$config.web_search_max_results"},
-        ),
-        Tool(
-            name="web_fetch",
-            description=("tools/web_fetch.md", {"max": "$config.read_max_chars"}),
-            parameters={
-                "properties": {
-                    "url": _str("http(s) URL to fetch"),
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "max chars of extracted text to return (default $config.read_max_chars)",
-                    },
-                    "start": {"type": "integer", "description": "0-based char offset to continue a truncated fetch"},
-                },
-                "required": ["url"],
-            },
-            command="fetch --envelope [--max-chars {max_chars}] [--start {start}] {url}",
-            defaults={"max_chars": "$config.read_max_chars"},
-        ),
-    ),
-)
-
-_SKILLS = Component(
-    name=modules.SKILLS,
-    interface=CLI,
-    subject=SKILL_LIB,
-    launch=Launch(argv=("{py}", "-m", "clutch_skills"), importable=True),
-    requires=("python",),
-    vars={"root": "config.skills_dir"},
-    ui={"label": "skill library", "status": True},
-    tools=(
-        Tool(
-            name="load_skill",
-            description=("tools/load_skill.md", {}),
-            parameters={
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "enum": "$skills",
-                        "description": "skill to load, one of: $skills",
-                    },
-                    "file": _str(
-                        "optional file inside the skill directory to read instead of SKILL.md "
-                        "(e.g. resources/template.html)"
-                    ),
-                },
-                "required": ["name"],
-            },
-            command="--envelope [--root {root}] show {name} [--file {file}]",
-            gate="skills",
-        ),
-    ),
-)
-
-SHIPPED: tuple[Component, ...] = (_WORKSPACE, _MEMORY, _WEBSEARCH, _SKILLS)
 
 
 # --------------------------------------------------------- registration -------
@@ -538,7 +278,7 @@ def catalog_dir() -> Path:
 
     A component whose code lives somewhere out-of-tree (a checkout under work, a
     locally built onefile) is registered by dropping its declaration in here —
-    one JSON file per component, the same shape the shipped catalog holds. The
+    one JSON file per component, the same manifest shape a package carries. The
     whole directory is machine-local bookkeeping, like the install root, and
     CLUTCH_COMPONENTS_CATALOG repoints it (tests, unusual layouts).
     """
@@ -551,10 +291,10 @@ def catalog_dir() -> Path:
 def _component_of(data: Mapping[str, Any]) -> Component | None:
     """One declaration dict -> a Component, or None when it is not one.
 
-    This is the protocol an installed manifest and a user catalog file both
-    speak. A declaration the host cannot drive (no name, an interface it does
-    not know) is refused HERE rather than half-registered and mysteriously
-    broken later.
+    This is the protocol all three registration sources speak — a checkout's
+    manifest, an installed manifest, a catalog file. A declaration the host
+    cannot drive (no name, an interface it does not know) is refused HERE rather
+    than half-registered and mysteriously broken later.
     """
     name = str(data.get("name", ""))
     interface = str(data.get("interface", DAEMON))
@@ -590,17 +330,18 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
 
 
 def _tool_of(raw: Any) -> Tool | None:
-    """One tool declaration -> a Tool, or None when it names no usable tool."""
+    """One tool declaration -> a Tool, or None when it names no usable tool.
+
+    A description that is not text is a malformed tool, and the tool is refused:
+    the spec (COMPONENTS.md) says a description is the model-facing string, and
+    a declaration the host cannot read as written is better absent than
+    garbled."""
     if not isinstance(raw, dict):
         return None
     name = str(raw.get("name", ""))
-    if not name:
-        return None
     description = raw.get("description", "")
-    if isinstance(description, dict):  # {"prompt": ..., "vars": {...}} (shipped)
-        description = (str(description.get("prompt", "")), description.get("vars", {}) or {})
-    if not isinstance(description, (str, tuple)):
-        description = str(description)
+    if not name or not isinstance(description, str):
+        return None
     return Tool(
         name=name,
         description=description,
@@ -623,16 +364,41 @@ def _read_json(path: Path) -> Mapping[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def registrations() -> list[Mapping[str, Any]]:
-    """Every declaration on this host that is not the shipped catalog.
+def checkout_registrations() -> list[Mapping[str, Any]]:
+    """The declarations of the dev checkouts beside the host repo.
 
-    Two sources, both machine-local: the manifest of each component installed
-    for THIS host (tools/components.py's landing dir) and the user's catalog
-    directory. Order is stable (install root first, then the catalog files by
-    name) so a later entry wins deterministically when two name the same
-    component.
+    Any sibling directory of the repo that carries a component.json IS a
+    component, in exactly the shape an installed one declares — this is the
+    whole development path (edit the manifest, restart, nothing to install) and
+    it is how the components this repo develops are registered without the host
+    naming a single one of them. Sorted by directory name, so the merge stays
+    deterministic; a malformed manifest is simply not a component.
     """
     found: list[Mapping[str, Any]] = []
+    base = modules.repo_root()
+    if not base.is_dir():
+        return found
+    for path in sorted(base.iterdir()):
+        if not path.is_dir():
+            continue
+        data = _read_json(path / components.MANIFEST)
+        if data is not None:
+            found.append(data)
+    return found
+
+
+def registrations() -> list[Mapping[str, Any]]:
+    """Every declaration this host knows, in merge order (lowest precedence
+    first).
+
+    Three sources, all machine-local: a dev checkout beside the repo, the
+    manifest of each component installed for THIS host (tools/components.py's
+    landing dir), and the user's catalog directory. Order is stable (checkouts
+    by name, then the install root, then the catalog files by name) so a later
+    entry wins deterministically when two declare the same component — an
+    installed artifact over its checkout, a catalog file over both.
+    """
+    found: list[Mapping[str, Any]] = [*checkout_registrations()]
     for record in components.inventory():
         directory = modules.component_dir(record["name"])
         manifest = components.read_manifest(directory)
@@ -648,15 +414,17 @@ def registrations() -> list[Mapping[str, Any]]:
 
 
 def table() -> dict[str, Component]:
-    """The components this host may drive: the shipped catalog, overlaid by
-    every registration.
+    """The components this host may drive: every registration, merged by name.
 
-    A registration for a name the catalog already carries contributes what it
-    declares and keeps the rest: an installed `clutch-memory` whose manifest
-    only records how it starts does not lose the tools the catalog describes,
-    while a third-party component brings tools of its own.
+    There is no base catalog — a host with no registrations drives nothing. Each
+    later registration (see registrations() for the order) refines the one it
+    agrees with by name: a field it leaves out means "as declared before", a
+    field it declares wins. That is what makes a thin install manifest (how the
+    artifact starts, at which digest) ride on the declaration its checkout or
+    package carries, and a third-party component simply has no earlier
+    declaration and enters whole.
     """
-    out: dict[str, Component] = {c.name: c for c in SHIPPED}
+    out: dict[str, Component] = {}
     for data in registrations():
         declared = _component_of(data)
         if declared is None:
@@ -665,14 +433,14 @@ def table() -> dict[str, Component]:
         if known is None:
             out[declared.name] = declared
             continue
-        # a registration refines a known component: an empty field means "as
-        # shipped", a declared one wins (an artifact's own launch shape, a
-        # third-party tool added to a component)
+        # a registration refines a known component: only a field the registration
+        # actually names overrides the earlier declaration (an artifact's own
+        # launch shape, a tool set of its own); everything else carries
         out[declared.name] = Component(
             name=known.name,
             interface=declared.interface if data.get("interface") else known.interface,
-            runs_on=declared.runs_on,
-            subject=declared.subject,
+            runs_on=declared.runs_on if data.get("runs_on") else known.runs_on,
+            subject=declared.subject if data.get("subject") else known.subject,
             launch=declared.launch if declared.launch.argv or declared.launch.binary else known.launch,
             discovery_env=declared.discovery_env or known.discovery_env,
             app_dir=declared.app_dir or known.app_dir,

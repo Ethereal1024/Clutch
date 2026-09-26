@@ -27,6 +27,7 @@ table BEFORE the artifact is used.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -43,13 +44,29 @@ ROOT_ENV = "CLUTCH_COMPONENTS_DIR"  # repoints the whole root (tests, unusual la
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
 
 # The wire contract between a client and the host it installs FOR: the manifest
-# rides in a header (JSON, ASCII), the artifact is the request body. The host's
+# rides in a header — base64 of the JSON's UTF-8 bytes, because a header value
+# is a ByteString (every code point <= 0xFF) and a declaration speaks the
+# component's own language — and the artifact is the request body. The host's
 # side of it is this module; the client's is ui/components.js.
 MANIFEST_HEADER = "X-Clutch-Component"
 DIGEST_FIELD = "digest"  # the manifest's record of the artifact's content hash
 ARTIFACT_FIELD = "artifact"  # the artifact's own file name (its shape, by suffix)
 SCRATCH = ".incoming"  # where a body lands while it is being received
 CHUNK = 1 << 20  # bytes read from a body per pass
+
+
+def manifest_from_header(raw: str | None) -> dict[str, Any]:
+    """The manifest one install request carried in its header (the wire contract
+    above), or ValueError when the value does not decode to a JSON object."""
+    if not raw:
+        raise ValueError(f"{MANIFEST_HEADER} is missing")
+    try:
+        payload = json.loads(base64.b64decode(raw, validate=True).decode("utf-8"))
+    except ValueError as err:  # bad base64 (binascii.Error) and bad JSON alike
+        raise ValueError(f"{MANIFEST_HEADER} must be base64 of a JSON object") from err
+    if not isinstance(payload, dict):
+        raise ValueError(f"{MANIFEST_HEADER} must be a JSON object")
+    return payload
 
 # A component's identity and its version string both end up in a path, so both
 # are restricted to the shapes an install may name. The version may carry a
@@ -304,9 +321,11 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
 
     `artifact` is a single file: an archive (unpacked in place) or an executable
     (installed as <name> and marked +x) — the two shapes a client can deliver
-    without needing anything else on the host. `manifest` becomes the installed
-    `component.json`; `version` overrides its version field (a caller that gates
-    on a content hash puts the hash here).
+    without needing anything else on the host. The installed `component.json` is
+    the request's `manifest` merged over the artifact's own (see
+    _merge_declaration: an archive that carries its declaration lands whole, a
+    thin header is enough for it); `version` overrides the record's version
+    field (a caller that gates on a content hash puts the hash here).
 
     The install happens in a sibling `.installing` directory that is renamed into
     place at the end, so a version directory is either complete or absent — a
@@ -337,12 +356,16 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
     try:
         if artifact.name.endswith(ARCHIVE_SUFFIXES):
             _unpack(artifact, staging)
+            record = _merge_declaration(staging, record)
         else:
             # a single-file artifact (a PyInstaller onefile, a script): the
             # component's own name is the executable the manifest may name
             exe = staging / name
             shutil.copyfile(artifact, exe)
             exe.chmod(exe.stat().st_mode | 0o755)
+        # the installed record is what the host later resolves the component BY
+        # (catalog.registrations reads it back), so it is the declaration of
+        # record: the wire manifest plus whatever the artifact itself declared
         (staging / MANIFEST).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         shutil.rmtree(target, ignore_errors=True)
         staging.rename(target)
@@ -351,6 +374,32 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return target
+
+
+def _merge_declaration(staging: Path, wire: dict[str, Any]) -> dict[str, Any]:
+    """The installed record: the artifact's own declaration, refined by the
+    request's facts.
+
+    A component's declaration travels WITH it (COMPONENTS.md): an archive that
+    carries its own component.json declares its tools, its launch shape and its
+    UI block, and the header the client sent needs to carry only the install
+    facts — so a thin header over a declaring artifact still lands a component
+    the host can drive. The header wins on every field it names (it is what the
+    digest was measured for); a package manifest naming a DIFFERENT component is
+    a refusal rather than a merge, because the bytes are then not the component
+    the request said they were. A missing or malformed package manifest is
+    simply no declaration, and the wire manifest stands alone.
+    """
+    try:
+        declared = json.loads((staging / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        declared = None
+    if not isinstance(declared, dict):
+        return wire
+    inner = str(declared.get("name", ""))
+    if inner and inner != str(wire.get("name", "")):
+        raise ValueError(f"the artifact declares itself as {inner!r}, not {wire.get('name')!r}")
+    return {**declared, **wire}
 
 
 def _prune(name: str, keep: Path) -> None:

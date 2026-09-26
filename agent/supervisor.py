@@ -17,7 +17,8 @@ installs ONTO, whether it is this desktop or a device behind a tunnel):
 
     GET  /api/components         -> {components: [{name, version, interface, digest}]}
     POST /api/components/install -> take one artifact; the manifest rides in the
-                                    X-Clutch-Component header, the artifact is the
+                                    X-Clutch-Component header (base64 of its
+                                    JSON), the artifact is the
                                     body -> {status: "installed"|"current", ...}
 
 Lifecycle (per product decision):
@@ -221,19 +222,19 @@ class _Handler(BaseHTTPRequestHandler):
         """Take one component artifact onto THIS machine.
 
         The install layer's HTTP face (agent/tools/components.py owns the logic):
-        the manifest rides in a header as JSON, the artifact IS the body, and the
+        the manifest rides in a header as base64 of its JSON, the artifact IS
+        the body, and the
         answer is a verdict — the client never gets to assume its upload landed.
         A component belongs to the machine its server runs on, so the supervisor
         is where a client installs it: this process IS that machine's resident
         server, and it knows its own install root.
         """
         try:
-            manifest = json.loads(self.headers.get(components.MANIFEST_HEADER) or "")
-        except ValueError:
-            self._json({"error": f"{components.MANIFEST_HEADER} must be a JSON object"}, 400)
-            return
-        if not isinstance(manifest, dict):
-            self._json({"error": f"{components.MANIFEST_HEADER} must be a JSON object"}, 400)
+            manifest = components.manifest_from_header(
+                self.headers.get(components.MANIFEST_HEADER)
+            )
+        except ValueError as err:
+            self._json({"error": str(err)}, 400)
             return
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:

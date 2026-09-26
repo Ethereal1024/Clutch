@@ -78,7 +78,8 @@ class Config:
     output_tail: int = 2500
     read_max_chars: int = 20000
 
-    # Web access (the clutch-websearch component, declared in tools/catalog.py):
+    # Web access (the clutch-websearch component; its declaration reads these
+    # knobs back through $config placeholders — the host only holds the values):
     # keyless out of the box (Bing RSS -> DDG HTML); better backends activate
     # automatically once their env is present
     web_search_timeout: float = 15.0
@@ -116,9 +117,10 @@ class Config:
     port: int = 8890
     host: str = "127.0.0.1"  # bind address; 0.0.0.0 exposes the API to other devices
     # Skills: catalog in the system prompt; loaded on demand via load_skill.
-    # The library belongs to the clutch-skills module, which ships its own
-    # (bundled) root next to the package; the host only reads that directory and
-    # servers it through the module's daemon (see agent/tools/rendezvous.py).
+    # This is where THIS host looks the library up — a position, not a claim of
+    # ownership: the clutch-skills component's own manifest decides how its
+    # tools run, and its statements read this field back through the
+    # $config.skills_dir placeholder.
     enable_skills: bool = True
     skills_dir: Path = field(default_factory=lambda: modules.component_dir(modules.SKILLS) / "skills")
     # Permission: confirm risky actions with the user, not a sandbox

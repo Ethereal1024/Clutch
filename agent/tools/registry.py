@@ -1,12 +1,13 @@
-"""Declarative tool registry: the catalog's declarations, wired for the model.
+"""Declarative tool registry: the components' declarations, wired for the model.
 
-One source of truth: a component's declaration in tools/catalog.py. From it this
-module builds the OpenAI function-calling schema the model sees AND the
+One source of truth: each component's own manifest (a component.json that
+travels with it — see COMPONENTS.md), discovered by tools/catalog.py. From it
+this module builds the OpenAI function-calling schema the model sees AND the
 statement that satisfies a call — there is no second, host-side implementation
-of any tool. A tool the catalog does not describe does not exist for the model,
-and a component this host does not have contributes no tools at all: with
-nothing installed the host's surface is run_command and nothing else, and every
-tool call it cannot serve is answered with the component's own name and reason.
+of any tool. A tool no manifest describes does not exist for the model, and a
+component this host does not have contributes no tools at all: with nothing
+installed the host's surface is run_command and nothing else, and every tool
+call it cannot serve is answered with the component's own name and reason.
 
 What the host owns, and only the host owns:
 
@@ -184,14 +185,15 @@ def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
 
 
 def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> Tool:
-    """One declaration -> the tool the model sees and the host runs."""
-    description = spec.description
-    if isinstance(description, tuple):
-        name, variables = description
-        description = render(name, **_resolve(dict(variables), config))
+    """One declaration -> the tool the model sees and the host runs.
+
+    The description and the schema alike are run through `_resolve`, so a
+    manifest's `$config.<field>` / `$skills` / `$backends` tokens become the
+    host facts they name — the component says WHAT it wants to know about this
+    host, the host answers with its own values."""
     return Tool(
         name=spec.name,
-        description=description,
+        description=_resolve(spec.description, config),
         parameters=copy.deepcopy(_resolve(dict(spec.parameters), config)),
         inst=spec.command,
         module=component.name,
@@ -338,8 +340,8 @@ class ToolRegistry:
 
         What a call may touch is decided by this string and the guarded argument
         it names (permission.GUARDED_ARG) — the evaluator never sees a tool name,
-        so a component installed later is subject to the same policy as one the
-        host shipped.
+        so a component installed later is subject to the same policy vocabulary
+        as the components this repo develops.
         """
         tool = self._tools.get(name)
         return tool.access if tool is not None else ""

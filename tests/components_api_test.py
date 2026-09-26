@@ -15,6 +15,7 @@ the components installed for the user running it.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -35,15 +36,17 @@ SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
 
 
 def _post_artifact(base: str, name: str, data: bytes, *, digest: str, artifact: str = "", **extra) -> tuple[int, str]:
-    """One install request, exactly as a client sends it: manifest in the header,
+    """One install request, exactly as a client sends it: manifest in the header
+    (base64 of the JSON's UTF-8 bytes — components.manifest_from_header's contract),
     artifact as the body."""
     manifest = {"name": name, "version": digest[:16], "interface": "cli", "digest": digest, **extra}
     if artifact:
         manifest["artifact"] = artifact
+    header = base64.b64encode(json.dumps(manifest).encode("utf-8")).decode("ascii")
     req = urllib.request.Request(
         f"{base}/api/components/install",
         data=data,
-        headers={components.MANIFEST_HEADER: json.dumps(manifest), "Content-Type": "application/octet-stream"},
+        headers={components.MANIFEST_HEADER: header, "Content-Type": "application/octet-stream"},
         method="POST",
     )
     try:
@@ -184,6 +187,31 @@ def main() -> int:
             resolved.argv == (modules.python_exe(), str(resolved.directory / "memory.py")),
             "and the launch template reads the entry point out of the install",
         )
+        # the checkout archives its own component.json, so the landed record is
+        # the artifact's declaration with the request's install facts on top —
+        # a host that never saw the checkout still receives a whole component
+        declared = components.read_manifest(Path(result["path"]))
+        check(
+            declared is not None and "save_memory" in {t.get("name") for t in declared.get("tools", [])},
+            "a declaring archive lands whole: the artifact's own manifest is the record",
+        )
+        check(
+            declared.get("version") == digest_ws[:16] and declared.get("digest") == digest_ws,
+            "the request's install facts sit on top of the artifact's declaration",
+        )
+        foreign = Path(root) / "foreign-src"
+        foreign.mkdir()
+        (foreign / components.MANIFEST).write_text(
+            json.dumps({"name": "clutch-a", "version": "1.0.0", "interface": "cli"}), encoding="utf-8"
+        )
+        foreign_tar = Path(root) / "foreign.tar.gz"
+        with tarfile.open(foreign_tar, "w:gz") as tf:
+            tf.add(foreign / components.MANIFEST, arcname=components.MANIFEST)
+        try:
+            components.install(foreign_tar, {"name": "clutch-b", "version": "1.0.0", "interface": "cli"})
+            check(False, "an artifact declaring a DIFFERENT component is refused")
+        except ValueError as err:
+            check("declares itself" in str(err), "an artifact declaring a different component is refused")
 
         # 7. the HTTP face: the same two answers a client acts on. A real
         #    supervisor, so the wiring is exercised and not just the functions.

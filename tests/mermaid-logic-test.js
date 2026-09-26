@@ -1,6 +1,6 @@
 // Logic test for renderMermaid: streaming/parse gates, cache restore, dedupe.
 //
-// Like its siblings (stream-render / perm-args / tool-ui-protocol) this runner
+// Like its siblings (stream-render / perm-args) this runner
 // does NOT re-implement what it tests: it extracts the real isLastElement /
 // initMermaidTheme / renderMermaid / showMermaidError out of ui/app.js and
 // drives them against stubs. It used to carry a hand-copied mirror of that code,

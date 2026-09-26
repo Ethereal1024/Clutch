@@ -1,31 +1,46 @@
-"""The component declaration: the UI protocol, and a user's own components.
+"""The declaration table: discovery, merge, the UI protocol, the host's facts.
 
 Run: .venv/bin/python -m tests.catalog_test
 
-Three facts this suite pins, all of them the point of the declaration table:
+The host ships NO component (COMPONENTS.md): what it can drive is whatever its
+three registration sources hold — a dev checkout beside the repo, an installed
+artifact, a file in the user's catalog directory — merged by name, a later
+source overriding only the fields it names. This suite pins that pipeline with
+declarations it writes itself, plus the components this repo develops where the
+fact is about what ships:
 
-  * with nothing installed the host offers NO tool but its own command — there
-    is no host-side implementation of a component's tool, so an absent component
-    takes its tools with it (the "chat only" surface);
-  * how a tool looks in the UI is the COMPONENT's declaration, read through one
+  * a bare host (no checkout, nothing installed, empty catalog) offers
+    run_command and NOTHING else — there is no host-side implementation of any
+    component's tool, so an absent component takes its tools with it;
+  * a checkout is discovered by its manifest, and a manifest that names no
+    component is not one;
+  * merge precedence: an installed manifest refines the checkout's declaration
+    field by field, and a catalog registration is the last word;
+  * how a tool looks in the UI is the component's declaration, read through one
     place (catalog.ui_of) and completed with the two facts only the host knows
-    (registry.ui: `mutates`, `undo`) — so a write declares its own folding diff
-    block while a run of reads shares one dense group, and the renderer holds no
-    tool name;
-  * a THIRD-PARTY component registers itself: a declaration dropped in the user's
-    catalog directory, or an artifact the install layer lands, enters the table
-    with its own tools and is executable end to end.
+    (registry.ui: `mutates`, `undo`) — a write declares its own folding diff
+    block while a run of reads shares one dense group, and the renderer holds
+    no tool name;
+  * the host's facts ride the schema: `$config.<field>` / `$skills` /
+    `$backends` in a declaration are resolved to THIS host's values when the
+    tool is wired, and no placeholder leaks through;
+  * access is a vocabulary the HOST defines: every declared access is one the
+    permission engine knows.
 
-Isolation: CLUTCH_COMPONENTS_DIR / CLUTCH_COMPONENTS_CATALOG point at a temp
-root, so the run never touches the components installed for the user running it.
+Isolation: isolated_host() repoints the install root (CLUTCH_COMPONENTS_DIR),
+the catalog directory (CLUTCH_COMPONENTS_CATALOG) and modules.repo_root at a
+temp tree, so the run never touches the components installed for the user
+running it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from agent.config import Config
@@ -37,6 +52,75 @@ from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
 
+# ------------------------------------------------------------------ fixtures ---
+
+
+@contextlib.contextmanager
+def isolated_host(checkouts: Mapping[str, Mapping | None] | None = None) -> Iterator[Path]:
+    """A host of one's own: temp install root and catalog, repo_root repointed
+    at a temp tree holding `checkouts` (directory name -> manifest; None lays
+    the directory down without one).
+
+    Yields the temp root, for callers that need to put an artifact or a code
+    directory somewhere the isolated host can see.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        saved = (
+            os.environ.get(components.ROOT_ENV),
+            os.environ.get("CLUTCH_COMPONENTS_CATALOG"),
+            modules.repo_root,
+        )
+        base = Path(root) / "repo"
+        base.mkdir()
+        for name, data in (checkouts or {}).items():
+            directory = base / name
+            directory.mkdir()
+            if data is not None:
+                (directory / components.MANIFEST).write_text(json.dumps(data), encoding="utf-8")
+        os.environ[components.ROOT_ENV] = root
+        os.environ["CLUTCH_COMPONENTS_CATALOG"] = str(Path(root) / "catalog.d")
+        modules.repo_root = lambda: base  # type: ignore[method-assign]
+        try:
+            yield Path(root)
+        finally:
+            modules.repo_root = saved[2]  # type: ignore[method-assign]
+            for key, previous in ((components.ROOT_ENV, saved[0]), ("CLUTCH_COMPONENTS_CATALOG", saved[1])):
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
+
+
+def _write_registration(data: Mapping) -> None:
+    """One registration in the (isolated) user's catalog directory."""
+    directory = catalog.catalog_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{data['name']}.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def _third_party(name: str, *, tool: str = "say_hello", directory: str = "") -> dict:
+    """A component declared the way a third party writes one: its own tools,
+    its own command template, its own UI block — and nothing the host named."""
+    return {
+        "name": name,
+        "interface": "cli",
+        "subject": "network",
+        "directory": directory,
+        "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
+        "requires": ["python"],
+        "ui": {"label": "hello", "status": True},
+        "tools": [
+            {
+                "name": tool,
+                "description": "say hello",
+                "parameters": {"properties": {"who": {"type": "string"}}, "required": ["who"]},
+                "command": "--envelope {who}",
+                "ui": {"summary": "hello {who}", "group": "greet"},
+            }
+        ],
+    }
+
+
 def _spec(component: str, tool: str) -> catalog.Tool:
     """The declaration of one shipped tool, straight from the table."""
     mod = catalog.table()[component]
@@ -46,37 +130,65 @@ def _spec(component: str, tool: str) -> catalog.Tool:
     raise AssertionError(f"{component} declares no {tool}")
 
 
-def check_no_components_is_chat_only() -> None:
-    """Nothing installed -> the host's whole surface is its own command.
+# --------------------------------------------------------------------- facts ---
+
+
+def check_bare_host_is_chat_only() -> None:
+    """Nothing registered -> the host's whole surface is its own command.
 
     The registry does not paper an absent component over: build_tools asks
     rendezvous whether the component is here, and a component that is not
-    contributes no schema at all. Point resolution at a bare host and the tool
-    table is run_command and nothing else.
+    contributes no schema at all.
     """
-    cfg = Config()
-    with tempfile.TemporaryDirectory() as bare:
-        previous = os.environ.get(components.ROOT_ENV)
-        real_dir = modules.module_dir
-        os.environ[components.ROOT_ENV] = bare
-        modules.module_dir = lambda name: Path(bare) / name  # no checkout either
-        try:
-            names = [t.name for t in build_tools(cfg)]
-            check(names == ["run_command"], "with no component installed the host offers only run_command")
-            check(
-                not rendezvous.available(modules.WORKSPACE),
-                "the workspace component is not available on a bare host",
-            )
-        finally:
-            modules.module_dir = real_dir
-            if previous is None:
-                os.environ.pop(components.ROOT_ENV, None)
-            else:
-                os.environ[components.ROOT_ENV] = previous
+    with isolated_host():
+        check(catalog.table() == {}, "a host with no registrations drives nothing")
+        check(
+            [t.name for t in build_tools(Config())] == ["run_command"],
+            "with no component installed the host offers only run_command",
+        )
+        check(not rendezvous.available(modules.WORKSPACE), "the workspace component is not available on a bare host")
+
+
+def check_checkout_discovery_and_precedence() -> None:
+    """A checkout is its own registration; an install refines it; a catalog
+    file is the last word."""
+    declaration = _third_party("clutch-x", tool="x_tool")
+    with isolated_host(
+        {
+            "clutch-x": declaration,
+            "clutch-nameless": {"interface": "cli"},  # a manifest that names nothing
+        }
+    ) as root:
+        table = catalog.table()
+        check("clutch-x" in table, "a checkout with a usable manifest enters the table")
+        check("clutch-nameless" not in table, "a manifest that names no component is not a component")
+        check(table["clutch-x"].subject == catalog.NETWORK, "the checkout declares its own subject")
+        check(table["clutch-x"].tools[0].name == "x_tool", "the checkout's tools are the table's")
+
+        # an install refines: a thin manifest names only the install facts, and
+        # every field it leaves out carries over from the checkout
+        artifact = root / "artifact"
+        artifact.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        components.install(artifact, {"name": "clutch-x", "version": "9.9.9", "interface": "daemon"})
+        merged = catalog.table()["clutch-x"]
+        check(merged.interface == catalog.DAEMON, "the install's interface overrides the checkout's")
+        check(merged.subject == catalog.NETWORK, "a field the install leaves out carries")
+        check(merged.tools[0].name == "x_tool", "a thin install rides on the checkout's declaration")
+
+        # a catalog registration is the last word, field by field
+        _write_registration({**declaration, "interface": "cli", "subject": "workspace-fs"})
+        final = catalog.table()["clutch-x"]
+        check(
+            final.interface == catalog.CLI and final.subject == catalog.WORKSPACE_FS,
+            "a catalog registration overrides both earlier sources",
+        )
 
 
 def check_ui_protocol() -> None:
     """The tool's presentation is its declaration, with defaults filled in."""
+    if modules.WORKSPACE not in catalog.table():
+        print("SKIP: no clutch-workspace checkout beside the repo")
+        return
     # a batch of reads: same group, folded body, no live preview
     read = catalog.ui_of(_spec(modules.WORKSPACE, "read_file"))
     grep = catalog.ui_of(_spec(modules.WORKSPACE, "grep"))
@@ -104,7 +216,8 @@ def check_ui_protocol() -> None:
     check(write["body"] == "diff", "a write shows its diff")
     check(write["collapse"] == "long", "a long diff folds")
     check(
-        write["chrome"] == "accent" and write["form"] == catalog.DEFAULTS["form"]
+        write["chrome"] == "accent"
+        and write["form"] == catalog.DEFAULTS["form"]
         and "{path}" in write["header"],
         "a write's own block wears accent chrome, titled by its declaration",
     )
@@ -122,12 +235,13 @@ def check_ui_protocol() -> None:
     # chip) and no label, its arguments one click away, its result shown whole
     bare = catalog.Tool(name="bare", description="", parameters={})
     check(catalog.ui_of(bare) == catalog.DEFAULTS, "a tool with no ui block is rendered from the defaults alone")
-    plain = catalog.ui_of(_spec(modules.MEMORY, "save_memory"))
-    check(
-        plain["chip"] == "name" and plain["summary"] == "" and plain["preview"] == "args",
-        "the plain row is the tool's own name, no label, its arguments streamed",
-    )
-    check(plain["body"] == "text" and plain["collapse"] == "never", "the default body is plain text, shown whole")
+    if modules.MEMORY in catalog.table():
+        plain = catalog.ui_of(_spec(modules.MEMORY, "save_memory"))
+        check(
+            plain["chip"] == "name" and plain["summary"] == "" and plain["preview"] == "args",
+            "the plain row is the tool's own name, no label, its arguments streamed",
+        )
+        check(plain["body"] == "text" and plain["collapse"] == "never", "the default body is plain text, shown whole")
     # and a declaration overrides only the keys it names: an edit titles its own
     # block, while the chip and the label it says nothing about stay the protocol's
     # defaults (the tool's name on the left, no label beside it)
@@ -165,6 +279,9 @@ def check_declared_access() -> None:
     shipped tools name the policy they need, and nothing names one the engine does
     not know.
     """
+    if modules.WORKSPACE not in catalog.table():
+        print("SKIP: no clutch-workspace checkout beside the repo")
+        return
     for component, tool, access in (
         (modules.WORKSPACE, "read_file", "read"),
         (modules.WORKSPACE, "grep", "sweep"),
@@ -181,130 +298,119 @@ def check_declared_access() -> None:
     )
 
 
-def _declaration(directory: Path, *, tool: str) -> dict:
-    """A third-party CLI component, declared the way a user writes one: its own
-    tools, its own command template, and its own UI block."""
-    return {
-        "name": "clutch-hello",
+def check_host_facts_in_schema() -> None:
+    """`$config.<field>` / `$skills` / `$backends` in a declaration become THIS
+    host's values when the tool is wired — the component asks what only the
+    host knows, and no placeholder leaks through."""
+    declaration = {
+        "name": "clutch-facts",
         "interface": "cli",
-        "subject": "network",
-        "directory": str(directory),
         "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
-        "requires": ["python"],
-        "ui": {"label": "hello", "status": True},
         "tools": [
             {
-                "name": tool,
-                "description": "say hello",
-                "parameters": {"properties": {"who": {"type": "string"}}, "required": ["who"]},
-                "command": "--envelope {who}",
-                "ui": {"summary": "hello {who}", "group": "greet"},
+                "name": "fact_tool",
+                "description": "reads up to $config.read_max_chars chars; backends: $backends; skills: $skills",
+                "parameters": {
+                    "properties": {"n": {"type": "integer", "description": "default $config.read_max_chars"}},
+                    "required": ["n"],
+                },
+                "defaults": {"n": "$config.read_max_chars"},
+                "command": "--n {n}",
             }
         ],
     }
+    with isolated_host() as root:
+        code = root / "facts-code"
+        code.mkdir()
+        (code / "tool.py").write_text("print('facts')\n", encoding="utf-8")  # resolve() wants the entry point
+        _write_registration({**declaration, "directory": str(code)})
+        cfg = Config()
+        reg = ToolRegistry(build_tools(cfg))
+        tool = reg.tool("fact_tool")
+        check(tool is not None, "the registered tool is wired")
+        check(
+            str(cfg.read_max_chars) in tool.description and "$config" not in tool.description,
+            "a $config placeholder becomes the host's value",
+        )
+        check(
+            "bing" in tool.description and "$backends" not in tool.description,
+            "the backends are this host's chain, spelled out",
+        )
+        check(tool.defaults.get("n") == cfg.read_max_chars, "a whole-value placeholder keeps the field's own type")
 
 
 def check_registration() -> None:
     """A declaration in the user's catalog directory becomes a live tool."""
-    with tempfile.TemporaryDirectory() as root:
-        previous_root = os.environ.get(components.ROOT_ENV)
-        previous_cat = os.environ.get("CLUTCH_COMPONENTS_CATALOG")
-        cat = Path(root) / "catalog.d"
-        cat.mkdir()
-        code = Path(root) / "hello-code"
+    with isolated_host() as root:
+        code = root / "hello-code"
         code.mkdir()
         (code / "tool.py").write_text(
             "import json, sys\nprint(json.dumps({'content': 'echo:' + sys.argv[-1], 'code': 0}))\n",
             encoding="utf-8",
         )
-        (cat / "hello.json").write_text(json.dumps(_declaration(code, tool="say_hello")), encoding="utf-8")
+        _write_registration(_third_party("clutch-hello", directory=str(code)))
 
-        os.environ[components.ROOT_ENV] = root
-        os.environ["CLUTCH_COMPONENTS_CATALOG"] = str(cat)
-        try:
-            check("clutch-hello" in catalog.table(), "a registration with a new name enters the table")
-            check(rendezvous.unavailable_reason("clutch-hello") == "", "and is available through its own directory")
-            cfg = Config()
-            names = [t.name for t in build_tools(cfg)]
-            check("say_hello" in names, "its tools are offered to the model")
-            reg = ToolRegistry(build_tools(cfg))
-            ui = reg.ui("say_hello")
-            check(ui["group"] == "greet" and ui["summary"] == "hello {who}", "its ui block rides the protocol")
-            check(ui["mutates"] is False and ui["undo"] is False, "the host derives the keys it did not declare")
-            if local_shell().posix:
-                ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-catalog-"))
-                result = reg.execute(ws, cfg, "say_hello", {"who": "世界"})
-                check(not result["error"] and result["content"] == "echo:世界", "and the tool is executable end to end")
-        finally:
-            if previous_cat is None:
-                os.environ.pop("CLUTCH_COMPONENTS_CATALOG", None)
-            else:
-                os.environ["CLUTCH_COMPONENTS_CATALOG"] = previous_cat
-            if previous_root is None:
-                os.environ.pop(components.ROOT_ENV, None)
-            else:
-                os.environ[components.ROOT_ENV] = previous_root
+        check("clutch-hello" in catalog.table(), "a registration with a new name enters the table")
+        check(rendezvous.unavailable_reason("clutch-hello") == "", "and is available through its own directory")
+        cfg = Config()
+        check("say_hello" in [t.name for t in build_tools(cfg)], "its tools are offered to the model")
+        reg = ToolRegistry(build_tools(cfg))
+        ui = reg.ui("say_hello")
+        check(ui["group"] == "greet" and ui["summary"] == "hello {who}", "its ui block rides the protocol")
+        check(ui["mutates"] is False and ui["undo"] is False, "the host derives the keys it did not declare")
+        if local_shell().posix:
+            ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-catalog-"))
+            result = reg.execute(ws, cfg, "say_hello", {"who": "世界"})
+            check(not result["error"] and result["content"] == "echo:世界", "and the tool is executable end to end")
 
 
 def check_installed_third_party() -> None:
     """An artifact the install layer lands registers itself too — the same path
     an installed SHIPPED component takes, with tools the host never declared."""
-    with tempfile.TemporaryDirectory() as root:
-        previous_root = os.environ.get(components.ROOT_ENV)
-        previous_cat = os.environ.get("CLUTCH_COMPONENTS_CATALOG")
-        os.environ[components.ROOT_ENV] = root
-        os.environ["CLUTCH_COMPONENTS_CATALOG"] = str(Path(root) / "catalog.d")  # empty
-        try:
-            artifact = Path(root) / "incoming"
-            artifact.write_text(
-                "#!/usr/bin/env python3\nimport json, sys\n"
-                "print(json.dumps({'content': 'installed:' + sys.argv[-1], 'code': 0}))\n",
-                encoding="utf-8",
+    with isolated_host() as root:
+        artifact = root / "incoming"
+        artifact.write_text(
+            "#!/usr/bin/env python3\nimport json, sys\n"
+            "print(json.dumps({'content': 'installed:' + sys.argv[-1], 'code': 0}))\n",
+            encoding="utf-8",
+        )
+        artifact.chmod(artifact.stat().st_mode | stat.S_IEXEC)
+        components.install(
+            artifact,
+            {
+                "name": "clutch-thirdparty",
+                "version": "1.0.0",
+                "interface": "cli",
+                "tools": [
+                    {
+                        "name": "installed_tool",
+                        "description": "a tool from an installed artifact",
+                        "parameters": {"properties": {"q": {"type": "string"}}, "required": ["q"]},
+                        "command": "--envelope {q}",
+                    }
+                ],
+            },
+        )
+        check("clutch-thirdparty" in catalog.table(), "an installed artifact enters the table")
+        check(rendezvous.available("clutch-thirdparty"), "and resolves to the code the install laid down")
+        cfg = Config()
+        check("installed_tool" in [t.name for t in build_tools(cfg)], "its declared tool joins the model's set")
+        if local_shell().posix:
+            reg = ToolRegistry(build_tools(cfg))
+            ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-catalog-"))
+            result = reg.execute(ws, cfg, "installed_tool", {"q": "hi"})
+            check(
+                not result["error"] and result["content"] == "installed:hi",
+                "the installed tool runs its own executable",
             )
-            artifact.chmod(artifact.stat().st_mode | stat.S_IEXEC)
-            components.install(
-                artifact,
-                {
-                    "name": "clutch-thirdparty",
-                    "version": "1.0.0",
-                    "interface": "cli",
-                    "tools": [
-                        {
-                            "name": "installed_tool",
-                            "description": "a tool from an installed artifact",
-                            "parameters": {"properties": {"q": {"type": "string"}}, "required": ["q"]},
-                            "command": "--envelope {q}",
-                        }
-                    ],
-                },
-            )
-            check("clutch-thirdparty" in catalog.table(), "an installed artifact enters the table")
-            check(rendezvous.available("clutch-thirdparty"), "and resolves to the code the install laid down")
-            cfg = Config()
-            check("installed_tool" in [t.name for t in build_tools(cfg)], "its declared tool joins the model's set")
-            if local_shell().posix:
-                reg = ToolRegistry(build_tools(cfg))
-                ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-catalog-"))
-                result = reg.execute(ws, cfg, "installed_tool", {"q": "hi"})
-                check(
-                    not result["error"] and result["content"] == "installed:hi",
-                    "the installed tool runs its own executable",
-                )
-        finally:
-            if previous_cat is None:
-                os.environ.pop("CLUTCH_COMPONENTS_CATALOG", None)
-            else:
-                os.environ["CLUTCH_COMPONENTS_CATALOG"] = previous_cat
-            if previous_root is None:
-                os.environ.pop(components.ROOT_ENV, None)
-            else:
-                os.environ[components.ROOT_ENV] = previous_root
 
 
 def main() -> int:
     check_ui_protocol()
     check_declared_access()
-    check_no_components_is_chat_only()
+    check_bare_host_is_chat_only()
+    check_checkout_discovery_and_precedence()
+    check_host_facts_in_schema()
     check_registration()
     check_installed_third_party()
     print("\nall passed")

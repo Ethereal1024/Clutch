@@ -22,6 +22,9 @@
 //     cached under ~/.clutch/artifacts by a source fingerprint, since the
 //     checkout is code a host with no artifact of its own can still run under
 //     python (the shape rendezvous.py's template launch describes).
+//
+// The declaration comes from the same places, as component.json (the checkout's
+// own, or the release's <dir>/<name>/component.json) — see declarationFor.
 
 "use strict";
 
@@ -34,7 +37,7 @@ const { resolveBash, platformTag, isPackagedApp, fileHash, treeHash } = require(
 const REPO = path.join(__dirname, "..");
 const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
 const TAR_SCRIPT = path.join(REPO, "scripts", "build-component-tar.sh");
-const MANIFEST_HEADER = "X-Clutch-Component"; // agent/tools/components.py's contract
+const MANIFEST_HEADER = "X-Clutch-Component"; // agent/tools/components.py's contract: base64 of UTF-8 JSON
 const REQUEST_TIMEOUT_MS = 120_000; // a onefile over a slow link
 const BUDGET_MS = 300_000; // the whole pass; beyond it the rest is deferred
 
@@ -67,6 +70,29 @@ function shippedArtifact(name) {
       } catch (e) {
         /* keep looking */
       }
+    }
+  }
+  return null;
+}
+
+// The declaration that travels WITH the artifact (COMPONENTS.md): the same
+// component.json the host discovers. Searched beside the artifact — the packaged
+// release ships it as resources/components/<name>/component.json, a dev build
+// under dist/components/, and a dev checkout IS one — so an install lands with
+// the component's whole declaration (tools, launch, ui), not just install
+// facts. A host that receives only the bytes of a declaring archive would still
+// merge the artifact's own manifest (agent/tools/components.py), but the header
+// is the declaration of record for the release's bare onefile artifacts.
+function declarationFor(name) {
+  const dirs = [];
+  if (isPackagedApp()) dirs.push(path.join(process.resourcesPath, "components"));
+  dirs.push(path.join(REPO, "dist", "components"), path.join(REPO, name));
+  for (const dir of dirs) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, "component.json"), "utf8"));
+      if (parsed && parsed.name === name) return parsed;
+    } catch (e) {
+      /* keep looking */
     }
   }
   return null;
@@ -112,7 +138,7 @@ function artifactFor(spec, { checkout = true } = {}) {
   const file = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
   if (!file) return null;
   const digest = fileHash(file);
-  return { ...spec, path: file, digest, version: digest.slice(0, 16) };
+  return { ...spec, declaration: declarationFor(spec.name), path: file, digest, version: digest.slice(0, 16) };
 }
 
 // What the host already holds (the version gate's first half).
@@ -131,7 +157,11 @@ async function hostInventory(base, timeoutMs = REQUEST_TIMEOUT_MS) {
 
 async function upload(base, spec, timeoutMs) {
   const data = fs.readFileSync(spec.path);
+  // the manifest is the component's own declaration with the install facts on
+  // top — a remote host that never saw the checkout still receives a component
+  // it can drive, because the declaration rode with the artifact
   const manifest = {
+    ...(spec.declaration || {}),
     name: spec.name,
     version: spec.version,
     interface: spec.interface,
@@ -144,7 +174,7 @@ async function upload(base, spec, timeoutMs) {
     const r = await fetch(`${base}/api/components/install`, {
       method: "POST",
       headers: {
-        [MANIFEST_HEADER]: JSON.stringify(manifest),
+        [MANIFEST_HEADER]: Buffer.from(JSON.stringify(manifest), "utf8").toString("base64"),
         "Content-Type": "application/octet-stream",
         "Content-Length": String(data.length),
       },

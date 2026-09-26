@@ -87,15 +87,20 @@ def resolve(module: str) -> Resolved | None:
     checkout beside the host repo (modules.component_dir, components.installed).
     A registration may name the code's own directory for an out-of-tree
     component, and that is used instead.
+
+    `installed` is a fact about the LAYER, not about the manifest: a checkout
+    carries a component.json of its own now, so "has a manifest" no longer
+    separates the two — "is the directory the install root resolves to" does.
     """
     mod = catalog.table().get(module)
     if mod is None:
         return None
-    directory = Path(mod.directory) if mod.directory else modules.component_dir(mod.name)
+    install_dir = components.installed(mod.name)
+    directory = Path(mod.directory) if mod.directory else (install_dir or modules.module_dir(mod.name))
     if not directory.is_dir():
         return None
     manifest = components.read_manifest(directory)
-    rendered = render_launch(mod, directory, manifest)
+    rendered = render_launch(mod, directory, manifest, installed=install_dir is not None and directory == install_dir)
     if rendered is None:
         return None
     argv, template = rendered
@@ -103,13 +108,17 @@ def resolve(module: str) -> Resolved | None:
         module=mod,
         directory=directory,
         argv=argv,
-        installed=manifest is not None,
+        installed=install_dir is not None and directory == install_dir,
         template=template,
     )
 
 
 def render_launch(
-    mod: catalog.Component, directory: Path, manifest: dict | None = None
+    mod: catalog.Component,
+    directory: Path,
+    manifest: dict | None = None,
+    *,
+    installed: bool = False,
 ) -> tuple[tuple[str, ...], bool] | None:
     """(argv words, they came from the declaration's template) for one process of
     `mod` inside `directory`, or None when nothing there can be started.
@@ -130,7 +139,6 @@ def render_launch(
     whose name contains a space needs no quoting and a template word cannot
     smuggle one in (quoting belongs to the statement layer, tools/inst.py).
     """
-    installed = manifest is not None
     declared = (manifest or {}).get("launch")
     names = [
         declared.get("binary") if isinstance(declared, dict) else "",

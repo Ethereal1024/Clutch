@@ -155,8 +155,9 @@ sequenceDiagram
 agent/                 宿主后端（会话循环 + 模型调用 + registry + 传输层）
   core/                上下文管理（context.py）、输出解析（parse.py）、
                        终止条件（terminate.py）、错误处理（errors.py）
-  tools/               工具定义与调用：catalog.py（组件声明：工具名、参数、命令
-                       模板、它在界面里的样子）、registry.py（声明 -> 模型可见的
+  tools/               工具定义与调用：catalog.py（发现并合并各组件自带的
+                       component.json 声明：工具名、参数、命令模板、它在界面里的
+                       样子）、registry.py（声明 -> 模型可见的
                        工具，宿主只保留策略）、components.py（安装层：把组件落到
                        运行它的那台机器）、rendezvous.py（daemon/CLI 寻址与启动）、
                        inst.py（一次调用 = 一条终端命令）、transport.py、modules.py
@@ -180,9 +181,10 @@ scripts/               打包与构建脚本
 四个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
 宿主不 import 它们的代码，只依赖它们发布的接口（HTTP 表面或 CLI 的 stdout 契约）：
 `clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起。宿主里没有任何工具的第
-二份实现——工具的名字、参数、命令模板，以及它在界面里的呈现方式，全部来自
-`agent/tools/catalog.py` 里那份声明（或组件自己的 `component.json`）。因此删掉任何
-一个模块，宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响；
+二份实现，也没有任何内置声明——工具的名字、参数、命令模板，以及它在界面里的呈现
+方式，全部写在组件自带的 `component.json` 里（随组件走，规范见
+[COMPONENTS.md](COMPONENTS.md)），宿主只负责发现与合并。因此删掉任何一个
+模块，宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响；
 一个组件都没装时，宿主只有 AI 聊天本身，没有可调用的文件/联网/记忆/技能工具。
 
 组件由客户端上传到"要运行它的那台机器"的 supervisor（`POST /api/components/install`，
@@ -195,12 +197,15 @@ scripts/               打包与构建脚本
 没有任何工具名。`ui` 的每个键只负责那一个部件：`chip`（行首那个工具名，默认打；
 summary 已经把这次调用说清楚的 read/grep 把它关掉）、`summary`（那行的一行标签，
 `{参数名}` / `{lines}` / `{name}` 由调用自己填，默认空 —— 行首的名字就是它）、
-`header`（结果自成一块时那块的标题，空则退回 summary，再退回 `result`）、`style`
-（结果怎么上色：plain / read / write）、`group`（同一组的调用密集合并成一块，所以
-一串 read/grep 扫成一列单行，而 write 不会被打包进去）、`preview`（调用流式进行时
-那行显示什么）、`body`（结果正文是文本 / diff / 不显示）与 `collapse`（折叠块怎么
-收），宿主再补上它才知道的 `mutates` / `undo`。协议的定义与默认值见
-`agent/tools/catalog.py` 顶部的说明，消费方是 `ui/app.js`。
+`preview`（调用流式进行时那行实时显示什么：原始参数 JSON / 参数自带的文本 / 解包后
+的命令）、`header`（结果自成一块时那块的标题，空则退回 summary，再退回 `result`）、
+`form`（结果是一整块还是折叠成一行）、`body`（结果正文是文本 / 代码面板 / diff /
+不显示）、`highlight` / `chrome`（正文上的点缀：按 `path` 参数高亮、标题变成强调
+色块）、`group`（同一组的调用密集合并成一块，所以
+一串 read/grep 扫成一列单行，而 write 不会被打包进去）、`collapse`（折叠块怎么
+收），宿主再补上只有它才知道的 `mutates` / `undo`。协议的定义与默认值见
+`agent/tools/catalog.py` 顶部的说明（完整规范见
+[COMPONENTS.md](COMPONENTS.md)），消费方是 `ui/app.js`。
 
 ## 测试
 
