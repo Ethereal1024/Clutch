@@ -81,6 +81,7 @@ ICONS = {
     0x270E: "✎ edit marker",
     0x25A6: "▦ open button",
     0x2699: "⚙ settings button",
+    0x1F6E1: "🛡 trust button",
 }
 PLUS_SOURCE = 0x002B  # Symbola's ASCII "+", remapped onto U+FF0B
 
@@ -92,7 +93,7 @@ PLUS_SOURCE = 0x002B  # Symbola's ASCII "+", remapped onto U+FF0B
 MAC_EPOCH_OFFSET = 2082844800  # 1904-01-01 → 1970-01-01
 BUILD_EPOCH = int(os.environ.get("SOURCE_DATE_EPOCH", 1735689600)) + MAC_EPOCH_OFFSET
 
-LICENSE_TEXT = f"""clutch-icons.woff2 — a 16-glyph subset of Symbola
+LICENSE_TEXT = f"""clutch-icons.woff2 — a {len(ICONS)}-glyph subset of Symbola
 
 Source: Symbola, Copyright (C) 2007-2015 George Douros <g1951d@teilar.gr>
         (Debian package fonts-symbola 2.60-1.1, {SOURCE_DEB})

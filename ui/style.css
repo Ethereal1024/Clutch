@@ -43,7 +43,7 @@
    fails loudly in tests/ui_fonts_check.py instead of silently falling back to
    the OS font. `font-display: block` (not swap) so an icon is never briefly
    drawn in the OS face before the bundled one arrives.
-   `unicode-range` is the same 16 codepoints written out in CSS. It is what
+   `unicode-range` is the same 17 codepoints written out in CSS. It is what
    makes "cannot shadow text" a property of the declaration instead of a
    promise about the font's cmap: the browser will not even consider this face
    for a codepoint outside the list. The test pins it to the font's own
@@ -55,7 +55,8 @@
   font-display: block;
   unicode-range:
     U+2192, U+2193, U+21B6, U+25A0, U+25A3, U+25A6, U+25B6, U+25B8,
-    U+25BE, U+2699, U+26A0, U+270E, U+2713, U+27E6, U+27E7, U+FF0B;
+    U+25BE, U+2699, U+26A0, U+270E, U+2713, U+27E6, U+27E7, U+FF0B,
+    U+1F6E1;
 }
 
 :root {
