@@ -46,7 +46,7 @@ class FakeLLM:
             return self._responses.pop(0)
         return dict(self._fallback)
 
-    def stream(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]):
+    def stream(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], cancel=None):
         """Emit the canned response as stream events (text chunks, tool_calls, finish)."""
         self.calls.append(messages)
         resp = dict(self._responses.pop(0)) if self._responses else dict(self._fallback)
@@ -419,7 +419,7 @@ def main() -> int:
         sb = LocalWorkspace(tmp)
 
         class BoomLLM:
-            def stream(self, messages, tools):
+            def stream(self, messages, tools, cancel=None):
                 raise AgentError(
                     code="context_window_exceeded",
                     message="Context window is full; cannot continue. Restart with a more focused task.",
@@ -453,7 +453,7 @@ def main() -> int:
             def __init__(self) -> None:
                 self.consumed = 0
 
-            def stream(self, messages, tools):
+            def stream(self, messages, tools, cancel=None):
                 self.consumed += 1
                 yield {"type": "text", "delta": "part1"}
                 cancel.set()  # Stop arrives between chunks
@@ -491,7 +491,7 @@ def main() -> int:
             backoff and the second attempt delivers. From the loop's perspective
             the stream yields a "retry" notice, then the recovered text."""
 
-            def stream(self, messages, tools=None):
+            def stream(self, messages, tools=None, cancel=None):
                 yield {
                     "type": "retry",
                     "attempt": 1,
@@ -524,6 +524,45 @@ def main() -> int:
         check(
             not any(isinstance(e, LlmRetryEvent) for e in agent.log.events()),
             "retry notice never lands in the durable log",
+        )
+
+    # 12c. Stop that lands inside a BLOCKED read: stream_runner's guard closes
+    # the connection from its helper thread and the client surfaces
+    # LlmError("cancelled") instead of a retryable transport error. The loop
+    # must treat that exactly like the between-chunk break of section 12 —
+    # partials kept, aborted final — never an error final.
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        live: list[Any] = []
+
+        class GuardKilledLlm:
+            """What the loop now sees when Stop fires mid-read: the attempt's
+            connection was closed under it and the runner reported cancellation."""
+
+            def stream(self, messages, tools=None, cancel=None):
+                yield {"type": "text", "delta": "partial answer"}
+                if cancel is not None:
+                    cancel.set()  # reality: the runner only reports cancelled when Stop fired
+                raise LlmError(code="cancelled", retryable=False, message="stop requested mid-stream")
+
+        config = Config()
+        agent = Agent(
+            llm=GuardKilledLlm(),  # type: ignore[arg-type]
+            registry=ToolRegistry(build_tools(config)),
+            workspace=sb,
+            config=config,
+            cancel=threading.Event(),
+            sink=live.append,
+        )
+        result = agent.run("t")
+        check(result == "ABORTED", "a guard-killed read aborts like a between-chunk break")
+        texts = [e for e in live if isinstance(e, TextDeltaEvent)]
+        check(bool(texts) and texts[0].content == "partial answer", "the partial text before the kill still streamed")
+        finals = [e for e in agent.log.events() if isinstance(e, FinalEvent)]
+        check(bool(finals) and finals[-1].status == "aborted", "aborted final, not an error final")
+        check(
+            not any(isinstance(e, FinalEvent) and e.status == "error" for e in agent.log.events()),
+            "no error final from a cancelled turn",
         )
 
     # 13. compaction: overflow rolls older turns into a summary, run continues
@@ -578,7 +617,7 @@ def main() -> int:
 
         # failed summary: the live block must close
         class BoomLlm:
-            def stream(self, messages, tools=None):
+            def stream(self, messages, tools=None, cancel=None):
                 yield {"type": "text", "delta": "partial"}
                 raise RuntimeError("boom")
 
@@ -607,7 +646,7 @@ def main() -> int:
     prompt_len: dict[str, int] = {}
 
     class CaptureLlm:
-        def stream(self, messages, tools=None):
+        def stream(self, messages, tools=None, cancel=None):
             prompt_len["n"] = len(messages[0]["content"].encode("utf-8"))
             yield {"type": "text", "delta": "S" * 60}
             yield {"type": "finish", "reason": "stop"}
@@ -628,7 +667,7 @@ def main() -> int:
     prompt_n: dict[str, str] = {}
 
     class CaptureLlm2:
-        def stream(self, messages, tools=None):
+        def stream(self, messages, tools=None, cancel=None):
             prompt_n["n"] = messages[0]["content"]
             yield {"type": "text", "delta": "S" * 60}
             yield {"type": "finish", "reason": "stop"}
@@ -660,7 +699,7 @@ def main() -> int:
     calls: list[int] = []
 
     class SlowLlm:
-        def stream(self, messages, tools=None):
+        def stream(self, messages, tools=None, cancel=None):
             calls.append(1)
             yield {"type": "text", "delta": "partial"}
             cancel.set()  # the user hits stop mid-summary
@@ -698,7 +737,7 @@ def main() -> int:
     notes: list[object] = []
 
     class ReconnectingSummaryLlm:
-        def stream(self, messages, tools=None):
+        def stream(self, messages, tools=None, cancel=None):
             yield {
                 "type": "retry",
                 "attempt": 1,
@@ -900,7 +939,7 @@ def main() -> int:
                 def __init__(self) -> None:
                     self.calls = 0
 
-                def stream(self, messages, tools):
+                def stream(self, messages, tools, cancel=None):
                     self.calls += 1
                     if self.calls == 1:
                         args = json.dumps({"command": "sleep 120"})
@@ -955,7 +994,7 @@ def main() -> int:
                 self.calls = 0
                 self.seen: list[list[dict[str, Any]]] = []
 
-            def stream(self, messages, tools=None):
+            def stream(self, messages, tools=None, cancel=None):
                 self.calls += 1
                 self.seen.append(messages)
                 if self.calls == 1:

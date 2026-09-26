@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import ast
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Collection, Iterator
@@ -135,7 +136,9 @@ class LlmClient(ABC):
     """Streaming chat client contract.
 
     ``stream`` emits the event protocol reasoning/text/tool_call_start/
-    tool_call_delta/finish.
+    tool_call_delta/finish. ``cancel`` (the run's Stop event) is optional but
+    real clients should pass it down: it arms the guard that interrupts a read
+    blocked mid-attempt (see stream_runner.run_streaming).
     """
 
     @abstractmethod
@@ -143,4 +146,5 @@ class LlmClient(ABC):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        cancel: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]: ...

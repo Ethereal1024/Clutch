@@ -110,7 +110,7 @@ class Agent:
         finish_reason = "stop"
 
         try:
-            for ev in self.llm.stream(msgs, tools=self.registry.schemas()):
+            for ev in self.llm.stream(msgs, tools=self.registry.schemas(), cancel=self.cancel):
                 # abort mid-stream: check the cancel flag between chunks
                 if self.cancel and self.cancel.is_set():
                     break
@@ -158,9 +158,15 @@ class Agent:
                     ]
                     return content, tool_calls, finish_reason, "".join(reasoning_parts)
         except LlmError as e:
-            if e.code == "context_window_exceeded":
+            if e.code == "cancelled":
+                # Stop closed the connection mid-read: fall through to the same
+                # partial return a between-chunk break produces; run() turns it
+                # into the aborted final at the top of the next iteration
+                pass
+            elif e.code == "context_window_exceeded":
                 raise agent_errors.context_window_error(e.message) from e
-            raise agent_errors.AgentError(code=e.code, message=e.message) from e
+            else:
+                raise agent_errors.AgentError(code=e.code, message=e.message) from e
         # any non-LlmError here is a genuine bug; let it propagate
         return "".join(content_parts), [], finish_reason, "".join(reasoning_parts)
 

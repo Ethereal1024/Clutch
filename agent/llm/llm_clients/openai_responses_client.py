@@ -27,11 +27,12 @@ as-is rather than being papered over here.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Iterator
 
 from .openai_base import BaseOpenaiClient
 from .response_handle import ResponsesState, finish_event, get_default_handlers
-from .stream_runner import run_streaming
+from .stream_runner import Attempt, run_streaming
 
 # The knob's levels are the chat protocol's (low/medium/max); the Responses API
 # names its top level "high". Anything else passes through untouched.
@@ -112,6 +113,7 @@ class OpenaiResponsesLlmClient(BaseOpenaiClient):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        cancel: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         # The retry policy (and why a retry is only safe before the first event
         # of an attempt) lives in stream_runner.run_streaming; this method only
@@ -133,15 +135,22 @@ class OpenaiResponsesLlmClient(BaseOpenaiClient):
         if self.reasoning_effort:
             kwargs["reasoning"] = {"effort": _REASONING_EFFORT.get(self.reasoning_effort, self.reasoning_effort)}
         yield from run_streaming(
-            lambda: self._attempt(kwargs),
+            lambda: self._open(kwargs),
             max_retries=self.max_retries,
             retryable_status=self.retryable_status,
+            cancel=cancel,
         )
 
-    def _attempt(self, kwargs: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        """One request/response pass: yields events, ends with exactly one finish."""
+    def _open(self, kwargs: dict[str, Any]) -> Attempt:
+        """Issue the request eagerly and hand back events + the kill switch
+        (see OpenaiLlmClient._open for why eager matters)."""
+        resp = self.client.responses.create(**kwargs)
+        return Attempt(events=self._events(resp), close=resp.close)
+
+    def _events(self, resp) -> Iterator[dict[str, Any]]:
+        """Translate one typed event feed into events, ending with exactly one finish."""
         state = ResponsesState()
-        for event in self.client.responses.create(**kwargs):
+        for event in resp:
             for handler in self.handlers:
                 for out in handler.handle(event, state):
                     yield out

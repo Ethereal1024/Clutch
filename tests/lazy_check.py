@@ -53,7 +53,7 @@ class FakeLlm:
     def __init__(self, summary: str = "NEW SUMMARY") -> None:
         self.summary = summary
 
-    def stream(self, msgs, tools=None):
+    def stream(self, msgs, tools=None, cancel=None):
         yield {"type": "text", "delta": self.summary}
         yield {"type": "finish"}
 

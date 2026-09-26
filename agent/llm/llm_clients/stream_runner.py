@@ -1,10 +1,11 @@
 """One streaming attempt + the retry policy that wraps it.
 
 Every provider client (chat completions, responses) streams a turn through the
-same contract: a *source* generator that yields internal events (reasoning /
-text / tool_call_start / tool_call_delta / finish) and raises on failure. The
-retry semantics are subtle enough that they live in exactly one place here; a
-client supplies only its request builder and its event translation.
+same contract: an *attempt factory* that issues the request eagerly and returns
+an Attempt — the event iterator plus a ``close`` that kills the underlying
+connection — and raises on failure. The retry semantics are subtle enough that
+they live in exactly one place here; a client supplies only its request builder
+and its event translation.
 
 Transport failures raised while the SSE body is being consumed (read timeout /
 reset / truncated response) escape the openai SDK unwrapped as raw httpx2
@@ -16,21 +17,75 @@ after the first event is therefore raised immediately (clear error instead of a
 silent stall); a failure before it retries with backoff, yielding a
 {"type": "retry", ...} notice first so the caller/UI can show "reconnecting…"
 instead of looking frozen until the next attempt dies.
+
+Cancellation: ``cancel`` (the run's Stop event) is woven through every waiting
+point, because the events themselves only surface between chunks — a Stop that
+arrives while the thread is parked inside a blocking socket read would otherwise
+be unobservable until the read budget (240s) runs out. Three mechanisms:
+
+- an armed guard thread per attempt polls the event and, on Stop, calls the
+  attempt's ``close`` from OUTSIDE — that is the only way to break a read
+  that is already blocked (closing the connection makes it raise now);
+- the backoff between attempts waits on the event instead of ``time.sleep``;
+- each attempt's top refuses to start when Stop is already pending.
+
+A Stop-induced failure raises LlmError(code="cancelled", retryable=False) —
+never retried, and the loop maps it to the same graceful partial-return a
+between-chunk break produces.
 """
 
 from __future__ import annotations
 
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Collection, Iterator
 
 from ..client import LlmError
 
+GUARD_POLL_S = 0.25  # how often the guard checks Stop while an attempt is parked in a read
+
+
+@dataclass
+class Attempt:
+    """One in-flight request: its event iterator and the way to kill it.
+
+    ``close`` must be safe to call from another thread (the guard runs there)
+    and after the stream already ended — it is the watchdog's only lever."""
+    events: Iterator[dict[str, Any]]
+    close: Callable[[], None]
+
+
+def _cancel_guard(cancel: threading.Event, close: Callable[[], None]) -> threading.Event:
+    """Arm the watchdog for one attempt: on Stop, close the connection from this
+    helper thread so a read blocked in the socket raises immediately instead of
+    at the read budget. Returns the stop handle; the guard is a daemon, so an
+    abandoned process never waits on it."""
+    stop = threading.Event()
+
+    def guard() -> None:
+        while not stop.wait(GUARD_POLL_S):
+            if cancel.is_set():
+                try:
+                    close()  # may race the stream's own end: best-effort by design
+                except Exception:  # noqa: BLE001 -- any outcome still unblocks the read
+                    pass
+                return
+
+    threading.Thread(target=guard, name="llm-cancel-guard", daemon=True).start()
+    return stop
+
+
+def _cancelled(note: str) -> LlmError:
+    return LlmError(code="cancelled", retryable=False, message=note)
+
 
 def run_streaming(
-    source: Callable[[], Iterator[dict[str, Any]]],
+    source: Callable[[], Attempt],
     *,
     max_retries: int,
     retryable_status: Collection[int],
+    cancel: threading.Event | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Drive ``source()`` to completion, retrying pre-delivery failures.
 
@@ -41,11 +96,14 @@ def run_streaming(
     instead of being flattened into the "unknown" catch-all by classify().
     """
     attempts = max(1, int(max_retries))
-    for attempt in range(attempts):
+    for attempt_no in range(attempts):
         delivered = False
-        stream = source()
+        if cancel is not None and cancel.is_set():
+            raise _cancelled("stop requested before the attempt started")
+        turn = source()
+        guard = _cancel_guard(cancel, turn.close) if cancel is not None else None
         try:
-            for event in stream:
+            for event in turn.events:
                 if event["type"] == "finish":
                     yield event
                     return  # this attempt completed the turn: never start another
@@ -55,8 +113,12 @@ def run_streaming(
             # state (both clients synthesize one before falling off the end)
             raise LlmError(code="unknown", retryable=False, message="stream ended without a finish event")
         except Exception as e:  # noqa: BLE001 -- classify then decide to retry
+            # a Stop that landed mid-read (the guard closed the connection under
+            # us) must read as cancellation, never as a retryable transport error
+            if cancel is not None and cancel.is_set():
+                raise _cancelled("stop requested mid-stream") from e
             last_err = e if isinstance(e, LlmError) else LlmError.classify(e, retryable_status)
-            if not last_err.retryable or delivered or attempt == attempts - 1:
+            if not last_err.retryable or delivered or attempt_no == attempts - 1:
                 if not delivered and last_err.retryable:
                     # all attempts exhausted: say so instead of a bare transport message
                     last_err.message = f"{last_err.message} (after {attempts} attempts)"
@@ -65,13 +127,22 @@ def run_streaming(
             # show the recovery process instead of a silent stall
             yield {
                 "type": "retry",
-                "attempt": attempt + 1,
+                "attempt": attempt_no + 1,
                 "max": attempts,
                 "code": last_err.code,
-                "message": f"{last_err.message} — retrying ({attempt + 1}/{attempts})",
+                "message": f"{last_err.message} — retrying ({attempt_no + 1}/{attempts})",
             }
-            time.sleep((2**attempt) + attempt * 0.5)
+            # backoff waits ON the event: a Stop during the wait short-circuits
+            delay = (2**attempt_no) + attempt_no * 0.5
+            if cancel is not None and cancel.wait(delay):
+                raise _cancelled("stop requested during retry backoff")
+            time.sleep(delay)
         finally:
             # the attempt is over either way (finish, error, abort): drop the
             # connection now instead of waiting for the generator to be collected
-            stream.close()
+            if guard is not None:
+                guard.set()  # first: no racing close against our own cleanup
+            turn.close()
+            events_close = getattr(turn.events, "close", None)
+            if events_close is not None:
+                events_close()

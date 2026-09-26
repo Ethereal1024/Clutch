@@ -1,8 +1,11 @@
+from __future__ import annotations
+
+import threading
 from typing import Any, Iterator
 
 from .chunk_handle import StreamState, get_default_handlers
 from .openai_base import BaseOpenaiClient
-from .stream_runner import run_streaming
+from .stream_runner import Attempt, run_streaming
 
 
 class OpenaiLlmClient(BaseOpenaiClient):
@@ -16,11 +19,12 @@ class OpenaiLlmClient(BaseOpenaiClient):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        cancel: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         # Streamed chat completion. The retry policy — including why a retry is
-        # only safe before the first token of an attempt — lives in
-        # stream_runner.run_streaming; this method only builds the request and
-        # translates chunks into events.
+        # only safe before the first token of an attempt, and how Stop interrupts
+        # a read blocked mid-attempt — lives in stream_runner.run_streaming; this
+        # method only builds the request and translates chunks into events.
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -36,14 +40,24 @@ class OpenaiLlmClient(BaseOpenaiClient):
                 }
             }
         yield from run_streaming(
-            lambda: self._attempt(kwargs),
+            lambda: self._open(kwargs),
             max_retries=self.max_retries,
             retryable_status=self.retryable_status,
+            cancel=cancel,
         )
 
-    def _attempt(self, kwargs: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        """One request/response pass: yields events, ends with exactly one finish."""
+    def _open(self, kwargs: dict[str, Any]) -> Attempt:
+        """Issue the request eagerly and hand back events + the kill switch.
+
+        Eager matters: the attempt factory runs between retries, so a Stop that
+        lands during backoff is honored before the next request is even sent.
+        The openai Stream's own close() is the connection closer the guard uses
+        to break a read that is already blocked."""
         resp = self.client.chat.completions.create(**kwargs, stream=True)
+        return Attempt(events=self._events(resp), close=resp.close)
+
+    def _events(self, resp) -> Iterator[dict[str, Any]]:
+        """Translate one response stream into events, ending with exactly one finish."""
         state = StreamState()
         pending_finish: dict[str, Any] | None = None
 

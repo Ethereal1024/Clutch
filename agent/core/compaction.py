@@ -105,6 +105,10 @@ class Compactor:
             self.log.set_cpr_start(self.log.items()[-1][0])
             return True
         except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
+            # a Stop that landed mid-summary reads as a quiet bail, not a failure
+            if self.cancel is not None and self.cancel.is_set():
+                self._report_progress(0, done=True)
+                return False
             # LlmError's str() is empty; log the .message field
             print(f"[clutch] compaction failed: {getattr(e, 'message', '') or e}", file=sys.stderr)
             self._report_progress(0, done=True)
@@ -154,7 +158,7 @@ class Compactor:
         parts: list[str] = []
         chars = 0
         reported = 0
-        for ev in llm.stream([{"role": "user", "content": prompt}], tools=None):
+        for ev in llm.stream([{"role": "user", "content": prompt}], tools=None, cancel=self.cancel):
             # stop must interrupt the summary call, not just the main turn
             if self.cancel and self.cancel.is_set():
                 return "", chars

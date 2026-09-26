@@ -20,6 +20,8 @@ finish), so the loop, the UI and the transcript cannot tell the two apart.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import httpx2
@@ -90,6 +92,32 @@ def _partial_then_fail():
     raise httpx2.ReadTimeout("timed out")
 
 
+class _BlockedStream:
+    """An SSE body parked in a read: next() blocks until close() interrupts it —
+    the exact shape of the incident (Stop arrived while the thread sat inside a
+    blocking socket read). What a real close raises is a raw transport error,
+    which only the cancellation check may keep from becoming a retry."""
+
+    instances: list["_BlockedStream"] = []
+
+    def __init__(self) -> None:
+        self.closed = False
+        self._wake = threading.Event()
+        _BlockedStream.instances.append(self)
+
+    def __iter__(self) -> "_BlockedStream":
+        return self
+
+    def __next__(self) -> SimpleNamespace:
+        if not self._wake.wait(timeout=10):
+            raise AssertionError("the blocked read was never interrupted")
+        raise httpx2.ReadError("connection closed under us")
+
+    def close(self) -> None:
+        self.closed = True
+        self._wake.set()
+
+
 class _FakeCompletions:
     def __init__(self, streams):
         self._streams = list(streams)
@@ -133,6 +161,27 @@ def _collect(gen):
 # them by attribute, so attribute-carrying namespaces are a faithful stand-in.
 
 
+class _ScriptStream:
+    """A scripted feed shaped like what responses.create() really hands back:
+    an iterable that is also closable. The SDK Stream's close() is what the
+    cancellation guard uses to break a parked read, and _open() reads .close
+    the moment create() returns — so a bare iter(list) (a list_iterator has no
+    close) models only half the transport contract."""
+
+    def __init__(self, events):
+        self._it = iter(events)
+        self.closed = False
+
+    def __iter__(self) -> "_ScriptStream":
+        return self
+
+    def __next__(self):
+        return next(self._it)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeResponses:
     """The SDK's `client.responses`: one scripted event feed per create() call."""
 
@@ -149,9 +198,10 @@ class _FakeResponses:
         if not self._streams:
             raise AssertionError("unexpected extra responses.create() call")
         # a script is either a generator function (it can raise mid-stream) or a
-        # plain list of events
+        # plain list of events; either way it must come back closable, the way
+        # the real Stream is
         script = self._streams.pop(0)
-        return script() if callable(script) else iter(script)
+        return script() if callable(script) else _ScriptStream(script)
 
 
 def _responses_client(max_retries, streams, reasoning_effort=None):
@@ -472,6 +522,40 @@ def main() -> int:
     check(evs[0]["delta"] == "partial", "partial content was delivered once")
     check(err is not None and err.code == "timeout", "mid-stream failure raises instead of duplicating")
     check(comps.calls == 1, "no retry request after partial delivery")
+
+    # 4b. cancellation: Stop must reach every waiting point of a turn — the
+    #     attempt's top, a read blocked mid-attempt, and the retry backoff —
+    #     because cancel is otherwise only observable between chunks.
+    # pre-set Stop: no request at all
+    client, comps = _client(3, [_ok_stream])
+    cancel = threading.Event()
+    cancel.set()
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}], cancel=cancel))
+    check(evs == [] and err is not None and err.code == "cancelled" and not err.retryable,
+          "a pre-set Stop raises cancelled without streaming")
+    check(comps.calls == 0, "a pre-set Stop never issues a request")
+    # Stop lands while the thread sits in a blocked read: the guard closes the
+    # connection from outside, the read raises now (not at the 240s read budget)
+    _BlockedStream.instances.clear()
+    client, comps = _client(3, [_BlockedStream])
+    cancel = threading.Event()
+    threading.Timer(0.5, cancel.set).start()
+    started = time.monotonic()
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}], cancel=cancel))
+    elapsed = time.monotonic() - started
+    check(err is not None and err.code == "cancelled" and not err.retryable,
+          "a Stop mid-read raises cancelled, not a transport error")
+    check(comps.calls == 1, "a guard-killed attempt is never retried")
+    check(_BlockedStream.instances and _BlockedStream.instances[0].closed, "the guard closed the blocked stream")
+    check(elapsed < 5, f"the blocked read was interrupted promptly (took {elapsed:.2f}s)")
+    # Stop lands during the retry backoff: the wait breaks off, no second attempt
+    client, comps = _client(3, [_fail_stream, _ok_stream])
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()  # attempt 0 fails instantly; backoff for it is 1s
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}], cancel=cancel))
+    check(err is not None and err.code == "cancelled", "a Stop during backoff cancels instead of retrying")
+    check(comps.calls == 1, "no second request after a cancelled backoff")
+    check([e["type"] for e in evs] == ["retry"], "the retry notice was already out when Stop landed")
 
     # 5. responses protocol: the same contract over a different wire format
     _check_responses_protocol()
