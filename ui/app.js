@@ -66,6 +66,7 @@ const els = {
   task: $("#task-input"),
   run: $("#run-btn"),
   mode: $("#mode-btn"),
+  trust: $("#trust-btn"),
   status: $("#status"),
   stream: $("#stream"),
   tree: $("#tree"),
@@ -2407,9 +2408,11 @@ function openPerm(ev) {
   }
   permModal.classList.remove("hidden", "closing");
   setStatus("waiting");
+  if (trustArmed()) startTrustCountdown(); // armed: the prompt answers itself in 10s
 }
 function closePerm() {
   // respond immediately (the agent is blocked); only the visual close animates
+  stopTrustCountdown(); // any close (allow/deny/overlay/stale final) kills the clock
   closeModal(permModal);
   pendingPerm = null;
 }
@@ -2428,6 +2431,63 @@ async function respondPerm(allow) {
 $("#perm-allow").addEventListener("click", () => respondPerm(true));
 $("#perm-deny").addEventListener("click", () => respondPerm(false));
 dismissOnOverlayPress(permModal, () => respondPerm(false));
+
+// ---- trust mode: permission prompts auto-allow after a short countdown ----
+// UI-side only: the armed flag lives in localStorage, the countdown lives here.
+// Expiry takes the same respondPerm(true) path as clicking Allow, so the backend
+// sees an ordinary allow; deny / any close / disarm cancels the clock. The clock
+// is a plain setTimeout chain (1 tick per second) so a closed prompt is seen on
+// the next tick at worst.
+const TRUST_COUNTDOWN_S = 10;
+let trustTimer = null;
+
+function trustArmed() {
+  return localStorage.getItem("clutch_trust_all") === "1";
+}
+
+function paintTrustBtn() {
+  els.trust.textContent = trustArmed() ? "🛡 Trusted" : "🛡 Trust";
+}
+
+function setTrustArmed(on) {
+  localStorage.setItem("clutch_trust_all", on ? "1" : "0");
+  els.trust.classList.toggle("trust-on", on);
+  els.trust.title = on
+    ? `trust mode ON — prompts auto-allow after ${TRUST_COUNTDOWN_S}s unless denied. Click to disable.`
+    : `trust mode OFF — every prompt waits. Click to auto-allow after ${TRUST_COUNTDOWN_S}s.`;
+  paintTrustBtn();
+  if (!on) stopTrustCountdown();
+  else if (pendingPerm) startTrustCountdown(); // arming mid-prompt starts the clock now
+}
+
+function startTrustCountdown() {
+  stopTrustCountdown();
+  if (!trustArmed() || !pendingPerm) return;
+  let left = TRUST_COUNTDOWN_S;
+  const allowBtn = $("#perm-allow");
+  const tick = () => {
+    if (!pendingPerm) return; // prompt closed under a pending tick
+    if (left <= 0) {
+      respondPerm(true); // same path as clicking Allow (which also closes + resets)
+      return;
+    }
+    allowBtn.textContent = `Allow (${left}s)`;
+    left -= 1;
+    trustTimer = setTimeout(tick, 1000);
+  };
+  tick();
+}
+
+function stopTrustCountdown() {
+  if (trustTimer) {
+    clearTimeout(trustTimer);
+    trustTimer = null;
+  }
+  $("#perm-allow").textContent = "Allow";
+}
+
+els.trust.addEventListener("click", () => setTrustArmed(!trustArmed()));
+setTrustArmed(trustArmed()); // paint the stored state on startup
 
 // ---- workspace tree ----
 let lastTreeSig = "";

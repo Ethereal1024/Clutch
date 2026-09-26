@@ -235,6 +235,10 @@ button.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--te
 #mode-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 #mode-btn.chat-mode { border-color: var(--border); color: var(--text); }
 #mode-btn.chat-mode:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+/* trust mode auto-allows prompts after a countdown → armed is accent-highlighted
+   (same convention as work mode: the more permissive state is the loud one) */
+#trust-btn.trust-on { border-color: var(--accent); color: var(--accent); }
+#trust-btn.trust-on:hover { border-color: var(--accent); color: var(--accent); }
 
 select {
   appearance: none;
