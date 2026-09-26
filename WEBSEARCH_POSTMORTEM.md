@@ -6,6 +6,15 @@
 - **错误结论**：「SRU 官方代码未发布，仓库为空 / 404」
 - **事实**：官方代码完整发布在 `leggedrobotics` 组织下，共 6 个仓库，全部有真实实现（见附录）
 
+> **修复状态（2026-09-24）**：第 5 节的改动已随模块抽取全部落地 —— 模块已从
+> `agent/tools/websearch.py` 迁出为独立组件 `clutch-websearch/websearch.py`（提交 851f986，
+> 文件头部逐条标注 P0/P1/P2）。已对事故现场复验：抓取 SRU 官网，`_TextExtractor` 输出
+> `[GitHub](https://github.com/leggedrobotics/…)` 真实链接（根因 A 消除）；用当年同一条
+> 查询实测，bing 的无关中文结果被相关性守卫拦下，返回 `all search backends failed` 加每个
+> 后端的原因，不再是静默成功（根因 C 消除）。32 个测试全绿（`cd clutch-websearch && python3 -m pytest`）。
+> 仍待办：`CLUTCH_TAVILY_API_KEY` 未配置（链条仍退化为 bing+ddg，这是环境配置不是代码）；
+> 独立安装的组件副本 / 打包版要吃到修复需另行更新（本仓库的开发 checkout 已是修复版）。
+
 ---
 
 ## TL;DR
