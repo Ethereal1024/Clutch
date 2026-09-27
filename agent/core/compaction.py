@@ -1,13 +1,13 @@
 """Context-window compaction: roll the older conversation into a summary.
 
-Compaction is pure context management — byte budgeting, serialization, the
+Compaction is pure context management — window sizing, serialization, the
 summary call — so it lives here (next to core/context.py, which owns message
 derivation from the log) instead of inside the run loop. The loop only asks
 `should_compact` / `compact`; everything about when to fire and what to
 summarize is this class's business.
 
-Every budget is BYTES: the window and the window-usage comparison are exact
-byte arithmetic — no token estimation anywhere.
+Byte arithmetic throughout: the window and the window-usage comparison are exact
+bytes — no token estimation anywhere.
 
 The model window is [cpr_start, file_end): everything since the newest
 compaction line. compact() summarizes the WHOLE current window (already
@@ -47,16 +47,12 @@ class Compactor:
         config: Config,
         log: LazyEventLog,
         llm: LlmClient,
-        llm_factory: Callable[[], LlmClient] | None = None,
         sink: Callable[[object], None] | None = None,
         cancel: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.log = log
         self.llm = llm
-        # compaction summarizer: built lazily if a dedicated model is configured
-        self.llm_factory = llm_factory
-        self.compactor_llm: LlmClient | None = None
         # progress sink: the UI gets compaction_delta events instead of looking frozen
         self.sink = sink
         # stop flag: compaction is synchronous, so it checks cancel itself
@@ -76,8 +72,6 @@ class Compactor:
     def should_compact(self) -> bool:
         """True when the current window fills the model window: pure byte
         comparison, O(1) — no token estimation, no per-event walk."""
-        if not self.config.compaction_enabled:
-            return False
         return self.log.window_bytes() >= self.config.llm_context_window_bytes
 
     def compact(self) -> bool:
@@ -119,8 +113,12 @@ class Compactor:
         return comp.summary if comp else ""
 
     def _serialize(self, events: list[Event]) -> str:
-        """Compact transcript of the window for the summary prompt, capped to
-        fit with the previous summary and template (keeps the most recent part).
+        """Compact transcript of the window: the summarizer's whole input.
+
+        There is no length cap and nothing is elided; what tells the summarizer
+        this is someone else's session is the prompt's framing (see
+        prompts/compaction.md). The only cut is per event: one tool result is
+        trimmed, so a single huge read cannot drown the rest of the window.
         """
         lines = []
         for ev in events:
@@ -138,27 +136,14 @@ class Compactor:
                 if len(out) > 500:
                     out = out[:500] + "\n[truncated]"
                 lines.append(f"[Tool result]: {out}")
-        text = "\n".join(lines)
-        cap = self.config.llm_context_window_bytes - len(self._previous_summary().encode("utf-8")) - 8192
-        if len(text.encode("utf-8")) > cap:
-            text = text.encode("utf-8")[-cap:].decode("utf-8", "replace")
-            nl = text.find("\n")
-            if nl != -1:
-                text = text[nl + 1:]  # drop the partial first line
-        return text
+        return "\n".join(lines)
 
     def _summarize(self, history: str, previous: str) -> tuple[str, int]:
-        llm = self.compactor_llm
-        if llm is None and self.llm_factory is not None:
-            llm = self.llm_factory()
-            self.compactor_llm = llm
-        if llm is None:
-            llm = self.llm
         prompt = render("compaction.md", history=history, previous_summary=previous or "(none)")
         parts: list[str] = []
         chars = 0
         reported = 0
-        for ev in llm.stream([{"role": "user", "content": prompt}], tools=None, cancel=self.cancel):
+        for ev in self.llm.stream([{"role": "user", "content": prompt}], tools=None, cancel=self.cancel):
             # stop must interrupt the summary call, not just the main turn
             if self.cancel and self.cancel.is_set():
                 return "", chars

@@ -54,7 +54,8 @@ class Config:
     # Like the reasoning knob it is env-less: it describes this endpoint
     # pairing, which the settings surface already owns.
     llm_api_protocol: str | None = None
-    # model context window in BYTES (compaction compares against it)
+    # model context window in BYTES: compaction fires when the window reaches
+    # this size. That window's content is then the summarizer's whole input.
     llm_context_window_bytes: int = 500_000
 
     # Loop budget
@@ -67,9 +68,10 @@ class Config:
     doom_loop_limit: int = 4
     abort_on_doom_loop: bool = True
 
-    # Compaction: old turns roll into a summary as the window fills
-    compaction_enabled: bool = True
-    compaction_model: str | None = None  # None = the main model
+    # Compaction: old turns roll into a summary as the window fills. There is
+    # deliberately no separate budget for it: the trigger is
+    # llm_context_window_bytes above, and the whole window is the summarizer's
+    # input (see Compactor._serialize).
 
     # Tool execution
     command_timeout: float = 30.0

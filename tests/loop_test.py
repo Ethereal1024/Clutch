@@ -638,25 +638,57 @@ def main() -> int:
             "done marker closes the live block on failure",
         )
 
-    # 13d. summary prompt capped: multi-MB head not serialized in full
-    log13d = LazyEventLog.in_memory()
-    log13d.append(UserMessageEvent(content="task"))
-    for i in range(1500):
-        log13d.append(AssistantMessageEvent(content=f"old work {i} " + "x" * 500))
+    # 13d. the whole window reaches the summarizer: no length cap, no elision.
+    # Identity comes from the prompt's framing instead — a declared third-party
+    # role, a stated end to the transcript, and the contract restated after it.
+    def big_log():
+        log = LazyEventLog.in_memory()
+        log.append(UserMessageEvent(content="task"))
+        for i in range(1500):
+            log.append(AssistantMessageEvent(content=f"old work {i} " + "x" * 500))
+        return log
+
+    log13d = big_log()
     prompt_len: dict[str, int] = {}
+    prompt_text: dict[str, str] = {}
 
     class CaptureLlm:
         def stream(self, messages, tools=None, cancel=None):
-            prompt_len["n"] = len(messages[0]["content"].encode("utf-8"))
+            prompt_text["t"] = messages[0]["content"]
+            prompt_len["n"] = len(prompt_text["t"].encode("utf-8"))
             yield {"type": "text", "delta": "S" * 60}
             yield {"type": "finish", "reason": "stop"}
 
     comp13d = Compactor(Config(llm_context_window_bytes=200_000), log13d, CaptureLlm())
     check(comp13d.compact() is True, "compaction with a multi-MB head succeeds")
     check(
-        prompt_len["n"] <= 200_000 - 8_192 + 5_000,
-        f"summary prompt capped to window minus previous summary + template "
-        f"({prompt_len['n']} <= ~197000)",
+        "[... earlier transcript elided ...]" not in prompt_text["t"],
+        "the transcript is never elided",
+    )
+    check(
+        "[User]: task" in prompt_text["t"] and "old work 1499" in prompt_text["t"],
+        "the summarizer sees BOTH ends of the window verbatim",
+    )
+    check(
+        prompt_len["n"] > 700_000,
+        f"the summarizer gets the whole window, not a capped slice ({prompt_len['n']} bytes)",
+    )
+
+    # 13h. no input budget: the summarizer's input is the window's CONTENT, not
+    # the configured window size. Same log at wildly different windows -> same
+    # prompt, and that prompt is the whole transcript — nothing binds it.
+    sizes: dict[int, int] = {}
+    for window in (200_000, 5_000_000):
+        comp = Compactor(Config(llm_context_window_bytes=window), big_log(), CaptureLlm())
+        check(comp.compact() is True, f"compaction succeeds at window={window}")
+        sizes[window] = prompt_len["n"]
+    check(
+        len(set(sizes.values())) == 1,
+        f"the summary prompt does not depend on the configured window ({sizes})",
+    )
+    check(
+        min(sizes.values()) > 700_000,
+        f"it carries the whole window rather than a budgeted slice ({min(sizes.values())} bytes)",
     )
 
     # 13f. second compaction input is the whole current window, not a capped slice
@@ -674,8 +706,7 @@ def main() -> int:
 
     comp13f = Compactor(Config(llm_context_window_bytes=200_000), log13f, CaptureLlm2())
     check(comp13f.compact() is True, "first compaction succeeds")
-    check(log13f.window_bytes() < 200_000,
-          "window collapsed to just the new summary line after compaction")
+    check(log13f.window_bytes() < 200_000, "window collapsed to just the new summary line after compaction")
     marker = "new work 0 "
     for i in range(600):
         log13f.append(AssistantMessageEvent(content=f"new work {i} " + "y" * 200))
@@ -685,8 +716,18 @@ def main() -> int:
         "second compaction input carries the whole post-compaction window "
         "verbatim (first appended event included, not a capped slice)",
     )
-    check(comp13f.compact() is False,
-          "third compaction is a no-op (the window holds only the summary line)")
+    check(comp13f.compact() is False, "third compaction is a no-op (the window holds only the summary line)")
+
+    # 13i. the output contract is restated AFTER the transcript: the summarizer is a
+    # completion over a huge pseudo-chat, so a contract that only sits at the top of
+    # the prompt is 200K+ bytes away from the generation point and the model continues
+    # the transcript instead of summarizing it (the compaction regression).
+    prompt = prompt_n["n"]
+    tail = prompt[prompt.rindex("</conversation>") :]
+    check(
+        "Relevant Files" in tail and "nothing else" in tail,
+        "the summary contract follows the transcript, adjacent to the generation point",
+    )
 
     # 13e. cancel aborts an in-flight compaction
     import threading  # noqa: PLC0415
@@ -722,10 +763,7 @@ def main() -> int:
         check(result13c == "real answer", "empty reply is retried, not completed")
         check(len(fake13c.calls) == 2, "empty reply costs exactly one retry")
         check(
-            any(
-                isinstance(e, UserMessageEvent) and "no visible text" in e.content
-                for e in agent13c.log.events()
-            ),
+            any(isinstance(e, UserMessageEvent) and "no visible text" in e.content for e in agent13c.log.events()),
             "retry prompt mentions the empty reply",
         )
 

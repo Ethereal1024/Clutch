@@ -62,7 +62,6 @@ class Agent:
         sink: EventSink | None = None,
         cancel: threading.Event | None = None,
         gate: PermissionGate | None = None,
-        compactor_factory: Callable[[], LlmClient] | None = None,
         memories: Any | None = None,
     ) -> None:
         self.llm = llm
@@ -74,10 +73,8 @@ class Agent:
         self.sink = sink
         self.cancel = cancel
         self.gate = gate
-        # compaction lives in the Compactor (dedicated model built lazily)
-        self.compactor = Compactor(
-            config, self.log, llm, llm_factory=compactor_factory, sink=self.sink, cancel=self.cancel
-        )
+        # compaction lives in the Compactor (it summarizes with this same client)
+        self.compactor = Compactor(config, self.log, llm, sink=self.sink, cancel=self.cancel)
         # durable project-memory store, if any
         self.memories = memories
 

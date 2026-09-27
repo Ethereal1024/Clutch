@@ -207,15 +207,6 @@ class BaseServer(ABC):
             workspace = self.build_workspace(project)
         workspace.protect(project.path)
         llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
-        # compaction summarizer built lazily via a factory capturing the resolved key
-        compactor_factory = None
-        if cfg.compaction_model and cfg.compaction_model != cfg.model:
-            api_key = self.state.api_key or cfg.api_key
-
-            def _make_compactor() -> LlmClient:
-                return self._build_llm(api_key, cfg.compaction_model, cfg)
-
-            compactor_factory = _make_compactor
         cancel = cancel or threading.Event()
         if not self.state.start(task, workspace, cancel):
             return None
@@ -233,6 +224,5 @@ class BaseServer(ABC):
             sink=self.broadcaster.publish,
             cancel=cancel,
             gate=gate,
-            compactor_factory=compactor_factory,
             memories=project.memories,
         )
