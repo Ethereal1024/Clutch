@@ -1,0 +1,214 @@
+The user makes a sharp observation: the model didn't actually receive ANY summary content — so it can only guess what happened.
+
+Wait, let me parse. "而且很明显，模型也没有实际收到任何的摘要内容，所以只能去自己猜发生了什么" — "And obviously, the model didn't actually receive any summary content, so it could only guess what happened."
+
+So the user is saying: it's not just that the summary is garbage — the model didn't receive the summary at all? Or: the model that produced these "summaries" wasn't given any actual content to summarize, so it was forced to guess (and guessed by emitting an agentic "I'd better go look" action)?
+
+Ah — I think the user is proposing/inferring the *upstream* explanation: the summary prompts were EMPTY (or nearly empty) of history, so the summarizer had nothing to summarize, and it therefore guessed/improvised — producing "I have the first repro..." style text. That would explain "short and similar" far more directly than "the model misbehaved".
+
+Wait, but which "model"? Let me reconsider. The user says "模型也没有实际收到任何的摘要内容" — "the model didn't actually receive any summary content". Hmm, ambiguous: 
+(a) The summarizer model didn't receive any content to summarize (empty history in prompt) → so it guessed.
+(b) The main model, after compaction, didn't receive the summary content (because the summary is garbage/not injected) → so it guessed what happened.
+
+Given the previous turn, I explained the mechanism as "the summarizer went agentic and its next-action text got stored as the summary". The user now adds: actually, the summarizer had NO content — it received an empty/near-empty history — so it had to guess, and guessing produced that text.
+
+Hmm, "所以只能去自己猜发生了什么" — "so it could only guess what happened". This fits (a): if the history given to the summarizer is empty or nearly empty, the model has to guess what happened, and it produces a hallucinated "I have the first repro..." line.
+
+Actually wait — is it (b)? "模型也没有实际收到任何的摘要内容" — the model didn't receive any summary content. "所以只能去自己猜发生了什么" — so it can only guess what happened. That's about the MAIN agent, post-compaction: it gets a summary that contains no real summary content, so it must guess what happened. Both readings converge on: the compaction carried no actual information.
+
+Let me think about which is more likely to be the real technical claim, and whether the code supports an "empty history" path.
+
+Let me reconsider the previous scenario. If the summarizer received an empty history, what would it output? With the compaction prompt saying "output exactly the template", a well-behaved model would output the template with "(none)" everywhere. A model that's confused might instead produce... hmm, "I have the first repro (scenario A fails). Let me pin down the exact call signatures" — that's a very specific continuation. It reads like the model continuing the CONVERSATION, not guessing at an empty history.
+
+Hmm. Actually, hold on. Let me reconsider: these summaries look like they could be the model's own *reasoning/thinking* or its *next action* — and the key question is where the text came from.
+
+The user's claim: the model received no actual content to summarize. Let me check whether that's mechanically possible in the code.
+
+Look at `_serialize`: `cap = self.config.llm_context_window_bytes - len(previous_summary) - 8192`. If `previous_summary` is large... no.
+
+Hmm, wait. Big realization candidate: **`_serialize` returns "" or nearly "" in some path**, so the prompt's `<conversation>` is empty → the summarizer must guess.
+
+When would `_serialize` return empty? If `events` (the window) contain no serializable events (no UserMessage/Assistant/ToolResult). E.g., if the window is only tool calls or step events... but window = events with off >= cpr_start; CompactionEvent is skipped, ToolCallEvent is NOT handled by `_serialize` (only User/Assistant/ToolResult)! Look:
+
+```python
+for ev in events:
+    if isinstance(ev, UserMessageEvent): ...
+    elif isinstance(ev, AssistantMessageEvent): ...
+    elif isinstance(ev, ToolResultEvent): ...
+```
+ToolCallEvent, StepStartEvent, etc. are ignored. So if a window consisted only of CompactionEvent + ... no.
+
+Hmm, after the FIRST bogus compaction, the window collapses to just the summary line. Then work continues. Next window = [summary(CompactionEvent, skipped), ...new events]. New events would include assistant messages. So not empty.
+
+Hmm, unless... Let me reconsider `compact()`:
+```python
+window = [ev for off, ev in self.log.items() if off >= self.log.cpr_start()]
+if len(window) <= 1:
+    return False
+```
+It requires len(window) > 1. So at minimum 2 events, one of which may be the previous summary.
+
+Hmm. Let me think about the ACTUAL reason the summarizer got no content.
+
+OH WAIT. I think I might have it. Consider the head+tail cap I just implemented... no, that's after.
+
+Hmm, let me reconsider. Actually — maybe the user is pointing at a DIFFERENT thing: the `previous_summary` placeholder. If `previous` is empty, the prompt renders `(none)`. Not empty.
+
+Let me reconsider the timing: the user says "模型也没有实际收到任何的摘要内容". Maybe they mean: after compaction, `derive_messages` injects the summary... but wait, does it? Let me re-check: `head_msgs = [{"role": "user", "content": render("compaction_head.md", summary=compaction.summary)}]`. So the summary IS injected. Unless `compaction.summary` is empty.
+
+Hmm, so if the stored summary were empty, head_msgs would be "Previous conversation summary:\n" — no content. And `compact()` guards `if not summary: return False`, so an empty summary never gets stored. So the stored summary is non-empty (the agentic text). But it contains no actual summary → the model reading it learns nothing → must guess.
+
+I think the user's point is a REFINEMENT of my explanation, pushing toward: **the reason these three summaries look like "guessing" is that the summarizer was fed essentially nothing meaningful — so the real question is why the history was empty/degenerate.** And they want me to find THAT mechanism.
+
+Actually, re-reading once more: "而且很明显，模型也没有实际收到任何的摘要内容，所以只能去自己猜发生了什么". 
+
+I think the strongest reading: the *main* agent, after these compactions, received no actual summary content — so it could only guess. That's a restatement/emphasis of the impact. But the user might also be implying the *cause*: the summarizer wasn't given content.
+
+Hmm, this is a genuinely ambiguous, short message. Given my role, the best response: acknowledge and then pin down the exact code path by which "no content reaches the model" — i.e., find whether there's a real "empty input to summarizer" bug. Let me investigate the code for that possibility seriously, since that's the new claim.
+
+Let me think hard about `_serialize` and the window.
+
+Scenario: after a bogus compaction at time T1, cpr_start points to the bogus summary line. The agent continues. Then at T2 the window fills again and compaction fires again. `window` = [bogus_summary_line] + [new events since T1]. `_serialize(window)` → skips CompactionEvent, serializes the new events. So the summarizer DOES get the new events. Unless the new events are mostly... hmm.
+
+Hmm, but wait: what if `previous_summary` is huge? `cap = window - len(prev) - 8192`. If prev summary is ~700 bytes, cap is fine.
+
+Hmm, what if `llm_context_window_bytes` is SMALL? No.
+
+Let me reconsider: maybe the real mechanism is the OPPOSITE — the history is huge and the `head+tail`/tail-only truncation... no, that's my fix.
+
+Hmm, actually — WAIT. Let me reconsider the OLD `_serialize` (before my fix — that's what produced these three samples, since the user "检查了异常发生的几次压缩"; the timestamps are from their real session, before my fix). The old code:
+
+```python
+if len(text.encode()) > cap:
+    text = text.encode()[-cap:].decode("utf-8", "replace")
+    nl = text.find("\n")
+    if nl != -1: text = text[nl+1:]
+```
+Tail-only. That keeps the tail, so not empty.
+
+Hmm, so where's "no content"?
+
+Let me reconsider — maybe the user is describing what THEY see in the UI: the model, after compaction, behaves as if it has no idea what happened, because the "summary" it got is a fragment of its own next-action text. That's just the impact of the bogus summary. So the user is agreeing/adding: "the model received no actual summary content, so it has to guess." And maybe they want me to confirm and generalize.
+
+Given the ambiguity, the best response:
+1. Agree and make it precise: yes — what reaches the model is a *non-summary*, so functionally it received ZERO information about the compacted history; the real window is gone (cpr_start moved past it). So the model must reconstruct/guess.
+2. But then go further and check the mechanism for "getting NO content": I should verify whether the summarizer itself had proper content, and whether there's a path where the summary prompt's `<conversation>` was empty/degenerate.
+
+Actually — hmm, let me reconsider a very plausible mechanism for "the summarizer got (almost) nothing": **the second and third compactions**. After the first bogus compaction, cpr_start → the bogus summary line. `_previous_summary()` = that bogus text. Now the prompt says "Prior summary: <bogus>". And the `<conversation>` = the new events.
+
+Hmm, so it gets new events.
+
+Unless... the new events after the bogus compaction were themselves tiny because the run was ABORTED right after compaction? Look at the timestamps: T3=1790416142, T2=1790431819, T1=1790433304. Gaps: T3→T2 = 15677s (4.35h), T2→T1 = 1485s (25min). So there's real time and presumably real activity between them. Hmm, but if the session was idle/closed between, the window wouldn't grow.
+
+OK let me step back and think about what would make the summarizer produce "I have the first repro (scenario A fails). Let me pin down the exact call signatures and the code I need to change." 
+
+That text is a *continuation of the transcript*. It's exactly what the NEXT assistant turn would say. So the summarizer received the transcript and CONTINUED it instead of summarizing. That requires the transcript to be present — so it DID receive content. So the user's claim "didn't receive any summary content" must refer to the *downstream* model (the main agent), not the summarizer.
+
+Hold on, but there's another possibility that fits BOTH: **the summarizer received the transcript, but the transcript it received was ITSELF only a previous bogus summary** (a self-referential loop). I.e., after bogus compaction #1, the model's "next turn" continues from the bogus summary, and the window at the next trigger contains: [bogus summary line] + [the assistant turn that continued it + tool calls + ...]. Hmm, still content.
+
+Hmm OK, alternatively: maybe the mechanism is that the summarizer's OUTPUT is being taken from the MAIN stream — i.e., there IS a concurrency bug and the "summary" is literally the main agent's assistant_message text (which is why it matches the model's next action exactly). And the summarizer itself returned nothing (empty), but `_summarize` somehow picked up the text from the shared client.
+
+But `_summarize`'s parts only append from `llm.stream(...)` of the compactor's own client. Unless `self.compactor_llm` is None and `llm = self.llm` = the MAIN client, and the main client is concurrently streaming... but each `stream()` call creates its own `StreamState` and iterates its own response. Concurrent `stream()` calls on the same client object are independent generators (the openai client is thread-safe-ish). So no cross-talk.
+
+Hmm. So the text must come from the compactor's own response.
+
+Let me reconsider: could the compactor's own prompt contain the transcript AND the model just... completes it? Yes! That's the "misbehaving summarizer" — but WHY would it misbehave so consistently? Because the history's LAST event is the assistant's in-progress turn, and the model is a strong instruction-follower for the agent persona... Actually, the compaction prompt is a user message with no system prompt. A base chat model receiving "Output exactly the Markdown structure inside <template> ... <conversation>[huge transcript]</conversation>" should output the template. But DeepSeek V3.x is heavily RLHF'd as an agent; given a transcript ending with the assistant's tool-call scaffolding, it may continue the pattern.
+
+Hmm, but the user's framing is different and I should engage with it rather than argue. Let me actually consider: is there a real path where the summarizer gets NO history? 
+
+**AH — I think I might have it!** Look at `_serialize`'s cap again:
+
+```python
+cap = self.config.llm_context_window_bytes - len(self._previous_summary().encode("utf-8")) - 8192
+```
+
+and then OLD code: `text = text.encode("utf-8")[-cap:]`.
+
+If `cap` is NEGATIVE (i.e., `previous_summary` is bigger than window-8192), then `text[-cap:]` with negative cap... `b"abc"[-(-5):]` = `b"abc"[5:]` = `b""`. So text becomes ""! Then `nl = ""` → find returns -1 → text stays "". So the history is EMPTY → the summarizer receives `<conversation>\n\n</conversation>` with NO content!
+
+When is cap negative? When `len(previous_summary) > window - 8192`, i.e., previous summary > ~192KB. That's huge — unlikely. Hmm.
+
+Hmm, but what about a smaller window? `llm_context_window_bytes` default? Let me check config. If the configured window is, say, 128_000 or 32_000... Let me look at config default.
+
+Actually, more interesting: what if `cap` is small positive but `text[-cap:]` keeps only the tail — not empty.
+
+Hmm, the negative-cap path needs a giant summary. Not it.
+
+Let me reconsider. Let me look at this from the user's phrasing once more: "而且很明显，模型也没有实际收到任何的摘要内容，所以只能去自己猜发生了什么".
+
+Maybe "模型" = the summarizer model, and "摘要内容" = the content to be summarized (the material). "the model didn't actually receive any content to summarize, so it could only guess what happened." → This is the user's DIAGNOSIS: the summarizer's input was empty/insufficient.
+
+If that's the user's hypothesis, I should test it. Is there a code path where the summarizer's `<conversation>` is empty while `window` has >1 event?
+
+`_serialize` handles only UserMessageEvent, AssistantMessageEvent, ToolResultEvent. So if the window contains only ToolCallEvents and StepStartEvents and CompactionEvents (i.e., NO user/assistant/tool_result), `lines` is empty → text = "" → prompt has empty conversation!
+
+When does a window contain assistant messages? Every LLM turn appends an AssistantMessageEvent... unless the assistant turn had empty content AND no reasoning AND no tool_calls? `_repair_dangling` might drop them from derive_messages, but `_serialize` iterates raw events: for AssistantMessageEvent it appends content if non-empty, reasoning if non-empty, and tool calls. So an assistant message always yields at least the tool-call lines or nothing.
+
+Hmm, hmm. Consider a window that is [previous CompactionEvent, ToolCallEvent, ToolResultEvent, ...]. ToolResultEvent IS serialized. So content exists.
+
+So for `_serialize` to return "", the window must contain >1 events but none of type user_message/assistant_message/tool_result. E.g., [CompactionEvent, ToolCallEvent, StepStartEvent, ...]. Possible if a turn is interrupted right after a tool call? Unlikely to be the norm.
+
+Hmm, I don't think there's a clean "empty" path. Let me reconsider.
+
+OK here's another thought that fits PERFECTLY and I think is the real answer the user is hinting at:
+
+**The three summaries are literally the LAST assistant message of the window, i.e., the model is echoing the tail.** And the reason the *user* says "the model didn't receive any summary content" is: because the summary content IS a copy of a transcript line, not a summary — so the model downstream has no information.
+
+But more importantly: the user might be pointing at the fact that these summaries are IDENTICAL IN SHAPE because the information content is nil.
+
+Hmm, I keep going in circles. Let me just be helpful and precise: 
+
+I'll do BOTH:
+1. Confirm the "no information reached the model" claim at the context level, and show exactly why it's structurally guaranteed once a bogus summary is stored: the summary IS the entire surviving context (head + window collapse), so a non-summary = zero information about everything before it. The model can only re-derive/guess. And I can point to the self-reinforcing loop: bogus summary → model guesses → its guess becomes the new window content → next compaction's prompt/prev-summary is again bogus → next summary again a guess.
+
+2. Actually CHECK the input-side hypothesis: does the summarizer ever receive an empty/near-empty history? I should verify by reasoning about `_serialize` and the window, and note the one path that CAN empty it (negative cap → tail slice becomes empty; or a window with no serializable types). And note that with my head+tail fix, `head+tail` would return just the marker if budget<=0 — also empty.
+
+Hmm wait, actually, let me reconsider #2 more carefully, because there IS a very plausible path I glossed: **the window after a bogus compaction contains the bogus summary + the events the model produced while "guessing"**. When the model guesses (because it lost context), its next turn is full of re-exploration (grep/read), which is exactly the content of the next window. And the next compaction summarizes THAT. So the summaries stay in the "I'm re-exploring to figure out what's going on" register — which matches all three samples! The middle one even says "Let me trace exactly how a tool result is projected back..." — that's re-investigating from scratch.
+
+So the causal chain: bogus compaction → context loss → model re-derives from scratch → its re-derivation IS the next window → next summary is again a fragment of re-derivation. Self-sustaining "amnesia loop". THAT explains why they're similar and consecutive.
+
+I think this is the most valuable synthesis, and it directly incorporates the user's point: the model received no summary content, so it guessed; its guessing became the material for the next compaction; ad infinitum.
+
+Let me also reconcile with the "why did the FIRST one go wrong" — the origin. The origin is the mechanism I described last turn (the summarizer going agentic + non-empty acceptance). After that, the amnesia loop sustains it.
+
+Hmm, but the user says "模型也没有实际收到任何的摘要内容" — maybe they want me to confirm the model literally got nothing. Let me verify: after compaction, `derive_messages` gives:
+- system
+- task.md (current task) — wait! In a continued session, the task IS re-injected. So the model isn't 100% blind: it has the current task line. But the task might be "继续" (short) — so it has almost nothing. That matches "只能去自己猜".
+- head_msgs: "Previous conversation summary:\n<bogus text>" — bogus = its own next-action text from before, which reads like "I have the first repro... let me go grep" → the model sees a fragment of ITSELF mid-action, with no context. So it continues guessing.
+- window: events after the compaction.
+
+So yes — the model's only "memory" is a fragment of its own next-action text. It has no real summary. Confirmed.
+
+So my answer should:
+- Confirm: correct — and it's not incidental, it's structural.
+- Explain WHY: the summary is the *entire* surviving memory (head) + the window is reset; so "summary is not a summary" == "model has no memory".
+- Explain the amnesia loop (self-sustaining), which explains "short, similar, three in a row".
+- Note the aggravating factor: in a continued session, the only other thing injected is `Task: <current>`, which is often thin ("继续").
+- Tie back: this is why P0 validation matters — refuse to slide cpr_start on an invalid summary, so the model never loses the window.
+- Maybe add: an extra safety net — keep the last N user messages (or the previous summary chain) so even a bad summary can't zero out memory. E.g., always inject the objective/task and the previous summary as separate fields; or "quote of the last real summary".
+
+Hmm, wait. Actually, let me reconsider the user's sentence ONE more time, because there's a reading I dismissed: "模型也没有实际收到任何的摘要内容" could mean **the summarizer received no *summary* content — i.e., no `<prior-summary>` and no real `<conversation>`** — specifically for the 2nd and 3rd compactions: because after the first bogus compaction, `previous_summary` = bogus, and the window... 
+
+Hmm, here's a concrete sub-case: what if the second compaction fired with a window that contains ONLY the previous compaction line + a couple of events that `_serialize` ignores? Then `<conversation>` is empty and `<prior-summary>` is the bogus text → the model has literally nothing → it guesses → produces a "let me go look" line. That would explain the 2nd and 3rd being guesses!
+
+But would `should_compact` fire on such a small window? No — it needs 200KB. Unless forced by `context_window_exceeded`.
+
+Hmm, unless `compaction_model` is configured with a SMALL window? `config.llm_context_window_bytes` is used for the cap, but `should_compact` also uses it. So if it were small, compaction would fire often on small windows → the summarizer would get small content → guess. That could explain the loop! Let me check the config default for `llm_context_window_bytes` and `compaction_model`.
+
+Let me actually look at config.py to see defaults, and check if there's a settings file in the repo that sets a small window. That's a concrete, checkable hypothesis.
+
+Let me read agent/config.py around line 50-75.
+
+Given I'm asked to "find the mechanism", let me do that read. It's cheap and could be decisive.
+
+Let me also reconsider: the user says "所以只能去自己猜发生了什么" — "so [the model] could only go and guess what happened". This is about the model's BEHAVIOR after compaction. I'm now fairly confident the intended meaning is:
+
+"The model didn't actually receive any summary content [i.e., the summaries carry no real information], so it can only guess what happened [in the compacted history]."
+
+So: the user is agreeing with my analysis and adding the crucial consequence — the model is left guessing. They want me to "find the mechanism and give a fix" (from the previous message, which I answered; this message is a refinement).
+
+Given that, the best response: confirm and deepen, with the amnesia-loop insight, and make the fix recommendation sharper: the summary must never be the *sole* carrier of the objective — there should be a non-summary, always-present anchor (the task/objective) that compaction cannot destroy.
+
+Let me quickly check config defaults to see if the window is small, since that would strengthen/alter the diagnosis. Let me read config.py.
+
+I'll read agent/config.py lines 40-80.
