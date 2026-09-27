@@ -133,8 +133,11 @@ def derive_messages(
     this host). Tool output is not folded here; it accumulates until compaction.
     """
     full_events = log.events()
-    # a never-compacted file has the raw task at index 0; skip it (task.md
-    # re-injects the current task). A compacted file starts at the summary line.
+    # index 0 may be the current run's task, which task.md re-injects. But in a
+    # continued session (a new run on the same project log) index 0 is the
+    # project's FIRST user message — a real requirement — so drop it only when it
+    # IS the current task; otherwise dropping it erased the original ask from the
+    # context on every follow-up message.
     raw_task = full_events[0] if full_events and isinstance(full_events[0], UserMessageEvent) else None
     events = full_events
     head_msgs: list[dict[str, Any]] = []
@@ -154,7 +157,7 @@ def derive_messages(
                 {"role": "user", "content": render("compaction_files.md", files=", ".join(files))}
             )
         events = tail_events
-    if raw_task is not None and events and events[0] is raw_task:
+    if raw_task is not None and events and events[0] is raw_task and raw_task.content == task:
         events = events[1:]
 
     msgs = _to_messages(events)

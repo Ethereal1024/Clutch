@@ -751,9 +751,9 @@ def main() -> None:
         "reopen keeps the same window (index stable across persistence)",
     )
 
-    # 2f. long log projects everything; the raw task copy is not sent twice
+    # 2f. long log projects everything; the CURRENT task's raw copy is not sent twice
     big = LazyEventLog.in_memory()
-    big.append(UserMessageEvent(content="original task"))
+    big.append(UserMessageEvent(content="test"))  # index 0 IS the current run's task
     for i in range(30):
         big.append(AssistantMessageEvent(content=f"turn {i}"))
     msgs = derive_messages(big, config, "test")
@@ -765,8 +765,19 @@ def main() -> None:
         "task injected exactly once (raw copy dropped)",
     )
     check(
-        not any(m["role"] == "user" and m.get("content") == "original task" for m in msgs),
-        "raw task copy excluded from projection",
+        not any(m["role"] == "user" and m.get("content") == "test" for m in msgs),
+        "the current task's raw copy excluded from projection",
+    )
+
+    # 2f2. continued session: index 0 is a PAST task, so it must stay visible
+    big2 = LazyEventLog.in_memory()
+    big2.append(UserMessageEvent(content="original task"))
+    big2.append(AssistantMessageEvent(content="turn 0"))
+    big2.append(UserMessageEvent(content="follow up"))
+    msgs2 = derive_messages(big2, config, "follow up")
+    check(
+        any(m["role"] == "user" and m.get("content") == "original task" for m in msgs2),
+        "a continued session keeps the project's first user message",
     )
 
     # 2g. tool output is preserved verbatim (only compaction trims)
