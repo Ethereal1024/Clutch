@@ -150,10 +150,15 @@ class Workspace(ABC):
         self._protected.add(self.realpath(path))
 
     def is_protected(self, path: Path) -> bool:
-        try:
-            return self.realpath(path) in self._protected
-        except OSError:
-            return False
+        """Whether the workspace hides this path (e.g. the .clc project file).
+
+        Deliberately unguarded: realpath is total (see its docstring), so a path
+        that cannot be normalized — a symlink loop — yields a path that simply is
+        not the protected file, instead of an exception the caller has to guess
+        the meaning of. The old `except OSError: return False` guarded an
+        exception Path.resolve() never raises on POSIX while the one it does
+        raise (RuntimeError, "symlink loop") went straight through it."""
+        return self.realpath(path) in self._protected
 
     def protected(self) -> set[Path]:
         """Snapshot of the protected set: the workspace daemon is spawned with
@@ -210,8 +215,20 @@ class Workspace(ABC):
         remote host's layout, and resolving a remote path locally rewrote it
         with the app host's spelling of /home (on macOS the autofs target
         /System/Volumes/Data/home) before the remote ever saw it. Everything
-        internal goes through this hook so the two can never drift."""
-        return Path(path).resolve()
+        internal goes through this hook so the two can never drift.
+
+        The local normalization is TOTAL: os.path.realpath instead of
+        Path.resolve(), which raises RuntimeError("Symlink loop from ...") on a
+        loop (CPython 3.10 — a RuntimeError is not an OSError, so no caller's
+        `except OSError` ever saw it). A loop IS a real directory entry, and
+        every caller of this hook is doing bookkeeping — comparing, keying,
+        contained-or-not — that must not throw across a boundary because one
+        entry cannot be resolved. realpath answers with the path it could not
+        resolve through, which is exactly "not the target, and not the .clc";
+        the operation that actually opens the path reports ELOOP itself.
+        Verified identical to Path.resolve() for every other input (existing,
+        missing, dangling, chained, relative, `..` through a symlink)."""
+        return Path(os.path.realpath(path))
 
     def home(self) -> Path:
         """The home directory a leading `~` expands to for this workspace.

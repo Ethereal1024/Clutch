@@ -13,6 +13,7 @@ enough to reason about from the payload alone.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +82,10 @@ def _fs_list_local(raw: str, show_hidden: bool) -> dict[str, Any]:
             "name": e.name,
             "path": str(e),
             "dir": e.is_dir(),
-            "link": str(e.resolve()) if e.is_symlink() else None,
+            # realpath, not e.resolve(): a symlink LOOP makes Path.resolve() raise
+            # RuntimeError (3.10), which would take down the whole listing over
+            # one unresolvable entry. realpath hands back the loop path itself.
+            "link": os.path.realpath(e) if e.is_symlink() else None,
         }
         for e in listing
         if entry_visible(e.name, e.is_dir(), show_hidden)
@@ -179,21 +183,20 @@ def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
     return children[""]
 
 
-def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hidden: bool) -> list:
+def _walk(root: Path, workspace: Workspace, expanded: list[str], show_hidden: bool) -> list:
     """Lazy partial tree walk: list children only for the root, the currently
     expanded dirs, and their direct children (one level of lookahead). Deeper
     levels are fetched as they get expanded, so opening a big project never walks
-    the whole tree up front. show_hidden keeps dotfiles out of every level."""
+    the whole tree up front. show_hidden keeps dotfiles out of every level.
+
+    A directory the OS refuses to list raises OSError here and the caller fails
+    loudly: an unreadable directory must not be quietly rendered as an empty one
+    (the picker's /api/fs/list already reports its failures through dir_error —
+    one behaviour, not two)."""
     expanded = set(expanded)
 
     def list_entries(p: Path) -> list[Path]:
-        if workspace is not None:
-            entries = workspace.visible_entries(p)
-        else:
-            try:
-                entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
-            except OSError:
-                return []
+        entries = workspace.visible_entries(p)
         if not show_hidden:
             entries = [e for e in entries if not e.name.startswith(".")]
         return entries
@@ -203,7 +206,10 @@ def _walk(root: Path, workspace: Workspace | None, expanded: list[str], show_hid
         for e in list_entries(p):
             child_rel = str(e.relative_to(root))
             node = _tree_node(e.name, child_rel, e.is_dir())
-            node["link"] = str(e.resolve()) if e.is_symlink() else None
+            # the workspace hook, not e.resolve(): a symlink loop raises
+            # RuntimeError there (3.10) and would kill the whole tree over one
+            # entry the UI merely labels
+            node["link"] = str(workspace.realpath(e)) if e.is_symlink() else None
             # symlinked dirs are shown as leaves: prevents escaping into system
             # trees and symlink cycles; the agent's tools still follow links, so
             # only the UI is affected

@@ -127,6 +127,25 @@ def _check_symlink_marking(base_url: str, proj_dir: Path, clc: Path) -> None:
     check(lnode is not None and lnode.get("link") == str(linked.resolve()), "tree marks symlink dir")
     check(lnode is not None and "children" not in lnode, "tree does not recurse into symlink dir")
 
+    # a symlink LOOP is a legitimate directory entry, not a fatal one: Path.resolve()
+    # raises RuntimeError("Symlink loop from ...") for it (and RuntimeError is not an
+    # OSError), so one looping pair used to take down the whole listing and the whole
+    # tree — the entry must be reported like any other unresolvable target instead
+    (proj_dir / "loopa").symlink_to("loopb")
+    (proj_dir / "loopb").symlink_to("loopa")
+    _, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
+    data = json.loads(body)
+    check(
+        any(e["name"] == "loopa" for e in data.get("entries", [])),
+        "fs list survives a symlink loop",
+    )
+    _, body = http_get(f"{base_url}/api/workspace/tree")
+    data = json.loads(body)
+    check(
+        any(n["name"] == "loopa" for n in data.get("tree", [])),
+        "workspace tree survives a symlink loop",
+    )
+
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     """Kill a spawned holder process AND its children. On Windows a venv's

@@ -311,6 +311,21 @@ def check_project_file(config: Config) -> None:
         ws = LocalWorkspace(str(ptmp))
         ws.protect(proj.path)
         check(ws.is_protected(proj.path), "workspace protects .clc")
+        # a symlink loop must not raise out of the path bookkeeping: Path.resolve()
+        # raises RuntimeError for one (RuntimeError is not an OSError, so the old
+        # `except OSError` guard here never saw it), while realpath is total and
+        # answers "not the protected file" — which is true of a loop by definition
+        try:
+            (Path(ptmp) / "loopa").symlink_to("loopb")
+            (Path(ptmp) / "loopb").symlink_to("loopa")
+        except OSError:
+            print("skip: symlink loop checks (this host cannot create symlinks)")
+        else:
+            check(
+                ws.realpath(ws.root / "loopa") == ws.realpath(ws.root) / "loopa",
+                "realpath is total: a symlink loop comes back unresolved, not as an error",
+            )
+            check(not ws.is_protected(ws.root / "loopa"), "a symlink loop is not the protected file")
         reg = ToolRegistry(build_tools(config))
         r = reg.execute(ws, config, "read_file", {"path": proj.path.name})
         check(r["error"], "read_file refuses protected .clc")

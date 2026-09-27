@@ -891,7 +891,9 @@ function applyStreamEvent(ev) {
   }
   if (ev.type === "tool_call" && ev.tool_call_id) {
     let args = {};
-    try { args = JSON.parse(ev.arguments || "{}"); } catch (e) {}
+    // the server forwards the model's raw argument string: if it is not JSON, the
+    // call must not silently render with no arguments at all
+    try { args = JSON.parse(ev.arguments || "{}"); } catch (e) { console.warn("[tool] arguments are not JSON", e); }
     toolCalls[ev.tool_call_id] = { name: ev.name, args, ui: ev.ui || {} };
     const st = streamRows[ev.tool_call_id];
     if (st) {
@@ -2434,15 +2436,24 @@ function closePerm() {
 }
 async function respondPerm(allow) {
   if (!pendingPerm) return;
-  const rid = pendingPerm.request_id;
+  const ev = pendingPerm;
   closePerm();
   setStatus("running");
   try {
     await apiFetch("/api/permission/respond", {
       method: "POST",
-      body: { request_id: rid, allow },
+      body: { request_id: ev.request_id, allow },
     });
-  } catch (e) {}
+  } catch (e) {
+    // core/permission.py blocks the agent on this verdict and has NO timeout, so a
+    // reply the backend never heard hangs the run for good with the prompt already
+    // gone. An HTTP answer (e.status) means the backend DID hear about the request
+    // — resolved, or no run waiting for it — and then there is nothing to answer;
+    // a transport failure means the gate is still waiting: put the prompt back.
+    console.error("[permission] verdict not delivered", e);
+    if (e && e.status) return;
+    openPerm(ev);
+  }
 }
 $("#perm-allow").addEventListener("click", () => respondPerm(true));
 $("#perm-deny").addEventListener("click", () => respondPerm(false));
@@ -2550,7 +2561,10 @@ async function refreshTree() {
     lastTreeSig = sig;
     els.tree.innerHTML = "";
     for (const node of data.tree || []) els.tree.appendChild(renderNode(node, 0));
-  } catch (e) {}
+  } catch (e) {
+    // Never swallow: the view would silently diverge from the disk.
+    console.warn("[tree] refresh failed", e);
+  }
 }
 
 const expandedDirs = new Set();
@@ -2800,7 +2814,7 @@ async function openProject(path, readOnly = false) {
         buf = buf.slice(nl + 1);
         if (!line) continue;
         let msg;
-        try { msg = JSON.parse(line); } catch (e) { continue; }
+        try { msg = JSON.parse(line); } catch (e) { console.warn("[openProject] undecodable line", e); continue; }
         if (msg.error) {
           const e = new Error(msg.error);
           e.code = msg.code || null;
