@@ -46,7 +46,7 @@ def parse_durable(text: str) -> list[Event]:
             continue
         try:
             data = json.loads(line)
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except ValueError:  # a corrupt/mangled line is not an event
             continue
         # [memories] lines are valid JSON but not events; skip them
         if not isinstance(data, dict) or "type" not in data:
@@ -77,8 +77,8 @@ def _parse_with_offsets(raw: bytes, base_rel: int) -> list[tuple[int, Event]]:
             continue
         try:
             data = json.loads(line)
-        except (ValueError, TypeError, json.JSONDecodeError):
-            continue  # mangled first line (range start mid-line) or a corrupt line
+        except ValueError:  # mangled first line (range start mid-line) or a corrupt line
+            continue
         if not isinstance(data, dict) or "type" not in data:
             continue
         ev = event_from_dict(data)

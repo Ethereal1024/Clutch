@@ -2623,7 +2623,8 @@ function connectSSE(replay = true) {
   qs.set("replay", replay ? "1" : "0");
   es = new EventSource(API_BASE + "/api/events?" + qs.toString());
   es.onmessage = (e) => {
-    try { addEvent(JSON.parse(e.data)); } catch (err) {}
+    // a dropped event silently desyncs the view from the log: never swallow it
+    try { addEvent(JSON.parse(e.data)); } catch (err) { console.warn("[sse] undecodable event", err); }
   };
   // on (re)connect the server replays stored history: reset the streaming state
   es.onopen = () => {

@@ -232,7 +232,7 @@ def _event_region_start(head: bytes) -> int:
             continue
         try:
             data = json.loads(seg.decode("utf-8", "replace"))
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except ValueError:
             pos += len(seg) + 1
             continue
         if isinstance(data, dict) and data.get("type") in DURABLE_TYPES:

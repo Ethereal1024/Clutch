@@ -84,10 +84,9 @@ def wait_port(proc: subprocess.Popen, banner_re: re.Pattern, timeout_s: float) -
 
     def forwarder() -> None:
         while True:
-            try:
-                line = sink.get()
-            except Exception:  # noqa: BLE001
-                return
+            # sink.get() blocks forever and cannot raise (no timeout): there is
+            # nothing to catch around it. Only the write needs a guard.
+            line = sink.get()
             try:
                 sys.stdout.write(line)
                 sys.stdout.flush()

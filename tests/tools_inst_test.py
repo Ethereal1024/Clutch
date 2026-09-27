@@ -426,6 +426,16 @@ def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
         "a numeric argument is rendered as the schema's integer",
     )
 
+    # a value that cannot BE an integer is an invalid argument, not a value to
+    # pass on: it must fail closed, naming the argument, before any command runs
+    r, stub = _call(
+        reg, ws, cfg, "web_search", {"query": "q", "max_results": "three"}, CommandResult(0, _envelope("ok"), "")
+    )
+    check(
+        r["error"] and "max_results" in r["content"] and "three" in r["content"] and stub.calls == [],
+        "an uncoercible integer argument fails closed, named, before the command",
+    )
+
     # unknown tool: the registry says so instead of crashing
     r = reg.execute(ws, cfg, "nope", {})
     check(r["error"] and "nope" in r["content"], "an unknown tool is reported as error-as-data")

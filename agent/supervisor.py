@@ -206,7 +206,7 @@ class _Handler(BaseHTTPRequestHandler):
             if n <= 0:
                 return {}
             return json.loads(self.rfile.read(n).decode("utf-8") or "{}")
-        except (ValueError, json.JSONDecodeError):
+        except ValueError:
             return {}
 
     def do_GET(self) -> None:

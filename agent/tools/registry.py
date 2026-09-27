@@ -475,5 +475,11 @@ class ToolRegistry:
                 try:
                     args[key] = int(args[key])
                 except (TypeError, ValueError):
-                    pass
+                    # An uncoercible value is an invalid argument, not a value to
+                    # pass on: leaving it in place sent the bad value into the
+                    # tool, where it either blew up as an opaque failure or was
+                    # ignored. Fail here, where the caller already has the
+                    # invalid-arguments envelope (the TypeError handler in
+                    # execute), and say which argument and what it got.
+                    raise TypeError(f"argument {key!r} must be an integer, got {args[key]!r}") from None
         return args
