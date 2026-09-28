@@ -14,6 +14,11 @@ a tool this catalog does not describe does not exist for the model, and a
 component that is absent takes its tools with it and nothing else (see
 registry.build_tools). A host with nothing installed can chat and nothing more.
 
+One declaration is not a component's, and it is declared rather than assumed:
+`run_command`, the single bootstrap exception, whose declaration lives in
+tools/host.py in this very vocabulary and whose name no component may publish
+(HOST_TOOL_NAMES below). See COMPONENTS.md §十一.
+
 Zero built-ins, three sources
 -----------------------------
 The host ships NO component declaration — not even for the components its own
@@ -176,6 +181,13 @@ MODES: tuple[str, ...] = ("work", "chat")
 # requires: the host facilities a component may declare it stands on
 # (rendezvous.unavailable_reason answers whether each holds on this host).
 FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
+# The tool names the HOST itself declares: the bootstrap exception (COMPONENTS.md
+# §五). The host always has exactly these — with nothing installed they ARE its
+# whole surface — so a component cannot publish one of them: a name the model
+# already means something by is not a component's to redefine (see
+# component_diagnostics). The declarations behind the names live in
+# agent/tools/host.py; registry._check_vocabulary keeps the two lists equal.
+HOST_TOOL_NAMES: tuple[str, ...] = ("run_command",)
 
 
 @dataclass(frozen=True)
@@ -235,12 +247,15 @@ def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
 def component_diagnostics(component: Component) -> list[Diagnostic]:
     """Every host word a component's declaration read wrongly, its tools' too.
 
-    One more thing is checked here rather than in tool_diagnostics, because it
-    straddles the two levels: a `vars` key that is also one of a tool's declared
-    arguments. Host vars shadow the model's argument of the same name when the
+    Two things are checked here rather than in tool_diagnostics, because both
+    straddle the two levels. A `vars` key that is also one of a tool's declared
+    arguments: host vars shadow the model's argument of the same name when the
     statement is rendered (inst.render), so the model's value would be silently
     dropped — a call that names a path the host then replaces. The declaration is
-    refused instead of quietly meaning something else.
+    refused instead of quietly meaning something else. And a tool that publishes
+    one of the host's OWN names (HOST_TOOL_NAMES): the host always has that tool,
+    so a component declaring it would either shadow it or lose silently, and the
+    model would have no way to tell which one it is calling.
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
@@ -259,6 +274,15 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                         f"the model's, so rename one of them",
                     )
                 )
+        if spec.name in HOST_TOOL_NAMES:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    spec.name,
+                    f"tool name {spec.name!r} is the host's own (the host always offers it), so a component "
+                    f"cannot publish it — rename this tool",
+                )
+            )
         out.extend(tool_diagnostics(component.name, spec))
     return out
 
@@ -443,7 +467,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
     launch = data.get("launch") if isinstance(data.get("launch"), dict) else {}
     tools: list[Tool] = []
     for raw in data.get("tools", []) or []:
-        spec = _tool_of(raw)
+        spec = tool_of(raw)
         if spec is not None:
             tools.append(spec)
     ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
@@ -470,13 +494,17 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
     )
 
 
-def _tool_of(raw: Any) -> Tool | None:
+def tool_of(raw: Any) -> Tool | None:
     """One tool declaration -> a Tool, or None when it names no usable tool.
 
     A description that is not text is a malformed tool, and the tool is refused:
     the spec (COMPONENTS.md) says a description is the model-facing string, and
     a declaration the host cannot read as written is better absent than
-    garbled."""
+    garbled.
+
+    Public because the host's own declarations are parsed by it too
+    (tools/host.py: the bootstrap exception, wired in registry._bootstrap) — one
+    parser for every declaration there is, a manifest's and the host's alike."""
     if not isinstance(raw, dict):
         return None
     name = str(raw.get("name", ""))

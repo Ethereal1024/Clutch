@@ -6,8 +6,9 @@ this module builds the OpenAI function-calling schema the model sees AND the
 statement that satisfies a call — there is no second, host-side implementation
 of any tool. A tool no manifest describes does not exist for the model, and a
 component this host does not have contributes no tools at all: with nothing
-installed the host's surface is run_command and nothing else, and every tool
-call it cannot serve is answered with the component's own name and reason.
+installed the host's surface is the one tool it declares for itself (tools/host.py
+— run_command, the bootstrap exception), and every tool call it cannot serve is
+answered with the component's own name and reason.
 
 What the host owns, and only the host owns:
 
@@ -17,7 +18,9 @@ What the host owns, and only the host owns:
   * the policy a component deliberately does not carry (`guard`: a path the
     workspace protects is not readable even when it is named explicitly);
   * the per-file undo the UI offers on a change result (`snapshot`);
-  * the gates and modes under which a tool is offered at all.
+  * the gates and modes under which a tool is offered at all;
+  * the ONE declaration that is not a component's (tools/host.py), because the
+    tool it declares is what this host has when no component is installed.
 
 Everything else — what a tool is called, what it means, how its events look in
 the UI — is the declaration's, and the declaration belongs to the component.
@@ -37,7 +40,7 @@ from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
-from . import catalog, filesystem, inst, rendezvous, shell
+from . import catalog, filesystem, host, inst, rendezvous
 from .envelope import Envelope
 from .inst import InstError
 from .transport import TransportError, failure_envelope
@@ -87,11 +90,16 @@ WATCHED_ACCESS: frozenset[str] = frozenset({"read", "write"})
 
 
 def _check_vocabulary() -> None:
-    """The two halves of the access vocabulary cannot drift apart silently: every
-    word the declaration protocol lists must have an implementation here, and
-    nothing else. A mismatch is a host bug, not a component's, so it is loud."""
+    """Neither half of the host's vocabulary can drift from the declarations
+    behind it silently: every access word the declaration protocol lists must have
+    an implementation here, and the host's own tool names must be exactly the ones
+    tools/host.py declares. A mismatch is a host bug, not a component's, so it is
+    loud."""
     assert set(ACCESS) == set(catalog.ACCESS_ARGS), (
         f"access vocabulary drift: catalog {sorted(catalog.ACCESS_ARGS)} vs registry {sorted(ACCESS)}"
+    )
+    assert set(host.names()) == set(catalog.HOST_TOOL_NAMES), (
+        f"host tool drift: catalog {sorted(catalog.HOST_TOOL_NAMES)} vs host {sorted(host.names())}"
     )
 
 
@@ -127,10 +135,11 @@ class Tool:
     component's `inst` is the whole line — the loopback call IS its interface.
 
     `host` is the one other kind of tool: one the HOST owns and no component
-    implements (run_command — the command IS the statement, and the host's
-    permission engine is the boundary it runs inside). It is not a fallback for
-    anything: a tool with neither `inst` nor `host` cannot exist, because a
-    declaration without a command never becomes a Tool (see build_tools).
+    implements (tools/host.py — run_command: the command IS the statement, and
+    the host's permission engine is the boundary it runs inside). It is not a
+    fallback for anything: a tool with neither `inst` nor `host` cannot exist,
+    because a declaration without a command never becomes a Tool unless the host
+    declares it itself and brings the implementation (see build_tools).
 
     `access` is the policy the tool's DECLARATION put it under (catalog.Tool.access)
     — the one thing permission.evaluate and permission.escaped_paths read to decide
@@ -254,7 +263,7 @@ def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
     return False
 
 
-def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> Tool:
+def _wire(spec: catalog.Tool, config: Config, *, owner: str, implementation: host.HostImpl | None = None) -> Tool:
     """One declaration -> the tool the model sees and the host runs.
 
     The description and the schema alike are run through `_resolve`, so a
@@ -264,15 +273,22 @@ def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> T
 
     The policy words are resolved here too, and a declaration that names one the
     host does not know is refused by the CALLER (build_tools, which asks
-    catalog.tool_diagnostics first) — never wired half-read."""
+    catalog.tool_diagnostics first) — never wired half-read.
+
+    `owner` names who declared it — a component, or the host itself for the
+    bootstrap exception (tools/host.py) — and `implementation` is what a
+    declaration has only when the host made it: a component's statement IS its
+    implementation, so it brings none and is carried out by its statement."""
     access = ACCESS.get(spec.access)
     access_arg = spec.access_arg or (access.arg if access else "")
     return Tool(
         name=spec.name,
         description=_resolve(spec.description, config),
         parameters=copy.deepcopy(_resolve(dict(spec.parameters), config)),
-        inst=spec.command,
-        module=component.name,
+        inst=spec.command if implementation is None else None,
+        module=owner if implementation is None else None,
+        host=implementation,
+        cancelable=implementation is not None,
         access=spec.access,
         access_arg=access_arg,
         guard=access.guard if access else None,
@@ -283,6 +299,30 @@ def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> T
     )
 
 
+def _bootstrap(config: Config) -> list[Tool]:
+    """The host's OWN declarations (tools/host.py), wired like any other.
+
+    The one exception to "the declaration belongs to a component", and it is a
+    DECLARATION all the same (COMPONENTS.md §十一): the same shape, the same
+    parser (catalog.tool_of), the same diagnostics a manifest goes through. What
+    it adds is the implementation — host code, where a component's statement is
+    its implementation — and it is why this tool can never be absent: with
+    nothing installed it is the host's whole surface.
+
+    A word the host itself cannot honor is a host bug, so it is LOUD here (an
+    assert) rather than dropped the way a component's unreadable declaration is
+    (that is what _drivable's refusals are for): there is nothing for the model
+    to fall back on if the host's own declaration is wrong."""
+    out: list[Tool] = []
+    for declared in host.declarations(config):
+        spec = catalog.tool_of(declared.declaration)
+        assert spec is not None, f"the host's own declaration is not a tool: {declared.declaration!r}"
+        fatal = [d.message for d in catalog.tool_diagnostics(host.NAME, spec) if d.fatal]
+        assert not fatal, f"the host's own {declared.name} declaration is invalid: {'; '.join(fatal)}"
+        out.append(_wire(spec, config, owner=host.NAME, implementation=declared.implementation))
+    return out
+
+
 def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Tool]:
     """Every tool this host can offer right now, in one pass over the catalog.
 
@@ -291,6 +331,11 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
     `unavailable_reason()` instead (components_unavailable), because a tool the
     model cannot call is not a thing the model should see.
 
+    The host's own tool comes first and is the one tool that is always there
+    (`_bootstrap`); every other tool is a component's, and a component that tried
+    to publish one of the host's own names is refused by the catalog before it
+    gets here.
+
     A declaration word the host does not know refuses what it governs rather than
     running half-read (catalog.Diagnostics): an unknown facility takes the whole
     component's tools out, an unknown `access`/`gate`/`mode`/argument name takes
@@ -298,14 +343,14 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
     judge wrongly. Each refusal is said once (registry._report). Which components
     can be driven at all is one filter for the whole model-facing surface
     (`_drivable`), shared with the prompt fragments they carry."""
-    tools: list[Tool] = [_run_command(config)]
+    tools: list[Tool] = _bootstrap(config)
     for component in _drivable():
         for spec in component.tools:
             if config.mode not in spec.modes:
                 continue
             if not _gate_ok(spec.gate, config, memories):
                 continue
-            tools.append(_wire(component, spec, config))
+            tools.append(_wire(spec, config, owner=component.name))
     return tools
 
 
@@ -395,30 +440,6 @@ def components_unavailable(config: Config) -> list[dict[str, str]]:
                 }
             )
     return out
-
-
-def _run_command(config: Config) -> Tool:
-    """The host's own tool — the one statement that is not a component's.
-
-    Deliberately not a component: the command IS the statement, and the host's
-    permission engine (read-only classifier, escape and protected-path guard,
-    Stop) is the boundary it runs inside. A component would only re-say "run
-    this" while the decision stayed here.
-    """
-    chat_mode = config.mode == "chat"
-    return Tool(
-        name="run_command",
-        description=render("tools/run_command_chat.md" if chat_mode else "tools/run_command.md"),
-        parameters={
-            "properties": {"command": {"type": "string", "description": "shell command string to run"}},
-            "required": ["command"],
-        },
-        host=lambda workspace, cfg, cancel=None, **kw: shell.run_command(workspace, cfg, cancel=cancel, **kw),
-        cancelable=True,
-        access="command",
-        access_arg=catalog.ACCESS_ARGS["command"],
-        ui={"preview": "command"},
-    )
 
 
 def module_blocked_reason(workspace: Workspace, module: str | None) -> str:

@@ -420,6 +420,17 @@ docstring 改口。
 ② 让 guard/undo 只对恰好把参数叫 `path` 的组件生效（未知 `access` 词还静默无守卫）；
 ④ 让技能库存在两份真值。
 
+① 已落地（第七步）：`run_command` 仍是宿主自己的工具，但它现在是**被声明**的——
+`agent/tools/host.py` 里一份与第四节同形的数据，由同一个解析器（`catalog.tool_of`）
+读入、同一套诊断（`catalog.tool_diagnostics`）校验，描述取自宿主自己的提示词文件
+（`prompts/tools/run_command{,/_chat}.md`）；"是不是组件"这件事只剩一个差别，就是
+实现（`shell.run_command`）随声明一起由宿主提供，而不是组件自己的一条语句，而策略
+（`access: "command"` → 权限引擎、只读分类、逃逸与 .clc 保护、Stop）依旧全在宿主这边。
+名字进了 `catalog.HOST_TOOL_NAMES`：组件声明同名工具会被拒绝
+（`component_diagnostics` 报 fatal），"模型看到的 `run_command` 是谁的"因此不再取决于
+安装顺序；宿主声明与词汇表在导入时互校（`registry._check_vocabulary`）。见
+`COMPONENTS.md` 第十一节。
+
 ### 3.3 一条可复用的判定规则：**事实 vs 语法**
 
 > 宿主发布的占位符只能是**事实**（宿主自己拥有并产生的：它启动的、它读到的、它的配置与路径）。
@@ -496,6 +507,8 @@ ls agent/prompts/tools/
 | 3 | 句柄合一 `Handle{service, fences, proc}`，键退化成 `(module, root)`（P0-3） | `bf4bb7f` refactor(rendezvous): one handle per daemon, and the fence says whether to ride it |
 | 4 | 语句不透明化：宿主只发布事实（P1-5） | `5b7d431`（宿主）+ `0dfdc9b`/`2d70307`（clutch-workspace） |
 | 8 | 信封类型化 + 合并"点名即覆盖" + 提示词片段随声明走（P1-4 + P1-6 + 审计⑥） | `32c3ea7` + `cf995c8` + `3cf0294`（宿主）+ `f985180`/`7a7e506`（clutch-workspace / clutch-memory） |
+| 7 | `run_command` 登记为唯一被声明的引导例外（审计①） | `agent/tools/host.py` + `catalog.HOST_TOOL_NAMES`（本次） |
+| 9 | 补测试：参数重命名后的 guard/undo、工具重名、传输 cwd | `3538759` test(tools): the renamed argument, the one name, and the transport a statement rides |
 
 ### 第四步实际落下的判据（P1-5）
 

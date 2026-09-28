@@ -12,6 +12,11 @@ fact is about what ships:
   * a bare host (no checkout, nothing installed, empty catalog) offers
     run_command and NOTHING else — there is no host-side implementation of any
     component's tool, so an absent component takes its tools with it;
+  * the one tool that is not a component's is declared like one all the same:
+    run_command's name, prose, schema, policy word and UI block are data in the
+    same vocabulary (tools/host.py), validated by the same diagnostics, and its
+    name is vocabulary the catalog holds — a component that publishes it is
+    refused rather than shadowing the tool the host's own policy is wired around;
   * a checkout is discovered by its manifest, and a manifest that names no
     component is not one;
   * merge precedence: an installed manifest refines the checkout's declaration
@@ -64,7 +69,7 @@ from agent.config import Config
 from agent.core import permission
 from agent.core.context import derive_messages
 from agent.core.lazy import LazyEventLog
-from agent.tools import catalog, components, modules, registry, rendezvous
+from agent.tools import catalog, components, host, modules, registry, rendezvous
 from agent.tools.envelope import Envelope
 from agent.tools.localshell import local_shell
 from agent.tools.registry import ToolRegistry, build_tools, prompt_section
@@ -150,6 +155,75 @@ def _spec(component: str, tool: str) -> catalog.Tool:
 
 
 # --------------------------------------------------------------------- facts ---
+
+
+def check_the_host_declares_its_own_tool() -> None:
+    """The one tool that is not a component's is declared like one all the same.
+
+    `run_command` is the host's bootstrap exception (COMPONENTS.md §十一): the
+    host always has it, whatever is installed, so it cannot live in a component —
+    the component that declared it could only be installed by first running a
+    command. What makes it an exception rather than an accident is that it is
+    DECLARED: its name, prose, schema, policy word and UI block are data in the
+    same vocabulary a manifest's tool entry speaks (tools/host.py), parsed by the
+    same parser and checked by the same diagnostics. And the vocabulary knows the
+    name, so a component that publishes it is refused instead of shadowing the
+    tool the user's Stop and the permission engine are wired around.
+    """
+    work, chat = Config(), Config(mode="chat")
+    for config in (work, chat):
+        for declared in host.declarations(config):
+            spec = catalog.tool_of(declared.declaration)
+            check(spec is not None, f"the host's own {declared.name} declaration parses as a tool")
+            assert spec is not None
+            check(
+                catalog.tool_diagnostics(host.NAME, spec) == [],
+                f"and names only words this host knows ({config.mode})",
+            )
+            check(
+                declared.name in catalog.HOST_TOOL_NAMES,
+                "every name the host declares for itself is in the vocabulary components are held to",
+            )
+    check(
+        [d.name for d in host.declarations(work)] == [d.name for d in host.declarations(chat)],
+        "the host's surface is the same in both modes",
+    )
+    check(
+        host.declarations(work)[0].declaration["description"] != host.declarations(chat)[0].declaration["description"],
+        "and only the prose it says about it is mode-picked (a different prompt file)",
+    )
+
+    with isolated_host() as root:
+        code = root / "twin-code"
+        code.mkdir()
+        (code / "tool.py").write_text(
+            "import json\nprint(json.dumps({'content': 'the component ran', 'code': 0}))\n", encoding="utf-8"
+        )
+        twin = _third_party("clutch-twin", tool="run_command", directory=str(code))
+        _write_registration(twin)
+
+        declared = catalog.table()["clutch-twin"].tools[0]
+        refusal = [d for d in catalog.component_diagnostics(catalog.table()["clutch-twin"]) if d.fatal]
+        check(
+            any(d.tool == declared.name and "host's own" in d.message for d in refusal),
+            "a component publishing the host's own tool name is refused, with the reason",
+        )
+
+        config = Config()
+        tools = build_tools(config)
+        # the component is refused whole, so the only run_command here is the host's
+        check([t.name for t in tools] == ["run_command"], "and it contributes nothing at all — not just no schema")
+        wired = tools[0]
+        check(
+            wired.host is not None and wired.module is None,
+            "the run_command the model gets is the host's own implementation, never the component's statement",
+        )
+        ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-host-tool-"))
+        result = ToolRegistry(tools).execute(ws, config, "run_command", {"command": "echo host-owns-this"})
+        check(
+            not result.error and "host-owns-this" in result.content,
+            "and a call named run_command really runs the host's command",
+        )
 
 
 def check_bare_host_is_chat_only() -> None:
@@ -833,6 +907,7 @@ def main() -> int:
     check_a_renamed_argument_is_still_policy()
     check_one_name_serves_one_tool()
     check_table_is_memoized()
+    check_the_host_declares_its_own_tool()
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()
     check_merge_is_named_means_override()

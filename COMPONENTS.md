@@ -5,6 +5,9 @@ Clutch 宿主**零内置工具**：`run_command` 之外的一切工具都来自*
 `clutch-websearch` / `clutch-skills`，或任何第三方的同类物）。宿主不为任何组件保留
 第二份实现，也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进循环。
 
+`run_command` 是唯一的例外，而且它同样是**被声明**的：宿主为自己写的唯一一条工具
+声明（`agent/tools/host.py`），见第十一节。
+
 这份文档是组件与宿主之间的契约，模型面向的 schema、安装协议与界面呈现都从这里读。
 代码对应关系：发现与合并在 `agent/tools/catalog.py`，声明 → 工具在
 `agent/tools/registry.py`，寻址与启动在 `agent/tools/rendezvous.py`，安装落地在
@@ -112,7 +115,7 @@ daemon 退出时按 pid 匹配才删记录，所以被顶替的 daemon 删不掉
     "properties": { "path": { "type": "string" } },
     "required": ["path"]
   },
-  "command": "…",                    // 语句模板（第三节）；没有 command 的声明不会成为工具
+  "command": "…",                    // 语句模板（第三节）；没有 command 的声明不会成为工具（宿主自己那条除外，第十一节）
   "defaults": { "max_chars": "$config.read_max_chars" }, // 语句载荷默认值，垫在模型参数之下
   "access": "read",                  // 宿主策略词汇："read" | "sweep" | "write" | "command" | ""（不受限）
   "snapshot": false,                 // true = 该语句覆写 path，宿主为界面保留 per-file undo
@@ -270,3 +273,27 @@ GET /api/components                            该机器已装清单（name/vers
 重启宿主后 `say_hello` 即在工具表里，权限策略、界面渲染与内建组件完全同路。若组件
 能打包成单文件可执行（或 tar），走 `POST /api/components/install`（第八节）安装，
 连 catalog.d 都不用——安装本身就是注册。
+
+## 十一、宿主自己的工具（唯一的引导例外）
+
+宿主只为自己声明**一个**工具：`run_command`。它是一个**被声明的例外**，不是一笔
+无人记账的欠款：
+
+- **为什么不能是组件**：组件要能被调用，得先有一条命令把它装上；若"执行一条命令"
+  的能力本身也来自组件，宿主在什么都没有时装不上任何东西。`run_command` 就是在
+  "什么都还没装"时宿主仍然拥有的那个面（`registry.build_tools` 的 `_bootstrap`）。
+- **它怎么被声明**：`agent/tools/host.py` 里的一份数据，字段与第四节完全相同（名字、
+  描述、schema、`access`、`ui`），由**同一个解析器**（`catalog.tool_of`）读入、
+  由**同一套诊断**（`catalog.tool_diagnostics`）校验——宿主自己的声明也受词汇表
+  约束，写错一个词是宿主 bug，当场报错而不是悄悄变形。描述取自宿主自己的提示词文件
+  （`agent/prompts/tools/run_command.md`，chat 模式读 `_chat` 版）。
+- **它多出的一样东西**：实现。组件的语句**就是**它的实现；宿主的这一条由宿主代码
+  兑现（`shell.run_command`），而"这次调用能不能跑"仍然全在宿主这边（`access:
+  "command"` → 权限引擎、chat 只读分类、逃逸与 .clc 保护、超时、截断、Stop）。
+- **组件不能占用这个名字**：`run_command` 属于 `catalog.HOST_TOOL_NAMES`——宿主
+  无论装了什么都会提供它，所以组件声明同名工具会被**拒绝**（`component_diagnostics`
+  报一条 fatal，整个组件不贡献任何东西），否则"模型看到的 `run_command` 是谁的"就
+  取决于安装顺序了。宿主声明与词汇表在导入时互校（`registry._check_vocabulary`）。
+
+除此之外宿主没有任何内置工具：不装组件时它只有这一个工具（`COMPONENTS.md` 开头那句
+"零内置工具"的准确含义就是"零内置**组件的**工具"）。
