@@ -274,10 +274,9 @@ def check_declared_access() -> None:
 
     permission.evaluate/escaped_paths read the policy string a declaration carries
     (permission.GUARDED_ARG) and never the tool's name, so this one field is what
-    puts a component's tool under the workspace's fence and the user's prompts. A
-    value outside the vocabulary is silently unguarded — hence both ends here: the
-    shipped tools name the policy they need, and nothing names one the engine does
-    not know.
+    puts a component's tool under the workspace's fence and the user's prompts.
+    Both ends are checked here: the components this repo develops name the policy
+    they need, and nothing names one the engine does not know.
     """
     if modules.WORKSPACE not in catalog.table():
         print("SKIP: no clutch-workspace checkout beside the repo")
@@ -296,6 +295,79 @@ def check_declared_access() -> None:
         declared <= set(permission.GUARDED_ARG) | {""},
         f"every declared access is one the permission engine knows ({sorted(declared)})",
     )
+
+
+def check_unknown_words_are_refused() -> None:
+    """A host-defined word the host cannot read is refused, never guessed at.
+
+    The direction is fail-CLOSED (COMPONENTS_REVIEW P0-2). An `access` this host
+    does not know would leave the tool with NO policy — a tool the workspace's
+    fence and the user's prompts do not cover, one typo away from the protection
+    being gone — so the tool is withheld instead of offered half-read. The same
+    goes for an `access_arg`/`snapshot_arg` naming an argument the tool does not
+    declare: the policy would judge nothing. A cosmetic word (a `ui` key the
+    renderer does not know) is reported WITHOUT taking the tool away — it works,
+    it just looks plainer than its author meant.
+    """
+    with isolated_host() as root:
+        code = root / "hello-code"
+        code.mkdir()
+        (code / "tool.py").write_text(
+            "import json, sys\nprint(json.dumps({'content': 'echo:' + sys.argv[-1], 'code': 0}))\n",
+            encoding="utf-8",
+        )
+
+        def register(name: str, tool: str, patch: Mapping) -> None:
+            data = _third_party(name, tool=tool, directory=str(code))
+            data["tools"][0].update(patch)
+            _write_registration(data)
+
+        cfg = Config()
+
+        def offered(name: str) -> list[str]:
+            return [t.name for t in build_tools(cfg)]
+
+        def diagnostic(component: str, tool: str) -> list[catalog.Diagnostic]:
+            return [d for d in catalog.diagnostics() if d.component == component and d.tool == tool]
+
+        register("clutch-typo-access", "say_access", {"access": "Read"})
+        check("say_access" not in offered("say_access"), "a tool under an unknown access is not offered")
+        check(
+            [d.fatal for d in diagnostic("clutch-typo-access", "say_access")] == [True],
+            "and the host names the word it could not read",
+        )
+
+        register("clutch-typo-gate", "say_gate", {"gate": "nomem"})
+        check("say_gate" not in offered("say_gate"), "a tool under an unknown gate is not offered")
+
+        register("clutch-typo-mode", "say_mode", {"modes": ["dream"]})
+        check("say_mode" not in offered("say_mode"), "a tool offered in an unknown mode is not offered")
+
+        register("clutch-typo-arg", "say_arg", {"access": "read", "access_arg": "file"})
+        check("say_arg" not in offered("say_arg"), "an access_arg the tool does not declare is not offered")
+
+        data = _third_party("clutch-facility", tool="say_facility", directory=str(code))
+        data["requires"] = ["python", "bash-frobnicator"]
+        _write_registration(data)
+        check("say_facility" not in offered("say_facility"), "an unknown facility takes the component's tools out")
+        check(
+            [d.fatal for d in diagnostic("clutch-facility", "")] == [True],
+            "and the host names the facility it cannot stand on",
+        )
+
+        # the accepted spellings, so the refusals above are about the WORD
+        register("clutch-named-arg", "say_named", {"access": "write", "access_arg": "who"})
+        reg = ToolRegistry(build_tools(cfg))
+        check("say_named" in reg.names(), "an access_arg the tool DOES declare is wired")
+        check(reg.access_arg("say_named") == "who", "and the policy judges that argument, not 'path'")
+        check(reg.path_arg("say_named") == "who", "so a compaction re-reads the file it actually named")
+
+        register("clutch-cosmetic", "say_looks", {"ui": {"summary": "hi {who}", "color": "red"}})
+        check("say_looks" in offered("say_looks"), "a ui key the renderer does not know keeps the tool")
+        check(
+            [d.fatal for d in diagnostic("clutch-cosmetic", "say_looks")] == [False],
+            "it is reported without refusing anything",
+        )
 
 
 def check_host_facts_in_schema() -> None:
@@ -408,6 +480,7 @@ def check_installed_third_party() -> None:
 def main() -> int:
     check_ui_protocol()
     check_declared_access()
+    check_unknown_words_are_refused()
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()
     check_host_facts_in_schema()

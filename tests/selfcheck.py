@@ -719,11 +719,14 @@ def main() -> None:
     log2.append(UserMessageEvent(content="task"))
     log2.append(AssistantMessageEvent(content="old work"))
     log2.append(CompactionEvent(summary="s"))
+    # `path_arg` is what the loop stamps from the tool's declaration; the reader
+    # learns which argument named the file from there, never from a tool name.
     log2.append(
         ToolCallEvent(
             name="write_file",
             arguments='{"path": "a.py", "content": "x"}',
             tool_call_id="c1",
+            path_arg="path",
         )
     )
     log2.append(
@@ -731,6 +734,16 @@ def main() -> None:
             name="edit_file",
             arguments='{"path": "b.py", "old_string": "a", "new_string": "b"}',
             tool_call_id="c2",
+            path_arg="path",
+        )
+    )
+    # a sweeping call (sweep policy: no single file) carries no path_arg and is
+    # not something to re-read
+    log2.append(
+        ToolCallEvent(
+            name="grep",
+            arguments='{"pattern": "x", "path": "c.py"}',
+            tool_call_id="c3",
         )
     )
     msgs2 = derive_messages(log2, config, "test")
@@ -739,6 +752,7 @@ def main() -> None:
         len(notes) == 1 and "a.py" in notes[0]["content"] and "b.py" in notes[0]["content"],
         "compaction note lists the working files to re-read",
     )
+    check("c.py" not in notes[0]["content"], "a call that named no single file is not re-read advice")
 
     # 2h. reopened (durable-only) log derives the same context as the live one
     live = LazyEventLog.in_memory()

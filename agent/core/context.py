@@ -32,19 +32,25 @@ if TYPE_CHECKING:  # type hints only: core must not import tools at runtime
 
 def _recent_working_files(tail_events: list[Any], cap: int = 6) -> list[str]:
     """Distinct file paths the model was reading/writing in the window
-    (most recent first), so a post-compaction context can tell it to re-read them."""
+    (most recent first), so a post-compaction context can tell it to re-read them.
+
+    Which calls count, and in which argument the file was named, is the tool's own
+    declaration: the loop stamps every call event with `path_arg` (the argument a
+    read/write policy judges, "" for a call that named no file). Core learns no
+    tool name here — a component's read tool is remembered exactly like the ones
+    this repo develops."""
     import json as _json
 
     out: list[str] = []
     seen: set[str] = set()
     for ev in reversed(tail_events):
-        if not isinstance(ev, ToolCallEvent) or ev.name not in ("read_file", "write_file", "edit_file"):
+        if not isinstance(ev, ToolCallEvent) or not ev.path_arg:
             continue
         try:
             args = _json.loads(ev.arguments or "{}")
         except (ValueError, TypeError):
             continue
-        path = args.get("path") if isinstance(args, dict) else None
+        path = args.get(ev.path_arg) if isinstance(args, dict) else None
         if isinstance(path, str) and path and path not in seen:
             seen.add(path)
             out.append(path)

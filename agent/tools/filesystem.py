@@ -39,20 +39,24 @@ def _refuse_protected(workspace: Workspace, path: str, *, write: bool) -> dict |
     return _result(render(template, path=path), error=True)
 
 
-def guard_read(workspace: Workspace, _config: Config, args: dict) -> dict | None:
-    """registry guard: a protected path is not readable, named or not."""
-    return _refuse_protected(workspace, str(args.get("path", "")), write=False)
+def guard_read(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> dict | None:
+    """registry guard: a protected path is not readable, named or not.
+
+    `arg` is the argument the tool's own declaration says holds the path
+    (catalog.Tool.access_arg -> registry.Tool.access_arg) — a component that
+    calls it `file` is guarded exactly the same."""
+    return _refuse_protected(workspace, str(args.get(arg, "")), write=False)
 
 
-def guard_write(workspace: Workspace, _config: Config, args: dict) -> dict | None:
+def guard_write(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> dict | None:
     """registry guard: a protected path is not writable/editable."""
-    return _refuse_protected(workspace, str(args.get("path", "")), write=True)
+    return _refuse_protected(workspace, str(args.get(arg, "")), write=True)
 
 
-def guard_grep(workspace: Workspace, _config: Config, args: dict) -> dict | None:
+def guard_grep(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> dict | None:
     """registry guard: grep never searches a protected file — a walk skips it,
     and naming it explicitly yields the same empty result the walk produces."""
-    path = str(args.get("path") or ".")
+    path = str(args.get(arg) or ".")
     try:
         p = workspace.resolve(path)
     except (OSError, ValueError):

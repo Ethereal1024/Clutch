@@ -81,6 +81,13 @@ class ToolCallEvent(Event):
     # own statement, carried here rather than looked up by the UI, which knows
     # no tool name. Durable, because a replayed session must render the same way.
     ui: dict[str, Any] = field(default_factory=dict)
+    # The argument this call named a FILE in, when the tool's declaration puts it
+    # under a policy that judges a path (registry.WATCHED_ACCESS); "" otherwise.
+    # Carried durably for the same reason as `ui`: the host derives its
+    # post-compaction context from events alone (core.context._recent_working_files),
+    # and WHICH argument holds the path is the tool's own declaration, never a
+    # tool name hardcoded in that reader.
+    path_arg: str = ""
 
 
 @dataclass

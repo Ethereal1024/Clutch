@@ -151,6 +151,111 @@ DEFAULTS: dict[str, Any] = {
 UI_KEYS = tuple(DEFAULTS) + ("mutates",)
 
 
+# ------------------------------------------------- the host's own vocabulary ----
+# The words a declaration may use that the HOST defines, listed once so a word
+# this host does not know can be refused instead of silently failing (see
+# Diagnostics below). A component chooses the value — which policy, which gate,
+# which facility — and never invents the word.
+
+# access: the policy a tool is put under, with the argument that policy judges by
+# default. A declaration may RENAME that argument (`Tool.access_arg`) — a path
+# argument called `file` still enters the workspace's fence — but the word and
+# its meaning stay the host's. "" = the host applies no policy. Read by
+# permission.GUARDED_ARG and registry.ACCESS.
+ACCESS_ARGS: dict[str, str] = {
+    "read": "path",  # a path the workspace may protect
+    "sweep": "path",  # a path a broad search walks
+    "write": "path",  # a path the call may overwrite
+    "command": "command",  # the shell text a command-shaped tool runs
+}
+# gate: a host-side condition that must hold for the tool to be offered at all
+# (registry._gate_ok). "" / "always" = no condition.
+GATES: tuple[str, ...] = ("", "always", "project", "skills")
+# modes: the agent modes a tool is offered in (config.Config.mode).
+MODES: tuple[str, ...] = ("work", "chat")
+# requires: the host facilities a component may declare it stands on
+# (rendezvous.unavailable_reason answers whether each holds on this host).
+FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
+
+
+@dataclass(frozen=True)
+class Diagnostic:
+    """A host-defined word a declaration used that this host does not know.
+
+    The direction is deliberately fail-CLOSED (COMPONENTS_REVIEW P0-2): a word
+    the host cannot read is never guessed at. `fatal` marks the ones that stop
+    the host from running the declaration at all — an unknown `access` would
+    leave a tool unguarded (the workspace's protection one typo away from gone),
+    and an unknown `gate` / `mode` / facility leaves the host unable to answer
+    the question the word asks. A cosmetic word (a `ui` key the renderer does
+    not know) is reported WITHOUT refusing the tool: it works, it just looks
+    plainer than its author meant.
+    """
+
+    component: str
+    tool: str  # "" for a word about the component itself
+    message: str
+    fatal: bool = True
+
+
+def _known(words) -> str:
+    return ", ".join(repr(w) for w in words)
+
+
+def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
+    """The host-defined words THIS tool names that the host does not know."""
+    out: list[Diagnostic] = []
+    declared = spec.parameters.get("properties", {}) if isinstance(spec.parameters, Mapping) else {}
+    if spec.access and spec.access not in ACCESS_ARGS:
+        out.append(
+            Diagnostic(component, spec.name, f"unknown access {spec.access!r} (host knows {_known(ACCESS_ARGS)})")
+        )
+    if spec.gate not in GATES:
+        out.append(Diagnostic(component, spec.name, f"unknown gate {spec.gate!r} (host knows {_known([g for g in GATES if g])})"))
+    for mode in spec.modes:
+        if mode not in MODES:
+            out.append(Diagnostic(component, spec.name, f"unknown mode {mode!r} (host offers {_known(MODES)})"))
+    for arg in (spec.access_arg, spec.snapshot_arg):
+        if arg and arg not in declared:
+            out.append(
+                Diagnostic(component, spec.name, f"argument {arg!r} is not among the tool's declared parameters")
+            )
+    for key in spec.ui or {}:
+        if key not in UI_KEYS:
+            out.append(
+                Diagnostic(
+                    component, spec.name, f"unknown ui key {key!r} (renderer knows {_known(UI_KEYS)})", fatal=False
+                )
+            )
+    return out
+
+
+def component_diagnostics(component: Component) -> list[Diagnostic]:
+    """Every host word a component's declaration read wrongly, its tools' too."""
+    out = [
+        Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
+        for f in component.requires
+        if f not in FACILITIES
+    ]
+    for spec in component.tools:
+        out.extend(tool_diagnostics(component.name, spec))
+    return out
+
+
+def diagnostics(table_: Mapping[str, Component] | None = None) -> list[Diagnostic]:
+    """Every declaration word this host cannot honor, over the whole table.
+
+    Data, not a side effect: the host refuses the affected tools at wiring
+    (registry.build_tools) and the caller can read back exactly which words and
+    where. A caller that wants them out loud logs each once (registry._report).
+    """
+    known = table() if table_ is None else table_
+    out: list[Diagnostic] = []
+    for component in known.values():
+        out.extend(component_diagnostics(component))
+    return out
+
+
 @dataclass(frozen=True)
 class Launch:
     """How this host STARTS one component process — the artifact's shape, never
@@ -196,17 +301,23 @@ class Tool:
     `defaults` rides the payload UNDER the model's arguments.
 
     `access` is the host POLICY this tool is subject to — the vocabulary the host
-    defines and no declaration invents: "read" / "write" / "sweep" name a `path`
+    defines and no declaration invents: "read" / "write" / "sweep" name a path
     argument the workspace may protect, "command" names the shell text a
-    command-shaped tool runs, "" nothing. It is what the host's permission
-    engine and guards judge a call by (permission.GUARDED_ARG), so a component
-    installed later enters that policy without an edit to the host.
-    `snapshot` marks a statement that OVERWRITES `path`, so the host can keep the
+    command-shaped tool runs, "" nothing (catalog.ACCESS_ARGS is the list). It is
+    what the host's permission engine and guards judge a call by
+    (permission.GUARDED_ARG), so a component installed later enters that policy
+    without an edit to the host. `access_arg` names the argument that policy
+    judges when it is not the word's default — a tool whose path argument is
+    called `file` says `access_arg: "file"` and gets the same fence, guard and
+    snapshot as one that calls it `path`.
+    `snapshot` marks a statement that OVERWRITES a path, so the host can keep the
     per-file undo the UI offers (the module keeps its own stack; this is the
-    host's). `modes` are the agent modes the tool is offered in. `gate` names a
-    host-side condition that must hold — "project" (a project memory store is
-    open) or "skills" (skills are enabled and there is one to load) — and a shut
-    gate means the tool is simply not offered (registry._gate_ok).
+    host's); `snapshot_arg` names the argument that holds that path (default:
+    `access_arg`, else "path"). `modes` are the agent modes the tool is offered
+    in. `gate` names a host-side condition that must hold — "project" (a project
+    memory store is open) or "skills" (skills are enabled and there is one to
+    load) — and a shut gate means the tool is simply not offered
+    (registry._gate_ok).
     """
 
     name: str
@@ -215,7 +326,9 @@ class Tool:
     command: str | None = None
     defaults: Mapping[str, Any] = field(default_factory=dict)
     access: str = ""
+    access_arg: str = ""  # the argument `access` judges ("" = the word's default)
     snapshot: bool = False
+    snapshot_arg: str = ""  # the argument `snapshot` records ("" = access_arg, else "path")
     modes: tuple[str, ...] = ("work", "chat")
     gate: str = ""
     ui: Mapping[str, Any] = field(default_factory=dict)
@@ -349,7 +462,9 @@ def _tool_of(raw: Any) -> Tool | None:
         command=raw.get("command") or None,
         defaults=raw.get("defaults") or {},
         access=str(raw.get("access", "") or ""),
+        access_arg=str(raw.get("access_arg", "") or ""),
         snapshot=bool(raw.get("snapshot", False)),
+        snapshot_arg=str(raw.get("snapshot_arg", "") or ""),
         modes=tuple(str(m) for m in raw.get("modes", ("work", "chat"))),
         gate=str(raw.get("gate", "") or ""),
         ui=raw.get("ui") if isinstance(raw.get("ui"), dict) else {},

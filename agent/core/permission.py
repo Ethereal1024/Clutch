@@ -26,18 +26,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..tools import catalog
 from ..tools.localshell import split_command
 from ..tools.workspace import Workspace
 
 Action = str  # "allow" | "ask" | "deny"
 
 # The host POLICY a declaration may put a tool under (catalog.Tool.access) and the
-# argument that policy judges. "read"/"sweep"/"write" name a `path` the workspace
-# may protect, "command" the shell text of the host's own tool. A tool that
-# declares no access is unguarded: nothing here judges it. Note what is NOT here —
-# a tool NAME. What a call is allowed to touch is the declaration's business, so
-# installing a component adds its tools to this policy without touching this file.
-GUARDED_ARG: dict[str, str] = {"read": "path", "sweep": "path", "write": "path", "command": "command"}
+# argument that policy judges BY DEFAULT. The vocabulary is the declaration
+# protocol's (catalog.ACCESS_ARGS) — this engine does not keep a second copy of
+# it; it reads which argument to judge from the tool's own declaration
+# (registry.access_arg), falling back to the word's default here. Note what is
+# NOT here — a tool NAME. What a call is allowed to touch is the declaration's
+# business, so installing a component adds its tools to this policy without
+# touching this file.
+GUARDED_ARG: dict[str, str] = dict(catalog.ACCESS_ARGS)
 
 
 @dataclass
@@ -88,12 +91,13 @@ DEFAULT_RULES: list[Rule] = [
 class PermissionEvaluator:
     rules: list[Rule] = field(default_factory=lambda: list(DEFAULT_RULES))
 
-    def evaluate(self, args_repr: str, workspace: Workspace, access: str) -> Action:
+    def evaluate(self, args_repr: str, workspace: Workspace, access: str, arg: str = "") -> Action:
         # Judge the guarded argument (the command, the path) rather than the whole
         # JSON: content is data, not a path, and must never prompt a write it does
         # not touch. WHICH argument that is comes from the tool's own declaration
-        # (GUARDED_ARG), never from its name.
-        key = GUARDED_ARG.get(access)
+        # (registry.access_arg, falling back to the vocabulary's default), never
+        # from its name.
+        key = arg or GUARDED_ARG.get(access)
         guarded: Any = args_repr
         if key:
             value = _parse_args(args_repr).get(key)
@@ -106,18 +110,20 @@ class PermissionEvaluator:
                 decision = rule
         if decision is not None:
             # escape rule: allow when no referenced path really leaves the workspace
-            if decision.escape and not self.escaped_paths(args_repr, workspace, access):
+            if decision.escape and not self.escaped_paths(args_repr, workspace, access, arg):
                 return "allow"
             return decision.action
         return "allow"
 
-    def escaped_paths(self, args_repr: str, workspace: Workspace, access: str) -> frozenset[Path]:
+    def escaped_paths(self, args_repr: str, workspace: Workspace, access: str, arg: str = "") -> frozenset[Path]:
         """Resolved absolute paths outside the workspace root this call references;
         empty means the call stays in the sandbox.
 
         ``access`` decides how to read the payload: a "command" names its paths in
-        shell text, every other guarded access names one in ``path``. A tool the
-        declaration leaves unguarded references nothing this can judge."""
+        shell text, every other guarded access names one in the argument its
+        declaration points at (``arg``; the word's default when the declaration
+        says nothing). A tool the declaration leaves unguarded references nothing
+        this can judge."""
         if access not in GUARDED_ARG:
             return frozenset()
         args = _parse_args(args_repr)
@@ -132,7 +138,7 @@ class PermissionEvaluator:
             if tokens is None:
                 return frozenset()
         else:
-            path = args.get("path")
+            path = args.get(arg or GUARDED_ARG.get(access, ""))
             if path is None:
                 return frozenset()
             tokens = [path]
@@ -206,17 +212,18 @@ class PermissionGate:
         self._lock = threading.Lock()
         self._counter = 0
 
-    def require(self, tool: str, args_repr: str, workspace: Workspace, access: str) -> None:
+    def require(self, tool: str, args_repr: str, workspace: Workspace, access: str, arg: str = "") -> None:
         """Raise PermissionRequired if the user must confirm (or deny).
 
         `tool` is only what the prompt calls the call; the POLICY reads `access`,
-        the access the tool's own declaration is under (registry.access) — so a
-        component installed later is subject to it without an edit here. Approved
-        escapes are recorded on the workspace for the call; auto_allow
+        the access the tool's own declaration is under (registry.access), and the
+        argument it judges, named by that same declaration (registry.access_arg) —
+        so a component installed later is subject to it without an edit here.
+        Approved escapes are recorded on the workspace for the call; auto_allow
         (unattended/eval) denies escapes rather than silently opening the sandbox.
         """
-        action = self.evaluator.evaluate(args_repr, workspace, access)
-        escapes = self.evaluator.escaped_paths(args_repr, workspace, access)
+        action = self.evaluator.evaluate(args_repr, workspace, access, arg)
+        escapes = self.evaluator.escaped_paths(args_repr, workspace, access, arg)
         if action == "deny":
             raise PermissionRequired("", tool, args_repr, "denied by permission rules")
         if action == "allow" and not escapes:

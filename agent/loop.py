@@ -221,6 +221,7 @@ class Agent:
                                 arguments=tc["arguments"],
                                 tool_call_id=tc["id"],
                                 ui=self.registry.ui(tc["name"]),
+                                path_arg=self.registry.path_arg(tc["name"]),
                             )
                         )
 
@@ -295,8 +296,15 @@ class Agent:
         if self.gate is not None:
             try:
                 # the policy comes from the tool's own declaration: the loop only
-                # reports what the registry says this tool is subject to
-                self.gate.require(ev.name, args_repr, self.workspace, self.registry.access(ev.name))
+                # reports what the registry says this tool is subject to — the
+                # access word and the argument that word judges
+                self.gate.require(
+                    ev.name,
+                    args_repr,
+                    self.workspace,
+                    self.registry.access(ev.name),
+                    self.registry.access_arg(ev.name),
+                )
             except PermissionRequired as e:
                 return {"content": f"ERROR: {e.reason}", "error": True}
         try:

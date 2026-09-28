@@ -44,18 +44,75 @@ from .workspace import LocalWorkspace, Workspace
 
 # (workspace, config, **args) -> dict{content, error?}
 ToolImpl = Callable[..., dict[str, Any]]
-# (workspace, config, args) -> dict{content, error?} | None -- a refusal, or None to proceed
-GuardImpl = Callable[[Workspace, Config, dict[str, Any]], dict[str, Any] | None]
+# (workspace, config, args, arg) -> dict{content, error?} | None -- a refusal, or None to proceed
+# `arg` is the argument this policy judges, from the tool's own declaration
+# (catalog.Tool.access_arg) — never assumed to be "path".
+GuardImpl = Callable[[Workspace, Config, dict[str, Any], str], dict[str, Any] | None]
+
+
+@dataclass(frozen=True)
+class Access:
+    """One host policy word: how it is enforced, and the argument it judges when
+    a declaration does not rename it.
+
+    `guard` is the host's own refusal (None when the word needs no host-side
+    check — permission rules alone judge `command`); `arg` is the default name
+    the policy reads. The WORDS live in catalog.ACCESS_ARGS (the declaration
+    vocabulary); this table binds each one to the implementation, and the keys
+    are checked against that vocabulary at import time (see _check_vocabulary).
+    """
+
+    guard: GuardImpl | None
+    arg: str
+
 
 # The host POLICY a declaration may put a tool under, by the name it is declared
-# with (catalog.Tool.access). Keeping the names in the declaration and the
-# implementations here is the split: a component says "this names a path the
-# workspace may protect", the host decides what protection means.
-GUARDS: dict[str, GuardImpl] = {
-    "read": filesystem.guard_read,
-    "sweep": filesystem.guard_grep,
-    "write": filesystem.guard_write,
+# with (catalog.Tool.access). Keeping the names in the declaration's vocabulary
+# and the implementations here is the split: a component says "this names a path
+# the workspace may protect", the host decides what protection means.
+ACCESS: dict[str, Access] = {
+    "read": Access(filesystem.guard_read, catalog.ACCESS_ARGS["read"]),
+    "sweep": Access(filesystem.guard_grep, catalog.ACCESS_ARGS["sweep"]),
+    "write": Access(filesystem.guard_write, catalog.ACCESS_ARGS["write"]),
+    "command": Access(None, catalog.ACCESS_ARGS["command"]),
 }
+
+
+# The policies under which a call is "working ON a file" rather than sweeping for
+# one: the context reader after a compaction re-reads the files a call NAMED, and
+# READ/WRITE are the words that name exactly one. `sweep` (a search) deliberately
+# stays out — it has no single file to re-read.
+WATCHED_ACCESS: frozenset[str] = frozenset({"read", "write"})
+
+
+def _check_vocabulary() -> None:
+    """The two halves of the access vocabulary cannot drift apart silently: every
+    word the declaration protocol lists must have an implementation here, and
+    nothing else. A mismatch is a host bug, not a component's, so it is loud."""
+    assert set(ACCESS) == set(catalog.ACCESS_ARGS), (
+        f"access vocabulary drift: catalog {sorted(catalog.ACCESS_ARGS)} vs registry {sorted(ACCESS)}"
+    )
+
+
+_check_vocabulary()
+
+# The words the host refuses a declaration over, said ONCE per process (a
+# component's typo is a fact about its manifest, not something to repeat on every
+# turn). The declaration itself stays in the table; only its tools are withheld.
+_REPORTED: set[tuple[str, str, str]] = set()
+
+
+def _report(diags: list[catalog.Diagnostic]) -> None:
+    """Say, once each, why the host is not offering some declared tools."""
+    from ..procmgr.stdio import log
+
+    for d in diags:
+        key = (d.component, d.tool, d.message)
+        if key in _REPORTED:
+            continue
+        _REPORTED.add(key)
+        where = f"{d.component}/{d.tool}" if d.tool else d.component
+        log(f"[components] refusing {where}: {d.message}")
 
 
 @dataclass
@@ -76,7 +133,10 @@ class Tool:
 
     `access` is the policy the tool's DECLARATION put it under (catalog.Tool.access)
     — the one thing permission.evaluate and permission.escaped_paths read to decide
-    what a call may touch.
+    what a call may touch. `access_arg` is the argument that policy judges, and
+    `snapshot_arg` the argument the undo record reads — both resolved from the
+    declaration (catalog.Tool.access_arg / snapshot_arg) with the vocabulary's
+    default filled in, so nothing downstream has to assume "path".
 
     `guard` is host policy a component deliberately does not carry: the
     workspace module's fence refuses mutations and hides broad sweeps but still
@@ -86,11 +146,11 @@ class Tool:
     left out gets the host's default instead of a hole in the request.
 
     `snapshot` marks the statements that OVERWRITE the file named in their
-    `path` argument. The component that performs such a write keeps its own undo
-    stack (the daemon's /undo pops its newest write, for its CLI), but the
-    per-file "undo" the UI offers on a change result is served by THIS process —
-    so the content the write is about to replace is recorded here too, and only
-    for a write that actually happened.
+    `snapshot_arg` argument. The component that performs such a write keeps its
+    own undo stack (the daemon's /undo pops its newest write, for its CLI), but
+    the per-file "undo" the UI offers on a change result is served by THIS
+    process — so the content the write is about to replace is recorded here too,
+    and only for a write that actually happened.
 
     `ui` is the component's presentation declaration (catalog.DEFAULTS), already
     defaulted: the UI renders a tool it did not design from this block alone.
@@ -103,9 +163,11 @@ class Tool:
     module: str | None = None  # which component serves the statement
     host: ToolImpl | None = None  # the host's own tool (no component behind it)
     access: str = ""  # the policy its declaration put it under ("" = unguarded)
+    access_arg: str = ""  # the argument that policy judges
     guard: GuardImpl | None = None  # host policy the component does not make
     defaults: Mapping[str, Any] | None = None  # statement payload defaults
-    snapshot: bool = False  # the statement overwrites args["path"]
+    snapshot: bool = False  # the statement overwrites snapshot_arg
+    snapshot_arg: str = ""  # the argument the undo record reads
     ui: Mapping[str, Any] = field(default_factory=dict)
 
     def to_openai_schema(self) -> dict[str, Any]:
@@ -190,7 +252,13 @@ def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> T
     The description and the schema alike are run through `_resolve`, so a
     manifest's `$config.<field>` / `$skills` / `$backends` tokens become the
     host facts they name — the component says WHAT it wants to know about this
-    host, the host answers with its own values."""
+    host, the host answers with its own values.
+
+    The policy words are resolved here too, and a declaration that names one the
+    host does not know is refused by the CALLER (build_tools, which asks
+    catalog.tool_diagnostics first) — never wired half-read."""
+    access = ACCESS.get(spec.access)
+    access_arg = spec.access_arg or (access.arg if access else "")
     return Tool(
         name=spec.name,
         description=_resolve(spec.description, config),
@@ -198,9 +266,11 @@ def _wire(component: catalog.Component, spec: catalog.Tool, config: Config) -> T
         inst=spec.command,
         module=component.name,
         access=spec.access,
-        guard=GUARDS.get(spec.access),
+        access_arg=access_arg,
+        guard=access.guard if access else None,
         defaults=_resolve(dict(spec.defaults), config),
         snapshot=spec.snapshot,
+        snapshot_arg=spec.snapshot_arg or access_arg or "path",
         ui=catalog.ui_of(spec),
     )
 
@@ -212,9 +282,18 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
     "not installed" stub, no host-side stand-in. The client shows the user
     `unavailable_reason()` instead (components_unavailable), because a tool the
     model cannot call is not a thing the model should see.
-    """
+
+    A declaration word the host does not know refuses what it governs rather than
+    running half-read (catalog.Diagnostics): an unknown facility takes the whole
+    component's tools out, an unknown `access`/`gate`/`mode`/argument name takes
+    just its tool — the model never sees the schema of a call the host would
+    judge wrongly. Each refusal is said once (registry._report)."""
     tools: list[Tool] = [_run_command(config)]
     for component in catalog.table().values():
+        fatal = [d for d in catalog.component_diagnostics(component) if d.fatal]
+        if fatal:
+            _report(fatal)
+            continue
         if not rendezvous.available(component.name):
             continue
         for spec in component.tools:
@@ -269,6 +348,7 @@ def _run_command(config: Config) -> Tool:
         },
         host=lambda workspace, cfg, cancel=None, **kw: shell.run_command(workspace, cfg, cancel=cancel, **kw),
         access="command",
+        access_arg=catalog.ACCESS_ARGS["command"],
         ui={"preview": "command"},
     )
 
@@ -301,10 +381,12 @@ def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
     return ""
 
 
-def _previous_content(workspace: Workspace, args: dict[str, Any]) -> tuple[Any, str] | None:
+def _previous_content(workspace: Workspace, args: dict[str, Any], arg: str) -> tuple[Any, str] | None:
     """(resolved path, content) of the file a component's write is about to
     replace — the host's own undo bookkeeping for the statement path.
 
+    `arg` is the argument that named that path, from the tool's own declaration
+    (registry.Tool.snapshot_arg) — the host never assumes it is called "path".
     The component performs the write, and its daemon keeps its own undo stack
     (the /undo its CLI pops: the newest write, whoever made it). The per-file
     revert the UI offers on a change result is answered by THIS process, so the
@@ -312,7 +394,7 @@ def _previous_content(workspace: Workspace, args: dict[str, Any]) -> tuple[Any, 
     means there is nothing to remember: a file that does not exist yet has no
     previous content, and a creation is not a change the UI can revert."""
     try:
-        p = workspace.resolve(str(args.get("path", "")))
+        p = workspace.resolve(str(args.get(arg, "")))
         old = workspace.read(str(p))
     except (OSError, ValueError):
         return None
@@ -338,13 +420,36 @@ class ToolRegistry:
     def access(self, name: str) -> str:
         """The policy this tool's declaration put it under ("" = unguarded).
 
-        What a call may touch is decided by this string and the guarded argument
-        it names (permission.GUARDED_ARG) — the evaluator never sees a tool name,
-        so a component installed later is subject to the same policy vocabulary
-        as the components this repo develops.
+        What a call may touch is decided by this string and the argument it names
+        (registry.access_arg, permission.GUARDED_ARG) — the evaluator never sees a
+        tool name, so a component installed later is subject to the same policy
+        vocabulary as the components this repo develops.
         """
         tool = self._tools.get(name)
         return tool.access if tool is not None else ""
+
+    def access_arg(self, name: str) -> str:
+        """The argument `access` judges for this tool ("" when it is unguarded).
+
+        Named by the tool's own declaration (catalog.Tool.access_arg) with the
+        vocabulary's default filled in, so the permission gate judges the
+        argument this tool actually uses even when it is not called `path`."""
+        tool = self._tools.get(name)
+        return tool.access_arg if tool is not None else ""
+
+    def path_arg(self, name: str) -> str:
+        """The argument in which this call NAMED A FILE ("" when it named none).
+
+        The two policies under which a call is "working on a file" rather than
+        sweeping for one: read and write. The context reader after a compaction
+        tells the model to re-read the files it was working on and it learns
+        which argument holds one from here — never from a tool name, so a
+        component's read tool is remembered exactly like the ones this repo
+        develops."""
+        tool = self._tools.get(name)
+        if tool is None or tool.access not in WATCHED_ACCESS:
+            return ""
+        return tool.access_arg
 
     def ui(self, name: str) -> dict[str, Any]:
         """One tool's presentation block, for the call events the UI renders from.
@@ -413,7 +518,7 @@ class ToolRegistry:
         runnable for this call is answered with the reason, never with a stand-in.
         """
         if tool.guard is not None:
-            refused = tool.guard(workspace, config, args)
+            refused = tool.guard(workspace, config, args, tool.access_arg)
             if refused is not None:
                 return refused
         if tool.inst is None:
@@ -428,7 +533,7 @@ class ToolRegistry:
         # the component performs the write; the host keeps the undo record, but
         # only once the statement has actually overwritten something — a refused
         # or failed edit must not leave a snapshot the UI could "restore"
-        remembered = _previous_content(workspace, args) if tool.snapshot else None
+        remembered = _previous_content(workspace, args, tool.snapshot_arg) if tool.snapshot else None
         result = self._exec_statement(workspace, config, tool, args, cancel)
         if remembered is not None and not result.get("error"):
             workspace.snapshot(remembered[0], remembered[1])
