@@ -319,6 +319,16 @@ const toolCallGroups = new Map();
 //             whole (a block body's rest state).
 //   mutates   the call may change the file tree (host-derived when undeclared).
 //   undo      the host holds an undo record for this call (host-derived).
+// The HOST's own default `ui` block (GET /api/host), fetched once at boot: the
+// host's document (host.json) may override any constant below, and every event
+// that carries no `ui` of its own then renders with what the host says, not
+// what was compiled in. The constants stay as the fallback -- a host that
+// predates the endpoint, or a fetch that fails -- so the renderer never waits
+// on the network to draw a row.
+let hostUiDefaults = null;
+function uiDefaults() {
+  return hostUiDefaults ? Object.assign({}, UI_DEFAULTS, hostUiDefaults) : UI_DEFAULTS;
+}
 const UI_DEFAULTS = {
   group: null,
   chip: "name",
@@ -337,7 +347,7 @@ const CALL_BLOCK = "__calls__"; // the block calls that declared no group share
 const RESULT_FOLD_LINES = 60; // "long": fold a body past this many lines
 
 function uiOf(ev) {
-  return Object.assign({}, UI_DEFAULTS, (ev && ev.ui) || {});
+  return Object.assign({}, uiDefaults(), (ev && ev.ui) || {});
 }
 
 // the declaration of the call a result belongs to: the tool_call event that
@@ -345,7 +355,7 @@ function uiOf(ev) {
 // older log page) renders from its own copy
 function uiOfResult(ev) {
   const call = toolCalls[ev.tool_call_id];
-  if (call && call.ui) return Object.assign({}, UI_DEFAULTS, call.ui);
+  if (call && call.ui) return Object.assign({}, uiDefaults(), call.ui);
   return uiOf(ev);
 }
 
@@ -3077,11 +3087,24 @@ function healSettingsMirror() {
   }
 }
 
+// the host's own default `ui` block: fetched once at boot, before the first
+// row is drawn, so the host's document (host.json) speaks through every event
+// that carries no `ui` of its own. Best effort in both directions: an older
+// host without the endpoint, or any fetch failure, leaves the compiled-in
+// constants standing -- the renderer never waits on the network to draw.
+async function loadHostDefaults() {
+  try {
+    const data = await apiFetch("/api/host");
+    if (data && data.ui) hostUiDefaults = data.ui;
+  } catch (e) {} // constants remain the fallback
+}
+
 // settle the stored URL before connecting SSE; connectSSE is idempotent, so a
 // switch inside reconciledBackendUrl (stale-SSH fallback, tunnel target) plus
 // the trailing call still leaves exactly one live stream
 (async () => {
   await resolveApiBase(); // learn this window's session port (IPC) first
+  await loadHostDefaults(); // the host's own ui block, before any row is drawn
   healSettingsMirror();
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);

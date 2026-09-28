@@ -231,6 +231,7 @@ uv run python -m tests.inst_test            # 工具语句：参数 -> 命令 ->
 uv run python -m tests.rendezvous_test      # 模块 daemon/CLI 寻址与权限围栏（需 checkout）
 uv run python -m tests.tools_inst_test      # 每个工具的命令契约（--live 走真实模块）
 uv run python -m tests.catalog_test         # 组件声明：UI 协议 + 第三方注册（R4）
+uv run python -m tests.hostconfig_test      # 宿主自己的文档（host.json）：access/gates/ui/backends 表
 uv run python -m tests.components_api_test  # 组件安装层：客户端上传 + 宿主落地
 uv run python -m tests.ui_fonts_check       # 字体/图标跨平台一致（含 mermaid 标签字体）
 uv run python -m eval.harness               # 三个评测场景

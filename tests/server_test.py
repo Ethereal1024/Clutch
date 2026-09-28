@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - Windows
 
 from agent.config import Config
 from agent.server import Broadcaster, RunState, build
+from agent.tools import catalog
 from tests.testsupport import check, http_get, http_post
 
 
@@ -306,6 +307,15 @@ def _run_server_test() -> int:
         check(bool(saved_url and saved_model), "saved endpoint present for the real-run section")
         st, body = http_post(f"{base_url}/api/settings", {"base_url": saved_url, "model": saved_model})
         check(st == 200, "settings restored")
+
+        # 2e. the host's own tables a renderer needs (GET /api/host): the ui
+        # defaults the document (host.json) merged over the built-ins, served
+        # rather than duplicated -- app.js's copy is only the fallback
+        st, body = http_get(f"{base_url}/api/host")
+        data = json.loads(body)
+        check(st == 200 and "ui" in data, "GET /api/host answers with the host's ui table")
+        check(data["ui"].get("chip") == catalog.DEFAULTS.get("chip"), "the served ui table IS catalog.DEFAULTS")
+        check("mutates" not in data["ui"], "the host derives mutates per tool; the table holds no default for it")
 
         # 3. create a project
         st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "demo"})

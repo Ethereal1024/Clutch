@@ -69,15 +69,26 @@ class Access:
     arg: str
 
 
+# The guard each access word is enforced by, under the name the host's document
+# calls it (catalog.GUARD_IMPLS lists the ones that exist — _check_vocabulary
+# keeps the two lists equal — and hostconfig refuses a document that names
+# anything else, so a word can never point at a guard this host does not have).
+_GUARD_IMPLS: dict[str, GuardImpl] = {
+    "guard_read": filesystem.guard_read,
+    "guard_grep": filesystem.guard_grep,
+    "guard_write": filesystem.guard_write,
+}
+
+
 # The host POLICY a declaration may put a tool under, by the name it is declared
 # with (catalog.Tool.access). Keeping the names in the declaration's vocabulary
 # and the implementations here is the split: a component says "this names a path
-# the workspace may protect", the host decides what protection means.
+# the workspace may protect", the host decides what protection means. The words
+# come from catalog.ACCESS_WORDS — the built-in table with this machine's
+# document merged over it (tools/hostconfig.py), so a host can be taught a word
+# that reuses a guard it already has without touching host source.
 ACCESS: dict[str, Access] = {
-    "read": Access(filesystem.guard_read, catalog.ACCESS_ARGS["read"]),
-    "sweep": Access(filesystem.guard_grep, catalog.ACCESS_ARGS["sweep"]),
-    "write": Access(filesystem.guard_write, catalog.ACCESS_ARGS["write"]),
-    "command": Access(None, catalog.ACCESS_ARGS["command"]),
+    word: Access(_GUARD_IMPLS.get(rec.guard), rec.arg) for word, rec in catalog.ACCESS_WORDS.items()
 }
 
 
@@ -99,14 +110,46 @@ _FACT_GATES: dict[str, Callable[[Config], bool]] = {
 }
 
 
+def gate_project(config: Config, memories: MemoryStore | None) -> bool:
+    """`project`: a memory store is open for the workspace being served."""
+    return memories is not None
+
+
+def gate_skills(config: Config, memories: MemoryStore | None) -> bool:
+    """`skills`: the library the `skills` fact publishes has something in it.
+
+    Skills off entirely, or nothing to load: an enum over an empty library is a
+    schema that offers the model nothing to pick. The gate word is also the fact
+    token, so a library the host cannot read shuts this gate too.
+    """
+    return bool(_entries("skills", config))
+
+
+# The host-side condition a NAMED `gate` word stands behind, by the name the
+# host's document calls it (catalog.GATE_IMPLS lists the ones that exist —
+# _check_vocabulary keeps the two lists equal — and "" / "always" are structural,
+# no condition at all, so they are not here).
+_GATE_IMPLS: dict[str, Callable[[Config, MemoryStore | None], bool]] = {
+    "project": gate_project,
+    "skills": gate_skills,
+}
+
+
 def _check_vocabulary() -> None:
     """Neither half of the host's vocabulary can drift from the declarations
     behind it silently: every access word the declaration protocol lists must have
-    an implementation here, every published fact a condition, and the host's own
-    tool names must be exactly the ones tools/host.py declares. A mismatch is a
-    host bug, not a component's, so it is loud."""
+    an implementation here (and every implementation a word may name), every named
+    gate a condition, every published fact a condition, and the host's own tool
+    names must be exactly the ones tools/host.py declares. A mismatch is a host
+    bug, not a component's, so it is loud."""
     assert set(ACCESS) == set(catalog.ACCESS_ARGS), (
         f"access vocabulary drift: catalog {sorted(catalog.ACCESS_ARGS)} vs registry {sorted(ACCESS)}"
+    )
+    assert set(_GUARD_IMPLS) == set(catalog.GUARD_IMPLS), (
+        f"guard implementation drift: catalog {sorted(catalog.GUARD_IMPLS)} vs registry {sorted(_GUARD_IMPLS)}"
+    )
+    assert set(_GATE_IMPLS) == set(catalog.GATE_IMPLS), (
+        f"gate implementation drift: catalog {sorted(catalog.GATE_IMPLS)} vs registry {sorted(_GATE_IMPLS)}"
     )
     assert set(_FACT_GATES) == set(catalog.FACT_TOKENS), (
         f"fact vocabulary drift: catalog {sorted(catalog.FACT_TOKENS)} vs registry {sorted(_FACT_GATES)}"
@@ -330,17 +373,17 @@ def _fact_answer(token: str, config: Config) -> facts.Answer:
 def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
     """Whether a tool's declared host-side condition holds at all (see
     catalog.Tool.gate). A tool whose gate is shut is not offered — it is not
-    offered-with-an-error, because the model would only learn to stop trying."""
+    offered-with-an-error, because the model would only learn to stop trying.
+
+    The word is looked up in the host's table (catalog.GATE_WORDS: the built-in
+    conditions with this machine's document merged over them), and a word whose
+    condition this host does not have shuts the gate: an unreadable condition is
+    not "always true" (a declaration naming one the host cannot answer is refused
+    by tool_diagnostics anyway, so this is the second lock on the same door)."""
     if gate in ("", "always"):
         return True
-    if gate == "project":
-        return memories is not None
-    if gate == "skills":
-        # skills off entirely, or nothing to load: an enum over an empty library
-        # is a schema that offers the model nothing to pick. The gate word is the
-        # fact token, so a library the host cannot read shuts the gate too.
-        return bool(_entries("skills", config))
-    return False
+    impl = _GATE_IMPLS.get(catalog.GATE_WORDS.get(gate, ""))
+    return bool(impl(config, memories)) if impl else False
 
 
 def _wire(spec: catalog.Tool, config: Config, *, owner: str, implementation: host.HostImpl | None = None) -> Tool:

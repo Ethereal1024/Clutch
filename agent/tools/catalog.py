@@ -119,7 +119,8 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from . import components, modules
+from ..config import Config
+from . import components, hostconfig, modules
 
 # How a component is spoken to.
 DAEMON = "daemon"  # a per-workspace HTTP service discovered through a record
@@ -142,7 +143,13 @@ SKILL_LIB = "skill-library"
 # tool works out of the box; a component only has to speak up when it looks
 # different. `mutates` is a key the HOST derives when the declaration leaves it
 # out (registry.ui), which is why it has no default here.
-DEFAULTS: dict[str, Any] = {
+#
+# The table below is the built-in one; `DEFAULTS` is what the host really uses,
+# the document merged over it (hostconfig). The renderer's own copy in
+# ui/app.js is only what an unreadable document — or a host that predates
+# GET /api/host — leaves in force, and a call's own `ui` block still wins over
+# both.
+DEFAULT_UI: dict[str, Any] = {
     "group": None,
     "chip": "name",
     "summary": "",
@@ -154,6 +161,7 @@ DEFAULTS: dict[str, Any] = {
     "highlight": "",
     "chrome": "",
 }
+DEFAULTS: dict[str, Any] = hostconfig.ui(DEFAULT_UI)
 UI_KEYS = tuple(DEFAULTS) + ("mutates",)
 
 
@@ -162,21 +170,43 @@ UI_KEYS = tuple(DEFAULTS) + ("mutates",)
 # this host does not know can be refused instead of silently failing (see
 # Diagnostics below). A component chooses the value — which policy, which gate,
 # which facility — and never invents the word.
+#
+# Two of these tables are also the host's own extension point: the `access` words
+# (and the guard each is enforced by) and the named `gate` conditions may be
+# named by the host's DOCUMENT as well as by this file — `~/.clutch/host.json`,
+# or CLUTCH_HOST_CONFIG (tools/hostconfig.py). What is written below is then the
+# built-in default, merged over word by word, and only implementations the host
+# ALREADY has can be named: a document chooses, it never brings code.
+
+# The guard implementations this host has, by the name a document calls one
+# (hostconfig: `"guard": "guard_read"`). registry._GUARD_IMPLS binds each name to
+# the function, and _check_vocabulary keeps the two lists equal: a name here that
+# nothing implements would otherwise be a policy word with no policy behind it.
+GUARD_IMPLS: tuple[str, ...] = ("guard_read", "guard_grep", "guard_write")
+# The gate conditions this host has, likewise named (registry._GATE_IMPLS
+# implements them; the same check keeps the lists equal).
+GATE_IMPLS: tuple[str, ...] = ("project", "skills")
 
 # access: the policy a tool is put under, with the argument that policy judges by
 # default. A declaration may RENAME that argument (`Tool.access_arg`) — a path
 # argument called `file` still enters the workspace's fence — but the word and
-# its meaning stay the host's. "" = the host applies no policy. Read by
-# permission.GUARDED_ARG and registry.ACCESS.
-ACCESS_ARGS: dict[str, str] = {
-    "read": "path",  # a path the workspace may protect
-    "sweep": "path",  # a path a broad search walks
-    "write": "path",  # a path the call may overwrite
-    "command": "command",  # the shell text a command-shaped tool runs
+# its meaning stay the host's. "" = no host-side guard (the permission engine
+# still judges the call). Read by permission.GUARDED_ARG and registry.ACCESS —
+# both of which read the MERGED table below, not this one.
+DEFAULT_ACCESS: dict[str, hostconfig.AccessWord] = {
+    "read": hostconfig.AccessWord("guard_read", "path"),  # a path the workspace may protect
+    "sweep": hostconfig.AccessWord("guard_grep", "path"),  # a path a broad search walks
+    "write": hostconfig.AccessWord("guard_write", "path"),  # a path the call may overwrite
+    "command": hostconfig.AccessWord("", "command"),  # the shell text a command-shaped tool runs
 }
+ACCESS_WORDS: dict[str, hostconfig.AccessWord] = hostconfig.access(DEFAULT_ACCESS, GUARD_IMPLS)
+ACCESS_ARGS: dict[str, str] = {word: rec.arg for word, rec in ACCESS_WORDS.items()}
 # gate: a host-side condition that must hold for the tool to be offered at all
-# (registry._gate_ok). "" / "always" = no condition.
-GATES: tuple[str, ...] = ("", "always", "project", "skills")
+# (registry._gate_ok). "" / "always" = no condition, and are structural rather
+# than declared: only the NAMED conditions are the document's to add or drop.
+DEFAULT_GATES: dict[str, str] = {"project": "project", "skills": "skills"}
+GATE_WORDS: dict[str, str] = hostconfig.gates(DEFAULT_GATES, GATE_IMPLS)
+GATES: tuple[str, ...] = ("", "always", *GATE_WORDS)
 # modes: the agent modes a tool is offered in (config.Config.mode).
 MODES: tuple[str, ...] = ("work", "chat")
 # requires: the host facilities a component may declare it stands on
@@ -469,13 +499,26 @@ class Component:
 # is a HOST fact — which knobs this machine's config has — not a declaration:
 # any component may spend `$backends` in its schema text and the host renders
 # what it knows, exactly as it does `$config.<field>` and `$skills`.
-_BACKENDS = (("tavily", "tavily_api_key"), ("searxng", "searxng_url"), ("bing", ""), ("ddg", ""))
+#
+# The chain the document may replace whole (a chain is ordered, so there is no
+# key to merge on): `DEFAULT_BACKENDS` is the built-in one, `_BACKENDS` what the
+# host really uses, and BACKEND_FIELDS is the `Config`'s own field list, read off
+# the dataclass — a backend is switched on by the host's config, so a name no
+# field can turn on is not a backend this host has.
+DEFAULT_BACKENDS: tuple[hostconfig.Backend, ...] = (
+    hostconfig.Backend("tavily", "tavily_api_key"),
+    hostconfig.Backend("searxng", "searxng_url"),
+    hostconfig.Backend("bing", ""),
+    hostconfig.Backend("ddg", ""),
+)
+BACKEND_FIELDS = frozenset(f.name for f in fields(Config))
+_BACKENDS = hostconfig.backends(DEFAULT_BACKENDS, BACKEND_FIELDS)
 
 
 def available_backends(config) -> tuple[str, ...]:
     """The backends this machine has configured, in chain order (prompt text).
     An unconfigured service does not exist here — no name, no install advice."""
-    return tuple(name for name, field in _BACKENDS if not field or getattr(config, field, ""))
+    return tuple(b.name for b in _BACKENDS if not b.field or getattr(config, b.field, ""))
 
 
 # --------------------------------------------------------- registration -------

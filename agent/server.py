@@ -49,6 +49,7 @@ from .events import (
     event_to_json,
 )
 from .project import Project, create_project, open_project_lazy
+from .tools import catalog
 from .tools.workspace import Workspace
 
 # a client hanging up mid-SSE surfaces as one of these on the socket write;
@@ -165,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
             self._clc_read()
         elif path == "/api/settings":
             self._settings_get()
+        elif path == "/api/host":
+            self._host_get()
         else:
             self._json({"error": "not found"}, status=404)
 
@@ -384,6 +387,15 @@ class Handler(BaseHTTPRequestHandler):
                 "has_api_key": bool(self._state.api_key or self._cfg.api_key or saved.get("api_key")),
             }
         )
+
+    def _host_get(self) -> None:
+        """The host's own tables a renderer needs to know about (GET /api/host).
+
+        Today one: the `ui` defaults — the host document's table merged over the
+        built-in one (catalog.DEFAULTS, tools/hostconfig.py). Served rather than
+        duplicated, so ui/app.js's copy of the constants is only what an older
+        host or an unreadable document leaves in force."""
+        self._json({"ui": catalog.DEFAULTS})
 
     def _permission_respond(self) -> None:
         body = self._read_body()
