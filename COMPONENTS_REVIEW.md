@@ -432,6 +432,17 @@ docstring 改口。
 安装顺序；宿主声明与词汇表在导入时互校（`registry._check_vocabulary`）。见
 `COMPONENTS.md` 第十一节。
 
+④ 已落地（第六步）：技能目录不再有第二份实现。`agent/skills.py` 整份删除，
+`core/context.py` 里那段"自己扫 `*/SKILL.md` 再拼目录表"的代码与它的 import 一起消失；
+宿主留给自己的只剩"问谁、怎么问"（`catalog.FACT_TOKENS = ("skills",)`），答案由组件
+**发布**：声明里 `"facts": {"skills": "--no-server --facts [--root {root}] list"}`，语句与
+工具语句同源同渲染（`inst.render`），只是没人调用它、所以没有模型参数
+（`rendezvous.prepare_cli`）。回答的形状是宿主的——stdout 一个 `[{"name","description"}]`
+JSON 数组——组件自己的 `--json list` 载荷宿主不读；读不出来时事实读作无值、门关上、
+花掉它的提示词片段整段不接（那批工具同样不在），组件自己的理由经 `registry._report`
+只说一次：库读不出来是用户必须看见的事，不是"空目录表"。见 `COMPONENTS.md` 第五节
+的"已发布的事实"。
+
 ### 3.3 一条可复用的判定规则：**事实 vs 语法**
 
 > 宿主发布的占位符只能是**事实**（宿主自己拥有并产生的：它启动的、它读到的、它的配置与路径）。
@@ -510,8 +521,8 @@ ls agent/prompts/tools/
 | 8 | 信封类型化 + 合并"点名即覆盖" + 提示词片段随声明走（P1-4 + P1-6 + 审计⑥） | `32c3ea7` + `cf995c8` + `3cf0294`（宿主）+ `f985180`/`7a7e506`（clutch-workspace / clutch-memory） |
 | 7 | `run_command` 登记为唯一被声明的引导例外（审计①） | `40a59f9` refactor(tools): the host's own tool is declared, and no component may name it |
 | 9 | 补测试：参数重命名后的 guard/undo、工具重名、传输 cwd | `3538759` test(tools): the renamed argument, the one name, and the transport a statement rides |
-| 5 | 宿主配置文件化：access→impl、门表、UI 缺省、后端链（审计③⑤ + 边界） | 待办（本项） |
-| 6 | 消灭第二份实现：技能目录由组件自己发布（审计④） | 待办（本项） |
+| 5 | 宿主配置文件化：access→impl、门表、UI 缺省、后端链（审计③⑤ + 边界） | 待办（下一步） |
+| 6 | 消灭第二份实现：技能目录由组件自己发布（审计④） | `01e0977` refactor(tools): the host asks the component for its catalog, and keeps no scan（宿主）+ `d7e40f7` clutch-skills（子模块指针 `0a091c2`） |
 
 ### 第四步实际落下的判据（P1-5）
 
@@ -533,7 +544,7 @@ ls agent/prompts/tools/
   由 daemon 自己的信封拒绝、9b 被顶替者不删继任者记录）、`tests/inst_test.py` 7b、
   `tests/tools_inst_test.py` 的 `check_daemon_lines` / `check_envelopes`。
 - 顺带确认的遗留：`unwrap` 的非信封分支**没有 `error`/`diff` 键**（P1-4），
-  测试里只能用 `.get("error")`；这条仍在待办里，不属本步。
+  测试里只能用 `.get("error")`；这条当时仍在待办里，第八步已落地（`Envelope`，见下节）。
 
 ### 第八步实际落下的判据（P1-4 + P1-6 + 审计⑥）
 
@@ -562,10 +573,43 @@ ls agent/prompts/tools/
   （片段入提示词、不可驱动者不贡献、读不出者只报一次）、
   `check_host_prompt_names_no_component_tool`（宿主三个提示词文件里不出现任何
   组件工具名）。
-- 遗留（都不属本步）：第四节只剩第 5、6 两步（宿主配置文档、技能目录由组件自己发布，
-  见下表）；`agent/skills.py:42` 的技能目录表头仍写 `load_skill` 就是第六步要拆的那处
-  （审计④ 的范围）。第 7、9 步已落地（`40a59f9`、`3538759`），P2-18 的五项零碎已落地
-  （`a01e74a`），见各节。
+- 遗留（都不属本步）：第四节只剩第 5 步（宿主配置文档，见下表）。第 6 步已落地
+  （`01e0977` + `d7e40f7`，见下节），第 7、9 步已落地（`40a59f9`、`3538759`），
+  P2-18 的五项零碎已落地（`a01e74a`），见各节。
+
+### 第六步实际落下的判据（审计④）
+
+- **宿主不再有技能扫描**：`agent/skills.py`（`load_skill_library` / `cached_library` /
+  扫 `skills_dir` 下 `*/SKILL.md`）在 `01e0977` 里整份删除，`core/context.py` 里拼目录的
+  那段与它的 import 一起消失。技能库的真值只剩 `clutch-skills` 自己，
+  `COMPONENTS.md:5-6` 那句"宿主不为任何组件保留第二份实现"因此第一次是真的。
+- **方向倒过来：宿主问，组件答**。token 是宿主的词汇表（`catalog.FACT_TOKENS`），
+  声明说的是"要问这个事实就打哪条语句"；语句与工具语句同源同渲染（`inst.render`，
+  可花同一批 `vars` 宿主事实与可选组），只是没人调用它、所以没有模型参数
+  （`rendezvous.prepare_cli`）。宿主值一律 `shq` 单引号包裹，`{root}` 因此能安全地
+  写在线里。
+- **回答的形状是宿主的**：stdout 上一个 JSON 数组，每项 `{"name","description"}`。
+  `clutch-skills` 自己的 `--json list` 载荷（`{"root","skills":[…]}`）宿主不读；
+  测试里拿这个载荷当答复会被拒成 `its answer is not a JSON array`。
+- **fail-closed，但绝不静默**：只有 `cli` 组件可以发布（daemon 的声明是 fatal）、
+  一个 token 只许一个发布者（两个供应商时两个工具都消失，一条报告点名两者）；
+  未知 token 与空语句分别 fatal / 不发布；答不出来或答得上来但 **0 项**都读作"无值"
+  ——门关上、花掉它的提示词片段整段不接，理由经 `registry._report` 只说一次。
+  库读不出来是用户必须看见的事，不是"空目录表"。
+- **门先于问题生效**：`config.enable_skills is False` 时事实读作无值，组件**根本不会被
+  启动**（`registry._FACT_GATES`）——测试用会写日志的假发布者证明日志为空。
+- **一个进程只问一次**：`facts._asked` 按**渲染后**的命令行缓存（目录、库根这些塑造了
+  这条线的宿主值都在线里，两个根不会共用一份答案），`facts.forget()` 清它。
+- **片段里怎么花掉它**：句中引用读作名字列表（`", ".join`，空则 `none`），而**整行恰好是
+  `$skills`** 的那一行展开成每条一行 `- name: description`——与组件自己的目录表
+  （`clutch-skills/catalog_section`）逐字节同形：组件写表头，每一行是宿主写的。
+- 钉住这些的测试：`tests/catalog_test.py` 的 `check_a_component_publishes_the_host_fact`
+  （enum / 描述 / 整行块 / 门、空答、非零退出、两个供应商、非法 token、daemon 发布、
+  `enable_skills=False` 下不启动组件）、`check_host_facts_in_schema`（没被答复的事实
+  在 schema 里读作 `skills: none`）、`tests/selfcheck.py` 里重写的 `check_skills`
+  （工具、提示词表头、关掉后不出现）、`tests/tools_inst_test.py` 里重写的 `live_skills`
+  （`load_skill` 必须逐字节服务 `*/SKILL.md`）；组件侧 `clutch-skills/tests/test_cli.py`
+  的 `--facts` 输出模式。
 
 ---
 
