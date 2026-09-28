@@ -351,6 +351,11 @@ class Component:
     it. `requires` names the host facilities it needs, so an unavailable
     component can say WHY instead of silently disappearing, and `ui` says how
     the user sees it.
+
+    `prompt` is the fragment of model-facing prose the component carries for the
+    system prompt (a file inside its own directory, like `launch.entry`): the
+    words its own tools are called by, and how to use them together. See
+    registry.prompt_section — the host writes no such word itself.
     """
 
     name: str
@@ -366,6 +371,7 @@ class Component:
     ui: Mapping[str, Any] = field(default_factory=dict)
     tools: tuple[Tool, ...] = ()
     directory: str = ""  # explicit code directory (a registration, not a checkout)
+    prompt: str = ""  # fragment of model-facing prose, inside this component's directory
 
 
 # --------------------------------------------- host facts a schema may ask for -
@@ -441,6 +447,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
         ui=ui,
         tools=tuple(tools),
         directory=str(data.get("directory", "") or ""),
+        prompt=str(data.get("prompt", "") or ""),
     )
 
 

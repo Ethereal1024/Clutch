@@ -1,1 +1,1 @@
-Interactive commands are blocked here. Write code with write_file and run it as `python file.py` with scripted input (stdin or a --test flag); use `python3` only on hosts that provide it (Windows ships `python`).
+Interactive commands are blocked here. Put the code in a file and run it as `python file.py` with scripted input (stdin or a --test flag); use `python3` only on hosts that provide it (Windows ships `python`).

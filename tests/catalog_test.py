@@ -27,7 +27,11 @@ fact is about what ships:
     `$backends` in a declaration are resolved to THIS host's values when the
     tool is wired, and no placeholder leaks through;
   * access is a vocabulary the HOST defines: every declared access is one the
-    permission engine knows.
+    permission engine knows;
+  * what the model is told about a component's tools travels with the component
+    (audit 6): a `prompt` fragment inside its own directory reaches the system
+    prompt only while that component is drivable, and the host's own prompt
+    files name no tool that is not the host's.
 
 Isolation: isolated_host() repoints the install root (CLUTCH_COMPONENTS_DIR),
 the catalog directory (CLUTCH_COMPONENTS_CATALOG) and modules.repo_root at a
@@ -40,6 +44,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import stat
 import tempfile
 from collections.abc import Iterator, Mapping
@@ -47,9 +52,11 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.core import permission
-from agent.tools import catalog, components, modules, rendezvous
+from agent.core.context import derive_messages
+from agent.core.lazy import LazyEventLog
+from agent.tools import catalog, components, modules, registry, rendezvous
 from agent.tools.localshell import local_shell
-from agent.tools.registry import ToolRegistry, build_tools
+from agent.tools.registry import ToolRegistry, build_tools, prompt_section
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
@@ -227,6 +234,88 @@ def check_merge_is_named_means_override() -> None:
         )
         check(merged.ui == {"label": "after"}, "ui is replaced whole, not deep-merged")
         check(merged.vars == {"token": "config.other"}, "vars is replaced whole too — one merge semantic")
+
+
+def check_prompt_travels_with_the_declaration() -> None:
+    """What the model is told about a component's tools is the component's own.
+
+    The host's prompt names no tool it does not own (audit 6), so a component
+    carries a `prompt` fragment inside its own directory and the host appends it
+    to the system prompt while that component is drivable. Words and tools then
+    arrive and leave together: a component that is absent, renamed or replaced by
+    a third party cannot leave the prompt describing a tool the model cannot
+    call. A fragment resolves like a tool description (the host's own facts are
+    available in it), and one that cannot be read is said once — without taking
+    the component's tools away, which still work.
+    """
+    with isolated_host() as root:
+        code = root / "hello-code"
+        code.mkdir()
+        (code / "tool.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        (code / "SAY.md").write_text(
+            "## hello\n\nsay_hello is this component's, up to $config.read_max_chars chars.\n", encoding="utf-8"
+        )
+        declaration = _third_party("clutch-hello", directory=str(code))
+        declaration["prompt"] = "SAY.md"
+        _write_registration(declaration)
+
+        cfg = Config()
+        section = prompt_section(cfg)
+        check(section.startswith("## hello"), "the declared fragment reaches the prompt section")
+        check(
+            str(cfg.read_max_chars) in section and "$config" not in section,
+            "and the host's facts are resolved in it, exactly as in a tool description",
+        )
+        system = derive_messages(LazyEventLog.in_memory(), cfg, "t", components=section)[0]["content"]
+        check("say_hello is this component's" in system, "the fragment lands in the system prompt")
+        check("say_hello" in ToolRegistry(build_tools(cfg)).names(), "and names a tool that is really here")
+
+        # a component the host cannot drive says nothing: the same filter that
+        # withholds its tools withholds its words
+        gone = _third_party("clutch-gone", tool="gone_tool", directory=str(root / "not-there"))
+        gone["prompt"] = "SAY.md"
+        _write_registration(gone)
+        cfg = Config()
+        check("gone_tool" not in [t.name for t in build_tools(cfg)], "a component with no code offers no tool")
+        check(prompt_section(cfg) == section, "and adds nothing to the prompt either")
+
+        # a fragment that cannot be read appends nothing, and is reported once
+        # rather than refusing the component: its tools never needed the prose
+        (code / "SAY.md").unlink()
+        reported: list[catalog.Diagnostic] = []
+        real_report = registry._report
+        registry._report = reported.extend  # type: ignore[assignment]
+        try:
+            check(prompt_section(cfg) == "", "an unreadable fragment appends nothing")
+        finally:
+            registry._report = real_report  # type: ignore[assignment]
+        check(
+            len(reported) == 1 and not reported[0].fatal and "SAY.md" in reported[0].message,
+            "and the host names the file it could not read, once, without refusing anything",
+        )
+        check("say_hello" in ToolRegistry(build_tools(cfg)).names(), "the component's tools are untouched by it")
+
+
+def check_host_prompt_names_no_component_tool() -> None:
+    """The host's own prompt files name no tool a component owns (audit 6).
+
+    A tool name written into agent/prompts/*.md is a promise about the surface
+    THIS host happens to have installed, and it survives the component being
+    absent, renamed or replaced — at which point the prompt tells the model about
+    a tool it cannot call. The names belong in the components' own fragments
+    (check_prompt_travels_with_the_declaration); `run_command` is the host's own
+    tool, so it is the one tool name these files may carry. What the skills
+    catalog's header says (agent/skills.py) is audit 4's to move, not this one's.
+    """
+    owned = {spec.name for mod in catalog.table().values() for spec in mod.tools}
+    if not owned:
+        print("SKIP: no component checkout beside the repo")
+        return
+    prompts = Path(__file__).resolve().parent.parent / "agent" / "prompts"
+    for name in ("system.md", "mode_work.md", "mode_chat.md"):
+        text = (prompts / name).read_text(encoding="utf-8")
+        leaked = sorted(t for t in owned if re.search(rf"\b{re.escape(t)}\b", text))
+        check(not leaked, f"the host's {name} names no component's tool (found {leaked})")
 
 
 def check_ui_protocol() -> None:
@@ -571,6 +660,8 @@ def main() -> int:
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()
     check_merge_is_named_means_override()
+    check_prompt_travels_with_the_declaration()
+    check_host_prompt_names_no_component_tool()
     check_host_facts_in_schema()
     check_registration()
     check_installed_third_party()

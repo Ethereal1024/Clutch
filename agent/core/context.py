@@ -131,12 +131,16 @@ def derive_messages(
     task: str,
     memories: Any | None = None,
     workspace: Workspace | None = None,
+    components: str = "",
 ) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying the compaction head.
 
     memories contributes a resident title list to the system prompt; workspace
     contributes the local-environment hint (which shell run_command speaks on
-    this host). Tool output is not folded here; it accumulates until compaction.
+    this host); components contributes the fragments the installed components
+    carry about their own tools (registry.prompt_section), so no tool name in
+    this module's prompt can drift from what is actually installed. Tool output
+    is not folded here; it accumulates until compaction.
     """
     full_events = log.events()
     # index 0 may be the current run's task, which task.md re-injects. But in a
@@ -175,6 +179,11 @@ def derive_messages(
     elif config.mode == "work":
         # work contract: announce full access (mirror of chat mode)
         system += "\n\n" + render("mode_work.md")
+    if components:
+        # the components' own words about their own tools — assembled by the tools
+        # layer, which knows what is installed and drivable. Core places it and
+        # names no tool itself, so the prompt cannot describe tools that are gone.
+        system += "\n\n" + components
     if config.enable_skills:
         # model-visible catalog: the model decides whether to load a skill
         catalog = cached_library(config.skills_dir).to_catalog_section()
@@ -197,9 +206,8 @@ def derive_messages(
             titles = [m.title for m in sorted(items.values(), key=lambda m: -m.updated)]
             system += (
                 "\n\nProject memories from earlier sessions (complete set, newest first) — "
-                "load_memory with the exact title for its content; only search_memory "
-                "when no listed title matches:\n"
-                + "\n".join(f"- {t}" for t in titles)
+                "load one by its exact title for its content; only search the contents "
+                "when no listed title matches:\n" + "\n".join(f"- {t}" for t in titles)
             )
         else:
             # empty store stated explicitly, so the model skips probing

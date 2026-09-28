@@ -45,7 +45,7 @@ from .events import (
 from .llm.client import LlmClient, LlmError
 from .prompts import render
 from .tools.envelope import Envelope
-from .tools.registry import ToolRegistry
+from .tools.registry import ToolRegistry, prompt_section
 from .tools.workspace import Workspace
 
 # Callback for subscribers (GUI/SSE).
@@ -171,6 +171,10 @@ class Agent:
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
         self._emit(UserMessageEvent(content=task))
+        # what the components themselves say about their own tools, read once per
+        # run: the surface is fixed for the run (the tools came from the same
+        # declarations), so every turn's system prompt carries the same fragments
+        components = prompt_section(self.config)
 
         turn = 0
         try:
@@ -186,7 +190,12 @@ class Agent:
                     )
                 # derive once per turn; compaction check and LLM call share it
                 msgs = context.derive_messages(
-                    self.log, self.config, task, memories=self.memories, workspace=self.workspace
+                    self.log,
+                    self.config,
+                    task,
+                    memories=self.memories,
+                    workspace=self.workspace,
+                    components=components,
                 )
                 # near the window: compact and continue instead of dropping/aborting
                 if self.compactor.should_compact():

@@ -31,6 +31,7 @@ import re
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from ..config import Config
@@ -288,15 +289,11 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
     running half-read (catalog.Diagnostics): an unknown facility takes the whole
     component's tools out, an unknown `access`/`gate`/`mode`/argument name takes
     just its tool — the model never sees the schema of a call the host would
-    judge wrongly. Each refusal is said once (registry._report)."""
+    judge wrongly. Each refusal is said once (registry._report). Which components
+    can be driven at all is one filter for the whole model-facing surface
+    (`_drivable`), shared with the prompt fragments they carry."""
     tools: list[Tool] = [_run_command(config)]
-    for component in catalog.table().values():
-        fatal = [d for d in catalog.component_diagnostics(component) if d.fatal]
-        if fatal:
-            _report(fatal)
-            continue
-        if not rendezvous.available(component.name):
-            continue
+    for component in _drivable():
         for spec in component.tools:
             if config.mode not in spec.modes:
                 continue
@@ -304,6 +301,69 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
                 continue
             tools.append(_wire(component, spec, config))
     return tools
+
+
+def _drivable() -> list[catalog.Component]:
+    """The components this host can drive right now, each refusal said once.
+
+    One filter for everything a component says to the model — the tools it
+    declares and the prompt fragment it carries alike: a declaration naming a word
+    the host cannot honor contributes nothing (catalog.component_diagnostics), and
+    neither does a component this host cannot launch at all
+    (rendezvous.available). Read in one place so the schema and the prose can
+    never disagree about what is here.
+    """
+    out: list[catalog.Component] = []
+    for component in catalog.table().values():
+        fatal = [d for d in catalog.component_diagnostics(component) if d.fatal]
+        if fatal:
+            _report(fatal)
+            continue
+        if not rendezvous.available(component.name):
+            continue
+        out.append(component)
+    return out
+
+
+def prompt_section(config: Config) -> str:
+    """What the components themselves tell the model, joined ("" when none does).
+
+    A component may name a `prompt` file inside its own directory
+    (catalog.Component.prompt); this reads it and returns the fragments in table
+    order. It is why the host's own prose names no tool it does not own: what the
+    model is told about a component's tools travels with the component, so one
+    that is absent, renamed or replaced by a third party cannot leave the prompt
+    describing tools that are not here.
+
+    A fragment is resolved exactly like a tool description, so a component may
+    spend `$config.<field>` / `$skills` / `$backends` in it too. One that cannot
+    be read is not fatal — the component's tools still work — but it is not silent
+    either: nothing is appended and the word is said once, like every other the
+    host cannot honor.
+    """
+    return "\n\n".join(text for text in (_fragment(c, config) for c in _drivable() if c.prompt) if text)
+
+
+def _fragment(component: catalog.Component, config: Config) -> str | None:
+    """One component's prompt fragment, or None when there is nothing to append."""
+    resolved = rendezvous.resolve(component.name)
+    if resolved is None:  # _drivable() already said why; nothing to read here
+        return None
+    path = Path(component.prompt)
+    if not path.is_absolute():  # relative to the component's own directory
+        path = resolved.directory / path
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        _report(
+            [
+                catalog.Diagnostic(
+                    component.name, "", f"prompt fragment {component.prompt!r} cannot be read ({e})", fatal=False
+                )
+            ]
+        )
+        return None
+    return str(_resolve(text, config)) or None
 
 
 def components_unavailable(config: Config) -> list[dict[str, str]]:

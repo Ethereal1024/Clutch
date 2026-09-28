@@ -884,8 +884,8 @@ def main() -> int:
         )
         check("user prefers utf-8" in sys_mem and "branch naming" in sys_mem, "all stored titles are listed")
         check(
-            "save_memory whenever you learn a durable fact" in sys_mem,
-            "base prompt carries the save guidance",
+            "Record a durable fact whenever you learn one" in sys_mem,
+            "the base prompt carries the save stance (the component's fragment names the tool)",
         )
         msgs_empty = _context.derive_messages(log, chat_cfg, "t", memories=MemoryStore(mem_path))
         check(
@@ -897,8 +897,8 @@ def main() -> int:
             "no titles when the store is empty",
         )
         check(
-            "save_memory whenever you learn a durable fact" in msgs_empty[0]["content"],
-            "save guidance is present even without stored memories",
+            "Record a durable fact whenever you learn one" in msgs_empty[0]["content"],
+            "the save stance is present even without stored memories",
         )
 
     # 15c. chat run_command: reads run, writes/unknowns rejected (default deny)
