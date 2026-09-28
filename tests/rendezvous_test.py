@@ -17,6 +17,7 @@ CLUTCH_RENDEZVOUS_IDLE keeps a failure from leaving a long-lived daemon.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -30,10 +31,13 @@ from agent.tools.transport import LocalTransport
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check, wait_gone
 
-# the statement shape the registry's four-file tools use (see registry.py)
+# the statement shape the registry's four-file tools use (see registry.py). The
+# header is spelled IN the statement, out of the host's facts: {token} is a host
+# var, so render quotes it, and `-H 'X-Clutch-Token: {token}'` is how a
+# statement says "this header" without the host knowing what a header is.
 READ_FILE = (
-    "curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' -H {auth} "
-    "--data-binary {*} -w {status} http://127.0.0.1:{port}/read_file"
+    "curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' -H 'X-Clutch-Token: {token}' "
+    "--data-binary {*} http://127.0.0.1:{port}/read_file"
 )
 WRITE_FILE = READ_FILE.replace("/read_file", "/write_file")
 # the workspace component's declaration (catalog.py), which carries the
@@ -202,7 +206,19 @@ def main() -> int:
         check(record is not None and record["version"] == 1, "the daemon published a v1 record")
         check(record["workspace"] == str(Path(workspace).resolve()), "the record names the resolved workspace")
         check(rendezvous._pid_alive(record["pid"]), "the record's pid is alive")
-        check(rendezvous._healthy(rendezvous._service(modules.WORKSPACE, record)), "/health answers our protocol")
+        # the record IS the protocol the host speaks: {port, token, pid}, nothing
+        # else — no health verb, no status. A second Clutch window holding only
+        # this file must be able to drive the daemon, which is exactly what the
+        # host's own values are checked to do here.
+        svc = rendezvous._service(modules.WORKSPACE, record)
+        check(
+            svc.vars() == {"port": str(record["port"]), "token": record["token"], "pid": str(record["pid"])},
+            "the record's facts are what a statement is handed (port/token/pid)",
+        )
+        command = render(READ_FILE, {"path": "hello.txt"}, vars=svc.vars(), defaults={"max_chars": 20000})
+        r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
+        check(not r["error"] and r["content"].strip() == "hello",
+              "the record alone, with no handle, is enough to answer a statement")
 
         # 5. reuse: the second call rides the same daemon (the undo stack lives there)
         pid = rendezvous.service(workspace, modules.WORKSPACE).pid
@@ -267,13 +283,37 @@ def main() -> int:
         # 8. a missing path is a verdict, not a transport failure
         r = _call(workspace, READ_FILE, {"path": "nope.txt"}, {"max_chars": 20000})
         check(r["error"] and "nope.txt" in r["content"], "the module's error text reaches the model")
-        bad = rendezvous.Service(modules.WORKSPACE, fenced.port, "wrong-token", fenced.pid)
-        check(not rendezvous._healthy(bad), "a bad token is not healthy")
+        # the wrong token is refused BY the daemon, and the 403 body is an
+        # envelope like every other answer: no host-side health verb, no HTTP
+        # status read — the model sees the daemon's own words.
+        live = rendezvous.service(workspace, modules.WORKSPACE, protect=fence)
+        bad = rendezvous.Service(modules.WORKSPACE, live.port, "wrong-token", live.pid)
+        command = render(READ_FILE, {"path": "hello.txt"}, vars=bad.vars(), defaults={"max_chars": 20000})
+        r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
+        check(r["error"] and "token" in r["content"], "a wrong token is refused by the daemon's own envelope")
 
         # 9. release: what this process started, this process stops
         rendezvous.release(workspace, modules.WORKSPACE)
         check(wait_gone(widened.pid) and wait_gone(fenced.pid), "release() stops the daemon (no leaked process)")
         check(rendezvous._read_record(workspace, WS) is None, "the daemon unpublished its record")
+
+        # 9b. a REPLACED daemon does not unpublish its replacement. The record is
+        #     rewritten to name somebody else (this test process — alive, so the
+        #     record stays valid), then the daemon we started is stopped: its
+        #     last act is remove(pid=…), which sees a different pid and leaves
+        #     the file alone. Without that guard the daemon winding down would
+        #     delete the record of whatever took over, and the next call would
+        #     spawn a second daemon for a workspace that already had one.
+        successor = rendezvous.service(workspace, modules.WORKSPACE)
+        record_path = rendezvous._record_path(workspace, WS)
+        replaced = json.loads(record_path.read_text(encoding="utf-8"))
+        replaced["pid"] = os.getpid()
+        record_path.write_text(json.dumps(replaced), encoding="utf-8")
+        rendezvous.release(workspace, modules.WORKSPACE)
+        check(wait_gone(successor.pid), "the daemon we started is stopped")
+        check(record_path.exists(), "a replaced daemon left its replacement's record standing")
+        record_path.unlink()  # the rest of the run starts from nothing, as before
+        rendezvous._note_path(workspace, WS).unlink(missing_ok=True)
 
         # 10. the registry: the SAME Tool definition the model sees, executed by
         #     the executor, reaches the machine's workspace module and comes back

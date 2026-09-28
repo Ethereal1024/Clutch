@@ -3,8 +3,9 @@
 catalog.py declares WHAT a component is and what it publishes; this file is the
 mechanics of getting to it. The host imports NOTHING from a component — it may
 point at nothing but the component's PUBLISHED interface, in the two shapes that
-comes in: a per-workspace daemon discovered through a record and spoken to over
-loopback HTTP, and a one-process command line the app host runs itself.
+comes in: a per-workspace daemon named by a record (this file starts it, watches
+its pid, and hands a statement the facts it needs — the SPEAKING is the
+statement's own text), and a one-process command line the app host runs itself.
 `prepare()` returns whichever one a statement needs.
 
 A component that is not on this machine is not an error to be papered over: it
@@ -27,11 +28,19 @@ machine, falling back to the dev checkout next to the repo.
 
 Lifecycle: a daemon started from here is fenced with the workspace's protected
 paths at spawn time (the module's fence IS spawn-time policy — its own docs say
-"to change it, /shutdown and restart"), and is asked to stop again when this
-process exits. The host owns the children it starts — but only those: a daemon
-it merely found is ridden when that daemon is already fenced at least as much
-as the call needs (see Handle, `_covers`), and left running when this process
-exits without having started it.
+"to change it, stop the daemon and restart"), and is stopped when this process
+exits. The host owns the children it starts — but only those: a daemon it merely
+found is ridden when that daemon is already fenced at least as much as the call
+needs (see Handle, `_covers`), and left running when this process exits without
+having started it. A daemon that cannot be ridden because its fence is too small
+is left running too: it is not ours to stop, its own idle timer ends it, and it
+cannot unpublish its replacement (a daemon removes the record only while the
+record still names it — see discovery.remove).
+
+Nothing here speaks the component's protocol. HOW a daemon is called is the
+declaration's `command`; the host's whole contribution to it is facts — a port,
+a token, a pid — and the record's shape, which is the one thing the host
+dictates (see `_read_record`).
 """
 
 from __future__ import annotations
@@ -44,8 +53,6 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,10 +62,9 @@ from . import catalog, components, modules
 from .localshell import local_shell, shq
 from .transport import LocalTransport
 
-TOKEN_HEADER = "X-Clutch-Token"  # the module daemons' auth header (frozen contract)
 RECORD_VERSION = 1
 READY_SECONDS = 10.0  # how long a daemon we just spawned has to publish itself
-PROBE_SECONDS = 2.0  # /health budget — a live daemon answers at once
+STOP_SECONDS = 2.0  # how long a stopped child may take to wind down before it is killed
 DEFAULT_IDLE = 600.0  # the daemon's own idle default; CLUTCH_RENDEZVOUS_IDLE overrides
 
 # The vocabulary (interface / runs_on / subject — catalog.py's constants) is the
@@ -180,27 +186,22 @@ def _fill(template: str, variables: dict[str, str]) -> str:
 
 @dataclass(frozen=True)
 class Service:
-    """A live module daemon: where it listens and how to authenticate."""
+    """A live module daemon: where it answers and how a statement authenticates.
+
+    These are FACTS the host read out of the daemon's own record, not words of
+    any protocol: a statement that wants an HTTP header, a path, or a query
+    spells all of it in the component's own text (inst.render quotes a host
+    value like any other word, so `-H 'X-Clutch-Token: {token}'` is the shape).
+    """
 
     module: str
     port: int
     token: str
     pid: int
 
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
     def vars(self) -> dict[str, str]:
         """The host placeholders a statement template may use (see inst.render)."""
-        return {
-            "port": str(self.port),
-            "token": self.token,
-            "auth": f"{TOKEN_HEADER}:{self.token}",
-            # curl's own `-w` format: a newline plus the HTTP status, which
-            # unwrap() reads as the transport's verdict (never the command's)
-            "status": "\\n%{http_code}",
-        }
+        return {"port": str(self.port), "token": self.token, "pid": str(self.pid)}
 
 
 @dataclass
@@ -263,10 +264,7 @@ def unavailable_reason(module: str) -> str:
             f"shell is {local_shell().name}"
         )
     if "curl" in mod.requires and shutil.which("curl") is None:
-        return (
-            f"{mod.name} is a daemon spoken to over loopback HTTP and this host "
-            f"has no curl"
-        )
+        return f"{mod.name} is driven through curl and this host has no curl"
     if resolved.template and "{py}" in mod.launch.argv[0] and modules.python_missing():
         return (
             f"{mod.name} runs under Python and this host has no interpreter that "
@@ -448,39 +446,44 @@ def service(root: str | Path, module: str, protect: Iterable[Path | str] = ()) -
         record = _read_record(resolved, mod)
         live = _service(module, record) if record is not None else None
         fenced = _fenced_with(resolved, mod, live, handle)
-        if live is not None and _covers(fenced, wanted) and _healthy(live):
+        if live is not None and _covers(fenced, wanted):
             _HANDLES[key] = Handle(service=live, fences=fenced, proc=_child(handle, live.pid))
             return live
-        if live is not None:
-            _stop(live, _child(handle, live.pid))
+        # Something else is serving this workspace, or what is serving it wears
+        # too small a fence. Our OWN child is stopped before it is replaced; a
+        # daemon we merely found is left running — it is not ours to signal (a
+        # record outlives its daemon, see _read_record), its idle timer ends it,
+        # and the replacement we start publishes over it.
+        _HANDLES.pop(key, None)
+        _stop(handle.proc if handle is not None else None)
         return _start(resolved, mod, _widen(fenced, wanted), key)
 
 
 def release(root: str | Path, module: str) -> None:
-    """Stop this workspace's daemon (best effort) and forget it.
+    """Stop this process's daemon for this workspace (best effort) and forget it.
 
-    Whose daemon it is does not matter here: the caller asked for this
-    workspace's service to go.
+    Only a child THIS process started: for a daemon that was merely found, this
+    is a forget, not a kill (see release_all — the same rule, for the same
+    reason: ownership is what makes stopping safe).
     """
     resolved = str(Path(root).resolve())
     with _LOCK:
         handle = _HANDLES.pop((module, resolved), None)
         if handle is not None:
-            _stop(handle.service, handle.proc)
+            _stop(handle.proc)
 
 
 def release_all() -> None:
     """Stop every daemon THIS process started, and forget them all (process
     exit / test teardown).
 
-    A daemon this process ADOPTED — a healthy one another window started, or
-    one of ours that is simply being ridden again — is forgotten and left
-    running: it is not ours to kill, and its own idle timer is what ends it.
+    A daemon this process ADOPTED — one another window started, or one of ours
+    that is simply being ridden again — is forgotten and left running: it is not
+    ours to kill, and its own idle timer is what ends it.
     """
     with _LOCK:
         for handle in list(_HANDLES.values()):
-            if handle.proc is not None:
-                _stop(handle.service, handle.proc)
+            _stop(handle.proc)
         _HANDLES.clear()
 
 
@@ -503,7 +506,13 @@ def _record_path(root: str, mod: catalog.Component) -> Path:
 
 
 def _read_record(root: str, mod: catalog.Component) -> dict | None:
-    """The published record, or None when it is missing, corrupt, or dead."""
+    """The published record, or None when it is missing, corrupt, or dead.
+
+    The record's SHAPE is the one thing the host dictates: the component writes
+    the file, the host reads a version, a port, a token and a pid out of it.
+    Nothing about HOW the daemon is called is named here — that is the
+    declaration's statement, and the host only fills its facts in.
+    """
     try:
         payload = json.loads(_record_path(root, mod).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -613,44 +622,34 @@ def _is_zombie(pid: int) -> bool:
         return False
 
 
-def _healthy(svc: Service) -> bool:
-    """A GET /health that answers {"ok": true} — a live daemon of our protocol."""
-    request = urllib.request.Request(f"{svc.url}/health", headers={TOKEN_HEADER: svc.token})
+def _stop(proc: subprocess.Popen | None) -> None:
+    """Stop a daemon THIS process started, and wait for it.
+
+    Only a child we started: a daemon we merely found answers to whoever
+    started it, and the host cannot tell a pid taken from a stale record from
+    any other process holding that number — a signal is not something to aim
+    at a number read off disk.
+
+    The signal is SIGTERM, which a daemon of ours treats as "wind down" (it
+    unpublishes its record on the way out); a daemon that ignores it is killed.
+    """
+    if proc is None:
+        return
     try:
-        with urllib.request.urlopen(request, timeout=PROBE_SECONDS) as response:
-            return response.status == 200 and bool(json.loads(response.read().decode("utf-8")).get("ok"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
-
-
-def _stop(svc: Service, proc: subprocess.Popen | None = None) -> None:
-    """Best-effort /shutdown: the daemon unpublishes and exits on its own.
-
-    When the pid is one we spawned, the child is also waited on — the daemon
-    outlives this call by design, and nothing else will reap it."""
-    request = urllib.request.Request(
-        f"{svc.url}/shutdown",
-        data=b"{}",
-        headers={"Content-Type": "application/json", TOKEN_HEADER: svc.token},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=PROBE_SECONDS):
-            pass
-    except (urllib.error.URLError, OSError, ValueError):
+        proc.terminate()
+    except OSError:
         pass
-    if proc is not None:
-        _reap(proc)
+    _reap(proc)
 
 
 def _reap(proc: subprocess.Popen) -> None:
-    """Wait for a child we started; kill it if the shutdown did not land."""
+    """Wait for a child we stopped; kill it if the signal did not land."""
     try:
         proc.wait(timeout=READY_SECONDS)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
-            proc.wait(timeout=PROBE_SECONDS)
+            proc.wait(timeout=STOP_SECONDS)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
@@ -666,9 +665,20 @@ def _import_dirs(resolved: Resolved) -> list[Path]:
 
 
 def _start(root: str, mod: catalog.Component, fences: tuple[str, ...], key: tuple[str, str]) -> Service:
+    """Spawn one daemon and wait for it to publish ITSELF.
+
+    Readiness is the record: a daemon publishes the moment its socket is
+    listening, and the record is the component's own promise that it is there —
+    the host does not call the component to ask (it knows no call). The record
+    it waits for has to be NEW: a daemon we could not ride is left running (see
+    `service`), and its record is still on disk while our child boots; adopting
+    that one would claim, in the note below, a fence it never wore.
+    """
     resolved = resolve(mod.name)
     if resolved is None:
         raise RendezvousError(unavailable_reason(mod.name))
+    before = _read_record(root, mod)
+    was = before["pid"] if before is not None else None
     cmd = [*resolved.argv, "--workspace", root, "--idle", _idle()]
     for glob in fences:
         cmd += ["--protect", glob]
@@ -682,19 +692,18 @@ def _start(root: str, mod: catalog.Component, fences: tuple[str, ...], key: tupl
         if proc.poll() is not None:
             raise RendezvousError(f"the {mod.name} daemon exited during startup (status {proc.returncode})")
         record = _read_record(root, mod)
-        if record is not None:
+        if record is not None and record["pid"] != was:
             svc = _service(mod.name, record)
-            if _healthy(svc):
-                # the fence travels with the record, for the host processes
-                # that did not spawn this daemon: without the note they would
-                # have to replace one they could have ridden
-                _write_note(root, mod, svc.pid, fences)
-                _HANDLES[key] = Handle(service=svc, fences=fences, proc=proc)
-                return svc
+            # the fence travels with the record, for the host processes that
+            # did not spawn this daemon: without the note they would have to
+            # replace one they could have ridden
+            _write_note(root, mod, svc.pid, fences)
+            _HANDLES[key] = Handle(service=svc, fences=fences, proc=proc)
+            return svc
         time.sleep(0.05)
     try:  # a daemon that never published is ours to clean up
         proc.kill()
-        proc.wait(timeout=PROBE_SECONDS)
+        proc.wait(timeout=STOP_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         pass
     raise RendezvousError(f"the {mod.name} daemon did not become ready within {READY_SECONDS:g}s")

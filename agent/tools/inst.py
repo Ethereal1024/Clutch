@@ -27,11 +27,13 @@ a shell command; its safety boundary is the host's permission engine
 
 Output contract: `unwrap` turns a finished command into {content, error, diff}.
 A stdout JSON object carrying "content" IS the envelope (it is what the
-standalone modules print — the workspace daemon's verdict-rides-200 bodies, the
-CLIs' --json output); anything else is framed by exit code, exactly the way the
-run_command engine has always framed it. HTTP statuses, when the command reports
-one (curl's `-w '%{http_code}'`), are transport failures — they mean no service
-spoke our protocol, which is a different thing from a command's own verdict.
+standalone modules print — the workspace daemon's verdict and transport-error
+bodies, the CLIs' --json output); anything else is framed by exit code, exactly
+the way the run_command engine has always framed it. Nothing else is consulted:
+in particular the host does not read an HTTP status out of the output. "The
+service answered 403" is the service's own business to say, in the same
+envelope as everything else it says, and curl's `-w '%{http_code}'` is one
+client's syntax — a statement's choice, not part of the host's vocabulary.
 """
 
 from __future__ import annotations
@@ -47,7 +49,6 @@ from .transport import CommandResult
 __all__ = ["InstError", "jarg", "render", "unwrap", "shq"]
 
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*|\*)\}")
-_UNREACHABLE = "ERROR: could not reach {service}: {detail}"
 
 
 class InstError(Exception):
@@ -186,24 +187,9 @@ def _envelope(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _body_and_status(stdout: str) -> tuple[str, int | None]:
-    """Split a body from the HTTP status a command appended (curl's
-    `-w '\\n%{http_code}'` shape: the last line is the status)."""
-    body, _, last = stdout.rstrip("\n").rpartition("\n")
-    if last.isdigit() and len(last) == 3:
-        return body, int(last)
-    return stdout, None
-
-
 def unwrap(result: CommandResult, *, service: str = "the tool service") -> dict[str, Any]:
     """The loop's envelope for a finished command (see the module docstring)."""
-    body, status = _body_and_status(result.stdout)
-    env = _envelope(body)
-    if status is not None and status != 200:
-        detail = body.strip()[:500] or (result.stderr or "").strip()[:500]
-        if status == 0:  # curl never got a reply: nothing is listening
-            return {"content": _UNREACHABLE.format(service=service, detail=detail or "no reply"), "error": True}
-        return {"content": f"ERROR: {service} answered HTTP {status}: {detail}", "error": True}
+    env = _envelope(result.stdout)
     if env is not None:
         # "code" is the transports' verdict (sysexits); error/diff are the
         # module envelope's own fields. Either one saying "failed" is enough —

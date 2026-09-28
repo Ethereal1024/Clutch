@@ -200,11 +200,14 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
         tool = reg.tool(name)
         assert tool is not None
         check(dict(tool.defaults or {}) == defaults, f"{name}: the host's statement defaults are pinned")
-        result, stub = _call(reg, ws, cfg, name, args, CommandResult(0, '{"content":"fine"}\n200', ""))
+        result, stub = _call(reg, ws, cfg, name, args, CommandResult(0, '{"content":"fine"}', ""))
         check(len(stub.calls) == 1, f"{name}: exactly one command per call")
         check(stub.calls[0][1] == cfg.command_timeout, f"{name}: the host's command timeout rides along")
         payload = {**defaults, **args}
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        # the whole line is the DECLARATION's text, token header spelling
+        # included: the host contributes the port and the token as facts
+        # (Service.vars) and nothing else — no header name, no curl flag
         check(
             shell_words(stub.line)
             == [
@@ -215,11 +218,9 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
                 "-H",
                 "Content-Type: application/json",
                 "-H",
-                f"{rendezvous.TOKEN_HEADER}:{FAKE_TOKEN}",
+                f"X-Clutch-Token: {FAKE_TOKEN}",
                 "--data-binary",
                 body,
-                "-w",
-                "\\n%{http_code}",
                 f"http://127.0.0.1:{FAKE_PORT}{endpoint}",
             ],
             f"{name}: the curl statement is byte-for-byte the frozen contract",
@@ -303,24 +304,28 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
 
 
 def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
-    """A verdict rides the transport's 200; a transport fact is not a verdict."""
-    # the module's verdict, reached over a 200 transport
-    body = json.dumps({"content": "file not found: nope.txt", "error": True, "diff": ""}) + "\n200"
+    """A verdict rides in the envelope; a transport failure is the exit code."""
+    # the module's verdict, reached in the module's own envelope
+    body = json.dumps({"content": "file not found: nope.txt", "error": True, "diff": ""})
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "nope.txt"}, CommandResult(0, body, ""))
-    check(r["error"] and r["content"] == "file not found: nope.txt", "a 200 whose envelope says 'failed' is a verdict")
+    check(r["error"] and r["content"] == "file not found: nope.txt", "an envelope that says 'failed' is a verdict")
 
     # the module's diff rides through untouched
-    body = json.dumps({"content": "changed", "error": False, "diff": "@@ -1 +1 @@"}) + "\n200"
+    body = json.dumps({"content": "changed", "error": False, "diff": "@@ -1 +1 @@"})
     r, _ = _call(reg, ws, cfg, "write_file", {"path": "a.txt", "content": "x"}, CommandResult(0, body, ""))
     check(r["diff"] == "@@ -1 +1 @@", "the module's diff reaches the loop")
 
-    # an HTTP status is the TRANSPORT's verdict (no service spoke our protocol)
-    r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(0, "bad or missing token\n403", ""))
-    check(r["error"] and "HTTP 403" in r["content"], "a non-200 status is reported as the service's answer")
-    r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(7, "\n000", "curl: (7) connect failed"))
+    # a refusal body IS the envelope (403 included): the host reads the
+    # envelope, never a status — the daemon's transport errors are envelopes too
+    r, _ = _call(
+        reg, ws, cfg, "read_file", {"path": "a.txt"},
+        CommandResult(0, json.dumps({"content": "bad or missing token", "error": True}), ""),
+    )
+    check(r["error"] and r["content"] == "bad or missing token", "a 403 body needs no status line to be understood")
+    r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(7, "", "curl: (7) connect failed"))
     check(
-        r["error"] and "could not reach" in r["content"] and "the clutch-workspace service" in r["content"],
-        "status 000 (nothing listening) reads as unreachable, naming the service",
+        r["error"] and "exit 7" in r["content"] and "the clutch-workspace service" in r["content"],
+        "a service nobody answers: the exit code and curl's own words, naming the service",
     )
 
     # a CLI module's {content, code} envelope (choice a): code != 0 is a refusal
@@ -463,7 +468,11 @@ def live_workspace(cfg: Config) -> None:
             r = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
             check(not r["error"] and r["content"].strip() == "hello", "live: read_file answers through the daemon")
             service = rendezvous.service(tmp, modules.WORKSPACE)
-            check(rendezvous._healthy(service), "live: the daemon this call started is healthy")
+            check(rendezvous._pid_alive(service.pid), "live: the daemon this call started is alive")
+            check(
+                rendezvous.service(tmp, modules.WORKSPACE).pid == service.pid,
+                "live: the next call rides that same daemon",
+            )
             r = reg.execute(ws, cfg, "write_file", {"path": "made.txt", "content": HOSTILE})
             check(
                 not r["error"] and (Path(tmp) / "made.txt").read_text(encoding="utf-8") == HOSTILE,

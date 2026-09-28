@@ -13,8 +13,9 @@ Pins the conventions a tool definition relies on, all of them fail-closed:
   4. [ ... ] optional groups are dropped whole (flag included) when the model
      omitted the value, and [[ / ]] are a literal bracket
   5. only `raw` names are inserted verbatim (run_command's {command})
-  6. unwrap reads the module envelope, and treats an HTTP status / a non-zero
-     exit as a transport failure rather than a command verdict
+  6. unwrap reads the module envelope: a service speaks its verdict in the
+     envelope (transport trouble included) and nothing is parsed out of the
+     output — the exit code is the only other input
 """
 
 from __future__ import annotations
@@ -120,7 +121,8 @@ def main() -> int:
     check(render("nothing to fill", {}) == "nothing to fill", "a statement without placeholders passes through")
     check(jarg({"a": 1}) == "'{\"a\":1}'", "jarg emits one compact quoted object")
 
-    # 7. unwrap: the module envelope is the verdict; HTTP/exit are transport facts
+    # 7. unwrap: the module envelope is the verdict; the exit code is the only
+    #    other input (a status line is not understood — see 7b)
     ok = unwrap(CommandResult(0, json.dumps({"content": "hello", "error": False, "diff": ""}), ""))
     check(ok == {"content": "hello", "error": False, "diff": ""}, "a 200 envelope passes through unchanged")
     err_env = json.dumps({"content": "file not found: x", "error": True, "diff": "", "code": 66})
@@ -141,14 +143,28 @@ def main() -> int:
     )
     check(unwrap(CommandResult(0, "", ""))["content"].startswith("OK:"), "empty success output is still an OK")
 
-    # 7b. curl's -w status line: transport statuses are NOT command verdicts
-    body, status = '{"content":"bad or missing token","error":true}', "403"
-    r = unwrap(CommandResult(0, f"{body}\n{status}", ""))
-    check(r["error"] and "HTTP 403" in r["content"], "a non-200 status is reported as the service's answer")
-    r = unwrap(CommandResult(7, "\n000", "curl: (7) Failed to connect"))
-    check(r["error"] and "could not reach" in r["content"], "status 000 (nothing listening) reads as unreachable")
-    r = unwrap(CommandResult(0, '{"content":"ok","error":false,"diff":""}\n200', ""))
-    check(r["content"] == "ok" and not r["error"], "the 200 status line is stripped from a good body")
+    # 7b. the envelope is the ONLY thing read: a service says "no service spoke
+    #     our protocol" in that same envelope (the daemon's transport errors are
+    #     envelopes), and a status line appended by a statement's own syntax
+    #     (curl's `-w '%{http_code}'`) is just text the host passes through —
+    #     parsing it would make one client's convention the host's vocabulary
+    refusal = '{"content":"bad or missing token","error":true,"diff":""}'
+    r = unwrap(CommandResult(0, refusal, ""))
+    check(r["error"] and r["content"] == "bad or missing token", "a 403 body IS the envelope (no status needed)")
+    r = unwrap(CommandResult(0, f"{refusal}\n403", ""))
+    # `error` is read with .get here on purpose: an envelope that does not
+    # parse is PLAIN TEXT, and this branch of unwrap carries no `error`/`diff`
+    # key at all — the single-envelope type is P1-4, still open. What this
+    # asserts is only that nothing parses the trailing `403` as a status.
+    check(
+        not r.get("error") and r["content"].endswith("403"),
+        "a trailing status line makes unparseable text, not a parsed status (fail visible, not clever)",
+    )
+    r = unwrap(CommandResult(7, "", "curl: (7) Failed to connect"), service="the workspace service")
+    check(
+        r["error"] and r["content"].startswith("ERROR: the workspace service failed (exit 7)"),
+        "a dead service is the exit code plus curl's own words, never a host-side guess",
+    )
     unreachable = unwrap(CommandResult(1, "", ""), service="the workspace service")
     check(
         unreachable["content"].startswith("ERROR: the workspace service failed"),
