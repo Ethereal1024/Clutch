@@ -234,7 +234,7 @@ FACT_TOKENS: tuple[str, ...] = ("skills",)
 class Diagnostic:
     """A host-defined word a declaration used that this host does not know.
 
-    The direction is deliberately fail-CLOSED (COMPONENTS_REVIEW P0-2): a word
+    The direction is deliberately fail-CLOSED: a word
     the host cannot read is never guessed at. `fatal` marks the ones that stop
     the host from running the declaration at all — an unknown `access` would
     leave a tool unguarded (the workspace's protection one typo away from gone),

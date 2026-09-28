@@ -6,7 +6,7 @@ one is enforced by, which `gate` words a tool can stand behind, what a tool's
 events look like when its `ui` block says nothing, and which search backends this
 machine's config can switch on. Those are the HOST's vocabulary, and a host that
 only ever read them from its own source could not be taught a word without
-editing that source (COMPONENTS_REVIEW §3.4: the one thing the host was not
+editing that source (COMPONENTS.md 十二: the one thing the host was not
 file-driven about). So one document may name them:
 
     {
