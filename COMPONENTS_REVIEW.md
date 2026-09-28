@@ -372,6 +372,13 @@ Clutch 仓库旁边"就自动成为组件是个不错的设计（无需注册）
   "Tool implementations: registry + workspace + filesystem + shell tools."。
   这两处与 `COMPONENTS.md` 的定调相反，会让新读者以为宿主还有一份实现。
 
+**已落地**（收尾提交，见五、进度的第八步记录之后）：`Tool.cancelable` 由接线处声明
+（不再 `inspect` 猜 `cancel`）；`registry.ui()` 对不认识的工具只回默认值 + `undo: False`，
+不再编造 `mutates`；`_coerce_types` 覆盖 `integer`/`number`/`boolean` 三种标量，拼不出
+声明形状的一律当无效参数；`vars` 的键与该工具某个参数重名的声明在接线时被拒绝
+（`catalog.component_diagnostics`）；`tools/filesystem.py` 与 `tools/__init__.py` 的
+docstring 改口。
+
 ---
 
 ## 三、宿主的协议知识审计（协议由谁提供）
@@ -540,8 +547,7 @@ ls agent/prompts/tools/
   `check_host_prompt_names_no_component_tool`（宿主三个提示词文件里不出现任何
   组件工具名）。
 - 遗留（都不属本步）：第四节 5–7、9 仍在待办；`agent/skills.py:42` 的技能目录表头
-  仍写 `load_skill`（审计④ 的范围）；P2-18——`tools/filesystem.py` 的 docstring
-  仍说四个文件工具"declared in tools/catalog.py"。
+  仍写 `load_skill`（审计④ 的范围）。P2-18 的五项零碎已落地，见该节。
 
 ---
 

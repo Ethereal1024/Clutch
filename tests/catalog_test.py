@@ -28,6 +28,9 @@ fact is about what ships:
     tool is wired, and no placeholder leaks through;
   * access is a vocabulary the HOST defines: every declared access is one the
     permission engine knows;
+  * an argument reaches its tool in the shape its declaration declared (a
+    spelling is converted, a wrong shape refused), and a `vars` key that would
+    shadow an argument of the same name refuses the tool instead;
   * what the model is told about a component's tools travels with the component
     (audit 6): a `prompt` fragment inside its own directory reaches the system
     prompt only while that component is drivable, and the host's own prompt
@@ -55,6 +58,7 @@ from agent.core import permission
 from agent.core.context import derive_messages
 from agent.core.lazy import LazyEventLog
 from agent.tools import catalog, components, modules, registry, rendezvous
+from agent.tools.envelope import Envelope
 from agent.tools.localshell import local_shell
 from agent.tools.registry import ToolRegistry, build_tools, prompt_section
 from agent.tools.workspace import LocalWorkspace
@@ -401,6 +405,12 @@ def check_ui_protocol() -> None:
     check(reg.ui("write_file")["mutates"] is True, "a write may change the file tree")
     check(reg.ui("read_file")["mutates"] is False and reg.ui("read_file")["undo"] is False, "a read changes nothing")
     check(reg.ui("run_command")["mutates"] is True, "the host's own command may change the tree")
+    # a name this registry does not hold gets the defaults and nothing else: it
+    # invented a `mutates` for a tool it cannot see, while the renderer already
+    # reads an absent key as the same value (ui/app.js UI_DEFAULTS)
+    unknown = reg.ui("no_such_tool")
+    check(unknown == {**catalog.DEFAULTS, "undo": False}, "an unknown tool gets the defaults alone")
+    check("mutates" not in unknown, "and no `mutates` the host cannot derive")
 
 
 def check_declared_access() -> None:
@@ -489,6 +499,23 @@ def check_unknown_words_are_refused() -> None:
             "and the host names the facility it cannot stand on",
         )
 
+        # a `vars` key that is also one of the tool's arguments: the host's value
+        # shadows the model's when the statement renders, so the declaration is
+        # refused rather than quietly dropping the argument the model passed
+        data = _third_party("clutch-shadow", tool="say_shadow", directory=str(code))
+        data["vars"] = {"who": "config.skills_dir"}
+        _write_registration(data)
+        check("say_shadow" not in offered("say_shadow"), "a vars key that names an argument refuses the tool")
+        check(
+            [d.fatal for d in diagnostic("clutch-shadow", "say_shadow")] == [True],
+            "and the host names the collision instead of shadowing with it",
+        )
+
+        data = _third_party("clutch-shadow-ok", tool="say_unshadowed", directory=str(code))
+        data["vars"] = {"root": "config.skills_dir"}
+        _write_registration(data)
+        check("say_unshadowed" in offered("say_unshadowed"), "a vars key no argument names is wired as before")
+
         # the accepted spellings, so the refusals above are about the WORD
         register("clutch-named-arg", "say_named", {"access": "write", "access_arg": "who"})
         reg = ToolRegistry(build_tools(cfg))
@@ -502,6 +529,50 @@ def check_unknown_words_are_refused() -> None:
             [d.fatal for d in diagnostic("clutch-cosmetic", "say_looks")] == [False],
             "it is reported without refusing anything",
         )
+
+
+def check_scalar_arguments_take_their_shape() -> None:
+    """An argument reaches the tool in the shape its declaration declared.
+
+    A model sometimes spells a number as a string, so the registry converts a
+    value that spells the declared scalar and REFUSES one that does not — before
+    any command is rendered, the same fail-closed stance the integer case always
+    took (the invalid-arguments envelope names the argument and what it got),
+    where passing the bad value on meant an opaque failure inside the tool. The
+    declared shape is what decides, and a `type` the host has no rule for (a
+    string, a list) passes through exactly as before.
+    """
+    seen: dict = {}
+
+    def host(workspace, config, **args):  # a host tool: no component behind it
+        seen.clear()
+        seen.update(args)
+        return Envelope("ok")
+
+    shaped = registry.Tool(
+        name="shaped",
+        description="",
+        parameters={
+            "properties": {
+                "n": {"type": "number"},
+                "b": {"type": "boolean"},
+                "i": {"type": "integer"},
+                "s": {"type": "string"},
+            }
+        },
+        host=host,
+    )
+    reg = ToolRegistry([shaped])
+    cfg = Config()
+    result = reg.execute(None, cfg, "shaped", {"n": "2.5", "b": "true", "i": "3", "s": 7})
+    check(
+        not result.error and seen == {"n": 2.5, "b": True, "i": 3, "s": 7},
+        "a string that spells the declared scalar is converted, an unknown type is left alone",
+    )
+    check(reg.execute(None, cfg, "shaped", {"i": "3.5"}).error, "a spelling that is not the shape fails closed")
+    check(reg.execute(None, cfg, "shaped", {"n": True}).error, "and a boolean is not a number")
+    bad = reg.execute(None, cfg, "shaped", {"b": "yes"})
+    check(bad.error and "b" in bad.content and "'yes'" in bad.content, "'yes' is not a boolean the host guesses")
 
 
 def check_table_is_memoized() -> None:
@@ -656,6 +727,7 @@ def main() -> int:
     check_ui_protocol()
     check_declared_access()
     check_unknown_words_are_refused()
+    check_scalar_arguments_take_their_shape()
     check_table_is_memoized()
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()

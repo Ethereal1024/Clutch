@@ -26,7 +26,6 @@ the UI — is the declaration's, and the declaration belongs to the component.
 from __future__ import annotations
 
 import copy
-import inspect
 import re
 import threading
 from collections.abc import Mapping
@@ -156,6 +155,12 @@ class Tool:
 
     `ui` is the component's presentation declaration (catalog.DEFAULTS), already
     defaulted: the UI renders a tool it did not design from this block alone.
+
+    `cancelable` is the one thing Stop needs to know about a call: a HOST tool
+    that accepts a `cancel` event says so here, at the wiring, instead of the
+    registry asking its signature (which read a plain `**kwargs` host tool as
+    uncancelable). A component's statement is always cancelable — its transport
+    carries the event — so the flag is about the host's own tool only.
     """
 
     name: str
@@ -164,6 +169,7 @@ class Tool:
     inst: str | None = None  # the component's own part of the statement
     module: str | None = None  # which component serves the statement
     host: ToolImpl | None = None  # the host's own tool (no component behind it)
+    cancelable: bool = False  # Stop reaches this call (a host tool that declares it)
     access: str = ""  # the policy its declaration put it under ("" = unguarded)
     access_arg: str = ""  # the argument that policy judges
     guard: GuardImpl | None = None  # host policy the component does not make
@@ -408,6 +414,7 @@ def _run_command(config: Config) -> Tool:
             "required": ["command"],
         },
         host=lambda workspace, cfg, cancel=None, **kw: shell.run_command(workspace, cfg, cancel=cancel, **kw),
+        cancelable=True,
         access="command",
         access_arg=catalog.ACCESS_ARGS["command"],
         ui={"preview": "command"},
@@ -465,12 +472,11 @@ def _previous_content(workspace: Workspace, args: dict[str, Any], arg: str) -> t
 class ToolRegistry:
     def __init__(self, tools: list[Tool]) -> None:
         self._tools = {t.name: t for t in tools}
-        # a host tool opts into Stop by declaring a `cancel` parameter
-        # (run_command does); component statements get Stop from their transport
-        self._cancelable = {
-            name: t.host is not None and "cancel" in inspect.signature(t.host).parameters
-            for name, t in self._tools.items()
-        }
+        # Stop reaches a call the wiring says it reaches (Tool.cancelable).
+        # run_command declares it; a component statement always has it, because
+        # its transport carries the event. Asking a signature instead would read
+        # a plain `**kwargs` host tool as uncancelable.
+        self._cancelable = {name: t.cancelable for name, t in self._tools.items()}
 
     def schemas(self) -> list[dict[str, Any]]:
         return [t.to_openai_schema() for t in self._tools.values()]
@@ -521,10 +527,15 @@ class ToolRegistry:
         call (`undo`), and whether the call may change what the file tree the UI
         shows (`mutates` — a component's write, or the host's own command; a
         declaration that knows better can say so itself).
+
+        A name no tool declares gets the defaults and nothing more: a call event
+        for a tool this registry does not hold (a stale session, a verb typed by
+        hand) is rendered from what the renderer already assumes, never from a
+        `mutates` this process invented for a tool it cannot see.
         """
         tool = self._tools.get(name)
         if tool is None:
-            return {**catalog.DEFAULTS, "mutates": True, "undo": False}
+            return {**catalog.DEFAULTS, "undo": False}
         return {
             **tool.ui,
             "mutates": bool(tool.ui.get("mutates", tool.snapshot or tool.host is not None)),
@@ -627,20 +638,46 @@ class ToolRegistry:
 
     @staticmethod
     def _coerce_types(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:
-        """Coerce args to the declared JSON Schema types (models sometimes pass strings)."""
+        """Coerce args to the declared JSON Schema scalar types (models sometimes
+        pass strings).
+
+        Every shape is judged the same way: a value already of the declared shape
+        passes, a spelling of it is converted, and anything else is an INVALID
+        argument — raised here, where the caller already has the
+        invalid-arguments envelope (the TypeError handler in execute), and said
+        with the argument and what it got. Leaving a bad value in place sent it
+        into the tool, where it either blew up as an opaque failure or was
+        ignored. `boolean` is the strictest: "yes" is not a guess this host makes
+        — only true/false in either case, or the 0/1 JSON Schema also spells true
+        and false. A `type` the host has no rule for (a string, a list) passes
+        through untouched."""
         props = tool.parameters.get("properties", {})
         for key, spec in props.items():
             if key not in args:
                 continue
-            if spec.get("type") == "integer" and not isinstance(args[key], int):
+            kind, value = spec.get("type"), args[key]
+            if kind == "integer":
+                if isinstance(value, int) and not isinstance(value, bool):
+                    continue
                 try:
-                    args[key] = int(args[key])
+                    args[key] = int(value)
                 except (TypeError, ValueError):
-                    # An uncoercible value is an invalid argument, not a value to
-                    # pass on: leaving it in place sent the bad value into the
-                    # tool, where it either blew up as an opaque failure or was
-                    # ignored. Fail here, where the caller already has the
-                    # invalid-arguments envelope (the TypeError handler in
-                    # execute), and say which argument and what it got.
-                    raise TypeError(f"argument {key!r} must be an integer, got {args[key]!r}") from None
+                    raise TypeError(f"argument {key!r} must be an integer, got {value!r}") from None
+            elif kind == "number":
+                if isinstance(value, bool):
+                    raise TypeError(f"argument {key!r} must be a number, got {value!r}")
+                if isinstance(value, (int, float)):
+                    continue
+                try:
+                    args[key] = float(value)
+                except (TypeError, ValueError):
+                    raise TypeError(f"argument {key!r} must be a number, got {value!r}") from None
+            elif kind == "boolean" and not isinstance(value, bool):
+                word = value.strip().lower() if isinstance(value, str) else ""
+                if word in ("true", "false"):
+                    args[key] = word == "true"
+                elif isinstance(value, int) and value in (0, 1):
+                    args[key] = bool(value)
+                else:
+                    raise TypeError(f"argument {key!r} must be true or false, got {value!r}")
         return args

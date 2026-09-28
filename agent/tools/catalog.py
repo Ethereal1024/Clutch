@@ -233,13 +233,32 @@ def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
 
 
 def component_diagnostics(component: Component) -> list[Diagnostic]:
-    """Every host word a component's declaration read wrongly, its tools' too."""
+    """Every host word a component's declaration read wrongly, its tools' too.
+
+    One more thing is checked here rather than in tool_diagnostics, because it
+    straddles the two levels: a `vars` key that is also one of a tool's declared
+    arguments. Host vars shadow the model's argument of the same name when the
+    statement is rendered (inst.render), so the model's value would be silently
+    dropped — a call that names a path the host then replaces. The declaration is
+    refused instead of quietly meaning something else.
+    """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
         for f in component.requires
         if f not in FACILITIES
     ]
     for spec in component.tools:
+        declared = spec.parameters.get("properties", {}) if isinstance(spec.parameters, Mapping) else {}
+        for key in component.vars:
+            if key in declared:
+                out.append(
+                    Diagnostic(
+                        component.name,
+                        spec.name,
+                        f"vars key {key!r} is also an argument of this tool: the host's value would shadow "
+                        f"the model's, so rename one of them",
+                    )
+                )
         out.extend(tool_diagnostics(component.name, spec))
     return out
 

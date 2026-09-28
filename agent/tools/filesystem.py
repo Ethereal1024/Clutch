@@ -1,8 +1,8 @@
 """Host policy for the file tools: the protected-path guard, and nothing else.
 
 The tools themselves — read_file / grep / write_file / edit_file — are the
-clutch-workspace COMPONENT's, declared in tools/catalog.py and performed by the
-component's daemon (or its installed executable). This file holds no
+clutch-workspace COMPONENT's: it declares them in its own manifest and its
+daemon (or installed executable) performs them. This file holds no
 implementation of any of them: a host-side stand-in would be a second, silently
 divergent definition of what "read" means, which is exactly what the tool
 constitution forbids. What is left is the one thing the component does NOT
