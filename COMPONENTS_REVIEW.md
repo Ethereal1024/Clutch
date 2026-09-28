@@ -372,7 +372,8 @@ Clutch 仓库旁边"就自动成为组件是个不错的设计（无需注册）
   "Tool implementations: registry + workspace + filesystem + shell tools."。
   这两处与 `COMPONENTS.md` 的定调相反，会让新读者以为宿主还有一份实现。
 
-**已落地**（收尾提交，见五、进度的第八步记录之后）：`Tool.cancelable` 由接线处声明
+**已落地**（`a01e74a` fix(tools): the wiring declares what Stop reaches, and a bad
+argument is named）：`Tool.cancelable` 由接线处声明
 （不再 `inspect` 猜 `cancel`）；`registry.ui()` 对不认识的工具只回默认值 + `undo: False`，
 不再编造 `mutates`；`_coerce_types` 覆盖 `integer`/`number`/`boolean` 三种标量，拼不出
 声明形状的一律当无效参数；`vars` 的键与该工具某个参数重名的声明在接线时被拒绝
@@ -507,8 +508,10 @@ ls agent/prompts/tools/
 | 3 | 句柄合一 `Handle{service, fences, proc}`，键退化成 `(module, root)`（P0-3） | `bf4bb7f` refactor(rendezvous): one handle per daemon, and the fence says whether to ride it |
 | 4 | 语句不透明化：宿主只发布事实（P1-5） | `5b7d431`（宿主）+ `0dfdc9b`/`2d70307`（clutch-workspace） |
 | 8 | 信封类型化 + 合并"点名即覆盖" + 提示词片段随声明走（P1-4 + P1-6 + 审计⑥） | `32c3ea7` + `cf995c8` + `3cf0294`（宿主）+ `f985180`/`7a7e506`（clutch-workspace / clutch-memory） |
-| 7 | `run_command` 登记为唯一被声明的引导例外（审计①） | `agent/tools/host.py` + `catalog.HOST_TOOL_NAMES`（本次） |
+| 7 | `run_command` 登记为唯一被声明的引导例外（审计①） | `40a59f9` refactor(tools): the host's own tool is declared, and no component may name it |
 | 9 | 补测试：参数重命名后的 guard/undo、工具重名、传输 cwd | `3538759` test(tools): the renamed argument, the one name, and the transport a statement rides |
+| 5 | 宿主配置文件化：access→impl、门表、UI 缺省、后端链（审计③⑤ + 边界） | 待办（本项） |
+| 6 | 消灭第二份实现：技能目录由组件自己发布（审计④） | 待办（本项） |
 
 ### 第四步实际落下的判据（P1-5）
 
@@ -559,8 +562,10 @@ ls agent/prompts/tools/
   （片段入提示词、不可驱动者不贡献、读不出者只报一次）、
   `check_host_prompt_names_no_component_tool`（宿主三个提示词文件里不出现任何
   组件工具名）。
-- 遗留（都不属本步）：第四节 5–7、9 仍在待办；`agent/skills.py:42` 的技能目录表头
-  仍写 `load_skill`（审计④ 的范围）。P2-18 的五项零碎已落地，见该节。
+- 遗留（都不属本步）：第四节只剩第 5、6 两步（宿主配置文档、技能目录由组件自己发布，
+  见下表）；`agent/skills.py:42` 的技能目录表头仍写 `load_skill` 就是第六步要拆的那处
+  （审计④ 的范围）。第 7、9 步已落地（`40a59f9`、`3538759`），P2-18 的五项零碎已落地
+  （`a01e74a`），见各节。
 
 ---
 
