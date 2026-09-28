@@ -109,7 +109,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -616,6 +616,44 @@ def invalidate() -> None:
     _TABLE = None
 
 
+# The merge reads these off the dataclasses rather than repeating them: a field
+# added to Component or Launch later is merged (or carried) by the same rule.
+_COMPONENT_FIELDS = frozenset(f.name for f in fields(Component))
+_LAUNCH_FIELDS = frozenset(f.name for f in fields(Launch))
+
+
+def _named(data: Mapping[str, Any], names: frozenset[str]) -> set[str]:
+    """Which of `names` the declaration actually writes down.
+
+    Judged on the raw JSON, never on the parsed object: the proposal is "named
+    means override", so `requires: []` and `discovery_env: ""` are a declaration
+    saying "none" — a value the `or`-chained merge could not express, because it
+    read every false-y field as "not mentioned" and carried the earlier one.
+    """
+    return {k for k in data if k in names}
+
+
+def _refine(known: Component, declared: Component, data: Mapping[str, Any]) -> Component:
+    """One later registration merged over the component it refines.
+
+    Every field the later declaration NAMES wins, with the value `_component_of`
+    already normalised for it; every field it leaves out carries from `known`
+    untouched. `launch` is merged at ITS field level for the same reason one
+    level up — a thin manifest that names only `binary` (or only `importable`)
+    keeps the earlier `argv` and `entry` instead of restating them.
+
+    Built with dataclasses.replace over the named fields, not a hand-written
+    constructor: the old one silently reset any field it did not know about, so
+    adding a field to Component meant remembering this function too.
+    """
+    named = {f: getattr(declared, f) for f in _named(data, _COMPONENT_FIELDS) if f != "name"}
+    if "launch" in named:
+        raw = data.get("launch")
+        inner = _named(raw, _LAUNCH_FIELDS) if isinstance(raw, Mapping) else set()
+        named["launch"] = replace(known.launch, **{f: getattr(declared.launch, f) for f in inner})
+    return replace(known, **named)
+
+
 def _build_table() -> dict[str, Component]:
     out: dict[str, Component] = {}
     for data in registrations():
@@ -626,24 +664,7 @@ def _build_table() -> dict[str, Component]:
         if known is None:
             out[declared.name] = declared
             continue
-        # a registration refines a known component: only a field the registration
-        # actually names overrides the earlier declaration (an artifact's own
-        # launch shape, a tool set of its own); everything else carries
-        out[declared.name] = Component(
-            name=known.name,
-            interface=declared.interface if data.get("interface") else known.interface,
-            runs_on=declared.runs_on if data.get("runs_on") else known.runs_on,
-            subject=declared.subject if data.get("subject") else known.subject,
-            launch=declared.launch if declared.launch.argv or declared.launch.binary else known.launch,
-            discovery_env=declared.discovery_env or known.discovery_env,
-            app_dir=declared.app_dir or known.app_dir,
-            prefix=declared.prefix or known.prefix,
-            requires=declared.requires or known.requires,
-            vars={**known.vars, **declared.vars},
-            ui={**known.ui, **declared.ui},
-            tools=declared.tools or known.tools,
-            directory=declared.directory or known.directory,
-        )
+        out[declared.name] = _refine(known, declared, data)
     return out
 
 
@@ -652,11 +673,15 @@ def table() -> dict[str, Component]:
 
     There is no base catalog — a host with no registrations drives nothing. Each
     later registration (see registrations() for the order) refines the one it
-    agrees with by name: a field it leaves out means "as declared before", a
-    field it declares wins. That is what makes a thin install manifest (how the
-    artifact starts, at which digest) ride on the declaration its checkout or
-    package carries, and a third-party component simply has no earlier
-    declaration and enters whole.
+    agrees with by name, and the rule is "named means override": a field the
+    later declaration writes down wins (its normalised value), a field it leaves
+    out carries from before, and inside `launch` the same rule applies field by
+    field. Naming a field is therefore also how a declaration CLEARS it —
+    `requires: []` means none, not "as before" — and there is one merge semantic
+    for the whole record instead of a deep-merge here and an overwrite there.
+    That is what makes a thin install manifest (how the artifact starts, at which
+    digest) ride on the declaration its checkout or package carries, and a
+    third-party component simply has no earlier declaration and enters whole.
 
     The result is MEMOIZED on the shape of the sources (source_signature): the
     table is the host's view of what is installed, and asking for it dozens of

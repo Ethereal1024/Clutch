@@ -15,7 +15,9 @@ fact is about what ships:
   * a checkout is discovered by its manifest, and a manifest that names no
     component is not one;
   * merge precedence: an installed manifest refines the checkout's declaration
-    field by field, and a catalog registration is the last word;
+    field by field, and a catalog registration is the last word — where "refines"
+    means "named means override", at every level (a field an empty list names is
+    cleared, a launch is merged field by field);
   * how a tool looks in the UI is the component's declaration, read through one
     place (catalog.ui_of) and completed with the two facts only the host knows
     (registry.ui: `mutates`, `undo`) — a write declares its own folding diff
@@ -181,6 +183,50 @@ def check_checkout_discovery_and_precedence() -> None:
             final.interface == catalog.CLI and final.subject == catalog.WORKSPACE_FS,
             "a catalog registration overrides both earlier sources",
         )
+
+
+def check_merge_is_named_means_override() -> None:
+    """A later declaration overrides exactly the fields it NAMES, at every level.
+
+    The rule used to be three rules in one function: some fields were read off
+    the raw JSON, some off the parsed object, and `vars`/`ui` were deep-merged
+    while everything else was replaced whole. Two consequences it could not
+    express: a field could not be CLEARED (an empty list read as "not
+    mentioned"), and `launch` could only be replaced whole (a thin manifest that
+    knew the binary still had to restate the argv). Both are named here.
+    """
+    checkout = {
+        "name": "clutch-m",
+        "interface": "cli",
+        "subject": "network",
+        "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
+        "requires": ["python", "curl"],
+        "vars": {"base": "host.port_url", "token": "config.token"},
+        "ui": {"label": "before", "status": True},
+    }
+    with isolated_host({"clutch-m": checkout}):
+        _write_registration(
+            {
+                "name": "clutch-m",
+                "requires": [],  # NAMED and empty: none, not "as before"
+                "launch": {"binary": "clutch-m"},  # one launch field, not the whole shape
+                "vars": {"token": "config.other"},  # named: the block, not a key-by-key merge
+                "ui": {"label": "after"},  # named: the block whole, like every other field
+            }
+        )
+        merged = catalog.table()["clutch-m"]
+        check(merged.requires == (), "an empty list names the field and clears it")
+        check(
+            merged.launch.binary == "clutch-m" and merged.launch.argv == ("{py}", "{script}"),
+            "launch refines field by field: the binary it names wins, the argv it does not carries",
+        )
+        check(merged.launch.entry == "tool.py", "and the entry the later manifest never mentions carries too")
+        check(
+            merged.interface == catalog.CLI and merged.subject == catalog.NETWORK,
+            "a field the later declaration leaves out still carries",
+        )
+        check(merged.ui == {"label": "after"}, "ui is replaced whole, not deep-merged")
+        check(merged.vars == {"token": "config.other"}, "vars is replaced whole too — one merge semantic")
 
 
 def check_ui_protocol() -> None:
@@ -524,6 +570,7 @@ def main() -> int:
     check_table_is_memoized()
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()
+    check_merge_is_named_means_override()
     check_host_facts_in_schema()
     check_registration()
     check_installed_third_party()
