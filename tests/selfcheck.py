@@ -30,9 +30,8 @@ from agent.events import (
     event_from_dict,
     event_to_json,
 )
-from agent.skills import load_skill_library
 from agent.tools import inst, modules, rendezvous
-from agent.tools.registry import ToolRegistry, build_tools
+from agent.tools.registry import ToolRegistry, build_tools, prompt_section
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
@@ -43,25 +42,48 @@ PY = "python" if os.name == "nt" else "python3"
 
 
 def check_skills(config: Config) -> None:
-    # 7. skills: the host's own catalog section (the enum the model picks from) +
-    #    the statement it drives
-    lib = load_skill_library(config.skills_dir)
-    check(len(lib.skills) >= 1, f"skill library loads at least one skill (from {config.skills_dir})")
-    first = lib.names()[0]
-    check(lib.get(first) is not None and bool(lib.get(first).content), "skill content retrievable by name")
-    check(lib.get("no-such-skill") is None, "unknown skill name returns None")
-    catalog = lib.to_catalog_section()
-    check(first in catalog and catalog.startswith("Available skills"), "catalog lists skill names")
-
-    disabled = Config(enable_skills=False)
-    sys_off = derive_messages(LazyEventLog.in_memory(), disabled, "t")[0]["content"]
-    check("Available skills (call load_skill" not in sys_off, "no catalog when skills disabled")
-    check("load_skill" not in ToolRegistry(build_tools(disabled)).names(), "no load_skill tool when disabled")
-
+    # 7. skills: the catalog belongs to the COMPONENT that serves the library.
+    #    clutch-skills publishes it (`facts` in its own component.json, answered
+    #    by its --facts mode), the host asks for it wherever it spends the fact
+    #    (tools/facts.py) — and the enum, the sentence beside it and the prompt
+    #    fragment all read that one answer. Nothing here reads skills_dir: the
+    #    host keeps no scanner of a library that is not its subject.
     reg = ToolRegistry(build_tools(config))
     tool = reg.tool("load_skill")
-    assert tool is not None and tool.inst is not None  # the registry always carries one
-    check(first in tool.parameters["properties"]["name"]["enum"], "the tool's enum carries the catalog")
+    if tool is None:
+        print("SKIP: no clutch-skills checkout beside the repo")
+        return
+    assert tool.inst is not None  # the registry always carries one
+    field = tool.parameters["properties"]["name"]
+    enum = field["enum"]
+    check(
+        isinstance(enum, list) and len(enum) >= 1 and all(isinstance(n, str) and n for n in enum),
+        f"the model picks from the component's own catalog ({len(enum)} skills)",
+    )
+    first = enum[0]
+    check(
+        first in field["description"] and "$skills" not in field["description"],
+        "and the sentence beside the enum is the same fact, resolved",
+    )
+
+    section = prompt_section(config)
+    header = "Available skills (call load_skill"
+    check(
+        header in section and f"- {first}:" in section,
+        "the component's own fragment reaches the prompt, catalog and all",
+    )
+    system = derive_messages(LazyEventLog.in_memory(), config, "t", components=section)[0]["content"]
+    check("load_skill" in system, "and lands in the system prompt the model reads")
+
+    # the knob governs the FACT itself, ahead of the question: with skills off the
+    # fact reads as no value, so the gate shuts, the fragment is dropped and the
+    # tool is gone — the component is never even asked
+    disabled = Config(enable_skills=False)
+    off = prompt_section(disabled)
+    check(header not in off, "no catalog when skills are disabled")
+    check("load_skill" not in ToolRegistry(build_tools(disabled)).names(), "no load_skill tool when disabled")
+    off_system = derive_messages(LazyEventLog.in_memory(), disabled, "t", components=off)[0]["content"]
+    check(header not in off_system, "and no catalog reaches the system prompt either")
 
     # The call the model makes is one terminal command: the module's CLI on the
     # APP host. Its bytes are pinned here; that the module ANSWERS (a skill, or

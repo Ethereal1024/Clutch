@@ -489,15 +489,40 @@ def live_workspace(cfg: Config) -> None:
         os.environ.pop("CLUTCH_RENDEZVOUS_IDLE", None)
 
 
+def _skill_name(path: Path) -> str:
+    """The name a skill file is served under: its frontmatter `name`, else the
+    directory it lives in.
+
+    The reading the component's own scan does (clutch_skills.skills.catalog) —
+    repeated here in three lines because the host no longer scans: the name the
+    model can pick comes from the component's own answer, and this check reads
+    the file only to know which name to ask for.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            key, sep, value = line.partition(":")
+            if sep and key.strip() == "name" and value.strip():
+                return value.strip().strip("\"'")
+    return path.parent.name
+
+
 def live_skills(cfg: Config) -> None:
     """clutch-skills: the CLI spawns its own daemon for the root it serves."""
-    from agent.skills import load_skill_library
-
-    lib = load_skill_library(cfg.skills_dir)
-    if not lib.skills:
+    files = sorted(Path(cfg.skills_dir).glob("*/SKILL.md"))
+    if not files:
         print(f"SKIP: no skills under {cfg.skills_dir}")
         return
-    first = lib.names()[0]
+    skill_file = files[0]
+    first = _skill_name(skill_file)
+    offered = ToolRegistry(build_tools(cfg)).tool("load_skill")
+    assert offered is not None  # rendezvous.available(modules.SKILLS) was checked
+    check(
+        first in offered.parameters["properties"]["name"]["enum"],
+        "live: the name this file is served under is in the enum the model picks from",
+    )
     state = tempfile.mkdtemp(prefix="clutch-inst-skills-")
     os.environ["CLUTCH_SKILLS_DISCOVERY_DIR"] = state
     daemon_pid = 0
@@ -506,7 +531,7 @@ def live_skills(cfg: Config) -> None:
             ws = LocalWorkspace(tmp)
             reg = ToolRegistry(build_tools(cfg))
             r = reg.execute(ws, cfg, "load_skill", {"name": first})
-            served = (lib.get(first).dir / "SKILL.md").read_text(encoding="utf-8")
+            served = skill_file.read_text(encoding="utf-8")
             check(not r.error and r.content == served, "live: load_skill serves the skill file byte for byte")
 
             # the CLI lazily started a daemon for the root and published it

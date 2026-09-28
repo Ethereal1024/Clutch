@@ -364,13 +364,33 @@ def prepare(module: str, workspace: Any, config) -> Statement:
     if mod is None:
         raise RendezvousError(f"unknown module: {module}")
     if mod.interface == catalog.CLI:
-        return Statement(
-            vars=host_vars(mod, config),
-            runner=LocalTransport(str(modules.repo_root())),
-            prefix=launch_prefix(module),
-        )
+        return prepare_cli(module, config)
     service_ = service(workspace.root, module, protect=workspace.protected())
     return Statement(vars=service_.vars(), runner=workspace)
+
+
+def prepare_cli(module: str, config) -> Statement:
+    """A CLI component's statement, ready to render and run WITHOUT a workspace.
+
+    Separate from prepare() because not every question is a call: a host fact a
+    component publishes (tools/facts.py) is asked of the component's own line,
+    outside any workspace and outside any turn, and a daemon cannot answer it
+    (its statements are spoken to a service that belongs to one workspace — see
+    catalog.component_diagnostics). The runner is the app host's, which is whose
+    machine these statements run on.
+    """
+    mod = catalog.table().get(module)
+    if mod is None:
+        raise RendezvousError(f"unknown module: {module}")
+    if mod.interface != catalog.CLI:
+        raise RendezvousError(
+            f"{module} is a {mod.interface} component: only a CLI's statement runs without a workspace"
+        )
+    return Statement(
+        vars=host_vars(mod, config),
+        runner=LocalTransport(str(modules.repo_root())),
+        prefix=launch_prefix(module),
+    )
 
 
 def fence_globs(protected: Iterable[Path | str], root: str | Path) -> tuple[str, ...]:

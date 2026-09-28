@@ -5,9 +5,10 @@ to (a per-workspace daemon over loopback HTTP, or one process per call). The
 host imports NOTHING from it: it holds a DECLARATION of the component — what it
 is spoken to as and where it runs (interface / runs_on), whose resources it
 serves (subject), how one of its processes starts (launch), which host facts its
-statements need (vars), which tools it publishes (each with the model-facing
-schema, the one statement that satisfies a call, and how the UI presents it),
-and how the user sees the component's own state (ui).
+statements need (vars) and which host facts IT answers (facts), which tools it
+publishes (each with the model-facing schema, the one statement that satisfies a
+call, and how the UI presents it), and how the user sees the component's own
+state (ui).
 
 There is no host-side implementation behind any of it, and no fallback either:
 a tool this catalog does not describe does not exist for the model, and a
@@ -188,6 +189,15 @@ FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
 # component_diagnostics). The declarations behind the names live in
 # agent/tools/host.py; registry._check_vocabulary keeps the two lists equal.
 HOST_TOOL_NAMES: tuple[str, ...] = ("run_command",)
+# facts: the host facts a component may PUBLISH, because only its own code can
+# compute them. `vars` is the other direction (what a component consumes from the
+# host); a `facts` key is a host fact a component ANSWERS — a component declares
+# the statement that produces it, and the host asks that statement when it needs
+# the value (tools/facts.py). The token is the host's, the answer shape is the
+# host's, and a word absent from here is refused rather than guessed at. One
+# token so far: `skills`, the catalog of the library the skills component serves
+# — the list this host used to scan for itself.
+FACT_TOKENS: tuple[str, ...] = ("skills",)
 
 
 @dataclass(frozen=True)
@@ -247,21 +257,43 @@ def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
 def component_diagnostics(component: Component) -> list[Diagnostic]:
     """Every host word a component's declaration read wrongly, its tools' too.
 
-    Two things are checked here rather than in tool_diagnostics, because both
-    straddle the two levels. A `vars` key that is also one of a tool's declared
+    Three things are checked here rather than in tool_diagnostics, because each
+    straddles two levels. A `vars` key that is also one of a tool's declared
     arguments: host vars shadow the model's argument of the same name when the
     statement is rendered (inst.render), so the model's value would be silently
     dropped — a call that names a path the host then replaces. The declaration is
-    refused instead of quietly meaning something else. And a tool that publishes
-    one of the host's OWN names (HOST_TOOL_NAMES): the host always has that tool,
-    so a component declaring it would either shadow it or lose silently, and the
-    model would have no way to tell which one it is calling.
+    refused instead of quietly meaning something else. A tool that publishes one
+    of the host's OWN names (HOST_TOOL_NAMES): the host always has that tool, so a
+    component declaring it would either shadow it or lose silently, and the model
+    would have no way to tell which one it is calling. And a `facts` entry: a
+    token the host does not know (it would be a fact nothing ever spends), or a
+    fact published by a component that is not a CLI — a daemon's statements are
+    spoken to a service that belongs to one workspace, while a host fact belongs
+    to none (tools/facts.py).
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
         for f in component.requires
         if f not in FACILITIES
     ]
+    for token in component.facts:
+        if token not in FACT_TOKENS:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    "",
+                    f"unknown fact {token!r} (this host publishes {_known(FACT_TOKENS)})",
+                )
+            )
+        elif component.interface != CLI:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    "",
+                    f"a {component.interface} component cannot publish the host fact {token!r}: a daemon's "
+                    f"statement belongs to one workspace, and a host fact belongs to none",
+                )
+            )
     for spec in component.tools:
         declared = spec.parameters.get("properties", {}) if isinstance(spec.parameters, Mapping) else {}
         for key in component.vars:
@@ -334,8 +366,9 @@ class Tool:
 
     `description` is the model-facing text. `parameters` is JSON Schema; a
     string value anywhere in the declaration may carry the host-fact
-    placeholders `$config.<field>`, `$skills` and `$backends`, resolved by the
-    registry from what only the host knows.
+    placeholders `$config.<field>`, a fact some component publishes (`$skills` —
+    catalog.FACT_TOKENS) and `$backends`, resolved by the registry from what only
+    the host knows.
 
     `command` is the statement template `inst.render` fills — the part of the
     line that is the COMPONENT's own business, never how its process starts
@@ -399,6 +432,16 @@ class Component:
     system prompt (a file inside its own directory, like `launch.entry`): the
     words its own tools are called by, and how to use them together. See
     registry.prompt_section — the host writes no such word itself.
+
+    `facts` maps a HOST fact this component PUBLISHES to the statement that
+    answers it: `{"skills": "--facts list"}`. It is the reverse of `vars` — there
+    a component asks the host for something only the host knows, here it offers
+    something only the component can compute (its own catalog, its own scan). The
+    tokens are the host's vocabulary (FACT_TOKENS) and so is the ANSWER SHAPE: one
+    JSON array of `{"name", "description"}` on stdout, whatever the component's
+    own `--json` contract looks like. Only a CLI component may publish one (a
+    daemon's statements are spoken to a service that belongs to one workspace, and
+    a host fact belongs to none). See tools/facts.py.
     """
 
     name: str
@@ -411,6 +454,7 @@ class Component:
     prefix: str = ""  # discovery file name prefix
     requires: tuple[str, ...] = ()
     vars: Mapping[str, str] = field(default_factory=dict)
+    facts: Mapping[str, str] = field(default_factory=dict)  # host fact -> the statement that answers it
     ui: Mapping[str, Any] = field(default_factory=dict)
     tools: tuple[Tool, ...] = ()
     directory: str = ""  # explicit code directory (a registration, not a checkout)
@@ -471,6 +515,10 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
         if spec is not None:
             tools.append(spec)
     ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
+    # A fact whose statement is empty or missing is NOT published: the key is a
+    # promise to answer, and a blank line is not an answer (tools/facts.py reads
+    # the absence as "this component publishes nothing of the sort").
+    raw_facts = data.get("facts") if isinstance(data.get("facts"), Mapping) else {}
     return Component(
         name=name,
         interface=interface,
@@ -487,6 +535,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
         prefix=str(data.get("prefix", "") or ""),
         requires=tuple(str(r) for r in data.get("requires", ()) or ()),
         vars={str(k): str(v) for k, v in (data.get("vars") or {}).items()},
+        facts={str(k): str(v or "").strip() for k, v in raw_facts.items() if str(v or "").strip()},
         ui=ui,
         tools=tuple(tools),
         directory=str(data.get("directory", "") or ""),

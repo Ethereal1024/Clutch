@@ -23,7 +23,6 @@ from ..events import (
     UserMessageEvent,
 )
 from ..prompts import render
-from ..skills import cached_library
 from .lazy import LazyEventLog
 
 if TYPE_CHECKING:  # type hints only: core must not import tools at runtime
@@ -183,12 +182,9 @@ def derive_messages(
         # the components' own words about their own tools — assembled by the tools
         # layer, which knows what is installed and drivable. Core places it and
         # names no tool itself, so the prompt cannot describe tools that are gone.
+        # The skill catalog arrives this way too: the component that serves the
+        # library publishes it (tools/facts.py), and the host scans nothing.
         system += "\n\n" + components
-    if config.enable_skills:
-        # model-visible catalog: the model decides whether to load a skill
-        catalog = cached_library(config.skills_dir).to_catalog_section()
-        if catalog:
-            system += "\n\n" + catalog
     if workspace is not None:
         # local shell the model's commands will execute under: on a Windows
         # host say so up front so the first command already speaks the right

@@ -39,8 +39,7 @@ from typing import Any, Callable
 from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
-from ..skills import cached_library
-from . import catalog, filesystem, host, inst, rendezvous
+from . import catalog, facts, filesystem, host, inst, rendezvous
 from .envelope import Envelope
 from .inst import InstError
 from .transport import TransportError, failure_envelope
@@ -89,14 +88,28 @@ ACCESS: dict[str, Access] = {
 WATCHED_ACCESS: frozenset[str] = frozenset({"read", "write"})
 
 
+# The host-side condition each PUBLISHED fact stands behind (catalog.FACT_TOKENS,
+# tools/facts.py): a fact a knob governs reads as no value while the knob is off,
+# because the tools that spend it are not offered either — the same condition
+# shows up as a gate (catalog.Tool.gate "skills"). The keys are the declaration
+# vocabulary's; the conditions are the host's, and _check_vocabulary keeps the two
+# lists equal.
+_FACT_GATES: dict[str, Callable[[Config], bool]] = {
+    "skills": lambda config: bool(config.enable_skills),
+}
+
+
 def _check_vocabulary() -> None:
     """Neither half of the host's vocabulary can drift from the declarations
     behind it silently: every access word the declaration protocol lists must have
-    an implementation here, and the host's own tool names must be exactly the ones
-    tools/host.py declares. A mismatch is a host bug, not a component's, so it is
-    loud."""
+    an implementation here, every published fact a condition, and the host's own
+    tool names must be exactly the ones tools/host.py declares. A mismatch is a
+    host bug, not a component's, so it is loud."""
     assert set(ACCESS) == set(catalog.ACCESS_ARGS), (
         f"access vocabulary drift: catalog {sorted(catalog.ACCESS_ARGS)} vs registry {sorted(ACCESS)}"
+    )
+    assert set(_FACT_GATES) == set(catalog.FACT_TOKENS), (
+        f"fact vocabulary drift: catalog {sorted(catalog.FACT_TOKENS)} vs registry {sorted(_FACT_GATES)}"
     )
     assert set(host.names()) == set(catalog.HOST_TOOL_NAMES), (
         f"host tool drift: catalog {sorted(catalog.HOST_TOOL_NAMES)} vs host {sorted(host.names())}"
@@ -120,7 +133,9 @@ def _report(diags: list[catalog.Diagnostic]) -> None:
         if key in _REPORTED:
             continue
         _REPORTED.add(key)
-        where = f"{d.component}/{d.tool}" if d.tool else d.component
+        # an empty component is a word about the table itself (two components
+        # publishing one fact), not about one of them
+        where = f"{d.component}/{d.tool}" if d.tool else (d.component or "the catalog")
         log(f"[components] refusing {where}: {d.message}")
 
 
@@ -205,24 +220,39 @@ class Tool:
 # -- declaration -> the schema the model sees ---------------------------------
 
 
-_PLACEHOLDER = re.compile(r"\$(config\.[a-z_]+|skills|backends)\b")
+# The host facts a declaration may spend in its prose, built from the vocabulary
+# rather than written out: `$config.<field>` and `$backends` are values this host
+# computes itself, and every word of catalog.FACT_TOKENS names a fact a component
+# publishes (asked of that component — _entries). Publishing a new fact therefore
+# adds a word here with no second edit.
+_PLACEHOLDER = re.compile(r"\$(config\.[a-z_]+|backends|" + "|".join(catalog.FACT_TOKENS) + r")\b")
+# A string value that is EXACTLY one published fact, and nothing else.
+_WHOLE = re.compile(r"\$(" + "|".join(catalog.FACT_TOKENS) + r")\Z")
+
+
+def _whole_fact(value: str) -> str:
+    """The published fact a whole value names, or "" when the value is not one."""
+    match = _WHOLE.fullmatch(value)
+    return match.group(1) if match else ""
 
 
 def _resolve(value: Any, config: Config) -> Any:
     """A declaration's schema value with the host's own facts filled in.
 
-    Two placeholders, both of them things only this host knows when it builds
-    the schema: `$config.<field>` (a knob the user set) and the two computed
-    lists `$skills` (the skill names on this machine) and `$backends` (the
-    search backends it is configured for). A value that IS `$skills` stays a
-    list — an enum — while the same token inside a sentence reads as the list;
-    likewise a value that IS `$config.<field>` keeps the knob's own type (a
-    default of `$config.read_max_chars` is the integer the statement sends), and
-    the same placeholder inside a sentence is spelled out.
+    Three placeholders, all of them things only this host knows when it builds
+    the schema: `$config.<field>` (a knob the user set), `$backends` (the search
+    backends this machine is configured for) and any fact a component publishes
+    (`$skills` — catalog.FACT_TOKENS, answered by the component that declares it;
+    see _entries). A value that IS a fact stays a list — an enum — while the same
+    token inside a sentence reads as the list of names; likewise a value that IS
+    `$config.<field>` keeps the knob's own type (a default of
+    `$config.read_max_chars` is the integer the statement sends), and the same
+    placeholder inside a sentence is spelled out.
     """
     if isinstance(value, str):
-        if value == "$skills":
-            return list(_skills(config))
+        token = _whole_fact(value)
+        if token:  # a whole value: the fact's own shape (the names, as a list)
+            return list(_names(token, config))
         if value.startswith("$config."):  # a whole value: the host's own type
             return getattr(config, value.split(".", 1)[1], "")
         return _PLACEHOLDER.sub(lambda m: _fact(m.group(1), config), value)
@@ -234,18 +264,67 @@ def _resolve(value: Any, config: Config) -> Any:
 
 
 def _fact(token: str, config: Config) -> str:
-    if token == "skills":
-        return ", ".join(_skills(config)) or "none"
+    """One placeholder read INSIDE a sentence: the fact as prose, never a list."""
+    if token in catalog.FACT_TOKENS:
+        return ", ".join(_names(token, config)) or "none"
     if token == "backends":
         return " or ".join(catalog.available_backends(config)) or "none"
     return str(getattr(config, token.split(".", 1)[1], ""))
 
 
-def _skills(config: Config) -> tuple[str, ...]:
-    """The skill names THIS machine has (the host's fact, not the component's
-    work): the model picks a name from the enum before anything runs, so the
-    host must be able to answer it without asking the skill component."""
-    return cached_library(config.skills_dir).names()
+def _names(token: str, config: Config) -> tuple[str, ...]:
+    """The names a published fact offers right now: what the model picks from."""
+    return tuple(entry.name for entry in _entries(token, config))
+
+
+def _entries(token: str, config: Config) -> tuple[facts.Entry, ...]:
+    """One published host fact's entries, or () when there is no value to read.
+
+    The single door to a fact, whoever spends it: the enum of a schema (_resolve),
+    a sentence of a description (_fact), the gate under which a tool is offered
+    (_gate_ok), the prompt fragment written around it (_fragment). An answer this
+    host cannot read is fail-CLOSED — no value at all, never a guess — and the
+    component's own reason is said once, out loud (tools/facts.py): a library that
+    cannot be read is something the user has to see, not an empty catalog.
+    """
+    answer = _fact_answer(token, config)
+    if answer.problem:
+        _report(
+            [
+                catalog.Diagnostic(
+                    answer.owner,
+                    "",
+                    f"cannot answer the host fact {token!r}: {answer.problem}",
+                    fatal=False,
+                )
+            ]
+        )
+    return answer.entries
+
+
+def _fact_answer(token: str, config: Config) -> facts.Answer:
+    """One host fact: what the single component publishing it answered.
+
+    The host keeps no value of its own behind a published fact — that is the
+    whole point of the direction (facts.py) — so the answer is the publishing
+    component's own statement, on its own line, through its own transport. What IS
+    the host's here is who may answer, and when the question is asked at all:
+
+      * the knob the fact stands behind (_FACT_GATES): turned off, the fact reads
+        as no value, exactly as the gate spending it is shut;
+      * only ONE component may publish a token. Two suppliers answer nothing and
+        say so: the host cannot tell which library the model is about to pick a
+        name from, and picking one is how two truth sources start.
+    """
+    condition = _FACT_GATES.get(token)
+    if condition is not None and not condition(config):
+        return facts.Answer(())
+    suppliers = [component for component in _drivable() if token in component.facts]
+    if not suppliers:
+        return facts.Answer(())
+    if len(suppliers) > 1:
+        return facts.Answer((), "", f"{' and '.join(c.name for c in suppliers)} both publish it")
+    return facts.ask(suppliers[0], token, config)
 
 
 def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
@@ -258,8 +337,9 @@ def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
         return memories is not None
     if gate == "skills":
         # skills off entirely, or nothing to load: an enum over an empty library
-        # is a schema that offers the model nothing to pick
-        return config.enable_skills and bool(_skills(config))
+        # is a schema that offers the model nothing to pick. The gate word is the
+        # fact token, so a library the host cannot read shuts the gate too.
+        return bool(_entries("skills", config))
     return False
 
 
@@ -267,9 +347,10 @@ def _wire(spec: catalog.Tool, config: Config, *, owner: str, implementation: hos
     """One declaration -> the tool the model sees and the host runs.
 
     The description and the schema alike are run through `_resolve`, so a
-    manifest's `$config.<field>` / `$skills` / `$backends` tokens become the
-    host facts they name — the component says WHAT it wants to know about this
-    host, the host answers with its own values.
+    manifest's `$config.<field>` / `$backends` / published-fact (`$skills`) tokens
+    become the host facts they name — the component says WHAT it wants to know
+    about this host, the host answers with its own values (and, for a published
+    fact, with the answer of the component that declares it).
 
     The policy words are resolved here too, and a declaration that names one the
     host does not know is refused by the CALLER (build_tools, which asks
@@ -387,10 +468,16 @@ def prompt_section(config: Config) -> str:
     describing tools that are not here.
 
     A fragment is resolved exactly like a tool description, so a component may
-    spend `$config.<field>` / `$skills` / `$backends` in it too. One that cannot
-    be read is not fatal — the component's tools still work — but it is not silent
-    either: nothing is appended and the word is said once, like every other the
-    host cannot honor.
+    spend `$config.<field>` / `$backends` / a published fact (`$skills`) in it
+    too — and one fact gets a second reading, because a catalog is not a word in
+    a sentence: a LINE that is exactly `$skills` becomes the block
+    `- name: description` per entry (_prose), which is how a component writes
+    "here is my catalog" without knowing a single entry of it. A fragment that
+    spends a fact nobody here can answer is NOT appended (the calls it describes
+    are gone by the same gate, and a prompt must not promise what the model
+    cannot call); one that cannot be read is not fatal — the component's tools
+    still work — but it is not silent either: nothing is appended and the word is
+    said once, like every other the host cannot honor.
     """
     return "\n\n".join(text for text in (_fragment(c, config) for c in _drivable() if c.prompt) if text)
 
@@ -414,7 +501,34 @@ def _fragment(component: catalog.Component, config: Config) -> str | None:
             ]
         )
         return None
-    return str(_resolve(text, config)) or None
+    missing = [token for token in facts.spent(text) if not _entries(token, config)]
+    if missing:
+        # The fragment is written around a fact nothing here can answer. The calls
+        # it describes are not offered either (the same gate shuts them), and a
+        # prompt must not promise what the model cannot call — so the fragment is
+        # dropped whole, and _entries already said why.
+        return None
+    return _prose(text, config) or None
+
+
+def _prose(text: str, config: Config) -> str:
+    """A fragment's prose with the host's facts filled in, LINE by line.
+
+    A line that is exactly one published fact is a BLOCK: one `- name:
+    description` line per entry, in the shape the component's own human `list`
+    renders — the component writes the header in its own words and says `$skills`
+    under it, and knows no entry of the library it is describing. Anywhere else
+    (a token inside a sentence) the fact reads as the list of names, exactly as
+    it does in a tool description (_resolve).
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        token = _whole_fact(line.strip())
+        if not token:
+            out.append(str(_resolve(line, config)))
+            continue
+        out.extend(f"- {entry.name}: {entry.description}" for entry in _entries(token, config))
+    return "\n".join(out)
 
 
 def components_unavailable(config: Config) -> list[dict[str, str]]:

@@ -64,12 +64,13 @@ import stat
 import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 from agent.config import Config
 from agent.core import permission
 from agent.core.context import derive_messages
 from agent.core.lazy import LazyEventLog
-from agent.tools import catalog, components, host, modules, registry, rendezvous
+from agent.tools import catalog, components, facts, host, modules, registry, rendezvous
 from agent.tools.envelope import Envelope
 from agent.tools.localshell import local_shell
 from agent.tools.registry import ToolRegistry, build_tools, prompt_section
@@ -152,6 +153,82 @@ def _spec(component: str, tool: str) -> catalog.Tool:
         if spec.name == tool:
             return spec
     raise AssertionError(f"{component} declares no {tool}")
+
+
+@contextlib.contextmanager
+def _reported() -> Iterator[list[catalog.Diagnostic]]:
+    """What the host says about a declaration, collected for one check.
+
+    The reports are said once per process (registry._REPORTED), so a check that
+    wants to READ them swaps the sink instead of watching a log.
+    """
+    said: list[catalog.Diagnostic] = []
+    real = registry._report
+    registry._report = said.extend  # type: ignore[assignment]
+    try:
+        yield said
+    finally:
+        registry._report = real  # type: ignore[assignment]
+
+
+def _answers(entries: list[tuple[str, str]] | None = None, *, payload: str = "", log: Path | None = None) -> str:
+    """A component program that answers the host's fact question.
+
+    One JSON array of `{"name", "description"}` on stdout — the host's own shape
+    (tools/facts.py), which the answer below writes out verbatim; `payload`
+    replaces it whole, for the answers that are NOT an answer. `log` makes the
+    program record that it ran, which is how a check pins that a fact spent in
+    three places still costs one process.
+    """
+    if not payload:
+        payload = json.dumps([{"name": n, "description": d} for n, d in entries or []])
+    record = "" if log is None else f"pathlib.Path({str(log)!r}).open('a').write('ran\\n')\n"
+    return f"import pathlib\nimport sys\n{record}sys.stdout.write({payload!r})\n"
+
+
+def _publisher(
+    name: str,
+    directory: Path,
+    body: str,
+    *,
+    entry: str = "facts.py",
+    tool: str = "load_thing",
+    **extra: Any,
+) -> dict:
+    """A CLI component that PUBLISHES the `skills` host fact, plus one tool that
+    spends it — the declaration the host asks, and the tool whose gate it answers.
+
+    `body` is the component's own program: the host runs it, so it IS the answer
+    the host gets (clutch-skills' `--facts` mode is the real one — see its own
+    tests/test_cli.py). `extra` replaces any key of the declaration, which is how
+    one check declares a bogus fact, an empty one or a daemon.
+    """
+    (directory / entry).write_text(body, encoding="utf-8")
+    declaration: dict[str, Any] = {
+        "name": name,
+        "interface": "cli",
+        "directory": str(directory),
+        "launch": {"argv": ["{py}", "{script}"], "entry": entry},
+        "requires": ["python"],
+        "facts": {"skills": "--facts list"},
+        "tools": [
+            {
+                "name": tool,
+                "description": "load one of $skills",
+                "parameters": {
+                    "properties": {
+                        "name": {"type": "string", "enum": "$skills", "description": "one of $skills"},
+                    },
+                    "required": ["name"],
+                },
+                "gate": "skills",
+                "command": "--envelope {name}",
+            }
+        ],
+    }
+    declaration.update(extra)
+    _write_registration(declaration)
+    return declaration
 
 
 # --------------------------------------------------------------------- facts ---
@@ -389,8 +466,10 @@ def check_host_prompt_names_no_component_tool() -> None:
     absent, renamed or replaced — at which point the prompt tells the model about
     a tool it cannot call. The names belong in the components' own fragments
     (check_prompt_travels_with_the_declaration); `run_command` is the host's own
-    tool, so it is the one tool name these files may carry. What the skills
-    catalog's header says (agent/skills.py) is audit 4's to move, not this one's.
+    tool, so it is the one tool name these files may carry. The skills catalog's
+    header is no longer one of these files' either: audit 4 moved it to the
+    component that serves the library, and it travels as that component's own
+    fragment now (clutch-skills/PROMPT.md).
     """
     owned = {spec.name for mod in catalog.table().values() for spec in mod.tools}
     if not owned:
@@ -831,6 +910,181 @@ def check_host_facts_in_schema() -> None:
             "the backends are this host's chain, spelled out",
         )
         check(tool.defaults.get("n") == cfg.read_max_chars, "a whole-value placeholder keeps the field's own type")
+        check(
+            "skills: none" in tool.description,
+            "a published fact no component here answers reads as no value, never as a guess",
+        )
+
+
+def check_a_component_publishes_the_host_fact() -> None:
+    """A host fact is ASKED of the component that publishes it — never scanned here.
+
+    `$skills` used to be the host's own work: agent/skills.py walked
+    config.skills_dir, parsed frontmatter and rendered a section. That made the
+    host the second implementation of a library the skills component already
+    serves, and it had the host reading files that are the component's subject.
+    The direction is reversed now (tools/facts.py): a component DECLARES the
+    statement that answers a host fact (`facts: {"skills": ...}`), and the host
+    asks that statement where it spends the fact — in a schema enum, in a
+    sentence, in a prompt fragment, in a gate.
+
+    What this check pins is that the three spendings read ONE answer, that the
+    answer is the host's shape and not the component's own wire format, that
+    every way of failing is fail-CLOSED (no value, the gate shuts, the fragment
+    is dropped) and never silent, and that the knob which governs the fact runs
+    ahead of the question: with skills off the component is never started at all.
+    """
+    facts.forget()  # a library laid down out of band is not the last process's
+
+    # one supplier: the enum, the sentence and the fragment all read its answer,
+    # and a fact spent in three places still costs ONE process
+    with isolated_host() as root:
+        code = root / "pub-code"
+        code.mkdir()
+        (code / "PROMPT.md").write_text(
+            "Available things (call load_thing to read one when relevant):\n$skills\n", encoding="utf-8"
+        )
+        log = code / "runs.log"
+        _publisher(
+            "clutch-pub",
+            code,
+            _answers([("alpha", "the first thing"), ("beta", "the second")], log=log),
+            prompt="PROMPT.md",
+        )
+        cfg = Config()
+        tool = ToolRegistry(build_tools(cfg)).tool("load_thing")
+        check(tool is not None, "a gated tool whose fact a component answers is offered")
+        assert tool is not None
+        name = tool.parameters["properties"]["name"]
+        check(name["enum"] == ["alpha", "beta"], "a whole-value fact becomes the enum the model picks from")
+        check(
+            name["description"] == "one of alpha, beta",
+            "and the same fact inside a sentence reads as the names",
+        )
+        section = prompt_section(cfg)
+        check(
+            "- alpha: the first thing" in section and "- beta: the second" in section,
+            "a LINE that is exactly the fact becomes one `- name: description` line per entry",
+        )
+        check("$skills" not in section and "$skills" not in tool.description, "with no placeholder left standing")
+        check(
+            log.read_text(encoding="utf-8").splitlines() == ["ran"],
+            "and the component was run once for all three spendings (the answer is remembered per process)",
+        )
+
+    # an answered but EMPTY catalog is no value, not an empty enum: the gate shuts
+    # and the fragment written around the fact is not appended — the tool it
+    # describes is gone by the same condition
+    with isolated_host() as root:
+        code = root / "empty-code"
+        code.mkdir()
+        (code / "PROMPT.md").write_text("Available things:\n$skills\n", encoding="utf-8")
+        _publisher("clutch-empty", code, _answers([]), prompt="PROMPT.md")
+        cfg = Config()
+        check("load_thing" not in ToolRegistry(build_tools(cfg)).names(), "an empty catalog shuts the gate")
+        check(prompt_section(cfg) == "", "and the fragment written around the fact is dropped whole")
+
+    # the component's OWN wire format is not an answer: `--json list` prints
+    # {"root", "skills": [...]}, which is the component's contract with its own
+    # callers — the host asked a question in ITS shape and reads an answer in it
+    with isolated_host() as root:
+        code = root / "wire-code"
+        code.mkdir()
+        own = json.dumps({"root": "/somewhere", "skills": [{"name": "alpha", "description": "d", "dir": "/x"}]})
+        _publisher("clutch-wire", code, _answers(payload=own))
+        cfg = Config()
+        with _reported() as said:
+            check(
+                "load_thing" not in [t.name for t in build_tools(cfg)],
+                "an answer in the component's own wire shape is not an answer",
+            )
+        check(
+            any("not a JSON array" in d.message for d in said),
+            "and the host says so in its own words, rather than reading a shape it did not ask for",
+        )
+
+    # a failed answer is fail-closed with the COMPONENT's reason: a library that
+    # cannot be read is something the user has to see, never an empty catalog
+    with isolated_host() as root:
+        code = root / "fail-code"
+        code.mkdir()
+        _publisher(
+            "clutch-fail",
+            code,
+            _answers([]) + "sys.stderr.write('the library is unreadable\\n')\nsys.exit(3)\n",
+        )
+        cfg = Config()
+        with _reported() as said:
+            check("load_thing" not in ToolRegistry(build_tools(cfg)).names(), "an answer that failed shuts the gate")
+        check(
+            any("the library is unreadable" in d.message and "exit 3" in d.message for d in said),
+            "and the component's own reason is what the host says",
+        )
+
+    # two suppliers of one token: neither answers, and the host names both rather
+    # than choosing one. Picking a library for the model is how two sources of
+    # truth for one name start
+    with isolated_host() as root:
+        for name, tool in (("clutch-a", "load_a"), ("clutch-b", "load_b")):
+            directory = root / f"{name}-code"
+            directory.mkdir()
+            _publisher(name, directory, _answers([("alpha", "d")]), entry=f"{name}.py", tool=tool)
+        cfg = Config()
+        with _reported() as said:
+            offered = [t.name for t in build_tools(cfg)]
+        check("load_a" not in offered and "load_b" not in offered, "two suppliers of one fact answer nothing at all")
+        check(
+            any("clutch-a" in d.message and "clutch-b" in d.message and "both publish it" in d.message for d in said),
+            "and the host says which two, instead of quietly serving one of them",
+        )
+
+    # a word the host does not publish is a fatal word; so is a fact declared by a
+    # component that cannot answer one (a daemon's statement belongs to one
+    # workspace, and a host fact belongs to none)
+    with isolated_host() as root:
+        code = root / "bogus-code"
+        code.mkdir()
+        _publisher("clutch-bogus", code, _answers([("alpha", "d")]), facts={"colour": "--facts list"})
+        messages = [d.message for d in catalog.diagnostics()]
+        check(
+            any(d.fatal and "unknown fact 'colour'" in d.message for d in catalog.diagnostics() if d.tool == ""),
+            f"a fact token the host does not publish is refused ({messages})",
+        )
+        check("load_thing" not in [t.name for t in build_tools(Config())], "and the component contributes nothing")
+
+        daemon = root / "daemon-code"
+        daemon.mkdir()
+        (daemon / "tool.py").write_text("print('[]')\n", encoding="utf-8")
+        _write_registration(
+            {
+                "name": "clutch-daemon",
+                "interface": "daemon",
+                "directory": str(daemon),
+                "facts": {"skills": "--envelope list"},
+                "tools": [],
+            }
+        )
+        check(
+            any(d.fatal and "cannot publish the host fact" in d.message for d in catalog.diagnostics()),
+            "and a daemon declaring one is refused too: only a CLI's statement runs outside a workspace",
+        )
+
+    # the knob the fact stands behind runs BEFORE the question: with skills off
+    # nothing is asked, so the component is never started (the log stays empty,
+    # the fragment is dropped and there is nothing to report — no value is not a
+    # problem to complain about)
+    with isolated_host() as root:
+        code = root / "gated-code"
+        code.mkdir()
+        (code / "PROMPT.md").write_text("Available things:\n$skills\n", encoding="utf-8")
+        log = code / "runs.log"
+        _publisher("clutch-gated", code, _answers([("alpha", "d")], log=log), prompt="PROMPT.md")
+        cfg = Config(enable_skills=False)
+        with _reported() as said:
+            check("load_thing" not in [t.name for t in build_tools(cfg)], "with the knob off the gate is shut")
+            check(prompt_section(cfg) == "", "and the fragment is not appended")
+        check(not log.exists() and said == [], "the component is never run, and nothing is reported about it")
+    facts.forget()
 
 
 def check_registration() -> None:
@@ -914,6 +1168,7 @@ def main() -> int:
     check_prompt_travels_with_the_declaration()
     check_host_prompt_names_no_component_tool()
     check_host_facts_in_schema()
+    check_a_component_publishes_the_host_fact()
     check_registration()
     check_installed_third_party()
     print("\nall passed")
