@@ -92,6 +92,28 @@ def _partial_then_fail():
     raise httpx2.ReadTimeout("timed out")
 
 
+def _sdk_error(cls, cause=None):
+    """An openai wrapper error shaped the way the SDK raises it: the transport
+    exception chained on with ``raise cls(request=...) from err`` (the SDK's own
+    wording is the flat "Request timed out." / "Connection error.")."""
+    err = cls(request=_REQ)
+    err.__cause__ = cause
+    return err
+
+
+def _refused(cause=None, cls=None):
+    """A request that never gets a response: the factory (``create()``) itself
+    fails — connection refused / DNS / connect timeout, i.e. "the network is
+    down". This is NOT a body-level failure: nothing was opened and no first
+    chunk ever existed, so a retry cannot duplicate anything."""
+    error = _sdk_error(cls or openai.APITimeoutError, cause or httpx2.ConnectTimeout("timed out"))
+
+    def _fail():
+        raise error
+
+    return _fail
+
+
 class _BlockedStream:
     """An SSE body parked in a read: next() blocks until close() interrupts it —
     the exact shape of the incident (Stop arrived while the thread sat inside a
@@ -472,6 +494,13 @@ def main() -> int:
         built.timeout.connect == 15.0 and built.timeout.read == 240.0 and built.timeout.write == 60.0,
         "timeout budgets split: tight connect, generous streaming read",
     )
+    # the SDK's OWN retry loop must stay off: what it does inside create() is
+    # invisible to the caller — no retry notice, no chip, just a frozen-looking
+    # window through every backoff (the reported symptom: "is it dead or is it
+    # retrying?"). The only retries allowed are the ones this loop announces.
+    check(built.client.max_retries == 0, "the chat client never lets the SDK retry behind our back")
+    responses_built = OpenaiResponsesLlmClient(api_key="sk-test", base_url="http://localhost/v1", model="m")
+    check(responses_built.client.max_retries == 0, "the responses client never lets the SDK retry behind our back")
     err = LlmError.classify(httpx2.ConnectError("refused"), retryable_status)
     check(err.code == "connection" and err.retryable, "connect error -> retryable connection")
     err = LlmError.classify(httpx2.ReadError("reset"), retryable_status)
@@ -504,6 +533,39 @@ def main() -> int:
     check("retrying (1/3)" in evs[0]["message"], "retry notice message names the attempt")
     check(comps.calls == 2, "exactly two requests were issued")
     check([e["delta"] for e in evs if e["type"] == "text"] == ["hi"], "no duplicated partial text")
+
+    # 2b. the request never lands at all ("cannot connect to the network"):
+    #     the factory itself raises — the SDK wraps the connect timeout /
+    #     connection error, no body was ever opened. Exactly as retryable as a
+    #     body-level drop, and it MUST be announced: without the notice the user
+    #     stares at a frozen window through the whole connect budget with no way
+    #     to tell "still working" from "dead".
+    client, comps = _client(3, [_refused(), _ok_stream])
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+    check(err is None and comps.calls == 2, "a refused request is retried and recovers")
+    check([e["type"] for e in evs] == ["retry", "text", "finish"], "the refused attempt is announced before retrying")
+    check("Connect timed out" in evs[0]["message"], "the notice names the connect phase, not a bare 'timed out'")
+    check("retrying (1/3)" in evs[0]["message"], "the notice counts the attempt")
+    client, comps = _client(2, [_refused(), _refused()])
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+    check([e["type"] for e in evs] == ["retry"], "one notice before exhaustion, not a silent death")
+    check(err is not None and err.code == "timeout" and err.retryable,
+          "an unreachable endpoint raises a retryable timeout")
+    check("after 2 attempts" in err.message, "exhaustion states the attempt count for an unreachable endpoint")
+    check(comps.calls == 2, "no extra request after exhaustion")
+    # a refused connection (the other wrapper) is retryable too, and names the cause
+    client, comps = _client(2, [_refused(httpx2.ConnectError("refused"), openai.APIConnectionError), _ok_stream])
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+    check(err is None and evs[0]["code"] == "connection", "a connection error at request time is retryable")
+    check("Cannot reach the API endpoint" in evs[0]["message"],
+          "the notice says what failed instead of 'Connection error.'")
+    # Stop still wins over a request-time failure
+    client, comps = _client(3, [_refused(), _ok_stream])
+    cancel = threading.Event()
+    cancel.set()
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}], cancel=cancel))
+    check(evs == [] and comps.calls == 0 and err is not None and err.code == "cancelled",
+          "a pre-set Stop never issues (or retries) a request")
 
     # 3. every attempt failing surfaces a clear, attempt-aware timeout
     client, comps = _client(2, [_fail_stream, _fail_stream])

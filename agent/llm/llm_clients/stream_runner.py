@@ -9,7 +9,10 @@ and its event translation.
 
 Transport failures raised while the SSE body is being consumed (read timeout /
 reset / truncated response) escape the openai SDK unwrapped as raw httpx2
-exceptions (see LlmError.classify); the loop below turns them into a retry. A
+exceptions (see LlmError.classify); a failure raised by the attempt factory
+itself (connection refused / DNS failure / connect timeout while issuing the
+request) arrives as a wrapped SDK error. Both are the same class of transport
+failure to this loop, and the loop below turns them into a retry. A
 retry restarts the request from scratch, so it is only safe when NOTHING of this
 attempt has reached the caller yet — retrying after a partial stream would
 re-emit already-delivered text and duplicate it in the transcript. A failure
@@ -100,9 +103,19 @@ def run_streaming(
         delivered = False
         if cancel is not None and cancel.is_set():
             raise _cancelled("stop requested before the attempt started")
-        turn = source()
-        guard = _cancel_guard(cancel, turn.close) if cancel is not None else None
+        turn: Attempt | None = None
+        guard: threading.Event | None = None
         try:
+            # the factory issues the request eagerly, so "cannot reach the
+            # endpoint at all" (connection refused, DNS failure, connect or read
+            # timeout before the response headers) surfaces HERE, not inside the
+            # body iteration below. It is the same class of transport failure as
+            # a mid-body drop and must be classified, announced and retried the
+            # same way — otherwise the very first network hiccup escapes as a
+            # raw SDK exception: no retry, no notice, the run dies with the UI
+            # still showing "running".
+            turn = source()
+            guard = _cancel_guard(cancel, turn.close) if cancel is not None else None
             for event in turn.events:
                 if event["type"] == "finish":
                     yield event
@@ -134,15 +147,21 @@ def run_streaming(
             }
             # backoff waits ON the event: a Stop during the wait short-circuits
             delay = (2**attempt_no) + attempt_no * 0.5
-            if cancel is not None and cancel.wait(delay):
-                raise _cancelled("stop requested during retry backoff")
-            time.sleep(delay)
+            if cancel is not None:
+                if cancel.wait(delay):
+                    # the stop is its own event, not a consequence of the error
+                    # that sent us into this backoff: keep it out of the chain
+                    raise _cancelled("stop requested during retry backoff") from None
+            else:
+                time.sleep(delay)
         finally:
             # the attempt is over either way (finish, error, abort): drop the
-            # connection now instead of waiting for the generator to be collected
+            # connection now instead of waiting for the generator to be collected.
+            # A factory that failed before handing us a turn has nothing to drop.
             if guard is not None:
                 guard.set()  # first: no racing close against our own cleanup
-            turn.close()
-            events_close = getattr(turn.events, "close", None)
-            if events_close is not None:
-                events_close()
+            if turn is not None:
+                turn.close()
+                events_close = getattr(turn.events, "close", None)
+                if events_close is not None:
+                    events_close()

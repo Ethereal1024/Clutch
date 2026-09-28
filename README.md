@@ -161,7 +161,9 @@ agent/                 宿主后端（会话循环 + 模型调用 + registry + �
                        工具，宿主只保留策略）、components.py（安装层：把组件落到
                        运行它的那台机器）、rendezvous.py（daemon/CLI 寻址与启动）、
                        inst.py（一次调用 = 一条终端命令）、transport.py、modules.py
-  llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）
+  llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）；keepalive.py
+                       给连接打开内核探活，被静默丢包的请求 ~35s 就报错，不再等
+                       240s 的读预算（选项装在后端上，走代理的连接也生效）
   browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
   server.py            HTTP + SSE 服务（会话入口，含 .clc 内容服务端点）
   supervisor.py        会话进程管理
@@ -223,6 +225,7 @@ uv run python -m tests.transport_test       # 传输层与远程工作区往返
 uv run python -m tests.remote_path_test     # 远端路径不得落到本机文件系统（macOS 回归）
 uv run python -m tests.project_lock_test    # 只读项目锁：第二个进程抢锁会被拒 / 被杀死后能释放
 uv run python -m tests.llm_client_test      # 两种线协议的流式错误与重试
+uv run python -m tests.llm_keepalive_test   # 内核 keepalive：选项被本机接受，直连与走代理的连接都真落到 socket 上
 uv run python -m tests.local_shell_test     # 本机 shell 决策（POSIX sh / Git Bash / cmd）
 uv run python -m tests.inst_test            # 工具语句：参数 -> 命令 -> 信封
 uv run python -m tests.rendezvous_test      # 模块 daemon/CLI 寻址与权限围栏（需 checkout）

@@ -15,6 +15,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Collection, Iterator
 
+import httpx2
+import openai
+
 
 def _clean_provider_message(raw: str, status: int | None) -> str:
     """Tidy an OpenAI-SDK error string. The SDK renders HTTP failures as
@@ -54,6 +57,44 @@ def is_context_overflow(*texts: str | None) -> bool:
     return any("context" in t.lower() for t in texts if t)
 
 
+def timeout_error(e: httpx2.TimeoutException) -> "LlmError":
+    """One timeout, one actionable wording. The phase is what the user needs:
+    a connect timeout points at routing / a proxy / the base_url (the "the
+    network is down" case), a read timeout at the provider stalling its stream.
+
+    Shared by both arrival paths — raw httpx2 exceptions raised while the SSE
+    body is consumed, and the openai SDK's APITimeoutError, which wraps (and
+    flattens to "Request timed out.") the very same underlying exception.
+    """
+    if isinstance(e, httpx2.ConnectTimeout):
+        return LlmError(
+            code="timeout",
+            retryable=True,
+            message=(
+                "Connect timed out: no route to the API endpoint "
+                "(network to the provider, a proxy, or the base_url)."
+            ),
+        )
+    if isinstance(e, httpx2.PoolTimeout):
+        return LlmError(
+            code="timeout", retryable=True, message="Timed out waiting for a free connection slot."
+        )
+    return LlmError(
+        code="timeout",
+        retryable=True,
+        message=(
+            "Read timed out: the API sent no data for a long stretch "
+            "(provider stall or a buffering relay)."
+        ),
+    )
+
+
+def _unwrap(e: Exception) -> BaseException | None:
+    """The exception the SDK's wrapper was raised from, if any (the SDK does
+    ``raise APITimeoutError(...) from err``), else None."""
+    return e.__cause__ or e.__context__
+
+
 @dataclass
 class LlmError(Exception):
     code: str = "unknown"
@@ -72,14 +113,21 @@ class LlmError(Exception):
         must be mapped explicitly — otherwise they fall into the non-retryable
         "unknown" catch-all and a transient network blip kills the whole run.
         """
-        import httpx2
-        import openai
-
         if isinstance(e, openai.RateLimitError):
             return LlmError(code="rate_limit", status=429, retryable=True, message=_clean_provider_message(str(e), 429))
         if isinstance(e, openai.APITimeoutError):
+            # the SDK wraps the httpx timeout that actually fired and flattens it
+            # to "Request timed out."; unwrap it so the user reads the phase
+            cause = _unwrap(e)
+            if isinstance(cause, httpx2.TimeoutException):
+                return timeout_error(cause)
             return LlmError(code="timeout", retryable=True, message=str(e))
         if isinstance(e, openai.APIConnectionError):
+            # likewise: the SDK's own text is "Connection error."; the cause
+            # names what actually failed (DNS, refused, TLS, a reset)
+            cause = _unwrap(e)
+            if isinstance(cause, httpx2.TransportError) and str(cause):
+                return LlmError(code="connection", retryable=True, message=f"Cannot reach the API endpoint: {cause}")
             return LlmError(code="connection", retryable=True, message=str(e))
         if isinstance(e, openai.APIStatusError):
             status = e.status_code
@@ -102,27 +150,7 @@ class LlmError(Exception):
         # matters to the user: connect points at routing/proxy/base_url, read
         # at the provider stalling or buffering a streaming reply.
         if isinstance(e, httpx2.TimeoutException):
-            if isinstance(e, httpx2.ConnectTimeout):
-                return LlmError(
-                    code="timeout",
-                    retryable=True,
-                    message=(
-                        "Connect timed out: no route to the API endpoint "
-                        "(network to the provider, a proxy, or the base_url)."
-                    ),
-                )
-            if isinstance(e, httpx2.PoolTimeout):
-                return LlmError(
-                    code="timeout", retryable=True, message="Timed out waiting for a free connection slot."
-                )
-            return LlmError(
-                code="timeout",
-                retryable=True,
-                message=(
-                    "Read timed out: the API sent no data for a long stretch "
-                    "(provider stall or a buffering relay)."
-                ),
-            )
+            return timeout_error(e)
         if isinstance(e, httpx2.TransportError):
             return LlmError(
                 code="connection",
