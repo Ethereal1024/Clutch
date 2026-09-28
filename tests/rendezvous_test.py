@@ -4,8 +4,10 @@ Run: .venv/bin/python -m tests.rendezvous_test
 
 This is the one host-side test that starts REAL module daemons: it pins the
 frozen discovery contract (record shape, token header, health), the statement
-shape a curl-driven tool relies on, the spawn-time fence, and — the discipline
-every leak in this repo came from — that release() really stops what we started.
+shape a curl-driven tool relies on, the spawn-time fence, the transport each
+statement runs in (the workspace's for a daemon, the app host's for a CLI), and —
+the discipline every leak in this repo came from — that release() really stops
+what we started.
 It then drives the same statements through the registry, so the executor's path
 (guard -> the component's statement, and nothing else) is pinned too: with the
 component gone the host has no tool, only the component's name in a refusal.
@@ -223,6 +225,35 @@ def main() -> int:
         # 5. reuse: the second call rides the same daemon (the undo stack lives there)
         pid = rendezvous.service(workspace, modules.WORKSPACE).pid
         check(pid == record["pid"], "a live daemon is reused, not respawned")
+
+        # 5b. WHERE a statement runs. A daemon statement is carried by the
+        #     workspace's own transport — the loopback call is issued by the
+        #     machine that owns the files, in the workspace root — while a CLI
+        #     statement is carried by the app host's, whose cwd is the host's own
+        #     repository. The CLI half is the latent inconsistency P1-8 records
+        #     (a relative path a component names is resolved against a directory
+        #     that is none of its business); what is pinned here is the contract
+        #     as it stands, so changing it is a deliberate edit, not a drift.
+        app_cfg = Config()
+        ws_obj = LocalWorkspace(workspace)
+        daemon_statement = rendezvous.prepare(modules.WORKSPACE, ws_obj, app_cfg)
+        check(daemon_statement.runner is ws_obj, "a daemon statement rides the workspace's own transport")
+        check(
+            daemon_statement.runner.run("pwd", 10).stdout.strip() == str(Path(workspace).resolve()),
+            "which runs in the workspace root, the machine that owns the files",
+        )
+        cli = next(
+            (m.name for m in catalog.table().values() if m.interface == catalog.CLI and rendezvous.available(m.name)),
+            "",
+        )
+        if cli:
+            cli_statement = rendezvous.prepare(cli, ws_obj, app_cfg)
+            check(
+                cli_statement.runner.run("pwd", 10).stdout.strip() == str(modules.repo_root()),
+                f"a CLI statement ({cli}) runs in the app host's own directory",
+            )
+        else:
+            print("SKIP: no available CLI component to pin the app host's transport")
 
         # 6. hostile payloads survive the two escaping layers byte for byte
         payload = "中文 'quoted' \"dq\" \\ backslash\nsecond line\n"

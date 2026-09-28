@@ -31,6 +31,13 @@ fact is about what ships:
   * an argument reaches its tool in the shape its declaration declared (a
     spelling is converted, a wrong shape refused), and a `vars` key that would
     shadow an argument of the same name refuses the tool instead;
+  * the argument host policy judges is the one the DECLARATION named: a
+    component that calls its file argument `who` still enters the workspace's
+    protection and still gets its undo record, so renaming an argument is not a
+    way around the guard;
+  * two components may declare one tool name — the registry is keyed by name, so
+    the model is offered one schema and the later source answers, which is the
+    deterministic answer this pins until the collision gets a voice (P1-7);
   * what the model is told about a component's tools travels with the component
     (audit 6): a `prompt` fragment inside its own directory reaches the system
     prompt only while that component is drivable, and the host's own prompt
@@ -575,6 +582,101 @@ def check_scalar_arguments_take_their_shape() -> None:
     check(bad.error and "b" in bad.content and "'yes'" in bad.content, "'yes' is not a boolean the host guesses")
 
 
+def check_a_renamed_argument_is_still_policy() -> None:
+    """Host policy follows the argument the declaration NAMED, never the word "path".
+
+    The guard (filesystem._refuse_protected) and the per-file undo
+    (registry._previous_content) are the host's own, and both ask the declaration
+    which argument to judge (registry.access_arg / snapshot_arg). A component that
+    calls the file it reads `who` must therefore still enter the workspace's
+    protection and still get its undo record — otherwise P0-2's fail-open comes
+    back as "rename the argument", and the one place that reads the resolved name
+    is the one place that cannot be allowed to guess.
+    """
+    with isolated_host() as root:
+        code = root / "renamed-code"
+        code.mkdir()
+        (code / "tool.py").write_text(
+            "import json, pathlib, sys\n"
+            "if '--write' in sys.argv:\n"
+            "    pathlib.Path(sys.argv[-1]).write_text('new\\n', encoding='utf-8')\n"
+            "print(json.dumps({'content': 'ok', 'code': 0}))\n",
+            encoding="utf-8",
+        )
+
+        def register(name: str, tool: str, patch: Mapping) -> None:
+            data = _third_party(name, tool=tool, directory=str(code))
+            data["tools"][0].update(patch)
+            _write_registration(data)
+
+        shape = {"parameters": {"properties": {"who": {"type": "string"}}, "required": ["who"]}}
+        register("clutch-renamed", "peek", {**shape, "command": "--envelope {who}", "access": "read",
+                                            "access_arg": "who"})
+        register("clutch-renamed-write", "poke", {**shape, "command": "--write {who}", "access": "write",
+                                                  "access_arg": "who", "snapshot": True, "snapshot_arg": "who"})
+        cfg = Config()
+        reg = ToolRegistry(build_tools(cfg))
+        check(reg.access_arg("peek") == "who", "the declaration names the argument the policy judges")
+        check(reg.access_arg("poke") == "who", "and the renamed argument rides the write policy too")
+        if not local_shell().posix:
+            print("SKIP: no POSIX shell to run the renamed-argument component")
+            return
+        ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-renamed-"))
+        secret = Path(ws.root) / "school.clc"
+        secret.write_text("secret\n", encoding="utf-8")
+        ws.protect(secret)
+
+        refused = reg.execute(ws, cfg, "peek", {"who": "school.clc"})
+        check(
+            refused.error and "protected" in refused.content,
+            "a renamed path argument still enters the guard (no call reaches the component)",
+        )
+
+        note = Path(ws.root) / "note.txt"
+        note.write_text("old\n", encoding="utf-8")
+        wrote = reg.execute(ws, cfg, "poke", {"who": str(note)})
+        check(not wrote.error and note.read_text(encoding="utf-8") == "new\n",
+              "the declared write runs and lands the content it was told to")
+        check(
+            ws.restore(note) == "old\n",
+            "and the host remembered the file the snapshot_arg name pointed at",
+        )
+
+
+def check_one_name_serves_one_tool() -> None:
+    """Two components may declare one tool name; the model still sees exactly one.
+
+    A tool name is what the model calls, so the registry holds one wiring per name
+    ({t.name: t}, registry.py) — and which one wins is decided by source order,
+    which this suite's other checks already pin (checkouts, then installs, then
+    the catalog directory, each sorted). What is NOT there yet is a voice: the
+    losing declaration disappears without a word, which is what
+    COMPONENTS_REVIEW P1-7 asks for. This pins today's answer — the later source
+    wins, deterministically — so giving the collision a voice is a deliberate
+    change with this test in the diff.
+    """
+    with isolated_host() as root:
+        code = root / "dup-code"
+        code.mkdir()
+        (code / "tool.py").write_text(
+            "import json\nprint(json.dumps({'content': 'x', 'code': 0}))\n", encoding="utf-8"
+        )
+        for name, word in (("clutch-first", "first"), ("clutch-second", "second")):
+            data = _third_party(name, tool="dup", directory=str(code))
+            data["tools"][0]["command"] = f"--envelope {word}"
+            _write_registration(data)  # clutch-first.json sorts before clutch-second.json
+        cfg = Config()
+        tools = build_tools(cfg)
+        check([t.name for t in tools].count("dup") == 2, "both declarations are built (nothing is dropped here yet)")
+        reg = ToolRegistry(tools)
+        check(reg.names().count("dup") == 1, "the model is offered one schema for the name, never two")
+        winner = reg.tool("dup")
+        check(
+            winner is not None and winner.module == "clutch-second",
+            "and the source that comes later in the table is the one that answers",
+        )
+
+
 def check_table_is_memoized() -> None:
     """The table is the host's view of what is installed, so asking for it the
     dozen times a turn asks must cost one scan, not a dozen.
@@ -728,6 +830,8 @@ def main() -> int:
     check_declared_access()
     check_unknown_words_are_refused()
     check_scalar_arguments_take_their_shape()
+    check_a_renamed_argument_is_still_policy()
+    check_one_name_serves_one_tool()
     check_table_is_memoized()
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()
