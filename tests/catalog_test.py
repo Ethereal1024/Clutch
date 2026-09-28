@@ -51,7 +51,6 @@ from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
-
 # ------------------------------------------------------------------ fixtures ---
 
 

@@ -211,7 +211,9 @@ def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
             Diagnostic(component, spec.name, f"unknown access {spec.access!r} (host knows {_known(ACCESS_ARGS)})")
         )
     if spec.gate not in GATES:
-        out.append(Diagnostic(component, spec.name, f"unknown gate {spec.gate!r} (host knows {_known([g for g in GATES if g])})"))
+        # "" is a valid gate (no gate) and never worth naming back at the tool
+        named = _known([g for g in GATES if g])
+        out.append(Diagnostic(component, spec.name, f"unknown gate {spec.gate!r} (host knows {named})"))
     for mode in spec.modes:
         if mode not in MODES:
             out.append(Diagnostic(component, spec.name, f"unknown mode {mode!r} (host offers {_known(MODES)})"))
