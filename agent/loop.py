@@ -44,6 +44,7 @@ from .events import (
 )
 from .llm.client import LlmClient, LlmError
 from .prompts import render
+from .tools.envelope import Envelope
 from .tools.registry import ToolRegistry
 from .tools.workspace import Workspace
 
@@ -249,28 +250,26 @@ class Agent:
                         if self.terminator.should_escalate(ev.name, ev.arguments):
                             if self.config.abort_on_doom_loop:
                                 return self._finish("aborted", render("doom_loop.md", tool=ev.name))
-                            result = {"content": render("doom_loop.md", tool=ev.name), "error": True}
+                            result = Envelope(render("doom_loop.md", tool=ev.name), error=True)
                         else:
                             result = self._execute_tool(ev)
                             # result-aware doom check: identical call AND identical
                             # result; the tool runs first so its output is known
-                            status = self.terminator.record_call(
-                                ev.name, ev.arguments, result.get("content", "")
-                            )
+                            status = self.terminator.record_call(ev.name, ev.arguments, result.content)
                             if status == "warn":
                                 # first detection: keep the real result, append the
                                 # warning, and let the model course-correct
-                                result = {
-                                    "content": f"{result.get('content', '')}\n\n{render('doom_loop.md', tool=ev.name)}",
-                                    "error": True,
-                                    "diff": result.get("diff", ""),
-                                }
+                                result = Envelope(
+                                    f"{result.content}\n\n{render('doom_loop.md', tool=ev.name)}",
+                                    error=True,
+                                    diff=result.diff,
+                                )
                         self._emit(
                             ToolResultEvent(
                                 tool_call_id=ev.tool_call_id,
-                                content=result.get("content", ""),
-                                is_error=result.get("error", False),
-                                diff=result.get("diff", ""),
+                                content=result.content,
+                                is_error=result.error,
+                                diff=result.diff,
                             )
                         )
                     continue
@@ -286,12 +285,12 @@ class Agent:
             # fatal LLM/context failures terminate gracefully
             return self._finish("error", str(e))
 
-    def _execute_tool(self, ev: ToolCallEvent) -> dict[str, Any]:
+    def _execute_tool(self, ev: ToolCallEvent) -> Envelope:
         """Parse args, check permission, then run the tool; denials feed an error back."""
         try:
             args = parse_arguments(ev.arguments)
         except ParseError as e:
-            return {"content": f"ERROR: {e.message}", "error": True}
+            return Envelope(f"ERROR: {e.message}", error=True)
         args_repr = ev.arguments
         if self.gate is not None:
             try:
@@ -306,7 +305,7 @@ class Agent:
                     self.registry.access_arg(ev.name),
                 )
             except PermissionRequired as e:
-                return {"content": f"ERROR: {e.reason}", "error": True}
+                return Envelope(f"ERROR: {e.reason}", error=True)
         try:
             # Stop reaches the tool: run_command polls this event while its
             # command is in flight and kills the tree the moment it is set

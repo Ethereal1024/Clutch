@@ -473,7 +473,7 @@ def check_registration() -> None:
         if local_shell().posix:
             ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-catalog-"))
             result = reg.execute(ws, cfg, "say_hello", {"who": "世界"})
-            check(not result["error"] and result["content"] == "echo:世界", "and the tool is executable end to end")
+            check(not result.error and result.content == "echo:世界", "and the tool is executable end to end")
 
 
 def check_installed_third_party() -> None:
@@ -512,7 +512,7 @@ def check_installed_third_party() -> None:
             ws = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-catalog-"))
             result = reg.execute(ws, cfg, "installed_tool", {"q": "hi"})
             check(
-                not result["error"] and result["content"] == "installed:hi",
+                not result.error and result.content == "installed:hi",
                 "the installed tool runs its own executable",
             )
 

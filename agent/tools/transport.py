@@ -25,6 +25,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from typing import Any, NamedTuple
 
+from .envelope import Envelope
 from .localshell import local_shell
 
 # how often an in-flight run re-checks its deadline and the Stop event
@@ -52,7 +53,7 @@ class TransportError(RuntimeError):
         self.aborted = aborted
 
 
-def failure_envelope(err: TransportError, *, timeout_seconds: float) -> dict[str, Any]:
+def failure_envelope(err: TransportError, *, timeout_seconds: float) -> Envelope:
     """One rendering of a transport failure as the model's envelope.
 
     A transport verdict is not the command's: an abort is the user's Stop, a
@@ -63,17 +64,17 @@ def failure_envelope(err: TransportError, *, timeout_seconds: float) -> dict[str
     from ..prompts import render  # local: the transport stays a leaf module
 
     if err.aborted:
-        return {"content": render("errors/command_aborted.md"), "error": True}
+        return Envelope(render("errors/command_aborted.md"), error=True)
     if err.timeout:
-        return {
-            "content": render(
+        return Envelope(
+            render(
                 "errors/command_timeout.md",
                 seconds=f"{timeout_seconds:.0f}s",
                 hint=render("errors/interactive_hint.md"),
             ),
-            "error": True,
-        }
-    return {"content": render("errors/execution_failed.md", error=err), "error": True}
+            error=True,
+        )
+    return Envelope(render("errors/execution_failed.md", error=err), error=True)
 
 
 class Transport(ABC):

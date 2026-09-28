@@ -12,8 +12,8 @@ call it cannot serve is answered with the component's own name and reason.
 What the host owns, and only the host owns:
 
   * the statement layer and its transport (tools/inst.py, tools/transport.py):
-    arguments -> one terminal command, output -> the {content, error, diff}
-    envelope the loop consumes;
+    arguments -> one terminal command, output -> the Envelope the loop consumes
+    (tools/envelope.py);
   * the policy a component deliberately does not carry (`guard`: a path the
     workspace protects is not readable even when it is named explicitly);
   * the per-file undo the UI offers on a change result (`snapshot`);
@@ -38,16 +38,17 @@ from ..memory import MemoryStore
 from ..prompts import render
 from ..skills import cached_library
 from . import catalog, filesystem, inst, rendezvous, shell
+from .envelope import Envelope
 from .inst import InstError
 from .transport import TransportError, failure_envelope
 from .workspace import LocalWorkspace, Workspace
 
-# (workspace, config, **args) -> dict{content, error?}
-ToolImpl = Callable[..., dict[str, Any]]
-# (workspace, config, args, arg) -> dict{content, error?} | None -- a refusal, or None to proceed
-# `arg` is the argument this policy judges, from the tool's own declaration
+# (workspace, config, **args) -> the result the model reads
+ToolImpl = Callable[..., Envelope]
+# a refusal, or None to proceed — (workspace, config, args, arg), where `arg` is
+# the argument this policy judges, from the tool's own declaration
 # (catalog.Tool.access_arg) — never assumed to be "path".
-GuardImpl = Callable[[Workspace, Config, dict[str, Any], str], dict[str, Any] | None]
+GuardImpl = Callable[[Workspace, Config, dict[str, Any], str], Envelope | None]
 
 
 @dataclass(frozen=True)
@@ -122,7 +123,7 @@ class Tool:
     `inst` is the component's own part of the terminal command (tools/inst.py):
     placeholders filled from the model's arguments, prefixed with the launch
     rendezvous renders from the artifact's shape, run through the workspace's
-    transport, its output unwrapped back into {content, error, diff}. A daemon
+    transport, its output unwrapped back into an Envelope. A daemon
     component's `inst` is the whole line — the loopback call IS its interface.
 
     `host` is the one other kind of tool: one the HOST owns and no component
@@ -483,24 +484,19 @@ class ToolRegistry:
         name: str,
         args: dict[str, Any],
         cancel: threading.Event | None = None,
-    ) -> dict[str, Any]:
+    ) -> Envelope:
         tool = self._tools.get(name)
         if tool is None:
-            return {
-                "content": render("unknown_tool.md", tool=name, available=", ".join(self.names())),
-                "error": True,
-            }
+            return Envelope(
+                render("unknown_tool.md", tool=name, available=", ".join(self.names())), error=True
+            )
         try:
             args = self._coerce_types(tool, args)
-            result = self._invoke(workspace, config, tool, args, cancel)
+            return self._invoke(workspace, config, tool, args, cancel)
         except TypeError as e:
-            result = {"content": render("errors/invalid_arguments.md", error=e), "error": True}
+            return Envelope(render("errors/invalid_arguments.md", error=e), error=True)
         except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
-            result = {"content": render("errors/tool_exception.md", error=e), "error": True}
-        # normalize: every tool result carries error/diff so callers can index them
-        result.setdefault("error", False)
-        result.setdefault("diff", "")
-        return result
+            return Envelope(render("errors/tool_exception.md", error=e), error=True)
 
     def _invoke(
         self,
@@ -509,7 +505,7 @@ class ToolRegistry:
         tool: Tool,
         args: dict[str, Any],
         cancel: threading.Event | None,
-    ) -> dict[str, Any]:
+    ) -> Envelope:
         """One call: the host's policy, then the one implementation of it.
 
         There is no precedence to speak of any more — a tool's implementation is
@@ -523,19 +519,19 @@ class ToolRegistry:
                 return refused
         if tool.inst is None:
             if tool.host is None:  # unreachable: build_tools never wires one
-                return {"content": f"ERROR: tool {tool.name} has no implementation", "error": True}
+                return Envelope(f"ERROR: tool {tool.name} has no implementation", error=True)
             if self._cancelable.get(tool.name):
                 return tool.host(workspace, config, cancel=cancel, **args)
             return tool.host(workspace, config, **args)
         blocked = module_blocked_reason(workspace, tool.module)
         if blocked:
-            return {"content": f"ERROR: {blocked}", "error": True}
+            return Envelope(f"ERROR: {blocked}", error=True)
         # the component performs the write; the host keeps the undo record, but
         # only once the statement has actually overwritten something — a refused
         # or failed edit must not leave a snapshot the UI could "restore"
         remembered = _previous_content(workspace, args, tool.snapshot_arg) if tool.snapshot else None
         result = self._exec_statement(workspace, config, tool, args, cancel)
-        if remembered is not None and not result.get("error"):
+        if remembered is not None and not result.error:
             workspace.snapshot(remembered[0], remembered[1])
         return result
 
@@ -546,7 +542,7 @@ class ToolRegistry:
         tool: Tool,
         args: dict[str, Any],
         cancel: threading.Event | None,
-    ) -> dict[str, Any]:
+    ) -> Envelope:
         """Run one tool statement: the launch, then the component's own flags.
 
         Which transport carries the line — and which host placeholders the
@@ -558,9 +554,9 @@ class ToolRegistry:
             statement = rendezvous.prepare(tool.module, workspace, config)
             command = inst.render(tool.inst, args, vars=statement.vars, defaults=tool.defaults or {})
         except rendezvous.RendezvousError as e:
-            return {"content": f"ERROR: {e}", "error": True}
+            return Envelope(f"ERROR: {e}", error=True)
         except InstError as e:
-            return {"content": render("errors/invalid_arguments.md", error=e), "error": True}
+            return Envelope(render("errors/invalid_arguments.md", error=e), error=True)
         if statement.prefix:
             command = f"{statement.prefix} {command}".rstrip()
         try:

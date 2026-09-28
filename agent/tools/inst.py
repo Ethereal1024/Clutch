@@ -3,8 +3,8 @@
 A tool definition is pure data — name / description / parameters / inst. `inst`
 is the shell command line that satisfies a call, with {placeholders} filled from
 the model's arguments. This module owns that ONE translation (arguments ->
-command text) and the ONE translation back (command output -> the
-{content, error, diff} envelope the loop consumes), so every tool request is a
+command text) and the ONE translation back (command output -> the `Envelope`
+the loop consumes, tools/envelope.py), so every tool request is a
 terminal command and the transport decides where it runs.
 
 Placeholders, fail-closed by design:
@@ -25,7 +25,8 @@ insertion is a caller-listed `raw` name — run_command's {command}, whose text 
 a shell command; its safety boundary is the host's permission engine
 (tools/shell.py), never the renderer.
 
-Output contract: `unwrap` turns a finished command into {content, error, diff}.
+Output contract: `unwrap` turns a finished command into an `Envelope` (the one
+result shape, tools/envelope.py).
 A stdout JSON object carrying "content" IS the envelope (it is what the
 standalone modules print — the workspace daemon's verdict and transport-error
 bodies, the CLIs' --json output); anything else is framed by exit code, exactly
@@ -43,6 +44,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from .envelope import Envelope
 from .localshell import shq
 from .transport import CommandResult
 
@@ -176,7 +178,7 @@ def render(
 
 
 def _envelope(text: str) -> dict[str, Any] | None:
-    """The {content, error, diff} object a service printed, or None when the
+    """The envelope-shaped JSON object a service printed, or None when the
     output is not one (a plain command's stdout, a crash, empty output)."""
     try:
         obj = json.loads(text.strip() or "null")
@@ -187,7 +189,7 @@ def _envelope(text: str) -> dict[str, Any] | None:
     return None
 
 
-def unwrap(result: CommandResult, *, service: str = "the tool service") -> dict[str, Any]:
+def unwrap(result: CommandResult, *, service: str = "the tool service") -> Envelope:
     """The loop's envelope for a finished command (see the module docstring)."""
     env = _envelope(result.stdout)
     if env is not None:
@@ -196,14 +198,10 @@ def unwrap(result: CommandResult, *, service: str = "the tool service") -> dict[
         # and so is a non-zero exit, so a service bug cannot hide behind an
         # optimistic envelope.
         failed = bool(env.get("error")) or bool(env.get("code")) or result.code != 0
-        return {
-            "content": str(env.get("content", "")),
-            "error": failed,
-            "diff": str(env.get("diff") or ""),
-        }
+        return Envelope(str(env.get("content", "")), error=failed, diff=str(env.get("diff") or ""))
     out = result.stdout.strip()
     if result.code != 0:
         tail = (result.stderr or "").strip() or out
         msg = f"ERROR: {service} failed (exit {result.code})"
-        return {"content": f"{msg}: {tail[-500:]}" if tail else msg, "error": True}
-    return {"content": out or f"OK: {service} succeeded, no output."}
+        return Envelope(f"{msg}: {tail[-500:]}" if tail else msg, error=True)
+    return Envelope(out or f"OK: {service} succeeded, no output.")

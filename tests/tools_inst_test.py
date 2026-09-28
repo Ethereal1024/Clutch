@@ -19,7 +19,8 @@ that carries it, and the envelope its output becomes:
     is handed is the host's own, and a guard refusal must reach it as NO call at
     all: host policy rides in front of either face.
   * the ENVELOPE. The real `inst.unwrap` turns the stub's answer into the loop's
-    {content, error, diff}: a module verdict rides a 200 body, an HTTP status is
+    one result shape (`Envelope`: content / error / diff): a module verdict rides
+    a 200 body, an HTTP status is
     a transport fact, a non-zero exit is a failure whatever the body says, and a
     transport error (timeout / Stop / unreachable) is the prose the model reads.
   * the ABSENCE of a fallback. A tool whose component is not on this host does
@@ -229,7 +230,7 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
             _payload(shell_words(stub.line)) == payload,
             f"{name}: {{*}} carries the model's values + the host's defaults",
         )
-        check(not result["error"] and result["content"] == "fine", f"{name}: a 200 verdict is the result")
+        check(not result.error and result.content == "fine", f"{name}: a 200 verdict is the result")
     # the payload is JSON, not a second escaping pass: the hostile value arrives
     # with its quotes, backslash and newline intact
     _, stub = _call(reg, ws, cfg, "write_file", {"path": "a.txt", "content": HOSTILE}, CommandResult(0, "", ""))
@@ -297,7 +298,7 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
         result, stub = _call(reg, ws, cfg, name, args, CommandResult(0, _envelope("answered"), ""))
         check(len(stub.calls) == 1, f"{name}: exactly one command per call ({args})")
         check(shell_words(stub.line) == expected, f"{name}: the module's argv is byte-for-byte the contract ({args})")
-        check(not result["error"] and result["content"] == "answered", f"{name}: the module's envelope is the result")
+        check(not result.error and result.content == "answered", f"{name}: the module's envelope is the result")
 
 
 # ------------------------------------------------- 4. the envelope mapping
@@ -308,12 +309,12 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
     # the module's verdict, reached in the module's own envelope
     body = json.dumps({"content": "file not found: nope.txt", "error": True, "diff": ""})
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "nope.txt"}, CommandResult(0, body, ""))
-    check(r["error"] and r["content"] == "file not found: nope.txt", "an envelope that says 'failed' is a verdict")
+    check(r.error and r.content == "file not found: nope.txt", "an envelope that says 'failed' is a verdict")
 
     # the module's diff rides through untouched
     body = json.dumps({"content": "changed", "error": False, "diff": "@@ -1 +1 @@"})
     r, _ = _call(reg, ws, cfg, "write_file", {"path": "a.txt", "content": "x"}, CommandResult(0, body, ""))
-    check(r["diff"] == "@@ -1 +1 @@", "the module's diff reaches the loop")
+    check(r.diff == "@@ -1 +1 @@", "the module's diff reaches the loop")
 
     # a refusal body IS the envelope (403 included): the host reads the
     # envelope, never a status — the daemon's transport errors are envelopes too
@@ -321,41 +322,41 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
         reg, ws, cfg, "read_file", {"path": "a.txt"},
         CommandResult(0, json.dumps({"content": "bad or missing token", "error": True}), ""),
     )
-    check(r["error"] and r["content"] == "bad or missing token", "a 403 body needs no status line to be understood")
+    check(r.error and r.content == "bad or missing token", "a 403 body needs no status line to be understood")
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(7, "", "curl: (7) connect failed"))
     check(
-        r["error"] and "exit 7" in r["content"] and "the clutch-workspace service" in r["content"],
+        r.error and "exit 7" in r.content and "the clutch-workspace service" in r.content,
         "a service nobody answers: the exit code and curl's own words, naming the service",
     )
 
     # a CLI module's {content, code} envelope (choice a): code != 0 is a refusal
     r, _ = _call(reg, ws, cfg, "search_memory", {"query": "x"}, CommandResult(1, _envelope("ERROR: boom", 1), ""))
-    check(r["error"] and r["content"] == "ERROR: boom", "a CLI refusal ({content, code:1}) is error-as-data")
+    check(r.error and r.content == "ERROR: boom", "a CLI refusal ({content, code:1}) is error-as-data")
     r, _ = _call(
         reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(1, _envelope("ERROR: unknown skill: 'x'", 1), "")
     )
-    check(r["error"] and "unknown skill" in r["content"], "the skills CLI's refusal reaches the model verbatim")
+    check(r.error and "unknown skill" in r.content, "the skills CLI's refusal reaches the model verbatim")
     r, _ = _call(
         reg, ws, cfg, "save_memory", {"title": "t", "content": "c"}, CommandResult(0, _envelope("OK: saved"), "")
     )
-    check(not r["error"] and r["content"] == "OK: saved", "a CLI success ({content, code:0}) is a plain result")
+    check(not r.error and r.content == "OK: saved", "a CLI success ({content, code:0}) is a plain result")
 
     # a service bug cannot hide behind an optimistic envelope
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(3, json.dumps({"content": "ok?"}), ""))
-    check(r["error"], "a non-zero exit beats an optimistic envelope")
+    check(r.error, "a non-zero exit beats an optimistic envelope")
     # a plain-text CLI answers without any envelope at all
     r, _ = _call(reg, ws, cfg, "web_search", {"query": "q"}, CommandResult(0, "1. result\n2. result\n", ""))
-    check(not r["error"] and "1. result" in r["content"], "non-JSON stdout is the content")
+    check(not r.error and "1. result" in r.content, "non-JSON stdout is the content")
     r, _ = _call(reg, ws, cfg, "web_search", {"query": "q"}, CommandResult(2, "", "usage: clutch-websearch ..."))
-    check(r["error"] and "exit 2" in r["content"] and "usage" in r["content"], "a failed command reports exit + stderr")
+    check(r.error and "exit 2" in r.content and "usage" in r.content, "a failed command reports exit + stderr")
 
     # transport failures are prose the model can act on
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, TransportError("timed out", timeout=True))
-    check(r["error"] and "timed out" in r["content"].lower(), "a timeout is reported as the budget, not a crash")
+    check(r.error and "timed out" in r.content.lower(), "a timeout is reported as the budget, not a crash")
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, TransportError("stop", aborted=True))
-    check(r["error"] and r["content"], "a Stop is reported as the user stopping the call")
+    check(r.error and r.content, "a Stop is reported as the user stopping the call")
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, TransportError("spawn failed"))
-    check(r["error"] and "spawn failed" in r["content"], "an executor failure names itself")
+    check(r.error and "spawn failed" in r.content, "an executor failure names itself")
 
 
 # ------------------------------- 5. the guard, in front of any statement
@@ -379,17 +380,17 @@ def check_guards(reg: ToolRegistry, cfg: Config) -> None:
         ws.protect(protected)
 
         r, stub = _call(reg, ws, cfg, "read_file", {"path": "school.clc"}, CommandResult(0, "leak\n200", ""))
-        check(r["error"] and "protected" in r["content"], "read_file refuses a protected path")
+        check(r.error and "protected" in r.content, "read_file refuses a protected path")
         check(stub.calls == [], "the refusal happens before the component is ever asked")
         r, stub = _call(reg, ws, cfg, "write_file", {"path": "school.clc", "content": "x"})
         check(
-            r["error"] and "protected" in r["content"] and stub.calls == [],
+            r.error and "protected" in r.content and stub.calls == [],
             "write_file refuses a protected path first",
         )
         r, stub = _call(reg, ws, cfg, "edit_file", {"path": "school.clc", "old_string": "a", "new_string": "b"})
-        check(r["error"] and stub.calls == [], "edit_file refuses a protected path first")
+        check(r.error and stub.calls == [], "edit_file refuses a protected path first")
         r, stub = _call(reg, ws, cfg, "grep", {"pattern": "secret", "path": "school.clc"})
-        check(not r["error"] and r["content"] == "(no matches)", "grep answers a protected path with the empty sweep")
+        check(not r.error and r.content == "(no matches)", "grep answers a protected path with the empty sweep")
         check(stub.calls == [], "grep never asks the component about a protected file")
         check(protected.read_text(encoding="utf-8") == "secret\n", "nothing was written")
 
@@ -398,7 +399,7 @@ def check_guards(reg: ToolRegistry, cfg: Config) -> None:
         r, stub = _call(
             reg, ws, cfg, "read_file", {"path": "hello.txt"}, CommandResult(0, _envelope("hello") + "\n200", "")
         )
-        check(len(stub.calls) == 1 and not r["error"], "an unprotected path is not the guard's business")
+        check(len(stub.calls) == 1 and not r.error, "an unprotected path is not the guard's business")
 
 
 # --------------------------------------- 6. the model's arguments themselves
@@ -408,11 +409,11 @@ def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
     # a missing required argument is error-as-data, and no command is rendered
     r, stub = _call(reg, ws, cfg, "load_memory", {}, CommandResult(0, "x", ""))
     check(
-        r["error"] and "name" in r["content"] and stub.calls == [],
+        r.error and "name" in r.content and stub.calls == [],
         "a missing argument fails closed, before any line",
     )
     r, stub = _call(reg, ws, cfg, "web_search", {}, CommandResult(0, "x", ""))
-    check(r["error"] and stub.calls == [], "a missing query fails closed too")
+    check(r.error and stub.calls == [], "a missing query fails closed too")
 
     # a hostile value in a CLI's positional slot stays one literal word
     result, stub = _call(
@@ -420,7 +421,7 @@ def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
     )
     check(shell_words(stub.line)[-1] == "'; rm -rf / #", "a shell-metacharacter query stays one word")
     check("rm -rf" in shell_words(stub.line)[-1], "and it is still the model's own text")
-    check(not result["error"], "the call itself is unaffected")
+    check(not result.error, "the call itself is unaffected")
 
     # string-typed numbers are coerced to the schema's integer before rendering
     _, stub = _call(
@@ -437,13 +438,13 @@ def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
         reg, ws, cfg, "web_search", {"query": "q", "max_results": "three"}, CommandResult(0, _envelope("ok"), "")
     )
     check(
-        r["error"] and "max_results" in r["content"] and "three" in r["content"] and stub.calls == [],
+        r.error and "max_results" in r.content and "three" in r.content and stub.calls == [],
         "an uncoercible integer argument fails closed, named, before the command",
     )
 
     # unknown tool: the registry says so instead of crashing
     r = reg.execute(ws, cfg, "nope", {})
-    check(r["error"] and "nope" in r["content"], "an unknown tool is reported as error-as-data")
+    check(r.error and "nope" in r.content, "an unknown tool is reported as error-as-data")
 
 
 # ------------------------------------------------------------- the live half
@@ -466,7 +467,7 @@ def live_workspace(cfg: Config) -> None:
             ws = LocalWorkspace(tmp)
             reg = ToolRegistry(build_tools(cfg))
             r = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
-            check(not r["error"] and r["content"].strip() == "hello", "live: read_file answers through the daemon")
+            check(not r.error and r.content.strip() == "hello", "live: read_file answers through the daemon")
             service = rendezvous.service(tmp, modules.WORKSPACE)
             check(rendezvous._pid_alive(service.pid), "live: the daemon this call started is alive")
             check(
@@ -475,11 +476,11 @@ def live_workspace(cfg: Config) -> None:
             )
             r = reg.execute(ws, cfg, "write_file", {"path": "made.txt", "content": HOSTILE})
             check(
-                not r["error"] and (Path(tmp) / "made.txt").read_text(encoding="utf-8") == HOSTILE,
+                not r.error and (Path(tmp) / "made.txt").read_text(encoding="utf-8") == HOSTILE,
                 "live: a hostile payload lands byte for byte",
             )
             r = reg.execute(ws, cfg, "grep", {"pattern": "back"})
-            check(not r["error"] and "made.txt" in r["content"], "live: grep sweeps through the daemon")
+            check(not r.error and "made.txt" in r.content, "live: grep sweeps through the daemon")
             rendezvous.release_all()
             check(wait_gone(service.pid, 10.0), "live: release_all() stopped the daemon (no leak)")
     finally:
@@ -506,7 +507,7 @@ def live_skills(cfg: Config) -> None:
             reg = ToolRegistry(build_tools(cfg))
             r = reg.execute(ws, cfg, "load_skill", {"name": first})
             served = (lib.get(first).dir / "SKILL.md").read_text(encoding="utf-8")
-            check(not r["error"] and r["content"] == served, "live: load_skill serves the skill file byte for byte")
+            check(not r.error and r.content == served, "live: load_skill serves the skill file byte for byte")
 
             # the CLI lazily started a daemon for the root and published it
             record = None
@@ -523,9 +524,9 @@ def live_skills(cfg: Config) -> None:
             daemon_pid = int(record["pid"]) if record else 0
 
             r = reg.execute(ws, cfg, "load_skill", {"name": "no-such-skill-xyz"})
-            check(r["error"] and "no-such-skill-xyz" in r["content"], "live: an unknown skill comes back as a refusal")
+            check(r.error and "no-such-skill-xyz" in r.content, "live: an unknown skill comes back as a refusal")
             r = reg.execute(ws, cfg, "load_skill", {"name": first, "file": "SKILL.md"})
-            check(not r["error"] and r["content"] == served, "live: an explicit --file reads the same file")
+            check(not r.error and r.content == served, "live: an explicit --file reads the same file")
     finally:
         # SIGTERM is the daemon's graceful exit (it unpublishes on the way out)
         if daemon_pid:
@@ -557,13 +558,13 @@ def live_memory() -> None:
             reg = ToolRegistry(build_tools(cfg, memories=state.project.memories))
 
             r = reg.execute(ws, cfg, "save_memory", {"title": "live fact", "content": "a durable 中文 fact"})
-            check(not r["error"] and "live fact" in r["content"], "live: save_memory writes through the real server")
+            check(not r.error and "live fact" in r.content, "live: save_memory writes through the real server")
             r = reg.execute(ws, cfg, "load_memory", {"name": "live fact"})
-            check(not r["error"] and "a durable 中文 fact" in r["content"], "live: load_memory reads it back")
+            check(not r.error and "a durable 中文 fact" in r.content, "live: load_memory reads it back")
             r = reg.execute(ws, cfg, "search_memory", {"query": "durable"})
-            check(not r["error"] and "live fact" in r["content"], "live: search_memory finds it by content")
+            check(not r.error and "live fact" in r.content, "live: search_memory finds it by content")
             r = reg.execute(ws, cfg, "load_memory", {"name": "nope"})
-            check(r["error"] and "nope" in r["content"], "live: an unknown title is a refusal, not a crash")
+            check(r.error and "nope" in r.content, "live: an unknown title is a refusal, not a crash")
 
             # the host's own reader sees the module's write: the file format IS
             # the shared contract (the in-process store is the stale one)
@@ -581,13 +582,13 @@ def live_web() -> None:
         ws = LocalWorkspace(tmp)
         reg = ToolRegistry(build_tools(cfg))
         r = reg.execute(ws, cfg, "web_search", {"query": "python shlex split", "max_results": 3})
-        check("could not reach" not in r["content"], "live: the websearch CLI answered (not a transport failure)")
-        if r["error"]:
-            print(f"WARN: no search backend answered this run: {r['content'][:120]}")
+        check("could not reach" not in r.content, "live: the websearch CLI answered (not a transport failure)")
+        if r.error:
+            print(f"WARN: no search backend answered this run: {r.content[:120]}")
         else:
-            check(len(r["content"]) > 20, "live: web_search returned entries")
+            check(len(r.content) > 20, "live: web_search returned entries")
         r = reg.execute(ws, cfg, "web_fetch", {"url": "https://example.com/", "max_chars": 2000})
-        check(not r["error"] and "example" in r["content"].lower(), "live: web_fetch returns the page text")
+        check(not r.error and "example" in r.content.lower(), "live: web_fetch returns the page text")
 
 
 def live(cfg: Config) -> None:

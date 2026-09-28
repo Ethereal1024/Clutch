@@ -20,14 +20,15 @@ from __future__ import annotations
 
 from ..config import Config
 from ..prompts import render
+from .envelope import Envelope
 from .workspace import Workspace
 
 
-def _result(content: str, error: bool = False, diff: str = "") -> dict:
-    return {"content": content, "error": error, "diff": diff}
+def _result(content: str, error: bool = False, diff: str = "") -> Envelope:
+    return Envelope(content, error=error, diff=diff)
 
 
-def _refuse_protected(workspace: Workspace, path: str, *, write: bool) -> dict | None:
+def _refuse_protected(workspace: Workspace, path: str, *, write: bool) -> Envelope | None:
     """The host's own protected-path refusal, or None when it does not apply."""
     try:
         p = workspace.resolve(path)
@@ -39,7 +40,7 @@ def _refuse_protected(workspace: Workspace, path: str, *, write: bool) -> dict |
     return _result(render(template, path=path), error=True)
 
 
-def guard_read(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> dict | None:
+def guard_read(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> Envelope | None:
     """registry guard: a protected path is not readable, named or not.
 
     `arg` is the argument the tool's own declaration says holds the path
@@ -48,12 +49,12 @@ def guard_read(workspace: Workspace, _config: Config, args: dict, arg: str = "pa
     return _refuse_protected(workspace, str(args.get(arg, "")), write=False)
 
 
-def guard_write(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> dict | None:
+def guard_write(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> Envelope | None:
     """registry guard: a protected path is not writable/editable."""
     return _refuse_protected(workspace, str(args.get(arg, "")), write=True)
 
 
-def guard_grep(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> dict | None:
+def guard_grep(workspace: Workspace, _config: Config, args: dict, arg: str = "path") -> Envelope | None:
     """registry guard: grep never searches a protected file — a walk skips it,
     and naming it explicitly yields the same empty result the walk produces."""
     path = str(args.get(arg) or ".")

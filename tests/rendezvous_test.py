@@ -199,7 +199,7 @@ def main() -> int:
 
         (Path(workspace) / "hello.txt").write_text("hello\n", encoding="utf-8")
         r = _call(workspace, READ_FILE, {"path": "hello.txt"}, {"max_chars": 20000})
-        check(not r["error"] and r["content"].strip() == "hello", "a rendered statement reads through the daemon")
+        check(not r.error and r.content.strip() == "hello", "a rendered statement reads through the daemon")
 
         # 4. the published record is the frozen contract (version/port/pid/token)
         record = rendezvous._read_record(workspace, WS)
@@ -217,7 +217,7 @@ def main() -> int:
         )
         command = render(READ_FILE, {"path": "hello.txt"}, vars=svc.vars(), defaults={"max_chars": 20000})
         r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
-        check(not r["error"] and r["content"].strip() == "hello",
+        check(not r.error and r.content.strip() == "hello",
               "the record alone, with no handle, is enough to answer a statement")
 
         # 5. reuse: the second call rides the same daemon (the undo stack lives there)
@@ -228,7 +228,7 @@ def main() -> int:
         payload = "中文 'quoted' \"dq\" \\ backslash\nsecond line\n"
         r = _call(workspace, WRITE_FILE, {"path": "odd.txt", "content": payload}, {})
         r = _call(workspace, READ_FILE, {"path": "odd.txt"}, {"max_chars": 20000})
-        check(r["content"] == payload, "{*} + shq round-trip CJK, quotes, newlines")
+        check(r.content == payload, "{*} + shq round-trip CJK, quotes, newlines")
 
         # 7. the fence: spawn-time policy, one matcher behind both faces. The
         #    module's own contract is "mutations + broad sweeps are fenced,
@@ -240,13 +240,13 @@ def main() -> int:
         check(fenced.pid != pid, "a changed fence replaces the daemon instead of trusting it")
         command = render(WRITE_FILE, {"path": "school.clc", "content": "clobbered"}, vars=fenced.vars())
         r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
-        check(r["error"] and "protected" in r["content"], "writing a fenced path is refused (77 -> error envelope)")
+        check(r.error and "protected" in r.content, "writing a fenced path is refused (77 -> error envelope)")
         kept = (Path(workspace) / "school.clc").read_text(encoding="utf-8")
         check(kept == "secret\n", "the refused write did not happen")
         command = render(READ_FILE, {"path": "."}, vars=fenced.vars(), defaults={"max_chars": 20000})
         r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
         check(
-            "school.clc" not in r["content"] and "hello.txt" in r["content"],
+            "school.clc" not in r.content and "hello.txt" in r.content,
             "a fenced file is hidden from a listing",
         )
         again = rendezvous.service(workspace, modules.WORKSPACE, protect=fence)
@@ -282,7 +282,7 @@ def main() -> int:
 
         # 8. a missing path is a verdict, not a transport failure
         r = _call(workspace, READ_FILE, {"path": "nope.txt"}, {"max_chars": 20000})
-        check(r["error"] and "nope.txt" in r["content"], "the module's error text reaches the model")
+        check(r.error and "nope.txt" in r.content, "the module's error text reaches the model")
         # the wrong token is refused BY the daemon, and the 403 body is an
         # envelope like every other answer: no host-side health verb, no HTTP
         # status read — the model sees the daemon's own words.
@@ -290,7 +290,7 @@ def main() -> int:
         bad = rendezvous.Service(modules.WORKSPACE, live.port, "wrong-token", live.pid)
         command = render(READ_FILE, {"path": "hello.txt"}, vars=bad.vars(), defaults={"max_chars": 20000})
         r = unwrap(LocalTransport(workspace).run(command, 30), service="the workspace service")
-        check(r["error"] and "token" in r["content"], "a wrong token is refused by the daemon's own envelope")
+        check(r.error and "token" in r.content, "a wrong token is refused by the daemon's own envelope")
 
         # 9. release: what this process started, this process stops
         rendezvous.release(workspace, modules.WORKSPACE)
@@ -323,17 +323,17 @@ def main() -> int:
         reg = ToolRegistry(build_tools(cfg))
         ws = LocalWorkspace(workspace)
         live = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
-        check(not live["error"] and live["content"].strip() == "hello", "the registry reads through the daemon")
+        check(not live.error and live.content.strip() == "hello", "the registry reads through the daemon")
         check(rendezvous._read_record(workspace, WS) is not None, "the registry started the daemon it needed")
 
         # 11. the calls really land where the assertion says they do: written
         #     and rewritten through the daemon, read back from the disk.
         fresh = "one\ntwo\n"
         mod = reg.execute(ws, cfg, "write_file", {"path": "m1.txt", "content": fresh})
-        check(not mod["error"] and (Path(workspace) / "m1.txt").read_text() == fresh,
+        check(not mod.error and (Path(workspace) / "m1.txt").read_text() == fresh,
               "write_file lands through the daemon")
         mod = reg.execute(ws, cfg, "edit_file", {"path": "m1.txt", "old_string": "two", "new_string": "TWO"})
-        check(not mod["error"] and "TWO" in (Path(workspace) / "m1.txt").read_text(),
+        check(not mod.error and "TWO" in (Path(workspace) / "m1.txt").read_text(),
               "edit_file rewrites through the daemon")
 
         # 12. no component, no tool. The workspace component gone means the host
@@ -347,7 +347,7 @@ def main() -> int:
             check("read_file" not in [t.name for t in build_tools(cfg)],
                   "the host offers no read_file with the component gone")
             gone = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
-            check(gone["error"] and modules.WORKSPACE in gone["content"],
+            check(gone.error and modules.WORKSPACE in gone.content,
                   "the call is answered with the component's name, never a stand-in")
         finally:
             modules.module_dir = real_dir
@@ -357,11 +357,11 @@ def main() -> int:
         protected = Path(workspace) / "school.clc"
         ws.protect(protected)
         r = reg.execute(ws, cfg, "read_file", {"path": "school.clc"})
-        check(r["error"] and "protected" in r["content"], "the guard refuses a protected read")
+        check(r.error and "protected" in r.content, "the guard refuses a protected read")
         r = reg.execute(ws, cfg, "write_file", {"path": "school.clc", "content": "clobbered"})
-        check(r["error"] and "protected" in r["content"], "the guard refuses a protected write")
+        check(r.error and "protected" in r.content, "the guard refuses a protected write")
         r = reg.execute(ws, cfg, "grep", {"pattern": "secret", "path": "school.clc"})
-        check(not r["error"] and r["content"] == "(no matches)", "the guard never greps a protected file")
+        check(not r.error and r.content == "(no matches)", "the guard never greps a protected file")
         check(protected.read_text(encoding="utf-8") == "secret\n", "the refused write really did not happen")
     finally:
         rendezvous.release_all()

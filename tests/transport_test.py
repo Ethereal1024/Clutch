@@ -219,8 +219,8 @@ def main() -> int:
         cfg = Config()
         reg = ToolRegistry(build_tools(cfg))
         refused = reg.execute(ws, cfg, "read_file", {"path": "log.txt"})
-        check(refused["error"], "a remote root refuses the file tools instead of serving the wrong machine")
-        check("clutch-workspace" in refused["content"], "and the refusal names the component that would serve it")
+        check(refused.error, "a remote root refuses the file tools instead of serving the wrong machine")
+        check("clutch-workspace" in refused.content, "and the refusal names the component that would serve it")
 
         # SshTransport surfaces a remote timeout as TransportError(timeout=True)
         try:

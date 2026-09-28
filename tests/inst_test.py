@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+from agent.tools.envelope import Envelope
 from agent.tools.inst import InstError, jarg, render, shq, unwrap
 from agent.tools.transport import CommandResult
 from tests.testsupport import check, posix_shell_argv, shell_words
@@ -124,24 +125,24 @@ def main() -> int:
     # 7. unwrap: the module envelope is the verdict; the exit code is the only
     #    other input (a status line is not understood — see 7b)
     ok = unwrap(CommandResult(0, json.dumps({"content": "hello", "error": False, "diff": ""}), ""))
-    check(ok == {"content": "hello", "error": False, "diff": ""}, "a 200 envelope passes through unchanged")
+    check(ok == Envelope("hello"), "a 200 envelope passes through unchanged")
     err_env = json.dumps({"content": "file not found: x", "error": True, "diff": "", "code": 66})
     code = unwrap(CommandResult(66, err_env, ""))
-    check(code["error"] and code["content"] == "file not found: x", "an error envelope keeps the module's message")
+    check(code.error and code.content == "file not found: x", "an error envelope keeps the module's message")
     lazy = unwrap(CommandResult(66, json.dumps({"content": "boom", "diff": "", "code": 66}), ""))
-    check(lazy["error"], "a non-zero verdict code alone still marks the result failed")
+    check(lazy.error, "a non-zero verdict code alone still marks the result failed")
     sneaky = unwrap(CommandResult(3, json.dumps({"content": "boom", "error": False, "diff": ""}), ""))
-    check(sneaky["error"], "a non-zero exit beats an optimistic envelope")
+    check(sneaky.error, "a non-zero exit beats an optimistic envelope")
     diff_env = '{"content":"x","error":false,"diff":"d"}'
-    check(unwrap(CommandResult(0, diff_env, ""))["diff"] == "d", "the diff rides through")
+    check(unwrap(CommandResult(0, diff_env, "")).diff == "d", "the diff rides through")
     plain = unwrap(CommandResult(0, "hello\n", ""))
-    check(plain["content"] == "hello" and not plain.get("error"), "non-JSON stdout is the content")
+    check(plain.content == "hello" and not plain.error, "non-JSON stdout is the content")
     failed = unwrap(CommandResult(2, "", "ls: nope: No such file"))
     check(
-        failed["error"] and "exit 2" in failed["content"] and "no such file" in failed["content"].lower(),
+        failed.error and "exit 2" in failed.content and "no such file" in failed.content.lower(),
         "a failed command reports exit + stderr",
     )
-    check(unwrap(CommandResult(0, "", ""))["content"].startswith("OK:"), "empty success output is still an OK")
+    check(unwrap(CommandResult(0, "", "")).content.startswith("OK:"), "empty success output is still an OK")
 
     # 7b. the envelope is the ONLY thing read: a service says "no service spoke
     #     our protocol" in that same envelope (the daemon's transport errors are
@@ -150,24 +151,24 @@ def main() -> int:
     #     parsing it would make one client's convention the host's vocabulary
     refusal = '{"content":"bad or missing token","error":true,"diff":""}'
     r = unwrap(CommandResult(0, refusal, ""))
-    check(r["error"] and r["content"] == "bad or missing token", "a 403 body IS the envelope (no status needed)")
+    check(r.error and r.content == "bad or missing token", "a 403 body IS the envelope (no status needed)")
     r = unwrap(CommandResult(0, f"{refusal}\n403", ""))
-    # `error` is read with .get here on purpose: an envelope that does not
-    # parse is PLAIN TEXT, and this branch of unwrap carries no `error`/`diff`
-    # key at all — the single-envelope type is P1-4, still open. What this
-    # asserts is only that nothing parses the trailing `403` as a status.
+    # the whole result is one Envelope now: an envelope that does not parse is
+    # PLAIN TEXT in `content`, and `error` stays False because nothing
+    # verdict-like was read. What this asserts is only that nothing parses the
+    # trailing `403` as a status.
     check(
-        not r.get("error") and r["content"].endswith("403"),
+        not r.error and r.content.endswith("403"),
         "a trailing status line makes unparseable text, not a parsed status (fail visible, not clever)",
     )
     r = unwrap(CommandResult(7, "", "curl: (7) Failed to connect"), service="the workspace service")
     check(
-        r["error"] and r["content"].startswith("ERROR: the workspace service failed (exit 7)"),
+        r.error and r.content.startswith("ERROR: the workspace service failed (exit 7)"),
         "a dead service is the exit code plus curl's own words, never a host-side guess",
     )
     unreachable = unwrap(CommandResult(1, "", ""), service="the workspace service")
     check(
-        unreachable["content"].startswith("ERROR: the workspace service failed"),
+        unreachable.content.startswith("ERROR: the workspace service failed"),
         "the service name lands in the error text",
     )
 

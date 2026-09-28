@@ -21,6 +21,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..prompts import render
+from .envelope import Envelope
 from .localshell import split_command
 from .transport import TransportError, failure_envelope
 from .workspace import Workspace
@@ -206,42 +207,42 @@ def classify_command(command: str, posix: bool = True) -> tuple[str, str]:
     return "unknown", f"'{name}' cannot be proven read-only"
 
 
-def run_command(workspace: Workspace, config: Config, command: str, cancel: threading.Event | None = None) -> dict:
+def run_command(workspace: Workspace, config: Config, command: str, cancel: threading.Event | None = None) -> Envelope:
     # the flavor of the shell that will PARSE this text: local host's decision
     # for local workspaces, always POSIX for a remote (SSH) workspace
     posix = workspace.exec_shell().posix
     reason = _blocked_reason(config, command, posix)
     if reason:
-        return {"content": f"ERROR: {reason}", "error": True}
+        return Envelope(f"ERROR: {reason}", error=True)
 
     # chat mode: only provably read-only commands may run (default deny)
     if config.mode == "chat":
         verdict, detail = classify_command(command, posix)
         if verdict != "read":
-            return {
-                "content": render("errors/read_only_command.md", verdict=verdict, detail=detail, command=command[:300]),
-                "error": True,
-            }
+            return Envelope(
+                render("errors/read_only_command.md", verdict=verdict, detail=detail, command=command[:300]),
+                error=True,
+            )
 
     if not command.strip():
-        return {"content": render("errors/empty_command.md"), "error": True}
+        return Envelope(render("errors/empty_command.md"), error=True)
 
     # Path escape guard: reject tokens resolving outside the workspace.
     # split_command (not raw shlex): on a cmd-flavored host the POSIX lexer
     # would eat the backslashes out of C:\ paths and mis-judge every verdict.
     args = split_command(command, posix)
     if args is None:
-        return {"content": "ERROR: command cannot be parsed (unbalanced quotes?)", "error": True}
+        return Envelope("ERROR: command cannot be parsed (unbalanced quotes?)", error=True)
     for tok in args:
         try:
             # shell_path: the token is shell text, not a plain path — on a
             # Git-Bash host /tmp and /dev/null mean %TEMP% and the NUL device
             p = workspace.resolve(workspace.shell_path(tok))
         except ValueError:
-            return {"content": render("errors/path_escape.md", token=repr(tok)), "error": True}
+            return Envelope(render("errors/path_escape.md", token=repr(tok)), error=True)
         # protected files (the .clc project file) are off-limits to commands too
         if workspace.is_protected(p):
-            return {"content": render("errors/protected_command.md", token=repr(tok)), "error": True}
+            return Envelope(render("errors/protected_command.md", token=repr(tok)), error=True)
 
     if args and args[0] in ("python", "python3"):
         file_arg = next((a for a in args[1:] if not a.startswith("-") and a.endswith(".py")), None)
@@ -249,10 +250,10 @@ def run_command(workspace: Workspace, config: Config, command: str, cancel: thre
             try:
                 p: Path = workspace.resolve(file_arg)
             except ValueError as e:
-                return {"content": f"ERROR: {e}", "error": True}
+                return Envelope(f"ERROR: {e}", error=True)
             err = _syntax_check(workspace, str(p))
             if err:
-                return {"content": f"ERROR: {err}", "error": True}
+                return Envelope(f"ERROR: {err}", error=True)
 
     try:
         r = workspace.run(command, config.command_timeout, cancel=cancel)
@@ -260,7 +261,7 @@ def run_command(workspace: Workspace, config: Config, command: str, cancel: thre
         # one mapping, shared with the statement layer (transport.failure_envelope)
         return failure_envelope(e, timeout_seconds=config.command_timeout)
     except Exception as e:  # noqa: BLE001 -- tool boundary: report to model
-        return {"content": render("errors/execution_failed.md", error=e), "error": True}
+        return Envelope(render("errors/execution_failed.md", error=e), error=True)
 
     parts = []
     if r.stdout:
@@ -270,10 +271,10 @@ def run_command(workspace: Workspace, config: Config, command: str, cancel: thre
 
     if r.code != 0:
         body = "\n".join(parts) if parts else "(no output)"
-        return {"content": render("errors/command_failed.md", code=r.code, body=body), "error": True}
+        return Envelope(render("errors/command_failed.md", code=r.code, body=body), error=True)
     if not parts:
-        return {"content": "OK: command succeeded, no output."}
-    return {"content": "OK: command succeeded\n" + "\n".join(parts)}
+        return Envelope("OK: command succeeded, no output.")
+    return Envelope("OK: command succeeded\n" + "\n".join(parts))
 
 
 def _blocked_reason(config: Config, command: str, posix: bool = True) -> str | None:

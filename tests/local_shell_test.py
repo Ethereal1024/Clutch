@@ -108,7 +108,7 @@ def test_run_command_guard() -> None:
         ws = LocalWorkspace(tmp)
         r = shell_mod.run_command(ws, Config(), 'echo "unbalanced')
         check(
-            bool(r.get("error")) and "cannot be parsed" in r["content"],
+            bool(r.error) and "cannot be parsed" in r.content,
             "cmd: unparseable command is rejected before any execution",
         )
     cfg = Config()
