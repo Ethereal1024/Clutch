@@ -28,7 +28,10 @@ machine, falling back to the dev checkout next to the repo.
 Lifecycle: a daemon started from here is fenced with the workspace's protected
 paths at spawn time (the module's fence IS spawn-time policy — its own docs say
 "to change it, /shutdown and restart"), and is asked to stop again when this
-process exits. The host owns the children it starts.
+process exits. The host owns the children it starts — but only those: a daemon
+it merely found is ridden when that daemon is already fenced at least as much
+as the call needs (see Handle, `_covers`), and left running when this process
+exits without having started it.
 """
 
 from __future__ import annotations
@@ -200,16 +203,32 @@ class Service:
         }
 
 
+@dataclass
+class Handle:
+    """Everything this host knows about ONE (module, workspace root) daemon:
+    where it answers (`service`), the fence it was SPAWNED with (`fences` — a
+    spawn-time policy, see fence_globs), and the child, when the child is ours
+    (`proc`; None when another Clutch started it and this one is only riding).
+
+    The host owns its children: a daemon we started must be waited on, or an
+    exited daemon stays a zombie and still answers os.kill(pid, 0) — "release()
+    stopped it" would be a lie the OS keeps telling.
+    """
+
+    service: Service
+    fences: tuple[str, ...]
+    proc: subprocess.Popen | None = None
+
+
 _LOCK = threading.RLock()
-_CACHE: dict[tuple[str, str, tuple[str, ...]], Service] = {}
-# pid -> the child WE spawned. The host owns its children: a daemon we started
-# must be waited on, or an exited daemon stays a zombie and still answers
-# os.kill(pid, 0) — "release() stopped it" would be a lie the OS keeps telling.
-_PROCS: dict[int, subprocess.Popen] = {}
-# (module, root) -> the fence globs we spawned that daemon with. A record does
-# not carry its fence, so this is the only way to know whether a daemon we see
-# is fenced the way the caller needs.
-_FENCED: dict[tuple[str, str], tuple[str, ...]] = {}
+# One daemon per (module, workspace root) — so one entry per daemon. This used
+# to be three tables (the service keyed by (module, root, fences), the fence by
+# (module, root), the child by pid) holding three facets of the same fact, and
+# keeping them in step by hand was the bug: a key still carrying a fence nobody
+# was asking for any more went on naming a daemon whose pid had long died, so
+# the next call read somebody else's healthy record, called it "a changed
+# fence", and killed it. Alternating fences restarted the daemon every call.
+_HANDLES: dict[tuple[str, str], Handle] = {}
 
 
 def available(module: str) -> bool:
@@ -378,55 +397,91 @@ def fence_globs(protected: Iterable[Path | str], root: str | Path) -> tuple[str,
     return tuple(sorted(g for g in out if g and g not in (".", "/")))
 
 
+def _covers(fenced: tuple[str, ...], wanted: tuple[str, ...]) -> bool:
+    """True when a daemon fenced with `fenced` already enforces `wanted`.
+
+    A fence cannot be widened after the fact — it is spawn-time policy inside
+    the component — so the only question is whether the daemon protects AT
+    LEAST this much. Over-fencing is the safe direction (fence_globs): the cost
+    of keeping a fence too long is the component refusing a path this host
+    stopped protecting, never the component touching one it should not.
+    """
+    return set(wanted) <= set(fenced)
+
+
+def _widen(fenced: tuple[str, ...], wanted: tuple[str, ...]) -> tuple[str, ...]:
+    """Both fences, for the daemon that replaces one: the fence only ever GROWS
+    for a (module, root), so the next call asking for what the replaced daemon
+    had does not have to replace this one too."""
+    return tuple(sorted(set(fenced) | set(wanted)))
+
+
+def _child(handle: Handle | None, pid: int) -> subprocess.Popen | None:
+    """The child this host started, when `handle` still describes that same
+    daemon — the only case in which reaping it is our business."""
+    return handle.proc if handle is not None and handle.service.pid == pid else None
+
+
 def service(root: str | Path, module: str, protect: Iterable[Path | str] = ()) -> Service:
     """The live service for this workspace, starting one when needed.
 
     Raises RendezvousError when the module is not available or the daemon never
     became ready — callers report that as error-as-data, never as a crash.
+
+    The fence is the one reason a live daemon is ever replaced: it is fixed at
+    spawn time, so a daemon is ridden when it is fenced AT LEAST as much as
+    this call asks (`_covers`; over-fencing is the safe direction) and replaced
+    with one carrying the wider set when it is not. Two fences alternating
+    therefore cost one restart, then nothing — where the key-per-fence this
+    replaces restarted on every single call.
     """
     mod = catalog.table().get(module)
     if mod is None:
         raise RendezvousError(f"unknown module: {module}")
     resolved = str(Path(root).resolve())
-    fences = fence_globs(protect, resolved)
-    key = (module, resolved, fences)
+    wanted = fence_globs(protect, resolved)
+    key = (module, resolved)
     with _LOCK:
-        cached = _CACHE.get(key)
-        if cached is not None and _pid_alive(cached.pid):
-            return cached
-        _CACHE.pop(key, None)
+        handle = _HANDLES.get(key)
+        if handle is not None and _pid_alive(handle.service.pid) and _covers(handle.fences, wanted):
+            return handle.service
         record = _read_record(resolved, mod)
-        # A daemon we did not start may carry a different fence, and the record
-        # does not say which: when there is a fence to enforce, replace it
-        # rather than trust it (silently serving a .clc unfenced is the one
-        # failure this policy exists to prevent).
-        seen = _service(module, record) if record is not None else None
-        remembered = not fences or _FENCED.get((module, resolved)) == fences
-        if seen is not None and remembered and _healthy(seen):
-            _CACHE[key] = seen
-            return seen
-        if record is not None:
-            _stop(record, pid=record.get("pid"))
-        return _start(resolved, mod, fences, key)
+        live = _service(module, record) if record is not None else None
+        fenced = _fenced_with(resolved, mod, live, handle)
+        if live is not None and _covers(fenced, wanted) and _healthy(live):
+            _HANDLES[key] = Handle(service=live, fences=fenced, proc=_child(handle, live.pid))
+            return live
+        if live is not None:
+            _stop(live, _child(handle, live.pid))
+        return _start(resolved, mod, _widen(fenced, wanted), key)
 
 
 def release(root: str | Path, module: str) -> None:
-    """Stop this workspace's daemon (best effort) and drop it from the cache."""
+    """Stop this workspace's daemon (best effort) and forget it.
+
+    Whose daemon it is does not matter here: the caller asked for this
+    workspace's service to go.
+    """
     resolved = str(Path(root).resolve())
     with _LOCK:
-        for key in [k for k in _CACHE if k[0] == module and k[1] == resolved]:
-            svc = _CACHE.pop(key)
-            _stop({"port": svc.port, "token": svc.token}, pid=svc.pid)
-        _FENCED.pop((module, resolved), None)
+        handle = _HANDLES.pop((module, resolved), None)
+        if handle is not None:
+            _stop(handle.service, handle.proc)
 
 
 def release_all() -> None:
-    """Stop every daemon this process started (process exit / test teardown)."""
+    """Stop every daemon THIS process started, and forget them all (process
+    exit / test teardown).
+
+    A daemon this process ADOPTED — a healthy one another window started, or
+    one of ours that is simply being ridden again — is forgotten and left
+    running: it is not ours to kill, and its own idle timer is what ends it.
+    """
     with _LOCK:
-        for svc in list(_CACHE.values()):
-            _stop({"port": svc.port, "token": svc.token}, pid=svc.pid)
-        _CACHE.clear()
-        _FENCED.clear()
+        for handle in list(_HANDLES.values()):
+            if handle.proc is not None:
+                _stop(handle.service, handle.proc)
+        _HANDLES.clear()
 
 
 atexit.register(release_all)
@@ -461,6 +516,67 @@ def _read_record(root: str, mod: catalog.Component) -> dict | None:
     if not (isinstance(pid, int) and _pid_alive(pid)):
         return None
     return payload
+
+
+def _note_path(root: str, mod: catalog.Component) -> Path:
+    """Where this host writes down the fence it spawned the daemon with.
+
+    Beside the daemon's own record, because that is what it describes: the
+    record says who is serving this workspace, the note says how WE fenced
+    them. The component neither writes it nor reads it — the fence is the
+    host's policy, and no component contract has to carry it for a second
+    Clutch window to ride a daemon this one already fenced properly.
+    """
+    record = _record_path(root, mod)
+    return record.with_name(f"{record.stem}.host{record.suffix}")
+
+
+def _fenced_with(
+    root: str, mod: catalog.Component, live: Service | None, handle: Handle | None
+) -> tuple[str, ...]:
+    """The fence the daemon now serving this workspace was spawned with.
+
+    Known when it is the daemon this process rides (one it started, or one it
+    adopted earlier), or when a host process left a note naming exactly this
+    pid. A daemon nobody can account for counts as UNFENCED, which is what
+    makes "a fence there is something to enforce is never trusted to a
+    stranger" hold across windows and restarts too — at the price of one
+    restart, paid once, instead of one per call.
+    """
+    if live is None:
+        return ()
+    if handle is not None and handle.service.pid == live.pid:
+        return handle.fences
+    note = _note(root, mod, live.pid)
+    return note if note is not None else ()
+
+
+def _note(root: str, mod: catalog.Component, pid: int) -> tuple[str, ...] | None:
+    """The fence recorded for the daemon at `pid`, or None when no note
+    describes THAT daemon (none, junk, or one left about an older daemon)."""
+    try:
+        payload = json.loads(_note_path(root, mod).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("pid") != pid:
+        return None
+    protect = payload.get("protect")
+    if not isinstance(protect, list) or not all(isinstance(glob, str) for glob in protect):
+        return None
+    return tuple(protect)
+
+
+def _write_note(root: str, mod: catalog.Component, pid: int, fences: tuple[str, ...]) -> None:
+    """Record the fence the daemon we just started was given.
+
+    Best effort: a host that cannot write it loses reuse ACROSS processes,
+    never correctness — its own handle still knows the fence."""
+    path = _note_path(root, mod)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": pid, "protect": list(fences)}), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _service(module: str, record: dict) -> Service:
@@ -507,15 +623,15 @@ def _healthy(svc: Service) -> bool:
         return False
 
 
-def _stop(record: dict, pid: int | None = None) -> None:
+def _stop(svc: Service, proc: subprocess.Popen | None = None) -> None:
     """Best-effort /shutdown: the daemon unpublishes and exits on its own.
 
     When the pid is one we spawned, the child is also waited on — the daemon
     outlives this call by design, and nothing else will reap it."""
     request = urllib.request.Request(
-        f"http://127.0.0.1:{record['port']}/shutdown",
+        f"{svc.url}/shutdown",
         data=b"{}",
-        headers={"Content-Type": "application/json", TOKEN_HEADER: str(record["token"])},
+        headers={"Content-Type": "application/json", TOKEN_HEADER: svc.token},
         method="POST",
     )
     try:
@@ -523,15 +639,12 @@ def _stop(record: dict, pid: int | None = None) -> None:
             pass
     except (urllib.error.URLError, OSError, ValueError):
         pass
-    if pid:
-        _reap(pid)
+    if proc is not None:
+        _reap(proc)
 
 
-def _reap(pid: int) -> None:
+def _reap(proc: subprocess.Popen) -> None:
     """Wait for a child we started; kill it if the shutdown did not land."""
-    proc = _PROCS.pop(pid, None)
-    if proc is None:
-        return
     try:
         proc.wait(timeout=READY_SECONDS)
     except subprocess.TimeoutExpired:
@@ -552,9 +665,7 @@ def _import_dirs(resolved: Resolved) -> list[Path]:
     return [resolved.directory] if resolved.module.launch.importable else []
 
 
-def _start(
-    root: str, mod: catalog.Component, fences: tuple[str, ...], key: tuple[str, str, tuple[str, ...]]
-) -> Service:
+def _start(root: str, mod: catalog.Component, fences: tuple[str, ...], key: tuple[str, str]) -> Service:
     resolved = resolve(mod.name)
     if resolved is None:
         raise RendezvousError(unavailable_reason(mod.name))
@@ -574,9 +685,11 @@ def _start(
         if record is not None:
             svc = _service(mod.name, record)
             if _healthy(svc):
-                _FENCED[(mod.name, root)] = fences
-                _CACHE[key] = svc
-                _PROCS[svc.pid] = proc
+                # the fence travels with the record, for the host processes
+                # that did not spawn this daemon: without the note they would
+                # have to replace one they could have ridden
+                _write_note(root, mod, svc.pid, fences)
+                _HANDLES[key] = Handle(service=svc, fences=fences, proc=proc)
                 return svc
         time.sleep(0.05)
     try:  # a daemon that never published is ours to clean up

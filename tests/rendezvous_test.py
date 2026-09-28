@@ -236,6 +236,34 @@ def main() -> int:
         again = rendezvous.service(workspace, modules.WORKSPACE, protect=fence)
         check(again.pid == fenced.pid, "the fence is remembered")
 
+        # 7b. two fences alternating: ONE replacement, then nothing. A fence is
+        #     spawn-time policy, so a daemon that does not carry one is replaced
+        #     — with BOTH fences — and every call after that asks for a fence
+        #     the daemon already has. Keyed per fence (the old shape) this
+        #     restarted on every call: 570ms each, measured, because the key
+        #     nobody was asking for any more still named a dead pid.
+        other = [Path(workspace) / "net-fail-fix.clc"]
+        widened = rendezvous.service(workspace, modules.WORKSPACE, protect=other)
+        check(widened.pid != fenced.pid, "a fence the daemon does not carry replaces it once")
+        check(rendezvous.service(workspace, modules.WORKSPACE, protect=fence).pid == widened.pid,
+              "the replacement covers the fence that was already there")
+        check(rendezvous.service(workspace, modules.WORKSPACE, protect=other).pid == widened.pid,
+              "so alternating fences stop restarting the daemon")
+
+        # 7c. a second Clutch window knows none of this: its own tables are
+        #     empty, and all it has is the record plus the note the spawning
+        #     host left beside it. It rides that daemon instead of killing a
+        #     healthy one — and does not call the child its own, so exiting
+        #     does not take a daemon it did not start down with it.
+        key = (modules.WORKSPACE, str(Path(workspace).resolve()))
+        mine = rendezvous._HANDLES.pop(key)
+        theirs = rendezvous.service(workspace, modules.WORKSPACE, protect=fence)
+        check(theirs.pid == widened.pid, "another host process rides a daemon already fenced for it")
+        check(rendezvous._HANDLES[key].proc is None, "and does not call the child its own")
+        rendezvous.release_all()
+        check(not wait_gone(widened.pid, 0.5), "a host exiting leaves a daemon it did not start running")
+        rendezvous._HANDLES[key] = mine  # this process still owns the child it started
+
         # 8. a missing path is a verdict, not a transport failure
         r = _call(workspace, READ_FILE, {"path": "nope.txt"}, {"max_chars": 20000})
         check(r["error"] and "nope.txt" in r["content"], "the module's error text reaches the model")
@@ -244,7 +272,7 @@ def main() -> int:
 
         # 9. release: what this process started, this process stops
         rendezvous.release(workspace, modules.WORKSPACE)
-        check(wait_gone(fenced.pid), "release() stops the daemon (no leaked process)")
+        check(wait_gone(widened.pid) and wait_gone(fenced.pid), "release() stops the daemon (no leaked process)")
         check(rendezvous._read_record(workspace, WS) is None, "the daemon unpublished its record")
 
         # 10. the registry: the SAME Tool definition the model sees, executed by
