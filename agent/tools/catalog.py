@@ -502,6 +502,17 @@ def checkout_registrations() -> list[Mapping[str, Any]]:
     return found
 
 
+def installed_registrations() -> list[Mapping[str, Any]]:
+    """The declarations of the components installed for THIS host, in install
+    order.
+
+    One pass over the install root (components.installed_records): the manifest
+    that resolved a component's version directory IS its declaration, so it is
+    read once and used for both jobs.
+    """
+    return [manifest for _name, _directory, manifest in components.installed_records()]
+
+
 def registrations() -> list[Mapping[str, Any]]:
     """Every declaration this host knows, in merge order (lowest precedence
     first).
@@ -513,12 +524,7 @@ def registrations() -> list[Mapping[str, Any]]:
     entry wins deterministically when two declare the same component — an
     installed artifact over its checkout, a catalog file over both.
     """
-    found: list[Mapping[str, Any]] = [*checkout_registrations()]
-    for record in components.inventory():
-        directory = modules.component_dir(record["name"])
-        manifest = components.read_manifest(directory)
-        if manifest is not None:
-            found.append(manifest)
+    found: list[Mapping[str, Any]] = [*checkout_registrations(), *installed_registrations()]
     base = catalog_dir()
     if base.is_dir():
         for path in sorted(base.glob("*.json")):
@@ -528,17 +534,87 @@ def registrations() -> list[Mapping[str, Any]]:
     return found
 
 
-def table() -> dict[str, Component]:
-    """The components this host may drive: every registration, merged by name.
+def _stamp(path: str | Path) -> tuple[int, int] | None:
+    """(mtime_ns, size) of one file or directory, or None when it is not there."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
-    There is no base catalog — a host with no registrations drives nothing. Each
-    later registration (see registrations() for the order) refines the one it
-    agrees with by name: a field it leaves out means "as declared before", a
-    field it declares wins. That is what makes a thin install manifest (how the
-    artifact starts, at which digest) ride on the declaration its checkout or
-    package carries, and a third-party component simply has no earlier
-    declaration and enters whole.
+
+def _scan(directory: Path) -> list[os.DirEntry]:
+    """One directory's entries, by name. scandir, so "is this a directory?" costs
+    no syscall of its own (the readdir entry already knows) — this runs on every
+    lookup, so it is the whole reason the signature can be asked that often."""
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entries, key=lambda e: e.name)
+    except OSError:
+        return []
+
+
+def source_signature() -> tuple:
+    """What the three registration sources look like RIGHT NOW, cheaply.
+
+    Only the SHAPE is read — the files and directories a registration is read
+    FROM, by mtime and size — never a manifest, so a table built from them can
+    be reused while nothing has changed. It covers everything the loaders look
+    at: a checkout directory appearing (or its component.json being edited), an
+    install landing or a version being pruned (both touch the component's own
+    directory), a registration file in the catalog directory, and the two
+    environment variables that repoint the roots. Cheap enough to ask on every
+    lookup, which is what makes the memoization safe rather than stale.
+
+    Out of reach, deliberately: a file EDITED in place inside an installed
+    component's version directory (a hand-patched manifest) does not move any
+    directory's mtime — `catalog.invalidate()` is how a caller says so.
     """
+    repo = modules.repo_root()
+    checkouts = [
+        (entry.name, _stamp(entry.path + os.sep + components.MANIFEST))
+        for entry in _scan(repo)
+        if entry.is_dir()
+    ]
+    install_root = components.root()
+    installs = [
+        (entry.name, _stamp(entry.path))
+        for entry in _scan(install_root)
+        if entry.is_dir() and entry.name != components.SCRATCH
+    ]
+    directory = catalog_dir()
+    registrations = [(entry.name, _stamp(entry.path)) for entry in _scan(directory) if entry.name.endswith(".json")]
+    return (
+        str(repo),
+        tuple(checkouts),
+        str(install_root),
+        tuple(installs),
+        str(directory),
+        tuple(registrations),
+        os.environ.get(components.ROOT_ENV, ""),
+        os.environ.get("CLUTCH_COMPONENTS_CATALOG", ""),
+    )
+
+
+# The table, and the source shape it was built from (catalog.source_signature).
+# A lookup asks the sources whether they still look the same — cheap — and only
+# re-reads them when they do not, so one turn's dozens of lookups cost one scan.
+_TABLE: tuple[tuple, dict[str, Component]] | None = None
+
+
+def invalidate() -> None:
+    """Forget the memoized table: the next `table()` re-reads every source.
+
+    Nothing in normal operation has to call this — a source appearing, being
+    pruned or being edited is visible in the signature — but a caller that
+    changed something the signature cannot see (an installed manifest edited in
+    place) can say so, and the tests that lay sources down out of band do.
+    """
+    global _TABLE
+    _TABLE = None
+
+
+def _build_table() -> dict[str, Component]:
     out: dict[str, Component] = {}
     for data in registrations():
         declared = _component_of(data)
@@ -567,6 +643,28 @@ def table() -> dict[str, Component]:
             directory=declared.directory or known.directory,
         )
     return out
+
+
+def table() -> dict[str, Component]:
+    """The components this host may drive: every registration, merged by name.
+
+    There is no base catalog — a host with no registrations drives nothing. Each
+    later registration (see registrations() for the order) refines the one it
+    agrees with by name: a field it leaves out means "as declared before", a
+    field it declares wins. That is what makes a thin install manifest (how the
+    artifact starts, at which digest) ride on the declaration its checkout or
+    package carries, and a third-party component simply has no earlier
+    declaration and enters whole.
+
+    The result is MEMOIZED on the shape of the sources (source_signature): the
+    table is the host's view of what is installed, and asking for it dozens of
+    times in one turn must cost one scan, not dozens. Returned as a copy —
+    callers keep it, nobody owns it."""
+    global _TABLE
+    signature = source_signature()
+    if _TABLE is None or _TABLE[0] != signature:
+        _TABLE = (signature, _build_table())
+    return dict(_TABLE[1])
 
 
 def ui_of(spec: Tool) -> dict[str, Any]:

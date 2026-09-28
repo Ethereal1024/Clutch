@@ -112,38 +112,69 @@ def read_manifest(directory: Path | str) -> dict[str, Any] | None:
     return payload
 
 
-def installed(name: str) -> Path | None:
-    """The newest installed version of `name` that carries a valid manifest.
+def resolve(name: str) -> tuple[Path, dict[str, Any]] | None:
+    """(directory, manifest) of the newest installed version of `name`, or None.
 
     Newest by the manifest's own version string, not by directory mtime: an
     install is a copy of a directory tree, so its mtime says when the copy
-    happened, not which artifact is newer. A directory without a manifest is
-    not an installed component (a half-finished install, a stray directory, a
-    checkout that happens to sit here) and is never resolved.
+    happened, not which artifact is newer. A directory without a manifest — or
+    one whose manifest names another component — is not an installed component
+    (a half-finished install, a stray directory, a checkout that happens to sit
+    here) and is never resolved.
+
+    The manifest is returned WITH the directory it was resolved by: picking the
+    winner means reading every candidate's manifest, and every caller needs that
+    same manifest (the host's launch, the catalog's declaration), so it is read
+    once here instead of again by whoever asked.
     """
     base = component_root(name)
     if not base.is_dir():
         return None
-    found: list[tuple[str, Path]] = []
+    found: list[tuple[str, Path, dict[str, Any]]] = []
     for child in base.iterdir():
         if not child.is_dir() or child.name.endswith(".installing"):
             continue
         manifest = read_manifest(child)
         if manifest is None or manifest["name"] != name:
             continue
-        found.append((str(manifest["version"]), child))
+        found.append((str(manifest["version"]), child, manifest))
     if not found:
         return None
-    return max(found)[1]
+    _version, directory, manifest = max(found, key=lambda found: found[0])
+    return directory, manifest
+
+
+def installed(name: str) -> Path | None:
+    """The directory of the newest installed version of `name` (None: none is)."""
+    resolved = resolve(name)
+    return resolved[0] if resolved else None
+
+
+def installed_records() -> list[tuple[str, Path, dict[str, Any]]]:
+    """Every component installed for THIS host, resolved once each: its name, the
+    version directory that resolves, and the manifest that directory carries.
+
+    One walk of the install root and one manifest read per component — the two
+    faces built on this (`inventory`, the catalog's registrations) are views of
+    the same records, not two passes over the same files.
+    """
+    base = root()
+    if not base.is_dir():
+        return []
+    out: list[tuple[str, Path, dict[str, Any]]] = []
+    for child in sorted(base.iterdir()):
+        if not child.is_dir() or child.name == SCRATCH:
+            continue
+        resolved = resolve(child.name)
+        if resolved is not None:
+            out.append((child.name, resolved[0], resolved[1]))
+    return out
 
 
 def installed_version(name: str) -> str:
     """The version string of the resolved install ("" when nothing is installed)."""
-    directory = installed(name)
-    if directory is None:
-        return ""
-    manifest = read_manifest(directory) or {}
-    return str(manifest.get("version", ""))
+    resolved = resolve(name)
+    return str(resolved[1].get("version", "")) if resolved else ""
 
 
 # -- the receiving half: what a client ships, and the gate it is measured by ---
@@ -157,26 +188,15 @@ def inventory() -> list[dict[str, Any]]:
     the machine that would RUN the code, never assumed by the machine that ships
     it. A directory without a usable manifest is not an install and is not listed.
     """
-    base = root()
-    if not base.is_dir():
-        return []
-    out: list[dict[str, Any]] = []
-    for child in sorted(base.iterdir()):
-        if not child.is_dir() or child.name == SCRATCH:
-            continue
-        directory = installed(child.name)
-        if directory is None:
-            continue
-        manifest = read_manifest(directory) or {}
-        out.append(
-            {
-                "name": child.name,
-                "version": str(manifest.get("version", "")),
-                "interface": str(manifest.get("interface", "")),
-                "digest": str(manifest.get(DIGEST_FIELD, "")),
-            }
-        )
-    return out
+    return [
+        {
+            "name": name,
+            "version": str(manifest.get("version", "")),
+            "interface": str(manifest.get("interface", "")),
+            "digest": str(manifest.get(DIGEST_FIELD, "")),
+        }
+        for name, _directory, manifest in installed_records()
+    ]
 
 
 def installed_digest(name: str) -> str:
@@ -186,11 +206,8 @@ def installed_digest(name: str) -> str:
     digest of the artifact it holds, so a rebuild of the same version is not
     mistaken for the same artifact.
     """
-    directory = installed(name)
-    if directory is None:
-        return ""
-    manifest = read_manifest(directory) or {}
-    return str(manifest.get(DIGEST_FIELD, ""))
+    resolved = resolve(name)
+    return str(resolved[1].get(DIGEST_FIELD, "")) if resolved else ""
 
 
 def current(name: str, version: str, digest: str) -> bool:

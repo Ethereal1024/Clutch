@@ -95,12 +95,16 @@ def resolve(module: str) -> Resolved | None:
     mod = catalog.table().get(module)
     if mod is None:
         return None
-    install_dir = components.installed(mod.name)
+    resolved_install = components.resolve(mod.name)
+    install_dir = resolved_install[0] if resolved_install else None
     directory = Path(mod.directory) if mod.directory else (install_dir or modules.module_dir(mod.name))
     if not directory.is_dir():
         return None
-    manifest = components.read_manifest(directory)
-    rendered = render_launch(mod, directory, manifest, installed=install_dir is not None and directory == install_dir)
+    installed_here = install_dir is not None and directory == install_dir
+    # the manifest the install resolved BY is already in hand; only an
+    # out-of-tree or checked-out directory has to be read here
+    manifest = resolved_install[1] if installed_here else components.read_manifest(directory)
+    rendered = render_launch(mod, directory, manifest, installed=installed_here)
     if rendered is None:
         return None
     argv, template = rendered
@@ -108,7 +112,7 @@ def resolve(module: str) -> Resolved | None:
         module=mod,
         directory=directory,
         argv=argv,
-        installed=install_dir is not None and directory == install_dir,
+        installed=installed_here,
         template=template,
     )
 

@@ -370,6 +370,47 @@ def check_unknown_words_are_refused() -> None:
         )
 
 
+def check_table_is_memoized() -> None:
+    """The table is the host's view of what is installed, so asking for it the
+    dozen times a turn asks must cost one scan, not a dozen.
+
+    The memo is keyed on the SHAPE of the sources (catalog.source_signature) and
+    not on a timer: a source that appears, is pruned or is edited is picked up by
+    the next lookup — nothing has to remember to invalidate — while a lookup that
+    changes nothing re-reads nothing. Those two are the whole point, so both are
+    pinned here.
+    """
+    with isolated_host():
+        scans = {"n": 0}
+        real = catalog.registrations
+
+        def counted() -> list:
+            scans["n"] += 1
+            return real()
+
+        catalog.registrations = counted  # type: ignore[assignment]
+        try:
+            check(catalog.table() == {}, "a host with no registrations has an empty table")
+            scans["n"] = 0
+            for _ in range(5):
+                catalog.table()
+            check(scans["n"] == 0, "a lookup that changes nothing re-reads nothing")
+
+            _write_registration(_third_party("clutch-late"))
+            check("clutch-late" in catalog.table(), "a registration landing IS picked up, without an invalidate")
+            check(scans["n"] == 1, "and it cost exactly one re-read")
+
+            catalog.invalidate()
+            catalog.table()
+            check(scans["n"] == 2, "invalidate() makes the next lookup re-read")
+
+            catalog.table()["clutch-scribble"] = None  # type: ignore[assignment]
+            check("clutch-scribble" not in catalog.table(), "the memo is not scribbled on through a returned table")
+        finally:
+            catalog.registrations = real  # type: ignore[assignment]
+            catalog.invalidate()
+
+
 def check_host_facts_in_schema() -> None:
     """`$config.<field>` / `$skills` / `$backends` in a declaration become THIS
     host's values when the tool is wired — the component asks what only the
@@ -481,6 +522,7 @@ def main() -> int:
     check_ui_protocol()
     check_declared_access()
     check_unknown_words_are_refused()
+    check_table_is_memoized()
     check_bare_host_is_chat_only()
     check_checkout_discovery_and_precedence()
     check_host_facts_in_schema()
