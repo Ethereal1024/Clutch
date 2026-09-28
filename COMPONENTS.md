@@ -69,8 +69,22 @@ cli：`--envelope` 信封输出）。argv 词逐一交给 Popen，**没有 shell
 组件的 `command` 是**整条**语句（loopback 调用即接口），典型形状：
 
 ```
-curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' -H {auth} --data-binary {*} -w {status} http://127.0.0.1:{port}/read_file
+curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' -H 'X-Clutch-Token: {token}' --data-binary {*} http://127.0.0.1:{port}/read_file
 ```
+
+宿主只提供**事实**：`{port}` `{token}` `{pid}`，都是从组件的发现记录里读出来的。至于
+"HTTP 头"、"状态码"、"`curl -w`"——那是**语句自己的措辞**，宿主不认识这些词。宿主值经
+`shq` 单引号包裹（永远如此），所以 `-H 'X-Clutch-Token: {token}'` 是惯用写法：值被包成
+`'tok'`，正好嵌在外层单引号之间，拼成 `'X-Clutch-Token: 'tok''`，shell 里就是一个词。
+响应一侧对称：宿主只认组件打印的信封（`{"content","error","diff"}`）与退出码，**从不**
+解析 HTTP 状态码——拒绝也要由组件自己写成信封（daemon 的 403 正文就是
+`{"content":"bad or missing token","error":true,"diff":""}`）。
+
+发现记录本身也是冻结契约：`{"version":1,"workspace":…,"port":…,"token":…,"pid":…,
+"started":…}`，宿主只读 `version/port/token/pid`。**就绪**的定义是"出现了一条 pid
+与之前不同的**新**记录"——没有健康探测这一步（组件不必实现任何动词）。进程纪律两条：
+宿主只对自己拉起的子进程发 SIGTERM，捡到的 daemon 不归它管（留给它自己的 idle 计时器）；
+daemon 退出时按 pid 匹配才删记录，所以被顶替的 daemon 删不掉继任者的记录。
 
 **cli**：一次调用一个进程。宿主按 `launch` 渲染出**前缀**（检出 = `{py} {script}`；
 安装版若有 `binary` 或与组件同名的可执行文件，前缀就是它本身），组件的 `command`
@@ -110,7 +124,8 @@ curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' -H {auth} --dat
 
 - `{参数名}` —— 模型参数，POSIX 单词引号包裹；
 - `{*}` —— 全部参数合成一个引号包裹的 JSON 对象（daemon 的请求体即它）；
-- 宿主值：daemon 语句可用 `{port}` `{token}` `{auth}` `{status}`（发现的服务事实）；
+- 宿主值：daemon 语句可用 `{port}` `{token}` `{pid}`——**只是发现记录里的事实**，
+  协议词汇由语句自己写（见第三节的 `-H 'X-Clutch-Token: {token}'` 惯用法）；
   cli 语句可用组件 `vars` 点名的宿主事实，已发布的两种：`host.port_url`（.clc 内容
   服务）、`config.skills_dir`（技能库根）；
 - `[ --flag {x} ]` —— 可选组：组内占位符填不上时整组（连旗标）消失，绝不留半截旗标。

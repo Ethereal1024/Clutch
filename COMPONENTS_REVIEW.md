@@ -1,0 +1,523 @@
+# 组件系统评审（COMPONENTS_REVIEW.md）
+
+对当前组件系统的运行逻辑梳理，以及"哪里不优雅、哪里值得改"的清单。规范本身见
+`COMPONENTS.md`；本文只讲现状与判断，每条问题都带证据（`文件:行`，标「实测」的
+是我在仓库里跑探针验证过的行为）。
+
+---
+
+## 一、运行逻辑
+
+### 1.1 一条声明的一生
+
+```mermaid
+flowchart TD
+  A["三个来源：dev 检出 / 已安装工件 / catalog.d 注册"] --> B["catalog.registrations 收集"]
+  B --> C["catalog.table 按 name 字段级 refine 合并"]
+  C --> D["registry.build_tools 接线"]
+  D --> E["Tool = schema + access/guard + 语句模板 + ui 块"]
+  E --> F["loop 每轮把 schemas 交给模型"]
+  F --> G["registry.execute 一次调用"]
+  G --> H["permission + guard 宿主策略"]
+  H --> I["rendezvous.prepare 拿到 Service 或 CLI 启动前缀"]
+  I --> J["inst.render 填充语句占位符"]
+  J --> K["transport 执行"]
+  K --> L["inst.unwrap 输出转信封"]
+  L --> M["事件携带 ui 块 → ui/app.js 渲染"]
+```
+
+1. **发现**：`catalog.registrations()`（catalog.py:390）按优先级收集三份声明 ——
+   dev 检出（`checkout_registrations`，catalog.py:367，扫仓库根的**每个兄弟目录**）、
+   本机安装层（`components.inventory()` + `read_manifest`，catalog.py:402-408）、
+   `catalog.d/*.json`（catalog.py:409-413）。宿主自己不带任何声明。
+2. **合并**：`catalog.table()`（catalog.py:416）按 `name` 做"字段级 refine"——
+   后一份声明点名的字段覆盖，没点名的照旧（catalog.py:439-453）。
+3. **接线**：`registry.build_tools()`（registry.py:208）先把 `run_command` 放进去，
+   再逐个组件问 `rendezvous.available()`，可用的才把每个 `catalog.Tool` 经 `_wire`
+   （registry.py:187）变成模型可见的 `registry.Tool`：描述/schema 过 `_resolve`
+   填宿主事实（`$config.*` / `$skills` / `$backends`），`access` 经 `GUARDS`
+   （registry.py:54）映射到守卫，`ui` 由 `catalog.ui_of` 补默认值。
+4. **调用**：`ToolRegistry.execute`（registry.py:322）→ `_invoke`：先跑声明策略
+   （`tool.guard`），再 `module_blocked_reason` 判断这个组件能不能为**这个工作区**服务，
+   然后 `_exec_statement`：`rendezvous.prepare` → `inst.render` → transport → `inst.unwrap`。
+   `snapshot` 语句在写之前由宿主记下旧内容，成功后 `workspace.snapshot()`（registry.py:428-441）。
+5. **接口两种**：daemon 组件每个工作区一个常驻进程（loopback HTTP，`Service` + 发现记录
+   + `/health` + `/shutdown`，rendezvous.py:377-410）；CLI 组件一次调用一个进程
+   （`launch_prefix` 渲染出可执行前缀，rendezvous.py:295）。
+6. **呈现**：`ui` 块随事件走（`ToolCallEvent.ui` / `ToolCallDeltaEvent.ui`，events.py:83/99），
+   `ui/app.js` 里没有任何工具名，只按 `ui` 的键组合（app.js:322-350 `UI_DEFAULTS`）。
+7. **安装**：`ui/components.js` → `POST /api/components/install`（manifest 走 base64 头，
+   工件走 body）→ `supervisor._install_component`（supervisor.py:221）→
+   `components.spool/accept/install`：摘要门 + 原子落地（`.installing` 改名）+
+   清理其它版本 + 与工件自带声明合并（components.py:319-404）。安装完即注册
+   （下一轮 `catalog.table()` 就看得见）。
+
+### 1.2 进程与状态
+
+| 状态 | 位置 | 生命周期 |
+| --- | --- | --- |
+| `_CACHE`（module, root, fences）→ Service | rendezvous.py:200 | 进程内，`release()`/`atexit` 清 |
+| `_FENCED`（module, root）→ fence globs | rendezvous.py:208 | 进程内 |
+| `_PROCS` pid → Popen | rendezvous.py:204 | 进程内，`_reap` 后移除 |
+| 发现记录 `<prefix><sha256(root)>.json` | `_record_path`，rendezvous.py:434 | 组件写、宿主读 |
+| 安装目录 `<root>/<name>/<version>/` | components.py:319 | 跨会话持久 |
+
+---
+
+## 二、问题清单
+
+### P0-1　`catalog.table()` 没有任何缓存，且在热路径上反复全量扫盘
+
+`table()`（catalog.py:416）每次调用都重新走 `registrations()`：扫仓库根的兄弟目录、
+遍历安装根并逐个 `read_manifest`、glob `catalog.d`。而它被调用得非常密：
+
+- `build_tools` 自己调一次（registry.py:217），然后**每个组件**再经
+  `rendezvous.available → unavailable_reason → table() + resolve() → table()` 各两次。
+- **实测**：仓库现状（4 个组件）`build_tools()` = **9 次** `registrations()` 全量扫描。
+- **实测**：`reg.execute(...)` 一次调用（grep / web_fetch 各测一次）= **6 次**全量扫描
+  （`module_blocked_reason` 里 4 次 + `prepare` 里 1 次 + 顶层 1 次）。
+- 成本现在只有几毫秒（dev 层 4.2ms），但这是**结构**问题：开销随组件数 × 2 线性增长，
+  而且每次工具调用都做一串 stat + JSON 解析 + 目录遍历。同一份数据在一轮 turn 里被解析几十次。
+
+现有对照：技能库恰恰有缓存（`registry._skills → skills.cached_library`，registry.py:165），
+组件表却一次都没有。
+
+**建议**：`table()` 加进程内缓存 + 明确的失效点（安装完成、`CLUTCH_*` 环境变量变更、
+显式 `catalog.invalidate()`）；`build_tools` 一次取表到处传，不要在函数内部互相重复取。
+顺带把 `registrations()` 里的重复 I/O 合并：`inventory()` 已经读过每个 manifest，
+`catalog.registrations` 又 `modules.component_dir()` + `read_manifest` 读一遍
+（catalog.py:402-408，实测量化：`build_tools` 里 `read_manifest` 4 次 / `installed` 5 次）。
+
+### P0-2　声明词汇表的失败方向自相矛盾：一个词不认识就**静默失效**（并且是 fail-open）
+
+同一份声明里三种"宿主定义的词"，处理方式各不相同：
+
+| 词 | 不认识的后果 | 代码 |
+| --- | --- | --- |
+| `access` | `GUARDS.get(access)` → `None`，**没有守卫**；`permission.GUARDED_ARG.get()` 也取不到 → 权限引擎按"无策略"放行 | registry.py:196、permission.py:96 |
+| `gate` | `_gate_ok` 落到 `return False`，工具**永不提供**（fail-closed） | registry.py:172-185 |
+| `ui` 的键 | `ui_of` 只保留 `UI_KEYS` 里的，其余**静默丢弃**（打错 `summery` 就退化成默认外观） | catalog.py:457-465 |
+| `requires` | 未知设施被忽略，组件"可用" | rendezvous.py:222-253 |
+
+**实测**（把 `access` 写成 `"Read"` 这种大小写手误）：
+
+```
+access='read'     -> protected-path guard: refuses   permission: allow
+access='Read'     -> protected-path guard: NO GUARD  permission: allow
+access='Write'    -> protected-path guard: NO GUARD  permission: allow
+access='readonly' -> protected-path guard: NO GUARD  permission: allow
+```
+
+即：一个词的拼写错误，就**静默拆掉了宿主对 .clc 的保护**（`filesystem._refuse_protected`
+是唯一挡住"点名读 .clc"的地方，且只在 `tool.guard` 存在时生效），也拆掉了权限引擎的
+ask/deny 规则。`catalog_test.py` 的文档字符串已经把这个事实写下来了
+（"A value outside the vocabulary is silently unguarded"）——但它是**当成已知行为**写的，
+不是当成要被修掉的缺陷。
+
+**建议**：把"声明词汇表"集中成一个可校验的表（`access` ∈ GUARDED_ARG、`gate` ∈
+{"project","skills"}、`ui` 的键 ∈ UI_KEYS、`requires` ∈ 设施表），在 `_wire` / 装表时校验：
+不认识的词 → 报错即数据（拒绝该工具、或保留工具但记一条诊断），至少不要 fail-open。
+这与项目里"error as data / fail-closed"的其它地方（`inst.render` 的占位符、
+`components.verify`、摘要门）是同一条原则。
+
+### P0-3　daemon 的三张全局表编码同一件事，且以 fence 做缓存键 → 交替 fence 时每次都杀进程重启
+
+`_CACHE`（键含 fences）/ `_FENCED` / `_PROCS`（rendezvous.py:200-208）分散维护
+"这个 (module, root) 的守卫是谁、fence 是哪份、子进程句柄在哪"，要靠 `release()`/
+`release_all()`/`_start()` 三处手写同步。而 `service()` 的判定是：
+
+```
+remembered = not fences or _FENCED.get((module, root)) == fences   # rendezvous.py:398
+if seen is not None and remembered and _healthy(seen): 复用
+if record is not None: _stop(...)                      # 否则杀掉重启
+```
+
+两个后果：
+
+1. **跨进程/重启必然重启**：`_FENCED` 只活在进程内，只要工作区有受保护路径
+   （打开项目就有 `.clc`），另一个 Clutch 窗口或重启后的宿主第一次调用就会**杀掉**
+   一个健康的 daemon（rendezvous_test.py:224 把这个行为当作正确性钉住了：宁可重起也不信记录）。
+2. **交替 fence 会让每次调用都重启**。**实测**：两个 fence 集合 A/B 交替请求
+   （两个窗口各自打开同目录下不同的 .clc，或同一个宿主进程里 `protect()` 集合变化）：
+
+```
+A (first): pid=6300  58ms
+A (again, same fence): pid=6300   1ms
+B (changed fence): pid=6305  570ms
+A (back to the first fence): pid=6310  570ms
+B (back to B): pid=6316  569ms
+A (and again): pid=6321  569ms
+```
+
+每一次调用都是"杀旧 daemon + 起新 daemon + 等就绪"。原因不只是 fence 变了，
+而是**陈旧 key 从不清理**：A 的 key 里存的 pid 早就死了，于是走到 `_read_record`
+拿到 B 的 daemon，再按"fence 不匹配"把它杀掉，起第三个 —— 而不是认出"B 的 daemon
+就是我刚起的、A 只是过时的 key"。
+
+**建议**：把三张表合成一个 `@dataclass Handle{service, fences, proc}`，缓存键退化成
+`(module, resolved_root)`；换 fence 时**按 (module, root) 失效所有别名**，再决定
+杀掉还是沿用。同时考虑把 fence 写进发现记录（记录由持有者签名/校验 pid+token 即可），
+这样重启和第二个窗口不必杀掉健康的 daemon。这条改动的收益是可测的（570ms → 1ms）。
+
+### P1-4　信封 `{content, error, diff}` 没有单一类型，只靠调用方 `setdefault` 补齐
+
+- `inst.unwrap`（inst.py:200-222）的**五个返回分支里有四个只有 `content`**
+  （HTTP 错误、不可达、非信封成功、非信封失败），只有信封分支带全三键。
+- `transport.failure_envelope`（transport.py:53）自己造一份。
+- `ToolRegistry.execute`（registry.py:389-394）最后再来一遍
+  `result.setdefault("error"/"diff")`。
+
+**实测**：`unwrap(CommandResult(0, "ok", ""))["error"]` → `KeyError`，
+而它的文档字符串写的是"unwrap turns a finished command into {content, error, diff}"。
+断言"每个结果都有三键"的地方只有 `execute`，其它调用者（测试、未来的调用点）会踩空。
+
+**建议**：定义一个 `Envelope`（dataclass 或 NamedTuple，带 `to_dict()`），
+`unwrap`/`failure_envelope`/`execute` 全部返回它，normalize 只在一处发生。
+
+### P1-5　curl 与"最后一行三位数字"的启发式把传输细节焊进了协议
+
+- `Service.vars()` 给模板塞 `"status": "\\n%{http_code}"`（rendezvous.py:190）——
+  这是 curl 的 `-w` 语法，成了宿主要给组件的事实之一；`requires: ["curl"]` 与
+  `unavailable_reason` 里的"没有 curl 就不能驱动 daemon"（rendezvous.py:245-250）也由此而来。
+- 反向解析在 `inst.unwrap._body_and_status`（inst.py:186-197）：**stdout 最后一行是
+  3 位数字就当成 HTTP 状态**。这条规则对所有组件生效，包括 CLI 组件。
+- **实测**：一个合法输出以三位数字结尾，就被判成"服务回答了 HTTP 404"并且**丢掉真实输出**：
+
+```
+stdout='file count: 3\n404\n' -> error=True content='ERROR: clutch-x answered HTTP 404: file count: 3'
+```
+
+- 讽刺的是宿主**本来就用 urllib** 做 `/health` 探测和 `/shutdown`（rendezvous.py:496-521）。
+
+**建议（已按"一切皆组件"原则修正，见第三章）**：**不是**把 loopback HTTP 收归宿主——那等于把
+HTTP/POST/JSON/token-header/path 路由这些组件协议知识搬进宿主，恰好违反"组件实现与宿主无关"。
+正确方向是让宿主**忘掉**组件协议：
+
+- `{auth}`（`X-Clutch-Token:<token>` 的 header 拼法）与 `{status}`（curl 的 `-w` 语法）**退回组件的语句文本**；
+  宿主只发布**事实**（`{port}`、`{token}`、`{pid}`）。
+- `_body_and_status` 的"末行三位数字"整个删掉：输出只认信封与退出码（`inst.py:28-31` 已经这么写着）。
+- `_healthy`（GET /health）与 `_stop`（POST /shutdown）从宿主生命周期里移除：就绪改判
+  "**记录出现 + pid 存活**"（`_read_record` 本来就在做 `_pid_alive`，`rendezvous.py:457`），
+  停止按记录里的 pid 终止进程。可选进阶：记录里带 `ready` / `stop` 语句，宿主用同一个渲染器跑它。
+- `requires: ["curl"]` **保留**——组件声明它脚下的宿主设施，正是"声明随组件走"。
+
+这样上面那条实测的误伤自然消失（CLI 输出不再被解释成状态码），宿主反而少了两处协议知识。
+若短期不动，至少按 `interface` 限定启发式（`registry.py:465` 已经知道 `tool.module`），
+别让"最后一行恰好是 404"变成协议。
+
+### P1-6　合并逻辑是手写的字段列表，且"是否点名字段"有三种判定
+
+`catalog.table()` 的 refine（catalog.py:439-453）逐字段写死：
+
+- 有的看**原始 dict**：`declared.interface if data.get("interface") else known.interface`；
+- 有的看**解析后的对象**：`declared.launch if declared.launch.argv or declared.launch.binary else known.launch`；
+- 有的用 `or`：`requires=declared.requires or known.requires`、`directory=declared.directory or known.directory`。
+
+三个后果：(a) 空值无法"显式清空"（`requires: []` 被当成"没点名"）；(b) `launch` 只能
+整体替换——薄 manifest 想只改 `binary` 也得重述 `argv`；(c) `ui={**known.ui, **declared.ui}`
+是**深合并**，其它字段是**整体覆盖**，同一份协议里两种语义。
+另外 `Component(...)` 是逐字段重建：**以后给 `Component` 加一个字段，忘了同时改这段 merge，
+新字段会被静默重置成默认值**（`_wire` 之于 `catalog.Tool` 同理，registry.py:194-204）。
+
+**建议**：改成"点名即覆盖"的通用实现——用 `dataclasses.replace(known, **{f: v for f in
+named_fields(data)})`，`named_fields` 只看原始 JSON 点了哪些键（这就是协议里真正想表达的）；
+`launch` 也走同样的字段级逻辑。
+
+### P1-7　工具名冲突与"声明被拒"全都没有声音
+
+- **实测**：两个组件各声明一个 `dup` 工具 → `ToolRegistry.__init__` 的
+  `{t.name: t for t in tools}`（registry.py:324）**后者静默覆盖前者**，模型只看到一个
+  schema，也没有任何提示。第三方组件重名（`search`、`status` 这种）是很现实的场景。
+- `_component_of` / `_tool_of`（catalog.py:291/332）对损坏的声明一律 `return None`：
+  `interface` 打错一个字母 → 整个组件不存在；`description` 不是字符串 → 工具静默消失；
+  manifest 是坏 JSON → 静默跳过。而协议里明明有"缺席要解释"的机制
+  （`ui.status` + `components_unavailable`，registry.py:229）——它只覆盖"工件不在，
+  不覆盖"声明读不懂"。
+
+**建议**：把"拒绝原因"收集起来（`table()` 返回 `(components, refusals)` 或把诊断挂到
+一个 host 侧列表），让 UI 能说"clutch-x 的 manifest 第 N 个工具缺少 description"；
+工具重名在 build 时就报告（error as data），不要 last-wins。
+
+### P1-8　CLI 组件的 cwd 是宿主仓库根，daemon 语句的 cwd 是工作区根
+
+`rendezvous.prepare`：CLI 组件的 runner 是 `LocalTransport(str(modules.repo_root()))`
+（rendezvous.py:348），而 daemon 语句走 `workspace` 这个 transport（cwd = 工作区根）。
+**实测**（工作区 `/tmp/probe-ws-*`）：
+
+```
+workspace root: /tmp/probe-ws-ehnq9bmm
+CLI statement runner cwd: /home/fanshu/Workplace/Clutch      ← 宿主的源码目录
+```
+
+对第三方 CLI 组件来说，一个跟它毫无关系、甚至可能不存在的目录成了相对路径基准；
+而 `subject: workspace-fs` 的 CLI 组件按语义应该以工作区根为 cwd。
+现在几个内置 CLI 组件恰好都用绝对参数（`--endpoint`、`--root`），所以这个问题是**潜伏**的，
+但它是"同一个协议两个 cwd 语义"的不一致。
+
+**建议**：cwd 由 `subject` 决定并显式写下来（`workspace-fs`/`project-file` → 工作区根，
+`network`/`skill-library` → 宿主仓库根或组件自己的目录），或干脆加一个 host fact（`{cwd}`）
+让声明自己说要什么。
+
+### P1-9　声明里存在"只有解析、没有使用者"的字段
+
+`runs_on`（catalog.py:79 起）被解析、被合并，但全仓库没有一处**读**它；
+`catalog.OTHER` 没有引用者，`catalog.FOREIGN_FS` 只在 `serves_workspace_fs` 的注释里出现。
+唯一的跨机器分支是 `registry.module_blocked_reason` 里写死的 LocalWorkspace 判断 +
+`TODO(ssh-workspace)`（registry.py:293-300）。
+
+**建议**：要么让它有消费者（`runs_on=other` → 走远端/通道，或至少在
+`module_blocked_reason` 里给出"这个组件不在本机运行"的解释），要么从协议里删掉、
+等实现时再加。留着会造成"文档承诺 > 代码能力"的错觉。
+
+### P1-10　`requires: ["python"]` 的判定靠 `"{py}" in launch.argv[0]`
+
+```python
+if resolved.template and "{py}" in mod.launch.argv[0] and modules.python_missing():
+```
+
+（rendezvous.py:250-253）一个声明了 `requires: ["python"]`、但模板写成
+`["/usr/bin/env", "python3", "{script}"]` 或 `["{py}", "-m", "pkg"]` 之外的形状的组件，
+拿不到"本机没有解释器"的解释；反之一个没声明 python 需求但用了 `{py}` 的组件行为相反。
+`requires` 是个字符串词汇表，实现却靠模板文本猜。
+
+**建议**：设施 → 检查函数的显式表（`{"python": needs_python, "curl": needs_curl,
+"posix-shell": needs_posix}`），`python` 的需求直接由"模板用到 `{py}`"推导，
+而不是让组件手写一个可能与模板矛盾的字串。
+
+### P2-11　`catalog.Tool` / `registry.Tool` 同名不同物，字段列表有三份
+
+`catalog.Tool`（声明）与 `registry.Tool`（接线后的工具）名字完全一样，读
+`from . import catalog` 与 `from .registry import Tool` 的代码要在脑子里切换语义。
+加上 `_component_of`（catalog.py:291）、`_tool_of`（catalog.py:332）、`_wire`
+（registry.py:187）三处逐字段搬运，新字段要改三处（见 P1-6）。
+
+**建议**：声明侧改名 `ToolDecl` / `ComponentDecl`（或 `Decl` 后缀），
+搬运改成"声明是 dataclass + `replace`/构造器集中一处"。
+
+### P2-12　UI 默认值有两份，且 `mutates` 的默认值还不一样
+
+Python 侧 `catalog.DEFAULTS`（catalog.py:139-150，**没有** `mutates` 键，
+由 `registry.ui` 算），JS 侧 `ui/app.js` 的 `UI_DEFAULTS`（app.js:322-335，
+`mutates: true`）。宿主其实已经把默认值填好随事件发出（`ui_of` + `registry.ui`），
+JS 那份是第二实现；两份漂移时没人会发现（`mutates` 已经是不同默认的实例）。
+
+**建议**：JS 只对"宿主没给 ui 块"的旧事件兜底，并把兜底表从 Python 侧生成/校验
+（或加一条测试比对两份键集）。
+
+### P2-13　`ToolResultEvent` 不携带 `ui`，分页回放会静默降级
+
+`ToolResultEvent`（events.py:102-108）没有 `ui` 字段；`ui/app.js` 的 `uiOfResult`
+（app.js:346-350）靠 `toolCalls[tool_call_id]` 找回声明，注释说"an older log page
+renders from its own copy"，但**结果事件里根本没有那份拷贝**，于是落到
+`UI_DEFAULTS`：`body: "diff"` 的写结果会按纯文本渲染，"read 行"也变回普通块。
+分页（懒加载历史）场景下组件声明的呈现会丢失。
+
+**建议**：`ToolResultEvent` 也带上 `ui`（与 `ToolCallEvent` 对称，小字段、可回放），
+或者 UI 在分页不足时按 tool_call_id 去日志里补。
+
+### P2-14　`components.installed()` 用字符串最大值当"最新版"
+
+`max(found)`（components.py:115-138）对 `("0.9.0", path)` / `("0.10.0", path)`
+做**字典序**比较。**实测**：同时存在 0.9.0 与 0.10.0 时解析结果是 **0.9.0**。
+平时 `_prune` 只留一个版本，所以不常暴露；但一旦出现手工拷贝、失败的 prune、
+或未来的多版本需求，解析就会选错。
+
+**建议**：要么老实实现版本比较（或明确"只允许一个版本"并在多版本时给出诊断），
+要么把最近的安装记在一个单独的 `current` 指针里而不是靠字符串排序猜。
+
+### P2-15　归档解包可以更省事也更严
+
+`_unpack`（components.py:412-431）手写逃逸检查，`_refuse_escape`（components.py:433）
+只查 `/` 前缀与 `..`：不覆盖 Windows 驱动器/UNC 拼写（`C:/x`、`//host/share`），
+也不拒绝 FIFO/设备文件成员。Python 3.12+ 有 `tarfile.extractall(filter="data")`
+（3.14 起是默认），能一次覆盖绝对路径、`..`、设备文件与符号链接。
+项目声明 `requires-python >= 3.10`／`.python-version` 是 3.10，所以要用特性探测。
+
+**建议**：`filter="data"` 可用时优先使用，保留现有检查作为 3.10/3.11 的回退；
+zip 侧至少补驱动器/UNC 形态。
+
+### P2-16　dev 检出发现扫"仓库根的每个兄弟目录"
+
+`checkout_registrations`（catalog.py:367-388）遍历仓库根的每个子目录并尝试读
+`component.json`——包含隐藏目录、`dist`、`node_modules` 之类。语义上"把检出放在
+Clutch 仓库旁边"就自动成为组件是个不错的设计（无需注册），但它①每轮 turn 重复做
+（见 P0-1）②对同名的第三方目录没有冲突提示。配合 P0-1 的缓存，这条会自动变便宜。
+
+### P2-17　安装记录里把 wire manifest 的未知字段原样写进 `component.json`
+
+`install` 写盘的是 `{**manifest, name, version}`，`_merge_declaration` 返回
+`{**declared, **wire}`（components.py:359-403）——于是上传方 manifest 里的任意键
+（`digest`、`artifact` 以及未来任何拼错的键）都会成为"已安装组件的声明"。
+`_component_of` 只读自己认识的键，所以现在无害，但"安装记录"和"组件声明"两种东西
+混在同一个扁平字典里，审计时很难分清哪一行是组件自己写的、哪一行是安装器写的。
+
+**建议**：给记录分层，例如 `{"declaration": {...}, "install": {"version", "digest",
+"artifact", "installed_at"}}`，读回时只把 `declaration` 当声明。
+
+### P2-18　零碎但值得记一笔
+
+- `ToolRegistry._cancelable` 靠 `inspect.signature(t.host)` 里有没有 `cancel` 参数
+  （registry.py:326-330）：隐式约定，用 `**kwargs` 的宿主工具会被漏判；一个显式
+  `Tool.cancelable: bool` 更直白。
+- `ToolRegistry.ui()` 对**不在表里**的工具返回 `{**DEFAULTS, "mutates": True, "undo": False}`
+  （registry.py:360-361）：为一个不存在的工具编造外观，而且 `mutates=True` 与
+  "宿主推导"的语义不一致。
+- `_coerce_types`（registry.py:467-485）只处理 `integer`，就地修改 `args`；
+  `boolean`/`number` 等类型仍然原样透传（注释也承认"models sometimes pass strings"）。
+- `host_vars` 的 NB 注释（rendezvous.py:279）指出"宿主事实的键绝不能和工具参数重名，
+  否则静默覆盖模型的值"——这是协议里的一个隐式约束，没有校验。声明里应该直接拒绝
+  重名（`vars` 的键 ∩ 参数名 ≠ ∅ → 拒绝该工具）。
+- 文档漂移：`agent/tools/filesystem.py` 开头仍说四个文件工具"declared in tools/catalog.py"
+  （现在宿主零内置声明了）；`agent/tools/__init__.py` 仍是
+  "Tool implementations: registry + workspace + filesystem + shell tools."。
+  这两处与 `COMPONENTS.md` 的定调相反，会让新读者以为宿主还有一份实现。
+
+---
+
+## 三、宿主的协议知识审计（协议由谁提供）
+
+本次讨论确立的判据：
+
+> **一切皆组件**：组件怎么实现与宿主无关；宿主只知道"一段被封装的语句可以和组件交互"；
+> 宿主最多管理组件的**启动与终止**。协议由**组件侧**提供，宿主只规定"**协议的协议**"
+> （词汇、位置、形状、封装规则），而这份"协议的协议"的具体实现应当由**配置文件或其他外部方式**
+> 提供；宿主不硬编码任何工具的具体封装。
+
+**结论：前一半成立，后一半不成立。** 协议确实随组件走（3.1）；但宿主里躺着 6 处具体
+工具/具体组件的知识（3.2），且"实现由配置文件提供"目前基本是 0 分（3.4）。
+
+### 3.1 成立的一半：协议确实由组件提供
+
+| 要素 | 由谁提供 | 证据 |
+| --- | --- | --- |
+| 工具的 schema / 描述 | 声明（宿主只做 `$` 事实替换） | `registry.py:187-205` |
+| 工具怎么执行 | 声明的语句文本 + 宿主渲染/传输 | `inst.render`、`registry.py:437-465` |
+| 输出协议 | 组件打印的 `{content,error,diff}` 信封 | `inst.py:28-34` |
+| 界面呈现 | 声明的 `ui` 块；`ui/app.js` 里**没有**任何工具名/组件名 | `COMPONENTS.md:131-132`，已 grep 复核 |
+| daemon 的寻址 | 组件发布的记录（port/pid/token），宿主只读 | `rendezvous.py:434-459` |
+| 组件从哪里来 | 文件驱动：安装根 + `catalog.d/*.json` | `catalog.py:276-288` |
+| 接入新组件要改宿主代码吗 | 基本不用（例外见 3.2） | 无 `if tool.name == …` 调度分支 |
+
+### 3.2 不成立的一半：宿主里的 6 处具体封装
+
+| # | 位置 | 宿主在说什么 |
+| --- | --- | --- |
+| ① | `registry.py:254-273` + `prompts/tools/run_command{,/_chat}.md` + `shell.py` | **唯一的硬编码工具**：`run_command` 的名字/描述/schema/实现/access/ui 全在宿主里（`COMPONENTS.md:3` 承认它是例外） |
+| ② | `permission.py:40`、`filesystem.py:44/49/55`、`registry.py:108/315`、`core/context.py:41/47` | 硬编码了具体参数的**参数名** `path`：guard、undo（`snapshot`）、"最近碰过的文件"都按这个名字找。组件把目标参数叫 `file`/`url` 就拿不到 guard 与 undo——这是 P0-2 fail-open 的另一面 |
+| ③ | `catalog.py:264` `_BACKENDS`、`catalog.py:267-270`、`config.py:87-98` | 宿主替 **clutch-websearch** 决定"网络搜索有哪些后端"（`tavily/searxng/bing/ddg`），那是那个组件的域内词汇 |
+| ④ | `agent/skills.py:42/48/55-60`、`core/context.py:172-176`、`registry.py:165-183` | 宿主为 **clutch-skills** 保留了**第二份实现**（自己扫 `*/SKILL.md`）：与 `COMPONENTS.md:5-6` 的"宿主不为任何组件保留第二份实现"直接冲突 |
+| ⑤ | `modules.py:40-43`、`config.py:127` | 默认配置按名字指向具体组件（`component_dir(modules.SKILLS)/"skills"`），注释却说"never a host-side registration" |
+| ⑥ | `prompts/system.md`、`prompts/mode_work.md:4/7`、`prompts/errors/interactive_hint.md` | 宿主提示词的流程文字里写死了具体工具名；组件缺席/改名/被第三方替换时会漂移 |
+
+其中 ② 与 ④ 是"宿主为具体工具写具体代码"的直接证据，危害也最大：
+② 让 guard/undo 只对恰好把参数叫 `path` 的组件生效（未知 `access` 词还静默无守卫）；
+④ 让技能库存在两份真值。
+
+### 3.3 一条可复用的判定规则：**事实 vs 语法**
+
+> 宿主发布的占位符只能是**事实**（宿主自己拥有并产生的：它启动的、它读到的、它的配置与路径）。
+> 一旦这个值**是某个客户端程序的语法**，它就不是事实，是泄漏。
+
+| 合法（事实） | 非法（语法） |
+| --- | --- |
+| `{py}` `{script}`（launch 约定） | `{status}` = `\n%{http_code}`（curl `-w` 语法，`rendezvous.py:193-195`） |
+| `{port}` `{token}` `{pid}`（来自发布记录） | `{auth}` = `X-Clutch-Token:<token>`（HTTP header 拼法，`rendezvous.py:192`） |
+| `$config.*` `$skills` `$backends`（宿主配置） | 任何形如"某客户端程序的命令行片段"的值 |
+| `host.port_url`（宿主**自己**的地址，发布给组件） | |
+
+同一把尺子也判定了"宿主不该解析组件协议"：`_body_and_status`（`inst.py:189-195`）、
+`_healthy`（`rendezvous.py:496-503`）、`_stop`（`rendezvous.py:511-521`）都是宿主在说组件的话，
+应由 P1-5 那条重写后的方案移除。
+
+### 3.4 "宿主实现由配置文件提供"：目前 0 分
+
+宿主唯一的配置文件只存 LLM 端点——`config.py:23` `_SETTING_FIELDS = ("base_url","model","api_key",
+"reasoning_effort","api_protocol")`、`server.py:64-84` `~/.clutch/settings.json`。
+而下面这些"协议的协议"的实现全是 Python 常量 + 环境变量，第三方无法在不改宿主源码的前提下扩展：
+
+- `registry.py:54-58` `GUARDS`（access 词 → 守卫实现）
+- `permission.py:40` `GUARDED_ARG`（access 词 → 参数名，见 ②）
+- `registry.py:172-184` `_gate_ok`（门表：`project` / `skills`）
+- `catalog.py:139-150` `DEFAULTS` 与 `ui/app.js` 的 `UI_DEFAULTS`（UI 缺省，两份）
+- `catalog.py:264` `_BACKENDS`（后端链）
+
+### 3.5 复核命令（只读，可自行复跑）
+
+```
+grep -rn "read_file\|write_file\|edit_file\|load_skill\|save_memory\|search_memory" agent/ ui/app.js
+grep -n "GUARDED_ARG" agent/core/permission.py
+grep -rn "args.get(\"path\")\|args\[\"path\"\]" agent/
+grep -n "_BACKENDS\|available_backends" agent/tools/catalog.py
+grep -n "skills_dir\|component_dir(modules" agent/config.py
+ls agent/prompts/tools/
+```
+
+---
+
+## 四、建议的收敛顺序
+
+按"收益/风险"与依赖关系排，前四步互相独立、都能单独验证：
+
+1. **集中词汇表校验 + guarded 参数声明化（P0-2 + 审计②）**：一张 host 侧词表 + `_wire` 时的
+   校验与诊断；词表词义留在宿主，但**参数名由声明点名**（`access_arg` / `snapshot_arg`）。
+   修掉"拼错一个词就静默拆掉 .clc 保护"这个最难解释的坑，也修掉"参数不叫 path 就无守卫"。
+2. **`catalog.table()` 缓存 + 失效点（P0-1）**：把 9 次/6 次扫描降到 1 次，
+   顺手把 `registrations()` 里重复的 manifest 读取合并。
+3. **daemon 句柄合一 + 缓存键退化成 (module, root)（P0-3）**：
+   570ms→1ms 的重复重启消失，三张表变一张。
+4. **语句不透明化（P1-5 重写）**：`{auth}`/`{status}` 退回组件文本，删掉末行启发式，
+   `_healthy`/`_stop` 移出宿主生命周期（就绪改判"记录 + pid 存活"）。
+5. **宿主配置文件化（审计③⑤ + 边界）**：开 `host.json`（或组件根下的同名文件）承载
+   access→impl、门表、UI 缺省、后端链；常量降级为缺省值。
+6. **消灭第二份实现（审计④）**：技能目录清单由组件在声明/注册阶段提供，宿主删掉自己的扫描。
+7. **`run_command`（审计①）**：组件化，或在规范里登记为唯一被声明的引导例外。
+8. **信封类型化（P1-4）+ 合并改成"点名即覆盖"（P1-6）+ 提示词片段随声明走（审计⑥）**：
+   收尾的一致性工作。
+9. **补测试**：工具重名、未知 `access`/`gate`/`ui` 键、`unwrap` 的每个分支、
+   交替 fence 不重启 daemon、CLI 的 cwd、参数名非 `path` 时的 guard/undo。每一步都值得一条钉住行为的测试。
+
+---
+
+## 五、进度
+
+按第四节的顺序推进，每一步单独提交、单独跑矩阵。
+
+| 步 | 内容 | 提交 |
+|----|------|------|
+| 1 | 词表校验 + guarded/snapshot 参数由声明点名（P0-2 + 审计②） | `fb8541e` refactor(tools): the vocabulary is the host's, and a word it cannot read refuses |
+| 2 | `catalog.table()` 记忆化，失效点 = `source_signature()`（P0-1） | `b44f1c5` perf(tools): the table remembers, and the install is resolved once |
+| 3 | 句柄合一 `Handle{service, fences, proc}`，键退化成 `(module, root)`（P0-3） | `bf4bb7f` refactor(rendezvous): one handle per daemon, and the fence says whether to ride it |
+| 4 | 语句不透明化：宿主只发布事实（P1-5） | `5b7d431`（宿主）+ `0dfdc9b`/`2d70307`（clutch-workspace） |
+
+### 第四步实际落下的判据（P1-5）
+
+- **宿主只发布事实**：`Service.vars()` = `{port}{token}{pid}`，全部来自组件的发现记录；
+  `{auth}`（`X-Clutch-Token:` 的拼法）与 `{status}`（curl 的 `-w` 语法）从宿主消失，
+  退回组件自己的语句文本——`clutch-workspace/component.json` 现在写
+  `-H 'X-Clutch-Token: {token}'`（宿主值一律 `shq` 单引号包裹，所以这个惯用法成立）。
+- **输出只认信封与退出码**：`_body_and_status`（"末行三位数字 = HTTP 状态"）与
+  `_UNREACHABLE` 一起删掉；403 的正文由组件自己写成信封
+  （`{"content":"bad or missing token","error":true,"diff":""}`），宿主不读状态码。
+- **就绪 = 一条 pid 与之前不同的新记录**：`_start` 先快照旧记录的 pid，只认"不同"的那条。
+  否则一个"不能骑（fence 太小）而被留在原地"的 daemon 的记录会被误当成我们刚起的那个。
+- **停止 = 只对本进程拉起的子进程发 SIGTERM**：`_stop(proc)` 取代 `POST /shutdown`
+  （`Service.url` / `TOKEN_HEADER` / `PROBE_SECONDS` 一并消失，多了 `STOP_SECONDS`）。
+  捡到的 daemon 不归我们管：它的 idle 计时器收尾。
+- **被顶替的 daemon 删不掉继任者的记录**：`discovery.remove(workspace, pid=…)` 只在记录
+  仍写着这个 pid 时才 unlink；daemon 退出路径传自己的 pid。
+- 钉住这些行为的测试：`tests/rendezvous_test.py`（记录即协议、新记录就绪、错误的 token
+  由 daemon 自己的信封拒绝、9b 被顶替者不删继任者记录）、`tests/inst_test.py` 7b、
+  `tests/tools_inst_test.py` 的 `check_daemon_lines` / `check_envelopes`。
+- 顺带确认的遗留：`unwrap` 的非信封分支**没有 `error`/`diff` 键**（P1-4），
+  测试里只能用 `.get("error")`；这条仍在待办里，不属本步。
+
+---
+
+### 附：本次评审的验证方式
+
+- 阅读：`COMPONENTS.md`、`agent/tools/{catalog,registry,inst,rendezvous,components,modules,transport,workspace,filesystem}.py`、
+  `agent/{events,loop,supervisor}.py`、`agent/core/permission.py`、`ui/{app,components}.js`、
+  `tests/{catalog,rendezvous}.py`。
+- 探针（临时脚本，评审后已删除）：统计 `catalog.registrations/inventory/read_manifest/installed`
+  的调用次数与耗时；未知 `access` 词对 protected-path 守卫的影响；`unwrap` 的各分支；
+  工具重名；`installed()` 的版本选择；`rendezvous.service` 在交替 fence 下的 pid 变化。
