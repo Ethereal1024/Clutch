@@ -50,6 +50,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   "vars": { "base": "host.port_url" }, // 语句占位符 -> 宿主事实（见第五节）
   "ui": { "label": "...", "status": true }, // 用户怎么称呼它；status=true 时缺席要在界面解释
   "directory": "",                   // 代码目录的显式指向（catalog.d 注册用；检出/安装版不需要）
+  "prompt": "PROMPT.md",             // 模型面向的提示词片段（组件目录内的文件，见下）
   "tools": [ /* 工具声明，见第四节 */ ]
 }
 ```
@@ -57,6 +58,13 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 `subject` 词汇（宿主定义，组件从中选）：`workspace-fs`（服务工作区所在机器的文件
 系统——该机器上必须有工作区根才能为它服务）、`foreign-fs`（别的机器的文件系统，
 预留）、`project-file`（.clc 项目文件）、`network`（网络）、`skill-library`（技能库）。
+
+`prompt` 是组件**自己的话**：一段 markdown 片段（相对组件目录，像 `launch.entry`），
+宿主读出来后接在系统提示词的通用部分之后——**只在这个组件可驱动时**才接
+（`registry.prompt_section`）。宿主自己的流程文字因此不写任何组件的工具名：组件缺席、
+改名或被第三方替换时，那段话随它的工具一起消失，提示词不会描述一个模型调不到的工具。
+片段与工具描述一样经过宿主事实替换（第五节），且**不加 `prompt` 就什么都不说**——
+工具自己的 `description` 已经说明了它怎么用。
 
 `launch` 不是对组件形态的限制：onefile、脚本、包、任何语言的可执行文件都可以，只要
 它接受调用契约（daemon：`--workspace <根> --idle <秒>`，围栏时另有 `--protect <glob>`；
@@ -178,8 +186,8 @@ daemon 退出时按 pid 匹配才删记录，所以被顶替的 daemon 删不掉
 就整体进入。
 
 **不可用的组件不提供工具，也没有替身**：`registry.build_tools` 对缺席组件贡献零
-schema，客户端用 `unavailable_reason()` 向用户解释（声明 `ui.status: true` 的才
-解释，其余安静缺席）。
+schema（提示词片段同理，`registry._drivable` 是同一道筛选），客户端用
+`unavailable_reason()` 向用户解释（声明 `ui.status: true` 的才解释，其余安静缺席）。
 
 ## 八、安装 wire 协议
 

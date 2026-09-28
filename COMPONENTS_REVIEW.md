@@ -488,6 +488,7 @@ ls agent/prompts/tools/
 | 2 | `catalog.table()` 记忆化，失效点 = `source_signature()`（P0-1） | `b44f1c5` perf(tools): the table remembers, and the install is resolved once |
 | 3 | 句柄合一 `Handle{service, fences, proc}`，键退化成 `(module, root)`（P0-3） | `bf4bb7f` refactor(rendezvous): one handle per daemon, and the fence says whether to ride it |
 | 4 | 语句不透明化：宿主只发布事实（P1-5） | `5b7d431`（宿主）+ `0dfdc9b`/`2d70307`（clutch-workspace） |
+| 8 | 信封类型化 + 合并"点名即覆盖" + 提示词片段随声明走（P1-4 + P1-6 + 审计⑥） | `32c3ea7` + `cf995c8` + `3cf0294`（宿主）+ `f985180`/`7a7e506`（clutch-workspace / clutch-memory） |
 
 ### 第四步实际落下的判据（P1-5）
 
@@ -510,6 +511,37 @@ ls agent/prompts/tools/
   `tests/tools_inst_test.py` 的 `check_daemon_lines` / `check_envelopes`。
 - 顺带确认的遗留：`unwrap` 的非信封分支**没有 `error`/`diff` 键**（P1-4），
   测试里只能用 `.get("error")`；这条仍在待办里，不属本步。
+
+### 第八步实际落下的判据（P1-4 + P1-6 + 审计⑥）
+
+- **一个结果类型**：`tools/envelope.py` 的 `Envelope(content, error, diff)` 是唯一的
+  成品形状。生产者在构造时说完自己知道的事（`inst.unwrap`、
+  `transport.failure_envelope`、`filesystem._result`、`shell.run_command`、各条
+  guard 的拒绝），消费者只读属性（`registry`、`core/loop.py`）——
+  `ToolRegistry.execute` 里那句 `setdefault("error", ...)` 随之消失：dataclass
+  表达不了"键不存在"，那个问题不再存在。刻意不给它 `to_dict`/`of`/`__getitem__`：
+  它是类型，不是"长得像 dict 的东西"。测试里成批的 `["content"]` / `.get("error")`
+  读法一并迁移。
+- **合并 = 点名即覆盖**：`catalog._named` 在**原始 JSON 键**上判定"点没点名"，
+  `_refine` 用 `dataclasses.replace` 只覆盖点名的字段，`launch` 按同一规则再下探一层。
+  两个以前表达不了的事实因此成立：`requires: []` 是"没有"而不是"照旧"；薄 manifest
+  只写 `launch.binary` 就保留前置声明的 `argv`/`entry`。字段清单读自 dataclass 本身
+  （`_COMPONENT_FIELDS`/`_LAUNCH_FIELDS`），以后加字段不必记得同步合并函数。
+- **提示词片段随声明走**：组件可以声明 `prompt`——自己目录里的一段 markdown——宿主在
+  这个组件**可驱动**时把它接进系统提示词（`registry.prompt_section`）。`_drivable()`
+  是同一道筛选：缺席的组件连同它的工具和它的话一起消失，schema 与文字不可能各说各话。
+  宿主自己的 `prompts/*.md` 于是只剩宿主拥有的东西（工作流、工具约定、`run_command`）：
+  `read_file`/`grep`/`edit_file` 怎么配合回到 clutch-workspace 的 `PROMPT.md`，
+  记忆的用法回到 clutch-memory 的。片段与工具描述同样经过宿主事实替换；读不出来时
+  报一次、不接、也不影响这个组件的工具。
+- 钉住这些的测试：`tests/catalog_test.py` 的 `check_merge_is_named_means_override`
+  （点名即覆盖，含 `launch` 内层）、`check_prompt_travels_with_the_declaration`
+  （片段入提示词、不可驱动者不贡献、读不出者只报一次）、
+  `check_host_prompt_names_no_component_tool`（宿主三个提示词文件里不出现任何
+  组件工具名）。
+- 遗留（都不属本步）：第四节 5–7、9 仍在待办；`agent/skills.py:42` 的技能目录表头
+  仍写 `load_skill`（审计④ 的范围）；P2-18——`tools/filesystem.py` 的 docstring
+  仍说四个文件工具"declared in tools/catalog.py"。
 
 ---
 
