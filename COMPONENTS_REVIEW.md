@@ -391,8 +391,8 @@ docstring 改口。
 > （词汇、位置、形状、封装规则），而这份"协议的协议"的具体实现应当由**配置文件或其他外部方式**
 > 提供；宿主不硬编码任何工具的具体封装。
 
-**结论：前一半成立，后一半不成立。** 协议确实随组件走（3.1）；但宿主里躺着 6 处具体
-工具/具体组件的知识（3.2），且"实现由配置文件提供"目前基本是 0 分（3.4）。
+**结论：前一半成立，后一半当时不成立。** 协议确实随组件走（3.1）；但宿主里躺着 6 处具体
+工具/具体组件的知识（3.2），且"实现由配置文件提供"当时是 0 分（3.4，第五步已落地）。
 
 ### 3.1 成立的一半：协议确实由组件提供
 
@@ -459,9 +459,9 @@ JSON 数组——组件自己的 `--json list` 载荷宿主不读；读不出来
 `_healthy`（`rendezvous.py:496-503`）、`_stop`（`rendezvous.py:511-521`）都是宿主在说组件的话，
 应由 P1-5 那条重写后的方案移除。
 
-### 3.4 "宿主实现由配置文件提供"：目前 0 分
+### 3.4 "宿主实现由配置文件提供"：已落地（第五步）
 
-宿主唯一的配置文件只存 LLM 端点——`config.py:23` `_SETTING_FIELDS = ("base_url","model","api_key",
+评审当时，宿主唯一的配置文件只存 LLM 端点——`config.py:23` `_SETTING_FIELDS = ("base_url","model","api_key",
 "reasoning_effort","api_protocol")`、`server.py:64-84` `~/.clutch/settings.json`。
 而下面这些"协议的协议"的实现全是 Python 常量 + 环境变量，第三方无法在不改宿主源码的前提下扩展：
 
@@ -470,6 +470,20 @@ JSON 数组——组件自己的 `--json list` 载荷宿主不读；读不出来
 - `registry.py:172-184` `_gate_ok`（门表：`project` / `skills`）
 - `catalog.py:139-150` `DEFAULTS` 与 `ui/app.js` 的 `UI_DEFAULTS`（UI 缺省，两份）
 - `catalog.py:264` `_BACKENDS`（后端链）
+
+已落地（`3ecaa74` refactor(tools): the host's own tables are a document, and the constants
+are defaults）：一张宿主自己的文档（`~/.clutch/host.json`；`CLUTCH_HOST_CONFIG` 可点名
+另一份，置空即明确"无文档"）承载上列四张表——access→impl、门表、UI 缺省、后端链，
+五处常量降级为缺省值。文档点名的词按"点名即覆盖"逐词盖上去（词写 `null` 即删除），
+`backends` 是有序链、没有键可合并，点名即整体替换；只能在宿主**已有的**实现里挑
+（`guard` ∈ `GUARD_IMPLS`、门 ∈ `GATE_IMPLS`、后端 `field` ∈ `Config` 的真实字段），
+带不进任何代码；读不出的每一条只说一次（`[host] host.json: …`），整份读不出则整份忽略、
+缺省表原样成立。`GUARDED_ARG` 不再是独立的第二份表——它就是合并后词表的副本
+（`dict(catalog.ACCESS_ARGS)`）。合并后的视图仍叫 `ACCESS_ARGS`/`GATES`/`DEFAULTS`/
+`_BACKENDS`，读表的代码一行未改；实现与词的绑定在 `registry` 导入时完成，
+`_check_vocabulary` 的三组 assert 保证目录与实现表不漂移。UI 缺省经 `GET /api/host`
+发给渲染器（`ui/app.js` 启动时拉取一次），优先级：调用自己的 `ui` 块 > 宿主表 > 常量。
+格式与语义见 `COMPONENTS.md` 第十二节；判据见第五节"第五步实际落下的判据"。
 
 ### 3.5 复核命令（只读，可自行复跑）
 
@@ -521,7 +535,7 @@ ls agent/prompts/tools/
 | 8 | 信封类型化 + 合并"点名即覆盖" + 提示词片段随声明走（P1-4 + P1-6 + 审计⑥） | `32c3ea7` + `cf995c8` + `3cf0294`（宿主）+ `f985180`/`7a7e506`（clutch-workspace / clutch-memory） |
 | 7 | `run_command` 登记为唯一被声明的引导例外（审计①） | `40a59f9` refactor(tools): the host's own tool is declared, and no component may name it |
 | 9 | 补测试：参数重命名后的 guard/undo、工具重名、传输 cwd | `3538759` test(tools): the renamed argument, the one name, and the transport a statement rides |
-| 5 | 宿主配置文件化：access→impl、门表、UI 缺省、后端链（审计③⑤ + 边界） | 待办（下一步） |
+| 5 | 宿主配置文件化：access→impl、门表、UI 缺省、后端链（审计③⑤ + 边界） | `3ecaa74` refactor(tools): the host's own tables are a document, and the constants are defaults |
 | 6 | 消灭第二份实现：技能目录由组件自己发布（审计④） | `01e0977` refactor(tools): the host asks the component for its catalog, and keeps no scan（宿主）+ `d7e40f7` clutch-skills（子模块指针 `0a091c2`） |
 
 ### 第四步实际落下的判据（P1-5）
@@ -573,7 +587,8 @@ ls agent/prompts/tools/
   （片段入提示词、不可驱动者不贡献、读不出者只报一次）、
   `check_host_prompt_names_no_component_tool`（宿主三个提示词文件里不出现任何
   组件工具名）。
-- 遗留（都不属本步）：第四节只剩第 5 步（宿主配置文档，见下表）。第 6 步已落地
+- 遗留（都不属本步）：当时只剩第 5 步（宿主配置文档），其后也已落地
+  （`3ecaa74`，见下文第五步判据）——第四节至此全部收尾。第 6 步已落地
   （`01e0977` + `d7e40f7`，见下节），第 7、9 步已落地（`40a59f9`、`3538759`），
   P2-18 的五项零碎已落地（`a01e74a`），见各节。
 
@@ -610,6 +625,39 @@ ls agent/prompts/tools/
   （工具、提示词表头、关掉后不出现）、`tests/tools_inst_test.py` 里重写的 `live_skills`
   （`load_skill` 必须逐字节服务 `*/SKILL.md`）；组件侧 `clutch-skills/tests/test_cli.py`
   的 `--facts` 输出模式。
+
+### 第五步实际落下的判据（审计③⑤ + §3.4 全表）
+
+- **一份文档，四个落点**：`~/.clutch/host.json`（`CLUTCH_HOST_CONFIG` 点名另一份、
+  置空明确"无文档"；缺席是常态，静默用缺省表）同时承载 access→impl、门表、UI 缺省、
+  后端链——评审时散在五处 Python 常量里的东西，如今是一份用户可写的 JSON
+  （`agent/tools/hostconfig.py`，每进程读一次）。
+- **点名即覆盖，逐词生效**：没点名的节整节用缺省；点了名的节逐词合并——
+  `{"access": {"read": {"arg": "file"}}}` 只改 read 的参数名，其余词原样；词写 `null`
+  即删除；`backends` 是有序链、没有键可合并，点名即整体替换。
+- **只能挑实现，不能带实现来**：`guard` 必须是宿主已有的（`GUARD_IMPLS`，与
+  `registry._GUARD_IMPLS` 由 `_check_vocabulary` 的 assert 互锁），门必须是 `GATE_IMPLS`
+  之一，后端 `field` 必须是 `Config` 的真实字段（`BACKEND_FIELDS` 读自 dataclass 本身）。
+  读不出的词不创建、也不拖累内建词——打错一个名字永远不会悄悄拆掉 .clc 的栅栏
+  （fail-closed 的那一半）；词必须给守卫点名参数，`guard: ""` 合法（宿主对它不额外设防，
+  权限引擎仍按参数判断，如内建的 `command`）。
+- **`ui` 是数据**：键携带的是值而非实现（`null` 是其中一种值，`group` 缺省即 `null`），
+  所以什么都不拒、什么都不丢；渲染器不认识的键自己忽略，没有任何工具的安全性压在这张
+  表上。缺省经 `GET /api/host` 发给 `ui/app.js`（启动时拉取一次），渲染优先级：
+  调用自己的 `ui` 块 > 宿主表 > 常量。
+- **读不出来要说出口**：每条读不出的东西记入 `_SAID`、以 `[host] host.json: …` 说一次
+  （`said()` 可读回，`forget()` 清空重读）；整份读不出的文档整份忽略——解析不了的
+  文件，它的每张表都只能是猜。
+- 钉住这些的测试：`tests/hostconfig_test.py`（path 的 env/展开语义、缺席静默、
+  坏 JSON 只说一次、四张表的纯合并、真实文档下整条目录/注册/权限链的子进程、
+  抱怨按增量断言）、`tests/host-defaults-test.js`（渲染优先级、拷贝不被变异、
+  启动拉取的源码守卫）、`tests/server_test.py` 2e（`GET /api/host` 回 `ui`、
+  不带 `mutates`）。
+- 边界（诚实记账）：审计⑤ 的 `config.skills_dir` 缺省值仍指向
+  `component_dir(modules.SKILLS)/"skills"`——第六步删掉的是第二份实现，这个缺省如今
+  只是 `$config.skills_dir` 事实替换的一个占位值；审计③ 更深的一步（后端词汇由
+  clutch-websearch 自己发布，如同技能目录那样）仍开放——第五步把"替组件挑后端"从
+  源码搬进了文档，词汇本身还是宿主的。
 
 ---
 
