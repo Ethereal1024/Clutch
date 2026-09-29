@@ -10,7 +10,9 @@ add_library(native-lib SHARED native-lib.cpp)
 add_library(node SHARED IMPORTED)
 set_target_properties(node PROPERTIES IMPORTED_LOCATION
         ${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libnode.so)
-target_include_directories(native-lib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(native-lib PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/node)
 
 find_library(log-lib log)
 target_link_libraries(native-lib node ${log-lib})
