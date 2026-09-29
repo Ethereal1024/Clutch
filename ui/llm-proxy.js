@@ -9,7 +9,19 @@ const https = require("https");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const { ProxyAgent } = require("proxy-agent");
+// proxy-agent is ESM-only since v7, so only runtimes with require(esm) support
+// (node >= 20.19, Electron >= 33) can load it synchronously. The Android shell
+// runs embedded node 18, where this require throws ERR_REQUIRE_ESM — and an
+// uncaught throw while embedded libnode is still loading modules exits the
+// whole app (the "tap the apk and it dies" bug). Load it best-effort: where it
+// is unavailable (the phone), getAgent() returns undefined and upstream LLM
+// requests connect directly — the normal case on a device.
+let ProxyAgent = null;
+try {
+  ({ ProxyAgent } = require("proxy-agent"));
+} catch (e) {
+  if (!e || e.code !== "ERR_REQUIRE_ESM") throw e;
+}
 
 const UPSTREAM_TIMEOUT_MS = 90000;
 
@@ -71,7 +83,8 @@ function getAgent(target) {
   }
   if (!agent) {
     const proxy = detectProxy();
-    if (proxy) agent = new ProxyAgent(proxy);
+    if (proxy && ProxyAgent) agent = new ProxyAgent(proxy);
+    // no ProxyAgent (embedded node 18): ignore the proxy, connect directly
   }
   return agent;
 }
