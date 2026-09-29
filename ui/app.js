@@ -577,22 +577,26 @@ function buildResultRow(ui, call, result) {
   const summary = templateText(ui.summary, call.name, call.args || {}, result.content);
   const row = document.createElement("div");
   row.className = "result-row";
-  const toggle = document.createElement("span");
-  toggle.className = "fold-toggle";
-  toggle.textContent = "▸";
+  const body = buildResultBody(ui, result, call.args || {});
+  const full = body ? wrapFold(body) : null;
+  // the toggle exists only when there is something to fold: a body the
+  // declaration rendered empty must not leave a "▸" that opens nothing
+  if (full) {
+    const toggle = document.createElement("span");
+    toggle.className = "fold-toggle";
+    toggle.textContent = "▸";
+    row.appendChild(toggle);
+    row.onclick = () => {
+      const wasHidden = toggleFold(full);
+      toggle.textContent = wasHidden ? "▾" : "▸";
+    };
+  }
   const lbl = document.createElement("span");
   // same anti-overflow contract as the call chip's name rule (style.css): a
   // summary that embeds a deep path must break in place, never widen the stream
   lbl.className = "result-label";
   lbl.textContent = summary;
-  row.appendChild(toggle);
   row.appendChild(lbl);
-  const body = buildResultBody(ui, result, call.args || {});
-  const full = body ? wrapFold(body) : null;
-  if (full) row.onclick = () => {
-    const wasHidden = toggleFold(full);
-    toggle.textContent = wasHidden ? "▾" : "▸";
-  };
   return { row, full };
 }
 
@@ -636,7 +640,10 @@ function buildResultBlock(ui, name, args, result) {
   wrap.appendChild(head);
   const body = buildResultBody(ui, result, args);
   if (body) {
-    if (ui.body === "diff") {
+    if (ui.body === "diff" && result.diff) {
+      // the diff pane: the component's one-line verdict over the diff it
+      // returned. Only a REAL diff wears the note above it — when the diff is
+      // what failed to arrive the verdict IS the body (drawn once, below)
       const note = document.createElement("div");
       note.className = "body md-plain";
       note.textContent = result.content; // the component's one-line verdict
@@ -708,7 +715,13 @@ function buildResultBlock(ui, name, args, result) {
 // highlighted by the call's path argument).
 function buildResultBody(ui, result, args) {
   if (ui.body === "none") return null;
-  if (ui.body === "diff") return result.diff ? renderDiff(result.diff) : null;
+  if (ui.body === "diff") {
+    // no diff to draw: the result's own message is the body. Every failure
+    // returns diff "" with its reason in content, so returning null here left a
+    // bare "result ⚠" — the reason gone, and nothing to unfold
+    if (!result.diff) return (result.content || "").trim() ? plainBody(result.content) : null;
+    return renderDiff(result.diff);
+  }
   if (ui.body === "code") {
     const pre = document.createElement("pre");
     pre.className = "result-detail";
@@ -716,9 +729,15 @@ function buildResultBody(ui, result, args) {
     if (ui.highlight === "path") highlightPreByPath(pre, (args && args.path) || "");
     return pre;
   }
+  return plainBody(result.content);
+}
+
+// the plain text body a "text" declaration draws (and the one a diff-shaped
+// result falls back to when it returned no diff)
+function plainBody(text) {
   const plain = document.createElement("div");
   plain.className = "body md-plain";
-  plain.textContent = result.content || "";
+  plain.textContent = text || "";
   return plain;
 }
 
@@ -726,7 +745,9 @@ function buildResultBody(ui, result, args) {
 function foldAtRest(ui, result) {
   if (ui.collapse === "always") return true;
   if (ui.collapse !== "long") return false;
-  const text = ui.body === "diff" ? result.diff || "" : result.content || "";
+  // the text the body actually draws: a diff pane with a diff draws that, and a
+  // diff pane without one (a failure) draws the result's own message
+  const text = ui.body === "diff" ? result.diff || result.content || "" : result.content || "";
   return String(text).split("\n").length > RESULT_FOLD_LINES;
 }
 
@@ -2156,10 +2177,15 @@ profileNameInput.addEventListener("keydown", (e) => {
   }
 });
 
-$("#llm-profile-del").addEventListener("click", () => {
+$("#llm-profile-del").addEventListener("click", async () => {
   const name = profileSelect.value;
   if (!name) return; // nothing selected: nothing to delete
-  if (!confirm("Delete profile \"" + name + "\"?")) return;
+  const yes = await askConfirm({
+    title: "Delete LLM profile",
+    text: 'Delete profile "' + name + '"?',
+    ok: "Delete",
+  });
+  if (!yes) return;
   const profiles = llmProfiles();
   delete profiles[name];
   saveLlmProfiles(profiles);
@@ -2231,6 +2257,56 @@ function closeModal(overlayEl, onDone) {
   if (reducedMotion()) finish();
   else setTimeout(finish, MODAL_CLOSE_MS);
 }
+
+// ---- in-page feedback: notice + confirm -------------------------------
+// The phone's WebView has no WebChromeClient, so the renderer's own dialogs are
+// dead there: alert() is a no-op and confirm() returns false without drawing
+// anything. A failure reported only through alert() therefore reads as "my tap
+// did nothing" (device report: opening another project from the phone's picker),
+// and a question asked through confirm() is always answered "no" (the read-only
+// offer, deleting an LLM profile). Both have a real surface here.
+
+// one self-dismissing line at the bottom of the viewport; never intercepts a
+// tap, never covers a dialog (z-index below .modal)
+let noticeTimer = null;
+function notice(message, kind = "error") {
+  const el = document.getElementById("notice");
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove("hidden");
+  el.classList.toggle("error", kind === "error");
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => el.classList.add("hidden"), kind === "error" ? 8000 : 4000);
+}
+
+const confirmModal = $("#confirm-modal");
+let confirmResolve = null;
+// promise-based: `if (await askConfirm({...})) ...` replaces `if (!confirm(...))`
+function askConfirm({ title, text, ok = "OK", cancel = "Cancel" }) {
+  $("#confirm-title").textContent = title;
+  $("#confirm-text").textContent = text;
+  $("#confirm-ok").textContent = ok;
+  $("#confirm-cancel").textContent = cancel;
+  confirmModal.classList.remove("hidden", "closing");
+  $("#confirm-ok").focus();
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+  });
+}
+function closeConfirm(answer) {
+  if (!confirmResolve) return;
+  const resolve = confirmResolve;
+  confirmResolve = null; // settle before the close animation: a re-press cannot double-answer
+  closeModal(confirmModal);
+  resolve(answer);
+}
+$("#confirm-ok").addEventListener("click", () => closeConfirm(true));
+$("#confirm-cancel").addEventListener("click", () => closeConfirm(false));
+dismissOnOverlayPress(confirmModal, () => closeConfirm(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || confirmModal.classList.contains("hidden")) return;
+  closeConfirm(false);
+});
 
 // ---- SSH connection (in the project picker) ----
 const connSelect = customSelect($("#conn-select"));
@@ -3178,7 +3254,7 @@ async function loadOlder() {
     }
     setOlderPill(data.older);
   } catch (e) {
-    alert("Failed to load earlier records: " + e.message);
+    notice("Failed to load earlier records: " + e.message);
   } finally {
     paging = false;
   }
@@ -3201,7 +3277,12 @@ function hideWelcome() {
 }
 
 async function openProject(path, readOnly = false) {
-  if (busy) return;
+  // a run keeps the write lock on the project it is appending to; say so out
+  // loud instead of swallowing the tap
+  if (busy) {
+    notice("a run is active — stop it before opening another project");
+    return;
+  }
   const prog = document.getElementById("open-progress");
   const fill = prog.querySelector(".open-progress-fill");
   const label = prog.querySelector(".open-progress-label");
@@ -3293,23 +3374,30 @@ async function openProject(path, readOnly = false) {
     stream.classList.remove("loading");
     // same project open for write in another window: offer read-only instead of failing
     if (e && e.code === "project_open_conflict") {
-      const wantReadOnly = confirm(
-        "This project is already open in another window.\nOpen it read-only? Read-only mode cannot run tasks."
-      );
+      const wantReadOnly = await askConfirm({
+        title: "Already open elsewhere",
+        text:
+          "This project is already open in another window.\n" +
+          "Open it read-only? Read-only mode cannot run tasks.",
+        ok: "Open read-only",
+      });
       if (wantReadOnly) {
         await openProject(path, true); // retry without the write lock
         return;
       }
       return; // cancelled: keep the previous project as-is
     }
-    alert("Failed to open project: " + e.message);
+    notice("Failed to open project: " + e.message);
     // a network "Failed to fetch" usually means the remote session forward died
     console.error("[openProject] failed:", { api: API_BASE, path, error: e && e.message });
   }
 }
 
 async function createProject(dir, name) {
-  if (busy) return;
+  if (busy) {
+    notice("a run is active — stop it before creating a project");
+    return;
+  }
   try {
     const data = await apiFetch("/api/project/new", { method: "POST", body: { dir, name } });
     clearStream();
@@ -3318,7 +3406,7 @@ async function createProject(dir, name) {
     reconnectSSE(false); // new empty project: nothing to replay, just live events
     refreshTree();
   } catch (e) {
-    alert("Failed to create project: " + e.message);
+    notice("Failed to create project: " + e.message);
   }
 }
 
@@ -3329,7 +3417,10 @@ let fsPath = "";
 let fsParent = null;
 
 function openFsBrowser(mode) {
-  if (busy) return;
+  if (busy) {
+    notice("a run is active — stop it before opening another project");
+    return;
+  }
   fsMode = mode;
   fsPath = "";
   fsParent = null;
@@ -3342,26 +3433,83 @@ function openFsBrowser(mode) {
   $("#fs-path-input").disabled = false;
   fsModal.classList.remove("hidden", "closing");
   // settle the stored URL against the tunnel's real state first, then list once
-  reconciledBackendUrl().then(async (url) => {
-    if (url) switchBackend(url);
-    // reopen where the user last left the browser instead of the home directory
-    loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
-    renderConnSelector();
-    await autoReconnectAndroid(); // report #2: bring the remembered host back
-  });
+  reconciledBackendUrl()
+    .catch((e) => {
+      // an unreachable bridge must not leave the dialog empty with no word: say
+      // so and fall through, so the local listing still has a chance to appear
+      notice("could not reach the backend: " + (e && e.message ? e.message : e));
+      return null;
+    })
+    .then(async (url) => {
+      if (url) switchBackend(url);
+      // reopen where the user last left the browser instead of the home directory
+      loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
+      renderConnSelector();
+      await autoReconnectAndroid(); // report #2: bring the remembered host back
+    });
 }
 
 function closeFsBrowser() {
   closeModal(fsModal);
 }
 
+// Row activation is DELEGATED to #fs-list and keyed to pointerup, not to a
+// per-row click listener. Why: a background re-list replaces every row (the
+// phone's remembered SSH backend arriving a moment after the dialog opened
+// re-fetches the directory), and a click whose mousedown target has been
+// removed from the document is never dispatched at all — the tap does nothing
+// at all, silently (device report: "opening another project on the phone does
+// nothing"). pointerup still fires and still reaches the list, so the tap lands
+// on whatever row is under the finger when it is released.
+const fsRowActions = new WeakMap(); // row element -> its activation (no leak: keyed by the row)
+const TAP_SLOP_PX = 10; // a press that travels farther than this is a scroll, not a tap
+let fsPress = null;
+let fsActivatedRow = null; // row already activated by the pointer path
+
+function fsTappableRowAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const row = el && el.closest ? el.closest(".fs-row") : null;
+  return row && fsRowActions.has(row) ? row : null;
+}
+
 function fsRow(label, cls, onClick) {
   const row = document.createElement("div");
   row.className = "fs-row " + cls;
   row.textContent = label;
-  if (onClick) row.addEventListener("click", onClick);
+  if (onClick) {
+    fsRowActions.set(row, onClick);
+    // The click listener is kept for what the pointer path cannot serve: a
+    // synthetic click (assistive tech, a test, a WebView without Pointer Events)
+    // has no pointerdown/up to pair with. A real tap produces both, in that
+    // order, so the trailing click of an already-activated row is dropped —
+    // without this the conflict offer would be asked twice for one tap.
+    row.addEventListener("click", () => {
+      if (fsActivatedRow === row) {
+        fsActivatedRow = null; // this click IS the pointerup above: not a second tap
+        return;
+      }
+      onClick();
+    });
+  }
   return row;
 }
+$("#fs-list").addEventListener("pointerdown", (e) => {
+  fsPress = fsTappableRowAt(e.clientX, e.clientY) ? { x: e.clientX, y: e.clientY } : null;
+});
+$("#fs-list").addEventListener("pointerup", (e) => {
+  const press = fsPress;
+  fsPress = null;
+  if (!press) return;
+  if (Math.abs(e.clientX - press.x) > TAP_SLOP_PX || Math.abs(e.clientY - press.y) > TAP_SLOP_PX) return;
+  const row = fsTappableRowAt(e.clientX, e.clientY);
+  if (!row) return;
+  fsActivatedRow = row; // ...so the click that follows is ignored
+  fsRowActions.get(row)();
+});
+// the browser cancels the pointer when the gesture turns into a scroll
+$("#fs-list").addEventListener("pointercancel", () => {
+  fsPress = null;
+});
 
 // wait for the backend to be claimed (cold start: supervisor spawn + session
 // child boot take a few seconds) so a click during that window just works

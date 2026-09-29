@@ -846,7 +846,10 @@ mjx-container[display="true"] {
 .args code { background: none; padding: 0; }
 
 #right {
-  width: 320px;
+  /* device report: the sidebar read too wide for what it holds (a file tree),
+     so it kept a column of dead space next to the stream. Trimmed to 300px;
+     the tree truncates long names rather than growing the panel. */
+  width: 300px;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -944,6 +947,27 @@ mjx-container[display="true"] {
 .modal-box p { margin: 10px 0 0; line-height: 1.5; }
 .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
 .modal-box h4 { margin: 20px 0 12px; font-size: 13px; font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); }
+/* a confirm question may be two lines and says so with \n */
+#confirm-text { white-space: pre-line; }
+
+/* in-page notice: one line at the bottom of the viewport. Above the phone panel
+   (60) and the welcome gate (90), below any dialog (100) — a failure notice must
+   be readable without ever covering the surface the user is working in. It never
+   takes a tap (pointer-events: none): it reports, it does not ask. */
+.notice {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 95;
+  max-width: min(560px, calc(100vw - 24px));
+  padding: 9px 14px;
+  background: var(--bg2); color: var(--text);
+  border: 1px solid var(--border); border-left: 4px solid var(--muted);
+  border-radius: 0;
+  font-size: 13px; line-height: 1.45;
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.notice.error { border-left-color: var(--accent); }
+.notice.hidden { display: none; }
 
 /* server file browser */
 #fs-modal .modal-box { width: 560px; }
