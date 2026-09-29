@@ -567,6 +567,9 @@ function buildResultRow(ui, call, result) {
   toggle.className = "fold-toggle";
   toggle.textContent = "▸";
   const lbl = document.createElement("span");
+  // same anti-overflow contract as the call chip's name rule (style.css): a
+  // summary that embeds a deep path must break in place, never widen the stream
+  lbl.className = "result-label";
   lbl.textContent = summary;
   row.appendChild(toggle);
   row.appendChild(lbl);

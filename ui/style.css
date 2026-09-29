@@ -523,6 +523,23 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .event .body pre.mermaid-rendered svg { max-width: 100%; height: auto; }
 
+/* MathJax output: a formula is ONE unbreakable box — MathJax v3 has no line
+   breaking, and a 10-column bmatrix (auto-aim.clc's state/observation pair)
+   is far wider than a phone column. Without a cap the container stretched
+   #stream into a page-level horizontal scrollbar; with it, the formula
+   scrolls inside its own box instead. Applies to inline math too: a long
+   inline formula is the same unbreakable box in a paragraph. */
+mjx-container {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+/* the scroll bar must not glue itself to the glyphs: a little air below, and
+   centering survives when the formula FITS (overflow only kicks in when wide) */
+mjx-container[display="true"] {
+  padding-bottom: 2px;
+}
+
 /* a diagram that failed to parse keeps its literal source + one small notice
    (never mermaid's giant error SVG): faint red border, unobtrusive text */
 .event .body pre.mermaid-failed {
@@ -556,7 +573,12 @@ main { display: flex; flex: 1; min-height: 0; }
   color: var(--muted);
 }
 .event .body a { color: var(--accent); }
-.event .body table { border-collapse: collapse; margin: 10px 0; }
+.event .body table {
+  border-collapse: collapse; margin: 10px 0;
+  /* responsive-table pattern: block + own scroll, so a many-column table
+     scrolls inside itself instead of stretching #stream horizontally */
+  display: block; max-width: 100%; overflow-x: auto;
+}
 .event .body th, .event .body td {
   border: 1px solid var(--border); padding: 4px 10px; font-size: 13px;
 }
@@ -576,7 +598,12 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .tool-name { color: var(--text); font-family: var(--font-mono); }
 /* the row's one-line label — a declaration's summary ("read /x (12 lines)",
-   "grep y (3 lines)"): the muted, monospace weight the exploration rows carried */
+   "grep y (3 lines)"): the muted, monospace weight the exploration rows carried.
+   min-width:0 + overflow-wrap are the anti-overflow pair: flex children refuse
+   to shrink below their longest unbreakable token by default, so a deep file
+   path pushed the whole row past #stream's width and opened a horizontal
+   scrollbar; with these the path breaks within its own flex line instead. */
+.tool-name, .tool-label { min-width: 0; overflow-wrap: anywhere; }
 .tool-label { color: var(--muted); font-family: var(--font-mono); }
 /* a row whose result folds under it: the toggle lives IN the row, so the whole
    row is the control — exactly what a collapsed read row was */
@@ -629,18 +656,18 @@ main { display: flex; flex: 1; min-height: 0; }
 .event.thinking::before { background: var(--muted); }
 .event.thinking .hdr { color: var(--muted); font-size: 12px; }
 .thinking-row {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   color: var(--muted); font-size: 13px; cursor: pointer;
   user-select: none; font-family: var(--font-mono);
 }
 .thinking-row:hover { color: var(--text); }
-.thinking-label { color: var(--muted); }
+.thinking-label { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .thinking-full {
   background: var(--code-bg); padding: 8px 10px; border-radius: 0;
   border: 1px solid var(--border);
   margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; color: var(--muted); white-space: pre-wrap;
-  line-height: 1.5;
+  line-height: 1.5; overflow-wrap: anywhere; /* pre-wrap alone won't break a huge URL */
 }
 
 /* run completion: full-width dashed divider with centered uppercase label */
@@ -690,6 +717,9 @@ main { display: flex; flex: 1; min-height: 0; }
   user-select: none;
 }
 .result-row:hover { color: var(--text); }
+/* the summary span: same shrink-and-wrap contract as .tool-label — summaries
+   carry paths/commands verbatim and must never stretch the row */
+.result-label { min-width: 0; overflow-wrap: anywhere; }
 .fold-toggle {
   /* no fixed-width glyph box: a glyph centered inside a 14px inline-block
      leaves dead air before the label, and baseline math drifts the icon off
