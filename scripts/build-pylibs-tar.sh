@@ -42,6 +42,14 @@ case "$OS" in
 esac
 ABI="cp${PYVER//./}"
 
+# uv sync creates the venv WITHOUT pip (uv's default), so a fresh CI checkout
+# dies here with "No module named pip". ensurepip is stdlib and boots pip into
+# the venv; a no-op wherever pip already exists. pip is only the wheel
+# downloader below — the == pins fix the tar's content, not the pip version.
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  "$PY" -m ensurepip --upgrade >/dev/null
+fi
+
 # pin the client venv's exact versions from uv.lock
 OPENAI_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('openai'))")"
 HTTPX2_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('httpx2'))")"
