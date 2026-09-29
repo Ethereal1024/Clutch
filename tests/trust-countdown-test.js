@@ -123,7 +123,7 @@ const closePermSrc = fnBody("closePerm");
   // ---- 5) deny/close cancels the clock: no late auto-allow ----
   global.pendingPerm = { request_id: "r3" };
   startTrustCountdown();
-  stopTrustCountdown(); // what closePerm() does on allow/deny/overlay/stale final
+  stopTrustCountdown(); // what closePerm() does on allow/deny/stale final
   check(advance() === 0, "cancelled chain leaves no timers");
   check(respondCalls.length === 1, "cancelled clock never responds");
   check(allowBtn.textContent === "Allow", "cancelled clock resets the label");
