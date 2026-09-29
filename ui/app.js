@@ -2850,72 +2850,85 @@ $("#fs-hidden-toggle").addEventListener("change", toggleHidden);
 $("#tree-hidden-toggle").addEventListener("change", toggleHidden);
 updateHiddenToggles();
 
-// ---- workspace panel: a fold on the desktop, a drawer on the phone ----
-// The desktop keeps the panel as a permanent right column; its ▸/▾ button
-// (style.css keeps .ws-fold display:none) folds it and the state is persisted
-// per device. On a phone (report #4) the panel is a right slide-over with no
-// folded state to speak of, so the same button just closes the drawer.
-const wsFoldBtn = $("#ws-fold");
-const NARROW_Q = window.matchMedia("(max-width: 640px)");
-const WS_FOLDED_DEFAULT = NARROW_Q.matches ? "1" : "0";
-let wsFolded = localStorage.getItem("clutch_ws_collapsed") ?? WS_FOLDED_DEFAULT;
-
-function applyWsFold() {
-  if (NARROW_Q.matches) {
-    wsFoldBtn.textContent = "✕";
-    wsFoldBtn.title = "close the workspace panel";
-    return;
-  }
-  const folded = wsFolded === "1";
-  $("#right").classList.toggle("collapsed", folded);
-  wsFoldBtn.textContent = folded ? "▸" : "▾";
-  wsFoldBtn.title = folded ? "expand the workspace panel" : "collapse the workspace panel";
-}
-
-wsFoldBtn.addEventListener("click", () => {
-  if (NARROW_Q.matches) {
-    closeShellDrawers(); // the phone drawer's close affordance
-    return;
-  }
-  wsFolded = wsFolded === "1" ? "0" : "1";
-  localStorage.setItem("clutch_ws_collapsed", wsFolded);
-  applyWsFold();
-});
-applyWsFold();
-
-// ---- phone shell (report #4): the project actions and the workspace panel
-// become two drawers, both closed until asked for ----
-// 主流 phone clients (DeepSeek / 豆包 / …) keep the conversation column clean
-// and park the shell behind ☰ and a second trigger. The three project buttons
-// are NOT duplicated: they are MOVED between #topbar and #shell-drawer-actions,
-// so there is exactly one node, one handler and one disabled state per action —
-// and a rotation back to the desktop layout moves the same nodes home.
-const shellDrawer = $("#shell-drawer");
+// ---- phone shell (device reports #2/#3): ONE slide-over panel ----
+// 主流 phone clients keep the conversation column clean and park the shell
+// behind a single trigger. That panel is #right with a project section on top:
+// the three project actions and the workspace tree stack in one drawer instead
+// of the project actions sitting alone in a mostly-empty second one. The
+// dismissal is a square ✕ at the panel's top edge, so it can never land in the
+// middle of a row.
+// The project buttons are NOT duplicated: they are MOVED between #topbar and
+// #shell-project-actions, so there is exactly one node, one handler and one
+// disabled state per action — and a rotation back to the desktop layout moves
+// the same nodes home.
 const shellBackdrop = $("#shell-backdrop");
-const drawerActions = $("#shell-drawer-actions");
+const shellPanel = $("#right");
+const shellActions = $("#shell-project-actions");
 const SHELL_ACTIONS = ["#open-project-btn", "#new-project-btn", "#settings-btn"];
+const NARROW_Q = window.matchMedia("(max-width: 640px)");
 
-// which: "" closes both, "menu" the left drawer, "ws" the workspace panel
-function setShellDrawer(which) {
-  shellDrawer.classList.toggle("open", which === "menu");
-  $("#right").classList.toggle("drawer-open", which === "ws");
-  shellBackdrop.classList.toggle("open", which !== "");
-}
-function closeShellDrawers() {
-  setShellDrawer("");
+// paintShellPanel only moves the classes; setShellPanel also owns the history
+// entry, so the two must not call each other (see the popstate listener).
+function paintShellPanel(open) {
+  shellPanel.classList.toggle("drawer-open", open);
+  shellBackdrop.classList.toggle("open", open);
 }
 
-$("#shell-menu-btn").addEventListener("click", () =>
-  setShellDrawer(shellDrawer.classList.contains("open") ? "" : "menu")
-);
+// The panel is a surface OVER the app, not a page: the phone's back button has
+// to dismiss it instead of walking out of the app. The WebView can only see
+// history, so opening pushes an entry of our own — exactly what the diagram
+// viewer does (a CSS overlay is invisible to MainActivity.onKeyDown).
+// A popstate's event.state describes the entry we LANDED on, not the one that
+// was popped, so which pop belongs to us is tracked by two flags: the open
+// panel owns an entry, and our own history.back() announces itself. Without the
+// second flag a stale pop (tapping ✕ and reopening a frame later) would close
+// the panel the user just reopened.
+let panelHistoryEntry = false; // the open panel owns a history entry
+let consumingEntry = false;    // our own history.back() is in flight
+function setShellPanel(open) {
+  const was = shellPanel.classList.contains("drawer-open");
+  paintShellPanel(open);
+  if (open === was) return;
+  if (open) {
+    try {
+      history.pushState({ clutchShellPanel: 1 }, "");
+      panelHistoryEntry = true;
+    } catch (e) {
+      panelHistoryEntry = false; // file:// (Electron) refuses pushState: nothing to consume
+    }
+  } else if (panelHistoryEntry) {
+    panelHistoryEntry = false;
+    consumingEntry = true;
+    try {
+      history.back(); // consume our own entry
+    } catch (e) {
+      consumingEntry = false;
+    }
+  }
+}
+function closeShellPanel() {
+  setShellPanel(false);
+}
+
+window.addEventListener("popstate", () => {
+  if (consumingEntry) {
+    consumingEntry = false; // the pop we asked for, not the back button
+    return;
+  }
+  if (!panelHistoryEntry) return;
+  panelHistoryEntry = false;
+  paintShellPanel(false); // the back button dismisses the panel
+});
+
 $("#shell-ws-btn").addEventListener("click", () =>
-  setShellDrawer($("#right").classList.contains("drawer-open") ? "" : "ws")
+  setShellPanel(!shellPanel.classList.contains("drawer-open"))
 );
-shellBackdrop.addEventListener("click", closeShellDrawers);
-// a drawer action opens a modal: step aside as soon as one is clicked (the
+$("#shell-close-btn").addEventListener("click", closeShellPanel);
+shellBackdrop.addEventListener("click", closeShellPanel);
+// a panel action opens a modal: step aside as soon as one is clicked (the
 // button's own handler runs first, this bubbling listener right after)
-drawerActions.addEventListener("click", (e) => {
-  if (e.target.closest && e.target.closest("button")) closeShellDrawers();
+shellActions.addEventListener("click", (e) => {
+  if (e.target.closest && e.target.closest("button")) closeShellPanel();
 });
 
 function layoutShell() {
@@ -2925,11 +2938,10 @@ function layoutShell() {
     if (!btn) continue;
     // back into the topbar BEFORE the ▤ trigger, so the desktop order stays
     // exactly what index.html declares
-    if (narrow) drawerActions.appendChild(btn);
+    if (narrow) shellActions.appendChild(btn);
     else $("#topbar").insertBefore(btn, $("#shell-ws-btn"));
   }
-  if (!narrow) closeShellDrawers(); // a rotation to the desktop layout drops them
-  applyWsFold();
+  if (!narrow) closeShellPanel(); // a rotation to the desktop layout drops the panel
 }
 NARROW_Q.addEventListener("change", layoutShell);
 layoutShell();

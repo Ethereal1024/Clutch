@@ -13,11 +13,15 @@
    #5 the workspace panel became a collapsible drawer under the input bar
 
    Device reports (round 2) covered here:
-   #4 the shell follows the主流 phone idiom: the topbar keeps the two drawer
-      triggers, Open/New/Settings move into a left slide-over, and the
-      workspace becomes a right slide-over — both closed until asked for, so
-      the stream owns the whole column
-   #3 thinner scrollbars on a touch screen */
+   #4 the shell follows the主流 phone idiom: the topbar keeps one drawer
+      trigger and the shell panel slides over the stream — closed until asked
+      for, so the stream owns the whole column
+   #3 thinner scrollbars on a touch screen
+
+   Device reports (round 3) covered here:
+   #2 the panel is the ONLY slide-over: the project actions sit above the
+      workspace tree inside it (the second, mostly-empty left drawer is gone)
+   #3 its dismissal is a square ✕ at the panel's top-right edge */
 
 @media (max-width: 640px) {
   /* the app is a fixed-viewport instrument: #topbar (order-free) + main fill
@@ -33,7 +37,7 @@
   /* report #3: a touch scrollbar is an overlay — keep it hairline */
   ::-webkit-scrollbar { width: 4px; height: 4px; }
 
-  /* ---- topbar: brand + status + the two drawer triggers only (report #4) ---- */
+  /* ---- topbar: brand + status + the single panel trigger (report #4) ---- */
   #topbar {
     flex-wrap: nowrap;
     gap: 8px;
@@ -44,15 +48,21 @@
     font-size: 12px;
   }
   /* the project actions are not hidden — app.js has moved them into
-     #shell-drawer-actions by the time this applies (the drawer is the only
+     #shell-project-actions by the time this applies (the panel is the only
      place they exist on a phone) */
-  #shell-menu-btn, #shell-ws-btn { display: inline-flex; align-items: center; }
+  /* the one remaining trigger is the phone's only door into the shell, so it
+     gets a real tap target instead of the compact desktop pill's box */
+  #shell-ws-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 38px; min-height: 34px; padding: 0 8px; font-size: 14px;
+  }
   #project-label { max-width: 110px; }
 
-  /* ---- the drawers themselves (report #4) ----
-     Left: project actions. Right: the workspace panel, which is #right moved
-     out of the column flow onto the edge. Closed = pushed off-canvas; the
-     backdrop both dims the stream and takes the close tap. */
+  /* ---- the panel (reports #2/#4) ----
+     #right is the one slide-over: moved out of the column flow onto the right
+     edge, it carries the project section above the workspace tree. Closed =
+     pushed off-canvas; the backdrop both dims the stream and takes the close
+     tap. */
   .shell-backdrop {
     display: block;
     position: fixed; inset: 0; z-index: 55;
@@ -61,16 +71,15 @@
     transition: opacity 0.18s ease;
   }
   .shell-backdrop.open { opacity: 1; pointer-events: auto; }
-  .shell-drawer {
-    display: flex;
-    position: fixed; top: 0; bottom: 0; left: 0; z-index: 60;
-    width: min(78vw, 300px);
-    background: var(--bg2);
-    border-right: 1px solid var(--border);
-    transform: translateX(-101%);
-    transition: transform 0.2s ease;
+  /* the project section only exists in the phone panel (report #2) */
+  .shell-project { display: block; }
+  /* section heads double as touch rows here, so both are the same height and
+     the ✕ gets a real target instead of the 2px of chrome a desktop row needs */
+  #right .panel-head {
+    padding: 6px 10px;
+    min-height: 44px;
   }
-  .shell-drawer.open { transform: none; }
+  .shell-close-btn { min-width: 32px; min-height: 32px; font-size: 15px; }
 
   /* ---- column layout: input bar on top, stream below ---- */
 
@@ -96,8 +105,9 @@
      already ellipsizes; keep the switches from shrinking below their text */
   .run-actions button { flex: none; }
 
-  /* report #4: the workspace is a right slide-over, out of the column flow —
-     it no longer steals height from the stream. Its tree scrolls inside. */
+  /* report #4: the panel is a right slide-over, out of the column flow — it
+     no longer steals height from the stream, and its tree scrolls inside.
+     Report #2 put the project section at the top of this same panel. */
   #right {
     position: fixed; top: 0; right: 0; bottom: 0; left: auto; z-index: 60;
     width: min(88vw, 380px);
@@ -108,12 +118,6 @@
   }
   #right.drawer-open { transform: none; }
   #tree { min-height: 0; }
-  /* the fold affordance only exists here; style.css keeps it display:none.
-     On a phone the panel has no folded state to toggle — the button closes
-     the drawer (app.js reads the same media query). */
-  .ws-fold {
-    display: inline-flex;
-  }
 
   /* the stream gets the whole column and scrolls in itself — which re-anchors
      #jump-bottom (report #6) inside .stream-wrap */

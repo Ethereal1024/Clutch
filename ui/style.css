@@ -172,27 +172,36 @@ body { display: flex; flex-direction: column; }
 
 .spacer { flex: 1; }
 
-/* ---- phone shell furniture (device report #4) ----------------------------
-   On a narrow screen the topbar's project actions and the whole workspace
-   panel become slide-over drawers, opened from two small triggers. Everything
-   below is INERT on the desktop: style.css hides the triggers, the drawers and
-   the backdrop, and mobile.css (loaded under max-width:640px) is the only
-   place that reveals and positions them — the desktop keeps exactly the
-   layout it had. The buttons themselves are not duplicated: app.js MOVES
-   #open-project-btn / #new-project-btn / #settings-btn into
-   #shell-drawer-actions on a phone, so their handlers, disabled state and DOM
-   identity stay single-sourced. */
-#shell-menu-btn, #shell-ws-btn, .shell-drawer, .shell-backdrop { display: none; }
+/* ---- phone shell furniture (device reports #2/#4) ------------------------
+   On a narrow screen the shell collapses into ONE slide-over panel: the topbar
+   keeps a single ▤ trigger, and that panel carries the project actions as a
+   section ABOVE the workspace tree, with its dismissal at the panel's top edge.
+   Everything below is INERT on the desktop: style.css hides the trigger, the
+   panel's project section and the backdrop, and mobile.css (loaded under
+   max-width:640px) is the only place that reveals and positions them — the
+   desktop keeps exactly the layout it had. The buttons themselves are not
+   duplicated: app.js MOVES #open-project-btn / #new-project-btn / #settings-btn
+   into #shell-project-actions on a phone, so their handlers, disabled state and
+   DOM identity stay single-sourced. */
+#shell-ws-btn, .shell-project, .shell-backdrop { display: none; }
 
-#shell-drawer-actions { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
-/* the drawer's rows are full-width, left-aligned buttons, not the topbar's
-   compact pills (same nodes, phone shape) */
-#shell-drawer-actions button {
-  width: 100%;
-  justify-content: flex-start;
-  text-align: left;
-  padding: 12px;
-  font-size: 14px;
+/* the phone panel's project row: three equal-width pills spanning the panel,
+   not the topbar's right-packed cluster (same nodes, phone shape) */
+#shell-project-actions { display: flex; align-items: center; gap: 8px; padding: 12px; }
+#shell-project-actions button { flex: 1; min-width: 0; text-align: center; padding: 10px 6px; }
+
+/* the phone panel's dismissal: a square tap target at the section head's right
+   edge (device report #3 — it used to be a ▾ wedged between the "workspace"
+   title and the "show hidden" switch, i.e. floating in the middle of the row) */
+.shell-close-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  line-height: 1;
 }
 
 /* status: rectangle badge (kept as a box, not a dot), vertically centered with
@@ -251,12 +260,16 @@ button.primary.stop-mode:hover:not(:disabled) { background: #fbe6e6; border-colo
 button.ghost { background: transparent; color: var(--muted); }
 button.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
 
-/* run button doubles as Stop; the mode toggle shares its exact box so the two
-   buttons stay perfectly aligned regardless of font weight / glyph ink */
-#run-btn, #mode-btn {
+/* the run row is ONE control cluster, not three independent buttons: run/stop,
+   mode and trust all read as switches over the next run, so they share a single
+   box by construction. Selecting on the group (not on two ids) is what keeps a
+   latecomer aligned: trust's 🛡 comes from an emoji fallback face whose em-box
+   is ~2.8px taller than Archivo's, which is exactly what nudged it out of line
+   (device report #1 — 80.1x31.8 against the neighbours' 90x29.0). */
+.run-actions button {
   min-width: 90px;   /* "▶ Run" and "■ Stop" both fit → no width change on toggle */
   height: 29px;      /* padding 7+7 + font 13 + border 1+1 → pinned identical */
-  line-height: 1;    /* the ■/▶ glyphs have large em-boxes; don't let them inflate height */
+  line-height: 1;    /* emoji/glyph em-boxes must never inflate the box */
   text-align: center;
 }
 
@@ -846,21 +859,6 @@ mjx-container[display="true"] {
   font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--muted);
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-}
-/* workspace fold button (report #5): a mobile-only affordance — the desktop
-   panel is a permanent fixture, so the button stays display:none here and
-   mobile.css is the only place that shows it */
-.ws-fold {
-  display: none;
-  flex: none;
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-size: 12px;
-  line-height: 1.4;
-  cursor: pointer;
 }
 #tree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 12px; }
 .tree-node {

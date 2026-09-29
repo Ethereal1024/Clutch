@@ -83,9 +83,9 @@ ICONS = {
     0x25A6: "▦ open button",
     0x2699: "⚙ settings button",
     0x1F6E1: "🛡 trust button",
-    0x2630: "☰ shell project-drawer trigger (narrow screens)",
-    0x25A4: "▤ shell workspace-drawer trigger (narrow screens)",
-    0x2715: "✕ close/dismiss (drawers, fold toggle, diagram viewer)",
+    0x2630: "☰ shell trigger (baked; the one-panel shell renders ▤ instead)",
+    0x25A4: "▤ shell panel trigger (narrow screens)",
+    0x2715: "✕ close/dismiss (shell panel, modals, diagram viewer)",
     0x2212: "− diagram-viewer zoom out (U+002D hyphen would be too short)",
 }
 PLUS_SOURCE = 0x002B  # Symbola's ASCII "+", remapped onto U+FF0B

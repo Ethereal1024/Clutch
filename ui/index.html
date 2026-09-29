@@ -20,30 +20,26 @@
 </head>
 <body>
   <header id="topbar">
-    <!-- phone shell (device report #4): on a narrow screen the topbar keeps only
-         these two triggers — ☰ opens the project drawer, ▤ the workspace one.
-         style.css hides them on the desktop; mobile.css shows them. -->
-    <button id="shell-menu-btn" class="shell-btn" title="project actions" aria-label="project actions">☰</button>
+    <!-- phone shell (device reports #2/#4): on a narrow screen the topbar keeps
+         ONE trigger — ▤ opens the shell panel, which carries the project
+         actions as well as the workspace tree. style.css hides it on the
+         desktop; mobile.css shows it. -->
     <div class="brand"><span class="logo">▣</span> Clutch</div>
     <div id="project-label" class="project-label muted" title="active project"></div>
     <span id="readonly-badge" class="readonly-badge hidden" title="opened read-only: another window holds the write lock">read-only</span>
     <div id="status" class="badge idle">idle</div>
     <div class="spacer"></div>
     <!-- the three project actions live here on the desktop; app.js MOVES these
-         same nodes into #shell-drawer-actions on a phone (report #4) -->
+         same nodes into #shell-project-actions on a phone (device report #2) -->
     <button id="open-project-btn" title="open a project">▦ Open</button>
     <button id="new-project-btn" title="create a new project">＋ New</button>
     <button id="settings-btn" title="API settings">⚙</button>
-    <button id="shell-ws-btn" class="shell-btn" title="workspace files" aria-label="workspace files">▤</button>
+    <button id="shell-ws-btn" class="shell-btn" title="project actions and workspace files" aria-label="project actions and workspace files">▤</button>
   </header>
 
-  <!-- phone shell drawers: inert on the desktop (style.css display:none),
-       revealed by mobile.css as slide-overs -->
+  <!-- phone shell backdrop: inert on the desktop (style.css display:none),
+       revealed by mobile.css while the panel is open -->
   <div id="shell-backdrop" class="shell-backdrop"></div>
-  <aside id="shell-drawer" class="shell-drawer" aria-label="project actions">
-    <div class="panel-head"><span>project</span></div>
-    <div id="shell-drawer-actions"></div>
-  </aside>
 
   <div id="welcome" class="welcome">
     <div class="welcome-box">
@@ -217,9 +213,23 @@
     </section>
 
     <aside id="right">
+      <!-- device report #2: on a phone the three project actions live in this
+           same slide-over, as a section ABOVE the workspace tree — one panel,
+           one trigger, nothing stranded in a second drawer. style.css keeps
+           this section display:none on the desktop, where app.js moves the
+           buttons back into #topbar and the panel stays the workspace column
+           it has always been. -->
+      <section id="shell-project" class="shell-project" aria-label="project">
+        <div class="panel-head">
+          <span>project</span>
+          <!-- the panel's dismissal: at the top edge of the panel it closes
+               (device report #3), never mid-row -->
+          <button id="shell-close-btn" class="shell-close-btn" title="close the panel" aria-label="close the panel">✕</button>
+        </div>
+        <div id="shell-project-actions"></div>
+      </section>
       <div class="panel-head">
         <span>workspace</span>
-        <button id="ws-fold" class="ws-fold" title="collapse or expand the workspace panel" aria-label="collapse or expand the workspace panel">▾</button>
         <label class="hidden-toggle" title="show hidden (dot) files">
           <input type="checkbox" id="tree-hidden-toggle" /> show hidden
         </label>
