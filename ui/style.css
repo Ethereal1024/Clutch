@@ -333,6 +333,17 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 #task-input:focus { outline: none; border-color: var(--accent); }
 .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+/* the row is space-between: give the path the slack and ellipsize it — a long
+   cwd must never stretch the actions row (on the phone it painted past the
+   taskbar into the body clip) */
+#workspace-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
 .muted { color: var(--muted); font-size: 13px; }
 
 /* project-open progress: a thin overlay strip pinned over the top of the
