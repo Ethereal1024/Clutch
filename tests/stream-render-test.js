@@ -41,6 +41,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---- load the real code ----
 (0, eval)(region("let textRenderRaf = 0;", "flushTextRender"));
 (0, eval)(region("const hlCache = new Map();", "highlightCode"));
+(0, eval)(fnBody("noBackend"));
 (0, eval)(fnBody("apiFetch"));
 
 (async () => {
@@ -107,11 +108,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const r = await apiFetch("/api/run", { method: "POST", body: { a: 1 } });
   check(r.fine && sawSignal && sawBody && sawCt, "apiFetch keeps method/body/headers and passes the signal");
 
+  // a null base (supervisor mid-spawn) is NOT an error the app can catch at the
+  // fetch layer: `null + "/api/host"` is the relative URL "null/api/host" and
+  // resolves against whatever origin served the UI. The request must never
+  // leave, and the failure must look like an unreachable backend.
+  global.API_BASE = null;
+  let sent = null;
+  global.fetch = async (url) => { sent = url; return { ok: true, json: async () => ({}) }; };
+  let noBase = null;
+  try { await apiFetch("/api/host"); } catch (e) { noBase = e; }
+  check(sent === null, `no request is sent without a base (saw ${JSON.stringify(sent)})`);
+  check(noBase && noBase.code === "no_backend" && noBase.status === undefined,
+        "apiFetch throws no_backend (no .status) so callers take their unreachable path");
+
   // ---- 4) source-level guards: the constants that make the fix what it is ----
   check(/TEXT_RENDER_MIN_MS = \d+/.test(src), "throttle window constant present in app.js");
   check(Number(src.match(/TEXT_RENDER_MIN_MS = (\d+)/)[1]) >= 100, "throttle window is at least ~100ms");
   check(/HL_STREAM_MAX = \d+/.test(src), "streaming fence size cap present");
   check(/_mathDone/.test(src), "math idempotence guard present");
+  check(/if \(!API_BASE\) throw noBackend\(\)/.test(src),
+        "the raw NDJSON stream in openProject guards its base too");
   check(/timeout = \d+/.test(fnBody("apiFetch").slice(0, 200)), "apiFetch has a default timeout");
 
   summary("stream-render-test");

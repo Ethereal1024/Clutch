@@ -29,6 +29,19 @@ async function resolveApiBase() {
 
 const $ = (s) => document.querySelector(s);
 
+// A request needs a resolved base. Until the supervisor hands this window its
+// session port API_BASE is null, and `null + "/api/host"` is not an error — it
+// is the relative URL "null/api/host", which resolves against whatever origin
+// served the UI and comes back a stray 404 (or, over file://, a network error
+// nobody can act on). Refuse before the request instead; the error is shaped
+// like an unreachable backend (`.code`, no `.status`), the path every caller
+// already has for "could not talk to it".
+function noBackend() {
+  const e = new Error("no backend URL yet — the session is still starting");
+  e.code = "no_backend";
+  return e;
+}
+
 // single JSON request path: base URL, Content-Type header and error unwrapping
 // live here instead of being re-written at every call site. Errors are thrown
 // as `Error` with `.status` (HTTP status, absent for network failures — callers
@@ -36,6 +49,7 @@ const $ = (s) => document.querySelector(s);
 // (server error code, e.g. project_open_conflict). Throws on non-2xx and on a
 // 200 body that carries an error (only /api/fs/list does that).
 async function apiFetch(path, { method = "GET", body, base = API_BASE, timeout = 30000 } = {}) {
+  if (!base) throw noBackend();
   // bounded: a hung backend must surface as a failed button, not a forever-
   // pending one (AbortError carries no .status -> callers treat it as
   // "backend unreachable", the same path as a refused connection)
@@ -2739,7 +2753,7 @@ function openPerm(ev) {
 }
 function closePerm() {
   // respond immediately (the agent is blocked); only the visual close animates
-  stopTrustCountdown(); // any close (allow/deny/overlay/stale final) kills the clock
+  stopTrustCountdown(); // any close (allow/deny/stale final) kills the clock
   closeModal(permModal);
   pendingPerm = null;
 }
@@ -2766,7 +2780,20 @@ async function respondPerm(allow) {
 }
 $("#perm-allow").addEventListener("click", () => respondPerm(true));
 $("#perm-deny").addEventListener("click", () => respondPerm(false));
-dismissOnOverlayPress(permModal, () => respondPerm(false));
+
+// Enter answers Allow. The agent is BLOCKED on this verdict and this prompt is
+// the only way to answer it, so the key a user presses by reflex must be the
+// permissive one — and nothing else may answer for them: this modal takes no
+// backdrop dismiss (a click outside the box used to mean DENY), so a stray
+// press can only ever allow, never reject a permission request.
+function permKey(e) {
+  if (e.key !== "Enter" || e.isComposing || !pendingPerm) return false;
+  if (e.ctrlKey || e.metaKey || e.altKey) return false; // those are the task box's shortcuts
+  e.preventDefault(); // a focused Deny button must not take the key too
+  respondPerm(true);
+  return true;
+}
+document.addEventListener("keydown", permKey);
 
 // ---- trust mode: permission prompts auto-allow after a short countdown ----
 // UI-side only: the armed flag lives in localStorage, the countdown lives here.
@@ -3186,6 +3213,7 @@ async function openProject(path, readOnly = false) {
     // NOT apiFetch: this endpoint streams NDJSON (meta/progress/event/done), so
     // the body must stay a stream; only the error unwrap below shares apiFetch's
     // contract (Error with .code/.status)
+    if (!API_BASE) throw noBackend(); // never fetch "null/api/project/open"
     const r = await fetch(API_BASE + "/api/project/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
