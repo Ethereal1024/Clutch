@@ -740,6 +740,21 @@ main { display: flex; flex: 1; min-height: 0; }
   color: var(--muted);
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
+/* workspace fold button (report #5): a mobile-only affordance — the desktop
+   panel is a permanent fixture, so the button stays display:none here and
+   mobile.css is the only place that shows it */
+.ws-fold {
+  display: none;
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
 #tree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 12px; }
 .tree-node {
   font-family: var(--font-mono); font-size: 13px;

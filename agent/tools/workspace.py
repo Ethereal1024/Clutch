@@ -40,9 +40,8 @@ def parse_ls_entries(stdout: str) -> list[tuple[str, bool]]:
 
     ls -1AF marks dirs with a trailing '/', executables with '*', symlinks with
     '@'; the '*'/'@' suffixes are stripped. Hidden filtering is deliberately NOT
-    done here: the three call sites disagree on it (the server's fs list shows
-    hidden dirs but not hidden files; the tree walk hides both), so each site
-    applies its own rule after this shared parse.
+    done here: the shared rule lives in browsing.entry_visible (off = no dot
+    entries anywhere) and every call site applies it after this parse.
     """
     out: list[tuple[str, bool]] = []
     for entry in stdout.splitlines():

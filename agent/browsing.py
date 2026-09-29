@@ -40,12 +40,13 @@ def dir_error(message: str) -> dict[str, Any]:
 
 
 def entry_visible(name: str, is_dir: bool, show_hidden: bool) -> bool:
-    """The one hidden-item policy for the directory browser: dot-FILES are
-    filtered when hidden entries are off, dot-DIRECTORIES stay listed — the
-    browser needs a way into ~/.config-style directories. Both transports call
-    this, so a local listing and a remote listing of the same directory agree
-    (the local list used to hide dot-dirs and had drifted from the remote)."""
-    return show_hidden or is_dir or not name.startswith(".")
+    """The one hidden-item policy for every browser surface (the picker's
+    /api/fs/list and the workspace tree, both transports): with the toggle off
+    NOTHING dot-prefixed is listed — file or directory. The old split (dot-dirs
+    stayed in the picker so ~/.config could be clicked into) read as "the
+    toggle does nothing"; a hidden directory is reached through the path input
+    instead, and its non-dot children list normally once inside."""
+    return show_hidden or not name.startswith(".")
 
 
 # ---- project-picker directory listing (/api/fs/list) ----

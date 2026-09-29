@@ -77,6 +77,12 @@ const els = {
 // agent mode for the next run: "work" (full tools) | "chat" (read-only); sticky per session
 let agentMode = localStorage.getItem("clutch_mode") || "work";
 
+// Android shell (user report #2): the phone has no local backend of its own —
+// the agent runs behind the SSH tunnel, so every "Local" affordance is dead
+// weight there. UA sniff, no bridge plumbing: the WebView UA always carries
+// the Android token, Electron/desktop UAs never do.
+const IS_ANDROID = /\bAndroid\b/.test(navigator.userAgent || "");
+
 function setMode(mode) {
   agentMode = mode === "chat" ? "chat" : "work";
   localStorage.setItem("clutch_mode", agentMode);
@@ -1978,6 +1984,9 @@ function closeModal(overlayEl, onDone) {
 // ---- SSH connection (in the project picker) ----
 const connSelect = customSelect($("#conn-select"));
 const connStatus = $("#conn-status");
+// report #2: the tooltip's "go back to the local backend" reads wrong on the
+// phone, where no local backend exists to go back to
+if (IS_ANDROID) $("#conn-cancel").title = "abort the connection attempt";
 const connNewHost = $("#conn-new-host");
 const connNewUser = $("#conn-new-user");
 const connNewPort = $("#conn-new-port");
@@ -2015,10 +2024,14 @@ function renderConnSelector() {
   const cUser = localStorage.getItem("clutch_ssh_user");
   const cPort = localStorage.getItem("clutch_ssh_port");
   connSelect.innerHTML = "";
-  const localOpt = document.createElement("option");
-  localOpt.value = "local";
-  localOpt.textContent = "Local (this machine)";
-  connSelect.appendChild(localOpt);
+  if (!IS_ANDROID) {
+    // report #2: the phone has no local backend, so the desktop-only escape
+    // hatch must not appear there at all
+    const localOpt = document.createElement("option");
+    localOpt.value = "local";
+    localOpt.textContent = "Local (this machine)";
+    connSelect.appendChild(localOpt);
+  }
   // keep the connected host entry selected instead of adding a synthetic URL
   let connectedValue = null;
   for (const c of sshConns()) {
@@ -2043,6 +2056,20 @@ function renderConnSelector() {
         : "SSH: " + override + " ✓";
       connSelect.appendChild(opt);
       connSelect.value = "ssh:__connected__";
+    }
+  } else if (IS_ANDROID) {
+    // report #2: with no Local entry, land the picker on the most recent saved
+    // host (display only — connecting still requires the user's change event);
+    // nothing saved yet: a placeholder whose "" value the change handler skips
+    const saved = sshConns();
+    if (saved.length) {
+      connSelect.value = "ssh:" + connLabel(saved[0]);
+    } else {
+      const ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = "— add an SSH connection —";
+      connSelect.appendChild(ph);
+      connSelect.value = "";
     }
   } else {
     connSelect.value = "local";
@@ -2555,6 +2582,30 @@ $("#fs-hidden-toggle").addEventListener("change", toggleHidden);
 $("#tree-hidden-toggle").addEventListener("change", toggleHidden);
 updateHiddenToggles();
 
+// ---- workspace drawer (report #5) ----
+// The phone used to pin the panel to the bottom of a page-length column.
+// mobile.css now re-orders it under the input bar as a collapsible drawer;
+// this is the fold state and its ▸/▾ button, persisted per device. The
+// desktop never sees the button (style.css keeps .ws-fold display:none) and
+// stays expanded.
+const wsFoldBtn = $("#ws-fold");
+const WS_FOLDED_DEFAULT = matchMedia("(max-width: 640px)").matches ? "1" : "0";
+let wsFolded = localStorage.getItem("clutch_ws_collapsed") ?? WS_FOLDED_DEFAULT;
+
+function applyWsFold() {
+  const folded = wsFolded === "1";
+  $("#right").classList.toggle("collapsed", folded);
+  wsFoldBtn.textContent = folded ? "▸" : "▾";
+  wsFoldBtn.title = folded ? "expand the workspace panel" : "collapse the workspace panel";
+}
+
+wsFoldBtn.addEventListener("click", () => {
+  wsFolded = wsFolded === "1" ? "0" : "1";
+  localStorage.setItem("clutch_ws_collapsed", wsFolded);
+  applyWsFold();
+});
+applyWsFold();
+
 // file changes only arrive via tool results: debounced refresh, no polling
 function scheduleTreeRefresh() {
   clearTimeout(treeRefreshTimer);
@@ -3015,14 +3066,17 @@ async function loadDir(path, remember = true) {
         "error-row"
       )
     );
-    listEl.appendChild(
-      fsRow("Reset to local backend", "action", async () => {
-        localStorage.removeItem("clutch_ssh_connected");
-        localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
-        await switchBackendResolved();
-        refreshPicker();
-      })
-    );
+    if (!IS_ANDROID) {
+      // report #2: there is no local backend to reset to on the phone
+      listEl.appendChild(
+        fsRow("Reset to local backend", "action", async () => {
+          localStorage.removeItem("clutch_ssh_connected");
+          localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
+          await switchBackendResolved();
+          refreshPicker();
+        })
+      );
+    }
   }
 }
 

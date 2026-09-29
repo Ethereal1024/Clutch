@@ -2,10 +2,27 @@
    the (max-width: 640px) media attribute in index.html, so the desktop is a
    no-op by construction — this file does not have to restate a single desktop
    rule, it only shrinks/re-flows what cannot fit a 360-430 CSS-px column.
-   Conservative on purpose: no selector here exists that style.css does not
-   already own; we only touch width/padding/order, never colors or type. */
+   Conservative on purpose: every selector here restates one style.css owns;
+   we only touch layout (width/padding/order/display), never colors or type.
+
+   M3.5 reports covered here:
+   #1 the conn modal grew a horizontal scrollbar (long SSH label + picker)
+   #4/#6 the input box scrolled away with the page / ↓ never showed — the
+      workspace panel at the bottom of the column let the stream stretch the
+      page instead of scrolling inside itself
+   #5 the workspace panel is now a collapsible drawer under the input bar */
 
 @media (max-width: 640px) {
+  /* the app is a fixed-viewport instrument: #topbar (order-free) + main fill
+     the height exactly and every pane scrolls inside itself. Stray overflow
+     must never turn into a page scroll — that is what slid the input box off
+     screen and hid the ↓ button. Modals are position:fixed, so this clip
+     cannot ever trap one. */
+  html, body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   /* topbar: let the brand row and the action buttons wrap to two lines
      instead of squeezing the status badge out of the viewport */
   #topbar {
@@ -18,23 +35,75 @@
     font-size: 12px;
   }
 
-  /* workspace panel: 320px side-by-side would leave ~40px of chat; stack it
-     under the stream as a 40vh scroll region instead of hiding it */
+  /* ---- column layout: input bar on top, workspace drawer, then stream ---- */
+
   main {
     flex-direction: column;
   }
-  #right {
-    width: auto;
-    max-height: 40vh;
-    border-left: none;
-    border-top: 1px solid var(--border);
+  /* dissolve the left pane: its children (taskbar, stream) become direct
+     flex items of main so the ORDER property can interleave the workspace
+     drawer between them. #left's own min-height:auto was the report-#4 bug:
+     it let the stream content stretch the column past the viewport, the
+     whole page scrolled, the input rode up and the ↓ button never showed. */
+  #left {
+    display: contents;
   }
-
+  /* the input bar stays pinned at the top, always visible */
   #taskbar {
+    order: 0;
     padding: 10px 12px 12px;
   }
   #task-input {
     padding: 8px;
+  }
+  /* report #5: the workspace sits UNDER the input bar as a collapsible
+     drawer (app.js toggles #right.collapsed; default folded on narrow
+     screens). Its tree scrolls inside the 45vh cap. */
+  #right {
+    order: 1;
+    width: auto;
+    flex: none;
+    max-height: 45vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  #tree {
+    min-height: 0;
+  }
+  #right.collapsed {
+    max-height: none;
+  }
+  #right.collapsed #tree {
+    display: none;
+  }
+  #right.collapsed .panel-head {
+    border-bottom: none;
+  }
+  /* the fold affordance only exists here; style.css keeps it display:none */
+  .ws-fold {
+    display: inline-flex;
+  }
+  /* the stream gets whatever the drawer leaves and scrolls in itself —
+     which re-anchors #jump-bottom (report #6) inside .stream-wrap */
+  .stream-wrap {
+    order: 2;
+  }
+
+  /* ---- report #1: rows that flex must be allowed to shrink/wrap ----
+     flex:1 alone doesn't shrink below the content's width (min-width:auto),
+     so a long user@host:port label in the picker pushed the ＋ button out of
+     the modal and opened a horizontal scrollbar on the window. */
+  .fs-conn-row {
+    flex-wrap: wrap;
+  }
+  .fs-conn-row .cselect {
+    min-width: 0;
+  }
+  .fs-toolbar {
+    flex-wrap: wrap;
+  }
+  .fs-toolbar input {
+    min-width: 0;
   }
 
   /* modals own fixed pixel widths (420/540/560) — cap them to the viewport */
