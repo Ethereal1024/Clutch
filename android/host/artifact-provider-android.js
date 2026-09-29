@@ -89,7 +89,24 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
     async ensurePyLibsTar(target) {
       // probe spellings vary (uname -s says "Linux"); the CI index is lowercase
       const key = `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}-py${target.pyver}`;
-      const index = await fetchIndex(indexUrl);
+      let index;
+      try {
+        index = await fetchIndex(indexUrl);
+      } catch (e) {
+        // a 404 here is the supply line, not the network: the release this
+        // APK's stamp points at predates the pylibs-matrix job (v0.1.14 did)
+        // and simply has no index asset. Say so — "HTTP 404 for …" sent the
+        // user chasing a connectivity ghost.
+        if (/HTTP 404/.test((e && e.message) || "")) {
+          throw new Error(
+            `pylibs index 404 at ${indexUrl}: that release carries no pylibs-matrix ` +
+              "assets (the tag predates the job). Cut a new tag so the release CI " +
+              "publishes the index + tars, or point the stamp at a LAN index " +
+              "(docs/android/02 §7)."
+          );
+        }
+        throw e;
+      }
       const entry = index && index[key];
       if (!entry || !entry.file || !entry.sha256) {
         throw new Error(`no prebuilt pylibs artifact for ${key}: the pylibs-matrix CI job has not published one`);

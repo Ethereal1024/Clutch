@@ -2268,11 +2268,15 @@ async function handleSshConnect(host, user, port, statusEl) {
         refreshPicker();
         return true;
       }
-      // false = tunnel never came up; string = local backend down (the real failure)
+      // false = tunnel never came up; string = local backend down (the real failure).
+      // res.error is the bootstrap verdict (e.g. the pylibs index 404) — never
+      // drop it: the bare "unreachable" hid a whole class of supply-line
+      // failures behind a symptom.
       setFsConnectError(
         degraded === false
           ? "connection failed: " + (res.error || "could not connect")
-          : "SSH connected, but the local agent server is " + degraded,
+          : "SSH connected, but the local agent server is " + degraded +
+            (res.error ? " (" + res.error + ")" : ""),
         statusEl
       );
     }
