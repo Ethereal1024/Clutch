@@ -1480,6 +1480,240 @@ function showMermaidError(pre, detail) {
   }
 }
 
+// ---- diagram viewer (device report #6) ----------------------------------
+// A flowchart in a phone column is unreadable at fit-width, and even on the PC
+// a 900px-wide diagram is a squint. Clicking a rendered diagram opens it
+// full-screen with the phone image-viewer gestures: drag to pan, wheel/pinch to
+// zoom, double-tap/double-click for 1:1, ✕ / Esc / Android back / tap outside to
+// leave. Built on first use; nothing is added to the page until then, and the
+// click is delegated (diagrams are re-rendered on every stream delta, so a
+// per-diagram listener would be re-attached hundreds of times).
+
+let dvOverlay = null;
+let dvStage = null;
+let dvInner = null;
+let dvZoom = 1;
+let dvX = 0;
+let dvY = 0;
+let dvFitZoom = 1;
+let dvHistoryEntry = false; // this viewer pushed a history entry (Android back)
+
+const DV_MIN_ZOOM = 0.05;
+const DV_MAX_ZOOM = 16;
+const clampZoom = (z) => Math.max(DV_MIN_ZOOM, Math.min(DV_MAX_ZOOM, z));
+
+function dvApply() {
+  dvInner.style.transform = "translate(" + dvX + "px," + dvY + "px) scale(" + dvZoom + ")";
+}
+
+// centre the diagram at its natural size in the stage
+function dvFit() {
+  const svg = dvInner.firstElementChild;
+  if (!svg || !dvStage) return;
+  const w = Number(svg.getAttribute("width")) || svg.clientWidth || 800;
+  const h = Number(svg.getAttribute("height")) || svg.clientHeight || 600;
+  const r = dvStage.getBoundingClientRect();
+  dvFitZoom = Math.min((r.width * 0.94) / w, (r.height * 0.94) / h) || 1;
+  dvZoom = dvFitZoom;
+  dvX = (r.width - w * dvZoom) / 2;
+  dvY = (r.height - h * dvZoom) / 2;
+  dvApply();
+}
+
+// scale by `factor`, keeping the point (cx,cy) — stage-local pixels — in place
+function dvZoomAt(factor, cx, cy) {
+  const z = clampZoom(dvZoom * factor);
+  const k = z / dvZoom;
+  dvX = cx - (cx - dvX) * k;
+  dvY = cy - (cy - dvY) * k;
+  dvZoom = z;
+  dvApply();
+}
+
+function dvCenterZoom(z) {
+  if (!dvStage) return;
+  const r = dvStage.getBoundingClientRect();
+  dvZoomAt(z / dvZoom, r.width / 2, r.height / 2);
+}
+
+function ensureDiagramViewer() {
+  if (dvOverlay) return;
+  dvOverlay = document.createElement("div");
+  dvOverlay.className = "diagram-viewer";
+  dvOverlay.innerHTML =
+    '<div class="dv-hint">drag to pan · pinch or wheel to zoom · double-tap for 1:1 · tap outside to close</div>' +
+    '<div class="dv-stage"><div class="dv-inner"></div></div>' +
+    '<div class="dv-bar">' +
+    '<button class="dv-zoom-out" title="zoom out">−</button>' +
+    '<button class="dv-one" title="actual size">1:1</button>' +
+    '<button class="dv-fit" title="fit to screen">fit</button>' +
+    '<button class="dv-zoom-in" title="zoom in">＋</button>' +
+    "</div>" +
+    '<button class="dv-close" title="close (Esc)">✕</button>';
+  document.body.appendChild(dvOverlay);
+  dvStage = dvOverlay.querySelector(".dv-stage");
+  dvInner = dvOverlay.querySelector(".dv-inner");
+
+  const localOf = (e) => {
+    const r = dvStage.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  dvOverlay.querySelector(".dv-close").addEventListener("click", closeDiagramViewer);
+  dvOverlay.querySelector(".dv-fit").addEventListener("click", dvFit);
+  dvOverlay.querySelector(".dv-one").addEventListener("click", () => dvCenterZoom(1));
+  dvOverlay.querySelector(".dv-zoom-in").addEventListener("click", () => dvCenterZoom(dvZoom * 1.5));
+  dvOverlay.querySelector(".dv-zoom-out").addEventListener("click", () => dvCenterZoom(dvZoom / 1.5));
+
+  // desktop: the wheel zooms around the cursor (a bare wheel must not scroll
+  // the page under the overlay)
+  dvStage.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      const p = localOf(e);
+      dvZoomAt(e.deltaY < 0 ? 1.12 : 1 / 1.12, p.x, p.y);
+    },
+    { passive: false }
+  );
+
+  // one pointer pans, two pointers pinch; a tap that never moved, landing
+  // outside the diagram, leaves (the diagram itself stays tappable so the
+  // double-tap gesture below still works)
+  const pts = new Map();
+  let pinch = null;
+  let moved = 0;
+  const startPinch = () => {
+    const [a, b] = [...pts.values()];
+    return {
+      dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      zoom: dvZoom,
+      x: dvX,
+      y: dvY,
+      mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+    };
+  };
+
+  dvStage.addEventListener("pointerdown", (e) => {
+    if (dvStage.setPointerCapture) dvStage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, localOf(e));
+    moved = 0;
+    if (pts.size === 2) pinch = startPinch();
+  });
+  dvStage.addEventListener("pointermove", (e) => {
+    const p = pts.get(e.pointerId);
+    if (!p) return;
+    const q = localOf(e);
+    const dx = q.x - p.x;
+    const dy = q.y - p.y;
+    moved += Math.abs(dx) + Math.abs(dy);
+    pts.set(e.pointerId, q);
+    if (pts.size === 1) {
+      dvX += dx;
+      dvY += dy;
+      dvApply();
+      return;
+    }
+    if (!pinch) pinch = startPinch();
+    const [a, b] = [...pts.values()];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const z = clampZoom(pinch.zoom * (dist / pinch.dist));
+    // the content point under the original midpoint stays under the new one
+    const cx = (pinch.mid.x - pinch.x) / pinch.zoom;
+    const cy = (pinch.mid.y - pinch.y) / pinch.zoom;
+    dvZoom = z;
+    dvX = mid.x - cx * z;
+    dvY = mid.y - cy * z;
+    dvApply();
+  });
+  const endPointer = (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    if (pts.size < 2) pinch = null;
+    if (pts.size || moved >= 8) return;
+    // the diagram as drawn, in the same stage-local pixels as localOf()
+    const sr = dvStage.getBoundingClientRect();
+    const r = dvInner.getBoundingClientRect();
+    const p = localOf(e);
+    const inside =
+      p.x >= r.left - sr.left && p.x <= r.right - sr.left &&
+      p.y >= r.top - sr.top && p.y <= r.bottom - sr.top;
+    if (!inside) closeDiagramViewer();
+  };
+  dvStage.addEventListener("pointerup", endPointer);
+  dvStage.addEventListener("pointercancel", endPointer);
+  dvStage.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    if (Math.abs(dvZoom - dvFitZoom) > 0.01) dvFit();
+    else dvCenterZoom(1);
+  });
+}
+
+function openDiagramViewer(source) {
+  const svg = source.querySelector("svg");
+  if (!svg) return;
+  ensureDiagramViewer();
+  // the clone gets its natural size back: the on-page svg is width-capped, and
+  // a max-width:100% box cannot be zoomed into anything readable
+  const vb = (svg.getAttribute("viewBox") || "").trim().split(/[\s,]+/).map(Number);
+  const box = svg.getBoundingClientRect();
+  const w = vb.length === 4 && vb[2] > 0 ? vb[2] : Math.round(box.width) || 800;
+  const h = vb.length === 4 && vb[3] > 0 ? vb[3] : Math.round(box.height) || 600;
+  const clone = svg.cloneNode(true);
+  clone.removeAttribute("style");
+  clone.setAttribute("width", w);
+  clone.setAttribute("height", h);
+  clone.style.width = w + "px";
+  clone.style.height = h + "px";
+  clone.style.maxWidth = "none";
+  while (dvInner.firstChild) dvInner.removeChild(dvInner.firstChild);
+  dvInner.appendChild(clone);
+  dvOverlay.classList.add("open");
+  dvFit(); // the stage has a size only once the overlay is displayed
+  if (!dvHistoryEntry) {
+    // an entry of our own, so the phone's back button closes the overlay
+    // instead of walking out of the app
+    try {
+      history.pushState({ clutchDiagram: 1 }, "");
+      dvHistoryEntry = true;
+    } catch (e) {
+      dvHistoryEntry = false;
+    }
+  }
+}
+
+function closeDiagramViewer() {
+  if (!dvOverlay || !dvOverlay.classList.contains("open")) return;
+  dvOverlay.classList.remove("open");
+  while (dvInner.firstChild) dvInner.removeChild(dvInner.firstChild);
+  if (dvHistoryEntry) {
+    dvHistoryEntry = false;
+    try {
+      history.back(); // consume our entry (the popstate listener below no-ops)
+    } catch (e) {}
+  }
+}
+
+window.addEventListener("popstate", () => {
+  if (dvHistoryEntry && dvOverlay && dvOverlay.classList.contains("open")) {
+    dvHistoryEntry = false;
+    dvOverlay.classList.remove("open");
+    while (dvInner.firstChild) dvInner.removeChild(dvInner.firstChild);
+  }
+  dvHistoryEntry = false;
+});
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeDiagramViewer();
+});
+
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  const pre = t && t.closest ? t.closest("pre.mermaid-rendered") : null;
+  if (pre && pre.querySelector("svg")) openDiagramViewer(pre);
+});
+
 // map a file extension to a highlight.js language id for bare <pre> results
 const CODE_LANGS = {
   py: "python", js: "javascript", mjs: "javascript", jsx: "javascript",
@@ -2414,12 +2648,43 @@ async function reconciledBackendUrl() {
     return null;
   }
   if (flag) {
+    if (IS_ANDROID) {
+      // device report #2: "fall back to the local backend" is not a fallback on
+      // the phone — there is no agent behind 127.0.0.1, so that branch pointed
+      // the app at a dead port while the picker still showed the saved host
+      // (the reported "selected SSH client but 127.0.0.1:8891 + connection
+      // error"). Keep the flag: it is the user's standing intent, and
+      // autoReconnectAndroid() re-establishes the host with it.
+      return null;
+    }
     // stale SSH leftover: fall back to the local backend via the main process
     localStorage.removeItem("clutch_ssh_connected");
     await switchBackendResolved();
     return null; // switchBackendResolved already switched
   }
   return null;
+}
+
+// device report #2: a phone that was on an SSH backend must come back to it.
+// Re-entry runs the same path as the user's own connect (keys first, password
+// prompt only if the host demands one) instead of leaving the UI pointed at a
+// local backend that cannot exist there.
+async function autoReconnectAndroid() {
+  if (!IS_ANDROID || !window.clutchTunnel) return false;
+  // no flag = the user left the picker disconnected on purpose
+  if (!localStorage.getItem("clutch_ssh_connected")) return false;
+  const host = localStorage.getItem("clutch_ssh_host");
+  const user = localStorage.getItem("clutch_ssh_user");
+  if (!host || !user) return false;
+  const s = await window.clutchTunnel.status().catch(() => null);
+  if (s && s.active) return true; // tunnel survived: already the active backend
+  const ok = await handleSshConnect(host, user, localStorage.getItem("clutch_ssh_port") || "22", connStatus);
+  if (!ok) {
+    // never leave the picker claiming a host we are not on
+    renderConnSelector();
+    connStatus.textContent = "Not connected — " + user + "@" + host + " did not come back.";
+  }
+  return Boolean(ok);
 }
 
 // tunnel died mid-session: fall back to the local backend in place
@@ -2585,17 +2850,22 @@ $("#fs-hidden-toggle").addEventListener("change", toggleHidden);
 $("#tree-hidden-toggle").addEventListener("change", toggleHidden);
 updateHiddenToggles();
 
-// ---- workspace drawer (report #5) ----
-// The phone used to pin the panel to the bottom of a page-length column.
-// mobile.css now re-orders it under the input bar as a collapsible drawer;
-// this is the fold state and its ▸/▾ button, persisted per device. The
-// desktop never sees the button (style.css keeps .ws-fold display:none) and
-// stays expanded.
+// ---- workspace panel: a fold on the desktop, a drawer on the phone ----
+// The desktop keeps the panel as a permanent right column; its ▸/▾ button
+// (style.css keeps .ws-fold display:none) folds it and the state is persisted
+// per device. On a phone (report #4) the panel is a right slide-over with no
+// folded state to speak of, so the same button just closes the drawer.
 const wsFoldBtn = $("#ws-fold");
-const WS_FOLDED_DEFAULT = matchMedia("(max-width: 640px)").matches ? "1" : "0";
+const NARROW_Q = window.matchMedia("(max-width: 640px)");
+const WS_FOLDED_DEFAULT = NARROW_Q.matches ? "1" : "0";
 let wsFolded = localStorage.getItem("clutch_ws_collapsed") ?? WS_FOLDED_DEFAULT;
 
 function applyWsFold() {
+  if (NARROW_Q.matches) {
+    wsFoldBtn.textContent = "✕";
+    wsFoldBtn.title = "close the workspace panel";
+    return;
+  }
   const folded = wsFolded === "1";
   $("#right").classList.toggle("collapsed", folded);
   wsFoldBtn.textContent = folded ? "▸" : "▾";
@@ -2603,11 +2873,66 @@ function applyWsFold() {
 }
 
 wsFoldBtn.addEventListener("click", () => {
+  if (NARROW_Q.matches) {
+    closeShellDrawers(); // the phone drawer's close affordance
+    return;
+  }
   wsFolded = wsFolded === "1" ? "0" : "1";
   localStorage.setItem("clutch_ws_collapsed", wsFolded);
   applyWsFold();
 });
 applyWsFold();
+
+// ---- phone shell (report #4): the project actions and the workspace panel
+// become two drawers, both closed until asked for ----
+// 主流 phone clients (DeepSeek / 豆包 / …) keep the conversation column clean
+// and park the shell behind ☰ and a second trigger. The three project buttons
+// are NOT duplicated: they are MOVED between #topbar and #shell-drawer-actions,
+// so there is exactly one node, one handler and one disabled state per action —
+// and a rotation back to the desktop layout moves the same nodes home.
+const shellDrawer = $("#shell-drawer");
+const shellBackdrop = $("#shell-backdrop");
+const drawerActions = $("#shell-drawer-actions");
+const SHELL_ACTIONS = ["#open-project-btn", "#new-project-btn", "#settings-btn"];
+
+// which: "" closes both, "menu" the left drawer, "ws" the workspace panel
+function setShellDrawer(which) {
+  shellDrawer.classList.toggle("open", which === "menu");
+  $("#right").classList.toggle("drawer-open", which === "ws");
+  shellBackdrop.classList.toggle("open", which !== "");
+}
+function closeShellDrawers() {
+  setShellDrawer("");
+}
+
+$("#shell-menu-btn").addEventListener("click", () =>
+  setShellDrawer(shellDrawer.classList.contains("open") ? "" : "menu")
+);
+$("#shell-ws-btn").addEventListener("click", () =>
+  setShellDrawer($("#right").classList.contains("drawer-open") ? "" : "ws")
+);
+shellBackdrop.addEventListener("click", closeShellDrawers);
+// a drawer action opens a modal: step aside as soon as one is clicked (the
+// button's own handler runs first, this bubbling listener right after)
+drawerActions.addEventListener("click", (e) => {
+  if (e.target.closest && e.target.closest("button")) closeShellDrawers();
+});
+
+function layoutShell() {
+  const narrow = NARROW_Q.matches;
+  for (const sel of SHELL_ACTIONS) {
+    const btn = $(sel);
+    if (!btn) continue;
+    // back into the topbar BEFORE the ▤ trigger, so the desktop order stays
+    // exactly what index.html declares
+    if (narrow) drawerActions.appendChild(btn);
+    else $("#topbar").insertBefore(btn, $("#shell-ws-btn"));
+  }
+  if (!narrow) closeShellDrawers(); // a rotation to the desktop layout drops them
+  applyWsFold();
+}
+NARROW_Q.addEventListener("change", layoutShell);
+layoutShell();
 
 // file changes only arrive via tool results: debounced refresh, no polling
 function scheduleTreeRefresh() {
@@ -2977,11 +3302,12 @@ function openFsBrowser(mode) {
   $("#fs-path-input").disabled = false;
   fsModal.classList.remove("hidden", "closing");
   // settle the stored URL against the tunnel's real state first, then list once
-  reconciledBackendUrl().then((url) => {
+  reconciledBackendUrl().then(async (url) => {
     if (url) switchBackend(url);
     // reopen where the user last left the browser instead of the home directory
     loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
     renderConnSelector();
+    await autoReconnectAndroid(); // report #2: bring the remembered host back
   });
 }
 
@@ -3170,4 +3496,8 @@ async function loadHostDefaults() {
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
+  // report #2: bring the phone's remembered SSH backend back in the background.
+  // Fire-and-forget: the UI is live either way, and a successful reconnect
+  // switches the base (and thus the SSE stream) in place.
+  autoReconnectAndroid();
 })();

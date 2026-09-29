@@ -156,8 +156,18 @@ const closePermSrc = fnBody("closePerm");
   check(/setTrustArmed\(trustArmed\(\)\)/.test(src), "stored state painted on startup");
 
   // ---- 10) the host page carries the button + the armed style ----
-  check(/id="trust-btn"/.test(html), "index.html has the topbar trust button");
-  check(/id="topbar"/.test(html.slice(0, html.indexOf('id="trust-btn"'))), "trust button sits inside the topbar markup");
+  // device report #5: trust governs the NEXT run exactly like the work/chat
+  // toggle does, so it sits beside it in .run-actions — not up in the topbar
+  // next to Open/New (where it used to live)
+  const trustAt = html.indexOf('id="trust-btn"');
+  const modeAt = html.indexOf('id="mode-btn"');
+  check(trustAt > 0, "index.html carries the trust button");
+  check(trustAt > html.indexOf("</header>"), "trust button is out of the topbar");
+  check(modeAt > 0 && modeAt < trustAt, "trust button follows the work/chat mode toggle");
+  check(
+    html.slice(modeAt, trustAt).indexOf("</div>") < 0,
+    "trust button shares the run-actions group with the mode toggle"
+  );
   check(/#trust-btn\.trust-on/.test(css), "style.css highlights the armed state");
 
   summary("trust-countdown-test");

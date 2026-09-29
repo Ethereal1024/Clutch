@@ -11,7 +11,7 @@ Electron 渲染层用 `file://` 装载（`ui/main.js` 的 `win.loadFile`），�
 | `archivo-var.woff2` | Archivo (variable) | 正文/标题（`--font-display`） | SIL OFL 1.1 |
 | `jetbrains-mono-400.woff2` | JetBrains Mono | 代码/等宽（`--font-mono`） | SIL OFL 1.1 |
 | `noto-sans-sc-vf.woff2` | Noto Sans SC (variable) | CJK 正文：双栈里排在系统字体前，中文三平台同源 | SIL OFL 1.1（`OFL.txt`） |
-| `clutch-icons.woff2` | Clutch Icons | 16 个界面图标的 Symbola 子集 | 见 `clutch-icons.LICENSE.txt` |
+| `clutch-icons.woff2` | Clutch Icons | 21 个界面图标的 Symbola 子集 | 见 `clutch-icons.LICENSE.txt` |
 | `clutch-icons.LICENSE.txt` | — | Symbola 归属与"任意用途免费"条款 | — |
 | `clutch-icons.manifest.txt` | — | 字体 sha256 + 内置码位，供测试比对 | — |
 
@@ -37,15 +37,15 @@ UA 的 `monospace`；裸 monospace 没有汉字字形，中文掉进 Chromium �
 
 ## 为什么图标要自带字体
 
-界面图标是**文本节点里的字符**（▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■），不是
+界面图标是**文本节点里的字符**（▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −），不是
 SVG：它们在按钮标签、diff 行、流式输出和 mermaid 图表标签里。Archivo /
 JetBrains Mono 都是约 230 字形的拉丁子集，这些符号一个都没有 → 过去由各平台
 自己的符号字体绘制：Windows 是 Segoe UI Symbol、macOS 是 Apple Symbols、
 Linux 是 fontconfig 挑的某个字体，于是同一个按钮三平台三种大小和形状。
 
-`clutch-icons.woff2` 把这些码位烤进一个 2.9 KB 的字体并让应用自带。
-它排在 `--font-display` / `--font-mono` **最前面**，但只会影响这 16 个码位：
-字体 cmap 里只有这 16 个（连 ASCII `+` / 标点 / 字母都没有），CSS 里还用
+`clutch-icons.woff2` 把这些码位烤进一个 3.4 KB 的字体并让应用自带。
+它排在 `--font-display` / `--font-mono` **最前面**，但只会影响这 21 个码位：
+字体 cmap 里只有这 21 个（连 ASCII `+` / 标点 / 字母都没有），CSS 里还用
 `unicode-range` 把范围再写一遍（浏览器对范围外的字符根本不会考虑这个 face）。
 所以它不可能顶掉任何正文字符，也让 mermaid 标签里的图标和其他文字一样一致。
 
@@ -53,22 +53,23 @@ Linux 是 fontconfig 挑的某个字体，于是同一个按钮三平台三种�
 
 ### 1. 符号字体（最终采用）
 
-用 fontTools 逐个读 cmap（`getBestCmap()`），统计对上述 16 个码位的原生覆盖：
+用 fontTools 逐个读 cmap（`getBestCmap()`），统计对上述 21 个码位的原生覆盖：
 
 | 现成字体 | 原生覆盖 | 许可 | 结论 |
 | --- | --- | --- | --- |
-| **Symbola 2.60**（George Douros，Debian `fonts-symbola`） | 15/16（缺 `U+FF0B`）+ ASCII `+` 重映射补上 | "free for any use; may be opened, edited, modified, regenerated, packaged and redistributed" | **采用** |
-| DejaVu Sans | 15/16（缺的是**同一个** `U+FF0B`，同样要靠重映射） | Bitstream Vera（自由，但有改名/再分发条款） | 并列第二，落选理由见下 |
-| Noto Sans Symbols 2 | 9/16 | SIL OFL 1.1 | 落选：缺 7 个图标 |
-| Noto Sans Symbols | 3/16 | SIL OFL 1.1 | 落选：缺 13 个图标 |
-| Archivo / JetBrains Mono | 1/16 | SIL OFL 1.1 | 落选（正文本体，本来就不含符号） |
+| **Symbola 2.60**（George Douros，Debian `fonts-symbola`） | 20/21（缺 `U+FF0B`）+ ASCII `+` 重映射补上 | "free for any use; may be opened, edited, modified, regenerated, packaged and redistributed" | **采用**（唯一只差一个码位的候选） |
+| DejaVu Sans | 19/21（缺 `U+FF0B` 与 `U+1F6E1` 🛡） | Bitstream Vera（自由，但有改名/再分发条款） | 第二，落选理由见下 |
+| Noto Sans Symbols 2 | 13/21 | SIL OFL 1.1 | 落选：缺 8 个图标 |
+| Noto Sans Symbols | 3/21 | SIL OFL 1.1 | 落选：缺 18 个图标 |
+| Archivo / JetBrains Mono | 2/21 | SIL OFL 1.1 | 落选（正文本体，本来就不含符号） |
 
-Symbola 与 DejaVu Sans 的覆盖是并列的（差的都是 `U+FF0B` 全角加号，两者的 ASCII
-`+` 都在），选 Symbola 是两点权衡：许可为零附加条件（DejaVu 的 Bitstream Vera
-许可虽然自由，但带改名与"不得单独出售"条款，闭源商业打包的合规成本更高）；且
-Symbola 是**只做符号**的字体，这 16 个轮廓就是它的主业，而 DejaVu Sans 本身就是
-三大平台系统里常见的正文族（Linux 上常常就是 fontconfig 的默认 sans）——用系统
-自带的正文族当内置图标字体，"图标终于来自内置字体"这件事在观感上无法自证。
+Symbola 与 DejaVu Sans 都缺 `U+FF0B` 全角加号（两者的 ASCII `+` 都在，所以都能靠
+重映射补齐），但 DejaVu 还缺 `U+1F6E1`（🛡，trust 按钮），因此不再并列：Symbola
+更全，且许可为零附加条件（DejaVu 的 Bitstream Vera 许可虽然自由，但带改名与
+"不得单独出售"条款，闭源商业打包的合规成本更高）；Symbola 还是**只做符号**的
+字体，这 21 个轮廓就是它的主业，而 DejaVu Sans 本身就是三大平台系统里常见的正文
+族（Linux 上常常就是 fontconfig 的默认 sans）——用系统自带的正文族当内置图标
+字体，"图标终于来自内置字体"这件事在观感上无法自证。
 
 Symbola 没有 `U+FF0B`（全角加号），构建脚本把它的 ASCII `+` 轮廓重映射到
 `U+FF0B`；标记里继续写 `＋`，而 ASCII `+` 仍然由 Archivo / JetBrains Mono 绘制
@@ -87,7 +88,7 @@ Phosphor（MIT）、Bootstrap Icons（MIT）、Material Symbols（Apache-2.0）�
   SVG 组件或图标字体组件都没法塞进 mermaid 生成的 `<text>` 标签；只有"字体"
   这一种形式能让图标和图内文字共用一套字形。
 - 把 SVG 转成字体需要额外的构建链（fantasticon / svgicons2svgfont / fontforge）
-  和一套新的码位约定，换来的 16 个图标形状并不比 Symbola 更贴这个 UI。
+  和一套新的码位约定，换来的 21 个图标形状并不比 Symbola 更贴这个 UI。
 - Font Awesome 的许可是自定义的 "Font Awesome Free License"（图标 CC BY 4.0、
   字体 SIL OFL 1.1、代码 MIT 三套条款叠加，GitHub API 也归为 "Other"），比
   MIT/ISC 复杂得多，不做这种未经确认的 vendoring。
@@ -108,7 +109,7 @@ mermaid 会把拿到的字符串原样写进 `<style>` 和内联样式），作�
 `--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif` 只是上游
 样式表的残留，已被 themeVariables 覆盖。
 
-## 16 个内置码位
+## 21 个内置码位
 
 | 码位 | 字符 | 用途 |
 | --- | --- | --- |
@@ -128,6 +129,11 @@ mermaid 会把拿到的字符串原样写进 `<style>` 和内联样式），作�
 | `U+270E` | ✎ | 编辑标记 |
 | `U+25A6` | ▦ | 打开按钮 |
 | `U+2699` | ⚙ | 设置按钮 |
+| `U+1F6E1` | 🛡 | trusted 按钮 |
+| `U+2630` | ☰ | 窄屏"项目"抽屉触发器 |
+| `U+25A4` | ▤ | 窄屏"工作区"抽屉触发器 |
+| `U+2715` | ✕ | 关闭（抽屉 / 折叠开关 / 图查看器） |
+| `U+2212` | − | 图查看器缩小（ASCII `-` 太短，视觉上不配对） |
 
 代码里新增一个符号字符时：把它加进 `scripts/build-icon-font.py` 的 `ICONS`，
 重新构建，否则该字符会被 OS 的符号字体绘制（也就是又漂移了）。测试会直接点名
@@ -139,7 +145,7 @@ mermaid 会把拿到的字符串原样写进 `<style>` 和内联样式），作�
 # 重新生成子集（依赖临时注入，不污染 venv）：字体 + LICENSE + manifest 一起更新
 uv run --with fonttools --with brotli python3 scripts/build-icon-font.py
 
-# 字体接线：相对 URL、preload、var(--font-*) 定义、16 个字符全部被内置 face 覆盖、
+# 字体接线：相对 URL、preload、var(--font-*) 定义、21 个字符全部被内置 face 覆盖、
 # manifest sha256、unicode-range == 字体码位、mermaid 标签字体、UA monospace 元素
 # (pre/code/kbd/samp/tt) 自带作者字体规则
 uv run python -m tests.ui_fonts_check

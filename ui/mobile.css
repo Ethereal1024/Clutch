@@ -10,7 +10,14 @@
    #4/#6 the input box scrolled away with the page / ↓ never showed — the
       workspace panel at the bottom of the column let the stream stretch the
       page instead of scrolling inside itself
-   #5 the workspace panel is now a collapsible drawer under the input bar */
+   #5 the workspace panel became a collapsible drawer under the input bar
+
+   Device reports (round 2) covered here:
+   #4 the shell follows the主流 phone idiom: the topbar keeps the two drawer
+      triggers, Open/New/Settings move into a left slide-over, and the
+      workspace becomes a right slide-over — both closed until asked for, so
+      the stream owns the whole column
+   #3 thinner scrollbars on a touch screen */
 
 @media (max-width: 640px) {
   /* the app is a fixed-viewport instrument: #topbar (order-free) + main fill
@@ -23,10 +30,12 @@
     overscroll-behavior: none;
   }
 
-  /* topbar: let the brand row and the action buttons wrap to two lines
-     instead of squeezing the status badge out of the viewport */
+  /* report #3: a touch scrollbar is an overlay — keep it hairline */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+
+  /* ---- topbar: brand + status + the two drawer triggers only (report #4) ---- */
   #topbar {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 8px;
     padding: 8px 10px;
   }
@@ -34,15 +43,42 @@
     padding: 6px 10px;
     font-size: 12px;
   }
+  /* the project actions are not hidden — app.js has moved them into
+     #shell-drawer-actions by the time this applies (the drawer is the only
+     place they exist on a phone) */
+  #shell-menu-btn, #shell-ws-btn { display: inline-flex; align-items: center; }
+  #project-label { max-width: 110px; }
 
-  /* ---- column layout: input bar on top, workspace drawer, then stream ---- */
+  /* ---- the drawers themselves (report #4) ----
+     Left: project actions. Right: the workspace panel, which is #right moved
+     out of the column flow onto the edge. Closed = pushed off-canvas; the
+     backdrop both dims the stream and takes the close tap. */
+  .shell-backdrop {
+    display: block;
+    position: fixed; inset: 0; z-index: 55;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.18s ease;
+  }
+  .shell-backdrop.open { opacity: 1; pointer-events: auto; }
+  .shell-drawer {
+    display: flex;
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 60;
+    width: min(78vw, 300px);
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    transform: translateX(-101%);
+    transition: transform 0.2s ease;
+  }
+  .shell-drawer.open { transform: none; }
+
+  /* ---- column layout: input bar on top, stream below ---- */
 
   main {
     flex-direction: column;
   }
   /* dissolve the left pane: its children (taskbar, stream) become direct
-     flex items of main so the ORDER property can interleave the workspace
-     drawer between them. #left's own min-height:auto was the report-#4 bug:
+     flex items of main. #left's own min-height:auto was the report-#4 bug:
      it let the stream content stretch the column past the viewport, the
      whole page scrolled, the input rode up and the ↓ button never showed. */
   #left {
@@ -56,35 +92,31 @@
   #task-input {
     padding: 8px;
   }
-  /* report #5: the workspace sits UNDER the input bar as a collapsible
-     drawer (app.js toggles #right.collapsed; default folded on narrow
-     screens). Its tree scrolls inside the 45vh cap. */
+  /* report #5: run/mode/trust share the row with the workspace path, which
+     already ellipsizes; keep the switches from shrinking below their text */
+  .run-actions button { flex: none; }
+
+  /* report #4: the workspace is a right slide-over, out of the column flow —
+     it no longer steals height from the stream. Its tree scrolls inside. */
   #right {
-    order: 1;
-    width: auto;
-    flex: none;
-    max-height: 45vh;
-    border-left: none;
-    border-top: 1px solid var(--border);
-  }
-  #tree {
-    min-height: 0;
-  }
-  #right.collapsed {
+    position: fixed; top: 0; right: 0; bottom: 0; left: auto; z-index: 60;
+    width: min(88vw, 380px);
     max-height: none;
+    border-top: none;
+    transform: translateX(101%);
+    transition: transform 0.2s ease;
   }
-  #right.collapsed #tree {
-    display: none;
-  }
-  #right.collapsed .panel-head {
-    border-bottom: none;
-  }
-  /* the fold affordance only exists here; style.css keeps it display:none */
+  #right.drawer-open { transform: none; }
+  #tree { min-height: 0; }
+  /* the fold affordance only exists here; style.css keeps it display:none.
+     On a phone the panel has no folded state to toggle — the button closes
+     the drawer (app.js reads the same media query). */
   .ws-fold {
     display: inline-flex;
   }
-  /* the stream gets whatever the drawer leaves and scrolls in itself —
-     which re-anchors #jump-bottom (report #6) inside .stream-wrap */
+
+  /* the stream gets the whole column and scrolls in itself — which re-anchors
+     #jump-bottom (report #6) inside .stream-wrap */
   .stream-wrap {
     order: 2;
   }
@@ -121,4 +153,9 @@
     width: calc(100vw - 32px);
     max-width: 420px;
   }
+
+  /* report #6: the diagram viewer is touch-first — a bigger close target, and
+     the hint does not sit in the way of a drag */
+  .dv-close { padding: 10px 16px; font-size: 17px; }
+  .dv-bar { bottom: 12px; }
 }

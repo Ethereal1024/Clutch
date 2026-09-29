@@ -18,11 +18,20 @@
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <!-- singleTask = the desktop's requestSingleInstanceLock (§3);
-             adjustResize = the soft keyboard must not cover the input line. -->
+             adjustResize = the soft keyboard must not cover the input line.
+
+             configChanges (device report #1): rotating the phone must NOT
+             recreate the activity. A recreate tears the WebView down and the
+             page reloads — the stream DOM, the current session view, the input
+             text and the live SSE stream all reset, which reads as "my
+             conversation was thrown away". Handled here, the WebView survives
+             the rotation and only re-lays-out; the page's own JS re-flows
+             (mobile.css is a max-width media query, so it follows the width). -->
         <activity
             android:name=".MainActivity"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

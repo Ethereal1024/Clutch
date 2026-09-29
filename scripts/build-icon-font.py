@@ -2,25 +2,26 @@
 """Build ui/vendor/fonts/clutch-icons.woff2 — the UI's cross-platform icon font.
 
 Why this exists: the UI draws its chrome icons with Unicode symbol glyphs
-(▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■). None of them are in the bundled Archivo /
-JetBrains Mono (both are ~230-glyph latin subsets), so each platform resolved
-them from ITS OWN symbol font — Segoe UI Symbol on Windows, Apple Symbols on
-macOS, whatever fontconfig picks on Linux — which is why buttons and carets
-were a different size/shape on every OS. This script bakes those 16 codepoints
+(▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −). None of them are in the bundled
+Archivo / JetBrains Mono (both are ~230-glyph latin subsets), so each platform
+resolved them from ITS OWN symbol font — Segoe UI Symbol on Windows, Apple
+Symbols on macOS, whatever fontconfig picks on Linux — which is why buttons and
+carets were a different size/shape on every OS. This script bakes those 21 codepoints
 into one small font the app ships, so every platform draws identical icons.
 
 Source: Symbola (George Douros), "fonts are free for any use; they may be
 opened, edited, modified, regenerated, packaged and redistributed" — vendored
 from the Debian package fonts-symbola 2.60-1.1 (checksum pinned below). Survey
-(fontTools cmap; table in ui/vendor/fonts/README.md): Symbola 15/16 native and
-DejaVu Sans 15/16 native, and BOTH lack U+FF0B, so either needs the ASCII "+"
-remap below; the tie went to Symbola for its zero-condition licence and because
-it is a symbol-only face (DejaVu Sans is the platforms' own text font, so a
-subset of it would be indistinguishable from the OS fallback it replaces).
-Others: Noto Sans Symbols 2 9/16, Noto Sans Symbols 3/16, the vendored Archivo /
-JetBrains Mono 1/16.
+(fontTools cmap; table in ui/vendor/fonts/README.md): Symbola 20/21 native and
+DejaVu Sans 19/21 native. BOTH lack U+FF0B, so either needs the ASCII "+"
+remap below; first place still went to Symbola because DejaVu falls one glyph
+further behind (no U+1F6E1) and because Symbola is a symbol-only face — DejaVu
+Sans is the platforms' own text font, so a subset of it would be
+indistinguishable from the OS fallback it replaces.
+Others: Noto Sans Symbols 2 13/21, Noto Sans Symbols 3/21, the vendored Archivo /
+JetBrains Mono 2/21.
 
-The subset keeps EXACTLY the 16 codepoints used by ui/ and nothing else, so it
+The subset keeps EXACTLY the 21 codepoints used by ui/ and nothing else, so it
 can sit first in --font-display / --font-mono without ever shadowing a normal
 character. Symbola has no U+FF0B (fullwidth plus), so its ASCII "+" outline is
 remapped to U+FF0B — the markup keeps using ＋ and ASCII "+" still comes from
@@ -82,6 +83,10 @@ ICONS = {
     0x25A6: "▦ open button",
     0x2699: "⚙ settings button",
     0x1F6E1: "🛡 trust button",
+    0x2630: "☰ shell project-drawer trigger (narrow screens)",
+    0x25A4: "▤ shell workspace-drawer trigger (narrow screens)",
+    0x2715: "✕ close/dismiss (drawers, fold toggle, diagram viewer)",
+    0x2212: "− diagram-viewer zoom out (U+002D hyphen would be too short)",
 }
 PLUS_SOURCE = 0x002B  # Symbola's ASCII "+", remapped onto U+FF0B
 

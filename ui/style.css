@@ -30,20 +30,20 @@
   font-weight: 100 900;
   font-display: swap;
 }
-/* The UI's chrome icons (▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■) are NOT in Archivo
+/* The UI's chrome icons (▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −) are NOT in Archivo
    or JetBrains Mono (both are latin subsets; see the cmap check in
    tests/ui_fonts_check.py), so each platform used to draw them from its own
    symbol font — Segoe UI Symbol on Windows, Apple Symbols on macOS, whatever
    fontconfig picks on Linux — i.e. a different size and shape per OS.
-   clutch-icons.woff2 is a 16-codepoint subset of Symbola (see its
+   clutch-icons.woff2 is a 21-codepoint subset of Symbola (see its
    LICENSE.txt) that ships with the app, so the icons are pixel-identical
    everywhere. It is listed FIRST in both stacks, which is safe *because* its
-   cmap holds exactly those 16 codepoints: it can never shadow a text
+   cmap holds exactly those 21 codepoints: it can never shadow a text
    character, and anything new that is added to ui/ without a matching glyph
    fails loudly in tests/ui_fonts_check.py instead of silently falling back to
    the OS font. `font-display: block` (not swap) so an icon is never briefly
    drawn in the OS face before the bundled one arrives.
-   `unicode-range` is the same 17 codepoints written out in CSS. It is what
+   `unicode-range` is the same 21 codepoints written out in CSS. It is what
    makes "cannot shadow text" a property of the declaration instead of a
    promise about the font's cmap: the browser will not even consider this face
    for a codepoint outside the list. The test pins it to the font's own
@@ -54,9 +54,9 @@
   font-weight: 400 900; /* one outline for all weights: no synthetic emboldening */
   font-display: block;
   unicode-range:
-    U+2192, U+2193, U+21B6, U+25A0, U+25A3, U+25A6, U+25B6, U+25B8,
-    U+25BE, U+2699, U+26A0, U+270E, U+2713, U+27E6, U+27E7, U+FF0B,
-    U+1F6E1;
+    U+2192, U+2193, U+21B6, U+2212, U+25A0, U+25A3, U+25A4, U+25A6, U+25B6,
+    U+25B8, U+25BE, U+2630, U+2699, U+26A0, U+270E, U+2713, U+2715, U+27E6,
+    U+27E7, U+FF0B, U+1F6E1;
 }
 
 :root {
@@ -105,12 +105,24 @@
 
 * { box-sizing: border-box; }
 
-/* thin, subdued scrollbars matching the graphite palette */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #2e2e33; border-radius: 0; }
-::-webkit-scrollbar-thumb:hover { background: #3a3a41; }
-* { scrollbar-width: thin; scrollbar-color: #2e2e33 transparent; }
+/* custom scrollbars (device report #3): a thin graphite pill on an invisible
+   track, accent while dragging. The OS default bar is fat and opaque — on a
+   phone it eats the few pixels the stream has. ::-webkit-scrollbar is what
+   Chromium (Electron + the Android WebView) honours; the standard
+   scrollbar-width/color pair would take over and *disable* those pseudo-
+   elements in current Chromium, so it is scoped to engines without them. */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #2b2b31;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background: #3f3f47; }
+::-webkit-scrollbar-thumb:active { background: var(--accent); }
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: #2b2b31 transparent; }
+}
 
 /* text selection: red fill + near-black text, the theme's single accent */
 ::selection { background: var(--accent); color: #0F0F10; }
@@ -159,6 +171,29 @@ body { display: flex; flex-direction: column; }
 .project-label:empty { display: none; }
 
 .spacer { flex: 1; }
+
+/* ---- phone shell furniture (device report #4) ----------------------------
+   On a narrow screen the topbar's project actions and the whole workspace
+   panel become slide-over drawers, opened from two small triggers. Everything
+   below is INERT on the desktop: style.css hides the triggers, the drawers and
+   the backdrop, and mobile.css (loaded under max-width:640px) is the only
+   place that reveals and positions them — the desktop keeps exactly the
+   layout it had. The buttons themselves are not duplicated: app.js MOVES
+   #open-project-btn / #new-project-btn / #settings-btn into
+   #shell-drawer-actions on a phone, so their handlers, disabled state and DOM
+   identity stay single-sourced. */
+#shell-menu-btn, #shell-ws-btn, .shell-drawer, .shell-backdrop { display: none; }
+
+#shell-drawer-actions { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+/* the drawer's rows are full-width, left-aligned buttons, not the topbar's
+   compact pills (same nodes, phone shape) */
+#shell-drawer-actions button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 12px;
+  font-size: 14px;
+}
 
 /* status: rectangle badge (kept as a box, not a dot), vertically centered with
    the title via the topbar's align-items:center + matching line-height */
@@ -522,6 +557,37 @@ main { display: flex; flex: 1; min-height: 0; }
   padding: 12px 10px;
 }
 .event .body pre.mermaid-rendered svg { max-width: 100%; height: auto; }
+/* device report #6: a wide diagram inside a phone column is unreadable at
+   fit-width — the block advertises the full-screen viewer on click */
+.event .body pre.mermaid-rendered { cursor: zoom-in; }
+
+/* ---- diagram viewer (device report #6) -----------------------------------
+   Clicking a rendered diagram opens it full-screen, the way QQ/WeChat open an
+   image: drag to pan, wheel or pinch to zoom, double-click for 1:1, tap/click
+   outside or Esc/back to leave. Same behavior on PC and phone (app.js
+   openDiagramViewer); z-index 60 keeps it under .modal (100) — a permission
+   prompt always wins. */
+.diagram-viewer {
+  display: none;
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 8, 10, 0.94);
+}
+.diagram-viewer.open { display: block; }
+.dv-stage { position: absolute; inset: 0; overflow: hidden; cursor: grab; touch-action: none; }
+.dv-stage:active { cursor: grabbing; }
+.dv-inner { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+.dv-inner svg { display: block; max-width: none; background: var(--code-bg); }
+.dv-bar {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 2; display: flex; gap: 6px; padding: 6px;
+  background: rgba(24, 24, 28, 0.92); border: 1px solid var(--border);
+}
+.dv-bar button { min-width: 42px; padding: 6px 10px; font-size: 13px; }
+.dv-close { position: absolute; top: 12px; right: 12px; z-index: 2; padding: 6px 12px; font-size: 15px; }
+.dv-hint {
+  position: absolute; top: 16px; left: 16px; z-index: 2;
+  color: var(--muted); font-size: 12px; pointer-events: none;
+}
 
 /* MathJax output: a formula is ONE unbreakable box — MathJax v3 has no line
    breaking, and a 10-column bmatrix (auto-aim.clc's state/observation pair)

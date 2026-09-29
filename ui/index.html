@@ -20,16 +20,30 @@
 </head>
 <body>
   <header id="topbar">
+    <!-- phone shell (device report #4): on a narrow screen the topbar keeps only
+         these two triggers — ☰ opens the project drawer, ▤ the workspace one.
+         style.css hides them on the desktop; mobile.css shows them. -->
+    <button id="shell-menu-btn" class="shell-btn" title="project actions" aria-label="project actions">☰</button>
     <div class="brand"><span class="logo">▣</span> Clutch</div>
     <div id="project-label" class="project-label muted" title="active project"></div>
     <span id="readonly-badge" class="readonly-badge hidden" title="opened read-only: another window holds the write lock">read-only</span>
     <div id="status" class="badge idle">idle</div>
     <div class="spacer"></div>
+    <!-- the three project actions live here on the desktop; app.js MOVES these
+         same nodes into #shell-drawer-actions on a phone (report #4) -->
     <button id="open-project-btn" title="open a project">▦ Open</button>
     <button id="new-project-btn" title="create a new project">＋ New</button>
-    <button id="trust-btn" title="trust mode OFF — every prompt waits. Click to auto-allow after 10s.">🛡 Trust</button>
     <button id="settings-btn" title="API settings">⚙</button>
+    <button id="shell-ws-btn" class="shell-btn" title="workspace files" aria-label="workspace files">▤</button>
   </header>
+
+  <!-- phone shell drawers: inert on the desktop (style.css display:none),
+       revealed by mobile.css as slide-overs -->
+  <div id="shell-backdrop" class="shell-backdrop"></div>
+  <aside id="shell-drawer" class="shell-drawer" aria-label="project actions">
+    <div class="panel-head"><span>project</span></div>
+    <div id="shell-drawer-actions"></div>
+  </aside>
 
   <div id="welcome" class="welcome">
     <div class="welcome-box">
@@ -175,6 +189,10 @@
           <div class="run-actions">
             <button id="run-btn" class="primary">▶ Run</button>
             <button id="mode-btn" title="chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.">work</button>
+            <!-- device report #5: trust belongs with the run/mode switches
+                 (they all govern how the NEXT run behaves), not up in the
+                 topbar next to Open/New — moved here on PC and phone alike -->
+            <button id="trust-btn" title="trust mode OFF — every prompt waits. Click to auto-allow after 10s.">🛡 Trust</button>
           </div>
           <span id="workspace-path" class="muted" title="active working directory"></span>
         </div>
