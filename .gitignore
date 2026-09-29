@@ -47,3 +47,6 @@ docs/
 /scratch_*.log
 /probe.log
 /scripts/stream_probe.py
+
+# local build outputs (scripts/build-android-apk.sh writes the apk here)
+*.apk

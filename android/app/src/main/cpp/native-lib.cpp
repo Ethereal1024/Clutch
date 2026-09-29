@@ -9,8 +9,10 @@
 #include <jni.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <android/log.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -20,18 +22,48 @@
 namespace {
 
 // node's console output goes to stdout/stderr, which Android drops; forward
-// both into logcat under the "clutch" tag. (tunnel.log stays the richer log.)
+// both into logcat under the "clutch" tag AND tee them into
+// $HOME/engine-stdio.log — when the engine dies at boot (before tunnel.log
+// exists) that file is the only forensics left. (tunnel.log stays the richer
+// runtime log.)
 void *log_pipe_thread(void *fdp) {
     const int fd = *static_cast<int *>(fdp);
+    const char *home = getenv("HOME");
+    FILE *tee = nullptr;
+    if (home) {
+        std::string path = std::string(home) + "/engine-stdio.log";
+        tee = fopen(path.c_str(), "a");
+    }
     char buf[4096];
     ssize_t n;
     while ((n = read(fd, buf, sizeof(buf))) > 0) {
         __android_log_print(ANDROID_LOG_INFO, "clutch", "%.*s", static_cast<int>(n), buf);
+        if (tee) {
+            fwrite(buf, 1, static_cast<size_t>(n), tee);
+            fflush(tee);
+        }
     }
+    if (tee) fclose(tee);
     return nullptr;
 }
 
+// Direct-dup2 into $HOME/engine-stdio.log: synchronous writes by the engine
+// itself, so a fatal uncaught exception is on disk BEFORE node's exit handler
+// tears the process down (a pipe+thread relay lost that tail to the exit
+// crash — this file is the boot forensics, the pipe variant is the fallback
+// when HOME is somehow unset).
 void redirectStdioToLogcat() {
+    const char *home = getenv("HOME");
+    if (home) {
+        std::string path = std::string(home) + "/engine-stdio.log";
+        int fd = open(path.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0600);
+        if (fd >= 0) {
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+            return;
+        }
+    }
     int fds[2];
     if (pipe(fds) != 0) return;
     dup2(fds[1], STDOUT_FILENO);

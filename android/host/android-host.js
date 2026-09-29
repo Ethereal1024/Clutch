@@ -140,15 +140,39 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
 // has the same guards — surface engine errors in the tunnel log, never die
 // silently in the background.
 function main() {
+  // boot forensics: every step lands in $HOME/boot-trace.log with fs sync
+  // writes that bypass tunnelLog's swallow-errors contract — a silent death
+  // must still leave a trace (the "app dies at tap" bug hunt, M3.5)
+  const trace = (m) => {
+    try {
+      fs.appendFileSync(path.join(os.homedir(), "boot-trace.log"), `[boot] ${m}\n`);
+    } catch (e) {
+      /* even tracing must not throw */
+    }
+  };
+  trace("main entered, node " + process.version);
   const tunnel = useUI("ssh-tunnel.js");
+  trace("ssh-tunnel loaded");
   process.on("uncaughtException", (e) => {
     tunnel.tunnelLog("[fatal] uncaughtException: " + ((e && e.stack) || e));
+    trace("uncaughtException: " + ((e && e.stack) || e));
   });
   process.on("unhandledRejection", (e) => {
     tunnel.tunnelLog("[fatal] unhandledRejection: " + ((e && e.stack) || e));
+    trace("unhandledRejection: " + ((e && e.stack) || e));
   });
   const host = createAndroidHost({ tunnel });
-  return host.start();
+  trace("host created, starting bridge");
+  return host.start().then(
+    (server) => {
+      trace("bridge listening on " + server.port);
+      return server;
+    },
+    (e) => {
+      trace("start() rejected: " + ((e && e.stack) || e));
+      throw e;
+    },
+  );
 }
 
 module.exports = { createAndroidHost, main, DEFAULT_API_BASE };
