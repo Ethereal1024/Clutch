@@ -28,9 +28,15 @@ class MainActivity : Activity() {
     // The render layer keeps a normal https origin so localStorage (settings
     // truth, stored connections, degrade markers) behaves exactly as on the PC
     // (§3: https://appassets.androidplatform.net/ui/…).
+    // AssetsPathHandler resolves the request's remaining path against the
+    // assets ROOT: with the bare /ui/ registration it looks for "index.html"
+    // at the root and misses assets/ui/. Delegate with the prefix restored:
+    // request /ui/index.html → suffix "index.html" → asset "ui/index.html".
+    private val uiAssets = WebViewAssetLoader.AssetsPathHandler(this)
+
     private val assetLoader = WebViewAssetLoader.Builder()
         .setDomain("appassets.androidplatform.net")
-        .addPathHandler("/ui/", WebViewAssetLoader.AssetsPathHandler(this))
+        .addPathHandler("/ui/") { path -> uiAssets.handle("ui/$path") }
         .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
