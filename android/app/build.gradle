@@ -1,0 +1,57 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'io.clutch.mobile'
+    compileSdk 34
+    // pinned so a CI runner's sdkmanager install and AGP's default resolve to
+    // the same NDK instead of "whatever is newest" (AGP 8.5's own default is
+    // exactly this build; stating it makes the CI contract explicit)
+    ndkVersion '26.3.11579264'
+
+    defaultConfig {
+        applicationId 'io.clutch.mobile'
+        minSdk 24        // nodejs-mobile floor is 21; 24 covers the WebView APIs we use
+        targetSdk 34
+        versionCode 1
+        // release CI stamps the tag (build-android-apk.sh -PAPP_VERSION=vX.Y.Z);
+        // the default keeps plain `gradlew assembleDebug` working from a checkout
+        versionName (project.findProperty('APP_VERSION')?.toString() ?: '0.1.0')
+        // armeabi-v7a ships in jniLibs too — add it here when a 32-bit device is targeted
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+        externalNativeBuild {
+            cmake { arguments '-DANDROID_STL=c++_shared' }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    packagingOptions {
+        // extract libnode.so to the app lib dir so the JNI shim resolves it by soname
+        jniLibs { useLegacyPackaging = true }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    // WebViewAssetLoader (https origin for the assets-loaded render layer)
+    implementation 'androidx.webkit:webkit:1.11.0'
+}

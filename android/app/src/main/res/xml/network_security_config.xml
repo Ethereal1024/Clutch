@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- N6: Android 9+ forbids cleartext by default, and loopback HTTP is this
+     architecture's entire carrier (bridge + forwarded supervisor APIs). Allow
+     cleartext ONLY for the loopback hosts; everything else stays https. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

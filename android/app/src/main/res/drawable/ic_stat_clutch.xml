@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- N5: the notification small icon — the app's ▣ logo as a flat white
+     vector (notification icons must be alpha-only; Android tints them).
+     Subpath 2 runs counterclockwise against the nonZero fill rule, so it
+     punches the frame's hole; subpath 3 redraws the solid core. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,3 h18 v18 h-18 z M7,7 v10 h10 v-10 z M9,9 h6 v6 h-6 z" />
+</vector>

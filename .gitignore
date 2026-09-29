@@ -45,3 +45,5 @@ docs/
 /scratch-*.py
 /scratch_*.py
 /scratch_*.log
+/probe.log
+/scripts/stream_probe.py

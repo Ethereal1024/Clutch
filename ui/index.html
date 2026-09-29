@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Clutch — coding agent</title>
   <link rel="stylesheet" href="style.css" />
+  <!-- N7 (M3): phone-only re-flow. The media attribute keeps this a no-op on
+       the desktop ( Electron loadFile AND the Android WebViewAssetLoader both
+       fetch it, only matching widths apply it). -->
+  <link rel="stylesheet" href="mobile.css" media="(max-width: 640px)" />
   <link rel="preload" href="vendor/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="preload" href="vendor/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin />
   <!-- CJK prose face: Archivo/JetBrains Mono are latin-only, so without this
@@ -270,6 +274,9 @@
     };
   </script>
   <script src="vendor/mathjax-tex-chtml.js"></script>
+  <!-- bridge into the host when preload.js is absent (browser dev / Android
+       WebView); inert under Electron thanks to the guard inside the shim -->
+  <script src="bridge-shim.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -126,9 +126,39 @@ function isPackagedApp() {
   }
 }
 
+// ---- artifact provider seam (R3) ----
+// Where agent binaries and pylibs tars COME FROM. The default is "build or
+// locate them on THIS machine" (desktop). The Android host registers a
+// downloader for CI prebuilt tars instead (N3) and hard-rejects ensureBundle
+// (no PyInstaller on a phone). ssh-tunnel.js cannot tell the difference.
+// Provider methods may be async (a download is); the defaults are sync and
+// simply wrapped, so existing call sites just await the seam.
+let artifactProvider = null; // { ensureBundle, ensurePyLibsTar }
+
+function setArtifactProvider(provider) {
+  if (provider && typeof provider.ensurePyLibsTar !== "function") {
+    throw new Error("artifact provider must implement ensurePyLibsTar");
+  }
+  artifactProvider = provider;
+}
+
+// Whether THIS machine can ship the PyInstaller bundle: the desktop default
+// yes (packaged resources or a local build); a registered Android provider
+// means no — a phone has no PyInstaller and never hosts a backend, so even a
+// same-platform remote (nodejs-mobile reports linux/aarch64!) must go through
+// pylibs. chooseStrategy consults this instead of platform equality alone.
+function hasLocalBundle() {
+  return !artifactProvider;
+}
+
 // Resolve agent binaries (packaged resources or a dev build), cache under a
 // content-hash key, return paths + combined version hash.
-function ensureBundle() {
+async function ensureBundle() {
+  if (artifactProvider) return artifactProvider.ensureBundle();
+  return defaultEnsureBundle();
+}
+
+async function defaultEnsureBundle() {
   let server, supervisor;
   if (isPackagedApp()) {
     server = path.join(process.resourcesPath, "agent-server");
@@ -180,7 +210,7 @@ function venvPin() {
 // byte-deterministic tars, so key hit == the exact artifact the remote's
 // VERSION gate expects and the rebuild (pip download: tens of seconds) is
 // skipped entirely on reconnect.
-function ensurePyLibsTar(target) {
+function defaultEnsurePyLibsTar(target) {
   const key = `${target.os}-${target.arch}-${target.libc}-${target.pyver}-${venvPin()}-${sourceFingerprint().slice(0, 16)}`;
   fs.mkdirSync(CACHE, { recursive: true });
   const out = path.join(CACHE, `agent-pylibs-${key}.tar.gz`);
@@ -199,4 +229,21 @@ function ensurePyLibsTar(target) {
   return { path: out, version: fileHash(out).slice(0, 16) };
 }
 
-module.exports = { platformTag, ensureBundle, ensurePyLibsTar, resolveBash, isPackagedApp, fileHash, treeHash };
+// The seam every caller goes through: an Android provider downloads the
+// CI-built tar (async); the desktop default builds/reads it from disk.
+async function ensurePyLibsTar(target) {
+  if (artifactProvider) return artifactProvider.ensurePyLibsTar(target);
+  return defaultEnsurePyLibsTar(target);
+}
+
+module.exports = {
+  platformTag,
+  ensureBundle,
+  ensurePyLibsTar,
+  setArtifactProvider,
+  hasLocalBundle,
+  resolveBash,
+  isPackagedApp,
+  fileHash,
+  treeHash,
+};

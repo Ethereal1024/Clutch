@@ -243,3 +243,144 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ui/dist/*.exe
+
+  # ---- pylibs-matrix (M2 supply line for Android, docs/android/02 §7) ----
+  # The phone has no pip/bash: its pylibs tar comes from these CI prebuilts
+  # (byte-deterministic, so the tar's sha256 IS the remote's VERSION gate and
+  # the phone's ~/.clutch/bundles cache stays valid). Wheels are fetched for
+  # the TARGET (pip --platform), so no QEMU/cross toolchain is needed — the
+  # build script already cross-downloads for the desktop's cross remotes.
+  # openai/httpx2 versions come from uv.lock — the same pins the desktop's
+  # venvPin() bakes into its cache keys (docs §7 "与桌面发布同源").
+  # Determinism rests on the pinned interpreter (3.11) + locked wheels; a pip
+  # patch upgrade shifting bytes is safe by design: a new hash simply becomes
+  # a new VERSION on the remote (one reinstall), never a silent mismatch.
+  pylibs-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pyver: ["3.10", "3.11", "3.12", "3.13"]
+        arch: [x86_64, aarch64]
+        libc: [glibc, musl]
+    steps:
+      - uses: actions/checkout@v4
+      # no submodules: the tar carries agent/ + site-packages only; the tool
+      # modules are installed onto the remote later via components install
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Sync python deps (pins openai/httpx2 from uv.lock)
+        run: uv sync
+
+      - name: Build pylibs tar (linux/${{ matrix.arch }}/${{ matrix.libc }} py${{ matrix.pyver }})
+        id: build
+        run: |
+          set -euo pipefail
+          bash scripts/build-pylibs-tar.sh build pylibs.tar.gz \
+            Linux ${{ matrix.arch }} ${{ matrix.libc }} ${{ matrix.pyver }}
+          SHA256="$(sha256sum pylibs.tar.gz | cut -d' ' -f1)"
+          NAME="agent-pylibs-linux-${{ matrix.arch }}-${{ matrix.libc }}-py${{ matrix.pyver }}-${SHA256:0:16}.tar.gz"
+          mv pylibs.tar.gz "$NAME"
+          echo "file=$NAME" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pylibs-linux-${{ matrix.arch }}-${{ matrix.libc }}-py${{ matrix.pyver }}
+          path: ${{ steps.build.outputs.file }}
+          if-no-files-found: error
+
+  # Assemble the release index the Android downloader reads (N3): one entry per
+  # target, keyed exactly like artifact-provider-android.js builds its key
+  # ("<os>-<arch>-<libc>-py<ver>", lowercase). The filename hash must equal the
+  # content hash — the M2 acceptance is "remote VERSION == tar hash", and the
+  # phone recomputes the hash instead of trusting this manifest.
+  pylibs-index:
+    needs: pylibs-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: pylibs-*
+          merge-multiple: true
+
+      - name: Build pylibs-index.json
+        run: |
+          python3 - <<'EOF'
+          import hashlib, json, pathlib
+          tars = sorted(pathlib.Path("artifacts").glob("agent-pylibs-*.tar.gz"))
+          assert tars, "no pylibs artifacts found"
+          index = {}
+          for p in tars:
+              # agent-pylibs-linux-<arch>-<libc>-py<ver>-<hash16>.tar.gz
+              key = p.name[len("agent-pylibs-"):-len(".tar.gz")].rsplit("-", 1)[0]
+              stated = p.name.rsplit("-", 1)[-1][:16]
+              sha = hashlib.sha256(p.read_bytes()).hexdigest()
+              assert stated == sha[:16], f"{p.name}: filename hash {stated} != content {sha[:16]}"
+              index[key] = {"file": p.name, "sha256": sha, "version": sha[:16]}
+          pathlib.Path("pylibs-index.json").write_text(json.dumps(index, indent=1, sort_keys=True) + "\n")
+          print(json.dumps(index, indent=1))
+          EOF
+
+      - name: Attach tars + index to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pylibs-index.json
+            artifacts/agent-pylibs-*.tar.gz
+
+  # ---- android-apk (M3: the phone build, docs/android/02 §8) ----
+  # needs: pylibs-index, not just for ordering — this job stamps the URL of
+  # THIS tag's pylibs-index.json release asset into the APK, so that URL only
+  # resolves after pylibs-index's attach step above has completed (needs =
+  # whole job, attach included). The APK is a DEBUG build signed with the
+  # runner's auto-generated keystore: installable and WebView-debuggable;
+  # release signing is a deliberate later step (every build's signature
+  # differs until an upload keystore exists).
+  android-apk:
+    needs: pylibs-index
+    runs-on: ubuntu-latest
+    steps:
+      # no submodules: the APK carries android/host + the in-repo ui/ subset
+      # (components.js and ui/vendor are tracked files); pylibs reach the
+      # phone at RUNTIME through the stamped index, never at build time
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17" # AGP 8.5 floor
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # sync-android-host.sh runs npm install for the host bundle
+
+      - name: Install Android SDK pieces
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+
+      - name: Build debug APK
+        run: |
+          bash scripts/build-android-apk.sh \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/pylibs-index.json" \
+            "${GITHUB_REF_NAME#v}" \
+            "clutch-android-${GITHUB_REF_NAME}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clutch-android-apk
+          path: clutch-android-*.apk
+          if-no-files-found: error
+
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: clutch-android-*.apk

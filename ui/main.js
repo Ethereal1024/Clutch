@@ -1,17 +1,11 @@
 // Electron main process: claims/releases each window's backend session
 // (local or tunneled) and re-establishes it on death via backend:base-changed.
 const { app, BrowserWindow, ipcMain, session, shell } = require("electron");
-const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const tunnel = require("./ssh-tunnel");
-const {
-  SUPERVISOR_PORT,
-  startLocalSession,
-  supervisorSessionStart,
-  supervisorSessionStop,
-  startSupervisorHeartbeat,
-} = require("./server-bootstrap");
+const { SUPERVISOR_PORT, startLocalSession } = require("./server-bootstrap");
+const { createHostCore } = require("./host-core");
+const { writeSettingsMirror, ensureSettingsMirror } = require("./settings-mirror");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -23,141 +17,19 @@ const REMOTE_LLM_BASE = "http://127.0.0.1:8892/v1";
 // failure placeholder only; a healthy session overrides this with the window's real URL
 const DEFAULT_API_BASE = "http://127.0.0.1:8890";
 
-// per-window backend state: webContentsId -> {kind, sessionId, url, stop()}
-const windowBackends = new Map();
-
-async function releaseWindowBackend(winId) {
-  const wb = windowBackends.get(winId);
-  if (!wb) return;
-  windowBackends.delete(winId);
-  try {
-    wb.stop();
-  } catch (e) {
-    /* best effort */
-  }
-}
-
-async function registerTunnelBackend(wc, supBase, res) {
-  const fwd = await tunnel.openSessionForward(res.port);
-  const hb = startSupervisorHeartbeat(supBase, res.sessionId, () => {
-    tunnelLog(`[backend] window ${wc.id} session heartbeat failed; re-establishing`);
-    (async () => {
-      const cur = windowBackends.get(wc.id);
-      if (!cur || cur.sessionId !== res.sessionId) return; // superseded / closed
-      await releaseWindowBackend(wc.id);
-      const url = await ensureWindowBackend(wc);
-      if (!wc.isDestroyed()) wc.send("backend:base-changed", url);
-    })();
-  });
-  const wb = {
-    kind: "tunnel",
-    sessionId: res.sessionId,
-    url: `http://127.0.0.1:${fwd.localPort}`,
-    stop: () => {
-      hb.stop();
-      fwd.close();
-      supervisorSessionStop(supBase, res.sessionId);
-    },
-  };
-  windowBackends.set(wc.id, wb);
-  return wb.url;
-}
-
-// Decide (and, if needed, re-create) this window's backend URL.
-async function claimWindowBackend(wc, notify = false) {
-  const ts = tunnel.tunnelStatus();
-  if (ts.active && ts.url) {
-    const existing = windowBackends.get(wc.id);
-    if (existing && existing.kind === "tunnel") return existing.url;
-    await releaseWindowBackend(wc.id); // drop any local session first
-    let res = await supervisorSessionStart(ts.url, REMOTE_LLM_BASE);
-    if (res.error) {
-      // the remote supervisor may have idle-exited: restart it through the tunnel and retry once
-      tunnelLog(`[backend] tunnel session start failed (${res.error}); restarting remote supervisor`);
-      const ok = await tunnel.restartRemoteServer();
-      if (ok) {
-        res = await supervisorSessionStart(ts.url, REMOTE_LLM_BASE);
-        if (res.error) tunnelLog(`[backend] tunnel session retry failed: ${res.error}`);
-      }
-    }
-    if (!res.error) {
-      const url = await registerTunnelBackend(wc, ts.url, res);
-      if (notify && !wc.isDestroyed()) wc.send("backend:base-changed", url);
-      return url;
-    }
-    // tunnel alive but supervisorless (degraded host or remote died): fall back to a local session
-    tunnelLog("[backend] no tunnel session; falling back to a local session");
-  }
-
-  const existing = windowBackends.get(wc.id);
-  if (existing && existing.kind === "local") return existing.url;
-  await releaseWindowBackend(wc.id);
-  let s = await startLocalSession(() => {
-    // self-heal: the local supervisor died (idle exit, crash, stale reap);
-    // re-claim and point the renderer at the new URL — same as the tunnel path
-    tunnelLog(`[backend] window ${wc.id} local session heartbeat failed; re-establishing`);
-    (async () => {
-      const cur = windowBackends.get(wc.id);
-      if (!cur || cur.sessionId !== s.sessionId) return; // superseded / closed
-      await releaseWindowBackend(wc.id);
-      await ensureWindowBackend(wc, true);
-    })();
-  });
-  if (s.mode === "failed") {
-    // a window booting mid-spawn can transiently fail; retry once
-    tunnelLog(`[backend] local session retry: ${s.reason}`);
-    await new Promise((r) => setTimeout(r, 600));
-    s = await startLocalSession();
-  }
-  if (s.mode === "failed") {
-    tunnelLog(`[backend] local session failed: ${s.reason}`);
-    return null;
-  }
-  const wb = { kind: "local", sessionId: s.sessionId, url: s.url, stop: s.stop };
-  windowBackends.set(wc.id, wb);
-  if (notify && !wc.isDestroyed()) wc.send("backend:base-changed", wb.url);
-  return wb.url;
-}
-
-// one in-flight claim per window: overlapping api:base calls (renderer boot,
-// retries) must share a single session claim, not spawn two session children
-const backendClaims = new Map(); // webContentsId -> Promise<url|null>
-function ensureWindowBackend(wc, notify = false) {
-  const inflight = backendClaims.get(wc.id);
-  if (inflight) return inflight;
-  const p = (async () => {
-    try {
-      return await claimWindowBackend(wc, notify);
-    } finally {
-      backendClaims.delete(wc.id);
-    }
-  })();
-  backendClaims.set(wc.id, p);
-  return p;
-}
-
-async function stopAllBackends() {
-  const ids = [...windowBackends.keys()];
-  for (const id of ids) await releaseWindowBackend(id);
-  // Normal close: tell every supervisor to exit once their sessions are gone
-  requestSupervisorShutdown();
-}
-
-function requestSupervisorShutdown() {
-  const local = `http://127.0.0.1:${SUPERVISOR_PORT}/api/shutdown`;
-  const remote = (() => {
-    const ts = tunnel.tunnelStatus();
-    return ts.active && ts.url ? ts.url + "/api/shutdown" : null;
-  })();
-  for (const url of [local, remote]) {
-    if (!url) continue;
-    try {
-      fetch(url, { method: "POST" }).catch(() => {});
-    } catch (e) {
-      /* best effort */
-    }
-  }
-}
+// the session-claim state machine lives in host-core.js, shared with the
+// Android host; this shell only feeds it its desktop inputs. Electron
+// webContents already satisfies host-core's window-handle contract
+// ({id, isDestroyed(), send}).
+const hostCore = createHostCore({
+  supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
+  remoteLlmBase: () => REMOTE_LLM_BASE,
+  tunnelStatus: () => tunnel.tunnelStatus(),
+  restartRemoteServer: () => tunnel.restartRemoteServer(),
+  openSessionForward: (port) => tunnel.openSessionForward(port),
+  startLocalSession,
+  log: tunnelLog,
+});
 
 // surface main-process errors in the tunnel log instead of the opaque error dialog
 process.on("uncaughtException", (e) => {
@@ -210,8 +82,8 @@ function createWindow() {
   });
   // release the session as soon as the window closes/crashes so its lock frees
   const winId = win.webContents.id;
-  win.on("closed", () => releaseWindowBackend(winId));
-  win.webContents.on("destroyed", () => releaseWindowBackend(winId));
+  win.on("closed", () => hostCore.releaseWindowBackend(winId));
+  win.webContents.on("destroyed", () => hostCore.releaseWindowBackend(winId));
   win.loadFile(path.join(__dirname, "index.html"));
   return win;
 }
@@ -238,7 +110,7 @@ if (!app.requestSingleInstanceLock()) {
     // (first and second-instance ones) shares them
     ipcMain.handle("api:base", async (e) => {
       try {
-        const url = await ensureWindowBackend(e.sender);
+        const url = await hostCore.ensureWindowBackend(e.sender);
         return url || DEFAULT_API_BASE;
       } catch (err) {
         tunnelLog(`[backend] api:base failed: ${err && err.message}`);
@@ -246,59 +118,20 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    // The flat mirror file the backend + LLM proxy read; the UI's localStorage
-    // is the source of truth, this file is (re)written on every UI save.
-    function writeSettingsFile(data) {
-      const p = path.join(os.homedir(), ".clutch", "settings.json");
-      let cur = {};
-      try {
-        cur = JSON.parse(fs.readFileSync(p, "utf-8"));
-      } catch (e) {
-        /* first save: start from an empty file */
-      }
-      if (cur && cur.profiles) {
-        cur = cur.profiles[cur.active] || {}; // legacy map: keep the active profile's values
-      }
-      const upd = {};
-      for (const k of ["base_url", "model"]) {
-        if (data && data[k]) upd[k] = data[k];
-      }
-      if (data && data.api_key) upd.api_key = data.api_key;
-      // empty string clears the knob (provider default), undefined keeps it
-      if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
-      if (data && data.api_protocol !== undefined) upd.api_protocol = data.api_protocol;
-      const flat = Object.assign({}, cur, upd);
-      fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, JSON.stringify(flat, null, 2), { mode: 0o600 });
-    }
-
+    // settings.json mirror logic lives in ui/settings-mirror.js — shared with
+    // the Android host's bridge handlers (single implementation, both shells).
     ipcMain.handle("settings:save", async (_e, data) => {
       try {
-        writeSettingsFile(data);
+        writeSettingsMirror(data);
         return { ok: true };
       } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
       }
     });
 
-    // Self-heal the mirror: settings.json is derived state that session
-    // children (LLM config) and the LLM proxy read, but only a UI save
-    // recreates it — if it went missing/corrupt while localStorage still holds
-    // the config, the next session spawn silently boots with an EMPTY LLM
-    // config. Rebuild from the renderer's copy, but ONLY when the file is
-    // missing/blank: an existing file may hold intentional manual edits.
     ipcMain.handle("settings:ensure", async (_e, data) => {
       try {
-        let cur = {};
-        try {
-          cur = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
-        } catch (e) {
-          /* missing/corrupt: heal below */
-        }
-        if (cur && (cur.base_url || cur.api_key || cur.model)) return { ok: true, healed: false };
-        writeSettingsFile(data);
-        tunnelLog("[settings] mirror missing — rebuilt ~/.clutch/settings.json from the UI config");
-        return { ok: true, healed: true };
+        return ensureSettingsMirror(data, tunnelLog);
       } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
       }
@@ -310,9 +143,7 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("tunnel:status", async () => tunnel.tunnelStatus());
     ipcMain.handle("tunnel:disconnect", async () => {
       // stop window backends first, while the tunnel/bridge is still alive
-      for (const id of [...windowBackends.keys()]) {
-        await releaseWindowBackend(id);
-      }
+      await hostCore.releaseAllBackends();
       await tunnel.stopTunnel();
       return { ok: true };
     });
@@ -329,11 +160,11 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on("window-all-closed", async () => {
     // stop sessions + ask the supervisors to exit while the tunnel is still up
-    await stopAllBackends();
+    await hostCore.stopAllBackends();
     tunnel.stopTunnel();
     app.quit();
   });
 
   // final safety net: a session child must never outlive the app
-  app.on("before-quit", () => stopAllBackends());
+  app.on("before-quit", () => hostCore.stopAllBackends());
 }

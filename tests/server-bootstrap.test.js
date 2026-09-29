@@ -95,6 +95,14 @@ async function main() {
   assert(await healthy(p1), "session child healthy");
   assert(await supervisorUp(), "supervisor is up after window 1");
 
+  // the extracted pure-HTTP client sees the same live supervisor
+  const { supervisorProbe } = require("../ui/supervisor-client");
+  assert.strictEqual(
+    await supervisorProbe(`http://127.0.0.1:${SUPERVISOR_PORT}`),
+    "up",
+    "supervisor-client probe recognizes the supervisor"
+  );
+
   // ---- window 2: supervisor already up -> not re-spawned, second session ----
   const s2 = await fresh().startLocalSession();
   windows.push(s2);

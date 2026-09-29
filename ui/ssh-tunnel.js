@@ -11,7 +11,7 @@ const fs = require("fs");
 const { Client } = require("ssh2");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
-const { platformTag, ensureBundle, ensurePyLibsTar } = require("./server-bundle");
+const { platformTag, ensureBundle, ensurePyLibsTar, hasLocalBundle } = require("./server-bundle");
 const components = require("./components");
 
 const LOG_FILE = path.join(os.homedir(), ".clutch", "tunnel.log");
@@ -323,11 +323,19 @@ function remoteRunningCmd(probe) {
 // The bundle strategy ships binaries built for THIS host, so it is only valid
 // when the remote runs the same OS *and* CPU arch — arch alone is not enough
 // (a Windows client must not ship its .exe to a Linux remote, and vice versa).
+// hasLocalBundle() gates it a second time: a registered artifact provider
+// (Android, N3/N4) cannot produce a bundle, so even a same-platform remote
+// goes through pylibs — otherwise a linux-aarch64 phone facing a linux-aarch64
+// remote would pick "bundle" and die in the provider's hard reject.
 // Cross-platform remotes use pylibs: exact wheels for the target are fetched
 // client-side and the remote runs them with its own python3.
 function chooseStrategy(probe, localTag = platformTag()) {
   const [localOs, localArch] = localTag.split("-");
-  if (String(probe.os || "").toLowerCase() === localOs && probe.arch === localArch) {
+  if (
+    String(probe.os || "").toLowerCase() === localOs &&
+    probe.arch === localArch &&
+    hasLocalBundle()
+  ) {
     // same-platform: self-contained bundle (remote python3 has segfaulted on a NAS)
     return "bundle";
   }
@@ -367,11 +375,11 @@ async function installServer(probe, { force, progress } = {}) {
   // VERSION equals our binaries' hash
   let artifact;  let version;
   if (strategy === "bundle") {
-    artifact = ensureBundle();
+    artifact = await ensureBundle();
     version = artifact.version;
   } else {
     try {
-      const p = ensurePyLibsTar({
+      const p = await ensurePyLibsTar({
         os: probe.os,
         arch: probe.arch,
         libc: probe.libc || "unknown",

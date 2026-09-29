@@ -1,0 +1,55 @@
+/* N7 (M3): narrow-screen overrides for the phone WebView. Loaded ONLY under
+   the (max-width: 640px) media attribute in index.html, so the desktop is a
+   no-op by construction — this file does not have to restate a single desktop
+   rule, it only shrinks/re-flows what cannot fit a 360-430 CSS-px column.
+   Conservative on purpose: no selector here exists that style.css does not
+   already own; we only touch width/padding/order, never colors or type. */
+
+@media (max-width: 640px) {
+  /* topbar: let the brand row and the action buttons wrap to two lines
+     instead of squeezing the status badge out of the viewport */
+  #topbar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  #topbar button {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  /* workspace panel: 320px side-by-side would leave ~40px of chat; stack it
+     under the stream as a 40vh scroll region instead of hiding it */
+  main {
+    flex-direction: column;
+  }
+  #right {
+    width: auto;
+    max-height: 40vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  #taskbar {
+    padding: 10px 12px 12px;
+  }
+  #task-input {
+    padding: 8px;
+  }
+
+  /* modals own fixed pixel widths (420/540/560) — cap them to the viewport */
+  .modal-box,
+  #fs-modal .modal-box,
+  #settings-modal .modal-box {
+    width: calc(100vw - 24px);
+    max-width: 560px;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+  }
+
+  /* the welcome card is the first thing a fresh install sees on the phone */
+  .welcome-box {
+    width: calc(100vw - 32px);
+    max-width: 420px;
+  }
+}

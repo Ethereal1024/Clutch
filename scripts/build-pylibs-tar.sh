@@ -58,11 +58,18 @@ mkdir -p "$TMP/pkg"
   -d "$TMP/wheels" "openai==$OPENAI_VER" "httpx2==$HTTPX2_VER"
 
 "$PY" -m pip install --target "$TMP/pkg/site-packages" \
-  --no-index --find-links "$TMP/wheels" --only-binary=:all: \
+  --no-index --find-links "$TMP/wheels" --only-binary=:all: --no-compile \
   --platform "$TAG" --python-version "$PYVER" --implementation cp --abi "$ABI" \
   "openai==$OPENAI_VER" "httpx2==$HTTPX2_VER"
 
 cp -r "$ROOT/agent" "$TMP/pkg/agent"
+# Ship sources only: a .pyc embeds the compiling interpreter's view of source
+# mtimes (nondeterministic across builds) and is dead weight anyway — a pyc
+# built by THIS venv's python (e.g. cp310) never loads under the remote's
+# python3.x (e.g. 3.12), which recompiles into its own __pycache__ on first
+# import. Purge also covers __pycache__ copied from the repo's agent/ tree.
+find "$TMP/pkg" -name "*.pyc" -delete
+find "$TMP/pkg" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$(dirname "$OUT")"
 # Deterministic bytes for a given input set: fixed mtimes + gzip -n (drops the
 # timestamp header). The tar's content hash is the remote install gate, so

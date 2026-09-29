@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Loopback HTTP + SSH outbound = INTERNET. N5 (M3): the tunnel/engine
+         live in a foreground service so Android does not freeze the process
+         the moment the activity is backgrounded (targetSdk 34 kills cached
+         processes aggressively). dataSync is the closest declared type to
+         "long-lived SSH tunnel"; POST_NOTIFICATIONS is what makes that
+         service's mandatory notification visible on API 33+. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <!-- singleTask = the desktop's requestSingleInstanceLock (§3);
+             adjustResize = the soft keyboard must not cover the input line. -->
+        <activity
+            android:name=".MainActivity"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- N5: holds NodeEngine alive across activity teardown. Not exported:
+             only this app may drive the engine. -->
+        <service
+            android:name=".TunnelService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+    </application>
+</manifest>

@@ -1,0 +1,60 @@
+# Fast Android APK iteration without cutting a release tag. Same pipeline as
+# release.yml's android-apk job (scripts/build-android-apk.sh does the work),
+# but the artifact stays a workflow artifact — nothing is attached to a
+# release, so no supply-line state is touched. For quick device testing:
+#   1. trigger from the Actions tab (optionally point pylibs_index_url at a
+#      dev index served on the LAN, see android/README.md §2B),
+#   2. download clutch-android-debug-apk, `adb install` it.
+# The APK stamps `pylibs_index_url` when given; the default is the LATEST
+# release's pylibs-index.json, i.e. the same URL an M3 APK would carry.
+name: android-debug
+
+on:
+  workflow_dispatch:
+    inputs:
+      pylibs_index_url:
+        description: "pylibs-index.json URL to stamp (empty = latest release's index)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      # no submodules (same reasoning as release.yml android-apk)
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Android SDK pieces
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+
+      - name: Build debug APK
+        env:
+          # env indirection, not ${{ inputs.* }} in the script: the input is
+          # arbitrary text and must never be template-injected into a shell
+          PYLIBS_INDEX_URL: ${{ inputs.pylibs_index_url }}
+        run: |
+          URL="${PYLIBS_INDEX_URL:-https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/pylibs-index.json}"
+          bash scripts/build-android-apk.sh \
+            "$URL" \
+            "debug-${GITHUB_RUN_NUMBER}-$(echo "${GITHUB_SHA}" | cut -c1-7)" \
+            clutch-android-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clutch-android-debug-apk
+          path: clutch-android-debug.apk
+          if-no-files-found: error

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Clutch</string>
+    <!-- N5: the foreground service's mandatory notification -->
+    <string name="tunnel_notification_text">Tunnel and engine running</string>
+</resources>

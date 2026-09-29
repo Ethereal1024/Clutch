@@ -1,0 +1,11 @@
+{
+  "name": "clutch-android-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Clutch Android host JS — runs under nodejs-mobile (libnode v18.20.4); shared ui/ modules are synced in by scripts/sync-android-host.sh",
+  "main": "index.js",
+  "dependencies": {
+    "proxy-agent": "^8.0.2",
+    "ssh2": "^1.16.0"
+  }
+}
