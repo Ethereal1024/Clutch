@@ -27,7 +27,11 @@ esac
 case "$OS" in
   Linux)
     if [ "$LIBC" = "musl" ]; then
-      TAG="musllinux_1_2_$ARCH"
+      # musllinux_1_1, not _1_2: the pinned Rust wheels (jiter, pydantic-core)
+      # ship _1_1 only, and pip's --platform matches the tag exactly — a _1_2
+      # request finds nothing. A _1_1 wheel also runs under musl 1.2, so this
+      # is the strictly wider-compatible choice.
+      TAG="musllinux_1_1_$ARCH"
     else
       TAG="manylinux2014_$ARCH"  # glibc>=2.17, i.e. all modern distros
     fi
