@@ -353,7 +353,7 @@ jobs:
       # phone at RUNTIME through the stamped index, never at build time
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17" # AGP 8.5 floor
@@ -362,10 +362,25 @@ jobs:
         with:
           node-version: "22" # sync-android-host.sh runs npm install for the host bundle
 
-      - name: Install Android SDK pieces
+      # do NOT assume the image preinstalls the Android SDK (the first
+      # android-debug run died 127 on a bare `sdkmanager`): resolve it or
+      # install cmdline-tools explicitly, then let AGP know via ANDROID_HOME
+      - name: Ensure Android SDK + components
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+          set -euo pipefail
+          AH="${ANDROID_HOME:-$HOME/Android/Sdk}"
+          SDKM="$AH/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then
+            echo "no preinstalled sdkmanager at $SDKM — installing cmdline-tools"
+            mkdir -p "$AH/cmdline-tools"
+            curl -sSL --fail -o cmdtools.zip "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+            unzip -q cmdtools.zip -d cmdtools-x
+            mv cmdtools-x/cmdline-tools "$AH/cmdline-tools/latest"
+            rm -rf cmdtools.zip cmdtools-x
+          fi
+          yes | "$SDKM" --licenses >/dev/null || true
+          "$SDKM" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264" "cmake;3.22.1"
+          echo "ANDROID_HOME=$AH" >> "$GITHUB_ENV"
 
       - name: Build debug APK
         run: |
