@@ -793,10 +793,25 @@ function clearStreamPreviews() {
   }
 }
 
+// a mid-stream retry (the attempt died after streaming part of the turn): the
+// client restarts the request from scratch, so everything THIS attempt drew —
+// the partial text, the reasoning block, the half-streamed tool rows — has to
+// go, or it would sit above the retried answer as a stale copy. The retry
+// notice announces it (discard=true); none of that partial output is durable
+// (stream deltas are never stored), so nothing is lost by dropping it here.
+function discardLivePartial() {
+  if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
+  if (lastTextEl) { lastTextEl.remove(); lastTextEl = null; }
+  lastTextContent = "";
+  if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+  thinkingContent = "";
+  clearStreamPreviews();
+}
+
 // transient "connection lost — retrying…" chip. Shown when an LLM stream
-// attempt fails before its first token (network drop / read timeout) and the
-// client reconnects with backoff; removed as soon as new tokens arrive, the
-// compaction clears, or the run ends — so the UI never looks frozen.
+// attempt fails (network drop / read timeout) and the client reconnects with
+// backoff; removed as soon as new tokens arrive, the compaction clears, or the
+// run ends — so the UI never looks frozen.
 function setRetryNote(ev) {
   if (retryNoteEl) retryNoteEl.remove();
   retryNoteEl = document.createElement("div");
@@ -891,7 +906,10 @@ function applyStreamEvent(ev) {
   }
   if (ev.type === "llm_retry") {
     // transient: an LLM stream attempt failed; the client is reconnecting with
-    // backoff (transient, never stored; the next delta removes the chip)
+    // backoff (never stored; the next delta removes the chip). discard=true
+    // means the dead attempt had already streamed part of this turn: drop the
+    // live partial before the retried answer starts drawing
+    if (ev.discard) discardLivePartial();
     setRetryNote(ev);
     return true;
   }

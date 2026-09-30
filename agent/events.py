@@ -170,14 +170,20 @@ class CompactionDeltaEvent(Event):
 
 @dataclass
 class LlmRetryEvent(Event):
-    """Transient notice that an LLM stream attempt failed before its first token
-    (network drop / read timeout while consuming the SSE body) and the client is
-    reconnecting with backoff. Purely for live UI display — never persisted,
-    never replayed; the next streamed delta is the signal that the retry landed."""
+    """Transient notice that an LLM stream attempt failed (network drop / read
+    timeout while consuming the SSE body) and the client is reconnecting with
+    backoff. Purely for live UI display — never persisted, never replayed; the
+    next streamed delta is the signal that the retry landed.
+
+    ``discard`` is set when the attempt had ALREADY streamed part of its answer
+    before it died: not one byte of that is durable state, so the consumer has to
+    drop it (the loop clears its accumulators, the UI removes the live blocks) or
+    the retried answer would duplicate it on screen."""
 
     type: str = "llm_retry"
     attempt: int = 0  # the retry about to run (1-based)
     max_retries: int = 0  # total attempts configured on the client
+    discard: bool = False  # the dead attempt already streamed output: drop it
     message: str = ""  # human text ("Request timed out. — retrying (1/3)")
 
 

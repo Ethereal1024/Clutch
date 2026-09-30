@@ -137,14 +137,22 @@ class Agent:
                     # stream args so the UI shows the call as it is generated
                     self._emit(ToolCallDeltaEvent(tool_call_id=entry["id"], name="", delta=ev["delta"]))
                 elif t == "retry":
-                    # transient notice: a stream attempt failed before its first
-                    # token (network drop / read timeout) and the client is
-                    # reconnecting with backoff — live UI display only, never
-                    # durable; the next delta means the retry landed
+                    # transient notice: a stream attempt failed (network drop /
+                    # read timeout) and the client is reconnecting with backoff
+                    # — live UI display only, never durable. discard=true means the
+                    # dead attempt had already streamed part of this turn: those
+                    # deltas live in the view, not in the log, so clearing the
+                    # accumulators here is what keeps the retried answer from
+                    # being appended to the dead attempt's half-sentence.
+                    if ev.get("discard"):
+                        content_parts.clear()
+                        reasoning_parts.clear()
+                        tool_accum.clear()
                     self._emit(
                         LlmRetryEvent(
                             attempt=ev.get("attempt", 0),
                             max_retries=ev.get("max", 0),
+                            discard=bool(ev.get("discard")),
                             message=ev.get("message", ""),
                         )
                     )

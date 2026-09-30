@@ -13,13 +13,19 @@ exceptions (see LlmError.classify); a failure raised by the attempt factory
 itself (connection refused / DNS failure / connect timeout while issuing the
 request) arrives as a wrapped SDK error. Both are the same class of transport
 failure to this loop, and the loop below turns them into a retry. A
-retry restarts the request from scratch, so it is only safe when NOTHING of this
-attempt has reached the caller yet — retrying after a partial stream would
-re-emit already-delivered text and duplicate it in the transcript. A failure
-after the first event is therefore raised immediately (clear error instead of a
-silent stall); a failure before it retries with backoff, yielding a
-{"type": "retry", ...} notice first so the caller/UI can show "reconnecting…"
-instead of looking frozen until the next attempt dies.
+retry restarts the request from scratch, so it re-emits whatever this attempt
+already streamed — which is exactly what a caller that accumulates deltas has
+to undo before the next attempt's events arrive. That undo is what the retry
+notice's ``discard`` flag asks for: true means "drop everything you took from the
+attempt that just died". A caller that can do that (the agent loop rebuilds the
+turn from its own accumulators, the compactor rebuilds the summary) opts in with
+``mid_stream_retry=True``, and then a drop in the middle of an answer costs a
+reconnect instead of the whole run. A caller that cannot, or does not opt in,
+keeps the old behavior: a failure after the first delivered event is raised
+immediately (a clear error instead of a silent stall), while a failure before it
+retries with backoff, yielding a {"type": "retry", ...} notice first so the
+caller/UI can show "reconnecting…" instead of looking frozen until the next
+attempt dies.
 
 Cancellation: ``cancel`` (the run's Stop event) is woven through every waiting
 point, because the events themselves only surface between chunks — a Stop that
@@ -89,14 +95,22 @@ def run_streaming(
     max_retries: int,
     retryable_status: Collection[int],
     cancel: threading.Event | None = None,
+    mid_stream_retry: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    """Drive ``source()`` to completion, retrying pre-delivery failures.
+    """Drive ``source()`` to completion, retrying transport failures.
 
     ``finish`` is the last event a source yields; reaching it ends the turn (this
     generator then stops consuming, whatever the provider still has buffered).
     A source may also raise LlmError itself for a provider-level failure
     (response.failed, a mid-stream error event): it is passed through untouched
     instead of being flattened into the "unknown" catch-all by classify().
+
+    ``mid_stream_retry`` is the promise that the CALLER honors ``discard``: with
+    it on, an attempt that fails after delivering events is retried too, and the
+    notice it yields carries ``discard: true`` so the caller throws away the dead
+    attempt's output before the next attempt's events arrive. Off by default —
+    re-running a request whose text already reached a caller that does not
+    discard would duplicate that text.
     """
     attempts = max(1, int(max_retries))
     for attempt_no in range(attempts):
@@ -131,18 +145,25 @@ def run_streaming(
             if cancel is not None and cancel.is_set():
                 raise _cancelled("stop requested mid-stream") from e
             last_err = e if isinstance(e, LlmError) else LlmError.classify(e, retryable_status)
-            if not last_err.retryable or delivered or attempt_no == attempts - 1:
-                if not delivered and last_err.retryable:
+            # a partly delivered attempt is only re-runnable when the caller
+            # promised to discard what it already took (mid_stream_retry);
+            # otherwise the text that reached it would sit in the transcript twice
+            rerunnable = not delivered or mid_stream_retry
+            if not last_err.retryable or not rerunnable or attempt_no == attempts - 1:
+                if last_err.retryable and attempt_no == attempts - 1:
                     # all attempts exhausted: say so instead of a bare transport message
                     last_err.message = f"{last_err.message} (after {attempts} attempts)"
                 raise last_err from e
             # announce the retry before the backoff sleep so the caller/UI can
-            # show the recovery process instead of a silent stall
+            # show the recovery process instead of a silent stall. discard=true
+            # tells the caller that this attempt already streamed part of its
+            # answer and that the caller has to drop it before the next one runs.
             yield {
                 "type": "retry",
                 "attempt": attempt_no + 1,
                 "max": attempts,
                 "code": last_err.code,
+                "discard": delivered,
                 "message": f"{last_err.message} — retrying ({attempt_no + 1}/{attempts})",
             }
             # backoff waits ON the event: a Stop during the wait short-circuits

@@ -149,9 +149,15 @@ class Compactor:
                 return "", chars
             t = ev["type"]
             if t == "retry":
-                # transport hiccup before the first summary token: the client is
-                # reconnecting with backoff — mirror the notice into the live
-                # compaction block instead of letting it sit silently
+                # transport hiccup: the client is reconnecting with backoff —
+                # mirror the notice into the live compaction block instead of
+                # letting it sit silently. discard=true means the dead attempt
+                # had already streamed part of the summary: no byte of that is
+                # part of the summary, so it goes and the counter restarts at 0
+                if ev.get("discard"):
+                    parts.clear()
+                    chars = 0
+                    reported = 0
                 self._report_progress(chars, note=ev.get("message", ""))
                 continue
             if t == "text":

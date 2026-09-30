@@ -6,10 +6,10 @@ Covers the mid-stream transport-error fix shared by both wire protocols — the
 retry policy lives in llm_clients/stream_runner.py, so its cases are exercised
 through the chat client where they were first hit and through the responses
 client in section 5. Both must classify a body-level httpx2 error as retryable,
-restart the request (with a visible {"type": "retry"} notice) only when nothing
-of the attempt reached the caller, raise immediately instead of re-streaming
-duplicated content once it did, and report exhaustion with a clear "after N
-attempts" message.
+restart the request with a visible {"type": "retry"} notice, mark that notice
+discard=true when the dead attempt had already streamed output (the caller drops
+it before the retry's events arrive, so nothing is duplicated), and report
+exhaustion with a clear "after N attempts" message.
 
 Section 5 also pins the responses protocol's format bridging: chat history ->
 items + instructions, flat tools, and the typed event feed -> the same events
@@ -87,7 +87,8 @@ def _fail_stream():
 
 
 def _partial_then_fail():
-    """An SSE body that delivers one token and then dies mid-stream."""
+    """An SSE body that delivers one token and then dies mid-stream: the case
+    whose retry notice has to carry discard=true."""
     yield _text_chunk("partial")
     raise httpx2.ReadTimeout("timed out")
 
@@ -462,15 +463,21 @@ def _check_responses_protocol() -> None:
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
     check(err is None and evs[0]["type"] == "retry", "a pre-event failure retries with a notice")
     check(evs[0]["attempt"] == 1 and evs[0]["max"] == 3, "the notice counts the attempt budget")
+    check(evs[0]["discard"] is False, "a pre-event failure asks for no discard")
     check(fake.calls == 2, "exactly two responses.create() calls were issued")
     check([e["delta"] for e in evs if e["type"] == "text"] == ["hi", "!"], "no duplicated partial text after retry")
-    client, fake = _responses_client(3, [_responses_partial_then_fail])
+    client, fake = _responses_client(3, [_responses_partial_then_fail, _full_turn_events])
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
-    check([e["type"] for e in evs] == ["text"], "partial text is delivered once")
+    check(err is None, "a mid-stream drop recovers on the next attempt here too")
     check(
-        err is not None and err.code == "timeout" and fake.calls == 1,
-        "mid-stream failure raises instead of duplicating",
+        [e["type"] for e in evs][:2] == ["text", "retry"] and evs[1]["discard"] is True,
+        "the partial text is followed by a discard notice",
     )
+    check(
+        [e["delta"] for e in evs if e["type"] == "text"] == ["partial", "hi", "!"],
+        "the retried turn streams from its own start, nothing is re-emitted",
+    )
+    check(fake.calls == 2, "exactly one retry request was issued")
     client, fake = _responses_client(2, [_responses_fail_stream, _responses_fail_stream])
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
     check(err is not None and "after 2 attempts" in err.message, "exhaustion states the attempt count")
@@ -576,16 +583,42 @@ def main() -> int:
     check("after 2 attempts" in err.message, "exhaustion message states the attempt count")
     check(comps.calls == 2, "no extra request after exhaustion")
 
-    # 4. a failure AFTER content was delivered raises immediately: restarting
-    #    from scratch would re-emit "partial" and duplicate it in the transcript
-    client, comps = _client(3, [_partial_then_fail])
+    # 4. a failure AFTER content was delivered is retried too: the attempt's
+    #    partial output is announced as discard=true, which tells the caller to
+    #    throw it away before the retry's events arrive — so a drop in the middle
+    #    of an answer costs a reconnect instead of duplicating the text
+    client, comps = _client(3, [_partial_then_fail, _ok_stream])
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
-    check([e["type"] for e in evs] == ["text"], "partial token streamed before the failure")
-    check(evs[0]["delta"] == "partial", "partial content was delivered once")
-    check(err is not None and err.code == "timeout", "mid-stream failure raises instead of duplicating")
-    check(comps.calls == 1, "no retry request after partial delivery")
+    check(err is None, "a mid-stream drop recovers on the next attempt")
+    check(
+        [e["type"] for e in evs] == ["text", "retry", "text", "finish"],
+        "partial text, then the discard notice, then the retried turn",
+    )
+    check(evs[0]["delta"] == "partial", "the dead attempt's text reached the caller once")
+    check(evs[1]["discard"] is True, "the notice tells the caller to drop that partial output")
+    check(evs[1]["attempt"] == 1 and evs[1]["max"] == 3, "the notice counts the attempt budget")
+    check("retrying (1/3)" in evs[1]["message"], "the notice names the attempt")
+    check(evs[2]["delta"] == "hi", "the retried attempt streams its own answer from the start")
+    check(comps.calls == 2, "exactly two requests were issued")
 
-    # 4b. cancellation: Stop must reach every waiting point of a turn — the
+    # 4a. nothing delivered yet: the notice asks for no discard
+    client, comps = _client(3, [_fail_stream, _ok_stream])
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+    check([e["type"] for e in evs] == ["retry", "text", "finish"], "a pre-token failure retries with a notice")
+    check(evs[0]["discard"] is False, "nothing reached the caller, so the notice asks for no drop")
+
+    # 4b. mid-stream drops that outlast the budget still surface a clear error
+    client, comps = _client(2, [_partial_then_fail, _partial_then_fail])
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+    check(
+        [e["type"] for e in evs] == ["text", "retry", "text"],
+        "each attempt delivers its partial before the next notice",
+    )
+    check(err is not None and err.code == "timeout", "a mid-stream drop that never recovers raises")
+    check("after 2 attempts" in err.message, "exhaustion after mid-stream drops states the attempt count")
+    check(comps.calls == 2, "no extra request after exhaustion")
+
+    # 4c. cancellation: Stop must reach every waiting point of a turn — the
     #     attempt's top, a read blocked mid-attempt, and the retry backoff —
     #     because cancel is otherwise only observable between chunks.
     # pre-set Stop: no request at all

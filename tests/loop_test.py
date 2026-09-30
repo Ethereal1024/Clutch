@@ -526,6 +526,58 @@ def main() -> int:
             "retry notice never lands in the durable log",
         )
 
+    # 12b2. a retry that lands MID-answer: the notice carries discard=true and
+    # the loop drops the dead attempt's accumulators, so the turn it returns is
+    # the retried one -- never the dead half-sentence with the new text glued on
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        live2: list[Any] = []
+
+        class MidStreamRetryLlm:
+            """Client-shaped mid-answer recovery: the first attempt died after
+            streaming part of the answer, the notice tells the loop that part is
+            already in the live view and has to be dropped."""
+
+            def stream(self, messages, tools=None, cancel=None):
+                yield {"type": "text", "delta": "half an ans"}
+                yield {
+                    "type": "retry",
+                    "attempt": 1,
+                    "max": 3,
+                    "code": "connection",
+                    "discard": True,
+                    "message": "Connection interrupted. — retrying (1/3)",
+                }
+                yield {"type": "text", "delta": "the whole answer"}
+                yield {"type": "finish", "reason": "stop", "content": "the whole answer", "tool_calls": []}
+
+        agent2 = Agent(
+            llm=MidStreamRetryLlm(),  # type: ignore[arg-type]
+            registry=ToolRegistry(build_tools(config)),
+            workspace=sb,
+            config=config,
+            sink=live2.append,
+        )
+        result2 = agent2.run("t")
+        check(result2 == "the whole answer", "a mid-stream retry returns only the retried answer")
+        texts2 = [e for e in live2 if isinstance(e, TextDeltaEvent)]
+        check(
+            "".join(e.content for e in texts2) == "half an ansthe whole answer",
+            "both attempts stream live; dropping the first is the UI's half of the contract",
+        )
+        retries2 = [e for e in live2 if isinstance(e, LlmRetryEvent)]
+        check(len(retries2) == 1 and retries2[0].discard is True, "the notice marks the drop for the UI")
+        check(live2.index(retries2[0]) < live2.index(texts2[1]), "the discard notice precedes the retried text")
+        check(
+            not any(isinstance(e, LlmRetryEvent) for e in agent2.log.events()),
+            "the discard notice never lands in the durable log",
+        )
+        assistant2 = [e for e in agent2.log.events() if isinstance(e, AssistantMessageEvent)]
+        check(
+            bool(assistant2) and assistant2[-1].content == "the whole answer",
+            "the durable turn holds the retried answer only, never both",
+        )
+
     # 12c. Stop that lands inside a BLOCKED read: stream_runner's guard closes
     # the connection from its helper thread and the client surfaces
     # LlmError("cancelled") instead of a retryable transport error. The loop
@@ -803,6 +855,43 @@ def main() -> int:
         len(comps13g) == 1 and comps13g[0].summary == "the summary",
         "resumed summary streamed once, no duplication",
     )
+
+    # 13h. mid-summary drop: the notice says discard=true, so the text the dead
+    # attempt already streamed is thrown away and the counter restarts -- the
+    # stored summary is the retried one, not half-sentence + retried tail
+    log13h = LazyEventLog.in_memory()
+    log13h.append(UserMessageEvent(content="task"))
+    log13h.append(AssistantMessageEvent(content="x" * 300))
+    notes13h: list[object] = []
+
+    class MidStreamSummaryLlm:
+        def stream(self, messages, tools=None, cancel=None):
+            yield {"type": "text", "delta": "half the summ"}
+            yield {
+                "type": "retry",
+                "attempt": 1,
+                "max": 3,
+                "code": "connection",
+                "discard": True,
+                "message": "Connection interrupted. — retrying (1/3)",
+            }
+            yield {"type": "text", "delta": "the summary"}
+            yield {"type": "finish", "reason": "stop"}
+
+    comp13h = Compactor(
+        Config(llm_context_window_bytes=1000),
+        log13h,
+        MidStreamSummaryLlm(),
+        sink=notes13h.append,
+    )
+    check(comp13h.compact() is True, "compaction survives a mid-summary drop")
+    comps13h = [e for e in log13h.events() if isinstance(e, CompactionEvent)]
+    check(
+        len(comps13h) == 1 and comps13h[0].summary == "the summary",
+        "the partial summary is dropped, the retried one is stored",
+    )
+    dropped13h = [e for e in notes13h if e.type == "compaction_delta" and e.note and e.chars == 0]
+    check(bool(dropped13h), "the discard is reported with the counter reset to 0")
 
     # 14. resumed session: the byte trigger fires on the first turn
     with tempfile.TemporaryDirectory() as tmp:

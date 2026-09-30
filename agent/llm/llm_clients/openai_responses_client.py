@@ -115,8 +115,8 @@ class OpenaiResponsesLlmClient(BaseOpenaiClient):
         tools: list[dict[str, Any]] | None = None,
         cancel: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
-        # The retry policy (and why a retry is only safe before the first event
-        # of an attempt) lives in stream_runner.run_streaming; this method only
+        # The retry policy (and what a caller has to discard when a drop lands
+        # mid-answer) lives in stream_runner.run_streaming; this method only
         # builds the request and the handler list translates the event feed.
         instructions, items = to_responses_input(messages)
         kwargs: dict[str, Any] = {
@@ -138,6 +138,11 @@ class OpenaiResponsesLlmClient(BaseOpenaiClient):
             lambda: self._open(kwargs),
             max_retries=self.max_retries,
             retryable_status=self.retryable_status,
+            # our consumers (the agent loop, the compactor) honor the discard
+            # flag of the retry notice: they drop what a dead attempt streamed,
+            # so a drop in the middle of an answer becomes a reconnect instead
+            # of the end of the run
+            mid_stream_retry=True,
             cancel=cancel,
         )
 

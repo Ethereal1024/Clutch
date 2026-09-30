@@ -21,10 +21,10 @@ class OpenaiLlmClient(BaseOpenaiClient):
         tools: list[dict[str, Any]] | None = None,
         cancel: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
-        # Streamed chat completion. The retry policy — including why a retry is
-        # only safe before the first token of an attempt, and how Stop interrupts
-        # a read blocked mid-attempt — lives in stream_runner.run_streaming; this
-        # method only builds the request and translates chunks into events.
+        # Streamed chat completion. The retry policy — when a mid-stream failure
+        # is worth another request, and how Stop interrupts a read blocked
+        # mid-attempt — lives in stream_runner.run_streaming; this method only
+        # builds the request and translates chunks into events.
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -43,6 +43,11 @@ class OpenaiLlmClient(BaseOpenaiClient):
             lambda: self._open(kwargs),
             max_retries=self.max_retries,
             retryable_status=self.retryable_status,
+            # our consumers (the agent loop, the compactor) honor the discard
+            # flag of the retry notice: they drop what a dead attempt streamed,
+            # so a drop in the middle of an answer becomes a reconnect instead
+            # of the end of the run
+            mid_stream_retry=True,
             cancel=cancel,
         )
 
