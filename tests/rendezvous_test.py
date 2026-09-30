@@ -135,10 +135,18 @@ def _install_probe() -> None:
             else:
                 os.environ[components.ROOT_ENV] = previous
             os.environ.pop("CLUTCH_PROBE_ARGV", None)
-    check(
-        modules.component_dir(modules.WORKSPACE) == modules.module_dir(modules.WORKSPACE),
-        "the install root is host-scoped: the checkout is back once it is unset",
-    )
+    # the override is an env var, so it scoped resolution to the temp root: once
+    # it is unset the probe's version is invisible. What is left is THIS host's
+    # own copy — its install root, or the checkout when it has no install (a dev
+    # box with the module installed resolves to the install, and must not be read
+    # as a failure of the checkout).
+    own = components.installed(modules.WORKSPACE)
+    check(own != version, "the install root is host-scoped: the probe install is gone once the env is unset")
+    if own is None:
+        check(
+            modules.component_dir(modules.WORKSPACE) == modules.module_dir(modules.WORKSPACE),
+            "and with no install of its own, resolution is the dev checkout",
+        )
 
 
 def main() -> int:
@@ -181,13 +189,23 @@ def main() -> int:
     )
     check(rendezvous.unavailable_reason(modules.WORKSPACE) == "", "the workspace component is available here")
 
-    checkout = rendezvous.resolve(modules.MEMORY)
-    if checkout is not None:  # the memory checkout may be absent on a bare host
-        check(not checkout.installed and checkout.template, "the dev checkout is a template launch, not an install")
+    # 2c. the two launch shapes resolution chooses between, and which one THIS
+    #     host gets. An install shadows the checkout (components.resolve), so the
+    #     checkout's own shape is asked of the checkout DIRECTORY rather than of
+    #     whatever resolve() prefers on this machine — a dev box with the module
+    #     installed would otherwise be asserting the install's shape here.
+    mem = catalog.table()[modules.MEMORY]
+    checkout_dir = modules.module_dir(modules.MEMORY)
+    if checkout_dir.is_dir():  # the memory checkout may be absent on a bare host
+        rendered = rendezvous.render_launch(mem, checkout_dir, components.read_manifest(checkout_dir))
+        check(rendered is not None and rendered[1], "the dev checkout is a template launch, not an install")
         check(
-            checkout.argv == (modules.python_exe(), str(checkout.directory / "memory.py")),
+            rendered[0] == (modules.python_exe(), str(checkout_dir / "memory.py")),
             "the CLI template is the interpreter plus the checkout's entry point",
         )
+    checkout = rendezvous.resolve(modules.MEMORY)
+    if checkout is not None:  # absent on a host that has neither an install nor the checkout
+        check(checkout.installed or checkout.template, "a resolved CLI is an install or a template, never neither")
         check(rendezvous.unavailable_reason(modules.MEMORY) == "", "a checked-out CLI with an interpreter is available")
     _install_probe()
 
@@ -373,6 +391,9 @@ def main() -> int:
         #     component's own name, never with a host-side stand-in.
         real_dir = modules.module_dir
         modules.module_dir = lambda name: Path(workspace) / "no-such-module" / name
+        real_installed, real_resolve = components.installed, components.resolve
+        components.installed = lambda name: None  # gone in BOTH forms: no install here either
+        components.resolve = lambda name: None
         try:
             check(not rendezvous.available(modules.WORKSPACE), "a deleted component is not available")
             check("read_file" not in [t.name for t in build_tools(cfg)],
@@ -382,6 +403,8 @@ def main() -> int:
                   "the call is answered with the component's name, never a stand-in")
         finally:
             modules.module_dir = real_dir
+            components.installed = real_installed
+            components.resolve = real_resolve
 
         # 13. the guard is host policy and rides in FRONT of either face: the
         #     module serves a path named explicitly, the host still refuses it
