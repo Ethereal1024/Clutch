@@ -11,6 +11,13 @@
 //      is installed under and the digest the host compares, so an unchanged
 //      artifact uploads nothing and a changed one always lands.
 //
+// The same supervisor also answers the reverse direction, and it is the same
+// gate read backwards: `hostVersions()` asks which versions a machine holds (and
+// which one it would run), `hostRemove()` asks it to let one go. Nothing here
+// decides whether that is allowed — the machine that would RUN the component is
+// the only side that knows if something is running it, so its refusal comes back
+// as its own sentence rather than as a status this file interprets.
+//
 // Failure here is never fatal to a session: the pass runs in the background and
 // a tool whose component has not landed is simply not offered (the host keeps
 // no stand-in for it), so every error is reported and the session proceeds.
@@ -409,18 +416,53 @@ async function artifactFor(spec, { checkout = true } = {}) {
   };
 }
 
-// What the host already holds (the version gate's first half).
-async function hostInventory(base, timeoutMs = REQUEST_TIMEOUT_MS) {
+// One JSON call to a machine's component endpoints, with the timeout every
+// caller in this file passes. A refusal comes back as the HOST's own sentence
+// (`{"error": …}`, the shape every component endpoint refuses with): "that
+// version is not installed" and "a daemon is running it" are outcomes a page has
+// to be able to quote, and a bare status code would leave it guessing which.
+async function hostJSON(url, { method = "GET", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const r = await fetch(`${base}/api/components`, { signal: ctl.signal });
-    if (!r.ok) throw new Error(`the host answered ${r.status} to /api/components`);
-    const body = await r.json();
-    return Array.isArray(body.components) ? body.components : [];
+    const r = await fetch(url, { method, signal: ctl.signal });
+    const text = await r.text();
+    let body = {};
+    try {
+      body = JSON.parse(text);
+    } catch (e) {
+      /* a non-JSON body is reported below as the status */
+    }
+    if (!r.ok) throw new Error(body.error || `${method} ${url} answered ${r.status}`);
+    return body;
   } finally {
     clearTimeout(t);
   }
+}
+
+// What the host already holds (the version gate's first half).
+async function hostInventory(base, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const body = await hostJSON(`${base}/api/components`, { timeoutMs });
+  return Array.isArray(body.components) ? body.components : [];
+}
+
+// Every version of ONE component this machine holds, newest first and with
+// `resolved` marking the one a launch would use — the rows a removal is asked
+// about. The host answers the ORDER too: which version wins is its decision, and
+// re-sorting it here would be a second opinion.
+async function hostVersions(base, name, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const body = await hostJSON(`${base}/api/components/versions?name=${encodeURIComponent(name)}`, { timeoutMs });
+  return Array.isArray(body.versions) ? body.versions : [];
+}
+
+// Let ONE component go. `version` names a single version to drop; with no
+// version the component goes whole (agent/tools/components.py remove()). The
+// verdict is the host's — "removed" with the versions that went, or "absent"
+// when there was nothing to remove (the request is already true, so it is not an
+// error) — and a refusal arrives as the host's own sentence, thrown.
+async function hostRemove(base, name, version = "", timeoutMs = REQUEST_TIMEOUT_MS) {
+  const q = version ? `?version=${encodeURIComponent(version)}` : "";
+  return hostJSON(`${base}/api/components/${encodeURIComponent(name)}${q}`, { method: "DELETE", timeoutMs });
 }
 
 async function upload(base, spec, timeoutMs) {
@@ -528,6 +570,8 @@ module.exports = {
   checkoutComponents,
   sources,
   hostInventory,
+  hostVersions,
+  hostRemove,
   upload,
   CACHE,
   REQUEST_TIMEOUT_MS,

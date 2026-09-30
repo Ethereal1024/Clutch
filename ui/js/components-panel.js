@@ -15,12 +15,14 @@
 // they did not. "No plugins exist" and "the network ate the answer" look exactly
 // alike in an empty list, and that is the one reading this page must not give.
 //
-// The one write this page can perform is an install, and it is offered the way
-// PLUGIN_PLAN.md I5 demands: the button says what it will do to WHICH machine,
-// the confirmation says a component cannot be taken back from here (no uninstall
-// exists on the host), and the outcome is the host's own verdict, quoted. A read
-// that failed never becomes an offer to write: an unreachable target disables
-// the button instead of pretending the install will land.
+// The two writes this page can perform are install and remove, and each is
+// offered the way PLUGIN_PLAN.md I5 demands: the button says what it will do to
+// WHICH machine, the confirmation says what the act actually costs (an install
+// writes bytes over whatever version is there; a removal DELETES them — neither
+// is a rollback, because nothing here keeps a copy of what it replaces or takes
+// away), and the outcome is the host's own verdict, quoted. A read that failed
+// never becomes an offer to write: an unreachable target disables the controls
+// instead of pretending the write will land.
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
@@ -42,8 +44,8 @@ const plugState = {
   market: null, // {entries, errors, sources}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
-  busy: null, // {name, stage} — an install in flight, nothing else may start
-  result: null, // {ok, text} — the host's verdict on the last install
+  busy: null, // {name, verb, stage} — a write in flight, nothing else may start
+  result: null, // {ok, text} — the host's verdict on the last write
 };
 
 // The machine this page is about, named the way the rest of the UI names it: the
@@ -153,9 +155,34 @@ function plugHeldSection() {
     if (h.version) chips.push([h.version, "mono"]);
     if (plugState.market && !offered.has(h.name)) chips.push(["not offered by this client", "warn"]);
     const digest = String(h.digest || "");
-    return plugRow(h.name, chips, [digest ? "digest " + digest.slice(0, 16) : ""]);
+    return plugRow(h.name, chips, [digest ? "digest " + digest.slice(0, 16) : ""], [plugRemoveButton(h)]);
   });
   return plugSection(`On this machine (${plugState.held.length})`, rows, "no component installed");
+}
+
+// The reverse verb for one installed component: the row IS the thing that can
+// go, so the control lives beside it and names it. Same discipline as the
+// install control — it is dead while the machine is unknown (which machine would
+// lose the bytes is exactly what must not be guessed) and while any write is in
+// flight, and its title says what it would take off where.
+function plugRemoveButton(held) {
+  const busy = plugState.busy && plugState.busy.name === held.name;
+  const btn = document.createElement("button");
+  btn.className = "plug-remove";
+  btn.type = "button";
+  btn.textContent = busy ? "…" : "Remove";
+  if (!plugState.target || !plugState.target.base) {
+    btn.disabled = true;
+    btn.title = "no supervisor URL for the target machine yet";
+  } else if (plugState.busy) {
+    btn.disabled = true;
+    btn.title = plugState.busy.verb === "remove" ? plugState.busy.name + " is being removed" : plugState.busy.name + " is being installed";
+  } else {
+    const version = held.version ? " " + held.version : "";
+    btn.title = `remove ${held.name}${version} from ${plugTargetName(plugState.target)}`;
+  }
+  btn.addEventListener("click", () => plugRemove(held));
+  return btn;
 }
 
 // The install control for one market row. The label is derived from what the
@@ -199,6 +226,7 @@ function plugInstallButton(entry) {
 // the tunnel), and the two host verdicts differ in what they cost.
 function plugStageLine(busy) {
   const where = plugTargetName(plugState.target);
+  if (busy.verb === "remove") return `removing ${busy.name} from ${where}…`;
   switch (busy.stage) {
     case "artifact":
       return `preparing the bytes for ${busy.name}…`;
@@ -227,6 +255,55 @@ function plugInstallResult(entry, res, where) {
   return { ok: true, text: `installed ${entry.name} ${res.version} on ${where}${path}` };
 }
 
+// The host's verdict on a removal, in the host's words. Three outcomes, and
+// only one of them is a failure: "removed" names the versions that went,
+// "absent" says there was nothing to take (the request was already true — a
+// problem report here would invent one), and a refusal is quoted.
+function plugRemoveResult(held, res, where) {
+  if (!res || !res.ok) {
+    return { ok: false, text: `could not remove ${held.name} from ${where} — ${(res && res.error) || "no answer"}` };
+  }
+  if (res.status === "absent") {
+    return { ok: true, text: `${held.name} was not installed on ${where} — there was nothing to remove` };
+  }
+  const went = res.removed && res.removed.length ? " " + res.removed.join(", ") : "";
+  return { ok: true, text: `removed ${held.name}${went} from ${where}` };
+}
+
+// Ask, then delete. The question is the same shape as the install's and says the
+// harder thing: these bytes are DELETED, and this page keeps no copy to put back.
+async function plugRemove(held) {
+  const api = window.clutchComponents;
+  if (!api || !api.remove || plugState.busy || !plugState.target || !plugState.target.base) return;
+  const where = plugTargetName(plugState.target);
+  const version = held.version ? " " + held.version : "";
+  const go = await askConfirm({
+    title: `Remove ${held.name}?`,
+    text:
+      `${held.name}${version} is deleted from ${where}'s component directory, together with any other version of it that machine holds.` +
+      " This cannot be undone from here: nothing in this app keeps a copy of what it removes," +
+      " so putting it back means installing it again from a source.",
+    ok: "Remove",
+  });
+  if (!go) return;
+  plugState.busy = { name: held.name, verb: "remove", stage: "removing" };
+  plugState.result = null;
+  renderPlugins();
+  let res;
+  try {
+    res = await api.remove(held.name);
+  } catch (e) {
+    // the IPC hop itself failed: still the failure path, still with a reason
+    res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
+  }
+  plugState.busy = null;
+  plugState.result = plugRemoveResult(held, res, where);
+  renderPlugins();
+  // the machine's inventory just changed: read both halves back (the counts and
+  // the rows), exactly as an install does
+  if (res && res.ok) plugRead();
+}
+
 // Ask, then write. The question names the machine and states the one fact the
 // page must not hide (the write cannot be undone from here), and the answer is
 // either an install that was actually started or nothing at all.
@@ -241,7 +318,8 @@ async function plugInstall(entry) {
     title: `Install ${entry.name}?`,
     text:
       `${entry.name}${entry.version ? " " + entry.version : ""} is written into ${where}'s component directory.` +
-      " This page cannot undo that: nothing in this app can remove an installed component yet." +
+      " It can be removed again from this page, but a removal DELETES bytes: nothing here keeps a copy," +
+      " so neither act is a rollback." +
       again +
       knows,
     ok: "Install",
@@ -290,7 +368,7 @@ function plugMarketSection() {
   if (plugState.market.entries.length) {
     const caution = document.createElement("p");
     caution.className = "plug-caution";
-    caution.textContent = "install writes files on the target machine — nothing in this app can take an installed component back yet";
+    caution.textContent = "install writes files on the target machine and Remove deletes them — neither is a rollback: nothing here keeps a copy of what it replaces or takes away";
     sec.appendChild(caution);
   }
   // a source that did not answer explains a short market: one line each, in the

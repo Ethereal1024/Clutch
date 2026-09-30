@@ -1,11 +1,13 @@
 "use strict";
 
 // The plugin tab is the ONE place this UI can write to a machine (PLUGIN_PLAN.md
-// I5), so its install path is the part that must not drift silently: which
-// machine the button claims, what the confirmation says, what a refusal looks
-// like, and what the page does afterwards. Nothing smaller than the page's own
-// file tests that, and the page is DOM code driven by ui/components-view.js over
-// the clutchComponents channel.
+// I5), so both of its write paths are what must not drift silently: which machine
+// a control claims, what the confirmation says, what a refusal looks like, and
+// what the page does afterwards — for the install and for the removal (the
+// reverse verb, which is the one that DELETES, so its wording is checked for the
+// fact that it is not a rollback). Nothing smaller than the page's own file tests
+// that, and the page is DOM code driven by ui/components-view.js over the
+// clutchComponents channel.
 //
 // So this runner loads ui/js/components-panel.js itself (taken from
 // ui/index.html's script list, so a page that forgets to load it fails here)
@@ -128,9 +130,11 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     listCalls: 0,
     marketCalls: 0,
     installCalls: [],
+    removeCalls: [],
     progress: null,
     control: null,
     reply: null,
+    removeReply: { ok: true, status: "removed", removed: ["0.1.0+5f900739"] },
     confirms: [],
     answer: true,
   };
@@ -145,6 +149,11 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       world.installCalls.push(name);
       if (world.control) return world.control.promise;
       return world.reply;
+    },
+    remove: async (name) => {
+      world.removeCalls.push(name);
+      if (world.control) return world.control.promise;
+      return world.removeReply;
     },
     onProgress: (cb) => { world.progress = cb; },
   };
@@ -172,6 +181,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     el: (id) => dom.byId.get("#" + id),
     body: () => dom.byId.get("#plug-body"),
     buttons: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-install/.test(n.className)),
+    removes: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-remove/.test(n.className)),
     note: () => dom.byId.get("#plug-note"),
     text: () => textOf(dom.byId.get("#plug-body")),
     open: async () => { vm.runInContext("pluginTabShown()", ctx); await settle(); },
@@ -192,7 +202,7 @@ const CODE = mod ? mod.code : "";
     check(p.buttons().map(ownerName).join(",") === "clutch-workspace,clutch-memory", "each control belongs to the row it installs");
     check(p.buttons().every((b) => b.textContent === "Install"), "a component the machine does not hold offers 'Install'");
     check(p.buttons().every((b) => !b.disabled), "and the control is live once the target is known");
-    check(/take an installed component back yet/.test(p.text()), "the market says a write cannot be taken back (I5, visible without hovering)");
+    check(/neither is a rollback/.test(p.text()), "the market says in plain words that a write is never a rollback (I5, visible without hovering)");
   }
 
   // 2. an unreachable target never draws a live button
@@ -235,7 +245,7 @@ const CODE = mod ? mod.code : "";
     const ask = p.world.confirms[0];
     check(p.world.confirms.length === 1 && ask.ok === "Install", "installing asks first, with the verb on the button");
     check(/SSH ubuntu@10\.0\.0\.5:22/.test(ask.text), "the question names the machine the write lands on");
-    check(/cannot undo that/.test(ask.text), "and states that this page cannot undo it (I5)");
+    check(/neither act is a rollback/.test(ask.text), "and says what the write costs: removable again, but never a rollback (I5)");
     check(p.world.installCalls.length === 0, "a declined install writes nothing");
     check(p.note().textContent === "", "and leaves no verdict behind");
   }
@@ -298,7 +308,109 @@ const CODE = mod ? mod.code : "";
     check(/could not install clutch-memory .*main process is gone/.test(p.note().textContent), "a channel that threw is reported as the install's reason");
   }
 
-  // 9. a read started from the tab shows the pending line, not a stale verdict
+  // 9. the reverse verb is offered where the component is: the row that names
+  //    what this machine holds is the row that can take it away
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    check(p.removes().length === 1, "an installed component gets a removal control, one per held row");
+    check(ownerName(p.removes()[0]) === "clutch-workspace", "and it belongs to the row it would empty");
+    check(p.removes()[0].textContent === "Remove", "the control says what it does");
+    check(/remove clutch-workspace 0\.1\.0\+5f900739 from Local \(this machine\)/.test(p.removes()[0].title), "and its title names the machine that would lose the bytes");
+  }
+
+  // 10. asking first, and the question is the whole point: a removal is a
+  //     DELETION, not a rollback (I5 — the page must not dress it up as one)
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.answer = false;
+    p.removes()[0].click();
+    await settle();
+    const ask = p.world.confirms[0];
+    check(p.world.confirms.length === 1 && ask.ok === "Remove", "removing asks first, with the verb on the button");
+    check(/is deleted from Local \(this machine\)/.test(ask.text), "the question says the bytes are deleted, and where");
+    check(/cannot be undone from here/.test(ask.text), "and that nothing here can put them back (I5)");
+    check(p.world.removeCalls.length === 0, "a declined removal deletes nothing");
+    check(p.note().textContent === "", "and leaves no verdict behind");
+  }
+
+  // 11. the happy path: the host's verdict names the versions that went, and the
+  //     machine is read back — the row it emptied is gone from the page next time
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    const before = p.world.listCalls;
+    p.world.removeReply = { ok: true, status: "removed", removed: ["0.1.0+5f900739"] };
+    p.removes()[0].click();
+    await settle();
+    check(p.world.removeCalls.join(",") === "clutch-workspace", "the confirmed removal hands that name to the channel");
+    check(/^removed clutch-workspace 0\.1\.0\+5f900739 from Local \(this machine\)$/.test(p.note().textContent), "the host's verdict names the versions that went");
+    check(p.note().className.includes("error") === false, "a completed removal is not drawn as an error");
+    check(p.world.listCalls > before, "and the machine's inventory is read again after it changed");
+  }
+
+  // 12. "absent" is an ANSWER, not a failure: the request was already true, so
+  //     nothing was there to remove and nothing is reported as broken
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.removeReply = { ok: true, status: "absent", removed: [] };
+    p.removes()[0].click();
+    await settle();
+    check(/^clutch-workspace was not installed on Local \(this machine\) — there was nothing to remove$/.test(p.note().textContent), "a component that was already gone is reported as nothing to remove");
+    check(p.note().className.includes("error") === false, "and it is not drawn as a failure");
+  }
+
+  // 13. a refusal is the host's sentence, quoted: what is running the component
+  //     is the host's to know, and this page must not paraphrase it away
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.removeReply = {
+      ok: false,
+      name: "clutch-workspace",
+      error: "clutch-workspace is being served right now by a daemon this process did not start (pid 4242): stop it first",
+    };
+    p.removes()[0].click();
+    await settle();
+    check(p.note().textContent.includes("pid 4242"), "the host's own refusal reaches the page verbatim");
+    check(p.note().className.includes("error"), "and is drawn as a failure");
+    check(p.removes()[0].disabled === false, "the control comes back once the write failed");
+
+    const broken = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await broken.open();
+    broken.ctx.window.clutchComponents.remove = async () => { throw new Error("main process is gone"); };
+    broken.removes()[0].click();
+    await settle();
+    check(/could not remove clutch-workspace .*main process is gone/.test(broken.note().textContent), "a channel that threw is reported as the removal's reason");
+  }
+
+  // 14. one write at a time, including across the two directions: a removal in
+  //     flight disables the installs, an install in flight disables the removals
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.control = defer();
+    p.removes()[0].click();
+    await settle(3);
+    check(/removing clutch-workspace from Local \(this machine\)/.test(p.note().textContent), "the note says what is being removed, while it is being removed");
+    check(p.removes().every((b) => b.disabled), "and the removal control is dead for the duration");
+    check(p.buttons().every((b) => b.disabled), "as is every install control (one write at a time)");
+    p.world.control.res({ ok: true, status: "removed", removed: ["0.1.0+5f900739"] });
+    await settle();
+    check(p.buttons().every((b) => !b.disabled), "and the installs come back once the write is over");
+  }
+
+  // 15. a target the page cannot name is no target: no supervisor URL, no removal
+  {
+    const died = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }], target: { kind: "remote", base: "" } });
+    await died.open();
+    check(died.removes().every((b) => b.disabled), "a tunnel with no supervisor URL leaves the removal control dead");
+    check(/no supervisor URL/.test(died.removes()[0].title), "and it says why");
+  }
+
+  // 16. a read started from the tab shows the pending line, not a stale verdict
   {
     const p = page();
     await p.open();
@@ -313,5 +425,5 @@ const CODE = mod ? mod.code : "";
     check(p.world.marketCalls >= 2, "and it re-reads the sources (force)");
   }
 
-  summary("components-panel: the plugin tab's install path (target, confirm text, verdicts, re-read)");
+  summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");
 })();

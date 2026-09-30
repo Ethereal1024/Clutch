@@ -111,6 +111,8 @@
     list: () => call("clutchComponents", "list"),
     market: (opts) => call("clutchComponents", "market", [opts]),
     install: (name) => call("clutchComponents", "install", [name]),
+    versions: (name) => call("clutchComponents", "versions", [name]),
+    remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
     onProgress: (cb) => subscribe("components:progress", cb),
   });
 

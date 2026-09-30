@@ -23,8 +23,12 @@ function fakeLib(opts = {}) {
     artifactError = null,
     verdict = { status: "installed", name: "clutch-memory", version: VERSION, digest: DIGEST, path: "/root/0.1.0" },
     uploadError = null,
+    versions = [{ name: "clutch-memory", version: VERSION, interface: "cli", digest: DIGEST, path: "/root/0.1.0", resolved: true }],
+    versionsError = null,
+    removal = { status: "removed", name: "clutch-memory", removed: [VERSION] },
+    removeError = null,
   } = opts;
-  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [] };
+  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [], versionReads: [], removals: [] };
   return {
     calls,
     REQUEST_TIMEOUT_MS: 120000,
@@ -37,6 +41,16 @@ function fakeLib(opts = {}) {
       calls.inventories++;
       if (inventoryError) throw new Error(inventoryError);
       return held;
+    },
+    hostVersions: async (base, name) => {
+      calls.versionReads.push({ base, name });
+      if (versionsError) throw new Error(versionsError);
+      return versions;
+    },
+    hostRemove: async (base, name, version) => {
+      calls.removals.push({ base, name, version });
+      if (removeError) throw new Error(removeError);
+      return removal;
     },
     artifactFor: async (spec) => {
       calls.artifacts.push(spec.name);
@@ -234,9 +248,69 @@ async function main() {
     check(!r4.ok, "no window and no tunnel still installs to this machine");
   }
 
-  // ---- 6. the view's default install layer is the real one, and complete ----
+  // ---- 7. the reverse verbs: what one machine holds, and letting it go ----
+  {
+    // the versions of ONE component, in the host's own order and with the
+    // host's own answer about which one it would run
+    const { api, lib } = view({
+      lib: fakeLib({
+        versions: [
+          { name: "clutch-memory", version: "0.2.0+x", interface: "cli", digest: DIGEST, path: "/root/0.2.0", resolved: true },
+          { name: "clutch-memory", version: VERSION, interface: "cli", digest: DIGEST, path: "/root/0.1.0", resolved: false },
+        ],
+      }),
+    });
+    const v = await api.versions("clutch-memory", EMPTY_WIN);
+    check(v.error === null && v.versions.length === 2, "every version this machine holds comes back for one component");
+    check(v.versions[0].resolved === true && v.versions[1].resolved === false, "with the host's own verdict about which one it would run");
+    check(lib.calls.versionReads[0].name === "clutch-memory" && lib.calls.versionReads[0].base === "http://127.0.0.1:8890", "the question goes to THIS machine's supervisor, by name");
+
+    // a read that failed is the reason it failed, never "no versions"
+    const blind = view({ lib: fakeLib({ versionsError: "DELETE /api/components/versions/… answered 500" }) });
+    const v2 = await blind.api.versions("clutch-memory", EMPTY_WIN);
+    check(v2.versions.length === 0 && /answered 500/.test(v2.error || ""), "a version read that failed says why, instead of reporting an empty machine");
+
+    // and a target that does not exist is not asked at all
+    const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const v3 = await nowhere.api.versions("clutch-memory", { id: 1 });
+    check(v3.error && nowhere.lib.calls.versionReads.length === 0, "a machine with no supervisor URL is reported without a request being made");
+  }
+
+  // ---- 8. one removal, and the three shapes its verdict takes ----
+  {
+    const { api, lib } = view({ lib: fakeLib() });
+    const r = await api.remove("clutch-memory", {}, EMPTY_WIN);
+    check(r.ok && r.status === "removed" && r.removed[0] === VERSION, "a removal reports the host's verdict and the versions that went");
+    check(lib.calls.removals[0].name === "clutch-memory" && lib.calls.removals[0].version === "", "no version named means the component goes whole");
+    check(lib.calls.removals[0].base === "http://127.0.0.1:8890", "and it is asked of the target machine's supervisor");
+
+    const one = view({ lib: fakeLib({ removal: { status: "removed", name: "clutch-memory", removed: [VERSION] } }) });
+    await one.api.remove("clutch-memory", { version: VERSION }, EMPTY_WIN);
+    check(one.lib.calls.removals[0].version === VERSION, "a version the caller names is the one asked about");
+
+    // "absent" is an outcome, not a failure: what was asked for is already true
+    const gone = view({ lib: fakeLib({ removal: { status: "absent", name: "clutch-memory", removed: [] } }) });
+    const r2 = await gone.api.remove("clutch-memory", {}, EMPTY_WIN);
+    check(r2.ok && r2.status === "absent" && r2.removed.length === 0, "a component that was already gone answers 'absent' and is not an error");
+
+    // a refusal is the host's sentence — the page quotes it, this layer does not
+    // invent a verdict of its own (the host is the side that knows what is running)
+    const refused = view({ lib: fakeLib({ removeError: "clutch-memory is being served right now by a daemon this process did not start (pid 4242): stop it first" }) });
+    const r3 = await refused.api.remove("clutch-memory", {}, EMPTY_WIN);
+    check(!r3.ok && /pid 4242/.test(r3.error), "a refusal surfaces with the host's own words");
+
+    const nowhere = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const r4 = await nowhere.api.remove("clutch-memory", {}, { id: 1 });
+    check(!r4.ok && nowhere.lib.calls.removals.length === 0, "a machine with no supervisor URL is refused before anything is sent");
+  }
+
+  // ---- 9. the view's default install layer is the real one, and complete ----
   {
     check(typeof components.upload === "function", "ui/components.js exports the uploader the view calls");
+    check(
+      typeof components.hostVersions === "function" && typeof components.hostRemove === "function",
+      "and the two reverse calls (list one component's versions, let one go)"
+    );
     check(
       Number.isFinite(components.REQUEST_TIMEOUT_MS) && components.REQUEST_TIMEOUT_MS > 0,
       "and the upload timeout it must pass is exported too"
@@ -248,7 +322,7 @@ async function main() {
     check(typeof api.marketCache === "function", "the view exposes its market cache (a page can tell what it is showing)");
   }
 
-  summary("components-view", "all passed (target machine, inventory, market cache, install verdicts)");
+  summary("components-view", "all passed (target machine, inventory, market cache, install + remove verdicts)");
 }
 
 main().catch((e) => {

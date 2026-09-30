@@ -172,6 +172,15 @@ if (!app.requestSingleInstanceLock()) {
     // reason) instead of rejecting the invoke.
     ipcMain.handle("components:list", async (e) => componentsView.list(e.sender));
     ipcMain.handle("components:market", async (_e, opts) => componentsView.market(opts || {}));
+    // the reverse verbs, named the way the host names them: `versions` asks what
+    // one machine holds, `remove` asks it to let one go (the host may refuse —
+    // something is running it — and that arrives as the error inside the answer).
+    ipcMain.handle("components:versions", async (e, name) =>
+      componentsView.versions(String(name || ""), e.sender)
+    );
+    ipcMain.handle("components:remove", async (e, name, opts) =>
+      componentsView.remove(String(name || ""), opts || {}, e.sender)
+    );
     ipcMain.handle("components:install", async (e, name) =>
       componentsView.install(String(name || ""), e.sender, {
         // one line at a time to the window that asked; a closed window is not an

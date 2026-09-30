@@ -1,5 +1,6 @@
 // the plugin page's backend: the target machine, what it holds, what this
-// client could give it, and the one install that hands bytes over
+// client could give it, and the two writes that move bytes across (an install
+// onto the machine, a removal off it)
 //
 // Everything the plugin tab shows crosses this file. The renderer may not touch
 // the filesystem, a supervisor, or a release, so it asks and receives facts.
@@ -197,7 +198,47 @@ function createComponentsView(deps) {
     }
   }
 
-  return { target, list, market: marketList, install, marketCache: () => market };
+  // Every version of ONE component the target machine holds, newest first, with
+  // `resolved` marking the one it would run. Same shape as list(): the reason a
+  // read failed travels INSIDE the answer, because an empty list of versions and
+  // "the machine could not be asked" are not the same fact.
+  async function versions(name, win = null) {
+    const t = target(win);
+    const problem = why(t);
+    if (problem) return { target: t, name, versions: [], error: problem };
+    try {
+      return { target: t, name, versions: await lib.hostVersions(t.base, name), error: null };
+    } catch (e) {
+      return { target: t, name, versions: [], error: (e && e.message) || String(e) };
+    }
+  }
+
+  // Let ONE component go from the target machine. `version` names one version to
+  // drop; with no version the component goes whole. The verdict is the host's and
+  // it has three shapes, all of them answers rather than failures — "removed"
+  // (with the versions that went), "absent" (nothing was there, so the request is
+  // already true), and a refusal as `error`, which is what arrives when something
+  // is running the component: this client cannot stop a process on another
+  // machine, and the host will not delete code out from under one.
+  async function remove(name, { version = "" } = {}, win = null) {
+    const t = target(win);
+    const problem = why(t);
+    if (problem) return { ok: false, name, error: problem };
+    try {
+      const res = await lib.hostRemove(t.base, name, version);
+      return {
+        ok: true,
+        name,
+        status: res.status || "removed",
+        removed: Array.isArray(res.removed) ? res.removed : [],
+        target: t,
+      };
+    } catch (e) {
+      return { ok: false, name, error: (e && e.message) || String(e) };
+    }
+  }
+
+  return { target, list, market: marketList, install, versions, remove, marketCache: () => market };
 }
 
 module.exports = { createComponentsView, MARKET_TTL_MS };

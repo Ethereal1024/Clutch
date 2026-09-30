@@ -5,6 +5,9 @@
 // component root, so the whole path is exercised end to end: read what the host
 // holds, build the artifact a client would send, upload it, and let the HOST
 // land it. No mocks: the gate, the digest and the unpacking are the product's.
+// The same machine answers the reverse direction at the end (which versions it
+// holds for one component, and letting that one go) — the two are the same
+// endpoint read backwards, so they are checked against the same run.
 //
 // Two supplies are checked, because they are the two the product has:
 //
@@ -299,7 +302,35 @@ async function main() {
     pubServer.server.close();
   }
 
-  // 9. cleanup: this run's supervisor goes away (its root is a temp dir)
+  // 9. the reverse verbs, against the same real machine: which versions it holds
+  //    for ONE component (newest first, and the one it would run), and letting
+  //    that component go. The two verdicts that matter are both here — "removed"
+  //    with the versions that went, and "absent" for a request already true.
+  {
+    const versions = await components.hostVersions(base, "clutch-memory");
+    check(versions.length === 1 && versions[0].resolved === true, "the host lists the versions it holds for one component, and which one it would run");
+    check(versions[0].version === `0.1.0+${artDigest.slice(0, 16)}`, "and it is the version this client installed, digest and all");
+
+    let badName = "";
+    try {
+      await components.hostVersions(base, "../../etc");
+    } catch (e) {
+      badName = (e && e.message) || "";
+    }
+    check(/bad component name/.test(badName), "a name that could never be an install is refused in the host's own words");
+
+    const removed = await components.hostRemove(base, "clutch-memory", "");
+    check(removed.status === "removed" && removed.removed.length === 1, "a removal answers with the versions that went");
+    check(!fs.existsSync(path.join(hostRoot, "clutch-memory")), "and the bytes are gone from the machine");
+    const left = await components.hostInventory(base);
+    check(!left.some((c) => c.name === "clutch-memory"), "and it is gone from what the host lists as held");
+
+    const again = await components.hostRemove(base, "clutch-memory", "");
+    check(again.status === "absent", "removing what is already gone answers 'absent' rather than failing");
+    check((await components.hostVersions(base, "clutch-memory")).length === 0, "and the host names no version of it any more");
+  }
+
+  // 10. cleanup: this run's supervisor goes away (its root is a temp dir)
   try {
     await fetch(`${base}/api/shutdown`, { method: "POST" });
   } catch (e) {
@@ -329,7 +360,7 @@ function cleanup() {
 main()
   .then(() => {
     cleanup();
-    summary("components", "all passed (checkout + published supplies, client install + host gate)");
+    summary("components", "all passed (checkout + published supplies, client install + host gate, reverse verbs)");
   })
   .catch((e) => {
     console.error(e && e.stack ? e.stack : e);

@@ -171,8 +171,8 @@
   }
   /* the tab strip's targets are finger-sized here, not pointer-sized */
   .modal-tab { padding: 8px 4px 10px; font-size: 13px; }
-  /* an install button in a row is a finger target too */
-  .plug-install { padding: 7px 12px; font-size: 13px; }
+  /* a write button in a row is a finger target too (both directions) */
+  .plug-install, .plug-remove { padding: 7px 12px; font-size: 13px; }
 
   /* in-page notice: lift it above the ↓ button (bottom 16px + 34px tall), so a
      failure line and the scroll-to-bottom control are never on top of each other */
