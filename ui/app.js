@@ -268,6 +268,9 @@ function setStatus(state) {
   busy = state === "running" || state === "waiting";
   // the run button doubles as Stop while a run is in progress
   els.run.textContent = busy ? "■ Stop" : "▶ Run";
+  els.run.title = busy
+    ? "stop the running task"
+    : "run the task — Cmd/Ctrl+Enter in the box";
   els.run.classList.toggle("stop-mode", busy);
   els.run.disabled = busy ? false : !currentProject;
   // the mode applies to the next run only: lock the toggle while busy
