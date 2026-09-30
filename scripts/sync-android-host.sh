@@ -18,8 +18,10 @@ UI_ASSETS=$ASSETS/ui
 
 # the pure-Node subset the host resolves via useUI(): the modules it names plus
 # their own ui/-relative requires (the tunnel is six files over one state
-# object), plus the shared transport defaults.
-UI_NODE="components.js exec-bridge.js host-core.js llm-proxy.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js supervisor-client.js transport_defaults.json"
+# object), plus the shared transport defaults and the component source list
+# (components.js reads it from __dirname; without it the phone hands the far
+# side nothing to install).
+UI_NODE="components.js components.sources.json exec-bridge.js host-core.js llm-proxy.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js supervisor-client.js transport_defaults.json"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"

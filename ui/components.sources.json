@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "sources": [
+    "https://github.com/Ethereal1024/clutch-workspace/releases/latest/download/clutch-component.json",
+    "https://github.com/Ethereal1024/clutch-memory/releases/latest/download/clutch-component.json",
+    "https://github.com/Ethereal1024/clutch-websearch/releases/latest/download/clutch-component.json",
+    "https://github.com/Ethereal1024/clutch-skills/releases/latest/download/clutch-component.json"
+  ]
+}

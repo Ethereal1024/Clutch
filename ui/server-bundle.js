@@ -75,7 +75,9 @@ function treeHash(roots, { base, skipDirs = new Set(), skipFile = () => false })
   return h.digest("hex");
 }
 
-// Dev build gate: fingerprint the source so PyInstaller only reruns on changes
+// Dev build gate: fingerprint the source so PyInstaller only reruns on changes.
+// Only the HOST's own files are in here: the bundle ships no module, so a module
+// edit must not invalidate it (nothing in the binary depends on one).
 function sourceFingerprint() {
   return treeHash(
     [
@@ -83,9 +85,6 @@ function sourceFingerprint() {
       path.join(REPO, "scripts", "server_entry.py"),
       path.join(REPO, "scripts", "supervisor_entry.py"),
       path.join(REPO, "scripts", "build-server-bundle.sh"),
-      // the bundle ships the skills library out of the clutch-skills module, so a
-      // changed skill has to invalidate a dev build like changed agent code does
-      path.join(REPO, "clutch-skills", "skills"),
     ],
     {
       base: REPO,

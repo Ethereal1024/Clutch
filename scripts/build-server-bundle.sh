@@ -12,43 +12,18 @@ OUT="${2:?output path required}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Skills shipped inside the agent-server binary. The library belongs to the
-# clutch-skills module, whose bundled root is what the host reads by default
-# (agent/config.py points skills_dir there), so the bundle must carry it too.
-# Local-only skills (gitignored: the writing humanizers) stay out of the release
-# on purpose — the module's .gitignore records them, and hatchling's wheel
-# already excludes them via VCS rules. A tracked skill missing from this list
-# would silently miss the release, hence the guard below.
-SKILLS_REL="clutch-skills/skills"
-if [ ! -d "$SKILLS_REL" ]; then
-  echo "FATAL: $SKILLS_REL is missing — initialize the clutch-skills submodule first" >&2
-  echo "       (git submodule update --init clutch-skills)" >&2
-  exit 1
-fi
-SHIPPED_SKILLS="readme-crafter readme-doctor refactor web-design"
-SKILL_ARGS=()
-for s in $SHIPPED_SKILLS; do
-  SKILL_ARGS+=(--add-data "$SKILLS_REL/$s:$SKILLS_REL/$s")
-done
-MISSING=""
-for d in "$SKILLS_REL"/*/; do
-  name="$(basename "$d")"
-  case " $SHIPPED_SKILLS " in *" $name "*) continue ;; esac
-  # a tracked skill dir that is not whitelisted is a packaging gap; the library
-  # is versioned by the module, so ask that repo what it tracks
-  if git -C "$ROOT/clutch-skills" ls-files --error-unmatch "skills/$name/SKILL.md" >/dev/null 2>&1; then
-    MISSING="$MISSING $name"
-  fi
-done
-if [ -n "$MISSING" ]; then
-  echo "FATAL: tracked skill(s) missing from SHIPPED_SKILLS:$MISSING" >&2
-  echo "       add them to SHIPPED_SKILLS above, or gitignore them as local-only" >&2
-  exit 1
-fi
+# The bundle carries the HOST and nothing of any module: no component's code, no
+# component's skills library, no roster of either. A component is a separate
+# artifact that belongs to the machine its server runs on — the client installs
+# it from the module's own release (ui/components.js) or the host finds a
+# checkout beside this repo (agent/tools/catalog.py) — so this build neither
+# needs a module checked out nor knows that any of them exist. It used to embed
+# the clutch-skills library here; that copy was a full-fidelity lie (the library
+# without the module's code runs nothing), and the guard that kept it complete
+# made every release depend on a submodule.
 
 "$ROOT/.venv/bin/python" -m PyInstaller --noconfirm --onefile --name agent-server \
   --add-data "agent/prompts:agent/prompts" \
-  "${SKILL_ARGS[@]}" \
   --add-data "agent/transport_defaults.json:agent/" \
   scripts/server_entry.py
 

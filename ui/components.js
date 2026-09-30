@@ -15,16 +15,36 @@
 // a tool whose component has not landed is simply not offered (the host keeps
 // no stand-in for it), so every error is reported and the session proceeds.
 //
-// Where an artifact comes from:
-//   - packaged app: resources/components/<name>-<platform>  (shipped by the release)
-//   - a dev build:  dist/components/<name>-<platform>
-//   - a dev checkout: the checkout, archived on demand (scripts/build-component-tar.sh),
-//     cached under ~/.clutch/artifacts by a source fingerprint, since the
-//     checkout is code a host with no artifact of its own can still run under
-//     python (the shape rendezvous.py's template launch describes).
+// Where the component comes from — and why this file names none
+// ------------------------------------------------------------
+// The host ships NO component: not its code, not its artifact, and not a roster
+// either. What rides in the app is a list of SOURCES (components.sources.json
+// beside this file, plus an optional ~/.clutch/components.sources.json), and a
+// source is a MODULE's own release manifest: the module declares its name, its
+// interface, where its declaration (component.json) is, and where its artifact
+// is per platform. So a release of the host never depends on any module — and a
+// module is added to a build by naming a URL, without editing code, or added by
+// a user without editing this repo at all.
 //
-// The declaration comes from the same places, as component.json (the checkout's
-// own, or the release's <dir>/<name>/component.json) — see declarationFor.
+// This is the client-side twin of the host's own discovery (agent/tools/
+// catalog.py): the host discovers what is absent-mindedly BESIDE it, the client
+// fetches what the module PUBLISHED, and both end at the same wire contract.
+//
+// Three sources, in the order they win:
+//   - a dev checkout beside the host repo: the component's own component.json
+//     IS its declaration and the checkout IS its artifact, tarred on demand
+//     (scripts/build-component-tar.sh). A contributor's edit therefore beats the
+//     published release, which is what makes module development possible.
+//   - a dev build:  dist/components/<name>-<platform>  (a onefile built by hand)
+//   - a published release: the module's manifest -> its per-platform asset,
+//     downloaded once into ~/.clutch/artifacts and pinned by the sha256 the
+//     module's own manifest carries (an unpinned artifact is refused, not
+//     guessed at).
+//
+// The declaration comes from the same places: the checkout's own component.json,
+// the release's component.json asset (digest-pinned the same way), or — for an
+// archive that carries its own manifest — nowhere at all, since the host merges
+// what the artifact says about itself (agent/tools/components.py).
 
 "use strict";
 
@@ -39,23 +59,118 @@ const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
 const TAR_SCRIPT = path.join(REPO, "scripts", "build-component-tar.sh");
 const MANIFEST_HEADER = "X-Clutch-Component"; // agent/tools/components.py's contract: base64 of UTF-8 JSON
 const REQUEST_TIMEOUT_MS = 120_000; // a onefile over a slow link
+const MANIFEST_TIMEOUT_MS = 30_000; // a few KB of JSON, from a release
 const BUDGET_MS = 300_000; // the whole pass; beyond it the rest is deferred
 
-// What a host has to have to serve the tools a session offers. The host's own
-// table (agent/tools/rendezvous.py) is what it accepts; this is the client's
-// list of what to ship, and the interface is the manifest's claim about how the
-// artifact is spoken to.
-const COMPONENTS = [
-  { name: "clutch-workspace", interface: "daemon" },
-  { name: "clutch-memory", interface: "cli" },
-  { name: "clutch-websearch", interface: "cli" },
-  { name: "clutch-skills", interface: "cli" },
-];
+// The source lists: what this build knows, and what this user added. Both are
+// data — the shape is the manifest spec's (schema 1), and a source is either an
+// https URL to a module's release manifest or a path to the same file on disk.
+const SOURCES_FILE = path.join(__dirname, "components.sources.json");
+const USER_SOURCES_FILE = path.join(os.homedir(), ".clutch", "components.sources.json");
+const SCHEMA = 1;
 
 const SKIP_DIRS = new Set([".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules"]);
 
-// A prebuilt artifact: the app's own resources, or a dev build. Both are single
-// files the release produced (a PyInstaller onefile), so nothing is built here.
+// ---------------------------------------------------------------- the sources --
+
+// One source list: the file's `sources` array, or [] when there is no file (a
+// build with no list installs nothing, and says so — never a crash).
+function readSourceList(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    return [];
+  }
+  if (!parsed || parsed.schema !== SCHEMA || !Array.isArray(parsed.sources)) return [];
+  return parsed.sources.filter((s) => typeof s === "string" && s);
+}
+
+// The sources one pass installs from. In order: the user's list first, then the
+// list this build shipped — the first manifest that names a component is the one
+// that ships, so a user can override a module this build knows by naming their
+// own, and the shipped list is the fallback. A caller that names its own list
+// (a packager pointing a build at a mirror, a test) gets exactly that list.
+function sources(explicit = null) {
+  if (Array.isArray(explicit)) return explicit.filter((s) => typeof s === "string" && s);
+  const out = [];
+  for (const file of [USER_SOURCES_FILE, SOURCES_FILE]) {
+    for (const s of readSourceList(file)) if (!out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+// A source is a URL or a local path; this is the one place the difference is
+// read, so a source works the same wherever it came from.
+function isRemote(source) {
+  return /^https?:\/\//i.test(source);
+}
+
+// One asset of a source: the manifest is the source itself, everything else it
+// names is its sibling — so a module's release needs no knowledge of its own
+// absolute URL, and a directory of artifacts on disk works the same way.
+function assetLocation(source, asset) {
+  return isRemote(source) ? new URL(asset, source).toString() : path.join(path.dirname(source), asset);
+}
+
+// One module's manifest, validated the way the host validates a declaration:
+// a word this client cannot read is refused rather than guessed at. The
+// `declaration` the manifest names is a LOCATION (an asset plus its digest), not
+// a declaration: the file itself is fetched (and pinned) only when a client
+// actually has to hand it to a host, so a manifest stays a few hundred bytes.
+function parseManifest(data, source) {
+  if (!data || typeof data !== "object") throw new Error("the manifest is not a JSON object");
+  if (data.schema !== SCHEMA) throw new Error(`unknown manifest schema ${JSON.stringify(data.schema)}`);
+  if (typeof data.name !== "string" || !data.name) throw new Error("the manifest names no component");
+  const artifacts = data.artifacts && typeof data.artifacts === "object" ? data.artifacts : {};
+  return {
+    name: data.name,
+    interface: typeof data.interface === "string" ? data.interface : "",
+    version: typeof data.version === "string" ? data.version : "",
+    declaration: null, // what this client will send: filled from the asset below
+    declarationRef: data.declaration && typeof data.declaration === "object" ? data.declaration : null,
+    artifacts,
+    source,
+  };
+}
+
+async function readManifest(source) {
+  if (!isRemote(source)) {
+    return parseManifest(JSON.parse(fs.readFileSync(source, "utf8")), source);
+  }
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
+  try {
+    const r = await fetch(source, { signal: ctl.signal });
+    if (!r.ok) throw new Error(`the source answered ${r.status}`);
+    return parseManifest(await r.json(), source);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Every component this client currently knows of, and why any source was
+// unreadable. Data, never a throw: one module's release being down must not stop
+// the others from installing.
+async function manifests(explicit = null) {
+  const out = { components: [], errors: [] };
+  for (const source of sources(explicit)) {
+    try {
+      const manifest = await readManifest(source);
+      if (out.components.some((c) => c.name === manifest.name)) continue; // the earlier source is the word
+      out.components.push(manifest);
+    } catch (e) {
+      out.errors.push({ name: "", reason: `${source}: ${(e && e.message) || e}` });
+    }
+  }
+  return out;
+}
+
+// ------------------------------------------------------------ local sources --
+
+// A prebuilt artifact sitting on this machine: a dev build, or whatever a
+// platform packager placed in the app's resources (nothing, today — the release
+// ships no component bytes, which is the point).
 function shippedArtifact(name) {
   const exe = process.platform === "win32" ? ".exe" : "";
   const tag = platformTag();
@@ -70,29 +185,6 @@ function shippedArtifact(name) {
       } catch (e) {
         /* keep looking */
       }
-    }
-  }
-  return null;
-}
-
-// The declaration that travels WITH the artifact (COMPONENTS.md): the same
-// component.json the host discovers. Searched beside the artifact — the packaged
-// release ships it as resources/components/<name>/component.json, a dev build
-// under dist/components/, and a dev checkout IS one — so an install lands with
-// the component's whole declaration (tools, launch, ui), not just install
-// facts. A host that receives only the bytes of a declaring archive would still
-// merge the artifact's own manifest (agent/tools/components.py), but the header
-// is the declaration of record for the release's bare onefile artifacts.
-function declarationFor(name) {
-  const dirs = [];
-  if (isPackagedApp()) dirs.push(path.join(process.resourcesPath, "components"));
-  dirs.push(path.join(REPO, "dist", "components"), path.join(REPO, name));
-  for (const dir of dirs) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(dir, "component.json"), "utf8"));
-      if (parsed && parsed.name === name) return parsed;
-    } catch (e) {
-      /* keep looking */
     }
   }
   return null;
@@ -131,14 +223,168 @@ function checkoutArtifact(name) {
   return out;
 }
 
+// The declaration a checkout carries: the component's own component.json, which
+// travels with the artifact's bytes when the artifact IS the checkout.
+function checkoutDeclaration(name) {
+  const p = path.join(REPO, name, "component.json");
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (parsed && parsed.name === name) return parsed;
+  } catch (e) {
+    /* not a checkout, or not readable */
+  }
+  return null;
+}
+
+// The components checked out beside the host repo: the whole development path,
+// read from the same manifests the host itself discovers (one file per module,
+// nothing here that has to be kept in step).
+function checkoutComponents() {
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(REPO, { withFileTypes: true });
+  } catch (e) {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
+    const declaration = checkoutDeclaration(entry.name);
+    if (!declaration) continue;
+    out.push({
+      name: declaration.name,
+      interface: typeof declaration.interface === "string" ? declaration.interface : "",
+      declaration,
+      checkout: true,
+      source: path.join(REPO, entry.name),
+    });
+  }
+  return out;
+}
+
+// ----------------------------------------------------------- remote source --
+
+// Download once, into a name that carries the digest the manifest pinned: a
+// second pass finds the file and sends nothing, and a manifest that changes its
+// bytes changes the name.
+async function downloadPinned(url, sha256, dest, timeoutMs = REQUEST_TIMEOUT_MS) {
+  if (fs.existsSync(dest)) return dest;
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  try {
+    const r = await fetch(url, { signal: ctl.signal });
+    if (!r.ok) throw new Error(`the artifact answered ${r.status}`);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
+    const got = fileHash(tmp);
+    if (got !== sha256) throw new Error(`${url} has sha256 ${got}, not the ${sha256} its manifest pins`);
+    fs.renameSync(tmp, dest);
+    return dest;
+  } finally {
+    clearTimeout(t);
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch (e) {
+      /* never created */
+    }
+  }
+}
+
+// The asset one entry names, `{asset, sha256}` or the asset name alone — a bare
+// name is a manifest that pinned nothing, and it is refused rather than trusted.
+function pinnedAsset(entry, what, name) {
+  const asset = typeof entry === "string" ? entry : entry && entry.asset;
+  const sha256 = typeof entry === "string" ? "" : entry && entry.sha256;
+  if (typeof asset !== "string" || !asset) throw new Error(`the ${name} manifest names no ${what}`);
+  if (!/^[0-9a-f]{64}$/.test(String(sha256))) {
+    throw new Error(`the ${name} manifest pins no sha256 for ${what} ${asset} — an unpinned artifact is refused`);
+  }
+  return { asset, sha256 };
+}
+
+// The artifact a published manifest points at for THIS platform, or why there is
+// none: the exact platform key, else `any` (a shape that needs no per-platform
+// build — the tar of a pure-Python component is one).
+async function remoteArtifact(manifest) {
+  const tag = platformTag();
+  const entry = manifest.artifacts[tag] || manifest.artifacts.any;
+  if (!entry) return { problem: `no artifact for ${tag} in its manifest` };
+  const { asset, sha256 } = pinnedAsset(entry, "artifact", manifest.name);
+  const dest = path.join(CACHE, `${manifest.name}-${sha256.slice(0, 16)}-${path.basename(asset)}`);
+  const url = assetLocation(manifest.source, asset);
+  await downloadPinned(url, sha256, dest);
+  return { path: dest, digest: sha256 };
+}
+
+// The declaration that rode with a release: its component.json asset, pinned by
+// digest like the artifact. An archive that carries its own manifest needs none,
+// so a manifest without a `declaration` is legal and lands as a thinner install.
+async function remoteDeclaration(manifest) {
+  if (!manifest.declarationRef) return null;
+  const { asset, sha256 } = pinnedAsset(manifest.declarationRef, "declaration", manifest.name);
+  const dest = path.join(CACHE, `${manifest.name}-${sha256.slice(0, 16)}-component.json`);
+  await downloadPinned(assetLocation(manifest.source, asset), sha256, dest, MANIFEST_TIMEOUT_MS);
+  const parsed = JSON.parse(fs.readFileSync(dest, "utf8"));
+  if (!parsed || parsed.name !== manifest.name) {
+    throw new Error(`the declaration names ${parsed && parsed.name}, not ${manifest.name}`);
+  }
+  return parsed;
+}
+
+// ------------------------------------------------------------------- the pass --
+
+// Every component this client could install, split by where its bytes come from.
+// Never throws: an unreadable source is a report, and the pass goes on without it.
+async function componentSpecs({ sources: list = null } = {}) {
+  const out = { specs: [], errors: [] };
+  out.specs.push(...checkoutComponents()); // a contributor's edit beats a release
+  const byName = new Map(out.specs.map((s) => [s.name, s]));
+  const fetched = await manifests(list);
+  out.errors.push(...fetched.errors);
+  for (const manifest of fetched.components) {
+    const checkout = byName.get(manifest.name);
+    if (checkout) {
+      // a checkout's own bytes win, but the release it published stays reachable
+      // under it: a machine that already HOLDS the checkout has nothing to
+      // receive, and the published artifact is then the only thing to hand over
+      checkout.published = manifest;
+      continue;
+    }
+    const spec = { ...manifest, checkout: false };
+    byName.set(spec.name, spec);
+    out.specs.push(spec);
+  }
+  return out;
+}
+
 // The artifact this client would send for one component, or null when it has
 // none: `checkout` is false for the machine that already holds the checkout
-// beside the host repo (there is nothing to send it that it does not have).
-function artifactFor(spec, { checkout = true } = {}) {
-  const file = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
-  if (!file) return null;
-  const digest = fileHash(file);
-  return { ...spec, declaration: declarationFor(spec.name), path: file, digest, version: digest.slice(0, 16) };
+// beside the host repo (there is nothing to send it that it does not have, so a
+// checkout spec falls back to the release its module published, if any).
+async function artifactFor(spec, { checkout = true } = {}) {
+  const local = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
+  if (local) {
+    // the bytes are this machine's own: the declaration is the one that travels
+    // with them — the checkout's own component.json, which is a checkout's whole
+    // point (an edited manifest describes the edited code beside it)
+    const declaration = spec.declaration || (spec.published ? await remoteDeclaration(spec.published) : null);
+    const digest = fileHash(local);
+    return { ...spec, declaration, path: local, digest, version: digest.slice(0, 16) };
+  }
+  const published = spec.published || (spec.checkout ? null : spec);
+  if (!published || !published.artifacts) return null; // nothing here and nothing published
+  const remote = await remoteArtifact(published);
+  if (remote.problem) throw new Error(remote.problem);
+  return {
+    ...spec,
+    // the published bytes are described by the published declaration, never by a
+    // checkout's (the two can disagree the moment a contributor edits one)
+    declaration: await remoteDeclaration(published),
+    path: remote.path,
+    digest: remote.digest,
+    version: remote.digest.slice(0, 16),
+  };
 }
 
 // What the host already holds (the version gate's first half).
@@ -164,7 +410,7 @@ async function upload(base, spec, timeoutMs) {
     ...(spec.declaration || {}),
     name: spec.name,
     version: spec.version,
-    interface: spec.interface,
+    interface: spec.interface || (spec.declaration && spec.declaration.interface) || "",
     digest: spec.digest,
     artifact: path.basename(spec.path), // its suffix is how the host reads the shape
   };
@@ -199,7 +445,7 @@ async function upload(base, spec, timeoutMs) {
 // Never throws: the returned summary is what the caller logs, and components
 // that were deferred or refused simply stay absent — the host then offers no
 // tool for them, because it has no implementation of its own to fall back to.
-async function ensureComponents(base, { checkout = true, progress = null, budgetMs = BUDGET_MS } = {}) {
+async function ensureComponents(base, { checkout = true, sources: list = null, progress = null, budgetMs = BUDGET_MS } = {}) {
   const out = { current: [], installed: [], skipped: [], deferred: [], errors: [] };
   const say = (msg) => {
     if (progress) progress(msg);
@@ -211,9 +457,18 @@ async function ensureComponents(base, { checkout = true, progress = null, budget
     out.errors.push({ name: "", reason: `the host did not answer: ${e && e.message}` });
     return out;
   }
+  const known = await componentSpecs({ sources: list });
+  out.errors.push(...known.errors);
   const deadline = Date.now() + budgetMs;
-  for (const spec of COMPONENTS) {
-    const file = artifactFor(spec, { checkout });
+  for (const spec of known.specs) {
+    let file;
+    try {
+      file = await artifactFor(spec, { checkout });
+    } catch (e) {
+      out.errors.push({ name: spec.name, reason: (e && e.message) || String(e) });
+      say(`${spec.name} failed: ${e && e.message}`);
+      continue;
+    }
     if (!file) {
       out.skipped.push(spec.name);
       continue;
@@ -240,4 +495,17 @@ async function ensureComponents(base, { checkout = true, progress = null, budget
   return out;
 }
 
-module.exports = { COMPONENTS, ensureComponents, artifactFor, checkoutArtifact, hostInventory, CACHE };
+module.exports = {
+  ensureComponents,
+  artifactFor,
+  componentSpecs,
+  readManifest,
+  downloadPinned,
+  checkoutArtifact,
+  checkoutComponents,
+  sources,
+  hostInventory,
+  CACHE,
+  SOURCES_FILE,
+  USER_SOURCES_FILE,
+};

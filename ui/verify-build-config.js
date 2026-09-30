@@ -84,6 +84,11 @@ const REQUIRED_ASSETS = [
   "index.html",
   "app.js",
   "style.css",
+  // The component source list is read by the main process from __dirname, i.e.
+  // from inside the asar (ui/components.js SOURCES_FILE). Dropped from the
+  // bundle, a packaged app installs no component at all: no workspace, memory,
+  // websearch or skills fact ever reaches the supervisor.
+  "components.sources.json",
   // The renderer is one program in classic scripts; ui/index.html lists them in
   // load order, and a module the packager drops (or a `files` glob that stops at
   // the top level) is a blank window, not a missing font. List them all.
