@@ -17,7 +17,7 @@ tool-calling 接口调用（DeepSeek 等均可），需要自备 API key。
 需要 Python ≥ 3.10 和 Node.js，包管理用 uv。
 
 ```bash
-git submodule update --init --recursive   # 四个工具模块（工具实现都在子模块里）
+git submodule update --init --recursive   # 四个工具模块的检出（开发用；发行版不带模块）
 pip install uv && uv sync    # 后端依赖
 cd ui && npm install         # 前端依赖
 export CLUTCH_API_KEY=...    # API key
@@ -176,8 +176,8 @@ clutch-workspace/      文件工具模块（子模块）：read_file / grep / wr
 clutch-memory/         记忆模块（子模块）：save_memory / load_memory /
                        search_memory，消费宿主的 .clc 内容服务
 clutch-websearch/      联网模块（子模块）：web_search / web_fetch，自带后端链
-clutch-skills/         技能模块（子模块）：load_skill 与技能库（随包发布 4 个，
-                       本机 dev-only 的写作技能不入库、也不进安装包）
+clutch-skills/         技能模块（子模块）：load_skill 与技能库（库随组件自己的
+                       发行包走；本机 dev-only 的写作技能不入库、也不进任何发行包）
 eval/                  评测场景（落地页 / 修 bug / 重构）
 tests/                 测试
 scripts/               打包与构建脚本
@@ -191,6 +191,14 @@ scripts/               打包与构建脚本
 [COMPONENTS.md](COMPONENTS.md)），宿主只负责发现与合并。因此删掉任何一个
 模块，宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响；
 一个组件都没装时，宿主只有 AI 聊天本身，没有可调用的文件/联网/记忆/技能工具。
+
+宿主发行物里**没有任何模块的字节**：发行版只装宿主自己，"有哪些模块"是一份数据。
+应用自带的 `ui/components.sources.json` 是四条 URL，每条指向该模块自己 release 里的
+`clutch-component.json`（模块自己声明版本、接口与各平台工件的摘要）；用户还可以写一份
+`~/.clutch/components.sources.json` 追加来源——它排在自带清单之前，同名模块以用户写的
+为准。客户端读清单、按平台选工件、核对 sha256，再把工件上传到"要运行它的那台机器"。
+清单里缺 sha256、摘要对不上、schema 不认识都只拒那一条，不影响其他模块。要加第五个
+模块，就是往这份 JSON 里加一行（不需要改宿主代码，也不需要重发宿主）。
 
 组件由客户端上传到"要运行它的那台机器"的 supervisor（`POST /api/components/install`，
 工件摘要对内容负责），落在该机器的用户目录里；宿主每次调用工具时按需解析，所以后台

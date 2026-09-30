@@ -2,8 +2,9 @@
 
 Clutch 宿主**零内置工具**：`run_command` 之外的一切工具都来自**组件**（component）——
 一个独立发布的工件（本仓库的四个子模块 `clutch-workspace` / `clutch-memory` /
-`clutch-websearch` / `clutch-skills`，或任何第三方的同类物）。宿主不为任何组件保留
-第二份实现，也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进循环。
+`clutch-websearch` / `clutch-skills`——子模块只是**开发检出**，宿主发行版一份组件字节
+都不带，见第一节末；也可以是任何第三方的同类物）。宿主不为任何组件保留第二份实现，
+也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进循环。
 
 `run_command` 是唯一的例外，而且它同样是**被声明**的：宿主为自己写的唯一一条工具
 声明（`agent/tools/host.py`），见第十一节。
@@ -30,6 +31,45 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 
 目录可分别用环境变量重指：安装根 `CLUTCH_COMPONENTS_DIR`，注册目录
 `CLUTCH_COMPONENTS_CATALOG`（测试与特殊布局用）。
+
+### 发行侧：`clutch-component.json`
+
+上面三种形态都落在**一台机器上**。跨机器的那一层是模块**自己发布的发行清单**
+`clutch-component.json`——放在模块自己的 release 资产里，宿主发行版一份都不带。
+它把"这个组件长什么样"说成一句客户端能读懂的话：
+
+```jsonc
+{
+  "schema": 1,                        // 必填；不是 1 即整条被拒
+  "name": "clutch-skills",            // 必填：组件身份
+  "interface": "cli",                 // 怎么被调用（第三节）
+  "version": "0.3.1",                 // 这份发行版自报的版本
+  "declaration": { "asset": "component.json", "sha256": "<64 hex>" },
+  "artifacts": {                      // 平台标签 -> 工件；键 "any" 兜底
+    "linux-x86_64": { "asset": "clutch-skills.tar",        "sha256": "<64 hex>" },
+    "darwin-arm64": { "asset": "clutch-skills-darwin.tar", "sha256": "<64 hex>" },
+    "any":          { "asset": "clutch-skills.tar",        "sha256": "<64 hex>" }
+  }
+}
+```
+
+- **资产相对清单**：`asset` 是清单**旁边**的名字（文件名或相对路径），清单自己的
+  地址给出基准——模块因此不必知道自己的绝对 URL，一份清单放进本地目录同样能用
+  （测试与镜像都靠这条）。
+- **摘要即信任**：`sha256` 必须是 64 位十六进制；缺失或形状不对的条目**整条拒绝**，
+  不猜、也不"尽力而为"。下载后先验字节再落地，与第八节的安装协议同一条规则。
+- **平台查找先精确后兜底**：按客户端的平台标签（`linux-x86_64` / `darwin-arm64` /
+  `windows-x86_64`）取键，取不到用 `any`。今天的四个模块都只发一个平台无关的
+  **tar**（`clutch-skills` 的 tar 里是代码 + `skills/`——技能库随组件自己的发行版走，
+  宿主不留第二份），将来要发 PyInstaller onefile 也不必改协议。
+- **声明是位置而不是内容**：`declaration` 说的是**一份文件在哪**（资产 + 摘要），不是
+  声明本身——清单因此只有几百字节，只有真要递给某台宿主时才把那几 KB 取回来（取回
+  后同样验摘要）。
+- **一个模块一条 URL**：客户端读的是**来源清单**——随宿主发行版打包的
+  `ui/components.sources.json`（`{"schema": 1, "sources": ["https://…/clutch-component.json", …]}`），
+  以及可选的用户清单 `~/.clutch/components.sources.json`（**用户清单先读，先命名一个
+  组件的那个说了算**，用户因此能覆盖某个模块、或在宿主不认识的地方挂上自己的发行版）。
+  这就是加第五个模块的全部代价：多一条 URL，宿主代码一行不用改。
 
 ## 二、组件级字段
 
@@ -272,10 +312,11 @@ GET /api/components                            该机器已装清单（name/vers
 - **声明合并（宿主端兜底）**：解包后若工件自带 `component.json`，安装记录 = 工件
   自带声明 + 请求 manifest（后者点名的字段覆盖）。所以**薄 header 也能落地一个完整
   组件**；自带声明若点名了**别的**组件，安装被拒——字节不是请求所说的那个组件。
-- 客户端发送（`ui/components.js`）：manifest = 组件自己的 `component.json`（从
-  `resources/components/<name>/component.json` → `dist/components/<name>/` → 检出
-  目录依次找）+ 安装事实覆盖。发布包因此**不需要含组件代码**：声明随 manifest 走，
-  onefile 工件 + 旁边一份 `component.json` 即完整组件。
+- 客户端发送（`ui/components.js`）：manifest = **组件发行版自己发布的那份声明**（从
+  来源清单里读到 `declaration` 的位置，取回后验摘要）+ 安装事实覆盖。检出态是同一件
+  事的本地形态：直接读仓库旁的 `component.json`。发布包因此**不含任何一个组件的字节**
+  ——声明随 manifest 走，一个 tar（或 onefile）+ 旁边一份 `component.json` 即完整组件；
+  往哪台机器装、装哪个版本，由来源清单和模块自己的 release 决定（第一节末）。
 
 ## 九、开发工作流
 
@@ -283,11 +324,12 @@ GET /api/components                            该机器已装清单（name/vers
   安装）。schema 描述、UI 块、语句模板的改动走这条路径。
 - **改实现**：宿主不 import 组件代码；接口（HTTP 表面 / stdout 契约）不变，两边
   各自迭代。组件有自己的测试套件（`cd clutch-<x> && python3 -m pytest`）。
-- **造工件**：dev tar 由 `scripts/build-component-tar.sh` 生成（成员在 tar 顶层，
-  排除 VCS/venv/缓存；`component.json` 在内），客户端按源码指纹缓存在
-  `~/.clutch/artifacts`。发布工件是 PyInstaller onefile，旁放同名目录下的
-  `component.json`（打包位置：`<resources>/components/<name>/component.json`，
-  CI 打包步骤负责放入）。
+- **造工件**：宿主侧只留 dev 用的一条路——`scripts/build-component-tar.sh` 把检出目录
+  打成 tar（成员在 tar 顶层，排除 VCS/venv/缓存，`component.json` 在内），客户端按源码
+  指纹缓存在 `~/.clutch/artifacts`。**发行工件由模块自己的 CI 出**：workflow 在模块
+  仓库里，推 tag → 打 tar → 连同 `component.json` 和生成的 `clutch-component.json`
+  一起发到它自己的 release。宿主发行版**不放置任何组件**：`<resources>` 下没有
+  `components/` 目录，打包步骤也不拷——宿主 release 里组件字节数为零（第一节末）。
 - **测试**：宿主侧 `tests/catalog_test.py`（发现/合并/UI 协议/占位符）、
   `tests/components_api_test.py`（安装协议）、`tests/rendezvous_test.py`（寻址）、
   `tests/tools_inst_test.py`（每个工具的命令契约）。
