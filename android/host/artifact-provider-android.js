@@ -19,7 +19,7 @@
 //   1. CLUTCH_PYLIBS_INDEX_URL env (dev runs / tests)
 //   2. pylibs-index-url.txt next to this file — stamped by the release CI
 //      with THIS APK's own tag (…/download/<tag>/pylibs-index.json)
-//   3. releases/latest/download (dev APKs: best effort)
+//   3. releases/latest/download of THIS repo (dev APKs: best effort)
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
@@ -35,7 +35,12 @@ function defaultIndexUrl() {
   } catch (e) {
     /* not stamped: dev build */
   }
-  return "https://github.com/clutch-dev/clutch/releases/latest/download/pylibs-index.json";
+  // this repo, never a placeholder host: a 404 from a repo that does not
+  // exist gets reported as "that release carries no pylibs-matrix assets
+  // (the tag predates the job)" -- sending the user after a release that is
+  // fine. Only an unstamped dev build lands here (build-android-apk.sh always
+  // stamps), i.e. exactly the assets sync-android-host.sh produces alone.
+  return "https://github.com/Ethereal1024/Clutch/releases/latest/download/pylibs-index.json";
 }
 
 function cacheDir() {

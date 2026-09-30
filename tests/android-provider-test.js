@@ -63,6 +63,23 @@ function serveArtifacts(tars) {
 }
 
 async function main() {
+  // 0. the unstamped dev fallback must name THIS repo. A placeholder host 404s,
+  // and the provider then reports "that release carries no pylibs-matrix assets
+  // (the tag predates the job)" -- the user goes looking for a release that
+  // exists. Asserted as a literal on purpose: moving the project must be a
+  // deliberate edit here, not a silent 404 on every assets-only APK.
+  const PROVIDER_SRC = fs.readFileSync(
+    path.join(__dirname, "..", "android", "host", "artifact-provider-android.js"),
+    "utf8"
+  );
+  const fallback = PROVIDER_SRC.match(/return "([^"]+\/pylibs-index\.json)";/);
+  assert(fallback, "the provider has a dev fallback index URL");
+  assert.strictEqual(
+    fallback[1],
+    "https://github.com/Ethereal1024/Clutch/releases/latest/download/pylibs-index.json",
+    "the dev fallback points at this repo releases/latest"
+  );
+
   // a deterministic 4-byte gzip-ish payload is enough: the provider must not care
   const good = Buffer.from([0x1f, 0x8b, 0x07, 0x99]);
   const goodHash16 = sha256(good).slice(0, 16);
