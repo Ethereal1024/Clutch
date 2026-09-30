@@ -105,6 +105,25 @@
 
 * { box-sizing: border-box; }
 
+/* Tap highlight (device report #8). On a phone every tap drew a flat blue
+   rectangle over the tapped node: that is Blink's OWN highlight, not a styled
+   control — LayoutThemeMobile::kDefaultTapHighlightColor = 0x6633b5e5 (33B5E5
+   at 40%): the holo blue, i.e. a colour this UI (near-black + one red accent)
+   does not contain anywhere. Worse, WebViewImpl::BestTapNode() walks the hit
+   node UP to the outermost hand-cursor ancestor, so tapping a control that sits
+   inside a clickable row lit the WHOLE row instead of the thing under the
+   finger — a block the size of the row, which is what made it read as "a
+   rectangle, not a button press".
+   The renderer reads -webkit-tap-highlight-color for that colour
+   (link_highlight_impl.cc -> StyleRef().VisitedDependentColor(...)), and the
+   property is inherited (css_properties.json5: inherited: true), so this single
+   root declaration outranks the theme default for every element the page has
+   now or gains later — one rule, no per-selector lists to keep in sync.
+   The press hint that replaces it is painted from the element's own box: see
+   the touch block at the end of this file. The desktop has no tap gesture, so
+   none of this is observable there (Electron stays pixel-identical). */
+html { -webkit-tap-highlight-color: transparent; }
+
 /* custom scrollbars (device report #3): a thin graphite pill on an invisible
    track, accent while dragging. The OS default bar is fat and opaque — on a
    phone it eats the few pixels the stream has. ::-webkit-scrollbar is what
@@ -1140,5 +1159,66 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   color: var(--accent); border-radius: 0; padding: 6px 12px; font-size: 12px; cursor: pointer;
 }
 .diff-expand:hover { border-color: var(--accent); }
+
+/* ---- touch press feedback (device report #8) -------------------------------
+   The renderer's blue tap block is off (see the root declaration at the top of
+   this file), so the press hint is the element's OWN background/border/color.
+   That is the whole point: those properties paint inside the control's own box,
+   so the hint can never spill past it — the Android block was the renderer's,
+   drawn over whichever node it picked (up to the outermost hand-cursor
+   ancestor), and that is exactly the "big rectangle" this replaces.
+
+   Gated on (hover: none), which is what a touch WebView reports, so a mouse
+   press (which already gets :hover) keeps the desktop untouched. Blink enters
+   :active on the way down and drops it on the way out, no touchstart shim
+   needed (that one is an iOS Safari quirk — the phone shell is a WebView).
+
+   Order matters: these selectors tie with the :hover rules above (same
+   specificity), so this block has to stay LAST to win, and the two filled
+   variants (.primary, .primary.stop-mode) need their own rule because the
+   shared wash would REPLACE their fill instead of tinting it. */
+@media (hover: none) {
+  /* bordered controls: the edge turns accent (hover only did the border), plus
+     a wash that stays inside the padding box. transition: none so the hint is
+     there on frame one — a 150ms fade only reaches ~60% inside a real tap.
+     The release still animates back through the base rule's transition. */
+  button:active:not(:disabled),
+  select:active,
+  .cselect-btn:active,
+  .older-pill:active,
+  .jump-bottom:active,
+  .diff-expand:active {
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+    transition: none;
+  }
+  button.primary:active:not(:disabled) {
+    background: #d8d8db; border-color: #d8d8db; color: #0F0F10;
+  }
+  button.primary.stop-mode:active:not(:disabled) {
+    background: #fbe6e6; border-color: var(--accent); color: var(--accent);
+  }
+  /* rows fill their own box — never wider than the row itself */
+  .fs-row:active,
+  .fs-row.action:active,
+  .tree-node:active {
+    background: rgba(255, 255, 255, 0.07);
+  }
+  /* the popup option fills with the accent, like its own .active/:hover state */
+  .cselect-opt:active { background: var(--accent); color: #0F0F10; }
+  /* rows that ARE their label have no box to fill, so the label is the press —
+     and it goes to the accent, not to the --text their :hover already reaches
+     (a tap fires :hover in Blink too, so a press state that equals hover would
+     be no state at all) */
+  .tool-row.folded:active .tool-label,
+  .tool-args-btn:active,
+  label.hidden-toggle:active { color: var(--accent); }
+  label.hidden-toggle:active input[type="checkbox"] { border-color: var(--accent); }
+  .thinking-row:active,
+  .result-row:active { color: var(--accent); }
+  /* a link is already accent text: the wash hugs the text box (inline), which
+     is as "inside the element" as an inline element can get */
+  .event .body a:active { background: rgba(239, 68, 68, 0.14); }
+}
 
 .hidden { display: none !important; }
