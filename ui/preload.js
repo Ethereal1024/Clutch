@@ -17,6 +17,21 @@ contextBridge.exposeInMainWorld("clutchSettings", {
   ensure: (data) => ipcRenderer.invoke("settings:ensure", data),
 });
 
+// the plugin tab's channel: what the target machine holds, what this client
+// could give it, and the one install. Everything crosses ui/main.js, which talks
+// to the target machine's supervisor (ui/components-view.js) — the renderer
+// never uploads anything itself.
+contextBridge.exposeInMainWorld("clutchComponents", {
+  list: () => ipcRenderer.invoke("components:list"),
+  market: (opts) => ipcRenderer.invoke("components:market", opts),
+  install: (name) => ipcRenderer.invoke("components:install", name),
+  onProgress: (cb) => {
+    const wrap = (_e, stage) => cb(stage);
+    ipcRenderer.on("components:progress", wrap);
+    return () => ipcRenderer.removeListener("components:progress", wrap);
+  },
+});
+
 contextBridge.exposeInMainWorld("clutchTunnel", {
   connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
   status: () => ipcRenderer.invoke("tunnel:status"),

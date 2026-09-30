@@ -528,7 +528,9 @@ module.exports = {
   checkoutComponents,
   sources,
   hostInventory,
+  upload,
   CACHE,
+  REQUEST_TIMEOUT_MS,
   SOURCES_FILE,
   USER_SOURCES_FILE,
 };

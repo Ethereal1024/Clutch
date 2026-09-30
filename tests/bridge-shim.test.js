@@ -71,7 +71,12 @@ function arityOf(api) {
 async function main() {
   // 1. method-for-method parity with preload
   assert.deepStrictEqual(
-    arityOf({ clutchApi: globalThis.clutchApi, clutchSettings: globalThis.clutchSettings, clutchTunnel: globalThis.clutchTunnel }),
+    arityOf({
+      clutchApi: globalThis.clutchApi,
+      clutchSettings: globalThis.clutchSettings,
+      clutchComponents: globalThis.clutchComponents,
+      clutchTunnel: globalThis.clutchTunnel,
+    }),
     arityOf(exposed),
     "shim surface == preload surface (names + arities)"
   );

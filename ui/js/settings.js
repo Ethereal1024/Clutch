@@ -286,9 +286,28 @@ async function openSettings() {
   modal.classList.remove("hidden", "closing");
   // url/key/model fields live in the profile editor; nothing to prefill here
   renderLlmProfiles(localStorage.getItem("clutch_llm_active") || "");
+  // always open on the model tab: the plugin page is a place a user goes, not
+  // the place they land (and its lists are re-read when they do)
+  showSettingsTab("llm");
 }
 function closeSettings() {
   closeModal(modal);
+}
+
+// ---- the settings modal's two panes ----
+// A tab strip over one modal box: "Model" (the LLM profile form) and "Plugins"
+// (ui/js/components-panel.js). Purely visual — this only moves a class; the
+// plugin pane draws itself when it becomes visible.
+const SETTINGS_TABS = ["llm", "plugins"];
+function showSettingsTab(name) {
+  const tab = SETTINGS_TABS.includes(name) ? name : "llm";
+  for (const t of SETTINGS_TABS) {
+    $("#settings-tab-" + t).classList.toggle("active", t === tab);
+    $("#settings-pane-" + t).classList.toggle("hidden", t !== tab);
+  }
+}
+for (const t of SETTINGS_TABS) {
+  $("#settings-tab-" + t).addEventListener("click", () => showSettingsTab(t));
 }
 // push the profile-editor form values to the backend
 async function pushSettings() {

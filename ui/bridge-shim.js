@@ -107,6 +107,13 @@
     ensure: (data) => call("clutchSettings", "ensure", [data]),
   });
 
+  expose("clutchComponents", {
+    list: () => call("clutchComponents", "list"),
+    market: (opts) => call("clutchComponents", "market", [opts]),
+    install: (name) => call("clutchComponents", "install", [name]),
+    onProgress: (cb) => subscribe("components:progress", cb),
+  });
+
   expose("clutchTunnel", {
     connect: (cfg) => call("clutchTunnel", "connect", [cfg]),
     status: () => call("clutchTunnel", "status"),

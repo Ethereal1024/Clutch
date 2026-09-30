@@ -191,12 +191,23 @@ function createHostCore(deps) {
     }
   }
 
+  // which machine a window's session runs on ("local" | "tunnel" | null when it
+  // has not claimed one yet). The components page needs it: components live on a
+  // machine's supervisor, so "install where this window works" means the far
+  // side of a tunnel, and a tunnel being up is not the same claim — a window
+  // that fell back to a local session is working HERE.
+  function backendKind(winId) {
+    const wb = windowBackends.get(winId);
+    return wb ? wb.kind : null;
+  }
+
   return {
     ensureWindowBackend,
     releaseWindowBackend,
     releaseAllBackends,
     stopAllBackends,
     claimWindowBackend,
+    backendKind,
     backendCount: () => windowBackends.size,
   };
 }

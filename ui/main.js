@@ -5,6 +5,7 @@ const path = require("path");
 const tunnel = require("./ssh-tunnel");
 const { SUPERVISOR_PORT, startLocalSession } = require("./server-bootstrap");
 const { createHostCore } = require("./host-core");
+const { createComponentsView } = require("./components-view");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings } = require("./settings-mirror");
 
 function tunnelLog(...args) {
@@ -45,6 +46,16 @@ const hostCore = createHostCore({
   restartRemoteServer: () => tunnel.restartRemoteServer(),
   openSessionForward: (port) => tunnel.openSessionForward(port),
   startLocalSession,
+  log: tunnelLog,
+});
+
+// The plugin tab's backend: which machine is the target, what it holds, what
+// this client could give it, and one install. Facts only — the renderer neither
+// reads a manifest nor uploads bytes itself (ui/components-view.js).
+const componentsView = createComponentsView({
+  supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
+  tunnelStatus: () => tunnel.tunnelStatus(),
+  windowKind: (wc) => hostCore.backendKind(wc.id),
   log: tunnelLog,
 });
 
@@ -156,9 +167,25 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
+    // the plugin tab: what the target machine holds and what this client knows.
+    // Reads, so a failure comes back inside the answer (the page draws the
+    // reason) instead of rejecting the invoke.
+    ipcMain.handle("components:list", async (e) => componentsView.list(e.sender));
+    ipcMain.handle("components:market", async (_e, opts) => componentsView.market(opts || {}));
+    ipcMain.handle("components:install", async (e, name) =>
+      componentsView.install(String(name || ""), e.sender, {
+        // one line at a time to the window that asked; a closed window is not an
+        // error, it is a page that stopped caring
+        progress: (stage) => {
+          if (!e.sender.isDestroyed()) e.sender.send("components:progress", stage);
+        },
+      })
+    );
+
     ipcMain.handle("tunnel:connect", async (e, cfg) =>
       tunnel.connectTunnel(cfg, (stage) => e.sender.send("tunnel:progress", stage))
     );
+
     ipcMain.handle("tunnel:status", async () => tunnel.tunnelStatus());
     ipcMain.handle("tunnel:disconnect", async () => {
       // stop window backends first, while the tunnel/bridge is still alive

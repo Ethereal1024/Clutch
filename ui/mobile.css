@@ -162,6 +162,16 @@
     max-width: 420px;
   }
 
+  /* the settings modal already scrolls as a whole on a phone (the width cap
+     above gives it a max-height): an inner scroll region would nest a second
+     scrollbar inside it, so the plugin lists just grow and the modal scrolls. */
+  .plug-body {
+    max-height: none;
+    overflow-y: visible;
+  }
+  /* the tab strip's targets are finger-sized here, not pointer-sized */
+  .modal-tab { padding: 8px 4px 10px; font-size: 13px; }
+
   /* in-page notice: lift it above the ↓ button (bottom 16px + 34px tall), so a
      failure line and the scroll-to-bottom control are never on top of each other */
   .notice { bottom: 60px; }
