@@ -12,7 +12,7 @@
 | I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()` `ui/components.js:174` |
 | I3 | **声明说词、宿主释义**：能力词汇（access / gate / mode）归宿主 | `agent/tools/gates.py:1-20`（导入期 `_check_vocabulary` 断言） |
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
-| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | 卸载端点不存在之前，页面不画卸载按钮 |
+| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"removal DELETES bytes…neither act is a rollback"（`ui/js/components-panel.js:320`），卸载确认说"cannot be undone from here"（`:283`），市场常驻警告说"neither is a rollback"（`:371`） |
 
 ## 零之二、进度（随施工更新）
 
@@ -21,7 +21,8 @@
 | P0 版本语义 | **已完成** | `42e6ee6` | 安装版本 = `<自报版本>+<摘要16>`；`ui/components.js:installVersion` |
 | P1 只读可见 | **已完成** | `2c473f6`（含 `0b7229e` 的修正） | 通道 + 设置弹窗第二个标签 + 市场/已装两份清单 |
 | P2 单向下发 | **已完成** | `8d11845` | 每行安装按钮 + 二次确认 + 进度 + 宿主裁定回显 + 装完重读清单 |
-| P3 反向动词 | **宿主侧已完成**（P3a） | `90140ea` | `versions()` / `remove()` + `GET …/versions`、`DELETE …/<name>`；先停后删、非我启动的 daemon 拒绝；页面暂无按钮 |
+| P3a 反向动词（宿主侧） | **已完成** | `90140ea` | `versions()` / `remove()` + `GET …/versions`、`DELETE …/<name>`；先停后删、非我启动的 daemon 拒绝 |
+| P3b 反向动词（页面） | **已完成** | `11f6ce4` | 每行卸载按钮 + 二次确认 + 宿主裁定回显（`removed`/`absent`/拒绝原文）+ 装完/卸完重读清单；I5 改由文案承担 |
 | P4 工具集 | 未动工 | — | — |
 | P5 静态索引 | 未动工 | — | — |
 
@@ -35,6 +36,12 @@ P3a 的端到端实测同上（另一个临时根）：`GET /api/components/vers
 一条 `resolved:true`；`DELETE …?version=9.9.9` → 400 宿主原文；`DELETE …/handmade` →
 `{"status":"removed","removed":["1.0.0"]}` 且目录消失；再来一次 → `{"status":"absent"}`；
 `DELETE …/..%2F..%2Fetc` → 400 `bad component name`。8890 未动。
+
+P3b 的端到端实测（再一个临时根、另一个端口）：真 `checkoutComponents()` → `artifactFor()` →
+`upload()` 装上 `clutch-workspace`（`0.1.0+31bc2b7c5f799e5b`）→ `view.versions()` 读回同一条
+`resolved:true` → `view.remove()` 报 `removed:["0.1.0+31bc2b7c5f799e5b"]` 且目录**真的消失**
+→ 再 `remove()` → `absent`、清单空 → `view.versions("../../etc")` → `bad component name`。
+全程只压到一次性 supervisor（端口独立），8890 / 78979 未动。
 
 ## 零之三、本轮新发现（P1/P2/P3 施工中得到）
 
@@ -96,7 +103,7 @@ P3a 的端到端实测同上（另一个临时根）：`GET /api/components/vers
 flowchart LR
   P0['P0 版本语义<br/>安装版本可读 ✅'] --> P1['P1 只读可见<br/>通道 + 标签页 ✅']
   P1 --> P2['P2 单向下发<br/>装到选定机器 ✅']
-  P1 --> P3['P3 反向动词<br/>宿主端点先行']
+  P1 --> P3['P3 反向动词<br/>卸载已通 ✅']
   P2 --> P3
   P3 --> P4['P4 工具集<br/>interface data']
   P4 --> P5['P5 可选<br/>静态索引 / 私有源']
@@ -155,9 +162,9 @@ digest (`0.2.0+<hex>`)"），`COMPONENTS.md` 第 79 行同样写着"安装版可
 - 验收（单测）：`node tests/components-panel.test.js`（37 条）覆盖目标机规则、死按钮、确认
   文案、拒绝、`installed`/`current`/宿主原文、重读清单；实测见零之二。
 
-### P3 反向动词（宿主侧先行）
+### P3 反向动词（**两头已通**：宿主 `90140ea`、页面 `11f6ce4`）
 
-**拆成 P3a（宿主侧，已完成，`90140ea`）与 P3b（页面上的反动词，未动工）。**
+**拆成 P3a（宿主侧，`90140ea`）与 P3b（页面上的反动词，`11f6ce4`），两段都已完成。**
 
 P3a 交付：
 
@@ -175,8 +182,34 @@ P3a 交付：
   磁盘上有活记录）一律拒绝，并把 pid 写进句子——"磁盘上读到的 pid 不是开枪许可"。
 - `rendezvous.live_daemons()` + `_record_dir()`（见零之三.5/6 的两条发现）。
 
-**没做的（下一批，需要拍板）**：`disable`/`enable`、`prune`、页面上的反动词。`disable` 不是
-加一个端点的事：宿主"停用了某组件"要影响 `inventory()`（清单里怎么报）与 `resolve()`（工具还
+P3b 交付（`11f6ce4`）：
+
+- 通道只加两个动词：`ui/components.js` 的 `hostVersions(base,name)`（`GET …/versions`）与
+  `hostRemove(base,name,version)`（`DELETE …/<name>[?version=]`）；两者共用新的
+  `hostJSON(url,{method,timeoutMs})`——宿主的 `{"error":…}` 直接变成抛出的句子（"谁在跑它"
+  这类拒绝，页面**必须能原文引用**，一个裸状态码会让它自己猜）。
+- `ui/components-view.js` 的 `versions(name,win)` / `remove(name,{version},win)`：先解目标机，
+  解不出来是**答案**不是异常；失败装在结果里（`{ok:false,error}`），所以"这台机器一版都没有"
+  和"这台机器问不到"绝不会画成同一幅空图。`remove()` 原样带出宿主的三种形状。
+- 页面：每条已装行一个 Remove 控件（`ui/js/components-panel.js:168`），**没有 supervisor URL
+  时它是死的**（哪台机器会掉字节是最不能猜的事），**任何写入在飞时它也是死的**——`busy` 现在
+  带 `verb`，两个方向共用"一次只准一个写入"。
+- 删除前先问（`:275`）：问题点名版本与机器，说清"连同这台机器持有的其它版本一起删"，并说最难
+  的那句——**这里撤不回来，本页不留副本，要拿回来只能再装一次**。
+- 裁定回显（`:262`）：`removed <name> <versions> from <where>` / `<name> was not installed on
+  <where> — there was nothing to remove`（`absent` 是答案不是错误）/ 拒绝原文。
+- **I5 从"靠缺席"改成"靠文案"**（见不变量表 I5 行）：按钮既然有了，就不能再靠不画它成立。
+
+验收（单测 + 实测）：`node tests/components-panel.test.js` 新增 9–15 节（每行控件与 title、
+先问再删且拒绝就什么都不删、成功回显点名删掉的版本、`absent` 画成答案、拒绝原文连 pid 一起
+引用且控件复位、两个方向共用"一次一个写入"、目标机没有 supervisor URL 时控件是死的并给出
+原因）；`tests/components-view.test.js` 7–8 节（版本读取、宿主顺序与 `resolved`、失败报成原因
+而不是"没有版本"、三种卸载裁定、带了版本号就问那一版）；`tests/components.test.js` 9 节对着
+真 supervisor 跑 `hostVersions()`/`hostRemove()`（改盘之后再读清单为空、第二次删是 `absent`、
+坏名字 400）。实测见零之二末段。
+
+**没做的（下一批，需要拍板）**：`disable`/`enable`、`prune`、页面上的"版本明细"视图。
+`disable` 不是加一个端点的事：宿主"停用了某组件"要影响 `inventory()`（清单里怎么报）与 `resolve()`（工具还
 出不出、dev 检出要不要跟着失效），是一条会动到 registry 的改动，得先定语义。`prune` 目前意义
 不大——`install()` 自己已经在清（`_prune`），一个组件目录正常只有一版。
 
@@ -236,7 +269,7 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 
 | 风险 | 说明 | 缓解 |
 | --- | --- | --- |
-| 不可撤销的远端写入 | 装到别人的机器上，今天没有卸载 | P2 二次确认；P3 尽快补反动词 |
+| 不可撤销的远端写入 | 装到别人的机器上，删是删掉字节、没有副本 | P3 已补反动词（`90140ea` + `11f6ce4`）：二次确认把"这不是回滚"说在明处（I5）；宿主只删**自己启动**的进程，其它一律拒绝并报 pid |
 | 版本语义断层 | 新旧两种"版本"形状并存 | P0 先统一；宿主落地自带清理，无需迁移脚本 |
 | 越权 | 工具集想让宿主执行它定义的行为 | 守 I3：只能引用宿主词汇，导入期断言会大声报错 |
 | 动态模式爆炸半径 | P4 改的是"模型看得到哪些工具" | 模式仍由宿主裁定（`registry.py:263` 的过滤保留），`chat` 语义不因插件变松 |
@@ -274,6 +307,6 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 | --- | --- | --- | --- |
 | G1 | 本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | `ui/server-bootstrap.js`（现在全文无 components）或 `ui/components-view.js` 的 `install()` 前段 |
 | G2 | Android 宿主没有 `clutchComponents` handler | 手机上插件标签页每条读取都是一行错误 | `android/host/android-host.js:78-107` 一带补同组调用 |
-| G3 | 宿主没有反动词（卸载/停用/回滚） | 装上是单向的，页面只能靠文案诚实（I5） | **宿主侧已补（P3a `90140ea`）**：`versions()`/`remove()` + 两条端点；页面仍没有按钮（I5 目前因此成立），按钮在 P3b |
+| G3 | 宿主没有反动词（卸载/停用/回滚） | 装上是单向的，页面只能靠文案诚实（I5） | **卸载已两头补齐**：宿主 `90140ea`、页面 `11f6ce4`。**停用/回滚仍缺**，见待拍板 5 |
 | G4 | `clutch-workspace/pyproject.toml` 0.2.0 与其 `component.json` 0.1.0 不一致 | 界面显示 0.1.0，包元数据说 0.2.0 | 模块仓库自身 |
 | G5 | 纯声明包（`interface:"data"`）目前 400 | 工具集还递不进去 | P4 |

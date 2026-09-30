@@ -284,16 +284,39 @@ token：`skills`（技能库目录表）——它正是宿主过去自己扫 `*/
 schema（提示词片段同理，`registry._drivable` 是同一道筛选），客户端用
 `unavailable_reason()` 向用户解释（声明 `ui.status: true` 的才解释，其余安静缺席）。
 
-## 八、安装 wire 协议
+## 八、安装与卸载 wire 协议
 
-组件属于**要运行它的那台机器**。客户端把工件装到那台机器的 supervisor：
+组件属于**要运行它的那台机器**。客户端把工件装到那台机器的 supervisor，也让那台机器把组件
+交出来——**同一个门，两个方向读**：
 
 ```
-POST /api/components/install
+POST   /api/components/install
   X-Clutch-Component: <base64(UTF-8 JSON)>   声明 + 安装事实
   body: <工件字节流>
-GET /api/components                            该机器已装清单（name/version/interface/digest）
+GET    /api/components                        该机器已装清单（name/version/interface/digest）
+GET    /api/components/versions?name=<name>    这一个组件的每一版，新→旧，resolved 标出会跑的那一版
+DELETE /api/components/<name>[?version=]       让这个组件（或它的某一版）离开这台机器
 ```
+
+`versions` 的**顺序也是宿主的决定**（就是 `resolve()` 的选择依据），客户端照抄不重排：哪一版
+会赢是宿主的知识，页面重排等于发表第二意见。`DELETE` 的回答有三种形状，都是**答案**：
+
+- `{"status":"removed","removed":[…]}`——删掉了这几版，删了哪几版由宿主报出来；
+- `{"status":"absent"}`——本来就没有，**不是错误**（要求已经成立，报错等于凭空造一个问题）；
+- 400 带宿主原文——名字不合法、`?version=` 指向没装的版本、或**有不是本次进程启动的 daemon
+  正在跑它**。
+
+三条规则，缺一条都不算实现对：
+
+1. **`absent` 是答案，`?version=` 没装是拒绝**。两者都"没删到东西"，但一个是请求已经为真，
+   一个是请求本身说错了对象——后者一删就要 400，且**不许**顺手删掉别的版本。
+2. **拒绝必须落在动手之前**。`remove()` 把"有没有在跑"作为调用方的 `stop` 回调接进来，且
+   **只在确实有东西可删时**才调用它；名字/版本的判断同样在 `stop` 之前。否则一次注定被拒的
+   删除会先把 daemon 杀掉再报错（见 PLUGIN_PLAN.md 零之三.6）。
+3. **先停后删，且只停自己启动的**。本进程启动的 daemon 先停再删（属主规则与 `release` 一致）；
+   收养的句柄（`proc is None`）或只在磁盘上有活记录的一律拒绝，并把 **pid 写进句子**——
+   "磁盘上读到的 pid 不是开枪许可"。已知边界：一个**记录被删掉**的活 daemon 查不出来，
+   记录是宿主唯一的名册（PLUGIN_PLAN.md 零之三.5）。
 
 头的值必须是 base64——HTTP 头是 ByteString（每个码点 ≤ 0xFF），而声明按设计就是
 组件自己的语言（中文照写），裸 JSON 过不去。解码在宿主端只有一处：
