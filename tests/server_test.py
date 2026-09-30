@@ -13,6 +13,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -515,6 +516,48 @@ def _run_server_test() -> int:
         # switch back to the demo project so the real-run section stays untouched
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
         check(st == 200, "switched back to the demo project")
+
+        # ---- SSE keepalive: the idle stream reasserts itself BY NAME ----
+        # The mouse hole this closes: the renderer cached the server state
+        # ("running" drives the Stop button) and could only refresh it from this
+        # stream, while a half-open socket raises no error on either side. The
+        # old heartbeat was an SSE comment, which reaches no listener at all, so
+        # a dead stream looked exactly like an idle one and the window froze on
+        # "thinking" while the run went on. The frame must therefore be a NAMED
+        # event, and the client must be able to derive its staleness window from
+        # the very constant that paces it here.
+        import agent.server as server_mod
+
+        keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+        server_mod.SSE_KEEPALIVE_SEC = 0.2  # patched in globally: the loop reads it per wait
+        try:
+            with contextlib.closing(urllib.request.urlopen(f"{base_url}/api/events", timeout=15)) as r:
+                lines: list[str] = []
+                deadline = time.time() + 15
+                while time.time() < deadline:
+                    raw = r.readline()
+                    if not raw:
+                        break
+                    lines.append(raw.decode("utf-8", "replace").strip())
+                    if lines[-2:] == ["event: ping", "data: {}"]:
+                        break
+                check(
+                    lines[-2:] == ["event: ping", "data: {}"],
+                    "an idle stream keeps the connection provably alive by name",
+                )
+                check(
+                    not [ln for ln in lines if ln.startswith(":")],
+                    "the keepalive is not an SSE comment (invisible to EventSource)",
+                )
+        finally:
+            server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
+
+        app_js = (Path(__file__).resolve().parents[1] / "ui" / "app.js").read_text(encoding="utf-8")
+        m = re.search(r"const SSE_KEEPALIVE_MS = (\d+);", app_js)
+        check(
+            m is not None and int(m.group(1)) == int(server_mod.SSE_KEEPALIVE_SEC * 1000),
+            "the renderer liveness window matches the server keepalive (one constant, two languages)",
+        )
 
         # ---- multi-window isolation: two SSE subscribers on different projects ----
         from agent.events import FinalEvent

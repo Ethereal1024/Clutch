@@ -1927,8 +1927,18 @@ async function run() {
 
 async function stop() {
   try {
-    await apiFetch("/api/stop", { method: "POST" }); // bodyless; best effort
-  } catch (e) {}
+    // bounded so a wedged request cannot outlive the patience of the user —
+    // and never swallowed: the click must do SOMETHING either way. `busy` is
+    // refreshed by the SSE stream, not by this response, so when the cancel
+    // cannot be delivered the window must stop pretending that it was.
+    await apiFetch("/api/stop", { method: "POST", timeout: 8000 }); // bodyless
+  } catch (e) {
+    notice("could not reach the backend to stop (" + ((e && e.message) || e) + ") — the task may still be running");
+    setStatus("idle"); // the button belongs to the user again: retry Stop, or Run
+    // the link itself may be recoverable: re-resolve the session of this
+    // window (the tunnel or the supervisor may have re-claimed one under us)
+    await switchBackendResolved();
+  }
 }
 
 els.run.addEventListener("click", () => (busy ? stop() : run()));
@@ -3155,6 +3165,57 @@ function renderNode(node, depth) {
 // ---- SSE live stream + session list ----
 let es = null;
 
+// The live stream is the ONLY thing that refreshes `busy` (the running or
+// waiting state of the run), so however it dies, the window must not keep
+// rendering a cached "running" as if it were live: that is the window stuck on
+// thinking with a Stop button that does nothing. The run is fine on the host,
+// the pipe to it is not. Three causes, three local answers:
+//   * a half-open TCP connection: writes vanish and EventSource NEVER fires
+//     onerror. The keepalive of the server is a real named event (see
+//     agent/server.py SSE_PING_FRAME), so silence past three of them is proof
+//     of death, not a slow run;
+//   * a base that is gone (tunnel torn down, session reaped): EventSource
+//     retries forever in silence, so the failures are counted instead;
+//   * a Stop click that could not be delivered (see stop()).
+// Every recovery is announced: a silent one is indistinguishable from a freeze.
+const SSE_KEEPALIVE_MS = 15000; // must match agent/server.py SSE_KEEPALIVE_SEC
+const SSE_STALE_MS = SSE_KEEPALIVE_MS * 3; // one missed keepalive is not death
+const SSE_MAX_ERRORS = 4; // EventSource retries ~3s apart: ~12s of a dead base
+let sseLastFrameAt = 0; // last byte the stream actually delivered
+let sseErrors = 0; // consecutive failed connects; reset by es.onopen
+let sseDown = false; // told once per outage, not once per tick
+let sseWatchdog = null;
+
+// any frame (event or keepalive) proves the pipe still carries bytes
+function sseFrame() {
+  sseLastFrameAt = Date.now();
+  sseDown = false;
+}
+
+// The stream can no longer be trusted: stop vetoing the buttons of the user,
+// and say why. `busy` comes back on its own from the replayed status once a
+// stream is live again — the run itself may still be alive on the host.
+function sseDegrade(reason) {
+  if (sseDown) return;
+  sseDown = true;
+  if (busy) setStatus("idle");
+  notice("lost the live stream (" + reason + ") — reconnecting; the task may still be running");
+}
+
+function sseWatchdogTick() {
+  if (!API_BASE || !es) return;
+  if (Date.now() - sseLastFrameAt < SSE_STALE_MS) return;
+  // re-arm first: one report + one reconnect per stale window, not per tick
+  sseLastFrameAt = Date.now();
+  sseDegrade("no keepalive for " + Math.round(SSE_STALE_MS / 1000) + "s");
+  reconnectSSE(false); // the base may have been re-claimed under us
+}
+
+function startSseWatchdog() {
+  if (sseWatchdog) return; // one timer per window, however many streams it had
+  sseWatchdog = setInterval(sseWatchdogTick, 5000);
+}
+
 function connectSSE(replay = true) {
   // backend not claimed yet: the main process announces the real URL via
   // backend:base-changed -> switchBackend -> reconnectSSE
@@ -3172,12 +3233,19 @@ function connectSSE(replay = true) {
   if (currentProject) qs.set("project", currentProject);
   qs.set("replay", replay ? "1" : "0");
   es = new EventSource(API_BASE + "/api/events?" + qs.toString());
+  sseFrame(); // the stream is starting: never stale before its first byte
   es.onmessage = (e) => {
+    sseFrame();
     // a dropped event silently desyncs the view from the log: never swallow it
     try { addEvent(JSON.parse(e.data)); } catch (err) { console.warn("[sse] undecodable event", err); }
   };
+  // the keepalive of the server is a NAMED event, so it arrives here and not
+  // in onmessage: the only proof that an idle-but-open socket is still there
+  es.addEventListener("ping", sseFrame);
   // on (re)connect the server replays stored history: reset the streaming state
   es.onopen = () => {
+    sseErrors = 0;
+    sseFrame();
     lastTextEl = null;
     lastTextContent = "";
     thinkingEl = null;
@@ -3188,7 +3256,14 @@ function connectSSE(replay = true) {
     // the backend (re)connected, possibly after a self-heal restart: resync the tree
     refreshTree();
   };
-  es.onerror = () => { /* auto-reconnect */ };
+  es.onerror = () => {
+    // the browser reconnects on its own, but a base that is GONE retries
+    // forever without a word: past a few failures the cached "running" is a
+    // claim we can no longer support, so it goes and the button reacts
+    sseErrors++;
+    if (sseErrors >= SSE_MAX_ERRORS) sseDegrade("the backend did not answer");
+  };
+  startSseWatchdog();
 }
 
 // point the SSE stream at the (possibly new) API_BASE; when es is null (boot

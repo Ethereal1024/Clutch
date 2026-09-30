@@ -61,6 +61,22 @@ from .tools.workspace import Workspace
 # stream.
 _SSE_ERR = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ValueError)
 
+# Idle gap after which the stream reasserts that it is still there. Bounded by
+# nothing on the client side: a half-open TCP connection (writes vanish into a
+# peer that will never answer) raises no error here and no error in the
+# browser's EventSource either, which is why the client is told explicitly.
+SSE_KEEPALIVE_SEC = 15
+
+# The keepalive is a NAMED event, not the usual `: comment` heartbeat. A
+# comment never reaches any listener — an EventSource client cannot tell a
+# live-but-idle stream from a socket that died an hour ago, and the UI's
+# "running" state is a CACHE it can only refresh from this stream: an
+# unnoticed death leaves the window showing a run that is not there, with a
+# Stop button that posts into nothing. A named event lands in
+# addEventListener("ping"), which is what lets the renderer prove liveness
+# (ui/app.js SSE_KEEPALIVE_MS must match this value).
+SSE_PING_FRAME = b"event: ping\ndata: {}\n\n"
+
 
 def _settings_path() -> Path:
     return Path.home() / ".clutch" / "settings.json"
@@ -480,14 +496,14 @@ class Handler(BaseHTTPRequestHandler):
             # then live events
             while True:
                 try:
-                    ev = q.get(timeout=15)
+                    ev = q.get(timeout=SSE_KEEPALIVE_SEC)
                     rp = self._state.run_project
                     if rp and project_q and rp != project_q:
                         continue  # another window's run: don't leak its events here
                     self._write_sse(ev)
                 except queue.Empty:
                     try:
-                        self.wfile.write(b": ping\n\n")
+                        self.wfile.write(SSE_PING_FRAME)
                         self.wfile.flush()
                     except _SSE_ERR:
                         break

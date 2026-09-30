@@ -1,4 +1,6 @@
-// Standalone check for ssh-tunnel.js's exec upload path.
+// Standalone checks for ssh-tunnel.js: the exec upload path (byte-exact
+// chunks under the sshd cap) and the end-of-tunnel notification, which is
+// what tells the renderer that its session URL is gone.
 // Run: node tests/ssh-tunnel.test.js
 //
 // Text must be written byte-exactly (printf chunks) and binary via base64, and
@@ -10,9 +12,22 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const Module = require("module");
 const { exec: shExec, execFile: shExecFile, execFileSync } = require("child_process");
-const { uploadFileViaExec } = require("../ui/ssh-tunnel");
-const { check, summary } = require("./harness");
+const UI_DIR = path.join(__dirname, "..", "ui");
+const TUNNEL_FILE = path.join(UI_DIR, "ssh-tunnel.js");
+const TUNNEL_SRC = fs.readFileSync(TUNNEL_FILE, "utf8");
+
+// stopTunnel appends to ~/.clutch/tunnel.log -- the forensic record of the
+// frozen-window incident -- so point HOME at a scratch dir before the module
+// is loaded: a test line in the real log would be evidence tampering.
+const SCRATCH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-home-"));
+process.env.HOME = SCRATCH_HOME;
+if (process.platform === "win32") process.env.USERPROFILE = SCRATCH_HOME;
+
+const { uploadFileViaExec, stopTunnel, onTunnelEnd } = require("../ui/ssh-tunnel");
+const { check, summary, slicer } = require("./harness");
+const { fnBody } = slicer(TUNNEL_SRC);
 
 // The mock remote is a POSIX shell: the real remote's exec bridge runs `sh -c`
 // there. On Windows child_process.exec is cmd.exe, which cannot run printf /
@@ -45,6 +60,23 @@ function findPosixSh() {
 }
 
 const POSIX_SH = findPosixSh();
+
+// A SECOND, private instance of the module: stopTunnel is a singleton (its end
+// latch is module state), and the latch must start fresh here. Compiling the
+// real source as a real CommonJS module keeps every Node global and resolves
+// "./llm-proxy" etc. from ui/; the appended line exposes only the flag that a
+// successful connect would have set, so the notification itself stays
+// unmodified.
+function loadFreshTunnel() {
+  const inst = new Module(TUNNEL_FILE, null);
+  inst.filename = TUNNEL_FILE;
+  inst.paths = Module._nodeModulePaths(UI_DIR);
+  inst._compile(
+    TUNNEL_SRC + "\n;module.exports.__testMarkLive = (v) => { wasDisconnected = v; };\n",
+    TUNNEL_FILE
+  );
+  return inst.exports;
+}
 
 // Simulated remote sh: run each exec command locally, recording the peak
 // command length (what the chunk cap must bound).
@@ -113,6 +145,46 @@ async function main() {
   check(maxCmdLen <= cap, `all exec commands under the chunk cap (max ${maxCmdLen} bytes)`);
 
   fs.rmSync(tmp, { recursive: true, force: true });
+
+  // 7. the end-of-tunnel notification: until it arrives the renderer keeps a
+  // session URL and a Stop button that post into whatever the SSH hop left
+  // behind. An intentional disconnect (the picker, window close) is handled by
+  // its caller and stays silent; a teardown the renderer did NOT ask for -- the
+  // healer giving up, or an unexpected death -- must be announced, even though
+  // stopTunnel nulls sshClient before end(), which is exactly why the ssh end
+  // handler cannot deliver it (its currency guard suppresses it).
+  const solo = loadFreshTunnel();
+  let ends = 0;
+  solo.onTunnelEnd(() => {
+    ends++;
+  });
+  await solo.stopTunnel();
+  check(ends === 0, "an intentional disconnect stays silent (the caller clears its own flag)");
+  solo.__testMarkLive(false); // what a successful connect has set by then
+  await solo.stopTunnel(true);
+  check(ends === 1, "a teardown the renderer did not ask for is announced");
+  await solo.stopTunnel(true);
+  check(ends === 1, "the latch keeps the end from being announced twice");
+
+  // 8. the paths a behavioural test cannot reach, asserted on the source: the
+  // notice must come AFTER the ports are closed (a listener that re-claims must
+  // not land on a half-alive tunnel), the last resort of the healer must
+  // notify, and a request racing the teardown must fail its own socket instead
+  // of throwing on a null client in the main process.
+  const stopBody = fnBody("stopTunnel");
+  check(/function stopTunnel\(notify = false\)/.test(stopBody),
+    "stopTunnel takes the notify flag (default: the caller manages its own disconnect)");
+  check(stopBody.indexOf("if (notify) notifyEnd();") > stopBody.indexOf("stopExecBridge();"),
+    "the announcement follows the port teardown, not the reverse");
+  check(/await stopTunnel\(true\)/.test(fnBody("healOnce")),
+    "the healer announces the teardown of its last resort");
+  check(/if \(!sshClient\) return sock.destroy\(\);/.test(fnBody("openSessionForward")),
+    "a session request racing the teardown fails its own socket");
+  const fwdBody = slicer(TUNNEL_SRC).region("async function establishForwardAndHealth", "establishForwardAndHealth");
+  check(/if \(!sshClient\) return sock.destroy\(\);/.test(fwdBody),
+    "a stale local forward fails its socket instead of throwing in the main process");
+
+  fs.rmSync(SCRATCH_HOME, { recursive: true, force: true });
   summary("ssh-tunnel");
 }
 

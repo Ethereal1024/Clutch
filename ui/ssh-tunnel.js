@@ -492,7 +492,14 @@ function stopServerCmd(strategy) {
   );
 }
 
-async function stopTunnel() {
+// `notify` is for teardowns the RENDERER did not ask for. Its own disconnect
+// (the SSH picker, window close) is caller-managed: the renderer clears its
+// flag and re-claims a local session itself, in the same turn. A teardown it
+// does NOT know about must be announced, because until then it keeps talking
+// to a port nobody serves: the SSE stream ends silently (the window shows a
+// run that is not there) and Stop posts the cancel into nothing while the
+// remote session keeps running -- unreachable, and unable to be stopped.
+async function stopTunnel(notify = false) {
   tunnelLog("[disconnect] stopTunnel");
   stopHealing();
   if (localSrv) {
@@ -519,7 +526,9 @@ async function stopTunnel() {
   }
   stopLlmProxy();
   stopExecBridge();
-  // intentional disconnects are caller-managed; only unexpected death notifies
+  // intentional disconnects are caller-managed; an unexpected death (the ssh
+  // 'end' event) and a teardown the caller flags both notify
+  if (notify) notifyEnd();
 }
 
 function notifyEnd() {
@@ -623,7 +632,11 @@ async function healOnce() {
   if (!ok) {
     tunnelLog("[heal] restart did not recover; collecting diagnostics + tearing down");
     await collectRemoteDiagnostics();
-    await stopTunnel(); // triggers onEnd -> renderer clears the stale URL
+    // notify: this teardown is not the renderer's own. stopTunnel nulls
+    // sshClient before end(), so the ssh 'end' handler is suppressed by its
+    // currency guard and would never tell anyone: without the flag the
+    // renderer keeps a dead session URL and its Stop button posts into it.
+    await stopTunnel(true); // onEnd -> renderer drops the stale URL + re-claims
   } else {
     tunnelLog("[heal] backend recovered");
   }
@@ -750,6 +763,9 @@ async function connectTunnel({ host, user, port, password }, progress) {
 // Set up the bidirectional forwards and gate on the health check through the tunnel.
 async function establishForwardAndHealth(localPort) {
   localSrv = net.createServer((sock) => {
+    // a request racing the teardown must fail the socket, not the main
+    // process: forwardOut on a null client throws before it can answer
+    if (!sshClient) return sock.destroy();
     sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", REMOTE_API_PORT, (err, stream) => {
       if (err) {
         tunnelLog("[error] forwardOut failed: " + (err && err.message));
