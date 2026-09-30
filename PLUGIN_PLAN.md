@@ -21,7 +21,7 @@
 | P0 版本语义 | **已完成** | `42e6ee6` | 安装版本 = `<自报版本>+<摘要16>`；`ui/components.js:installVersion` |
 | P1 只读可见 | **已完成** | `2c473f6`（含 `0b7229e` 的修正） | 通道 + 设置弹窗第二个标签 + 市场/已装两份清单 |
 | P2 单向下发 | **已完成** | `8d11845` | 每行安装按钮 + 二次确认 + 进度 + 宿主裁定回显 + 装完重读清单 |
-| P3 反向动词 | 未动工 | — | — |
+| P3 反向动词 | **宿主侧已完成**（P3a） | `90140ea` | `versions()` / `remove()` + `GET …/versions`、`DELETE …/<name>`；先停后删、非我启动的 daemon 拒绝；页面暂无按钮 |
 | P4 工具集 | 未动工 | — | — |
 | P5 静态索引 | 未动工 | — | — |
 
@@ -31,7 +31,12 @@ P2 的端到端实测（不是单测）：起一个**一次性** supervisor
 /api/components` 从空变一条、字节落到磁盘；**再装一次** → `status:"current"`，阶段序列
 `artifact -> current`（没有 upload）。本机 8890 上的 supervisor 全程未动。
 
-## 零之三、本轮新发现（P1/P2 施工中得到）
+P3a 的端到端实测同上（另一个临时根）：`GET /api/components/versions?name=handmade` 报出
+一条 `resolved:true`；`DELETE …?version=9.9.9` → 400 宿主原文；`DELETE …/handmade` →
+`{"status":"removed","removed":["1.0.0"]}` 且目录消失；再来一次 → `{"status":"absent"}`；
+`DELETE …/..%2F..%2Fetc` → 400 `bad component name`。8890 未动。
+
+## 零之三、本轮新发现（P1/P2/P3 施工中得到）
 
 1. **组件端点长在 supervisor 上，不在 session API 上**（最关键的一条）：
    `GET /api/components`（`agent/supervisor.py:233`）与 `POST /api/components/install`
@@ -55,6 +60,17 @@ P2 的端到端实测（不是单测）：起一个**一次性** supervisor
    `0.1.0+31bc2b7c5f799e5b`。两个事实：旧记录确实停留在裸摘要年代（`install()` 会清掉同组件
    其它版本，所以下次安装自然换名，不需要迁移脚本）；且模块检出在这之后**变过**
    （`82e974a` 那次 release 修复），所以现在点一次安装是**真的会写入新字节**，不是空跑。
+5. **"谁在跑"只能靠散目录里的记录去数**：daemon 的记录名是**工作区根路径的哈希**
+   （`rendezvous._record_path`），从名字复原不出工作区，所以"这个组件现在有没有进程在跑"
+   只有一条路可问——列该组件自己的记录目录（`_record_dir()`，本轮从 `_record_path()` 里
+   析出）。这也意味着一个**已经删掉记录**的活进程查不出来：记录是宿主唯一的名册，页面上
+   的"有没有在跑"和实际进程之间存在这个窗口，P3b 做界面时必须知道。
+   （顺带：今天表里只有 `clutch-workspace` 是 daemon，其余三个是 `cli`——一次性进程没有
+   常驻 daemon，"先停后删"对它们恒为真。）
+6. **拒绝必须发生在动手之前**：`remove()` 把"有没有在跑"作为调用方的 `stop` 回调接进来，
+   并且**只在确实有东西可删时**才调用它——否则一次注定被拒的删除（比如版本号写错）
+   会先把 daemon 杀掉再报错。同理，宿主对"名字不合法/版本没装"的判断在 `stop` 之前。
+   活体与单测都钉住了这一条：被拒之后目录还在、进程还在。
 
 ## 一、目标与非目标
 
@@ -141,12 +157,28 @@ digest (`0.2.0+<hex>`)"），`COMPONENTS.md` 第 79 行同样写着"安装版可
 
 ### P3 反向动词（宿主侧先行）
 
-- 新端点：`DELETE /api/components/<name>[?version=]`、`POST /api/components/{disable,enable}`、
-  `POST /api/components/prune`、`GET /api/components/versions?name=`。
-- `agent/tools/components.py` 新增 `remove()` / `versions()`；把内部 `_prune()` `:422` 变成
-  有端点的操作。裁定模型不变：**卸载也返回 verdict 与理由**。
-- 风险：删掉正在运行组件的 daemon（pid/record 握手在 `agent/tools/rendezvous.py`）→ 必须
-  "先停后删"，对被别人启动的 daemon 按既有 fence 规则拒绝。
+**拆成 P3a（宿主侧，已完成，`90140ea`）与 P3b（页面上的反动词，未动工）。**
+
+P3a 交付：
+
+- `GET /api/components/versions?name=` → `{name, versions:[{name,version,interface,digest,path,
+  resolved}]}`，**新→旧**排序（就是 `resolve()` 的选择依据），`resolved:true` 标出宿主真会启
+  动的那一个；名字不合法 → 400（而不是空清单——空清单读起来像"没装"）。
+- `DELETE /api/components/<name>[?version=]` → `{status:"removed", removed:[…]}` /
+  `{status:"absent"}`；拒绝（名字不合法、`?version=` 没装、有非我启动的 daemon 在跑）→ 400
+  带宿主原文。
+- `components.versions()` / `components.remove()`；`_check_name()` / `_check_version()` 从
+  `install()` 的内联判断提出来（名字就是路径片段，越权门与拼写规则是同一条规则）。
+- **"先停后删"落地**：`remove()` 收一个调用方的 `stop` 回调（`rendezvous.stop_for_removal`），
+  **只在确实有东西可删时调用**，返回拒绝句子就抛 `ValueError`；本进程启动的 daemon 先停
+  （属主规则与 `release`/`_stop` 一致），**别人启动的**（`proc is None` 的收养句柄、或只在
+  磁盘上有活记录）一律拒绝，并把 pid 写进句子——"磁盘上读到的 pid 不是开枪许可"。
+- `rendezvous.live_daemons()` + `_record_dir()`（见零之三.5/6 的两条发现）。
+
+**没做的（下一批，需要拍板）**：`disable`/`enable`、`prune`、页面上的反动词。`disable` 不是
+加一个端点的事：宿主"停用了某组件"要影响 `inventory()`（清单里怎么报）与 `resolve()`（工具还
+出不出、dev 检出要不要跟着失效），是一条会动到 registry 的改动，得先定语义。`prune` 目前意义
+不大——`install()` 自己已经在清（`_prune`），一个组件目录正常只有一版。
 
 ### P4 工具集（`interface: "data"`）
 
@@ -227,6 +259,14 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 2. **旧记录**：是否强制重装以统一版本形状（`install()` 会清掉旧版本目录，所以代价只是一次
    上传），或让两种形状长期并存。
 3. **索引仓库（P5）**：模块数 ≤4 时先不建。
+4. ~~**`DELETE` 不带版本号是什么意思**~~ → **已决（P3a）**：整个组件一起拿掉（"卸载这个
+   组件"就是这个意思），返回 `removed:[…]` 说明删掉了哪几版；本来就没装 → `absent`，**不是
+   错误**（要求已经成立）。`?version=` 指向没装的版本 → 拒绝。
+5. **停用（`disable`）怎么表示、表示成什么**：待拍板。两个方向——(a) 组件目录下一个标记文件
+   （`<root>/<name>/.disabled`），(b) 把版本目录改名。选 (a) 还是 (b) 之前要先定**语义**：
+   停用后 `inventory()` 报什么（仍列出 + `disabled:true`，还是干脆不列）、`resolve()` 要不要
+   返回 None（工具就不出现）、以及一个 dev 检出在场时停用**是否也压得住检出回退**（不压住会
+   出现"停用了但工具还在，因为跑的是检出"这种最坏组合）。这一条会动 registry，先定再写。
 
 ## 八、待办（本轮明确留着的缺口）
 
@@ -234,6 +274,6 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 | --- | --- | --- | --- |
 | G1 | 本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | `ui/server-bootstrap.js`（现在全文无 components）或 `ui/components-view.js` 的 `install()` 前段 |
 | G2 | Android 宿主没有 `clutchComponents` handler | 手机上插件标签页每条读取都是一行错误 | `android/host/android-host.js:78-107` 一带补同组调用 |
-| G3 | 宿主没有反动词（卸载/停用/回滚） | 装上是单向的，页面只能靠文案诚实（I5） | P3 |
+| G3 | 宿主没有反动词（卸载/停用/回滚） | 装上是单向的，页面只能靠文案诚实（I5） | **宿主侧已补（P3a `90140ea`）**：`versions()`/`remove()` + 两条端点；页面仍没有按钮（I5 目前因此成立），按钮在 P3b |
 | G4 | `clutch-workspace/pyproject.toml` 0.2.0 与其 `component.json` 0.1.0 不一致 | 界面显示 0.1.0，包元数据说 0.2.0 | 模块仓库自身 |
 | G5 | 纯声明包（`interface:"data"`）目前 400 | 工具集还递不进去 | P4 |
