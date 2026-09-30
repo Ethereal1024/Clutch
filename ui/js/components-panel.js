@@ -15,8 +15,12 @@
 // they did not. "No plugins exist" and "the network ate the answer" look exactly
 // alike in an empty list, and that is the one reading this page must not give.
 //
-// This file installs nothing (PLUGIN_PLAN.md I5: a page that cannot undo a write
-// does not offer it). It reads, and says what it read.
+// The one write this page can perform is an install, and it is offered the way
+// PLUGIN_PLAN.md I5 demands: the button says what it will do to WHICH machine,
+// the confirmation says a component cannot be taken back from here (no uninstall
+// exists on the host), and the outcome is the host's own verdict, quoted. A read
+// that failed never becomes an offer to write: an unreachable target disables
+// the button instead of pretending the install will land.
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
@@ -38,6 +42,8 @@ const plugState = {
   market: null, // {entries, errors, sources}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
+  busy: null, // {name, stage} — an install in flight, nothing else may start
+  result: null, // {ok, text} — the host's verdict on the last install
 };
 
 // The machine this page is about, named the way the rest of the UI names it: the
@@ -62,7 +68,7 @@ function plugChip(text, cls) {
 }
 
 // one row: the name, what it is, and whatever it makes of the target machine
-function plugRow(name, chips, lines) {
+function plugRow(name, chips, lines, actions = []) {
   const row = document.createElement("div");
   row.className = "plug-row";
   const head = document.createElement("div");
@@ -72,6 +78,12 @@ function plugRow(name, chips, lines) {
   nameEl.textContent = name;
   head.appendChild(nameEl);
   for (const [text, cls] of chips) head.appendChild(plugChip(text, cls));
+  if (actions.length) {
+    const box = document.createElement("span");
+    box.className = "plug-row-actions";
+    for (const a of actions) box.appendChild(a);
+    head.appendChild(box);
+  }
   row.appendChild(head);
   for (const line of lines) {
     if (!line) continue;
@@ -146,6 +158,115 @@ function plugHeldSection() {
   return plugSection(`On this machine (${plugState.held.length})`, rows, "no component installed");
 }
 
+// The install control for one market row. The label is derived from what the
+// target already holds, so pressing it is never a surprise: a version the
+// machine already carries says "Reinstall" (the same bytes are rewritten), and
+// while any install runs every button is dead — one write at a time, and the
+// page can always name which one.
+function plugInstallButton(entry) {
+  const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
+  const same = Boolean(held) && String(held.version || "").split("+")[0] === String(entry.version || "");
+  const busy = plugState.busy && plugState.busy.name === entry.name;
+  const btn = document.createElement("button");
+  btn.className = "plug-install";
+  btn.type = "button";
+  btn.textContent = busy ? "…" : same ? "Reinstall" : "Install";
+  if (!plugState.target) {
+    btn.disabled = true;
+    // the target is unresolvable (the read is still running, or it failed):
+    // which machine would receive the bytes is exactly what must not be guessed
+    btn.title = "the target machine has not been read yet — nothing may be sent before it is";
+  } else if (!plugState.target.base) {
+    // a tunnel with no supervisor URL is no machine yet: no button may imply a write
+    btn.disabled = true;
+    btn.title = "no supervisor URL for the target machine yet";
+  } else if (plugState.busy) {
+    btn.disabled = true;
+    btn.title = plugState.busy.name + " is being installed";
+  } else if (same) {
+    btn.title = `this machine already holds ${entry.name} ${held.version}`;
+  } else if (plugState.held === null) {
+    btn.title = "what this machine holds could not be read; the host still decides";
+  } else {
+    btn.title = `install ${entry.name} on ${plugTargetName(plugState.target)}`;
+  }
+  btn.addEventListener("click", () => plugInstall(entry));
+  return btn;
+}
+
+// Where an in-flight install is, in words the user can act on: the two slow
+// steps differ in kind (building bytes off a local checkout vs sending them over
+// the tunnel), and the two host verdicts differ in what they cost.
+function plugStageLine(busy) {
+  const where = plugTargetName(plugState.target);
+  switch (busy.stage) {
+    case "artifact":
+      return `preparing the bytes for ${busy.name}…`;
+    case "upload":
+      return `sending ${busy.name} ${busy.version || ""} to ${where}…`.replace("  ", " ");
+    case "current":
+      return `${busy.name} is already current on ${where} — nothing was sent`;
+    case "installed":
+      return `${busy.name} landed on ${where}`;
+    default:
+      return `installing ${busy.name} on ${where}…`;
+  }
+}
+
+// The host's verdict, in the host's words: it is the side that weights the bytes
+// against the declaration's digest, refuses a schema it cannot read, and decides
+// whether it needed them at all. A refusal here is quoted, not paraphrased.
+function plugInstallResult(entry, res, where) {
+  if (!res || !res.ok) {
+    return { ok: false, text: `could not install ${entry.name} on ${where} — ${(res && res.error) || "no answer"}` };
+  }
+  if (res.status === "current") {
+    return { ok: true, text: `${entry.name} was already current (${res.version}) on ${where} — nothing was sent` };
+  }
+  const path = res.path ? " · " + res.path : "";
+  return { ok: true, text: `installed ${entry.name} ${res.version} on ${where}${path}` };
+}
+
+// Ask, then write. The question names the machine and states the one fact the
+// page must not hide (the write cannot be undone from here), and the answer is
+// either an install that was actually started or nothing at all.
+async function plugInstall(entry) {
+  const api = window.clutchComponents;
+  if (!api || plugState.busy || !plugState.target || !plugState.target.base) return;
+  const where = plugTargetName(plugState.target);
+  const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
+  const knows = plugState.held === null ? " Whether this machine already holds it could not be read." : "";
+  const again = held ? ` It already holds ${held.version}; installing rewrites that same version.` : "";
+  const go = await askConfirm({
+    title: `Install ${entry.name}?`,
+    text:
+      `${entry.name}${entry.version ? " " + entry.version : ""} is written into ${where}'s component directory.` +
+      " This page cannot undo that: nothing in this app can remove an installed component yet." +
+      again +
+      knows,
+    ok: "Install",
+  });
+  if (!go) return;
+  plugState.busy = { name: entry.name, stage: "starting" };
+  plugState.result = null;
+  renderPlugins();
+  let res;
+  try {
+    res = await api.install(entry.name);
+  } catch (e) {
+    // the IPC hop itself failed (window gone, main process gone): still the
+    // failure path, not a silent no-op
+    res = { ok: false, name: entry.name, error: (e && e.message) || String(e) };
+  }
+  plugState.busy = null;
+  plugState.result = plugInstallResult(entry, res, where);
+  renderPlugins();
+  // the machine's inventory just changed: read it back. The market is cached
+  // (ui/components-view.js MARKET_TTL_MS), so this is one local HTTP call, not a
+  // second pass over the network.
+  if (res && res.ok) plugRead();
+}
+
 function plugMarketSection() {
   if (!plugState.market) {
     return plugSection(
@@ -159,13 +280,19 @@ function plugMarketSection() {
     if (e.interface) chips.push([e.interface, ""]);
     chips.push([e.version || "no version", "mono"]);
     chips.push([e.origin, e.origin === "checkout" ? "accent" : ""]);
-    return plugRow(e.name, chips, plugMarketLines(e));
+    return plugRow(e.name, chips, plugMarketLines(e), [plugInstallButton(e)]);
   });
   const sec = plugSection(
     `Market (${plugState.market.entries.length} of ${plugState.market.sources} source(s))`,
     rows,
     "no component is known to this client"
   );
+  if (plugState.market.entries.length) {
+    const caution = document.createElement("p");
+    caution.className = "plug-caution";
+    caution.textContent = "install writes files on the target machine — nothing in this app can take an installed component back yet";
+    sec.appendChild(caution);
+  }
   // a source that did not answer explains a short market: one line each, in the
   // section it shortened
   for (const reason of plugState.market.errors) {
@@ -181,9 +308,25 @@ function renderPlugins() {
   plugBodyEl.innerHTML = ""; // full redraw: two short lists, one state object
   plugTargetEl.textContent = plugTargetName(plugState.target);
   plugBaseEl.textContent = plugState.target && plugState.target.base ? plugState.target.base : "";
+  // one line, in order of what the user needs to know right now: a write in
+  // flight outranks its own outcome, which outranks a read that failed, which
+  // outranks a read still running
   const problem = plugState.heldError || plugState.marketError;
-  plugNoteEl.className = "plug-note" + (problem ? " error" : "");
-  plugNoteEl.textContent = problem || (plugState.pending ? "reading…" : "");
+  let note = "";
+  let bad = false;
+  if (plugState.busy) {
+    note = plugStageLine(plugState.busy);
+  } else if (plugState.result) {
+    note = plugState.result.text;
+    bad = !plugState.result.ok;
+  } else if (problem) {
+    note = problem;
+    bad = true;
+  } else if (plugState.pending) {
+    note = "reading…";
+  }
+  plugNoteEl.className = "plug-note" + (bad ? " error" : "");
+  plugNoteEl.textContent = note;
   if (!window.clutchComponents) {
     plugNoteEl.className = "plug-note error";
     plugNoteEl.textContent = "this shell has no component channel";
@@ -234,10 +377,25 @@ function plugRead({ force = false } = {}) {
     });
 }
 
-plugReloadBtn.addEventListener("click", () => plugRead({ force: true }));
+plugReloadBtn.addEventListener("click", () => {
+  plugState.result = null; // a reload is a request for facts, not a report to keep
+  plugRead({ force: true });
+});
 // the tab is the entry point: opening it is what makes the page go and look
 $("#settings-tab-plugins").addEventListener("click", () => pluginTabShown());
 
 function pluginTabShown() {
   plugRead();
+}
+
+// The install runs in the main process (it holds the filesystem and the network);
+// the stages come back as they happen, so a slow tunnel does not look like a
+// frozen button. A stage for anything but the install this page started is
+// ignored — this page is not the only window.
+if (window.clutchComponents && window.clutchComponents.onProgress) {
+  window.clutchComponents.onProgress((stage) => {
+    if (!stage || !plugState.busy || stage.name !== plugState.busy.name) return;
+    plugState.busy = { name: stage.name, stage: stage.stage, version: stage.version };
+    renderPlugins();
+  });
 }
