@@ -207,7 +207,10 @@ function plugRead({ force = false } = {}) {
     .list()
     .then((r) => {
       plugState.target = r.target;
-      plugState.held = r.held;
+      // a machine that could not be read is NOT a machine holding nothing: the
+      // empty list is what the read leaves behind on failure, and drawing it as
+      // "no component installed" is exactly the reading this page must not give
+      plugState.held = r.error ? null : r.held;
       plugState.heldError = r.error;
     })
     .catch((e) => {
