@@ -47,8 +47,8 @@
     padding: 6px 10px;
     font-size: 12px;
   }
-  /* the project actions are not hidden — app.js has moved them into
-     #shell-project-actions by the time this applies (the panel is the only
+  /* the project actions are not hidden — ui/js/workspace-panel.js has moved them
+     into #shell-project-actions by the time this applies (the panel is the only
      place they exist on a phone) */
   /* the one remaining trigger is the phone's only door into the shell, so it
      gets a real tap target instead of the compact desktop pill's box */

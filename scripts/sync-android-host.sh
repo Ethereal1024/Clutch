@@ -16,9 +16,10 @@ ASSETS=android/app/src/main/assets
 NODEJS_PROJECT=$ASSETS/nodejs-project
 UI_ASSETS=$ASSETS/ui
 
-# the pure-Node subset the host resolves via useUI(): the five modules it names
-# plus their own ui/-relative requires, plus the shared transport defaults.
-UI_NODE="components.js exec-bridge.js host-core.js llm-proxy.js server-bundle.js settings-mirror.js ssh-tunnel.js supervisor-client.js transport_defaults.json"
+# the pure-Node subset the host resolves via useUI(): the modules it names plus
+# their own ui/-relative requires (the tunnel is six files over one state
+# object), plus the shared transport defaults.
+UI_NODE="components.js exec-bridge.js host-core.js llm-proxy.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js supervisor-client.js transport_defaults.json"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"
@@ -31,6 +32,8 @@ for f in $UI_NODE; do cp "ui/$f" "$NODEJS_PROJECT/ui/"; done
 rm -rf "$UI_ASSETS"
 mkdir -p "$UI_ASSETS"
 cp ui/index.html ui/app.js ui/style.css ui/mobile.css ui/bridge-shim.js "$UI_ASSETS/"
+# the renderer's own modules (ui/js) + the vendored third-party libraries
+cp -r ui/js "$UI_ASSETS/js"
 cp -r ui/vendor "$UI_ASSETS/vendor"
 
 # 3. the N3 stamp, when this machine has one (build-android-apk.sh writes it

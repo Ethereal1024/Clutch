@@ -6,16 +6,16 @@
 // attempt drew is stale. If the view keeps it, the retried answer lands below a
 // copy of the first attempt half-sentence.
 //
-// Like stream-render-test.js this extracts the REAL functions from ui/app.js and
+// Like stream-render-test.js this extracts the REAL functions from the renderer and
 // drives them against stubs, so a silent edit that drops the discard handling
 // fails here instead of showing duplicated text to the user.
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
-const src = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
 
 // ---- stub environment (only what the discarding path touches) ----

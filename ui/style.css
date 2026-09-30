@@ -199,7 +199,7 @@ body { display: flex; flex-direction: column; }
    panel's project section and the backdrop, and mobile.css (loaded under
    max-width:640px) is the only place that reveals and positions them — the
    desktop keeps exactly the layout it had. The buttons themselves are not
-   duplicated: app.js MOVES #open-project-btn / #new-project-btn / #settings-btn
+   duplicated: ui/js/workspace-panel.js MOVES #open-project-btn / #new-project-btn / #settings-btn
    into #shell-project-actions on a phone, so their handlers, disabled state and
    DOM identity stay single-sourced. */
 #shell-ws-btn, .shell-project, .shell-backdrop { display: none; }
@@ -462,7 +462,7 @@ main { display: flex; flex: 1; min-height: 0; }
   position: relative; /* anchors the ::before rail and the absolute jump-bottom */
   flex: 1; overflow-y: auto; padding: 16px 16px 24px 16px;
   counter-reset: step;
-  /* scroll anchoring would fight the latch-driven scrolling in app.js */
+  /* scroll anchoring would fight the latch-driven scrolling in ui/js/stream-view.js */
   overflow-anchor: none;
 }
 /* the session content wrapper: hidden while the project-open progress runs,
@@ -596,7 +596,7 @@ main { display: flex; flex: 1; min-height: 0; }
 /* ---- diagram viewer (device report #6) -----------------------------------
    Clicking a rendered diagram opens it full-screen, the way QQ/WeChat open an
    image: drag to pan, wheel or pinch to zoom, double-click for 1:1, tap/click
-   outside or Esc/back to leave. Same behavior on PC and phone (app.js
+   outside or Esc/back to leave. Same behavior on PC and phone (ui/js/diagram-viewer.js
    openDiagramViewer); z-index 60 keeps it under .modal (100) — a permission
    prompt always wins. */
 .diagram-viewer {

@@ -17,17 +17,17 @@
 // local one exists.
 //
 // Like android-resume-test.js, the renderer part pulls the REAL functions out of
-// ui/app.js and drives them against stubs; the host part drives the REAL
+// the renderer and drives them against stubs; the host part drives the REAL
 // android-host.js handlers against a fake tunnel.
 //
 // Run: node tests/no-local-fallback-test.js
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
-const APP = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf8");
+const APP = uiSource(); // the renderer, every module in page load order
 const MAIN = fs.readFileSync(path.join(ROOT, "ui", "main.js"), "utf8");
 const HOST = fs.readFileSync(path.join(ROOT, "android", "host", "android-host.js"), "utf8");
 const { fnBody } = slicer(APP);

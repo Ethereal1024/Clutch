@@ -84,6 +84,26 @@ const REQUIRED_ASSETS = [
   "index.html",
   "app.js",
   "style.css",
+  // The renderer is one program in classic scripts; ui/index.html lists them in
+  // load order, and a module the packager drops (or a `files` glob that stops at
+  // the top level) is a blank window, not a missing font. List them all.
+  "js/stream-view.js",
+  "js/tool-render.js",
+  "js/stream-events.js",
+  "js/stream-text.js",
+  "js/markdown.js",
+  "js/diagram-viewer.js",
+  "js/render-events.js",
+  "js/settings.js",
+  "js/conn-store.js",
+  "js/backend-lifecycle.js",
+  "js/conn-flow.js",
+  "js/permissions.js",
+  "js/workspace-panel.js",
+  "js/sse-stream.js",
+  "js/project.js",
+  "js/fs-browser.js",
+  "js/boot.js",
 ];
 // …and files that must NOT ship. They prove the filter below really filters
 // (a filter that says "yes" to everything would pass the list above vacuously).

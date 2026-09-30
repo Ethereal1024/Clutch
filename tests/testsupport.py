@@ -9,18 +9,21 @@ one runner needs — the canonical list of suites lives in README.md, not here.
 - http_get() / http_post()   drive the local HTTP API
 - wait_gone()        prove a process did not leak (poll the pid until it is gone)
 - posix_shell_argv() run POSIX sh text on this host for the mock "remote"
+- ui_source()        the renderer's source, every module in page load order
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import sys
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 
 from agent.tools.localshell import local_shell
 from agent.tools.rendezvous import _pid_alive
@@ -105,3 +108,21 @@ def http_post(url: str, body: dict | None = None) -> tuple[int, str]:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def ui_source() -> str:
+    """The renderer's source, in page load order — the Python twin of
+    tests/harness.js's uiSource().
+
+    The renderer used to be one file (ui/app.js); it is now several classic
+    scripts that ui/index.html lists in the only order that works (they share one
+    global scope, so a file may use names declared above it and nothing below).
+    Scrapers that grep the renderer read the page's own script list, so a
+    constant that moves between modules keeps working and a module the page
+    forgets to load shows up as a missing constant rather than passing silently.
+    """
+    root = Path(__file__).resolve().parent.parent / "ui"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    srcs = [s for s in re.findall(r'<script\s+src="([^"]+)"', html)
+            if not s.startswith("vendor/") and s != "bridge-shim.js"]  # third-party + host shim
+    return "\n".join((root / s).read_text(encoding="utf-8") for s in srcs)

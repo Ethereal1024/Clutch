@@ -169,7 +169,8 @@ agent/                 宿主后端（会话循环 + 模型调用 + registry + �
   browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
   server.py            HTTP + SSE 服务（会话入口，含 .clc 内容服务端点）
   supervisor.py        会话进程管理
-ui/                    Electron 前端（设置、SSH 隧道、LLM 反代）
+ui/                    Electron 前端（设置、SSH 隧道、LLM 反代）；渲染层是
+                       app.js + js/*，按 index.html 的脚本顺序加载
 clutch-workspace/      文件工具模块（子模块）：read_file / grep / write_file /
                        edit_file 与 undo，per-workspace daemon
 clutch-memory/         记忆模块（子模块）：save_memory / load_memory /
@@ -209,7 +210,8 @@ summary 已经把这次调用说清楚的 read/grep 把它关掉）、`summary`�
 一串 read/grep 扫成一列单行，而 write 不会被打包进去）、`collapse`（折叠块怎么
 收），宿主再补上只有它才知道的 `mutates` / `undo`。协议的定义与默认值见
 `agent/tools/catalog.py` 顶部的说明（完整规范见
-[COMPONENTS.md](COMPONENTS.md)），消费方是 `ui/app.js`。
+[COMPONENTS.md](COMPONENTS.md)），消费方是 UI 渲染层（`ui/app.js` 与 `ui/js/*`，
+加载顺序见 `ui/index.html`；绘制这块表的是 `ui/js/tool-render.js`）。
 
 ## 测试
 

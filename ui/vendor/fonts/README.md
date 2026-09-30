@@ -100,7 +100,7 @@ Phosphor（MIT）、Bootstrap Icons（MIT）、Material Symbols（Apache-2.0）�
 （在 bundle 里出现 2 次）。裸 `Arial` 在每个平台由不同 face 解析（Linux 是
 Liberation Sans、Windows 才是真 Arial），图表标题因此和界面其余部分一样漂移。
 
-修法是不复制字体栈，而是把 UI 的栈交给 mermaid：`ui/app.js` 的 `renderMermaid`
+修法是不复制字体栈，而是把 UI 的栈交给 mermaid：`ui/js/markdown.js` 的 `renderMermaid`
 读取 `--font-display`（`cssValue()` 先剥掉 CSS 里的 `/* 注释 */` 并压平空白 ——
 mermaid 会把拿到的字符串原样写进 `<style>` 和内联样式），作为
 `themeVariables.fontFamily` 传入；取不到时退回 `sans-serif` 而不是空串。

@@ -12,11 +12,21 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const Module = require("module");
 const { exec: shExec, execFile: shExecFile, execFileSync } = require("child_process");
 const UI_DIR = path.join(__dirname, "..", "ui");
-const TUNNEL_FILE = path.join(UI_DIR, "ssh-tunnel.js");
-const TUNNEL_SRC = fs.readFileSync(TUNNEL_FILE, "utf8");
+// ui/ssh-tunnel.js is only the public face: the tunnel is six files over one
+// shared state object. The source assertions below slice whichever file holds
+// the function, so they read the whole module, in dependency order.
+const TUNNEL_FILES = [
+  "ssh-tunnel.js",
+  "tunnel-core.js",
+  "tunnel-net.js",
+  "tunnel-remote.js",
+  "tunnel-bootstrap.js",
+  "tunnel-lifecycle.js",
+  "tunnel-connect.js",
+].map((f) => path.join(UI_DIR, f));
+const TUNNEL_SRC = TUNNEL_FILES.map((f) => fs.readFileSync(f, "utf8")).join("\n");
 
 // stopTunnel appends to ~/.clutch/tunnel.log -- the forensic record of the
 // frozen-window incident -- so point HOME at a scratch dir before the module
@@ -62,20 +72,18 @@ function findPosixSh() {
 const POSIX_SH = findPosixSh();
 
 // A SECOND, private instance of the module: stopTunnel is a singleton (its end
-// latch is module state), and the latch must start fresh here. Compiling the
-// real source as a real CommonJS module keeps every Node global and resolves
-// "./llm-proxy" etc. from ui/; the appended line exposes only the flag that a
-// successful connect would have set, so the notification itself stays
-// unmodified.
+// latch lives in the shared tunnel-core state), and the latch must start fresh
+// here. Dropping the whole tunnel from the require cache and requiring it again
+// yields a private instance that still resolves "./llm-proxy" etc. from ui/; it
+// exposes only the flag a successful connect would have set, so the
+// notification itself stays unmodified.
 function loadFreshTunnel() {
-  const inst = new Module(TUNNEL_FILE, null);
-  inst.filename = TUNNEL_FILE;
-  inst.paths = Module._nodeModulePaths(UI_DIR);
-  inst._compile(
-    TUNNEL_SRC + "\n;module.exports.__testMarkLive = (v) => { wasDisconnected = v; };\n",
-    TUNNEL_FILE
-  );
-  return inst.exports;
+  for (const f of TUNNEL_FILES) delete require.cache[require.resolve(f)];
+  const inst = require("../ui/ssh-tunnel");
+  inst.__testMarkLive = (v) => {
+    require("../ui/tunnel-core").state.wasDisconnected = v;
+  };
+  return inst;
 }
 
 // Simulated remote sh: run each exec command locally, recording the peak
@@ -151,8 +159,8 @@ async function main() {
   // behind. An intentional disconnect (the picker, window close) is handled by
   // its caller and stays silent; a teardown the renderer did NOT ask for -- the
   // healer giving up, or an unexpected death -- must be announced, even though
-  // stopTunnel nulls sshClient before end(), which is exactly why the ssh end
-  // handler cannot deliver it (its currency guard suppresses it).
+  // stopTunnel nulls state.sshClient before end(), which is exactly why the ssh
+  // end handler cannot deliver it (its currency guard suppresses it).
   const solo = loadFreshTunnel();
   let ends = 0;
   solo.onTunnelEnd(() => {
@@ -178,10 +186,10 @@ async function main() {
     "the announcement follows the port teardown, not the reverse");
   check(/await stopTunnel\(true\)/.test(fnBody("healOnce")),
     "the healer announces the teardown of its last resort");
-  check(/if \(!sshClient\) return sock.destroy\(\);/.test(fnBody("openSessionForward")),
+  check(/if \(!state\.sshClient\) return sock.destroy\(\);/.test(fnBody("openSessionForward")),
     "a session request racing the teardown fails its own socket");
   const fwdBody = slicer(TUNNEL_SRC).region("async function establishForwardAndHealth", "establishForwardAndHealth");
-  check(/if \(!sshClient\) return sock.destroy\(\);/.test(fwdBody),
+  check(/if \(!state\.sshClient\) return sock.destroy\(\);/.test(fwdBody),
     "a stale local forward fails its socket instead of throwing in the main process");
 
   fs.rmSync(SCRATCH_HOME, { recursive: true, force: true });

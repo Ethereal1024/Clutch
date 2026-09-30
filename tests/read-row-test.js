@@ -13,16 +13,13 @@
 //   declaration's summary as the label, the declared body folding under it,
 //   decorated as the declaration asks (highlight: "path").
 //
-// The real functions are extracted from ui/app.js (slicer) and driven against a
+// The real functions are extracted from the renderer (slicer) and driven against a
 // stub DOM, so a silent edit that merges the result back into the call row,
 // drops the chip, or routes on a tool name or a purpose word fails here.
 
-const fs = require("fs");
-const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
-const APP = path.join(__dirname, "..", "ui", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
 
 // ---- stub DOM: just enough shape for the row builders ----

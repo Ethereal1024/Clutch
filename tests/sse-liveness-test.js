@@ -9,17 +9,14 @@
 // stream, stayed true forever.
 //
 // Like stream-render-test.js this runner does NOT re-implement the fix: it pulls
-// the real functions out of ui/app.js and drives them against a fake
+// the real functions out of the renderer and drives them against a fake
 // EventSource, so a silent edit that reintroduces the freeze fails here.
 //
 // Run: node tests/sse-liveness-test.js
 
-const fs = require("fs");
-const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
-const APP = path.join(__dirname, "..", "ui", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
 
 // ---- the wire contract with the server (agent/server.py) ----
@@ -77,7 +74,7 @@ global.API_BASE = "http://127.0.0.1:43761";
 global.currentProject = "/tmp/demo.clc";
 global.es = null;
 global.busy = false;
-// the module-level stream state of ui/app.js: its let-declarations are NOT
+// the module-level stream state of the renderer: its let-declarations are NOT
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the block below asserts the source declares it for real)
 global.sseLastFrameAt = 0;

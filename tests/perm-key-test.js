@@ -12,15 +12,15 @@
 //
 // The fix: the prompt opts out of backdrop dismissal (every OTHER modal keeps
 // it) and Enter answers Allow. Enter is handled by a real named function
-// (permKey) so this runner can drive the REAL implementation out of ui/app.js
-// instead of re-implementing it.
+// (permKey) so this runner can drive the REAL implementation out of the renderer
+// (ui/js/permissions.js) instead of re-implementing it.
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
-const src = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const html = fs.readFileSync(path.join(ROOT, "ui", "index.html"), "utf8");
 
 // ---- the real permKey, driven against stubs ----
@@ -84,7 +84,7 @@ global.pendingPerm = null;
 // ---- 5) the prompt is no longer dismissible by a backdrop click ----
 check(
   !/dismissOnOverlayPress\(\s*permModal/.test(src),
-  "app.js registers no backdrop dismiss for the permission prompt",
+  "the renderer registers no backdrop dismiss for the permission prompt",
 );
 check(
   (src.match(/respondPerm\(false\)/g) || []).length === 1,

@@ -1,5 +1,8 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
+
 // Shared assertion harness for the standalone node runners (no test framework:
 // each is `node tests/<name>.test.js`). check() prints one line per assertion and
 // counts failures; summary() prints the verdict and exits non-zero when anything
@@ -23,9 +26,8 @@ function summary(name, okMsg) {
 // ---- slicing real code out of a source file ----
 //
 // Some runners (stream-render / perm-args) deliberately do NOT
-// re-implement what they test: they pull the REAL functions out of ui/app.js and
-// drive them against stubs, so a silent edit to app.js cannot regress them
-// unnoticed. Locating a function's body inside a text is the one piece of that
+// re-implement what they test: they pull the REAL functions out of the renderer
+// and drive them against stubs, so a silent edit cannot regress them unnoticed. Locating a function's body inside a text is the one piece of that
 // trick — and a copy of it in every runner is exactly the sort of helper that
 // drifts (they were identical, with one of them quietly missing the async case).
 //
@@ -74,4 +76,30 @@ function slicer(src) {
   return { bodyEnd, sigBodyOpen, fnBody, region };
 }
 
-module.exports = { check, summary, slicer, get failures() { return failures; } };
+// ---- the renderer's source, in page load order ----
+//
+// The renderer used to be one file (ui/app.js); it is now several classic
+// scripts that ui/index.html lists in the only order that works (they share one
+// global scope, so each may use names declared above it and nothing below). The
+// runners care about the code, not the file layout, so they read the page's own
+// script list rather than a private copy of it: a function that moves between
+// modules keeps working, and a module the page forgets to load is simply absent
+// (the runner fails loudly instead of passing against dead code).
+const UI_DIR = path.join(__dirname, "..", "ui");
+
+// [{ file, code }] — the renderer's own scripts, in page order. The load-order
+// test needs them separately (each file is a classic script with its own
+// directive prologue and its own declarations); everything else wants uiSource().
+function uiModules() {
+  const html = fs.readFileSync(path.join(UI_DIR, "index.html"), "utf8");
+  const srcs = [...html.matchAll(/<script\s+src="([^"]+)"/g)]
+    .map((m) => m[1])
+    .filter((s) => !s.startsWith("vendor/") && s !== "bridge-shim.js"); // third-party + host shim
+  return srcs.map((file) => ({ file, code: fs.readFileSync(path.join(UI_DIR, file), "utf8") }));
+}
+
+function uiSource() {
+  return uiModules().map((m) => m.code).join("\n");
+}
+
+module.exports = { check, summary, slicer, uiSource, uiModules, get failures() { return failures; } };

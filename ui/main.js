@@ -116,7 +116,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => createWindow());
 
   app.whenReady().then(async () => {
-    // file:// cache can serve a stale app.js after a bundle update: clear it on launch
+    // file:// cache can serve stale renderer scripts after a bundle update: clear it on launch
     try {
       await session.defaultSession.clearCache();
     } catch (e) {

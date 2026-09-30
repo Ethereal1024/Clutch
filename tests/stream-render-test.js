@@ -8,15 +8,12 @@
 // hljs output by code source, defers math to the flush, and bounds apiFetch.
 //
 // Unlike most runners here this one does NOT re-implement the logic: it
-// extracts the real functions from ui/app.js and drives them against stubs, so
-// a silent edit to app.js that regresses the fix fails this test.
+// extracts the real functions from the renderer and drives them against stubs, so
+// a silent change that regresses the fix fails this test.
 
-const fs = require("fs");
-const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
-const APP = path.join(__dirname, "..", "ui", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
 
 // ---- stub environment ----
@@ -122,7 +119,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         "apiFetch throws no_backend (no .status) so callers take their unreachable path");
 
   // ---- 4) source-level guards: the constants that make the fix what it is ----
-  check(/TEXT_RENDER_MIN_MS = \d+/.test(src), "throttle window constant present in app.js");
+  check(/TEXT_RENDER_MIN_MS = \d+/.test(src), "throttle window constant present in the renderer");
   check(Number(src.match(/TEXT_RENDER_MIN_MS = (\d+)/)[1]) >= 100, "throttle window is at least ~100ms");
   check(/HL_STREAM_MAX = \d+/.test(src), "streaming fence size cap present");
   check(/_mathDone/.test(src), "math idempotence guard present");

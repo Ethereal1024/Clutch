@@ -43,7 +43,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from tests.testsupport import collecting_check
+from tests.testsupport import collecting_check, ui_source
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "ui"
@@ -407,7 +407,7 @@ def main() -> int:
     check_icon_font(css)
     check_icon_family_first(css)
     print("diagram labels:")
-    check_mermaid_font((UI / "app.js").read_text(encoding="utf-8"))
+    check_mermaid_font(ui_source())
 
     if failures:
         print(f"\nui_fonts_check: {len(failures)} FAILED")

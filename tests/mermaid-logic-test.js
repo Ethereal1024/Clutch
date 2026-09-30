@@ -2,22 +2,19 @@
 //
 // Like its siblings (stream-render / perm-args) this runner
 // does NOT re-implement what it tests: it extracts the real isLastElement /
-// initMermaidTheme / renderMermaid / showMermaidError out of ui/app.js and
+// initMermaidTheme / renderMermaid / showMermaidError out of the renderer and
 // drives them against stubs. It used to carry a hand-copied mirror of that code,
 // which had already drifted (no showMermaidError, no render-side parse-error
-// gate, missing theme keys) — a green mirror said nothing about app.js.
+// gate, missing theme keys) — a green mirror said nothing about the real code.
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
-const APP = path.join(__dirname, "..", "ui", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
 
 // ---- stub environment ----
-// app.js reads the theme off the live CSS (:root custom properties) instead of
+// the renderer reads the theme off the live CSS (:root custom properties) instead of
 // duplicating the palette and the font stack in JS; the stub shims the two
 // globals it touches. The font stack is deliberately spelled the way
 // ui/style.css spells it — multiline, with inline comments.

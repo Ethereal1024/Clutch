@@ -3,21 +3,21 @@
 // Trust mode: a topbar toggle that arms the perm dialog — an open prompt
 // auto-allows itself after TRUST_COUNTDOWN_S seconds unless the user denies
 // (or closes) first. UI-side only: the armed flag is localStorage
-// ("clutch_trust_all"), the countdown is a 1s setTimeout chain in app.js, and
+// ("clutch_trust_all"), the countdown is a 1s setTimeout chain in the renderer, and
 // expiry takes the same respondPerm(true) path as clicking Allow, so the
 // backend sees an ordinary allow.
 //
-// Like stream-render-test.js this extracts the REAL functions from ui/app.js
+// Like stream-render-test.js this extracts the REAL functions from the renderer
 // (the whole trust block, openPerm/closePerm hooks asserted on source) and
-// drives them against stubs with fake timers, so a silent edit to app.js that
+// drives them against stubs with fake timers, so a silent change that
 // breaks the countdown fails here.
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
-const src = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const html = fs.readFileSync(path.join(ROOT, "ui", "index.html"), "utf8");
 const css = fs.readFileSync(path.join(ROOT, "ui", "style.css"), "utf8");
 
@@ -87,7 +87,7 @@ const closePermSrc = fnBody("closePerm");
 
 (async () => {
   // ---- 1) default state: disarmed, painted as such, key normalized ----
-  setTrustArmed(trustArmed()); // what app.js runs at startup
+  setTrustArmed(trustArmed()); // what the renderer runs at startup
   check(trustArmed() === false, "default: not armed");
   check(store.clutch_trust_all === "0", "startup normalizes the stored flag to '0'");
   check(trustBtn.textContent === "🛡 Trust", "button paints the disarmed label");

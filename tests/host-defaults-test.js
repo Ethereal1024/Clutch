@@ -3,23 +3,20 @@
 // Regression test for the renderer's UI-DEFAULTS precedence. Where a tool's
 // look comes from, oldest first:
 //
-//   the compiled-in constants (UI_DEFAULTS in ui/app.js) are the fallback;
+//   the compiled-in constants (UI_DEFAULTS in ui/js/tool-render.js) are the fallback;
 //   the HOST's own table (GET /api/host -- the host.json document merged over
 //   those constants server-side) is fetched once at boot and speaks for every
 //   event that carries no `ui` of its own;
 //   a call's own declaration (`ui` on the event / on the call row) wins over
 //   both.
 //
-// The real functions are extracted from ui/app.js (slicer) and driven against
+// The real functions are extracted from the renderer (slicer) and driven against
 // globals, so a silent edit that lets a constant outrank the host's table, or a
 // call's block lose to either, fails here.
 
-const fs = require("fs");
-const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
-const APP = path.join(__dirname, "..", "ui", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
 
 // the precedence lives in the slice from `function uiDefaults` through

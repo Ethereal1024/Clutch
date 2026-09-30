@@ -13,17 +13,14 @@
 // as idle for the rest of the run.
 //
 // Like sse-liveness-test.js, this runner pulls the REAL functions out of
-// ui/app.js and drives them against a fake EventSource and fake timers, so a
+// the renderer and drives them against a fake EventSource and fake timers, so a
 // silent edit that reintroduces the false positive fails here.
 //
 // Run: node tests/android-resume-test.js
 
-const fs = require("fs");
-const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
-const APP = path.join(__dirname, "..", "ui", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
 
 // ---- the wire contract with the server (agent/server.py) ----
@@ -83,7 +80,7 @@ global.API_BASE = "http://127.0.0.1:43761";
 global.currentProject = "/tmp/demo.clc";
 global.es = null;
 global.busy = false;
-// the module-level stream state of ui/app.js: its let-declarations are NOT
+// the module-level stream state of the renderer: its let-declarations are NOT
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the source checks above assert the declarations exist)
 global.sseLastFrameAt = 0;

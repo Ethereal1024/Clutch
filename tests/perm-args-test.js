@@ -11,15 +11,15 @@
 //    embedded the raw args JSON ("... with args {\"command\": ...}"), so the
 //    dialog showed brace-wrapped payload instead of the command.
 //
-// Like stream-render-test.js this extracts the REAL functions from ui/app.js
+// Like stream-render-test.js this extracts the REAL functions from the renderer
 // and asserts on the real sources, so silent regressions fail here.
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, uiSource } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
-const src = fs.readFileSync(path.join(ROOT, "ui", "app.js"), "utf8");
+const src = uiSource(); // the renderer, every module in page load order
 const css = fs.readFileSync(path.join(ROOT, "ui", "style.css"), "utf8");
 const permPy = fs.readFileSync(path.join(ROOT, "agent", "core", "permission.py"), "utf8");
 
