@@ -76,6 +76,13 @@ def main() -> int:
     d1 = json.loads(body)
     sid1, port1 = d1["session_id"], d1["port"]
     check(len(sid1) > 0 and isinstance(port1, int), "session returns id + port")
+    # an unclaimed knob must add no flag at all: an empty value would be
+    # rejected by the child argparse choices and kill the spawn
+    args1 = sup.sessions[sid1].proc.args
+    check(
+        "--reasoning-effort" not in args1 and "--api-protocol" not in args1,
+        "unclaimed LLM knobs add no CLI flag",
+    )
 
     # the session child is a full agent server
     st, _ = http_get(f"http://127.0.0.1:{port1}/api/health")
@@ -176,16 +183,45 @@ def main() -> int:
     wd.terminate()
     wd.wait(timeout=10)
 
-    # ---- 7. base_url forwarding (remote sessions point at the LLM proxy) ----
+    # ---- 7. base_url + model forwarding (remote sessions point at the LLM proxy) ----
     sup5, port5, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
     base5 = f"http://127.0.0.1:{port5}"
-    st, body = http_post(f"{base5}/api/session/start", {"base_url": "http://127.0.0.1:8892/v1"})
+    st, body = http_post(
+        f"{base5}/api/session/start",
+        {
+            "base_url": "http://127.0.0.1:8892/v1",
+            "model": "deepseek-v4-flash",
+            "reasoning_effort": "max",
+            "api_protocol": "responses",
+        },
+    )
     check(st == 200, "session start with base_url accepted")
     d5 = json.loads(body)
     args5 = sup5.sessions[d5["session_id"]].proc.args
     check(
         "--base-url" in args5 and "http://127.0.0.1:8892/v1" in args5,
         "base_url forwarded to the session child (--base-url ...)",
+    )
+    check(
+        "--model" in args5 and "deepseek-v4-flash" in args5,
+        "model forwarded to the session child (--model ...): a remote host owns no settings",
+    )
+    check(
+        "--reasoning-effort" in args5 and "max" in args5,
+        "reasoning_effort forwarded to the session child (--reasoning-effort max)",
+    )
+    check(
+        "--api-protocol" in args5 and "responses" in args5,
+        "api_protocol forwarded to the session child (--api-protocol responses)",
+    )
+    # end of the line: the child really runs with the claimed knobs, not with
+    # the defaults it would have picked on its own host
+    port5 = d5["port"]
+    st, body = http_get(f"http://127.0.0.1:{port5}/api/settings")
+    knobs5 = json.loads(body)
+    check(
+        knobs5.get("reasoning_effort") == "max" and knobs5.get("api_protocol") == "responses",
+        "the session child APPLIED the claimed knobs (GET /api/settings)",
     )
     sup5.shutdown_all()
 

@@ -7,6 +7,8 @@
 // deps:
 //   supervisorBase()      => "http://127.0.0.1:8890" | null  (null = no local mode, N4)
 //   remoteLlmBase()       => "http://127.0.0.1:8892/v1"     (reverse-forward LLM proxy)
+//   remoteLlmModel()      => "deepseek-v4-flash" | ""       (model for the remote session)
+//   remoteLlmKnobs()      => { reasoning_effort, api_protocol }  (same trip as the model)
 //   tunnelStatus()        => { active, url }                (SSH tunnel state)
 //   restartRemoteServer() => Promise<bool>                  (reboot an idle-exited remote supervisor)
 //   openSessionForward(port) => Promise<{ localPort, close() }>
@@ -25,6 +27,8 @@ function createHostCore(deps) {
   const {
     supervisorBase,
     remoteLlmBase,
+    remoteLlmModel = () => "",
+    remoteLlmKnobs = () => ({}),
     tunnelStatus,
     restartRemoteServer,
     openSessionForward,
@@ -80,13 +84,23 @@ function createHostCore(deps) {
       const existing = windowBackends.get(wc.id);
       if (existing && existing.kind === "tunnel") return existing.url;
       await releaseWindowBackend(wc.id); // drop any local session first
-      let res = await sessions.supervisorSessionStart(ts.url, remoteLlmBase());
+      let res = await sessions.supervisorSessionStart(
+        ts.url,
+        remoteLlmBase(),
+        remoteLlmModel(),
+        remoteLlmKnobs(),
+      );
       if (res.error) {
         // the remote supervisor may have idle-exited: restart it through the tunnel and retry once
         log(`[backend] tunnel session start failed (${res.error}); restarting remote supervisor`);
         const ok = await restartRemoteServer();
         if (ok) {
-          res = await sessions.supervisorSessionStart(ts.url, remoteLlmBase());
+          res = await sessions.supervisorSessionStart(
+            ts.url,
+            remoteLlmBase(),
+            remoteLlmModel(),
+            remoteLlmKnobs(),
+          );
           if (res.error) log(`[backend] tunnel session retry failed: ${res.error}`);
         }
       }

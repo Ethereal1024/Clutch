@@ -860,6 +860,18 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=defaults.port)
     parser.add_argument("--model", default=None)
     parser.add_argument(
+        "--reasoning-effort",
+        choices=REASONING_EFFORT_LEVELS,
+        default=None,
+        help="reasoning effort the claiming client wants (rides with --model; default = saved settings)",
+    )
+    parser.add_argument(
+        "--api-protocol",
+        choices=API_PROTOCOLS,
+        default=None,
+        help="API protocol the claiming client wants: chat | responses (rides with --model)",
+    )
+    parser.add_argument(
         "--base-url",
         default=None,
         help=(
@@ -886,10 +898,16 @@ def main() -> int:
         config.model = saved.get("model", "")
     # API key: env > saved settings > config default
     config.api_key = config.api_key or saved.get("api_key")
-    # reasoning_effort / api_protocol: env-less; saved settings only
-    if not config.llm_reasoning_effort:
+    # reasoning_effort / api_protocol: env-less; precedence is CLI (the session
+    # claim) > saved settings. A claiming client owns them for the same reason
+    # it owns the model: the remote host has no usable settings file of its own.
+    if args.reasoning_effort:
+        config.llm_reasoning_effort = args.reasoning_effort
+    elif not config.llm_reasoning_effort:
         config.llm_reasoning_effort = saved.get("reasoning_effort") or None
-    if not config.llm_api_protocol:
+    if args.api_protocol:
+        config.llm_api_protocol = args.api_protocol
+    elif not config.llm_api_protocol:
         config.llm_api_protocol = saved.get("api_protocol") or None
     api_key = config.api_key
     if args.base_url and not api_key:

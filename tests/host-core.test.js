@@ -16,8 +16,8 @@ function fakeSessions() {
   return {
     calls,
     beats,
-    supervisorSessionStart: async (base, baseUrl) => {
-      calls.started.push({ base, baseUrl });
+    supervisorSessionStart: async (base, baseUrl, model, knobs) => {
+      calls.started.push({ base, baseUrl, model, knobs });
       return { sessionId: "s" + ++seq, port: 30000 + seq };
     },
     supervisorSessionStop: (base, sid) => calls.stopped.push({ base, sid }),
@@ -52,6 +52,8 @@ function makeCore({ tunnel = { active: false, url: null }, localSessions = 99, s
   const deps = {
     supervisorBase: () => "http://127.0.0.1:8890",
     remoteLlmBase: () => "http://127.0.0.1:8892/v1",
+    remoteLlmModel: () => "deepseek-v4-flash",
+    remoteLlmKnobs: () => ({ reasoning_effort: "max", api_protocol: "responses" }),
     tunnelStatus: () => tunnel,
     restartRemoteServer: async () => true,
     openSessionForward: async (port) => {
@@ -83,6 +85,12 @@ async function main() {
     assert.strictEqual(url, "http://127.0.0.1:31001", "tunnel claim forwards the session port");
     assert.strictEqual(sessions.calls.started[0].base, "http://127.0.0.1:8891");
     assert.strictEqual(sessions.calls.started[0].baseUrl, "http://127.0.0.1:8892/v1", "remote sessions point at the reverse forward");
+    assert.strictEqual(sessions.calls.started[0].model, "deepseek-v4-flash", "the client model rides along: a remote session cannot read it");
+    assert.deepStrictEqual(
+      sessions.calls.started[0].knobs,
+      { reasoning_effort: "max", api_protocol: "responses" },
+      "the two LLM knobs ride with the model: the remote host has neither",
+    );
     // second ensure: same window reuses its backend, no new session child
     assert.strictEqual(await core.ensureWindowBackend(fakeWin(1)), url, "existing tunnel backend is reused");
     assert.strictEqual(sessions.calls.started.length, 1);

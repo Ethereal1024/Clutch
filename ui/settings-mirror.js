@@ -50,4 +50,18 @@ function ensureSettingsMirror(data, log = () => {}) {
   return { ok: true, healed: true };
 }
 
-module.exports = { writeSettingsMirror, ensureSettingsMirror };
+// The settings as the backend + LLM proxy read them back: a legacy
+// {profiles, active} map resolves to the active profile, anything unreadable to
+// {} (callers treat "absent" as "no endpoint configured yet").
+function readSettings() {
+  let cur = {};
+  try {
+    cur = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
+  } catch (e) {
+    return {};
+  }
+  if (cur && cur.profiles) return cur.profiles[cur.active] || {};
+  return cur && typeof cur === "object" ? cur : {};
+}
+
+module.exports = { writeSettingsMirror, ensureSettingsMirror, readSettings };

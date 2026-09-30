@@ -26,7 +26,7 @@ function useUI(name) {
 
 // shared with the desktop shell — these are THE implementations, not copies
 const { createHostCore } = useUI("host-core.js");
-const { writeSettingsMirror, ensureSettingsMirror } = useUI("settings-mirror.js");
+const { writeSettingsMirror, ensureSettingsMirror, readSettings } = useUI("settings-mirror.js");
 
 // failure placeholder only; a healthy session overrides it with the forwarded
 // session URL (same constant as ui/main.js — the machine-wide supervisor port,
@@ -48,6 +48,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
   const hostCore = createHostCore({
     supervisorBase: () => null, // N4: no local supervisor on Android
     remoteLlmBase: () => REMOTE_LLM_BASE,
+    // same reason as ui/main.js: the remote session cannot read this device's settings
+    remoteLlmModel: () => readSettings().model || "",
+    remoteLlmKnobs: () => {
+      const s = readSettings();
+      return { reasoning_effort: s.reasoning_effort || "", api_protocol: s.api_protocol || "" };
+    },
     tunnelStatus: () => tunnel.tunnelStatus(),
     restartRemoteServer: () => tunnel.restartRemoteServer(),
     openSessionForward: (port) => tunnel.openSessionForward(port),

@@ -5,7 +5,7 @@ const path = require("path");
 const tunnel = require("./ssh-tunnel");
 const { SUPERVISOR_PORT, startLocalSession } = require("./server-bootstrap");
 const { createHostCore } = require("./host-core");
-const { writeSettingsMirror, ensureSettingsMirror } = require("./settings-mirror");
+const { writeSettingsMirror, ensureSettingsMirror, readSettings } = require("./settings-mirror");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -13,6 +13,19 @@ function tunnelLog(...args) {
 
 // remote sessions: LLM via the tunnel's reverse forward (matches LLM_PROXY_REMOTE_PORT)
 const REMOTE_LLM_BASE = "http://127.0.0.1:8892/v1";
+
+// The remote host carries no LLM settings of its own (the settings mirror is
+// local), so the model must ride along with the session claim; without it the
+// remote server dies at LLM init with "missing LLM argument: model".
+const remoteLlmModel = () => readSettings().model || "";
+
+// reasoning_effort / api_protocol ride along with the model, for the same
+// reason: the remote host settings file has neither, and the session would
+// run with provider defaults instead of this client settings.
+const remoteLlmKnobs = () => {
+  const s = readSettings();
+  return { reasoning_effort: s.reasoning_effort || "", api_protocol: s.api_protocol || "" };
+};
 
 // failure placeholder only; a healthy session overrides this with the window's real URL
 const DEFAULT_API_BASE = "http://127.0.0.1:8890";
@@ -24,6 +37,8 @@ const DEFAULT_API_BASE = "http://127.0.0.1:8890";
 const hostCore = createHostCore({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
   remoteLlmBase: () => REMOTE_LLM_BASE,
+  remoteLlmModel,
+  remoteLlmKnobs,
   tunnelStatus: () => tunnel.tunnelStatus(),
   restartRemoteServer: () => tunnel.restartRemoteServer(),
   openSessionForward: (port) => tunnel.openSessionForward(port),

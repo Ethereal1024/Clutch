@@ -136,13 +136,31 @@ class SessionSupervisor(ProcessSupervisor):
 
     # ---- session lifecycle ----
 
-    def start_session(self, base_url: str | None = None) -> Session | None:
+    def start_session(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        api_protocol: str | None = None,
+    ) -> Session | None:
         """Spawn one agent.server child on a random port, learning the port from
-        its stdout banner. None when the child never prints it. base_url is
-        forwarded as --base-url."""
+        its stdout banner. None when the child never prints it. base_url/model
+        are forwarded as --base-url/--model: a REMOTE session's LLM endpoint and
+        model belong to the claiming client (which owns the settings), not to
+        the remote host's own ~/.clutch/settings.json — that file usually has no
+        model at all, and an empty model aborts the run before it starts. The
+        reasoning_effort / api_protocol knobs ride along for the same reason:
+        the child validates them through argparse choices, so an unknown value
+        fails the spawn loudly instead of being silently ignored."""
         cmd = [*self.agent_cmd, "--port", "0"]
         if base_url:
             cmd += ["--base-url", base_url]
+        if model:
+            cmd += ["--model", model]
+        if reasoning_effort:
+            cmd += ["--reasoning-effort", reasoning_effort]
+        if api_protocol:
+            cmd += ["--api-protocol", api_protocol]
         spec = SpawnSpec(
             cmd=cmd,
             cwd=self.cwd,
@@ -252,7 +270,13 @@ class _Handler(BaseHTTPRequestHandler):
         sup = self.supervisor
         if self.path == "/api/session/start":
             body = self._read_body()
-            sess = sup.start_session(base_url=body.get("base_url") or None)
+            sess = sup.start_session(
+                base_url=body.get("base_url") or None,
+                model=body.get("model") or None,
+                # the client LLM knobs ride with the claim, exactly like the model
+                reasoning_effort=body.get("reasoning_effort") or None,
+                api_protocol=body.get("api_protocol") or None,
+            )
             if sess is None:
                 self._json({"error": "session start failed"}, 500)
             else:

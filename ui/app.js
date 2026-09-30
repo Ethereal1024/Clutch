@@ -2236,9 +2236,19 @@ async function pushSettings() {
     await apiFetch("/api/settings", { method: "POST", body: payload });
     if (key) localStorage.setItem("clutch_api_key", key);
     localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
-    // keep the client-side LLM proxy in sync (it reads the local settings file)
+    // keep the client-side LLM proxy in sync (it reads the local settings file).
+    // The knobs ride along with the model here too: this mirror is what a
+    // session claim reads back (host-core remoteLlmKnobs), and an omitted knob
+    // means "keep the stored one", so a save without them would leave a remote
+    // claim forwarding nothing.
     if (window.clutchSettings && window.clutchSettings.save) {
-      await window.clutchSettings.save({ api_key: key, model, base_url: llmUrl });
+      await window.clutchSettings.save({
+        api_key: key,
+        model,
+        base_url: llmUrl,
+        reasoning_effort: payload.reasoning_effort,
+        api_protocol: payload.api_protocol,
+      });
     }
     return true;
   } catch (e) {
