@@ -559,6 +559,62 @@ def _run_server_test() -> int:
             "the renderer liveness window matches the server keepalive (one constant, two languages)",
         )
 
+        # ---- the connecting stream carries the HOST's status, not a flat idle ----
+        # A stream is also what a RECONNECTING window gets: an EventSource retry,
+        # a phone coming back from the background, a tunnel healer. Telling it
+        # "idle" while a run is in flight left a running task painted as idle for
+        # the rest of the run (the run emits its own "running" only once, at the
+        # start), so the frame must be derived from the host's own state.
+        #
+        # These probes hang up right after the first frame, and the server only
+        # notices a hung-up subscriber when its next keepalive write fails — so
+        # the keepalive is shortened for this section (the same lever the section
+        # above uses) and the block waits for its own subscribers to be gone
+        # before handing the broadcaster back to the isolation section.
+        def first_status(url: str) -> str | None:
+            with contextlib.closing(urllib.request.urlopen(url, timeout=15)) as r:
+                for raw in r:
+                    line = raw.decode().strip()
+                    if not line.startswith("data: "):
+                        continue
+                    ev = json.loads(line[6:])
+                    if ev.get("type") == "state_update" and ev.get("key") == "execution_status":
+                        return ev.get("value")
+            return None
+
+        subscribers_before = broadcaster.count()
+        probe_keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+        server_mod.SSE_KEEPALIVE_SEC = 0.2
+        try:
+            check(first_status(f"{base_url}/api/events?replay=0") == "idle",
+                  "nothing in flight: a connecting window is told idle")
+            state.busy = True
+            state.run_project = str(clc)
+            try:
+                live = first_status(
+                    f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
+                other = first_status(
+                    f"{base_url}/api/events?replay=0&project={quote(str(clc.parent / 'elsewhere.clc'))}")
+            finally:
+                state.busy = False
+                state.run_project = None
+            check(live == "running",
+                  "reconnecting into a live run of THIS project is told running")
+            check(other == "idle",
+                  "another project's run is still not leaked into this window's status")
+            check(first_status(f"{base_url}/api/events?replay=0") == "idle",
+                  "a finished run reports idle again")
+            # hand the broadcaster back clean: no probe subscriber outlives this
+            # block (a stale subscriber inflates broadcaster.count(), which the
+            # isolation section below uses as "both windows are connected")
+            deadline = time.time() + 10
+            while broadcaster.count() > subscribers_before and time.time() < deadline:
+                time.sleep(0.05)
+            check(broadcaster.count() <= subscribers_before,
+                  "the status probes hang up cleanly (they leave no subscriber behind)")
+        finally:
+            server_mod.SSE_KEEPALIVE_SEC = probe_keepalive_saved
+
         # ---- multi-window isolation: two SSE subscribers on different projects ----
         from agent.events import FinalEvent
 

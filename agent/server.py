@@ -476,10 +476,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         q = self._broadcaster.subscribe()
         try:
-            # always reset the UI status first so a stale "running" never locks the
-            # taskbar after a project switch or an interrupted run
+            # the status frame is a RESET for a window that has nothing in
+            # flight (a project switch, an interrupted run) — and it is also
+            # what a RECONNECTING window gets (EventSource retry, a phone
+            # returning from the background, a tunnel healer). Saying "idle"
+            # there was a lie the moment a run was still in flight: the window
+            # painted a running task as idle for the rest of the run, since the
+            # run emits its own "running" only once, at the start. So report the
+            # host's real state instead: in flight for the project this stream
+            # watches = running, anything else = idle.
+            in_flight = bool(self._state.busy) and (
+                not project_q or self._state.run_project == project_q
+            )
             try:
-                self._write_sse(StateUpdateEvent(key="execution_status", value="idle"))
+                self._write_sse(StateUpdateEvent(
+                    key="execution_status", value="running" if in_flight else "idle"))
                 # replay durable events only (deltas are transient); replay=False
                 # skips it when the UI just rendered the open NDJSON stream
                 if replay:

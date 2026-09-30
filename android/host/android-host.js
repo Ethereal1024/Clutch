@@ -28,10 +28,12 @@ function useUI(name) {
 const { createHostCore } = useUI("host-core.js");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings } = useUI("settings-mirror.js");
 
-// failure placeholder only; a healthy session overrides it with the forwarded
-// session URL (same constant as ui/main.js — the machine-wide supervisor port,
-// ui/server-bootstrap.js SUPERVISOR_PORT)
-const DEFAULT_API_BASE = "http://127.0.0.1:8890";
+// No base placeholder exists. The desktop's 127.0.0.1:8890 is the supervisor's
+// LIFECYCLE port (it answers /api/session/*, never a window API), and this host
+// has no local supervisor at all (N4) — so a "failure placeholder" here could
+// only ever point a window at a dead port that fails every request with
+// "Failed to fetch". A host with nothing to offer returns null and the window
+// stays on "not running" until the tunnel produces a real forwarded session.
 // remote sessions: LLM via the tunnel's reverse forward (matches
 // LLM_PROXY_REMOTE_PORT in ui/ssh-tunnel.js)
 const REMOTE_LLM_BASE = "http://127.0.0.1:8892/v1";
@@ -76,11 +78,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     clutchApi: {
       baseUrl: async () => {
         try {
-          const url = await hostCore.ensureWindowBackend(window);
-          return url || DEFAULT_API_BASE;
+          // null = no session (no tunnel, and no local mode to fall back to):
+          // the renderer shows "not running" and waits for backend:base-changed
+          return (await hostCore.ensureWindowBackend(window)) || null;
         } catch (err) {
           log(`[backend] api:base failed: ${err && err.message}`);
-          return DEFAULT_API_BASE;
+          return null;
         }
       },
     },
@@ -181,4 +184,4 @@ function main() {
   );
 }
 
-module.exports = { createAndroidHost, main, DEFAULT_API_BASE };
+module.exports = { createAndroidHost, main };

@@ -35,7 +35,9 @@ check(/es\.onerror = \(\) => \{\n    \/\/ the browser reconnects/.test(src),
   "es.onerror is no longer an empty auto-reconnect stub");
 check(/notice\("could not reach the backend to stop/.test(src),
   "stop() surfaces the failure instead of an empty catch");
-check(/let sseLastFrameAt = 0;[\s\S]{0,240}?let sseWatchdog = null;/.test(src),
+check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseFrames = 0;/m.test(src) &&
+  /^let sseErrors = 0;/m.test(src) && /^let sseDown = false;/m.test(src) &&
+  /^let sseWatchdog = null;/m.test(src),
   "the liveness state is real module state, not a per-stream local");
 
 // ---- stub environment ----
@@ -79,8 +81,10 @@ global.busy = false;
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the block below asserts the source declares it for real)
 global.sseLastFrameAt = 0;
+global.sseFrames = 0;
 global.sseErrors = 0;
 global.sseDown = false;
+global.sseSuspended = false; // the page is running here: android-resume covers the other case
 global.sseWatchdog = null;
 global.SSE_STALE_MS = 45000;
 global.SSE_MAX_ERRORS = 4;

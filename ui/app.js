@@ -1,7 +1,12 @@
 "use strict";
 
-// Session API base: 8890 is the supervisor's lifecycle port, never a real backend.
-let DEFAULT_BASE = "http://127.0.0.1:8890";
+// Session API base. 8890 is the supervisor's lifecycle port: it answers
+// /api/session/* and nothing a window can work with. It is a SENTINEL for "this
+// window has no session yet" — never a URL to talk to. Routing a failed remote
+// to it (the old "fallback") could only ever produce "Failed to fetch", and on
+// the phone there is not even a supervisor behind it.
+const SUPERVISOR_BASE = "http://127.0.0.1:8890";
+let DEFAULT_BASE = SUPERVISOR_BASE; // this machine's session base, once resolved
 let API_BASE = null; // resolved in resolveApiBase() before the app starts
 
 async function resolveApiBase() {
@@ -11,7 +16,7 @@ async function resolveApiBase() {
       try {
         const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
         const clean = b ? String(b).replace(/\/+$/, "") : "";
-        if (clean && clean !== "http://127.0.0.1:8890") {
+        if (clean && clean !== SUPERVISOR_BASE) {
           API_BASE = clean;
           DEFAULT_BASE = clean;
           return clean;
@@ -2439,26 +2444,43 @@ function renderConnSelector() {
   } else {
     connSelect.value = "local";
   }
-  connStatus.textContent = connected ? "Connected: " + override : "Using " + API_BASE;
+  // never claim "Using <url>" when there is no session: with the supervisor's
+  // port refused as a base, API_BASE is either a real session or null
+  connStatus.textContent = connected
+    ? "Connected: " + override
+    : API_BASE
+      ? "Using " + API_BASE
+      : "Not connected — no backend";
 }
 
-// switch the active backend in place without a full page reload
+// Switch the active backend in place without a full page reload. The
+// supervisor's lifecycle port is refused: it is not a backend, and letting it
+// through (the old "fallback") pointed the whole window at a port that answers
+// no API — a guaranteed "Failed to fetch", and on the phone a port that cannot
+// exist at all. Returns whether the base actually moved.
 function switchBackend(url) {
-  API_BASE = url.replace(/\/+$/, "");
+  const clean = url ? String(url).replace(/\/+$/, "") : "";
+  if (!clean || clean === SUPERVISOR_BASE) {
+    console.warn("[backend] refused a non-session base:", url);
+    return false;
+  }
+  API_BASE = clean;
   localStorage.setItem("clutch_api_url", API_BASE);
   reconnectSSE();
+  return true;
 }
 
-// ask the main process for the current backend URL; re-apply degrade mode
-// to the new session
+// Ask the host (main process / Android bridge) for THIS window's session URL
+// and adopt it. null means "no session": there is no second route to guess at,
+// so the window stays on "not running" instead of being pointed at a local port
+// that cannot serve it — the host announces a real URL when it has one
+// (backend:base-changed).
 async function switchBackendResolved() {
   if (!window.clutchApi) return false;
   const url = await window.clutchApi.baseUrl();
-  if (url) {
-    switchBackend(url);
-    await reapplyDegradeIfNeeded();
-  }
-  return Boolean(url);
+  if (!switchBackend(url)) return false;
+  await reapplyDegradeIfNeeded();
+  return true;
 }
 
 // degrade mode is a per-process setting that dies with the session: re-apply
@@ -2518,9 +2540,13 @@ async function tryDegradeToSshTools() {
 }
 
 async function resetBackendLocal() {
+  // nothing to reset without a resolved base: DEFAULT_BASE is the supervisor
+  // sentinel until this machine's own session is claimed, and the supervisor
+  // does not serve /api/backend — posting there is a guaranteed "Failed to fetch"
+  if (DEFAULT_BASE === SUPERVISOR_BASE) return;
   try {
-    // DEFAULT_BASE, not API_BASE: the local supervisor port answers even while
-    // no session has claimed the renderer yet
+    // DEFAULT_BASE, not API_BASE: this machine's local session answers even
+    // while no window has claimed it yet
     await apiFetch("/api/backend", { method: "POST", body: { mode: "local" }, base: DEFAULT_BASE });
   } catch (e) {
     /* the local server may be down; the renderer still falls back in place */
@@ -2739,9 +2765,14 @@ $("#conn-retry").addEventListener("click", () => {
 $("#conn-cancel").addEventListener("click", async () => {
   localStorage.removeItem("clutch_ssh_connected");
   localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
-  resetBackendLocal(); // end any SSH degradation on the local server
   closeConnNew(); // a new-connection attempt may have failed with its modal open
-  await switchBackendResolved(); // in-place fallback to the local backend
+  if (!IS_ANDROID) {
+    // desktop only: "cancel" goes back to this machine's local session. There
+    // is no local backend on the phone, so that path could only point the app
+    // at 127.0.0.1:8890 — a port nothing there serves.
+    resetBackendLocal(); // end any SSH degradation on the local server
+    await switchBackendResolved();
+  }
   refreshPicker();
 });
 if (window.clutchTunnel && window.clutchTunnel.onProgress) {
@@ -2815,17 +2846,62 @@ async function autoReconnectAndroid() {
   return Boolean(ok);
 }
 
-// tunnel died mid-session: fall back to the local backend in place
+// A dropped remote is re-attempted, never replaced. The phone has no local
+// backend (N4) and on a desktop a wrong "fallback" only hides the outage, so
+// the one recovery that makes sense is the remote itself: retry the standing
+// SSH host a few times, spaced, so a blip longer than one SSH keepalive lands
+// instead of leaving the app pointed at nothing.
+const REMOTE_RETRY_TRIES = 3;
+const REMOTE_RETRY_GAP_MS = 4000;
+async function reconnectRemote(tries = REMOTE_RETRY_TRIES) {
+  for (let i = 0; i < tries; i++) {
+    // another attempt (or a heal) may already have won the race
+    const s = await window.clutchTunnel.status().catch(() => null);
+    if (s && s.active) return true;
+    if (await autoReconnectAndroid()) return true;
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, REMOTE_RETRY_GAP_MS));
+  }
+  return false;
+}
+
+// The backend this window was talking to is gone: drop the stale session URL so
+// nothing keeps posting into a port nobody serves, and the picker stops
+// claiming a connection. The standing intent (clutch_ssh_connected) is the
+// caller's to keep. The next real URL arrives via switchBackend /
+// backend:base-changed.
+function dropStaleBackend() {
+  API_BASE = null;
+  localStorage.removeItem("clutch_api_url");
+  reconnectSSE(); // closes the dead stream; connectSSE bails on a null base
+}
+
+// The tunnel died mid-session. A dropped remote is NOT a reason to quietly
+// point the window at a local port: on the phone there is no local backend to
+// point at (N4), so that "fallback" could only produce "Failed to fetch" while
+// the picker claimed 127.0.0.1:8890 — a port that answers no API. So the host
+// gets the decision (it knows whether a local session is even possible) and, on
+// the phone, the REMOTE that was lost gets re-established instead.
 if (window.clutchTunnel) {
   window.clutchTunnel.onEnd(async () => {
     // the tunnel (and its exec bridge) is gone: any degrade mode dies with it
     localStorage.removeItem("clutch_degrade");
-    if (localStorage.getItem("clutch_ssh_connected")) {
-      localStorage.removeItem("clutch_ssh_connected");
-      resetBackendLocal(); // end any SSH degradation on the local server
-      await switchBackendResolved(); // the main process re-claims a local session
+    // no flag = the user's own disconnect: leave their intent alone
+    if (!localStorage.getItem("clutch_ssh_connected")) return;
+    dropStaleBackend(); // the forwarded port is dead; stop talking to it
+    if (IS_ANDROID) {
+      // keep clutch_ssh_connected: it is the user's standing intent and the
+      // reconnect below reads it. Clearing it (as the old code did) is what
+      // killed every retry and left the picker claiming a local backend.
+      notice("lost the remote connection — reconnecting");
+      const back = await reconnectRemote();
+      if (!back) notice("could not reach " + (localStorage.getItem("clutch_ssh_host") || "the host") + " — open the picker to retry");
       if (!fsModal.classList.contains("hidden")) refreshPicker();
+      return;
     }
+    localStorage.removeItem("clutch_ssh_connected");
+    resetBackendLocal(); // end any SSH degradation on the local server
+    await switchBackendResolved(); // the host re-claims a local session, if it has one
+    if (!fsModal.classList.contains("hidden")) refreshPicker();
   });
 }
 
@@ -3178,23 +3254,36 @@ let es = null;
 //     retries forever in silence, so the failures are counted instead;
 //   * a Stop click that could not be delivered (see stop()).
 // Every recovery is announced: a silent one is indistinguishable from a freeze.
+// The one exception is a recovery the USER caused by leaving: coming back from a
+// background (see sseSuspend/sseResume) announces nothing, because there the
+// window knows it was away — nothing has to be guessed, and the stream that
+// replaces a socket Doze killed carries the host's own status.
 const SSE_KEEPALIVE_MS = 15000; // must match agent/server.py SSE_KEEPALIVE_SEC
 const SSE_STALE_MS = SSE_KEEPALIVE_MS * 3; // one missed keepalive is not death
 const SSE_MAX_ERRORS = 4; // EventSource retries ~3s apart: ~12s of a dead base
+const SSE_RESUME_PROBE_MS = 2000; // a queued keepalive is flushed with the unfreeze
 let sseLastFrameAt = 0; // last byte the stream actually delivered
+let sseFrames = 0; // monotonic proof of life: any frame bumps it
 let sseErrors = 0; // consecutive failed connects; reset by es.onopen
 let sseDown = false; // told once per outage, not once per tick
 let sseWatchdog = null;
+// the PAGE is gone (phone backgrounded): see sseSuspend/sseResume
+let sseSuspended = false;
+let sseSuspendedAt = 0;
+let sseProbe = null;
 
 // any frame (event or keepalive) proves the pipe still carries bytes
 function sseFrame() {
   sseLastFrameAt = Date.now();
+  sseFrames++;
   sseDown = false;
 }
 
 // The stream can no longer be trusted: stop vetoing the buttons of the user,
-// and say why. `busy` comes back on its own from the replayed status once a
-// stream is live again — the run itself may still be alive on the host.
+// and say why. `busy` comes back on its own once a stream is live again: the
+// first frame of every connect is the host's own status (agent/server.py _sse),
+// so a run that is still in flight returns as running instead of leaving the
+// window idle for the rest of the run.
 function sseDegrade(reason) {
   if (sseDown) return;
   sseDown = true;
@@ -3204,12 +3293,61 @@ function sseDegrade(reason) {
 
 function sseWatchdogTick() {
   if (!API_BASE || !es) return;
+  // the page was gone: no JS ran, so nothing could have arrived. That silence is
+  // not evidence about the pipe (see sseSuspend/sseResume).
+  if (sseSuspended) return;
   if (Date.now() - sseLastFrameAt < SSE_STALE_MS) return;
   // re-arm first: one report + one reconnect per stale window, not per tick
   sseLastFrameAt = Date.now();
   sseDegrade("no keepalive for " + Math.round(SSE_STALE_MS / 1000) + "s");
   reconnectSSE(false); // the base may have been re-claimed under us
 }
+
+// ---- the page is not the stream: a suspended window is silence by design ----
+// Android freezes the WebView while the app is in the background, its timers
+// with it, so on return the first watchdog tick sees a gap as long as the whole
+// background and calls it a dead stream: the phone's "switch app, come back and
+// the run went idle, with lost the live stream (no keepalive for 45s)".
+// Nothing can be concluded from a period in which no JS ran, so the gap is
+// forgiven and only the silence AFTER the page is back counts. What a spell in
+// the background CAN leave behind is a socket the radio quietly dropped (Doze
+// closes without a FIN, which no onerror ever reports), so a spell longer than
+// one keepalive interval is followed by a short probe: a live pipe flushes its
+// queued keepalive the moment the renderer unfreezes, a dead one stays silent
+// and is replaced WITHOUT announcing a loss (the page was away — the user lost
+// nothing) and WITHOUT dropping the cached run state: the reconnect carries the
+// host's own status (agent/server.py), so a run still in flight stays running.
+function sseSuspend() {
+  if (sseSuspended) return; // one suspension, however many times it is announced
+  sseSuspended = true;
+  sseSuspendedAt = Date.now();
+}
+
+function sseResume() {
+  if (!sseSuspended) return;
+  const awayFor = Date.now() - sseSuspendedAt;
+  sseSuspended = false;
+  sseLastFrameAt = Date.now(); // the gap is forgiven, never judged
+  if (sseProbe) { clearTimeout(sseProbe); sseProbe = null; }
+  // away for less than one keepalive: the pipe owed us nothing yet, and the
+  // ordinary watchdog window (now re-armed) is a fair judge
+  if (!API_BASE || !es || awayFor < SSE_KEEPALIVE_MS) return;
+  const frames = sseFrames; // what a proof of life would have had to move
+  sseProbe = setTimeout(() => {
+    sseProbe = null;
+    if (sseSuspended || !es) return; // went away again, or the stream is gone
+    if (sseFrames !== frames) return; // the pipe spoke: the queued frame landed
+    reconnectSSE(false); // silent: nothing to announce, nothing to reset
+  }, SSE_RESUME_PROBE_MS);
+}
+
+// every way the platform announces that this page stops running: a hidden tab,
+// the WebView frozen outright (Page Lifecycle), a bfcache-style suspend
+document.addEventListener("visibilitychange", () => (document.hidden ? sseSuspend() : sseResume()));
+document.addEventListener("freeze", sseSuspend);
+document.addEventListener("resume", sseResume);
+window.addEventListener("pagehide", sseSuspend);
+window.addEventListener("pageshow", sseResume);
 
 function startSseWatchdog() {
   if (sseWatchdog) return; // one timer per window, however many streams it had

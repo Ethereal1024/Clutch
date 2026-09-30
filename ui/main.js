@@ -27,8 +27,10 @@ const remoteLlmKnobs = () => {
   return { reasoning_effort: s.reasoning_effort || "", api_protocol: s.api_protocol || "" };
 };
 
-// failure placeholder only; a healthy session overrides this with the window's real URL
-const DEFAULT_API_BASE = "http://127.0.0.1:8890";
+// no base placeholder: the machine-wide supervisor port (8890) answers the
+// session lifecycle, not a window API, so handing it to the renderer as a
+// "fallback" would only point it at a port that fails every request. A window
+// with no session gets null and shows "not running".
 
 // the session-claim state machine lives in host-core.js, shared with the
 // Android host; this shell only feeds it its desktop inputs. Electron
@@ -125,11 +127,13 @@ if (!app.requestSingleInstanceLock()) {
     // (first and second-instance ones) shares them
     ipcMain.handle("api:base", async (e) => {
       try {
-        const url = await hostCore.ensureWindowBackend(e.sender);
-        return url || DEFAULT_API_BASE;
+        // null = this window has no session (no tunnel, and no local one
+        // either): the renderer stays on "not running" and waits for
+        // backend:base-changed. Never the supervisor's port as a stand-in.
+        return (await hostCore.ensureWindowBackend(e.sender)) || null;
       } catch (err) {
         tunnelLog(`[backend] api:base failed: ${err && err.message}`);
-        return DEFAULT_API_BASE;
+        return null;
       }
     });
 
