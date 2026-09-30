@@ -121,6 +121,10 @@ def main() -> int:
             check(True, f"malformed placeholder rejected: {malformed!r}")
     check(render("nothing to fill", {}) == "nothing to fill", "a statement without placeholders passes through")
     check(jarg({"a": 1}) == "'{\"a\":1}'", "jarg emits one compact quoted object")
+    # the payload's key order is the host's, not the declaration file's: the
+    # install layer re-serializes a component's declaration (sort_keys=True), so
+    # an installed and a checked-out spelling of one declaration send one body
+    check(jarg({"b": 1, "a": 2}) == "'{\"a\":2,\"b\":1}'", "jarg sorts keys (one body per call, not per file order)")
 
     # 7. unwrap: the module envelope is the verdict; the exit code is the only
     #    other input (a status line is not understood — see 7b)

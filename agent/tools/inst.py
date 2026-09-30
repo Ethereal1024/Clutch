@@ -64,8 +64,17 @@ def jarg(obj: Any) -> str:
     Exactly ONE escaping pass per layer (json for the body, shq for the shell),
     so the service sees the model's argument values byte-for-byte — never a
     JSON string that was quoted twice and arrives with the escapes still in it.
+
+    Keys are SORTED: the payload's byte order is the HOST's, never the
+    declaration file's. The host re-serializes a component's declaration when it
+    installs it (tools/components.MANIFEST, sort_keys=True), so the same
+    component installed and checked out would otherwise send two different
+    bodies for the same call — and a component author reordering two keys in
+    component.json would silently move a byte of the wire contract. A JSON object
+    has no order to speak of, so pinning one here costs nothing and makes the
+    line a fact of the call, not of the file.
     """
-    return shq(json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
+    return shq(json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
 
 def _tokens(template: str) -> list[tuple[str, str | None]]:

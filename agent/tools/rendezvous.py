@@ -308,8 +308,16 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     out: dict[str, str] = {}
     for name, fact in mod.vars.items():
         make = facts.get(fact)
-        if make is not None:
-            out[name] = make()
+        if make is None:
+            continue
+        resolved = make()
+        # A host fact the host has no value for is not a fact: it is left out of
+        # `vars` entirely, which is what makes an optional group naming it drop
+        # whole (inst.render) instead of rendering `--root ''` — an empty word the
+        # component would have to read as a root. An unset config.skills_dir means
+        # "the component's own library", and only the component can name it.
+        if resolved:
+            out[name] = resolved
     return out
 
 

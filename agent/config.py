@@ -9,8 +9,6 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .tools import modules
-
 # Reasoning effort knob (extra_body thinking.reasoning_effort); ignored by models without thinking
 REASONING_EFFORT_LEVELS = ("low", "medium", "max")
 
@@ -119,12 +117,13 @@ class Config:
     port: int = 8890
     host: str = "127.0.0.1"  # bind address; 0.0.0.0 exposes the API to other devices
     # Skills: catalog in the system prompt; loaded on demand via load_skill.
-    # This is where THIS host looks the library up — a position, not a claim of
-    # ownership: the clutch-skills component's own manifest decides how its
-    # tools run, and its statements read this field back through the
-    # $config.skills_dir placeholder.
+    # None means "ask the component": the clutch-skills module owns its library
+    # root and its own manifest says where it is (its launch/CLI default), so the
+    # host names no position at all and the `[--root {root}]` group in its
+    # statements is dropped when this is empty (agent/tools/inst.py). Setting it
+    # points the host at a library somewhere else — an override, not a default.
     enable_skills: bool = True
-    skills_dir: Path = field(default_factory=lambda: modules.component_dir(modules.SKILLS) / "skills")
+    skills_dir: Path | None = None
     # Permission: confirm risky actions with the user, not a sandbox
     non_interactive: bool = False  # auto-allow (used by eval harness / unattended runs)
 

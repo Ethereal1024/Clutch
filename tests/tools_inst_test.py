@@ -205,7 +205,10 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
         check(len(stub.calls) == 1, f"{name}: exactly one command per call")
         check(stub.calls[0][1] == cfg.command_timeout, f"{name}: the host's command timeout rides along")
         payload = {**defaults, **args}
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        # the host builds the body, so its key order is the host's (sorted, see
+        # inst.jarg) — NOT the declaration file's, which the install layer
+        # re-serializes anyway
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         # the whole line is the DECLARATION's text, token header spelling
         # included: the host contributes the port and the token as facts
         # (Service.vars) and nothing else — no header name, no curl flag
@@ -243,10 +246,20 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
 
 def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     py = modules.python_exe()
-    skill_root = str(cfg.skills_dir)
-    memory = [py, str(modules.module_dir(modules.MEMORY) / "memory.py")]
-    search = [py, str(modules.module_dir(modules.WEBSEARCH) / "websearch.py")]
-    skills = [f"PYTHONPATH={modules.module_dir(modules.SKILLS)}", py, "-m", "clutch_skills"]
+    # The launch PREFIX is this host's own resolution of the artifact (an
+    # installed onefile, an installed package, or the dev checkout) — asked of the
+    # real code rather than restated, so this check stays about the flags the
+    # declaration puts after it. What the prefix resolves TO is pinned in
+    # tests/rendezvous_test.py (_install_probe), where the install root is a temp
+    # dir; here it is whatever this machine has, and either spelling drives the
+    # same declaration.
+    memory = shell_words(rendezvous.launch_prefix(modules.MEMORY))
+    search = shell_words(rendezvous.launch_prefix(modules.WEBSEARCH))
+    skills = shell_words(rendezvous.launch_prefix(modules.SKILLS))
+    # config.skills_dir is None by default — the COMPONENT owns its library root,
+    # so `[--root {root}]` is dropped whole and the line names no root at all; the
+    # CLI then serves its own bundled library (scripts/skills-root.py asks it for
+    # the position). The pinned case is checked after the table.
 
     # clutch-memory: the .clc content service is THIS process, so the line names
     # the endpoint the server publishes on loopback
@@ -282,16 +295,17 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
             {"url": "https://example.com/x", "max_chars": 500, "start": 100},
             [*search, "fetch", "--envelope", "--max-chars", "500", "--start", "100", "https://example.com/x"],
         ),
-        # clutch-skills: --root names the library this session was pointed at
+        # clutch-skills: no --root — the group is dropped when the host is not
+        # pinned to one (only an explicit config.skills_dir puts it back)
         (
             "load_skill",
             {"name": "some-skill"},
-            [*skills, "--envelope", "--root", skill_root, "show", "some-skill"],
+            [*skills, "--envelope", "show", "some-skill"],
         ),
         (
             "load_skill",
             {"name": "some-skill", "file": "resources/t.html"},
-            [*skills, "--envelope", "--root", skill_root, "show", "some-skill", "--file", "resources/t.html"],
+            [*skills, "--envelope", "show", "some-skill", "--file", "resources/t.html"],
         ),
     ]
     for name, args, expected in cases:
@@ -299,6 +313,36 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
         check(len(stub.calls) == 1, f"{name}: exactly one command per call ({args})")
         check(shell_words(stub.line) == expected, f"{name}: the module's argv is byte-for-byte the contract ({args})")
         check(not result.error and result.content == "answered", f"{name}: the module's envelope is the result")
+
+    # …and a host PINNED to a root keeps the group: an override is a fact about
+    # this host, so the component is told exactly where to look — and a real
+    # library (one skill) is laid down there, because the `skills` gate is the
+    # component's own answer: a root it refuses is a tool this host does not have.
+    with tempfile.TemporaryDirectory(prefix="clutch-pinned-skills-") as pinned_root:
+        probe = Path(pinned_root) / "pinned-probe"
+        probe.mkdir()
+        (probe / "SKILL.md").write_text(
+            "---\nname: pinned-probe\ndescription: a probe for the pinned-root check\n---\n# pinned probe\n",
+            encoding="utf-8",
+        )
+        pinned = Config(skills_dir=Path(pinned_root))
+        preg = ToolRegistry(build_tools(pinned))
+        for args, expected in [
+            ({"name": "some-skill"}, [*skills, "--envelope", "--root", pinned_root, "show", "some-skill"]),
+            (
+                {"name": "some-skill", "file": "resources/t.html"},
+                [*skills, "--envelope", "--root", pinned_root, "show", "some-skill", "--file", "resources/t.html"],
+            ),
+        ]:
+            result, stub = _call(preg, ws, pinned, "load_skill", args, CommandResult(0, _envelope("answered"), ""))
+            check(
+                shell_words(stub.line) == expected,
+                f"load_skill: a pinned skills_dir stays on the line ({args})",
+            )
+            check(
+                not result.error and result.content == "answered",
+                f"load_skill: the pinned envelope is the result ({args})",
+            )
 
 
 # ------------------------------------------------- 4. the envelope mapping
@@ -510,10 +554,21 @@ def _skill_name(path: Path) -> str:
 
 
 def live_skills(cfg: Config) -> None:
-    """clutch-skills: the CLI spawns its own daemon for the root it serves."""
-    files = sorted(Path(cfg.skills_dir).glob("*/SKILL.md"))
+    """clutch-skills: the CLI spawns its own daemon for the root it serves.
+
+    The root is the COMPONENT's own library unless this host is pinned to one
+    (config.skills_dir is None by default, so the host names no position at all) —
+    the same order scripts/skills-root.py resolves, computed here instead of
+    shelling out to it.
+    """
+    root = (
+        Path(cfg.skills_dir).expanduser().resolve()
+        if cfg.skills_dir
+        else (modules.component_dir(modules.SKILLS) / "skills").resolve()
+    )
+    files = sorted(root.glob("*/SKILL.md"))
     if not files:
-        print(f"SKIP: no skills under {cfg.skills_dir}")
+        print(f"SKIP: no skills under {root}")
         return
     skill_file = files[0]
     first = _skill_name(skill_file)
@@ -543,7 +598,7 @@ def live_skills(cfg: Config) -> None:
                 "live: the skills CLI started its daemon",
             )
             check(
-                record is not None and record["root"] == str(Path(cfg.skills_dir).resolve()),
+                record is not None and record["root"] == str(root),
                 "live: it serves this session's root",
             )
             daemon_pid = int(record["pid"]) if record else 0

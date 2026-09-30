@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # install-skill.sh — download a skill from the web and install it into the
-# LIVE skill library this host serves (config.skills_dir, the root the host's
-# `load_skill` tool and the $skills fact both read).
+# LIVE skill library this host serves (the root clutch-skills answers with, or
+# config.skills_dir when the host is pinned to one — see scripts/skills-root.py).
+# That root is what the host's `load_skill` tool and the $skills fact both read.
 #
 #   scripts/install-skill.sh <skill-dir-url> <skill-name> [dest-root]
+#
+# The dest root may also come from CLUTCH_SKILLS_ROOT (when the caller knows it
+# and cannot pass a third word through).
 #
 # The skill is a directory holding SKILL.md plus whatever it references; the
 # library scans the root for `*/SKILL.md`, so installing is exactly "put the
@@ -28,9 +32,22 @@ case "$NAME" in
 esac
 
 HOSTROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ROOT="${3:-}"
+# The interpreter for the root lookup below. A source checkout uses its own venv;
+# a packaged host (no venv next to the script) is running under an interpreter it
+# names with CLUTCH_PYTHON — the same override agent/tools/modules.py honours.
+PY="$HOSTROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  PY="${CLUTCH_PYTHON:-python3}"
+fi
+
+# The library belongs to the clutch-skills COMPONENT (config.skills_dir is None
+# unless the host is pinned), so the root is resolved in this order: an explicit
+# argument, then a caller's override, then the component's own answer —
+# scripts/skills-root.py (which reads a pinned config.skills_dir first, else asks
+# the component where its library is).
+ROOT="${3:-${CLUTCH_SKILLS_ROOT:-}}"
 if [ -z "$ROOT" ]; then
-  ROOT="$("$HOSTROOT/.venv/bin/python" -c 'import sys; sys.path.insert(0,sys.argv[1]); from agent.config import Config; print(Config().skills_dir)' "$HOSTROOT")"
+  ROOT="$("$PY" "$HOSTROOT/scripts/skills-root.py")"
 fi
 DEST="$ROOT/$NAME"
 mkdir -p "$DEST"
