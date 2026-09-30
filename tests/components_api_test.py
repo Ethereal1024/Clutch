@@ -132,6 +132,39 @@ def main() -> int:
             {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": components.digest_of(blob2)}
         ], "the inventory is the manifest's claims plus the install's real digest")
 
+        # 3b. the version a CLIENT sends is `<the component's own>+<digest16>`:
+        #     the client records a version it can list, and the host reads the
+        #     shape it has always read (_VERSION_RE). It has to be a legal install
+        #     name AND it has to come back out of the inventory unchanged, because
+        #     a page lists what this function returns.
+        blob3 = blob + b"# the composite version\n"
+        composite_artifact = Path(root) / "composite"
+        composite_artifact.write_bytes(blob3)
+        composite = f"0.1.0+{components.digest_of(blob3)[:16]}"
+        third = components.accept(
+            composite_artifact,
+            {
+                "name": "clutch-memory",
+                "version": composite,
+                "interface": "cli",
+                "digest": components.digest_of(blob3),
+            },
+        )
+        check(third["status"] == "installed", "a version carrying its own content digest installs")
+        check(components.installed_version("clutch-memory") == composite, "and the host resolves it by that version")
+        check(
+            components.component_root("clutch-memory").joinpath(composite).is_dir(),
+            "the version is a legal directory name, whatever rides after the +",
+        )
+        check(
+            sorted(d.name for d in components.component_root("clutch-memory").iterdir() if d.is_dir()) == [composite],
+            "one machine, one version: installing it replaced the bare-digest directory",
+        )
+        check(
+            components.installed_digest("clutch-memory") == components.digest_of(blob3),
+            "and the digest stays the content's own, not the version's tail",
+        )
+
         # 4. an interface the host's table cannot hold is refused before it lands
         try:
             components.accept(

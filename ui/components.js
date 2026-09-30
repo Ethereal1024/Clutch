@@ -358,6 +358,25 @@ async function componentSpecs({ sources: list = null } = {}) {
   return out;
 }
 
+// The version ONE install is recorded under: the component's own version with
+// the content digest appended — `0.1.0+<hex16>`. The host already reads that
+// shape (agent/tools/components.py `_VERSION_RE`, and COMPONENTS.md says an
+// installed manifest may carry it), so nothing new is being asked of it; what it
+// buys is a version a client can LIST. A bare digest is an identity, not a
+// version: a host holding only that can say which bytes it has but not which
+// release, and an upgrade or a rollback has to be asked FOR a version.
+//
+// A spec that names no version (a bare `{name, interface}`) still sends the
+// digest alone — an identity is all this client has, and inventing a version
+// would be a claim it cannot back. A version that already carries a digest is
+// handed over as it stands, rather than suffixed twice.
+function installVersion(named, digest) {
+  const short = digest.slice(0, 16);
+  const version = named && typeof named.version === "string" ? named.version.trim() : "";
+  if (!version) return short;
+  return version.includes("+") ? version : `${version}+${short}`;
+}
+
 // The artifact this client would send for one component, or null when it has
 // none: `checkout` is false for the machine that already holds the checkout
 // beside the host repo (there is nothing to send it that it does not have, so a
@@ -370,20 +389,23 @@ async function artifactFor(spec, { checkout = true } = {}) {
     // point (an edited manifest describes the edited code beside it)
     const declaration = spec.declaration || (spec.published ? await remoteDeclaration(spec.published) : null);
     const digest = fileHash(local);
-    return { ...spec, declaration, path: local, digest, version: digest.slice(0, 16) };
+    return { ...spec, declaration, path: local, digest, version: installVersion(declaration || spec, digest) };
   }
   const published = spec.published || (spec.checkout ? null : spec);
   if (!published || !published.artifacts) return null; // nothing here and nothing published
   const remote = await remoteArtifact(published);
   if (remote.problem) throw new Error(remote.problem);
+  const declaration = await remoteDeclaration(published);
   return {
     ...spec,
     // the published bytes are described by the published declaration, never by a
     // checkout's (the two can disagree the moment a contributor edits one)
-    declaration: await remoteDeclaration(published),
+    declaration,
     path: remote.path,
     digest: remote.digest,
-    version: remote.digest.slice(0, 16),
+    // the release's own manifest names its version too, and a manifest that pins
+    // no separate declaration is a legal (thinner) install
+    version: installVersion(declaration || published, remote.digest),
   };
 }
 
@@ -498,6 +520,7 @@ async function ensureComponents(base, { checkout = true, sources: list = null, p
 module.exports = {
   ensureComponents,
   artifactFor,
+  installVersion,
   componentSpecs,
   readManifest,
   downloadPinned,

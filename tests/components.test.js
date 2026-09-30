@@ -146,8 +146,28 @@ async function main() {
   } else {
     check(fs.statSync(spec.path).isFile(), "the client has an artifact to send for a checked-out component");
     check(/^[0-9a-f]{64}$/.test(spec.digest), "the artifact's sha256 is the version gate's key");
-    check(spec.version === spec.digest.slice(0, 16), "the version is the content's own prefix, not a claim");
+    check(spec.version === spec.digest.slice(0, 16), "a spec that names no version sends the content's own prefix, not a claim");
     check(spec.path.endsWith(".tar.gz"), "an archived checkout keeps its suffix (the host reads the shape from it)");
+  }
+
+  // 4b. a component that DOES name a version lands under `<its version>+<digest>`:
+  //     the label is what a client can list and what an upgrade is asked by, and
+  //     the digest suffix is what keeps the content gate honest. The host reads
+  //     that shape already (agent/tools/components.py _VERSION_RE); what is new
+  //     is that the client sends it.
+  if (haveBash) {
+    const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-memory", "component.json"), "utf8")).version;
+    const versioned = await components.artifactFor(
+      (await components.componentSpecs({ sources: [] })).specs.find((s) => s.name === "clutch-memory"),
+      { checkout: true }
+    );
+    check(
+      versioned.version === `${own}+${versioned.digest.slice(0, 16)}`,
+      "a versioned component installs under <its own version>+<content digest>"
+    );
+    check(components.installVersion({ version: "1.2.3" }, "ab".repeat(32)) === "1.2.3+" + "ab".repeat(8), "the recorded version is the component's own, digest appended");
+    check(components.installVersion({}, "ab".repeat(32)) === "ab".repeat(8), "a version nobody named stays a bare digest (an identity, not a claim)");
+    check(components.installVersion({ version: "1.2.3+deadbeef" }, "ab".repeat(32)) === "1.2.3+deadbeef", "a version that already carries a digest is not suffixed twice");
   }
 
   // 5. the install pass: upload what the host lacks, land it, gate it next time
@@ -169,6 +189,11 @@ async function main() {
   check(
     after.every((c) => c.digest && versions.length),
     "each landed component carries the digest the gate compares"
+  );
+  const held = after.find((c) => c.name === "clutch-memory");
+  check(
+    held && held.version.endsWith("+" + held.digest.slice(0, 16)),
+    "and it lists a version a page can read: the component's own, with the content digest appended"
   );
 
   // 6. the gate: the second pass sends nothing (the point of a content hash)
@@ -225,8 +250,16 @@ async function main() {
     check(pinned.errors.length === 0, `a published artifact installs (${JSON.stringify(pinned.errors)})`);
     check(pinned.installed.includes("clutch-memory"), "and it is the download that lands, not the checkout beside the repo");
     const published = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
-    check(published.length === 1 && published[0] === artDigest.slice(0, 16), "the landed version IS the digest its manifest pinned");
+    check(
+      published.length === 1 && published[0] === `0.1.0+${artDigest.slice(0, 16)}`,
+      "the landed directory is the release's own version + the digest its manifest pinned"
+    );
     check(fs.existsSync(path.join(hostRoot, "clutch-memory", published[0], "RELEASE")), "the host holds the published bytes");
+    const listed = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    check(
+      listed && listed.version === `0.1.0+${artDigest.slice(0, 16)}` && listed.digest === artDigest,
+      "and the host hands that version back, so a page can name what this machine holds"
+    );
 
     const repinned = await components.ensureComponents(base, { checkout: false, sources: [source] });
     check(repinned.installed.length === 0 && repinned.current.includes("clutch-memory"), "a second pass against the same pin uploads nothing");
