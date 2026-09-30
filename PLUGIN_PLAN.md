@@ -14,6 +14,48 @@
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
 | I5 | **不可撤销的动作不得在界面上伪装成可撤销** | 卸载端点不存在之前，页面不画卸载按钮 |
 
+## 零之二、进度（随施工更新）
+
+| 阶段 | 状态 | 提交 | 实际交付 |
+| --- | --- | --- | --- |
+| P0 版本语义 | **已完成** | `42e6ee6` | 安装版本 = `<自报版本>+<摘要16>`；`ui/components.js:installVersion` |
+| P1 只读可见 | **已完成** | `2c473f6`（含 `0b7229e` 的修正） | 通道 + 设置弹窗第二个标签 + 市场/已装两份清单 |
+| P2 单向下发 | **已完成** | `8d11845` | 每行安装按钮 + 二次确认 + 进度 + 宿主裁定回显 + 装完重读清单 |
+| P3 反向动词 | 未动工 | — | — |
+| P4 工具集 | 未动工 | — | — |
+| P5 静态索引 | 未动工 | — | — |
+
+P2 的端到端实测（不是单测）：起一个**一次性** supervisor
+（`CLUTCH_COMPONENTS_DIR=/tmp/… --port 8899`，空目录），用真的 `createComponentsView`
+装 `clutch-workspace` → `status:"installed"`、版本 `0.1.0+31bc2b7c5f799e5b`、`GET
+/api/components` 从空变一条、字节落到磁盘；**再装一次** → `status:"current"`，阶段序列
+`artifact -> current`（没有 upload）。本机 8890 上的 supervisor 全程未动。
+
+## 零之三、本轮新发现（P1/P2 施工中得到）
+
+1. **组件端点长在 supervisor 上，不在 session API 上**（最关键的一条）：
+   `GET /api/components`（`agent/supervisor.py:233`）与 `POST /api/components/install`
+   （`:292`）属于 supervisor 进程（本机 `127.0.0.1:8890`，远端 = 隧道的
+   `tunnelStatus().url`）。**窗口的 session base 是另一个端口、另一个进程，对组件一无所知**。
+   照 session base 去写这个页面会"看起来正确"——每个机器都显示"没有装任何组件"。所以：
+   * 页面写入的 base 一律取 supervisor（`ui/components-view.js:45 target()`）；
+   * "装到哪台机器"由**窗口的会话种类**决定（`ui/main.js:55` 把
+     `hostCore.backendKind(wc.id)` 传进去）：会话在隧道对端 → 装对端；其余（包括隧道在线
+     但窗口回退到本地会话的情形）→ 装本机；没有窗口也没有隧道 → 本机。
+2. **supervisor 会空闲退出**：本机那个是 `--idle-timeout 25` 起的（见其命令行），空闲即退出，
+   由 app 按需重启。于是"本机安装"在 supervisor 没在跑时会直接失败——页面能报出宿主的话，
+   **但没有任何东西会为这次安装把它叫起来**（`ui/server-bootstrap.js` 全文没有 components）。
+   这是 P2 未补上的已知缺口，留在"待办"里。
+3. **Android 只做了表面齐平**：`ui/bridge-shim.js` 现在暴露 `clutchComponents`（手机端与桌面
+   端 API 同名），但 `android/host/android-host.js` 没有任何 handler，所以手机上调用会以
+   `no such bridge method: clutchComponents.list` 结束，标签页把它当一条错误画出来。
+   真要在手机上用，得在 Android 宿主里实现同一组调用。
+4. **本机已装版本还是旧形状**：实测 8890 上四条记录是 `59b12509b19c6759`、
+   `c66bb70851a8e165`…，而当前检出算出来的 `clutch-workspace` 是
+   `0.1.0+31bc2b7c5f799e5b`。两个事实：旧记录确实停留在裸摘要年代（`install()` 会清掉同组件
+   其它版本，所以下次安装自然换名，不需要迁移脚本）；且模块检出在这之后**变过**
+   （`82e974a` 那次 release 修复），所以现在点一次安装是**真的会写入新字节**，不是空跑。
+
 ## 一、目标与非目标
 
 **目标**：设置弹窗第二个标签"插件"；市场清单 + 已装清单（版本**人类可读**）；一键安装到
@@ -36,15 +78,15 @@
 
 ```mermaid
 flowchart LR
-  P0['P0 版本语义<br/>安装版本可读'] --> P1['P1 只读可见<br/>通道 + 标签页']
-  P1 --> P2['P2 单向下发<br/>装到选定机器']
+  P0['P0 版本语义<br/>安装版本可读 ✅'] --> P1['P1 只读可见<br/>通道 + 标签页 ✅']
+  P1 --> P2['P2 单向下发<br/>装到选定机器 ✅']
   P1 --> P3['P3 反向动词<br/>宿主端点先行']
   P2 --> P3
   P3 --> P4['P4 工具集<br/>interface data']
   P4 --> P5['P5 可选<br/>静态索引 / 私有源']
 ```
 
-### P0 版本语义：一次安装的版本必须可读（**本轮已动工**）
+### P0 版本语义：一次安装的版本必须可读（**已完成**，`42e6ee6`）
 
 问题：客户端把 `version` 写成 `digest.slice(0, 16)`（`ui/components.js:373,386`），于是宿主
 清单里只有 `5f900739e6a35f43` 这样的十六进制——**能列出组件，说不出它是哪个发行版**，升级
@@ -63,30 +105,39 @@ digest (`0.2.0+<hex>`)"），`COMPONENTS.md` 第 79 行同样写着"安装版可
   "宿主清单把该版本回报给客户端"两条断言；`tests/components_api_test.py` 补一条宿主侧
   用例（复合版本是合法路径名）。
 
-### P1 只读可见（通道 + 标签页）
+### P1 只读可见（通道 + 标签页）（**已完成**，`2c473f6`）
 
-- `ui/preload.js` 新增 `clutchComponents { list, market, onProgress }`；`ui/main.js` 加
-  `components:*` handler，内部复用 `ui/components.js` 已有导出（`componentSpecs` :339、
-  `hostInventory` :391）。
+- `ui/preload.js` 新增 `clutchComponents { list, market, install, onProgress }`；`ui/main.js`
+  加 `components:*` handler，内部复用 `ui/components.js` 已有导出（`componentSpecs` :339、
+  `hostInventory` :413）、新增的 `ui/components-view.js` 承载目标机/市场缓存/安装裁定。
 - `ui/js/settings.js`（408 行、**无标签结构**）加标签；`ui/style.css` / `ui/mobile.css`
   **没有 tab 样式**，需新增；overlay 套件（`customSelect` / `notice` / `askConfirm` /
-  `closeModal`）直接复用。
+  `closeModal`）直接复用。渲染层是 **19 个经典脚本**，`ui/index.html` 的顺序就是契约
+  （`tests/ui-load-order-test.js` 守）。
 - 页面必须显示**来源错误**（`manifests()` `:155` 的 `errors` 是 data，不是异常）：否则用户
   看到空市场却不知道是网络问题。
 - 本阶段**不画安装按钮**（I5）。
 - 验收：开发态显示 4 个检出组件 + 4 条来源失败原因（`componentSpecs()` :340 "a
   contributor's edit beats a release"，本机不会真空）；连隧道后显示对端的 4 条已装记录。
+  实测：19 个脚本装序通过；本机 8890 返回 4 条已装记录；4 条远端来源在本机全部失败（见第
+  四节的网络约束），页面逐条画出原因而不是空市场。
+- 一处修正（`0b7229e`）：读失败时 `held` 不能留成"空数组"——那会被画成"没有装任何组件"，
+  与"读不到"混为一谈。失败一律 `held = null`。
 
-### P2 单向下发（安装）
+### P2 单向下发（安装）（**已完成**，`8d11845`）
 
-- 目标机语义复用 `ui/js/conn-store.js` 的 `#conn-select` / `#conn-status`。
-- 新增 `components:install`（走 `upload()` `:404`）与 `components:progress`；`askConfirm`
-  二次确认（装到远端**不可撤销**）。
-- 幂等来自宿主：`components.accept()` 的 `current()` 门 → `"current"`，重连不重传。
-- 顺带补上已知缺口：本机手动安装入口（`ui/server-bootstrap.js` 全文无 components，自动
-  pass 以后再说，先给人类一个按钮）。
-- 验收：远端安装后 `GET /api/components` 变化；重复安装返回 `current`；被拒时页面显示宿主
-  给的 `error` 原文。
+- 目标机语义**不复用** `#conn-select`：那个选择器描述的是"这个窗口连到哪台机器的会话"，而
+  组件要送到**supervisor**（见零之三.1）。现在由窗口的会话种类推导（`backendKind`），页面
+  只显示结果。
+- 新增 `components:install`（走 `upload()` `:426`）与 `components:progress`；`askConfirm`
+  二次确认，文案明说"**这个页面不能撤销它**"（I5）；市场行自带一行常驻警告，不只藏在弹窗里。
+- 幂等来自宿主：`components.accept()` 的 `current()` 门 → `"current"`，重连不重传；客户端
+  还先查一次清单，同版本同摘要**连上传都不发生**。
+- 被拒时页面显示宿主给的 `error` **原文**，不转述。
+- 本机手动安装入口已给（按钮在），**但缺口还在**：supervisor 没在跑时没有任何东西为这次
+  安装把它叫起来（零之三.2）。
+- 验收（单测）：`node tests/components-panel.test.js`（37 条）覆盖目标机规则、死按钮、确认
+  文案、拒绝、`installed`/`current`/宿主原文、重读清单；实测见零之二。
 
 ### P3 反向动词（宿主侧先行）
 
@@ -127,10 +178,22 @@ digest (`0.2.0+<hex>`)"），`COMPONENTS.md` 第 79 行同样写着"安装版可
 ## 四、验证
 
 ```bash
+node tests/components-panel.test.js               # 插件标签页：目标机、确认、裁定、重读（DOM 假件）
+node tests/components-view.test.js                # 主进程插件后端：目标机/清单/市场缓存/安装裁定
+node tests/ui-load-order-test.js                  # ui/index.html 的 19 个脚本装序
+node tests/bridge-shim.test.js                    # 桌面端与手机端暴露同一组名字
 node tests/components.test.js                      # 客户端 + 宿主端到端（自带 supervisor）
 PYTHONPATH=. python3 tests/components_api_test.py  # 宿主侧安装/解析/门
 PYTHONPATH=. python3 tests/rendezvous_test.py
 PYTHONPATH=. python3 tests/tools_inst_test.py
+```
+
+手动活体检查（会真的写字节，务必指到一次性 supervisor 上）：
+
+```bash
+CLUTCH_COMPONENTS_DIR=/tmp/x PYTHONPATH=. python3 -m agent.supervisor --port 8899 --idle-timeout 900 &
+curl -s http://127.0.0.1:8899/api/components          # 空
+# 用 createComponentsView 指向 8899 装一次，再装一次（第二次必须是 current）
 ```
 
 本机网络约束（硬条件）：`github.com` 的 HTTPS 不通（curl 28），`api.github.com` 可达。所以
@@ -158,8 +221,19 @@ PYTHONPATH=. python3 tests/tools_inst_test.py
 
 ## 七、待拍板
 
-1. **P1 是否单独交付**：建议 P1+P2 合并（只读页面对用户价值低，安装端点已存在，风险由确认
-   框兜住）。
+1. ~~**P1 是否单独交付**~~ → **已决**：P1 单独一个只读提交（画不出安装按钮就不涉及 I5），
+   P2 同批紧跟（`8d11845`）。只读页面单独上线对用户价值低，但拆开让"什么时候开始能写"
+   在历史里一目了然。
 2. **旧记录**：是否强制重装以统一版本形状（`install()` 会清掉旧版本目录，所以代价只是一次
    上传），或让两种形状长期并存。
 3. **索引仓库（P5）**：模块数 ≤4 时先不建。
+
+## 八、待办（本轮明确留着的缺口）
+
+| # | 缺口 | 影响 | 想修的话落在哪 |
+| --- | --- | --- | --- |
+| G1 | 本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | `ui/server-bootstrap.js`（现在全文无 components）或 `ui/components-view.js` 的 `install()` 前段 |
+| G2 | Android 宿主没有 `clutchComponents` handler | 手机上插件标签页每条读取都是一行错误 | `android/host/android-host.js:78-107` 一带补同组调用 |
+| G3 | 宿主没有反动词（卸载/停用/回滚） | 装上是单向的，页面只能靠文案诚实（I5） | P3 |
+| G4 | `clutch-workspace/pyproject.toml` 0.2.0 与其 `component.json` 0.1.0 不一致 | 界面显示 0.1.0，包元数据说 0.2.0 | 模块仓库自身 |
+| G5 | 纯声明包（`interface:"data"`）目前 400 | 工具集还递不进去 | P4 |
