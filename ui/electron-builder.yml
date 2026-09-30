@@ -24,6 +24,49 @@ files:
   # the asset survey doc next to the vendored fonts is for the repo, not runtime
   - "!vendor/fonts/README.md"
 
+# Native-dependency rebuild is OFF on purpose — it is what made `npm run dist`
+# depend on the host compiler.
+#
+# @electron/rebuild only rebuilds packages carrying a binding.gyp at their OWN
+# root — rebuild.js:98 is
+#   candidatePaths.filter((p) => fs.existsSync(path.resolve(p, "binding.gyp")))
+# Under ui/ that matches exactly one package: cpu-features 0.0.10, an OPTIONAL
+# dependency of ssh2. (ssh2's own binding lives one level down at
+# lib/protocol/crypto/binding.gyp and is built by its install.js during `npm ci`,
+# so the rebuild step never touched ssh2.)
+#
+# Rebuilding cpu-features against Electron's ABI is where GNU/Linux builds die:
+# electron@44's common.gypi sets v8_deprecation_warnings, so node-gyp compiles
+# with -DV8_DEPRECATION_WARNINGS=1, and Electron's using_v8_shared adds
+# -DUSING_V8_SHARED=1. Those two together expand v8-primitive.h into
+#
+#   class [[deprecated("...")]] __attribute__((visibility("default"))) Value
+#
+# i.e. a class-head carrying a C++ attribute followed by a GNU one. GCC <= 12
+# rejects that ("expected identifier before '__attribute__'", then "expected
+# primary-expression before 'public'"); only GCC >= 13 / clang >= 16 parse it.
+# Ubuntu 22.04 ships GCC 11, so packaging there needed CC/CXX wrappers that
+# append -UV8_DEPRECATION_WARNINGS — a host-side hack in every contributor's
+# shell. Skipping the rebuild removes the compiler from the build entirely.
+#
+# Dropping it is safe: nothing needed goes missing.
+#   - cpu-features is optional, and ssh2/lib/protocol/constants.js:6-9 wraps the
+#     require in a bare `try {} catch {}`. The copy `npm ci` built is a
+#     NODE_MODULE_VERSION 127 (node 22) binary; Electron 44 is 149, so it cannot
+#     load there at all, and all that is lost is the CPU-feature query that
+#     reorders the cipher preference list (constants.js:94-105).
+#   - ssh2's sshcrypto.node is likewise the npm-ci/node-ABI copy, which crypto.js
+#     already handles the same way (require wrapped in try/catch at :29-33,
+#     exported as bindingAvailable at :1579, falling back to the node:crypto
+#     cipher/decipher classes). This key changes nothing about that.
+#
+# app-builder-lib/out/packager.js:454 returns before install/rebuild whenever
+# this is false, so nothing else is affected.
+#
+# If a REQUIRED native module is ever added under ui/, delete this key and pin
+# the toolchain instead (clang >= 16, or GCC >= 13).
+npmRebuild: false
+
 # The bundled backend binaries (built by scripts/build-server-bundle.sh; both
 # live in dist/ — agent-server and agent-supervisor) are declared per platform
 # instead of at the top level: electron-builder ADDS platform-specific
