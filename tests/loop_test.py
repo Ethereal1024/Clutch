@@ -103,9 +103,7 @@ def _agent(fake: FakeLLM, config: Config, workspace: Workspace, log: LazyEventLo
     )
 
 
-def main() -> int:
-    config = Config()
-
+def _natural_finish(config) -> None:
     # 0. natural finish: a no-tool answer completes in one round trip
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -117,6 +115,8 @@ def main() -> int:
         check(result == "done", "natural finish completes the task")
         check(len(fake.calls) == 1, "no extra LLM round trips on natural finish")
 
+
+def _tool_round_trip(config) -> None:
     # 1. tool execution round trip: write a file, then a no-tool answer completes
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -132,6 +132,8 @@ def main() -> int:
         check((sb.root / "a.txt").read_text() == "hi", "tool actually wrote file")
         check(fake.calls[1][-1]["role"] == "tool", "tool result fed back")
 
+
+def _budget_abort() -> None:
     # 3. budget abort: model keeps returning tool calls until turns exhausted
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -148,6 +150,8 @@ def main() -> int:
         check(result == "ABORTED", "budget abort even when only tool calls")
         check(len(fake.calls) == 3, "budget stops after max_turns calls")
 
+
+def _doom_loop_warns(config) -> None:
     # 4. doom-loop: first detection warns (feeds back), repeating the exact call aborts
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -170,6 +174,8 @@ def main() -> int:
             "doom warning fed back inside the tool result",
         )
 
+
+def _doom_loop_aborts(config) -> None:
     # 4b. repeating the exact warned call aborts the run
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -186,6 +192,8 @@ def main() -> int:
         result = _agent(fake, config, sb).run("t")
         check(result == "ABORTED", "repeating the warned call aborts the run")
 
+
+def _max_tokens_truncation(config) -> None:
     # 5. max-tokens truncation: drop tool calls, feed user message, model retries
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -200,6 +208,8 @@ def main() -> int:
         check(result == "recovered", "max-tokens truncation recovered")
         check("max_tokens" in fake.calls[1][-1]["content"], "truncation feedback shown")
 
+
+def _sink_isolation(config) -> None:
     # 6. sink isolation: a throwing sink must not kill the agent
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -218,6 +228,8 @@ def main() -> int:
         result = agent.run("t")
         check(result == "done", "throwing sink does not kill agent")
 
+
+def _cancellation_before_any_llm_call(config) -> None:
     # 7. cancellation: a pre-set cancel event aborts before any LLM call
     import threading
 
@@ -237,6 +249,8 @@ def main() -> int:
         check(result == "ABORTED", "pre-set cancel aborts before LLM call")
         check(len(fake.calls) == 0, "cancel prevents any LLM call")
 
+
+def _permission_allow(config) -> None:
     # 8. permission gate: allow executes the tool
     from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
 
@@ -262,6 +276,10 @@ def main() -> int:
         check(result == "done", "permission allow executes tool")
         check((sb.root / "a.txt").read_text() == "hi", "allowed tool wrote file")
 
+
+def _permission_deny(config) -> None:
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+
     # 9. permission gate: deny raises, tool error fed back, model recovers
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -284,6 +302,11 @@ def main() -> int:
         result = agent.run("t")
         check(result == "gave up", "permission deny feeds error and agent continues")
         check(not (sb.root / "a.txt").exists(), "denied tool did not run")
+
+
+def _permission_ask(config) -> None:
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+    import threading as _threading
 
     # 10. permission gate: ask blocks until the UI resolves; allow lets it proceed
     import threading as _threading
@@ -318,6 +341,11 @@ def main() -> int:
         check(result == "done", "permission ask resolved by UI then executes")
         check((sb.root / "a.txt").read_text() == "hi", "asked-and-allowed tool wrote file")
 
+
+def _sandbox_escape_approved(config) -> None:
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+    import threading as _threading
+
     # 10b. sandbox escape: approved external write executes
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -349,6 +377,11 @@ def main() -> int:
         check(result == "done", "approved external write completes the run")
         check(outside.read_text() == "hi", "approved external write executed")
 
+
+def _sandbox_escape_denied(config) -> None:
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+    import threading as _threading
+
     # 10c. sandbox escape denied: error fed back, nothing written outside
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -379,6 +412,11 @@ def main() -> int:
         result = agent.run("t")
         check(result == "gave up", "denied external write: agent continues")
         check(not outside.exists(), "denied external write did not execute")
+
+
+def _run_command_escape(config) -> None:
+    from agent.core.permission import PermissionEvaluator, PermissionGate, Rule
+    import threading as _threading
 
     # 10d. run_command escape: `echo > /outside` asks and an approved one runs
     with tempfile.TemporaryDirectory() as tmp:
@@ -412,6 +450,8 @@ def main() -> int:
         check(result == "done", "approved run_command escape completes the run")
         check(outside.read_text().strip() == "hi", "approved run_command escape executed")
 
+
+def _fatal_llm_error(config) -> None:
     # 11. fatal LLM error (context overflow) -> graceful error final, no crash
     from agent.core.errors import AgentError
 
@@ -442,6 +482,8 @@ def main() -> int:
             "error state emitted",
         )
 
+
+def _stop_mid_stream() -> None:
     # 12. Stop mid-stream: cancel aborts promptly, partial turn dropped
     import threading
 
@@ -479,6 +521,8 @@ def main() -> int:
             "no tool path ran on the partial turn",
         )
 
+
+def _mid_stream_transport_drop(config) -> None:
     # 12b. mid-stream transport drop: the client's retry notice reaches the live
     # sink BEFORE the recovered text, and nothing transient touches the durable log
     with tempfile.TemporaryDirectory() as tmp:
@@ -526,6 +570,8 @@ def main() -> int:
             "retry notice never lands in the durable log",
         )
 
+
+def _mid_answer_retry_discards(config) -> None:
     # 12b2. a retry that lands MID-answer: the notice carries discard=true and
     # the loop drops the dead attempt's accumulators, so the turn it returns is
     # the retried one -- never the dead half-sentence with the new text glued on
@@ -578,6 +624,10 @@ def main() -> int:
             "the durable turn holds the retried answer only, never both",
         )
 
+
+def _stop_inside_a_blocked_read() -> None:
+    import threading
+
     # 12c. Stop that lands inside a BLOCKED read: stream_runner's guard closes
     # the connection from its helper thread and the client surfaces
     # LlmError("cancelled") instead of a retryable transport error. The loop
@@ -617,6 +667,8 @@ def main() -> int:
             "no error final from a cancelled turn",
         )
 
+
+def _compaction_overflow() -> None:
     # 13. compaction: overflow rolls older turns into a summary, run continues
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -643,6 +695,8 @@ def main() -> int:
         check(len(comps) == 1, "context overflow triggered one compaction")
         check(comps[0].summary == "SUMMARY", "compaction summary recorded")
 
+
+def _compaction_progress() -> None:
     # 13b. compaction progress: delta events stream; done=True closes on failure
     with tempfile.TemporaryDirectory() as tmp:
         log13 = LazyEventLog.in_memory()
@@ -690,6 +744,8 @@ def main() -> int:
             "done marker closes the live block on failure",
         )
 
+
+def _compaction_window_reaches_summarizer() -> tuple[Any, Any, dict[str, int]]:
     # 13d. the whole window reaches the summarizer: no length cap, no elision.
     # Identity comes from the prompt's framing instead — a declared third-party
     # role, a stated end to the transcript, and the contract restated after it.
@@ -725,7 +781,10 @@ def main() -> int:
         prompt_len["n"] > 700_000,
         f"the summarizer gets the whole window, not a capped slice ({prompt_len['n']} bytes)",
     )
+    return big_log, CaptureLlm, prompt_len
 
+
+def _compaction_prompt_has_no_input_budget(big_log: Any, CaptureLlm: Any, prompt_len: dict[str, int]) -> None:
     # 13h. no input budget: the summarizer's input is the window's CONTENT, not
     # the configured window size. Same log at wildly different windows -> same
     # prompt, and that prompt is the whole transcript — nothing binds it.
@@ -743,6 +802,8 @@ def main() -> int:
         f"it carries the whole window rather than a budgeted slice ({min(sizes.values())} bytes)",
     )
 
+
+def _compaction_second_window() -> dict[str, str]:
     # 13f. second compaction input is the whole current window, not a capped slice
     log13f = LazyEventLog.in_memory()
     log13f.append(UserMessageEvent(content="task"))
@@ -769,7 +830,10 @@ def main() -> int:
         "verbatim (first appended event included, not a capped slice)",
     )
     check(comp13f.compact() is False, "third compaction is a no-op (the window holds only the summary line)")
+    return prompt_n
 
+
+def _compaction_output_contract_tail(prompt_n: dict[str, str]) -> None:
     # 13i. the output contract is restated AFTER the transcript: the summarizer is a
     # completion over a huge pseudo-chat, so a contract that only sits at the top of
     # the prompt is 200K+ bytes away from the generation point and the model continues
@@ -781,6 +845,8 @@ def main() -> int:
         "the summary contract follows the transcript, adjacent to the generation point",
     )
 
+
+def _compaction_cancel() -> None:
     # 13e. cancel aborts an in-flight compaction
     import threading  # noqa: PLC0415
 
@@ -803,6 +869,8 @@ def main() -> int:
     check(comp13e.compact() is False, "cancel mid-summary aborts compaction")
     check(len(calls) == 1, "summary stream interrupted once, not completed")
 
+
+def _compaction_empty_reply(config) -> None:
     # 13c. empty reply is fed back as an error and retried
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -819,6 +887,8 @@ def main() -> int:
             "retry prompt mentions the empty reply",
         )
 
+
+def _compaction_summary_transport_drop() -> None:
     # 13g. compaction summary transport drop: the client's retry notice is
     # mirrored into the live progress block; the resumed summary lands intact
     log13g = LazyEventLog.in_memory()
@@ -856,6 +926,8 @@ def main() -> int:
         "resumed summary streamed once, no duplication",
     )
 
+
+def _compaction_summary_mid_drop() -> None:
     # 13h. mid-summary drop: the notice says discard=true, so the text the dead
     # attempt already streamed is thrown away and the counter restarts -- the
     # stored summary is the retried one, not half-sentence + retried tail
@@ -893,6 +965,8 @@ def main() -> int:
     dropped13h = [e for e in notes13h if e.type == "compaction_delta" and e.note and e.chars == 0]
     check(bool(dropped13h), "the discard is reported with the counter reset to 0")
 
+
+def _resumed_session() -> None:
     # 14. resumed session: the byte trigger fires on the first turn
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -912,6 +986,8 @@ def main() -> int:
         check(len(comps) == 1, "byte trigger compacted on the first turn")
         check(comps[0].summary == "SUMMARY", "resume compaction summary recorded")
 
+
+def _tool_call_argument_streaming(config) -> None:
     # 15. tool-call argument streaming: deltas reassemble to the final arguments
     from agent.events import ToolCallDeltaEvent
 
@@ -939,6 +1015,8 @@ def main() -> int:
         joined = "".join(e.delta for e in streamed)
         check(joined == '{"path": "a.txt", "content": "hi"}', "streamed deltas reassemble the arguments")
 
+
+def _chat_mode_toolset() -> tuple[Config, LazyEventLog]:
     # 15b. chat-mode toolset: schema pruning + system-prompt mode note
     from agent.core import context as _context
 
@@ -956,6 +1034,11 @@ def main() -> int:
         msgs_work = _context.derive_messages(log, Config(mode="work"), "t")
         check("work (full access)" in msgs_work[0]["content"], "work system prompt carries the work note")
         check("chat (read-only)" not in msgs_work[0]["content"], "work system prompt has no chat note")
+    return chat_cfg, log
+
+
+def _project_memory_prompt(chat_cfg: Config, log: LazyEventLog) -> None:
+    from agent.core import context as _context
 
     # 15d. project memory: titles listed; base prompt carries save guidance
     from agent.memory import MemoryStore
@@ -990,6 +1073,8 @@ def main() -> int:
             "the save stance is present even without stored memories",
         )
 
+
+def _chat_run_command(chat_cfg: Config) -> None:
     # 15c. chat run_command: reads run, writes/unknowns rejected (default deny)
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -1011,6 +1096,8 @@ def main() -> int:
             "rejection fed back as an error",
         )
 
+
+def _chat_write_tools_unreachable(chat_cfg: Config) -> None:
     # 15d. chat mode cannot reach write_file even if the model tries (unknown tool)
     with tempfile.TemporaryDirectory() as tmp:
         sb = LocalWorkspace(tmp)
@@ -1026,6 +1113,8 @@ def main() -> int:
         check(result == "done", "chat run with attempted write completes")
         check(not (sb.root / "a.txt").exists(), "write_file unknown in chat mode: nothing written")
 
+
+def _classify_command() -> None:
     # 15e. classify_command unit checks (static read-only classifier)
     from agent.tools.shell import classify_command
 
@@ -1044,6 +1133,8 @@ def main() -> int:
         got, _ = classify_command(cmd)
         check(got == exp, f"classify {cmd!r} == {exp!r} (got {got!r})")
 
+
+def _stop_during_a_tool_call() -> None:
     # 16. Stop during a tool call: the cancel event reaches the RUNNING
     # run_command and kills the command tree, so the run aborts promptly —
     # it must NOT wait out the command. (The Stop-latency bug: cancel was
@@ -1102,6 +1193,8 @@ def main() -> int:
                 "the killed command says it was aborted by Stop",
             )
 
+
+def _window_overflow_compacts() -> None:
     # 17. window overflow: the loop compacts the overflowing window and retries
     #     the same turn once instead of aborting. Both wire protocols normalize
     #     the provider's own wording onto context_window_exceeded for exactly
@@ -1147,6 +1240,49 @@ def main() -> int:
         check(len(comps17) == 1 and comps17[0].summary == "SUMMARY", "the overflow forced one compaction")
         check(agent.log.cpr_start() > 0, "the window slid to the summary: the overflowed history is gone")
         check("earlier answer" in str(fake17.seen[1]), "the summarizer saw the window that overflowed")
+
+
+def main() -> int:
+    config = Config()
+
+    _natural_finish(config)
+    _tool_round_trip(config)
+    _budget_abort()
+    _doom_loop_warns(config)
+    _doom_loop_aborts(config)
+    _max_tokens_truncation(config)
+    _sink_isolation(config)
+    _cancellation_before_any_llm_call(config)
+    _permission_allow(config)
+    _permission_deny(config)
+    _permission_ask(config)
+    _sandbox_escape_approved(config)
+    _sandbox_escape_denied(config)
+    _run_command_escape(config)
+    _fatal_llm_error(config)
+    _stop_mid_stream()
+    _mid_stream_transport_drop(config)
+    _mid_answer_retry_discards(config)
+    _stop_inside_a_blocked_read()
+    _compaction_overflow()
+    _compaction_progress()
+    big_log, CaptureLlm, prompt_len = _compaction_window_reaches_summarizer()
+    _compaction_prompt_has_no_input_budget(big_log, CaptureLlm, prompt_len)
+    prompt_n = _compaction_second_window()
+    _compaction_output_contract_tail(prompt_n)
+    _compaction_cancel()
+    _compaction_empty_reply(config)
+    _compaction_summary_transport_drop()
+    _compaction_summary_mid_drop()
+    _resumed_session()
+    _tool_call_argument_streaming(config)
+    chat_cfg, chat_log = _chat_mode_toolset()
+    _project_memory_prompt(chat_cfg, chat_log)
+    _chat_run_command(chat_cfg)
+    _chat_write_tools_unreachable(chat_cfg)
+    _classify_command()
+    _stop_during_a_tool_call()
+    _window_overflow_compacts()
 
     print("\nall passed")
     return 0

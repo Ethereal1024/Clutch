@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover - Windows
 from agent.config import Config
 from agent.server import Broadcaster, RunState, build
 from agent.tools import catalog
-from tests.testsupport import check, http_get, http_post
+from tests.testsupport import check, http_get, http_post, ui_source
 
 
 def _saved_api_key() -> str:
@@ -209,6 +209,827 @@ def main() -> int:
             _run_server_test()
 
 
+def _health_and_cors(base_url) -> None:
+    # 1. health + CORS + API-only routing (no static files)
+    st, body = http_get(f"{base_url}/api/health")
+    check(st == 200 and '"ok": true' in body, "health ok")
+    req = urllib.request.Request(f"{base_url}/api/health")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        check(r.headers.get("Access-Control-Allow-Origin") == "*", "CORS allow-origin present")
+    st, _ = http_get(f"{base_url}/")
+    check(st == 404, "root is not served (API-only server)")
+    st, _ = http_get(f"{base_url}/app.js")
+    check(st == 404, "static assets not served")
+
+
+def _run_without_project_rejected(base_url) -> None:
+    # 2. run without a project is rejected
+    st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
+    check(st == 400, "run without project rejected")
+
+
+def _empty_task_rejected(base_url) -> None:
+    # 2b. reject empty task
+    st, body = http_post(f"{base_url}/api/run", {"task": "   "})
+    check(st == 400, "empty task rejected")
+
+
+def _settings_api_key(base_url, state) -> None:
+    # 2c. settings: persist an API key in-memory + to user dir
+    st, body = http_post(f"{base_url}/api/settings", {"api_key": "sk-test-123"})
+    check(st == 200, "settings accepted")
+    check(state.api_key == "sk-test-123", "settings stored in state")
+    state.api_key = None
+
+
+def _settings_endpoint(base_url, config) -> None:
+    # 2d. settings: one flat LLM endpoint (base_url/model/api_key)
+    st, body = http_post(
+        f"{base_url}/api/settings",
+        {"base_url": "https://open.bigmodel.cn/api/coding/paas/v4", "model": "glm-5.3", "api_key": "sk-test-123"},
+    )
+    check(st == 200, "settings save accepted")
+    check(
+        config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4" and config.model == "glm-5.3",
+        "settings applied to live config",
+    )
+    st, body = http_get(f"{base_url}/api/settings")
+    data = json.loads(body)
+    check(
+        data.get("base_url") == "https://open.bigmodel.cn/api/coding/paas/v4"
+        and data.get("model") == "glm-5.3"
+        and data.get("has_api_key") is True,
+        "GET /api/settings returns the live LLM endpoint config",
+    )
+    check("api_key" not in data or not data["api_key"], "GET /api/settings never leaks api keys")
+
+
+def _settings_reasoning_effort(base_url, config) -> None:
+    # 2d2. reasoning_effort passthrough: applied live, validated, clearable
+    st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "max"})
+    check(st == 200, "reasoning_effort save accepted")
+    check(config.llm_reasoning_effort == "max", "reasoning_effort applied to live config")
+    st, body = http_get(f"{base_url}/api/settings")
+    check(json.loads(body).get("reasoning_effort") == "max", "GET reports the saved reasoning_effort")
+    st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "turbo"})
+    check(st == 400, "invalid reasoning_effort rejected")
+    st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": ""})
+    check(st == 200, "empty reasoning_effort accepted (clears the knob)")
+    check(config.llm_reasoning_effort is None, "empty reasoning_effort clears live config")
+
+
+def _settings_api_protocol(base_url, config) -> None:
+    # 2d3. api_protocol knob: same shape (applied live, validated, clearable)
+    check(json.loads(http_get(f"{base_url}/api/settings")[1]).get("api_protocol") == "",
+          "GET reports an unset api_protocol")
+    st, body = http_post(f"{base_url}/api/settings", {"api_protocol": "responses"})
+    check(st == 200, "api_protocol save accepted")
+    check(config.llm_api_protocol == "responses", "api_protocol applied to live config")
+    st, body = http_get(f"{base_url}/api/settings")
+    check(json.loads(body).get("api_protocol") == "responses", "GET reports the saved api_protocol")
+    check(_saved_knob("api_protocol") == "responses", "api_protocol persisted to the settings file")
+    st, body = http_post(f"{base_url}/api/settings", {"api_protocol": "carrier-pigeon"})
+    check(st == 400, "invalid api_protocol rejected")
+    st, body = http_post(f"{base_url}/api/settings", {"api_protocol": ""})
+    check(st == 200, "empty api_protocol accepted (clears the knob)")
+    check(config.llm_api_protocol is None, "empty api_protocol clears live config")
+    check(_saved_knob("api_protocol") is None, "cleared api_protocol leaves the settings file")
+
+    # partial save: sending only the model keeps the saved base_url
+    st, body = http_post(f"{base_url}/api/settings", {"model": "glm-5.3"})
+    check(st == 200, "partial save accepted")
+    check(config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4", "partial save keeps the saved base_url")
+    st, body = http_post(f"{base_url}/api/settings", {})
+    check(st == 400, "empty settings body rejected")
+    # restore the saved endpoint so the real-run section targets a working pairing
+    saved_url, saved_model = _saved_endpoint()
+    check(bool(saved_url and saved_model), "saved endpoint present for the real-run section")
+    st, body = http_post(f"{base_url}/api/settings", {"base_url": saved_url, "model": saved_model})
+    check(st == 200, "settings restored")
+
+
+def _host_defaults_table(base_url) -> None:
+    # 2e. the host's own tables a renderer needs (GET /api/host): the ui
+    # defaults the document (host.json) merged over the built-ins, served
+    # rather than duplicated -- app.js's copy is only the fallback
+    st, body = http_get(f"{base_url}/api/host")
+    data = json.loads(body)
+    check(st == 200 and "ui" in data, "GET /api/host answers with the host's ui table")
+    check(data["ui"].get("chip") == catalog.DEFAULTS.get("chip"), "the served ui table IS catalog.DEFAULTS")
+    check("mutates" not in data["ui"], "the host derives mutates per tool; the table holds no default for it")
+
+
+def _create_project(base_url, proj_dir) -> Path:
+    # 3. create a project
+    st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "demo"})
+    check(st == 200, "project created")
+    pdata = json.loads(body)
+    check(pdata.get("name") == "demo", "project name returned")
+    clc = Path(pdata["project"])
+    check(clc.suffix == ".clc" and clc.exists(), ".clc file exists")
+    check(pdata.get("workdir") == str(proj_dir), "workdir is project dir")
+    return clc
+
+
+def _reopen_project(base_url, clc) -> None:
+    # 3b. reopen the project (NDJSON stream: progress, meta, count, events)
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "project reopened")
+    lines = [json.loads(line) for line in body.splitlines() if line.strip()]
+    meta = next((m["meta"] for m in lines if m.get("meta")), None)
+    check(meta is not None and meta.get("name") == "demo", "reopened project name")
+
+
+def _file_browser(base_url, proj_dir) -> None:
+    # 3c. server file browser (/api/fs/list)
+    st, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
+    data = json.loads(body)
+    check(
+        data.get("error") is None and any(e["name"] == "demo.clc" and not e["dir"] for e in data["entries"]),
+        "fs list shows the project file",
+    )
+    st, body = http_get(f"{base_url}/api/fs/list")
+    data = json.loads(body)
+    check(data.get("path") == str(Path.home()), "fs list defaults to home")
+    st, body = http_get(f"{base_url}/api/fs/list?path=/nonexistent_clutch_xyz")
+    data = json.loads(body)
+    check(data.get("error"), "fs list reports a bad path")
+
+
+def _symlink_marking(base_url, proj_dir, clc) -> None:
+    # 3d. symlinks are marked with their resolved target in the browser + tree
+    if not _symlinks_supported(proj_dir):
+        # Windows without Developer Mode / SeCreateSymbolicLinkPrivilege
+        # (a non-admin shell): os.symlink raises WinError 1314. The server's
+        # symlink marking is already covered on hosts that can create them.
+        print("skip: symlink checks (this host cannot create symlinks)")
+    else:
+        _check_symlink_marking(base_url, proj_dir, clc)
+
+
+def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
+    # 3e. lazy .clc: open reports older bytes; history pages by byte range
+    from agent.events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, _line_bytes, event_to_json
+
+    lazy_dir = Path(sdir) / "lazywork"
+    lazy_dir.mkdir()
+    lclc = lazy_dir / "big.clc"
+    levents = [UserMessageEvent(content="task")]
+    for i in range(1, 500):
+        levents.append(AssistantMessageEvent(content=f"old work {i}"))
+    # compaction line offset = window start (persisted in header)
+    comp_off = sum(_line_bytes(ev) for ev in levents[:450])
+    levents.append(CompactionEvent(summary="old work summarized"))
+    for i in range(501, 531):
+        levents.append(AssistantMessageEvent(content=f"recent {i}"))
+    from agent.memory import empty_index_line
+
+    lazy_lines = [
+        "# clutch project v1", "name: lazybig", "model: fake-model",
+        f"cpr_start={comp_off:010d}", empty_index_line(), "---",
+    ]
+    for ev in levents:
+        lazy_lines.append(event_to_json(ev))
+    # newline="\n": byte-addressed .clc — CRLF would shift every offset
+    lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8", newline="\n")
+
+    # every open is lazy now (one code path)
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
+    check(st == 200, "lazy project reopened")
+    llines = [json.loads(line) for line in body.splitlines() if line.strip()]
+    lmeta = next((m["meta"] for m in llines if m.get("meta")), None)
+    check(lmeta is not None and lmeta.get("name") == "lazybig", "lazy project name")
+    lcount = next((m for m in llines if m.get("count") is not None), None)
+    check(lcount is not None and lcount.get("older") == comp_off,
+          "lazy open reports the older bytes (window start = cpr_start)")
+    lsevs = [m for m in llines if m.get("event") and m.get("offset") is not None]
+    check(lsevs and lsevs[0]["offset"] == comp_off,
+          "lazy open streams the window first (offset cpr_start)")
+    check(all(m["offset"] >= comp_off for m in lsevs),
+          "window events carry byte offsets at/after the compaction line")
+    check(all(isinstance(m.get("offset"), int) and "event" in m for m in lsevs),
+          "lazy open events are {offset, event} wrapped")
+
+    st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000000")
+    h = json.loads(body)
+    check(st == 200 and h.get("older") == 0, "history after the last page reports older=0")
+    check(len(h["events"]) == 450, "history pages the task + the on-disk middle (450 events)")
+    check(h["events"][0]["offset"] == 0 and h["events"][-1]["offset"] < comp_off,
+          "history events carry byte offsets inside the paged region")
+    st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000")
+    h2 = json.loads(body)
+    check(len(h2["events"]) < len(h["events"]), "history respects the byte-window clamp")
+    st, body = http_get(f"{base_url}/api/history?before=1&limit=1000000")
+    h3 = json.loads(body)
+    check(h3.get("events") == [] and h3.get("older") == 0, "history before the task is empty")
+    return lclc, comp_off
+
+
+def _clc_read_and_append(base_url, lclc) -> dict:
+    # 3f. /api/clc*: byte-level .clc service for decoupled tool modules —
+    # exact bytes back (b64), append hands back the write offset, patch is
+    # strictly in place, and the event log's size bookkeeping stays exact.
+    disk0 = os.path.getsize(lclc)
+    st, body = http_get(f"{base_url}/api/clc?lo=0&hi=16")
+    c = json.loads(body)
+    check(st == 200 and c.get("size") == disk0, "clc read reports the file size")
+    check(base64.b64decode(c["b64"]) == b"# clutch project", "clc read returns exact bytes")
+    st, body = http_get(f"{base_url}/api/clc?lo=0&hi=0")
+    check(json.loads(body)["b64"] == "", "empty range is an empty payload")
+    st, body = http_get(f"{base_url}/api/clc?lo=5&hi=3")
+    check(st == 400, "clc read rejects lo > hi")
+    st, body = http_get(f"{base_url}/api/clc?lo=99999999&hi=99999999")
+    check(st == 200 and json.loads(body)["b64"] == "", "clc read clamps out-of-range hi")
+
+    mem_line = '{"title": "tone", "content": "be terse", "updated": 1234.5}'
+    st, body = http_post(f"{base_url}/api/clc/append", {"line": mem_line})
+    a = json.loads(body)
+    check(st == 200 and a.get("offset") == disk0, "append returns the pre-append size as offset")
+    check(a.get("size") == disk0 + len(mem_line) + 1, "append size counts the newline")
+    st, body = http_get(f"{base_url}/api/clc?lo={a['offset']}&hi={a['size']}")
+    check(
+        base64.b64decode(json.loads(body)["b64"]) == (mem_line + "\n").encode(),
+        "append lands at the returned offset",
+    )
+    st, body = http_post(f"{base_url}/api/clc/append", {"line": "two\nlines"})
+    check(st == 400, "append rejects embedded newlines")
+    return a
+
+
+def _clc_patch_memory_index(base_url, lclc, state, a) -> None:
+    # the module's real flow: patch the header's fixed-width memory index in
+    # place to point at the appended line (never growing the file)
+    from agent.memory import index_line_from_offsets, parse_index_line, ring_add, ring_items
+
+    st, body = http_get(f"{base_url}/api/clc?lo=0&hi={min(a['size'], 4096)}")
+    head_raw = base64.b64decode(json.loads(body)["b64"])
+    idx_off, idx_ln = 0, b""
+    for ln in head_raw.split(b"\n"):
+        if ln.startswith(b"memory_index="):
+            idx_ln = ln
+            break
+        idx_off += len(ln) + 1
+    check(bool(idx_ln), "clc read exposes the header memory_index line")
+    count, hdr_head, offsets = parse_index_line(idx_ln.decode())
+    check(count == 0, "fresh project index is empty")
+    count, hdr_head = ring_add(count, hdr_head, offsets, a["offset"])
+    new_ln = index_line_from_offsets(ring_items(count, hdr_head, offsets)).encode("ascii")
+    check(len(new_ln) == len(idx_ln), "rebuilt index line keeps the fixed width")
+    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": idx_off, "b64": base64.b64encode(new_ln).decode()})
+    check(st == 200 and json.loads(body).get("size") == a["size"], "patch keeps the file size")
+    st, body = http_get(f"{base_url}/api/clc?lo=0&hi={min(a['size'], 4096)}")
+    again = parse_index_line(base64.b64decode(json.loads(body)["b64"])[idx_off:].split(b"\n", 1)[0].decode())
+    check(again is not None and a["offset"] in again[2], "patched index points at the appended line")
+    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": a["size"], "b64": base64.b64encode(b"x").decode()})
+    check(st == 400, "patch refuses to grow the file")
+    st, body = http_post(
+        f"{base_url}/api/clc/patch", {"offset": a["size"] - 1, "b64": base64.b64encode(b"xy").decode()}
+    )
+    check(st == 400, "patch refuses an overwrite past EOF")
+    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": -1, "b64": ""})
+    check(st == 400, "patch rejects a negative offset")
+    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": 0, "b64": "!!not-b64!!"})
+    check(st == 400, "patch rejects invalid base64")
+
+    # note_bytes_written kept the lazy log's window math exact: its byte
+    # total still equals the on-disk size after the endpoint appends
+    check(
+        state.project.log._file_bytes == os.path.getsize(lclc),
+        "endpoint appends are bookkept into the event log",
+    )
+
+
+def _clc_sse_replay(base_url, clc, comp_off) -> None:
+    evs2: list[dict] = []
+    done2 = threading.Event()
+
+    def sse_reader2() -> None:
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/events", timeout=30) as r:
+                seen_hist = False
+                for raw in r:
+                    line = raw.decode().strip()
+                    if line.startswith("data: "):
+                        ev = json.loads(line[6:])
+                        evs2.append(ev)
+                        if ev.get("type") == "history":
+                            seen_hist = True
+                        if seen_hist and "offset" in ev and "event" in ev:
+                            done2.set()
+                            break
+        except Exception as e:  # noqa: BLE001
+            print(f"  [sse2] {e}")
+
+    rt2 = threading.Thread(target=sse_reader2, daemon=True)
+    rt2.start()
+    check(done2.wait(timeout=30), "SSE lazy replay opens with a history line")
+    hist_idx = next((i for i, e in enumerate(evs2) if e.get("type") == "history"), None)
+    first_off = next((i for i, e in enumerate(evs2) if "offset" in e and "event" in e), None)
+    check(hist_idx is not None and isinstance(evs2[hist_idx].get("older"), int),
+          "history line carries the older count")
+    check(first_off is not None and hist_idx is not None and hist_idx < first_off,
+          "history line precedes the offset-wrapped replay")
+    check(evs2[first_off]["offset"] == comp_off, "SSE replay starts at the window's byte offset")
+
+    # switch back to the demo project so the real-run section stays untouched
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "switched back to the demo project")
+
+
+def _sse_keepalive(base_url) -> None:
+    # ---- SSE keepalive: the idle stream reasserts itself BY NAME ----
+    # The mouse hole this closes: the renderer cached the server state
+    # ("running" drives the Stop button) and could only refresh it from this
+    # stream, while a half-open socket raises no error on either side. The
+    # old heartbeat was an SSE comment, which reaches no listener at all, so
+    # a dead stream looked exactly like an idle one and the window froze on
+    # "thinking" while the run went on. The frame must therefore be a NAMED
+    # event, and the client must be able to derive its staleness window from
+    # the very constant that paces it here.
+    import agent.server as server_mod
+
+    keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+    server_mod.SSE_KEEPALIVE_SEC = 0.2  # patched in globally: the loop reads it per wait
+    try:
+        with contextlib.closing(urllib.request.urlopen(f"{base_url}/api/events", timeout=15)) as r:
+            lines: list[str] = []
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                raw = r.readline()
+                if not raw:
+                    break
+                lines.append(raw.decode("utf-8", "replace").strip())
+                if lines[-2:] == ["event: ping", "data: {}"]:
+                    break
+            check(
+                lines[-2:] == ["event: ping", "data: {}"],
+                "an idle stream keeps the connection provably alive by name",
+            )
+            check(
+                not [ln for ln in lines if ln.startswith(":")],
+                "the keepalive is not an SSE comment (invisible to EventSource)",
+            )
+    finally:
+        server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
+
+    app_js = ui_source()                       # every renderer module, in page order
+    m = re.search(r"const SSE_KEEPALIVE_MS = (\d+);", app_js)
+    check(
+        m is not None and int(m.group(1)) == int(server_mod.SSE_KEEPALIVE_SEC * 1000),
+        "the renderer liveness window matches the server keepalive (one constant, two languages)",
+    )
+
+
+def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
+    import agent.server as server_mod
+
+    # ---- the connecting stream carries the HOST's status, not a flat idle ----
+    # A stream is also what a RECONNECTING window gets: an EventSource retry,
+    # a phone coming back from the background, a tunnel healer. Telling it
+    # "idle" while a run is in flight left a running task painted as idle for
+    # the rest of the run (the run emits its own "running" only once, at the
+    # start), so the frame must be derived from the host's own state.
+    #
+    # These probes hang up right after the first frame, and the server only
+    # notices a hung-up subscriber when its next keepalive write fails — so
+    # the keepalive is shortened for this section (the same lever the section
+    # above uses) and the block waits for its own subscribers to be gone
+    # before handing the broadcaster back to the isolation section.
+    def first_status(url: str) -> str | None:
+        with contextlib.closing(urllib.request.urlopen(url, timeout=15)) as r:
+            for raw in r:
+                line = raw.decode().strip()
+                if not line.startswith("data: "):
+                    continue
+                ev = json.loads(line[6:])
+                if ev.get("type") == "state_update" and ev.get("key") == "execution_status":
+                    return ev.get("value")
+        return None
+
+    subscribers_before = broadcaster.count()
+    probe_keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+    server_mod.SSE_KEEPALIVE_SEC = 0.2
+    try:
+        check(first_status(f"{base_url}/api/events?replay=0") == "idle",
+              "nothing in flight: a connecting window is told idle")
+        state.busy = True
+        state.run_project = str(clc)
+        try:
+            live = first_status(
+                f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
+            other = first_status(
+                f"{base_url}/api/events?replay=0&project={quote(str(clc.parent / 'elsewhere.clc'))}")
+        finally:
+            state.busy = False
+            state.run_project = None
+        check(live == "running",
+              "reconnecting into a live run of THIS project is told running")
+        check(other == "idle",
+              "another project's run is still not leaked into this window's status")
+        check(first_status(f"{base_url}/api/events?replay=0") == "idle",
+              "a finished run reports idle again")
+        # hand the broadcaster back clean: no probe subscriber outlives this
+        # block (a stale subscriber inflates broadcaster.count(), which the
+        # isolation section below uses as "both windows are connected")
+        deadline = time.time() + 10
+        while broadcaster.count() > subscribers_before and time.time() < deadline:
+            time.sleep(0.05)
+        check(broadcaster.count() <= subscribers_before,
+              "the status probes hang up cleanly (they leave no subscriber behind)")
+    finally:
+        server_mod.SSE_KEEPALIVE_SEC = probe_keepalive_saved
+
+
+def _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster) -> Path:
+    # ---- multi-window isolation: two SSE subscribers on different projects ----
+    from agent.events import FinalEvent
+
+    st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "iso-b"})
+    check(st == 200, "second project created for isolation")
+    clc2 = Path(json.loads(body)["project"])
+    # reopen the demo project so the active project is A's file again
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "active project is A again")
+
+    evs_a: list[dict] = []
+    evs_b: list[dict] = []
+    done_a = threading.Event()
+    done_b = threading.Event()
+
+    def iso_reader(evs: list[dict], done: threading.Event, url: str, want: str) -> None:
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                for raw in r:
+                    line = raw.decode().strip()
+                    if line.startswith("data: "):
+                        ev = json.loads(line[6:])
+                        evs.append(ev)
+                        if ev.get("type") == "final" and ev.get("summary") == want:
+                            done.set()
+                            break
+        except Exception as e:  # noqa: BLE001
+            print(f"  [iso] {e}")
+
+    threading.Thread(
+        target=iso_reader,
+        args=(evs_a, done_a, f"{base_url}/api/events?project={quote(str(clc))}&replay=1", "iso-a"),
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=iso_reader,
+        args=(evs_b, done_b, f"{base_url}/api/events?project={quote(str(clc2))}&replay=1", "iso-b"),
+        daemon=True,
+    ).start()
+    deadline = time.time() + 10
+    while broadcaster.count() < 2 and time.time() < deadline:
+        time.sleep(0.05)
+    check(broadcaster.count() >= 2, "both SSE subscribers connected")
+
+    # a run on project A must reach only A's subscriber
+    state.run_project = str(clc)
+    broadcaster.publish(FinalEvent(status="completed", summary="iso-a"))
+    check(done_a.wait(timeout=10), "A's subscriber received A's run final")
+    time.sleep(0.3)  # give B's loop a chance to (wrongly) deliver the same event
+    check(not any(e.get("summary") == "iso-a" for e in evs_b), "B's subscriber never saw A's run final")
+
+    # a run on project B reaches only B's subscriber
+    state.run_project = str(clc2)
+    broadcaster.publish(FinalEvent(status="completed", summary="iso-b"))
+    check(done_b.wait(timeout=10), "B's subscriber received B's run final")
+
+    # a run carrying project=<path> switches the active project before starting
+    state.run_project = None
+    state.api_key = "sk-fake"  # let start_task reach the busy check without LLM init
+    state.busy = True  # busy -> 409, and the project of the live run is left alone
+    st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
+    check(st == 409, "busy run rejected during switch test")
+    check(
+        str(state.project.path) == str(clc.resolve()),
+        "a busy server never switches away from (and unlocks) the project of the live run",
+    )
+    state.busy = False
+    state.api_key = None
+    # not busy: the switch happens (the run itself fails without a key, which
+    # is the part the lock section below builds on)
+    st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
+    check(st == 500, "run without an LLM key fails")
+    check(str(state.project.path) == str(clc2.resolve()), "run with project= switched the active project")
+    # restore the demo project so the real-run section stays untouched
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "switched back to the demo project after isolation")
+    return clc2
+
+
+def _write_lock_one_writer(base_url, clc, clc2, state) -> None:
+    # ---- 3f. per-window write lock: one writer per .clc ----
+    # the server under test released its own lock first...
+    from agent.core.project_lock import ProjectLock, _local_lock_path
+
+    lock_path = _local_lock_path(str(clc))
+    handle = state.project.lock if state.project is not None else None
+    check(handle is not None, "open project holds a local lock")
+    ProjectLock.release(handle)
+
+    # ...and ANOTHER window (process) now holds it
+    with _lock_held_elsewhere(str(clc), lock_path):
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 409, "second window open -> 409")
+        err = json.loads(body)
+        check(err.get("code") == "project_open_conflict", "409 carries project_open_conflict")
+
+        # read-only open succeeds despite the lock, carries the flag in meta
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
+        check(st == 200, "read-only open succeeds while another window holds the lock")
+        ro_meta = next(
+            (m["meta"] for m in (json.loads(line) for line in body.splitlines() if line.strip()) if m.get("meta")),
+            None,
+        )
+        check(ro_meta is not None and ro_meta.get("read_only") is True, "meta carries read_only")
+        check(state.project is not None and state.project.read_only, "project is read-only")
+
+        # a run on the read-only project is refused
+        st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
+        check(st == 409, "run on a read-only project rejected")
+
+        # a different project opens fine (the lock is per-path)
+        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
+        check(st == 200, "different project opens while another holds demo's lock")
+
+    # the other window released -> the demo project opens normally again
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "open works after the other window released")
+    check(state.project is not None and not state.project.read_only, "reopen is writable again")
+
+
+def _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir) -> None:
+    from agent.core.project_lock import ProjectLock, _local_lock_path
+
+    # ---- 3f-bis. the write lock FOLLOWS the active project ----
+    # A window holds the write lock on at most its CURRENTLY-open project:
+    # the moment the active project is replaced — by another project opened
+    # for write or read-only, by a created one, by a run that switches — the
+    # lock of the project left behind goes back to the pool. A lock that
+    # outlives its project is unreachable (nothing keeps the handle, so
+    # nothing could ever release it) and locks every other window out of that
+    # .clc until this server exits.
+    def lock_free(path: Path) -> bool:
+        """Whether a second INDEPENDENT claim on this .clc still succeeds —
+        the kernel truth, not the server's bookkeeping. The probe claims and
+        immediately releases, so it leaves nothing held."""
+        h = ProjectLock._acquire_local(str(path))
+        if h is None:
+            return False
+        ProjectLock.release(h)
+        return True
+
+    def open_project(path: Path, read_only: bool = False) -> int:
+        body = {"path": str(path)}
+        if read_only:
+            body["read_only"] = True
+        st, _ = http_post(f"{base_url}/api/project/open", body)
+        return st
+
+    st = open_project(clc)
+    check(st == 200 and state.project.lock is not None, "demo is open for write (lock held)")
+    check(not lock_free(clc), "another window cannot claim the open project")
+
+    # a read-only open gives the write claim up: the project left behind is
+    # free again (and the read-only one never claims anything)
+    st = open_project(clc2, read_only=True)
+    check(st == 200, "b opens read-only")
+    check(state.project.read_only and state.project.lock is None, "a read-only project holds no lock")
+    check(lock_free(clc), "the project left for a read-only one hands its write lock back")
+
+    # a WRITE reopen of the same project keeps the lock (it is reused, never
+    # dropped and re-taken: another window's claim during that window would
+    # be a spurious conflict)
+    check(open_project(clc) == 200 and open_project(clc) == 200, "demo reopened for write twice")
+    check(not lock_free(clc), "reopening the same project for write keeps the lock")
+
+    # a created project is write-locked like an opened one (the window that
+    # created it is its only writer from the first byte)
+    lkdir = Path(sdir) / "lockwork"
+    lkdir.mkdir()
+    st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "created"})
+    check(st == 200, "project created")
+    created = Path(json.loads(body)["project"])
+    check(state.project.lock is not None, "a created project holds a write lock")
+    check(not lock_free(created), "a second window cannot claim a created project")
+    check(open_project(clc) == 200, "moved on to another project")
+    check(lock_free(created), "the created project hands its lock back when left")
+
+    # a create must never TAKE a path another window holds
+    victim = lkdir / "taken.clc"
+    with _lock_held_elsewhere(str(victim), _local_lock_path(str(victim))):
+        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "taken"})
+        check(st == 409, "create over another window's path is refused")
+        check(json.loads(body).get("code") == "project_open_conflict", "the create conflict carries the code")
+        check(not victim.exists(), "the refused create wrote nothing at all")
+
+    # a run that switches the active project hands the old lock back too
+    check(open_project(clc) == 200, "demo open for write again")
+    state.api_key = None  # no key: the run fails, the switch is what is under test
+    st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
+    check(st == 500, "run without a key fails (switch only)")
+    check(str(state.project.path) == str(clc2.resolve()), "the run switched the active project")
+    check(not lock_free(clc2), "the switched-to project holds the write lock")
+    check(lock_free(clc), "the switched-away project hands its write lock back")
+
+    st = open_project(clc)
+    check(st == 200, "demo reopened for the real-run section")
+
+
+def _remote_workspace_locks_locally() -> None:
+    # ---- 3g. remote workspaces lock locally (kernel lock keyed by .clc path) ----
+    from agent.core.project_lock import ProjectLock, _local_lock_path
+
+    with tempfile.TemporaryDirectory() as rdir:
+        root = Path(rdir)
+        rclc = str(root / "remote.clc")
+        (root / "remote.clc").write_text("x\n")
+
+        h1 = ProjectLock.acquire(rclc)
+        check(h1 is not None, "remote-path lock acquired (local kernel lock)")
+        check(not (root / ".clc.lock").exists(), "no lock file is written on the remote host")
+        check(Path(_local_lock_path(rclc)).exists(), "lock file lives in the local temp dir")
+
+        # a second window (fresh process state) is refused — the lock is held
+        saved_held = dict(ProjectLock._held)
+        ProjectLock._held.clear()
+        try:
+            h2 = ProjectLock.acquire(rclc)
+            check(h2 is None, "second window on the same remote project refused")
+        finally:
+            ProjectLock._held.update(saved_held)  # restore the demo handle
+
+        ProjectLock.release(h1)
+        check(ProjectLock.acquire(rclc) is not None, "fresh acquire after release")
+        ProjectLock.release_all()
+
+        # read-only remote dir must open for write (old lock file could not be created there)
+        ro = root / "ro-dir"
+        ro.mkdir()
+        (ro / "proj.clc").write_text("x\n")
+        ro.chmod(0o500)  # directory not writable by the ssh user
+        try:
+            h3 = ProjectLock.acquire(str(ro / "proj.clc"))
+            check(h3 is not None, "acquire works in a read-only remote dir (no remote write)")
+            ProjectLock.release(h3)
+        finally:
+            ro.chmod(0o700)  # restore so the temp dir cleans up
+
+
+def _dying_holder_frees_the_lock() -> None:
+    from agent.core.project_lock import ProjectLock
+
+    # ---- 3h. a dying holder frees the lock ----
+    # Both backends are KERNEL locks (flock / LockFileEx), so the OS drops the
+    # lock when the holder dies — no pid check, no reclaim. Killing the holder
+    # is therefore enough, but it does have to be the TRUE holder: see
+    # _kill_tree (the venv python.exe is a redirector).
+    with tempfile.TemporaryDirectory() as rdir:
+        root = Path(rdir)
+        rclc = str(root / "remote2.clc")
+        (root / "remote2.clc").write_text("x\n")
+        snippet = (
+            "import sys,time; sys.path.insert(0,sys.argv[1]);"
+            "from agent.core.project_lock import ProjectLock;"
+            "ProjectLock.acquire(sys.argv[2]);"
+            "print('LOCKED', flush=True);"
+            "time.sleep(120)"
+        )
+        holder = subprocess.Popen(
+            [sys.executable, "-c", snippet, str(Path(__file__).resolve().parents[1]), rclc],
+            stdout=subprocess.PIPE,
+        )
+        try:
+            deadline = time.time() + 15
+            locked = False
+            while time.time() < deadline:
+                if holder.poll() is not None:
+                    break
+                if holder.stdout.readline().decode("utf-8", "replace").strip() == "LOCKED":
+                    locked = True
+                    break
+                time.sleep(0.1)
+            check(locked, "holder subprocess took the lock")
+            check(ProjectLock.acquire(rclc) is None, "lock held by the live holder")
+            _kill_tree(holder)
+            freed = None
+            for _ in range(50):  # the kernel drops the lock at process death
+                freed = ProjectLock.acquire(rclc)
+                if freed is not None:
+                    break
+                time.sleep(0.1)
+            check(freed is not None, "lock freed when the holder died")
+            ProjectLock.release_all()
+        finally:
+            if holder.poll() is None:
+                _kill_tree(holder)
+
+
+def _start_real_run(base_url, state) -> bool:
+    # 4. real run (only with a key saved in ~/.clutch/settings.json)
+    key = _saved_api_key()
+    if not key:
+        print("\n(no API key in ~/.clutch/settings.json - real-run section skipped)")
+        print("\nall passed (network-free)")
+        return False
+    state.api_key = key  # the server uses the UI-saved key (no env fallback)
+
+    st, body = http_post(
+        f"{base_url}/api/run",
+        {
+            "task": (
+                "write a file hello.txt containing the word hi using write_file, "
+                "then read it with run_command cat hello.txt"
+            ),
+        },
+    )
+    check(st == 200 and body != "", "run accepted")
+    return True
+
+
+def _duplicate_run_rejected(base_url) -> None:
+    # 4b. duplicate run rejected (busy)
+    st, _ = http_post(f"{base_url}/api/run", {"task": "another"})
+    check(st == 409, "concurrent run rejected")
+
+
+def _collect_run_events(base_url) -> None:
+    # collect SSE events
+    events: list[dict] = []
+    done = threading.Event()
+
+    def sse_reader() -> None:
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/events", timeout=90) as r:
+                for raw in r:
+                    line = raw.decode().strip()
+                    if line.startswith("data: "):
+                        ev = json.loads(line[6:])
+                        if "event" in ev and isinstance(ev["event"], dict):
+                            continue  # replay row: wrapped history, not this run
+                        events.append(ev)
+                        if ev.get("type") == "final":
+                            done.set()
+                            break
+        except Exception as e:  # noqa: BLE001
+            print(f"  [sse] {e}")
+
+    rthread = threading.Thread(target=sse_reader, daemon=True)
+    rthread.start()
+    finished = done.wait(timeout=120)
+    check(finished, "final event received within 120s")
+
+    types = {e["type"] for e in events}
+    check("tool_call" in types, "tool calls streamed")
+    check("tool_result" in types, "tool results streamed")
+    finals = [e for e in events if e["type"] == "final"]
+    check(finals and finals[-1]["status"] == "completed", "final status completed")
+
+
+def _workspace_tree(base_url, clc) -> None:
+    # 5. workspace tree after run
+    st, body = http_get(f"{base_url}/api/workspace/tree")
+    data = json.loads(body)
+    check(st == 200 and data.get("root"), "workspace tree has root")
+    names = [n["name"] for n in data.get("tree", [])]
+    check("hello.txt" in names, "workspace shows created file")
+    check(clc.name not in names, ".clc file hidden from workspace tree")
+
+
+def _undo_endpoint(base_url, clc) -> None:
+    # 5b. undo endpoint: routing + guards (restore logic in selfcheck)
+    st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "hello.txt"})
+    check(st == 404, "revert on a never-snapshot file returns 404")
+    st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "../escape"})
+    check(st == 400, "revert rejects an escaping path")
+    st, body = http_post(f"{base_url}/api/workspace/revert", {"path": clc.name})
+    check(st == 400, "revert refuses the protected .clc")
+    st, body = http_post(f"{base_url}/api/workspace/revert", {})
+    check(st == 400, "revert requires a path")
+
+
+def _clc_persisted_conversation(base_url, clc) -> None:
+    # 6. .clc persisted the conversation
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "project reopened after run")
+    # /api/project/open streams NDJSON: meta, progress, event lines, done
+    ev_types = [
+        json.loads(line)["event"]["type"]
+        for line in body.splitlines()
+        if line.strip() and "event" in json.loads(line)
+    ]
+    check("user_message" in ev_types and "final" in ev_types, ".clc persisted conversation")
+
+
+def _stop_is_safe_on_idle(base_url, srv) -> None:
+    # 7. stop is safe on idle
+    st, _ = http_post(f"{base_url}/api/stop", {})
+    check(st == 200, "stop on idle is safe")
+
+
 def _run_server_test() -> int:
     config = Config(port=8899)
     broadcaster = Broadcaster()
@@ -224,756 +1045,37 @@ def _run_server_test() -> int:
 
         time.sleep(0.5)
 
-        # 1. health + CORS + API-only routing (no static files)
-        st, body = http_get(f"{base_url}/api/health")
-        check(st == 200 and '"ok": true' in body, "health ok")
-        req = urllib.request.Request(f"{base_url}/api/health")
-        with urllib.request.urlopen(req, timeout=15) as r:
-            check(r.headers.get("Access-Control-Allow-Origin") == "*", "CORS allow-origin present")
-        st, _ = http_get(f"{base_url}/")
-        check(st == 404, "root is not served (API-only server)")
-        st, _ = http_get(f"{base_url}/app.js")
-        check(st == 404, "static assets not served")
-
-        # 2. run without a project is rejected
-        st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
-        check(st == 400, "run without project rejected")
-
-        # 2b. reject empty task
-        st, body = http_post(f"{base_url}/api/run", {"task": "   "})
-        check(st == 400, "empty task rejected")
-
-        # 2c. settings: persist an API key in-memory + to user dir
-        st, body = http_post(f"{base_url}/api/settings", {"api_key": "sk-test-123"})
-        check(st == 200, "settings accepted")
-        check(state.api_key == "sk-test-123", "settings stored in state")
-        state.api_key = None
-
-        # 2d. settings: one flat LLM endpoint (base_url/model/api_key)
-        st, body = http_post(
-            f"{base_url}/api/settings",
-            {"base_url": "https://open.bigmodel.cn/api/coding/paas/v4", "model": "glm-5.3", "api_key": "sk-test-123"},
-        )
-        check(st == 200, "settings save accepted")
-        check(
-            config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4" and config.model == "glm-5.3",
-            "settings applied to live config",
-        )
-        st, body = http_get(f"{base_url}/api/settings")
-        data = json.loads(body)
-        check(
-            data.get("base_url") == "https://open.bigmodel.cn/api/coding/paas/v4"
-            and data.get("model") == "glm-5.3"
-            and data.get("has_api_key") is True,
-            "GET /api/settings returns the live LLM endpoint config",
-        )
-        check("api_key" not in data or not data["api_key"], "GET /api/settings never leaks api keys")
-
-        # 2d2. reasoning_effort passthrough: applied live, validated, clearable
-        st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "max"})
-        check(st == 200, "reasoning_effort save accepted")
-        check(config.llm_reasoning_effort == "max", "reasoning_effort applied to live config")
-        st, body = http_get(f"{base_url}/api/settings")
-        check(json.loads(body).get("reasoning_effort") == "max", "GET reports the saved reasoning_effort")
-        st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": "turbo"})
-        check(st == 400, "invalid reasoning_effort rejected")
-        st, body = http_post(f"{base_url}/api/settings", {"reasoning_effort": ""})
-        check(st == 200, "empty reasoning_effort accepted (clears the knob)")
-        check(config.llm_reasoning_effort is None, "empty reasoning_effort clears live config")
-
-        # 2d3. api_protocol knob: same shape (applied live, validated, clearable)
-        check(json.loads(http_get(f"{base_url}/api/settings")[1]).get("api_protocol") == "",
-              "GET reports an unset api_protocol")
-        st, body = http_post(f"{base_url}/api/settings", {"api_protocol": "responses"})
-        check(st == 200, "api_protocol save accepted")
-        check(config.llm_api_protocol == "responses", "api_protocol applied to live config")
-        st, body = http_get(f"{base_url}/api/settings")
-        check(json.loads(body).get("api_protocol") == "responses", "GET reports the saved api_protocol")
-        check(_saved_knob("api_protocol") == "responses", "api_protocol persisted to the settings file")
-        st, body = http_post(f"{base_url}/api/settings", {"api_protocol": "carrier-pigeon"})
-        check(st == 400, "invalid api_protocol rejected")
-        st, body = http_post(f"{base_url}/api/settings", {"api_protocol": ""})
-        check(st == 200, "empty api_protocol accepted (clears the knob)")
-        check(config.llm_api_protocol is None, "empty api_protocol clears live config")
-        check(_saved_knob("api_protocol") is None, "cleared api_protocol leaves the settings file")
-
-        # partial save: sending only the model keeps the saved base_url
-        st, body = http_post(f"{base_url}/api/settings", {"model": "glm-5.3"})
-        check(st == 200, "partial save accepted")
-        check(config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4", "partial save keeps the saved base_url")
-        st, body = http_post(f"{base_url}/api/settings", {})
-        check(st == 400, "empty settings body rejected")
-        # restore the saved endpoint so the real-run section targets a working pairing
-        saved_url, saved_model = _saved_endpoint()
-        check(bool(saved_url and saved_model), "saved endpoint present for the real-run section")
-        st, body = http_post(f"{base_url}/api/settings", {"base_url": saved_url, "model": saved_model})
-        check(st == 200, "settings restored")
-
-        # 2e. the host's own tables a renderer needs (GET /api/host): the ui
-        # defaults the document (host.json) merged over the built-ins, served
-        # rather than duplicated -- app.js's copy is only the fallback
-        st, body = http_get(f"{base_url}/api/host")
-        data = json.loads(body)
-        check(st == 200 and "ui" in data, "GET /api/host answers with the host's ui table")
-        check(data["ui"].get("chip") == catalog.DEFAULTS.get("chip"), "the served ui table IS catalog.DEFAULTS")
-        check("mutates" not in data["ui"], "the host derives mutates per tool; the table holds no default for it")
-
-        # 3. create a project
-        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "demo"})
-        check(st == 200, "project created")
-        pdata = json.loads(body)
-        check(pdata.get("name") == "demo", "project name returned")
-        clc = Path(pdata["project"])
-        check(clc.suffix == ".clc" and clc.exists(), ".clc file exists")
-        check(pdata.get("workdir") == str(proj_dir), "workdir is project dir")
-
-        # 3b. reopen the project (NDJSON stream: progress, meta, count, events)
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 200, "project reopened")
-        lines = [json.loads(line) for line in body.splitlines() if line.strip()]
-        meta = next((m["meta"] for m in lines if m.get("meta")), None)
-        check(meta is not None and meta.get("name") == "demo", "reopened project name")
-
-        # 3c. server file browser (/api/fs/list)
-        st, body = http_get(f"{base_url}/api/fs/list?path={quote(str(proj_dir))}")
-        data = json.loads(body)
-        check(
-            data.get("error") is None and any(e["name"] == "demo.clc" and not e["dir"] for e in data["entries"]),
-            "fs list shows the project file",
-        )
-        st, body = http_get(f"{base_url}/api/fs/list")
-        data = json.loads(body)
-        check(data.get("path") == str(Path.home()), "fs list defaults to home")
-        st, body = http_get(f"{base_url}/api/fs/list?path=/nonexistent_clutch_xyz")
-        data = json.loads(body)
-        check(data.get("error"), "fs list reports a bad path")
-
-        # 3d. symlinks are marked with their resolved target in the browser + tree
-        if not _symlinks_supported(proj_dir):
-            # Windows without Developer Mode / SeCreateSymbolicLinkPrivilege
-            # (a non-admin shell): os.symlink raises WinError 1314. The server's
-            # symlink marking is already covered on hosts that can create them.
-            print("skip: symlink checks (this host cannot create symlinks)")
-        else:
-            _check_symlink_marking(base_url, proj_dir, clc)
-
-        # 3e. lazy .clc: open reports older bytes; history pages by byte range
-        from agent.events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, _line_bytes, event_to_json
-
-        lazy_dir = Path(sdir) / "lazywork"
-        lazy_dir.mkdir()
-        lclc = lazy_dir / "big.clc"
-        levents = [UserMessageEvent(content="task")]
-        for i in range(1, 500):
-            levents.append(AssistantMessageEvent(content=f"old work {i}"))
-        # compaction line offset = window start (persisted in header)
-        comp_off = sum(_line_bytes(ev) for ev in levents[:450])
-        levents.append(CompactionEvent(summary="old work summarized"))
-        for i in range(501, 531):
-            levents.append(AssistantMessageEvent(content=f"recent {i}"))
-        from agent.memory import empty_index_line
-
-        lazy_lines = [
-            "# clutch project v1", "name: lazybig", "model: fake-model",
-            f"cpr_start={comp_off:010d}", empty_index_line(), "---",
-        ]
-        for ev in levents:
-            lazy_lines.append(event_to_json(ev))
-        # newline="\n": byte-addressed .clc — CRLF would shift every offset
-        lclc.write_text("\n".join(lazy_lines) + "\n", encoding="utf-8", newline="\n")
-
-        # every open is lazy now (one code path)
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
-        check(st == 200, "lazy project reopened")
-        llines = [json.loads(line) for line in body.splitlines() if line.strip()]
-        lmeta = next((m["meta"] for m in llines if m.get("meta")), None)
-        check(lmeta is not None and lmeta.get("name") == "lazybig", "lazy project name")
-        lcount = next((m for m in llines if m.get("count") is not None), None)
-        check(lcount is not None and lcount.get("older") == comp_off,
-              "lazy open reports the older bytes (window start = cpr_start)")
-        lsevs = [m for m in llines if m.get("event") and m.get("offset") is not None]
-        check(lsevs and lsevs[0]["offset"] == comp_off,
-              "lazy open streams the window first (offset cpr_start)")
-        check(all(m["offset"] >= comp_off for m in lsevs),
-              "window events carry byte offsets at/after the compaction line")
-        check(all(isinstance(m.get("offset"), int) and "event" in m for m in lsevs),
-              "lazy open events are {offset, event} wrapped")
-
-        st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000000")
-        h = json.loads(body)
-        check(st == 200 and h.get("older") == 0, "history after the last page reports older=0")
-        check(len(h["events"]) == 450, "history pages the task + the on-disk middle (450 events)")
-        check(h["events"][0]["offset"] == 0 and h["events"][-1]["offset"] < comp_off,
-              "history events carry byte offsets inside the paged region")
-        st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000")
-        h2 = json.loads(body)
-        check(len(h2["events"]) < len(h["events"]), "history respects the byte-window clamp")
-        st, body = http_get(f"{base_url}/api/history?before=1&limit=1000000")
-        h3 = json.loads(body)
-        check(h3.get("events") == [] and h3.get("older") == 0, "history before the task is empty")
-
-        # 3f. /api/clc*: byte-level .clc service for decoupled tool modules —
-        # exact bytes back (b64), append hands back the write offset, patch is
-        # strictly in place, and the event log's size bookkeeping stays exact.
-        disk0 = os.path.getsize(lclc)
-        st, body = http_get(f"{base_url}/api/clc?lo=0&hi=16")
-        c = json.loads(body)
-        check(st == 200 and c.get("size") == disk0, "clc read reports the file size")
-        check(base64.b64decode(c["b64"]) == b"# clutch project", "clc read returns exact bytes")
-        st, body = http_get(f"{base_url}/api/clc?lo=0&hi=0")
-        check(json.loads(body)["b64"] == "", "empty range is an empty payload")
-        st, body = http_get(f"{base_url}/api/clc?lo=5&hi=3")
-        check(st == 400, "clc read rejects lo > hi")
-        st, body = http_get(f"{base_url}/api/clc?lo=99999999&hi=99999999")
-        check(st == 200 and json.loads(body)["b64"] == "", "clc read clamps out-of-range hi")
-
-        mem_line = '{"title": "tone", "content": "be terse", "updated": 1234.5}'
-        st, body = http_post(f"{base_url}/api/clc/append", {"line": mem_line})
-        a = json.loads(body)
-        check(st == 200 and a.get("offset") == disk0, "append returns the pre-append size as offset")
-        check(a.get("size") == disk0 + len(mem_line) + 1, "append size counts the newline")
-        st, body = http_get(f"{base_url}/api/clc?lo={a['offset']}&hi={a['size']}")
-        check(
-            base64.b64decode(json.loads(body)["b64"]) == (mem_line + "\n").encode(),
-            "append lands at the returned offset",
-        )
-        st, body = http_post(f"{base_url}/api/clc/append", {"line": "two\nlines"})
-        check(st == 400, "append rejects embedded newlines")
-
-        # the module's real flow: patch the header's fixed-width memory index in
-        # place to point at the appended line (never growing the file)
-        from agent.memory import index_line_from_offsets, parse_index_line, ring_add, ring_items
-
-        st, body = http_get(f"{base_url}/api/clc?lo=0&hi={min(a['size'], 4096)}")
-        head_raw = base64.b64decode(json.loads(body)["b64"])
-        idx_off, idx_ln = 0, b""
-        for ln in head_raw.split(b"\n"):
-            if ln.startswith(b"memory_index="):
-                idx_ln = ln
-                break
-            idx_off += len(ln) + 1
-        check(bool(idx_ln), "clc read exposes the header memory_index line")
-        count, hdr_head, offsets = parse_index_line(idx_ln.decode())
-        check(count == 0, "fresh project index is empty")
-        count, hdr_head = ring_add(count, hdr_head, offsets, a["offset"])
-        new_ln = index_line_from_offsets(ring_items(count, hdr_head, offsets)).encode("ascii")
-        check(len(new_ln) == len(idx_ln), "rebuilt index line keeps the fixed width")
-        st, body = http_post(f"{base_url}/api/clc/patch", {"offset": idx_off, "b64": base64.b64encode(new_ln).decode()})
-        check(st == 200 and json.loads(body).get("size") == a["size"], "patch keeps the file size")
-        st, body = http_get(f"{base_url}/api/clc?lo=0&hi={min(a['size'], 4096)}")
-        again = parse_index_line(base64.b64decode(json.loads(body)["b64"])[idx_off:].split(b"\n", 1)[0].decode())
-        check(again is not None and a["offset"] in again[2], "patched index points at the appended line")
-        st, body = http_post(f"{base_url}/api/clc/patch", {"offset": a["size"], "b64": base64.b64encode(b"x").decode()})
-        check(st == 400, "patch refuses to grow the file")
-        st, body = http_post(
-            f"{base_url}/api/clc/patch", {"offset": a["size"] - 1, "b64": base64.b64encode(b"xy").decode()}
-        )
-        check(st == 400, "patch refuses an overwrite past EOF")
-        st, body = http_post(f"{base_url}/api/clc/patch", {"offset": -1, "b64": ""})
-        check(st == 400, "patch rejects a negative offset")
-        st, body = http_post(f"{base_url}/api/clc/patch", {"offset": 0, "b64": "!!not-b64!!"})
-        check(st == 400, "patch rejects invalid base64")
-
-        # note_bytes_written kept the lazy log's window math exact: its byte
-        # total still equals the on-disk size after the endpoint appends
-        check(
-            state.project.log._file_bytes == os.path.getsize(lclc),
-            "endpoint appends are bookkept into the event log",
-        )
-
-
-        evs2: list[dict] = []
-        done2 = threading.Event()
-
-        def sse_reader2() -> None:
-            try:
-                with urllib.request.urlopen(f"{base_url}/api/events", timeout=30) as r:
-                    seen_hist = False
-                    for raw in r:
-                        line = raw.decode().strip()
-                        if line.startswith("data: "):
-                            ev = json.loads(line[6:])
-                            evs2.append(ev)
-                            if ev.get("type") == "history":
-                                seen_hist = True
-                            if seen_hist and "offset" in ev and "event" in ev:
-                                done2.set()
-                                break
-            except Exception as e:  # noqa: BLE001
-                print(f"  [sse2] {e}")
-
-        rt2 = threading.Thread(target=sse_reader2, daemon=True)
-        rt2.start()
-        check(done2.wait(timeout=30), "SSE lazy replay opens with a history line")
-        hist_idx = next((i for i, e in enumerate(evs2) if e.get("type") == "history"), None)
-        first_off = next((i for i, e in enumerate(evs2) if "offset" in e and "event" in e), None)
-        check(hist_idx is not None and isinstance(evs2[hist_idx].get("older"), int),
-              "history line carries the older count")
-        check(first_off is not None and hist_idx is not None and hist_idx < first_off,
-              "history line precedes the offset-wrapped replay")
-        check(evs2[first_off]["offset"] == comp_off, "SSE replay starts at the window's byte offset")
-
-        # switch back to the demo project so the real-run section stays untouched
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 200, "switched back to the demo project")
-
-        # ---- SSE keepalive: the idle stream reasserts itself BY NAME ----
-        # The mouse hole this closes: the renderer cached the server state
-        # ("running" drives the Stop button) and could only refresh it from this
-        # stream, while a half-open socket raises no error on either side. The
-        # old heartbeat was an SSE comment, which reaches no listener at all, so
-        # a dead stream looked exactly like an idle one and the window froze on
-        # "thinking" while the run went on. The frame must therefore be a NAMED
-        # event, and the client must be able to derive its staleness window from
-        # the very constant that paces it here.
-        import agent.server as server_mod
-
-        keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
-        server_mod.SSE_KEEPALIVE_SEC = 0.2  # patched in globally: the loop reads it per wait
-        try:
-            with contextlib.closing(urllib.request.urlopen(f"{base_url}/api/events", timeout=15)) as r:
-                lines: list[str] = []
-                deadline = time.time() + 15
-                while time.time() < deadline:
-                    raw = r.readline()
-                    if not raw:
-                        break
-                    lines.append(raw.decode("utf-8", "replace").strip())
-                    if lines[-2:] == ["event: ping", "data: {}"]:
-                        break
-                check(
-                    lines[-2:] == ["event: ping", "data: {}"],
-                    "an idle stream keeps the connection provably alive by name",
-                )
-                check(
-                    not [ln for ln in lines if ln.startswith(":")],
-                    "the keepalive is not an SSE comment (invisible to EventSource)",
-                )
-        finally:
-            server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
-
-        app_js = (Path(__file__).resolve().parents[1] / "ui" / "app.js").read_text(encoding="utf-8")
-        m = re.search(r"const SSE_KEEPALIVE_MS = (\d+);", app_js)
-        check(
-            m is not None and int(m.group(1)) == int(server_mod.SSE_KEEPALIVE_SEC * 1000),
-            "the renderer liveness window matches the server keepalive (one constant, two languages)",
-        )
-
-        # ---- the connecting stream carries the HOST's status, not a flat idle ----
-        # A stream is also what a RECONNECTING window gets: an EventSource retry,
-        # a phone coming back from the background, a tunnel healer. Telling it
-        # "idle" while a run is in flight left a running task painted as idle for
-        # the rest of the run (the run emits its own "running" only once, at the
-        # start), so the frame must be derived from the host's own state.
-        #
-        # These probes hang up right after the first frame, and the server only
-        # notices a hung-up subscriber when its next keepalive write fails — so
-        # the keepalive is shortened for this section (the same lever the section
-        # above uses) and the block waits for its own subscribers to be gone
-        # before handing the broadcaster back to the isolation section.
-        def first_status(url: str) -> str | None:
-            with contextlib.closing(urllib.request.urlopen(url, timeout=15)) as r:
-                for raw in r:
-                    line = raw.decode().strip()
-                    if not line.startswith("data: "):
-                        continue
-                    ev = json.loads(line[6:])
-                    if ev.get("type") == "state_update" and ev.get("key") == "execution_status":
-                        return ev.get("value")
-            return None
-
-        subscribers_before = broadcaster.count()
-        probe_keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
-        server_mod.SSE_KEEPALIVE_SEC = 0.2
-        try:
-            check(first_status(f"{base_url}/api/events?replay=0") == "idle",
-                  "nothing in flight: a connecting window is told idle")
-            state.busy = True
-            state.run_project = str(clc)
-            try:
-                live = first_status(
-                    f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
-                other = first_status(
-                    f"{base_url}/api/events?replay=0&project={quote(str(clc.parent / 'elsewhere.clc'))}")
-            finally:
-                state.busy = False
-                state.run_project = None
-            check(live == "running",
-                  "reconnecting into a live run of THIS project is told running")
-            check(other == "idle",
-                  "another project's run is still not leaked into this window's status")
-            check(first_status(f"{base_url}/api/events?replay=0") == "idle",
-                  "a finished run reports idle again")
-            # hand the broadcaster back clean: no probe subscriber outlives this
-            # block (a stale subscriber inflates broadcaster.count(), which the
-            # isolation section below uses as "both windows are connected")
-            deadline = time.time() + 10
-            while broadcaster.count() > subscribers_before and time.time() < deadline:
-                time.sleep(0.05)
-            check(broadcaster.count() <= subscribers_before,
-                  "the status probes hang up cleanly (they leave no subscriber behind)")
-        finally:
-            server_mod.SSE_KEEPALIVE_SEC = probe_keepalive_saved
-
-        # ---- multi-window isolation: two SSE subscribers on different projects ----
-        from agent.events import FinalEvent
-
-        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "iso-b"})
-        check(st == 200, "second project created for isolation")
-        clc2 = Path(json.loads(body)["project"])
-        # reopen the demo project so the active project is A's file again
-        st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 200, "active project is A again")
-
-        evs_a: list[dict] = []
-        evs_b: list[dict] = []
-        done_a = threading.Event()
-        done_b = threading.Event()
-
-        def iso_reader(evs: list[dict], done: threading.Event, url: str, want: str) -> None:
-            try:
-                with urllib.request.urlopen(url, timeout=30) as r:
-                    for raw in r:
-                        line = raw.decode().strip()
-                        if line.startswith("data: "):
-                            ev = json.loads(line[6:])
-                            evs.append(ev)
-                            if ev.get("type") == "final" and ev.get("summary") == want:
-                                done.set()
-                                break
-            except Exception as e:  # noqa: BLE001
-                print(f"  [iso] {e}")
-
-        threading.Thread(
-            target=iso_reader,
-            args=(evs_a, done_a, f"{base_url}/api/events?project={quote(str(clc))}&replay=1", "iso-a"),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=iso_reader,
-            args=(evs_b, done_b, f"{base_url}/api/events?project={quote(str(clc2))}&replay=1", "iso-b"),
-            daemon=True,
-        ).start()
-        deadline = time.time() + 10
-        while broadcaster.count() < 2 and time.time() < deadline:
-            time.sleep(0.05)
-        check(broadcaster.count() >= 2, "both SSE subscribers connected")
-
-        # a run on project A must reach only A's subscriber
-        state.run_project = str(clc)
-        broadcaster.publish(FinalEvent(status="completed", summary="iso-a"))
-        check(done_a.wait(timeout=10), "A's subscriber received A's run final")
-        time.sleep(0.3)  # give B's loop a chance to (wrongly) deliver the same event
-        check(not any(e.get("summary") == "iso-a" for e in evs_b), "B's subscriber never saw A's run final")
-
-        # a run on project B reaches only B's subscriber
-        state.run_project = str(clc2)
-        broadcaster.publish(FinalEvent(status="completed", summary="iso-b"))
-        check(done_b.wait(timeout=10), "B's subscriber received B's run final")
-
-        # a run carrying project=<path> switches the active project before starting
-        state.run_project = None
-        state.api_key = "sk-fake"  # let start_task reach the busy check without LLM init
-        state.busy = True  # busy -> 409, and the project of the live run is left alone
-        st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
-        check(st == 409, "busy run rejected during switch test")
-        check(
-            str(state.project.path) == str(clc.resolve()),
-            "a busy server never switches away from (and unlocks) the project of the live run",
-        )
-        state.busy = False
-        state.api_key = None
-        # not busy: the switch happens (the run itself fails without a key, which
-        # is the part the lock section below builds on)
-        st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
-        check(st == 500, "run without an LLM key fails")
-        check(str(state.project.path) == str(clc2.resolve()), "run with project= switched the active project")
-        # restore the demo project so the real-run section stays untouched
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 200, "switched back to the demo project after isolation")
-
-        # ---- 3f. per-window write lock: one writer per .clc ----
-        # the server under test released its own lock first...
-        from agent.core.project_lock import ProjectLock, _local_lock_path
-
-        lock_path = _local_lock_path(str(clc))
-        handle = state.project.lock if state.project is not None else None
-        check(handle is not None, "open project holds a local lock")
-        ProjectLock.release(handle)
-
-        # ...and ANOTHER window (process) now holds it
-        with _lock_held_elsewhere(str(clc), lock_path):
-            st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-            check(st == 409, "second window open -> 409")
-            err = json.loads(body)
-            check(err.get("code") == "project_open_conflict", "409 carries project_open_conflict")
-
-            # read-only open succeeds despite the lock, carries the flag in meta
-            st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
-            check(st == 200, "read-only open succeeds while another window holds the lock")
-            ro_meta = next(
-                (m["meta"] for m in (json.loads(line) for line in body.splitlines() if line.strip()) if m.get("meta")),
-                None,
-            )
-            check(ro_meta is not None and ro_meta.get("read_only") is True, "meta carries read_only")
-            check(state.project is not None and state.project.read_only, "project is read-only")
-
-            # a run on the read-only project is refused
-            st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
-            check(st == 409, "run on a read-only project rejected")
-
-            # a different project opens fine (the lock is per-path)
-            st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
-            check(st == 200, "different project opens while another holds demo's lock")
-
-        # the other window released -> the demo project opens normally again
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 200, "open works after the other window released")
-        check(state.project is not None and not state.project.read_only, "reopen is writable again")
-
-        # ---- 3f-bis. the write lock FOLLOWS the active project ----
-        # A window holds the write lock on at most its CURRENTLY-open project:
-        # the moment the active project is replaced — by another project opened
-        # for write or read-only, by a created one, by a run that switches — the
-        # lock of the project left behind goes back to the pool. A lock that
-        # outlives its project is unreachable (nothing keeps the handle, so
-        # nothing could ever release it) and locks every other window out of that
-        # .clc until this server exits.
-        def lock_free(path: Path) -> bool:
-            """Whether a second INDEPENDENT claim on this .clc still succeeds —
-            the kernel truth, not the server's bookkeeping. The probe claims and
-            immediately releases, so it leaves nothing held."""
-            h = ProjectLock._acquire_local(str(path))
-            if h is None:
-                return False
-            ProjectLock.release(h)
-            return True
-
-        def open_project(path: Path, read_only: bool = False) -> int:
-            body = {"path": str(path)}
-            if read_only:
-                body["read_only"] = True
-            st, _ = http_post(f"{base_url}/api/project/open", body)
-            return st
-
-        st = open_project(clc)
-        check(st == 200 and state.project.lock is not None, "demo is open for write (lock held)")
-        check(not lock_free(clc), "another window cannot claim the open project")
-
-        # a read-only open gives the write claim up: the project left behind is
-        # free again (and the read-only one never claims anything)
-        st = open_project(clc2, read_only=True)
-        check(st == 200, "b opens read-only")
-        check(state.project.read_only and state.project.lock is None, "a read-only project holds no lock")
-        check(lock_free(clc), "the project left for a read-only one hands its write lock back")
-
-        # a WRITE reopen of the same project keeps the lock (it is reused, never
-        # dropped and re-taken: another window's claim during that window would
-        # be a spurious conflict)
-        check(open_project(clc) == 200 and open_project(clc) == 200, "demo reopened for write twice")
-        check(not lock_free(clc), "reopening the same project for write keeps the lock")
-
-        # a created project is write-locked like an opened one (the window that
-        # created it is its only writer from the first byte)
-        lkdir = Path(sdir) / "lockwork"
-        lkdir.mkdir()
-        st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "created"})
-        check(st == 200, "project created")
-        created = Path(json.loads(body)["project"])
-        check(state.project.lock is not None, "a created project holds a write lock")
-        check(not lock_free(created), "a second window cannot claim a created project")
-        check(open_project(clc) == 200, "moved on to another project")
-        check(lock_free(created), "the created project hands its lock back when left")
-
-        # a create must never TAKE a path another window holds
-        victim = lkdir / "taken.clc"
-        with _lock_held_elsewhere(str(victim), _local_lock_path(str(victim))):
-            st, body = http_post(f"{base_url}/api/project/new", {"dir": str(lkdir), "name": "taken"})
-            check(st == 409, "create over another window's path is refused")
-            check(json.loads(body).get("code") == "project_open_conflict", "the create conflict carries the code")
-            check(not victim.exists(), "the refused create wrote nothing at all")
-
-        # a run that switches the active project hands the old lock back too
-        check(open_project(clc) == 200, "demo open for write again")
-        state.api_key = None  # no key: the run fails, the switch is what is under test
-        st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
-        check(st == 500, "run without a key fails (switch only)")
-        check(str(state.project.path) == str(clc2.resolve()), "the run switched the active project")
-        check(not lock_free(clc2), "the switched-to project holds the write lock")
-        check(lock_free(clc), "the switched-away project hands its write lock back")
-
-        st = open_project(clc)
-        check(st == 200, "demo reopened for the real-run section")
-
-        # ---- 3g. remote workspaces lock locally (kernel lock keyed by .clc path) ----
-        from agent.core.project_lock import ProjectLock, _local_lock_path
-
-        with tempfile.TemporaryDirectory() as rdir:
-            root = Path(rdir)
-            rclc = str(root / "remote.clc")
-            (root / "remote.clc").write_text("x\n")
-
-            h1 = ProjectLock.acquire(rclc)
-            check(h1 is not None, "remote-path lock acquired (local kernel lock)")
-            check(not (root / ".clc.lock").exists(), "no lock file is written on the remote host")
-            check(Path(_local_lock_path(rclc)).exists(), "lock file lives in the local temp dir")
-
-            # a second window (fresh process state) is refused — the lock is held
-            saved_held = dict(ProjectLock._held)
-            ProjectLock._held.clear()
-            try:
-                h2 = ProjectLock.acquire(rclc)
-                check(h2 is None, "second window on the same remote project refused")
-            finally:
-                ProjectLock._held.update(saved_held)  # restore the demo handle
-
-            ProjectLock.release(h1)
-            check(ProjectLock.acquire(rclc) is not None, "fresh acquire after release")
-            ProjectLock.release_all()
-
-            # read-only remote dir must open for write (old lock file could not be created there)
-            ro = root / "ro-dir"
-            ro.mkdir()
-            (ro / "proj.clc").write_text("x\n")
-            ro.chmod(0o500)  # directory not writable by the ssh user
-            try:
-                h3 = ProjectLock.acquire(str(ro / "proj.clc"))
-                check(h3 is not None, "acquire works in a read-only remote dir (no remote write)")
-                ProjectLock.release(h3)
-            finally:
-                ro.chmod(0o700)  # restore so the temp dir cleans up
-
-        # ---- 3h. a dying holder frees the lock ----
-        # Both backends are KERNEL locks (flock / LockFileEx), so the OS drops the
-        # lock when the holder dies — no pid check, no reclaim. Killing the holder
-        # is therefore enough, but it does have to be the TRUE holder: see
-        # _kill_tree (the venv python.exe is a redirector).
-        with tempfile.TemporaryDirectory() as rdir:
-            root = Path(rdir)
-            rclc = str(root / "remote2.clc")
-            (root / "remote2.clc").write_text("x\n")
-            snippet = (
-                "import sys,time; sys.path.insert(0,sys.argv[1]);"
-                "from agent.core.project_lock import ProjectLock;"
-                "ProjectLock.acquire(sys.argv[2]);"
-                "print('LOCKED', flush=True);"
-                "time.sleep(120)"
-            )
-            holder = subprocess.Popen(
-                [sys.executable, "-c", snippet, str(Path(__file__).resolve().parents[1]), rclc],
-                stdout=subprocess.PIPE,
-            )
-            try:
-                deadline = time.time() + 15
-                locked = False
-                while time.time() < deadline:
-                    if holder.poll() is not None:
-                        break
-                    if holder.stdout.readline().decode("utf-8", "replace").strip() == "LOCKED":
-                        locked = True
-                        break
-                    time.sleep(0.1)
-                check(locked, "holder subprocess took the lock")
-                check(ProjectLock.acquire(rclc) is None, "lock held by the live holder")
-                _kill_tree(holder)
-                freed = None
-                for _ in range(50):  # the kernel drops the lock at process death
-                    freed = ProjectLock.acquire(rclc)
-                    if freed is not None:
-                        break
-                    time.sleep(0.1)
-                check(freed is not None, "lock freed when the holder died")
-                ProjectLock.release_all()
-            finally:
-                if holder.poll() is None:
-                    _kill_tree(holder)
-
-        # 4. real run (only with a key saved in ~/.clutch/settings.json)
-        key = _saved_api_key()
-        if not key:
-            print("\n(no API key in ~/.clutch/settings.json - real-run section skipped)")
-            print("\nall passed (network-free)")
+        _health_and_cors(base_url)
+        _run_without_project_rejected(base_url)
+        _empty_task_rejected(base_url)
+        _settings_api_key(base_url, state)
+        _settings_endpoint(base_url, config)
+        _settings_reasoning_effort(base_url, config)
+        _settings_api_protocol(base_url, config)
+        _host_defaults_table(base_url)
+        clc = _create_project(base_url, proj_dir)
+        _reopen_project(base_url, clc)
+        _file_browser(base_url, proj_dir)
+        _symlink_marking(base_url, proj_dir, clc)
+        lclc, comp_off = _lazy_open_and_history(base_url, sdir)
+        appended = _clc_read_and_append(base_url, lclc)
+        _clc_patch_memory_index(base_url, lclc, state, appended)
+        _clc_sse_replay(base_url, clc, comp_off)
+        _sse_keepalive(base_url)
+        _connecting_stream_status(base_url, clc, state, broadcaster)
+        clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)
+        _write_lock_one_writer(base_url, clc, clc2, state)
+        _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir)
+        _remote_workspace_locks_locally()
+        _dying_holder_frees_the_lock()
+        if not _start_real_run(base_url, state):
             return 0
-        state.api_key = key  # the server uses the UI-saved key (no env fallback)
-
-        st, body = http_post(
-            f"{base_url}/api/run",
-            {
-                "task": (
-                    "write a file hello.txt containing the word hi using write_file, "
-                    "then read it with run_command cat hello.txt"
-                ),
-            },
-        )
-        check(st == 200 and body != "", "run accepted")
-
-        # 4b. duplicate run rejected (busy)
-        st, _ = http_post(f"{base_url}/api/run", {"task": "another"})
-        check(st == 409, "concurrent run rejected")
-
-        # collect SSE events
-        events: list[dict] = []
-        done = threading.Event()
-
-        def sse_reader() -> None:
-            try:
-                with urllib.request.urlopen(f"{base_url}/api/events", timeout=90) as r:
-                    for raw in r:
-                        line = raw.decode().strip()
-                        if line.startswith("data: "):
-                            ev = json.loads(line[6:])
-                            if "event" in ev and isinstance(ev["event"], dict):
-                                continue  # replay row: wrapped history, not this run
-                            events.append(ev)
-                            if ev.get("type") == "final":
-                                done.set()
-                                break
-            except Exception as e:  # noqa: BLE001
-                print(f"  [sse] {e}")
-
-        rthread = threading.Thread(target=sse_reader, daemon=True)
-        rthread.start()
-        finished = done.wait(timeout=120)
-        check(finished, "final event received within 120s")
-
-        types = {e["type"] for e in events}
-        check("tool_call" in types, "tool calls streamed")
-        check("tool_result" in types, "tool results streamed")
-        finals = [e for e in events if e["type"] == "final"]
-        check(finals and finals[-1]["status"] == "completed", "final status completed")
-
-        # 5. workspace tree after run
-        st, body = http_get(f"{base_url}/api/workspace/tree")
-        data = json.loads(body)
-        check(st == 200 and data.get("root"), "workspace tree has root")
-        names = [n["name"] for n in data.get("tree", [])]
-        check("hello.txt" in names, "workspace shows created file")
-        check(clc.name not in names, ".clc file hidden from workspace tree")
-
-        # 5b. undo endpoint: routing + guards (restore logic in selfcheck)
-        st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "hello.txt"})
-        check(st == 404, "revert on a never-snapshot file returns 404")
-        st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "../escape"})
-        check(st == 400, "revert rejects an escaping path")
-        st, body = http_post(f"{base_url}/api/workspace/revert", {"path": clc.name})
-        check(st == 400, "revert refuses the protected .clc")
-        st, body = http_post(f"{base_url}/api/workspace/revert", {})
-        check(st == 400, "revert requires a path")
-
-        # 6. .clc persisted the conversation
-        st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
-        check(st == 200, "project reopened after run")
-        # /api/project/open streams NDJSON: meta, progress, event lines, done
-        ev_types = [
-            json.loads(line)["event"]["type"]
-            for line in body.splitlines()
-            if line.strip() and "event" in json.loads(line)
-        ]
-        check("user_message" in ev_types and "final" in ev_types, ".clc persisted conversation")
-
-        # 7. stop is safe on idle
-        st, _ = http_post(f"{base_url}/api/stop", {})
-        check(st == 200, "stop on idle is safe")
+        _duplicate_run_rejected(base_url)
+        _collect_run_events(base_url)
+        _workspace_tree(base_url, clc)
+        _undo_endpoint(base_url, clc)
+        _clc_persisted_conversation(base_url, clc)
+        _stop_is_safe_on_idle(base_url, srv)
 
         srv.shutdown()
         print("\nall passed (full)")

@@ -24,142 +24,56 @@ What the host owns, and only the host owns:
 
 Everything else — what a tool is called, what it means, how its events look in
 the UI — is the declaration's, and the declaration belongs to the component.
+
+This file is the module's public face as well as its runtime. The host's policy
+vocabulary lives in gates.py, what the components say to the model in prompt.py,
+the host's answers to what a declaration asks in answers.py — and every name
+those files own is re-exported here, because `registry.<name>` is the handle this
+repo, COMPONENTS.md and the tests call them by (see __all__). What is left is
+what the name promises: the wiring from a declaration to the tool the model
+calls, and the call itself.
 """
 
 from __future__ import annotations
 
 import copy
-import re
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
-from . import catalog, facts, filesystem, host, inst, rendezvous
+from . import catalog, host, inst, rendezvous
+from .answers import (
+    _FACT_GATES,
+    _drivable,
+    _entries,
+    _fact,
+    _fact_answer,
+    _names,
+    _resolve,
+    _whole_fact,
+)
 from .envelope import Envelope
+from .gates import (
+    _GATE_IMPLS,
+    _GUARD_IMPLS,
+    ACCESS,
+    WATCHED_ACCESS,
+    Access,
+    GuardImpl,
+    ToolImpl,
+    _check_vocabulary,
+    _gate_ok,
+    gate_project,
+    gate_skills,
+)
 from .inst import InstError
+from .prompt import components_unavailable, module_blocked_reason, prompt_section
 from .transport import TransportError, failure_envelope
-from .workspace import LocalWorkspace, Workspace
-
-# (workspace, config, **args) -> the result the model reads
-ToolImpl = Callable[..., Envelope]
-# a refusal, or None to proceed — (workspace, config, args, arg), where `arg` is
-# the argument this policy judges, from the tool's own declaration
-# (catalog.Tool.access_arg) — never assumed to be "path".
-GuardImpl = Callable[[Workspace, Config, dict[str, Any], str], Envelope | None]
-
-
-@dataclass(frozen=True)
-class Access:
-    """One host policy word: how it is enforced, and the argument it judges when
-    a declaration does not rename it.
-
-    `guard` is the host's own refusal (None when the word needs no host-side
-    check — permission rules alone judge `command`); `arg` is the default name
-    the policy reads. The WORDS live in catalog.ACCESS_ARGS (the declaration
-    vocabulary); this table binds each one to the implementation, and the keys
-    are checked against that vocabulary at import time (see _check_vocabulary).
-    """
-
-    guard: GuardImpl | None
-    arg: str
-
-
-# The guard each access word is enforced by, under the name the host's document
-# calls it (catalog.GUARD_IMPLS lists the ones that exist — _check_vocabulary
-# keeps the two lists equal — and hostconfig refuses a document that names
-# anything else, so a word can never point at a guard this host does not have).
-_GUARD_IMPLS: dict[str, GuardImpl] = {
-    "guard_read": filesystem.guard_read,
-    "guard_grep": filesystem.guard_grep,
-    "guard_write": filesystem.guard_write,
-}
-
-
-# The host POLICY a declaration may put a tool under, by the name it is declared
-# with (catalog.Tool.access). Keeping the names in the declaration's vocabulary
-# and the implementations here is the split: a component says "this names a path
-# the workspace may protect", the host decides what protection means. The words
-# come from catalog.ACCESS_WORDS — the built-in table with this machine's
-# document merged over it (tools/hostconfig.py), so a host can be taught a word
-# that reuses a guard it already has without touching host source.
-ACCESS: dict[str, Access] = {
-    word: Access(_GUARD_IMPLS.get(rec.guard), rec.arg) for word, rec in catalog.ACCESS_WORDS.items()
-}
-
-
-# The policies under which a call is "working ON a file" rather than sweeping for
-# one: the context reader after a compaction re-reads the files a call NAMED, and
-# READ/WRITE are the words that name exactly one. `sweep` (a search) deliberately
-# stays out — it has no single file to re-read.
-WATCHED_ACCESS: frozenset[str] = frozenset({"read", "write"})
-
-
-# The host-side condition each PUBLISHED fact stands behind (catalog.FACT_TOKENS,
-# tools/facts.py): a fact a knob governs reads as no value while the knob is off,
-# because the tools that spend it are not offered either — the same condition
-# shows up as a gate (catalog.Tool.gate "skills"). The keys are the declaration
-# vocabulary's; the conditions are the host's, and _check_vocabulary keeps the two
-# lists equal.
-_FACT_GATES: dict[str, Callable[[Config], bool]] = {
-    "skills": lambda config: bool(config.enable_skills),
-}
-
-
-def gate_project(config: Config, memories: MemoryStore | None) -> bool:
-    """`project`: a memory store is open for the workspace being served."""
-    return memories is not None
-
-
-def gate_skills(config: Config, memories: MemoryStore | None) -> bool:
-    """`skills`: the library the `skills` fact publishes has something in it.
-
-    Skills off entirely, or nothing to load: an enum over an empty library is a
-    schema that offers the model nothing to pick. The gate word is also the fact
-    token, so a library the host cannot read shuts this gate too.
-    """
-    return bool(_entries("skills", config))
-
-
-# The host-side condition a NAMED `gate` word stands behind, by the name the
-# host's document calls it (catalog.GATE_IMPLS lists the ones that exist —
-# _check_vocabulary keeps the two lists equal — and "" / "always" are structural,
-# no condition at all, so they are not here).
-_GATE_IMPLS: dict[str, Callable[[Config, MemoryStore | None], bool]] = {
-    "project": gate_project,
-    "skills": gate_skills,
-}
-
-
-def _check_vocabulary() -> None:
-    """Neither half of the host's vocabulary can drift from the declarations
-    behind it silently: every access word the declaration protocol lists must have
-    an implementation here (and every implementation a word may name), every named
-    gate a condition, every published fact a condition, and the host's own tool
-    names must be exactly the ones tools/host.py declares. A mismatch is a host
-    bug, not a component's, so it is loud."""
-    assert set(ACCESS) == set(catalog.ACCESS_ARGS), (
-        f"access vocabulary drift: catalog {sorted(catalog.ACCESS_ARGS)} vs registry {sorted(ACCESS)}"
-    )
-    assert set(_GUARD_IMPLS) == set(catalog.GUARD_IMPLS), (
-        f"guard implementation drift: catalog {sorted(catalog.GUARD_IMPLS)} vs registry {sorted(_GUARD_IMPLS)}"
-    )
-    assert set(_GATE_IMPLS) == set(catalog.GATE_IMPLS), (
-        f"gate implementation drift: catalog {sorted(catalog.GATE_IMPLS)} vs registry {sorted(_GATE_IMPLS)}"
-    )
-    assert set(_FACT_GATES) == set(catalog.FACT_TOKENS), (
-        f"fact vocabulary drift: catalog {sorted(catalog.FACT_TOKENS)} vs registry {sorted(_FACT_GATES)}"
-    )
-    assert set(host.names()) == set(catalog.HOST_TOOL_NAMES), (
-        f"host tool drift: catalog {sorted(catalog.HOST_TOOL_NAMES)} vs host {sorted(host.names())}"
-    )
-
-
-_check_vocabulary()
+from .workspace import Workspace
 
 # The words the host refuses a declaration over, said ONCE per process (a
 # component's typo is a fact about its manifest, not something to repeat on every
@@ -180,6 +94,7 @@ def _report(diags: list[catalog.Diagnostic]) -> None:
         # publishing one fact), not about one of them
         where = f"{d.component}/{d.tool}" if d.tool else (d.component or "the catalog")
         log(f"[components] refusing {where}: {d.message}")
+
 
 
 @dataclass
@@ -259,131 +174,6 @@ class Tool:
             },
         }
 
-
-# -- declaration -> the schema the model sees ---------------------------------
-
-
-# The host facts a declaration may spend in its prose, built from the vocabulary
-# rather than written out: `$config.<field>` and `$backends` are values this host
-# computes itself, and every word of catalog.FACT_TOKENS names a fact a component
-# publishes (asked of that component — _entries). Publishing a new fact therefore
-# adds a word here with no second edit.
-_PLACEHOLDER = re.compile(r"\$(config\.[a-z_]+|backends|" + "|".join(catalog.FACT_TOKENS) + r")\b")
-# A string value that is EXACTLY one published fact, and nothing else.
-_WHOLE = re.compile(r"\$(" + "|".join(catalog.FACT_TOKENS) + r")\Z")
-
-
-def _whole_fact(value: str) -> str:
-    """The published fact a whole value names, or "" when the value is not one."""
-    match = _WHOLE.fullmatch(value)
-    return match.group(1) if match else ""
-
-
-def _resolve(value: Any, config: Config) -> Any:
-    """A declaration's schema value with the host's own facts filled in.
-
-    Three placeholders, all of them things only this host knows when it builds
-    the schema: `$config.<field>` (a knob the user set), `$backends` (the search
-    backends this machine is configured for) and any fact a component publishes
-    (`$skills` — catalog.FACT_TOKENS, answered by the component that declares it;
-    see _entries). A value that IS a fact stays a list — an enum — while the same
-    token inside a sentence reads as the list of names; likewise a value that IS
-    `$config.<field>` keeps the knob's own type (a default of
-    `$config.read_max_chars` is the integer the statement sends), and the same
-    placeholder inside a sentence is spelled out.
-    """
-    if isinstance(value, str):
-        token = _whole_fact(value)
-        if token:  # a whole value: the fact's own shape (the names, as a list)
-            return list(_names(token, config))
-        if value.startswith("$config."):  # a whole value: the host's own type
-            return getattr(config, value.split(".", 1)[1], "")
-        return _PLACEHOLDER.sub(lambda m: _fact(m.group(1), config), value)
-    if isinstance(value, list):
-        return [_resolve(v, config) for v in value]
-    if isinstance(value, dict):
-        return {k: _resolve(v, config) for k, v in value.items()}
-    return value
-
-
-def _fact(token: str, config: Config) -> str:
-    """One placeholder read INSIDE a sentence: the fact as prose, never a list."""
-    if token in catalog.FACT_TOKENS:
-        return ", ".join(_names(token, config)) or "none"
-    if token == "backends":
-        return " or ".join(catalog.available_backends(config)) or "none"
-    return str(getattr(config, token.split(".", 1)[1], ""))
-
-
-def _names(token: str, config: Config) -> tuple[str, ...]:
-    """The names a published fact offers right now: what the model picks from."""
-    return tuple(entry.name for entry in _entries(token, config))
-
-
-def _entries(token: str, config: Config) -> tuple[facts.Entry, ...]:
-    """One published host fact's entries, or () when there is no value to read.
-
-    The single door to a fact, whoever spends it: the enum of a schema (_resolve),
-    a sentence of a description (_fact), the gate under which a tool is offered
-    (_gate_ok), the prompt fragment written around it (_fragment). An answer this
-    host cannot read is fail-CLOSED — no value at all, never a guess — and the
-    component's own reason is said once, out loud (tools/facts.py): a library that
-    cannot be read is something the user has to see, not an empty catalog.
-    """
-    answer = _fact_answer(token, config)
-    if answer.problem:
-        _report(
-            [
-                catalog.Diagnostic(
-                    answer.owner,
-                    "",
-                    f"cannot answer the host fact {token!r}: {answer.problem}",
-                    fatal=False,
-                )
-            ]
-        )
-    return answer.entries
-
-
-def _fact_answer(token: str, config: Config) -> facts.Answer:
-    """One host fact: what the single component publishing it answered.
-
-    The host keeps no value of its own behind a published fact — that is the
-    whole point of the direction (facts.py) — so the answer is the publishing
-    component's own statement, on its own line, through its own transport. What IS
-    the host's here is who may answer, and when the question is asked at all:
-
-      * the knob the fact stands behind (_FACT_GATES): turned off, the fact reads
-        as no value, exactly as the gate spending it is shut;
-      * only ONE component may publish a token. Two suppliers answer nothing and
-        say so: the host cannot tell which library the model is about to pick a
-        name from, and picking one is how two truth sources start.
-    """
-    condition = _FACT_GATES.get(token)
-    if condition is not None and not condition(config):
-        return facts.Answer(())
-    suppliers = [component for component in _drivable() if token in component.facts]
-    if not suppliers:
-        return facts.Answer(())
-    if len(suppliers) > 1:
-        return facts.Answer((), "", f"{' and '.join(c.name for c in suppliers)} both publish it")
-    return facts.ask(suppliers[0], token, config)
-
-
-def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
-    """Whether a tool's declared host-side condition holds at all (see
-    catalog.Tool.gate). A tool whose gate is shut is not offered — it is not
-    offered-with-an-error, because the model would only learn to stop trying.
-
-    The word is looked up in the host's table (catalog.GATE_WORDS: the built-in
-    conditions with this machine's document merged over them), and a word whose
-    condition this host does not have shuts the gate: an unreadable condition is
-    not "always true" (a declaration naming one the host cannot answer is refused
-    by tool_diagnostics anyway, so this is the second lock on the same door)."""
-    if gate in ("", "always"):
-        return True
-    impl = _GATE_IMPLS.get(catalog.GATE_WORDS.get(gate, ""))
-    return bool(impl(config, memories)) if impl else False
 
 
 def _wire(spec: catalog.Tool, config: Config, *, owner: str, implementation: host.HostImpl | None = None) -> Tool:
@@ -476,155 +266,6 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
                 continue
             tools.append(_wire(spec, config, owner=component.name))
     return tools
-
-
-def _drivable() -> list[catalog.Component]:
-    """The components this host can drive right now, each refusal said once.
-
-    One filter for everything a component says to the model — the tools it
-    declares and the prompt fragment it carries alike: a declaration naming a word
-    the host cannot honor contributes nothing (catalog.component_diagnostics), and
-    neither does a component this host cannot launch at all
-    (rendezvous.available). Read in one place so the schema and the prose can
-    never disagree about what is here.
-    """
-    out: list[catalog.Component] = []
-    for component in catalog.table().values():
-        fatal = [d for d in catalog.component_diagnostics(component) if d.fatal]
-        if fatal:
-            _report(fatal)
-            continue
-        if not rendezvous.available(component.name):
-            continue
-        out.append(component)
-    return out
-
-
-def prompt_section(config: Config) -> str:
-    """What the components themselves tell the model, joined ("" when none does).
-
-    A component may name a `prompt` file inside its own directory
-    (catalog.Component.prompt); this reads it and returns the fragments in table
-    order. It is why the host's own prose names no tool it does not own: what the
-    model is told about a component's tools travels with the component, so one
-    that is absent, renamed or replaced by a third party cannot leave the prompt
-    describing tools that are not here.
-
-    A fragment is resolved exactly like a tool description, so a component may
-    spend `$config.<field>` / `$backends` / a published fact (`$skills`) in it
-    too — and one fact gets a second reading, because a catalog is not a word in
-    a sentence: a LINE that is exactly `$skills` becomes the block
-    `- name: description` per entry (_prose), which is how a component writes
-    "here is my catalog" without knowing a single entry of it. A fragment that
-    spends a fact nobody here can answer is NOT appended (the calls it describes
-    are gone by the same gate, and a prompt must not promise what the model
-    cannot call); one that cannot be read is not fatal — the component's tools
-    still work — but it is not silent either: nothing is appended and the word is
-    said once, like every other the host cannot honor.
-    """
-    return "\n\n".join(text for text in (_fragment(c, config) for c in _drivable() if c.prompt) if text)
-
-
-def _fragment(component: catalog.Component, config: Config) -> str | None:
-    """One component's prompt fragment, or None when there is nothing to append."""
-    resolved = rendezvous.resolve(component.name)
-    if resolved is None:  # _drivable() already said why; nothing to read here
-        return None
-    path = Path(component.prompt)
-    if not path.is_absolute():  # relative to the component's own directory
-        path = resolved.directory / path
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        _report(
-            [
-                catalog.Diagnostic(
-                    component.name, "", f"prompt fragment {component.prompt!r} cannot be read ({e})", fatal=False
-                )
-            ]
-        )
-        return None
-    missing = [token for token in facts.spent(text) if not _entries(token, config)]
-    if missing:
-        # The fragment is written around a fact nothing here can answer. The calls
-        # it describes are not offered either (the same gate shuts them), and a
-        # prompt must not promise what the model cannot call — so the fragment is
-        # dropped whole, and _entries already said why.
-        return None
-    return _prose(text, config) or None
-
-
-def _prose(text: str, config: Config) -> str:
-    """A fragment's prose with the host's facts filled in, LINE by line.
-
-    A line that is exactly one published fact is a BLOCK: one `- name:
-    description` line per entry, in the shape the component's own human `list`
-    renders — the component writes the header in its own words and says `$skills`
-    under it, and knows no entry of the library it is describing. Anywhere else
-    (a token inside a sentence) the fact reads as the list of names, exactly as
-    it does in a tool description (_resolve).
-    """
-    out: list[str] = []
-    for line in text.splitlines():
-        token = _whole_fact(line.strip())
-        if not token:
-            out.append(str(_resolve(line, config)))
-            continue
-        out.extend(f"- {entry.name}: {entry.description}" for entry in _entries(token, config))
-    return "\n".join(out)
-
-
-def components_unavailable(config: Config) -> list[dict[str, str]]:
-    """The components this host is MISSING, for the UI to explain — and only the
-    ones whose declaration asks to be explained (catalog Component.ui.status).
-
-    A component that says `status: True` declares that its absence is something
-    the user should be told about, in the words its own declaration chooses
-    (`ui.label`). One that says nothing about its state disappears quietly, which
-    is the right default for an optional extra.
-    """
-    out: list[dict[str, str]] = []
-    for component in catalog.table().values():
-        if not component.ui.get("status"):
-            continue
-        reason = rendezvous.unavailable_reason(component.name)
-        if reason:
-            out.append(
-                {
-                    "name": component.name,
-                    "label": str(component.ui.get("label", component.name)),
-                    "reason": reason,
-                }
-            )
-    return out
-
-
-def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
-    """Why this host cannot run `module`'s statements for THIS call ("" = it can).
-
-    Two facts, both local. The component has to be here and drivable
-    (`rendezvous.unavailable_reason` — nothing on the host's side can stand in
-    for it), and a component whose SUBJECT is the workspace root's own
-    filesystem additionally needs the root to live HERE, because it serves the
-    filesystem of the machine it runs on. A component serving anything else runs
-    on the app host whatever kind of workspace the call came from — its subject
-    is the project file / the network / the skill library, never the workspace's
-    machine.
-    """
-    if module is None:
-        return "no component serves this tool"
-    missing = rendezvous.unavailable_reason(module)
-    if missing:
-        return missing
-    # TODO(ssh-workspace): this branch disappears with the component that serves
-    # a foreign filesystem over a channel of its own — that component's subject
-    # is FOREIGN_FS and it is driven from here, so the root's home stops mattering.
-    if rendezvous.serves_workspace_fs(module) and not isinstance(workspace, LocalWorkspace):
-        return (
-            f"{module} serves the filesystem of the machine this workspace root lives on, "
-            f"and this root is another machine's"
-        )
-    return ""
 
 
 def _previous_content(workspace: Workspace, args: dict[str, Any], arg: str) -> tuple[Any, str] | None:
@@ -859,3 +500,40 @@ class ToolRegistry:
                 else:
                     raise TypeError(f"argument {key!r} must be true or false, got {value!r}")
         return args
+
+__all__ = [
+    # the wiring and the calls
+    "Tool",
+    "ToolRegistry",
+    "build_tools",
+    # what the model and the UI are told
+    "prompt_section",
+    "components_unavailable",
+    "module_blocked_reason",
+    # the words the host honors (gates.py)
+    "Access",
+    "ACCESS",
+    "WATCHED_ACCESS",
+    "ToolImpl",
+    "GuardImpl",
+    "gate_project",
+    "gate_skills",
+    "_GUARD_IMPLS",
+    "_GATE_IMPLS",
+    "_check_vocabulary",
+    "_gate_ok",
+    # the host's answers (answers.py)
+    "_FACT_GATES",
+    "_drivable",
+    "_entries",
+    "_fact",
+    "_fact_answer",
+    "_names",
+    "_resolve",
+    "_whole_fact",
+    # the sink, which stays here: the tests swap registry._report to READ what
+    # the host says, so _say in answers.py reaches it late (see there)
+    "_REPORTED",
+    "_report",
+]
+

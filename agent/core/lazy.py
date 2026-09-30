@@ -32,7 +32,7 @@ from ..events import (
 from ..tools.workspace import LocalWorkspace, Workspace
 from .persist import append_jsonl
 
-_SEPARATOR = "---"  # the .clc header separator (project.SEPARATOR)
+_SEPARATOR = "---"  # the .clc header separator (project/format.py: SEPARATOR)
 _SECTION = "[memories]"  # the memory.py section marker written to every .clc
 
 

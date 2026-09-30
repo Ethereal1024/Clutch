@@ -38,13 +38,14 @@ extension's package manifest), and this module only DISCOVERS and MERGES:
 
 The declaration is data. Nothing here executes a tool; `registry` turns a
 declaration into the Tool the model sees, `rendezvous` turns its coordinates
-into a running process, and `ui/app.js` turns its `ui` block into pixels.
+into a running process, and `ui/js/tool-render.js` turns its `ui` block into
+pixels (`ui/app.js` + `ui/js/*` are the renderer; ui/index.html fixes the order).
 The full manifest spec is COMPONENTS.md at the repo root.
 
-The UI protocol (declared per tool, consumed by ui/app.js)
+The UI protocol (declared per tool, consumed by ui/js/tool-render.js)
 ----------------------------------------------------------
 The host renders tool events it did not design, so the component says how its
-events look — and ui/app.js contains no tool name at all. Every tool event
+events look — and the renderer contains no tool name at all. Every tool event
 carries this block (events.ToolCallEvent.ui), so a replayed session renders the
 same way and a component installed later is rendered without a UI change.
 
@@ -146,7 +147,7 @@ SKILL_LIB = "skill-library"
 #
 # The table below is the built-in one; `DEFAULTS` is what the host really uses,
 # the document merged over it (hostconfig). The renderer's own copy in
-# ui/app.js is only what an unreadable document — or a host that predates
+# ui/js/tool-render.js is only what an unreadable document — or a host that predates
 # GET /api/host — leaves in force, and a call's own `ui` block still wins over
 # both.
 DEFAULT_UI: dict[str, Any] = {
