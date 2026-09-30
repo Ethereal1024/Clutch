@@ -9,6 +9,13 @@ taken (POST /api/components/install) — plus the discipline that makes the gate
 trustworthy: the artifact's DIGEST decides, never the manifest's claim, and a
 body that lies or ends early leaves the host exactly as it was.
 
+It also pins the reverse half, which answers the same way (a verdict, or the
+host's own sentence as error-as-data): what versions this machine holds
+(GET /api/components/versions), and letting one go (DELETE /api/components/…),
+which refuses to delete a component's bytes while a daemon of it is running that
+this process did not start — nothing goes out from under a running process, and
+nothing is signalled or deleted on the way to a refusal.
+
 Isolation: CLUTCH_COMPONENTS_DIR points at a temp root, so the run never touches
 the components installed for the user running it.
 """
@@ -19,6 +26,7 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -54,6 +62,22 @@ def _post_artifact(base: str, name: str, data: bytes, *, digest: str, artifact: 
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def _delete(url: str) -> tuple[int, str]:
+    """One removal request, exactly as a client sends it: the verb carries the
+    component's name in the path, `?version=` names one version to drop."""
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def _sleeper() -> subprocess.Popen:
+    """A live pid nothing in this suite owns: the stand-in for a daemon."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 
 
 def _tar_checkout(name: str, into: Path) -> Path:
@@ -309,6 +333,178 @@ def main() -> int:
             {c["name"] for c in listed} == {modules.MEMORY, modules.WEBSEARCH},
             "the inventory grew by each install and by neither refusal",
         )
+
+        # 8. the reverse verbs. Library first: a host can hold more than one
+        #    version (an install prunes, but nothing forces a machine to hold only
+        #    what one install made), and letting go is aimed at ONE of them.
+        hand = components.component_root("clutch-handmade")
+        for ver in ("1.0.0", "2.0.0"):
+            (hand / ver).mkdir(parents=True)
+            (hand / ver / components.MANIFEST).write_text(
+                json.dumps({"name": "clutch-handmade", "version": ver, "interface": "cli", "digest": ver * 8}),
+                encoding="utf-8",
+            )
+        held = components.versions("clutch-handmade")
+        check(
+            [record["version"] for record in held] == ["2.0.0", "1.0.0"],
+            "versions() lists every installed version, newest first",
+        )
+        check(held[0]["resolved"] and not held[1]["resolved"], "and marks the one this host would launch")
+        check(components.installed_version("clutch-handmade") == "2.0.0", "which is the version a launch resolves to")
+        check(components.versions("clutch-nothing-installed") == [], "a component this host does not hold has no versions")
+        refused = 0
+        for bad in ("../escape", ".hidden", ""):
+            try:
+                components.versions(bad)
+            except ValueError:
+                refused += 1
+        check(refused == 3, "a name that could never be an install is refused, not answered with an empty list")
+
+        dropped = components.remove("clutch-handmade", "1.0.0")
+        check(
+            dropped == {"status": "removed", "name": "clutch-handmade", "removed": ["1.0.0"]},
+            "removing one version is a verdict, not an assumption that it worked",
+        )
+        check(
+            components.installed_version("clutch-handmade") == "2.0.0",
+            "and what the host runs is untouched by a stale version going away",
+        )
+        try:
+            components.remove("clutch-handmade", "9.9.9")
+            check(False, "a version this host does not hold is refused")
+        except ValueError as err:
+            check("is not installed on this host" in str(err), "a version this host does not hold is refused")
+        check(hand.is_dir(), "and a refused removal deleted nothing")
+        try:
+            components.remove("clutch-handmade", stop=lambda _name: "it is running")
+            check(False, "the caller's refusal stops the removal")
+        except ValueError as err:
+            check(
+                "it is running" in str(err) and hand.is_dir(),
+                "the caller's refusal (a process of it is running) lands BEFORE anything is deleted",
+            )
+        whole = components.remove("clutch-handmade")
+        check(
+            whole["status"] == "removed" and whole["removed"] == ["2.0.0"],
+            "a version-less removal takes the component whole",
+        )
+        check(
+            components.installed("clutch-handmade") is None and not hand.exists(),
+            "which is the component's own directory gone, staging and all",
+        )
+        check(
+            components.remove("clutch-handmade") == {"status": "absent", "name": "clutch-handmade", "removed": []},
+            "removing what is not installed is absent, not an error",
+        )
+
+        # 8b. the one thing the filesystem cannot say: is any of it RUNNING. Ours
+        #     is stopped first (stop-then-delete); another process's daemon is a
+        #     refusal, and its bytes stay. The discovery directory is repointed so
+        #     this suite can neither see nor disturb the daemons of the machine it
+        #     runs on.
+        workspace_mod = catalog.table()[modules.WORKSPACE]
+        check(
+            workspace_mod.discovery_env and workspace_mod.interface == catalog.DAEMON,
+            "the fixture is a daemon component with a repointable discovery directory",
+        )
+        os.environ[workspace_mod.discovery_env] = str(Path(root) / "discovery")
+        try:
+            ours = _sleeper()
+            key = (modules.WORKSPACE, str(Path(root) / "workspace"))
+            with rendezvous._LOCK:
+                rendezvous._HANDLES[key] = rendezvous.Handle(
+                    service=rendezvous.Service(module=modules.WORKSPACE, port=1234, token="t", pid=ours.pid),
+                    fences=(),
+                    proc=ours,
+                )
+            check(rendezvous.stop_for_removal(modules.WORKSPACE) == "", "a daemon of ours is stopped, not refused")
+            check(
+                ours.poll() is not None and key not in rendezvous._HANDLES,
+                "and it really is stopped and forgotten before any byte would go",
+            )
+
+            st, body_json = _post_artifact(base, modules.WORKSPACE, blob, digest=digest, interface="daemon")
+            check(
+                st == 200 and json.loads(body_json)["status"] == "installed",
+                "a daemon component installs through the same endpoint as a one-process one",
+            )
+            foreign = _sleeper()
+            record = rendezvous._record_path(str(Path(root) / "elsewhere"), workspace_mod)
+            try:
+                record.parent.mkdir(parents=True, exist_ok=True)
+                record.write_text(
+                    json.dumps({"version": rendezvous.RECORD_VERSION, "port": 4321, "token": "t", "pid": foreign.pid}),
+                    encoding="utf-8",
+                )
+                check(
+                    [service.pid for service in rendezvous.live_daemons(modules.WORKSPACE)] == [foreign.pid],
+                    "a running daemon is found from its own record, with no workspace named",
+                )
+                refusal = rendezvous.stop_for_removal(modules.WORKSPACE)
+                check(
+                    f"pid {foreign.pid}" in refusal and "did not start" in refusal,
+                    "another process's daemon is a refusal, and the refusal names its pid",
+                )
+                check(foreign.poll() is None, "and it is left running: a pid read off disk is not a licence to signal")
+                st, body_json = _delete(f"{base}/api/components/{modules.WORKSPACE}")
+                check(
+                    st == 400 and "did not start" in json.loads(body_json)["error"],
+                    "a removal over HTTP is refused while a daemon this host did not start is serving it",
+                )
+                check(
+                    components.installed(modules.WORKSPACE) is not None,
+                    "and a refused removal left the artifact exactly where it was",
+                )
+            finally:
+                record.unlink(missing_ok=True)
+                foreign.terminate()
+                foreign.wait(timeout=10)
+            st, body_json = _delete(f"{base}/api/components/{modules.WORKSPACE}")
+            check(
+                st == 200 and json.loads(body_json)["status"] == "removed",
+                "with nothing of it running, the same removal goes through",
+            )
+            check(components.installed(modules.WORKSPACE) is None, "and the host no longer resolves it")
+        finally:
+            os.environ.pop(workspace_mod.discovery_env, None)
+
+        # 8c. the same two verbs over HTTP, for a component with no daemon at all
+        st, body_json = http_get(f"{base}/api/components/versions?name={modules.MEMORY}")
+        payload = json.loads(body_json)
+        check(
+            st == 200 and bool(payload["versions"]) and payload["versions"][0]["resolved"],
+            "GET /api/components/versions names what this host holds, and which one it runs",
+        )
+        check(payload["versions"][0]["digest"] == digest, "and carries the digest the client's gate compares")
+        st, body_json = http_get(f"{base}/api/components/versions?name=..%2F..%2Fetc")
+        check(
+            st == 400 and "bad component name" in json.loads(body_json)["error"],
+            "a name that could never be an install is refused over HTTP too",
+        )
+        st, body_json = http_get(f"{base}/api/components/versions")
+        check(
+            st == 400 and "name is required" in json.loads(body_json)["error"],
+            "asking for versions without naming a component is refused",
+        )
+
+        st, body_json = _delete(f"{base}/api/components/{modules.WEBSEARCH}?version=9.9.9")
+        check(
+            st == 400 and "is not installed on this host" in json.loads(body_json)["error"],
+            "removing a version this host does not hold is refused",
+        )
+        st, body_json = _delete(f"{base}/api/components/{modules.WEBSEARCH}")
+        check(
+            st == 200
+            and json.loads(body_json) == {"status": "removed", "name": modules.WEBSEARCH, "removed": [components.digest_of(blob2)[:16]]},
+            "DELETE takes the component whole and answers which versions went",
+        )
+        check(components.installed(modules.WEBSEARCH) is None, "and the host no longer resolves it")
+        listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
+        check({c["name"] for c in listed} == {modules.MEMORY}, "the inventory shrank by exactly that component")
+        st, body_json = _delete(f"{base}/api/components/{modules.WEBSEARCH}")
+        check(st == 200 and json.loads(body_json)["status"] == "absent", "removing it again is absent, not an error")
+        st, _body = _delete(f"{base}/api/components/")
+        check(st == 404, "a removal that names no component is not found")
 
         srv.shutdown()
     finally:

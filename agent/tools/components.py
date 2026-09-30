@@ -36,6 +36,7 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
@@ -73,6 +74,24 @@ def manifest_from_header(raw: str | None) -> dict[str, Any]:
 # content digest (`0.2.0+<hex>`), which is how the client's install gate works.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+def _check_name(name: str) -> None:
+    """Refuse a component name that could never be an install on this host.
+
+    Names are path components, so this is the traversal gate as much as a
+    spelling rule: a name outside the shape an install may have would otherwise
+    reach the filesystem, and "refuse the request" is the only safe answer —
+    nothing about the caller's intent can make `../..` a component here.
+    """
+    if not _NAME_RE.match(name):
+        raise ValueError(f"bad component name: {name!r}")
+
+
+def _check_version(version: str) -> None:
+    """Refuse a version string that could never name an install directory."""
+    if not _VERSION_RE.match(version):
+        raise ValueError(f"bad component version: {version!r}")
 
 REQUIRED_FIELDS = ("name", "version", "interface")
 INTERFACES = ("daemon", "cli")
@@ -228,6 +247,112 @@ def current(name: str, version: str, digest: str) -> bool:
     return str(manifest.get("version", "")) == str(version) and str(manifest.get(DIGEST_FIELD, "")) == digest
 
 
+# -- the reverse verbs: what this host holds, version by version, and letting go
+
+
+def versions(name: str) -> list[dict[str, Any]]:
+    """Every version of `name` installed on THIS host, newest first ([]: none).
+
+    The finer list `inventory()` is too coarse to give: the inventory names one
+    record per component (the one `resolve()` would launch), while a machine can
+    hold an older version beside it — and letting go is aimed at ONE version
+    directory, so it has to be nameable. The order is `resolve()`'s own
+    comparison (newest by the manifest's version string), so the first record is
+    the one this host runs, and `resolved` marks exactly that one. The others
+    are directories this host would never launch — which is what makes them
+    harmless to remove, and removing the RESOLVED one a rollback to the next.
+
+    A directory without a usable manifest, or one whose manifest names another
+    component, is not an install (see resolve) and is not listed. A name that
+    could never be an install is refused rather than answered with []: the
+    caller asked about something that cannot exist here, and an empty list would
+    read as "not installed".
+    """
+    _check_name(name)
+    base = component_root(name)
+    if not base.is_dir():
+        return []
+    resolved = resolve(name)
+    resolved_directory = resolved[0] if resolved else None
+    out: list[dict[str, Any]] = []
+    for child in base.iterdir():
+        if not child.is_dir() or child.name.endswith(".installing"):
+            continue
+        manifest = read_manifest(child)
+        if manifest is None or manifest["name"] != name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "version": str(manifest["version"]),
+                "interface": str(manifest.get("interface", "")),
+                "digest": str(manifest.get(DIGEST_FIELD, "")),
+                "path": str(child),
+                "resolved": child == resolved_directory,
+            }
+        )
+    return sorted(out, key=lambda record: record["version"], reverse=True)
+
+
+def remove(name: str, version: str = "", *, stop: Callable[[str], str] | None = None) -> dict[str, Any]:
+    """Make this host hold less of `name`: drop ONE version, or all of them.
+
+    A verdict, like every other write on this layer (`accept`): what was actually
+    removed, so a page repeats the host's own sentence instead of assuming a
+    delete landed. Three outcomes:
+
+      - "removed" — the version directory (or the component's whole directory)
+        is gone; `removed` lists the versions that were there
+      - "absent" — a version-less removal of something this host does not hold.
+        NOT an error: what was asked for ("make sure none of it is here") is
+        already true, and an error would have a page report a problem that is
+        not one.
+      - ValueError — a name that could never be an install, or a `version` that
+        names nothing installed here. Nothing could make such a request true, so
+        it is refused with the reason, and nothing was touched.
+
+    The removal is the directory the version resolves by, so it cannot be aimed
+    at anything else on the filesystem. A version-less removal takes the
+    component's own directory whole — every version, plus whatever a crashed
+    install left staging inside it (`.installing` is inside that directory, not
+    a second thing to remember).
+
+    `stop` is the one thing this module cannot know: whether a process of the
+    component is RUNNING right now, which is not a filesystem fact (rendezvous
+    owns it, and owns the rule about daemons this host did not start). It is
+    called once, only when there is something to remove, and returns the
+    sentence to refuse with ("" when the bytes may go) — so a refusal to remove
+    happens BEFORE anything is signalled or deleted. Omitted, the caller is
+    saying it has already dealt with that.
+    """
+    _check_name(name)
+    base = component_root(name)
+    if version:
+        _check_version(version)
+        present = {record["version"]: Path(record["path"]) for record in versions(name)}
+        if version not in present:
+            raise ValueError(f"{name} {version} is not installed on this host")
+        victims = [present[version]]
+        removed = [version]
+    else:
+        removed = [record["version"] for record in versions(name)]
+        if not base.is_dir():
+            return {"status": "absent", "name": name, "removed": []}
+        victims = [base]
+    if stop is not None:
+        refusal = stop(name)
+        if refusal:
+            raise ValueError(refusal)
+    for victim in victims:
+        try:
+            shutil.rmtree(victim)
+        except OSError as err:
+            # the verdict is about what happened, so a directory that would not
+            # go is reported and not answered with "removed"
+            raise OSError(f"{victim} could not be removed: {err}") from err
+    return {"status": "removed", "name": name, "removed": removed}
+
+
 def spool(stream: IO[bytes], length: int, name: str = "") -> Path:
     """Write an incoming body to a scratch file in the install root; the caller
     deletes it.
@@ -355,10 +480,8 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
     artifact = Path(artifact)
     name = str(manifest.get("name", ""))
     ver = str(version or manifest.get("version", ""))
-    if not _NAME_RE.match(name):
-        raise ValueError(f"bad component name: {name!r}")
-    if not _VERSION_RE.match(ver):
-        raise ValueError(f"bad component version: {ver!r}")
+    _check_name(name)
+    _check_version(ver)
     interface = str(manifest.get("interface", ""))
     if interface not in INTERFACES:
         raise ValueError(f"manifest declares interface {interface!r}, expected one of {INTERFACES}")

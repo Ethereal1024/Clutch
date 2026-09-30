@@ -518,19 +518,104 @@ def release_all() -> None:
 atexit.register(release_all)
 
 
+# -- removal: what a component's bytes must not be removed from under ----------
+
+
+def live_daemons(module: str) -> list[Service]:
+    """Every daemon of `module` that is alive right now, whichever workspace it
+    serves and whichever process started it.
+
+    The records on disk are the only list of a component's daemons that exists —
+    this process publishes none of its own, and a record is named by a HASH of
+    the workspace it serves, so no root can be enumerated from a name. Listing
+    the module's own record directory is therefore the way to ask the machine
+    the only question it can answer from the filesystem: is anything of this
+    component running? The `.host` notes beside the records are this host's
+    fence bookkeeping, not records (see _note_path).
+
+    A one-process interface has no resident daemon at all: nothing to list.
+    """
+    mod = catalog.table().get(module)
+    if mod is None or mod.interface != catalog.DAEMON:
+        return []
+    try:
+        candidates = sorted(_record_dir(mod).glob(f"{mod.prefix}*.json"))
+    except OSError:  # no directory yet is not an error, and not a daemon either
+        return []
+    out: list[Service] = []
+    for path in candidates:
+        if path.name.endswith(".host.json"):
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        record = _live_record(payload)
+        if record is not None:
+            out.append(_service(module, record))
+    return out
+
+
+def stop_for_removal(module: str) -> str:
+    """Why this host must NOT remove `module`'s artifact ("" when it may), having
+    first stopped every daemon of OURS for it.
+
+    Removing a component is not only a filesystem act: a daemon of it that is
+    running is a process reading the very bytes that would go. So the rule is
+    "stop first, then delete", with the ownership rule this file already keeps
+    (release, _stop): a daemon THIS process started is stopped — our own child,
+    whose SIGTERM path unpublishes its record on the way out — and a daemon this
+    process did NOT start is not ours to signal, so its presence is a REFUSAL
+    with the pid named, and the artifact stays. That is the same verdict a
+    foreign daemon gets everywhere else here: a pid read off disk is not a
+    licence to kill, and a host that cannot stop the process must not delete
+    the code it is running.
+
+    A handle with no child (`proc is None`) is a daemon we ADOPTED — somebody
+    else started it — so it is refused by the same rule, not stopped.
+    """
+    with _LOCK:
+        ours = [
+            (key, handle)
+            for key, handle in _HANDLES.items()
+            if key[0] == module and handle.proc is not None
+        ]
+        for key, handle in ours:
+            _HANDLES.pop(key, None)
+            _stop(handle.proc)
+        foreign = live_daemons(module)
+    if foreign:
+        pids = ", ".join(str(service.pid) for service in foreign)
+        return (
+            f"{module} is being served right now by a daemon this process did not start "
+            f"(pid {pids}): stop it first — a component's bytes are not removed from under "
+            f"a running process"
+        )
+    return ""
+
+
 # -- discovery: the record a daemon publishes, and its readiness ---------------
 
 
 def _record_path(root: str, mod: catalog.Component) -> Path:
     """The discovery file a module daemon for this workspace publishes."""
+    digest = hashlib.sha256(os.path.normcase(root).encode("utf-8")).hexdigest()[:32]
+    return _record_dir(mod) / f"{mod.prefix}{digest}.json"
+
+
+def _record_dir(mod: catalog.Component) -> Path:
+    """The directory this module's daemons publish their records in.
+
+    Keyed on the module's own declaration, not on a workspace: a record's NAME
+    carries the workspace (a hash of its root), so listing the directory is how a
+    caller learns which workspaces have a daemon without guessing roots —
+    `stop_for_removal` is that caller.
+    """
     override = os.environ.get(mod.discovery_env)
     if override:
-        base = Path(override)
-    else:
-        local = os.environ.get("LOCALAPPDATA")
-        base = Path(local) / mod.app_dir if local else Path.home() / f".{mod.app_dir}"
-    digest = hashlib.sha256(os.path.normcase(root).encode("utf-8")).hexdigest()[:32]
-    return base / f"{mod.prefix}{digest}.json"
+        return Path(override)
+    local = os.environ.get("LOCALAPPDATA")
+    return Path(local) / mod.app_dir if local else Path.home() / f".{mod.app_dir}"
 
 
 def _read_record(root: str, mod: catalog.Component) -> dict | None:
@@ -545,6 +630,13 @@ def _read_record(root: str, mod: catalog.Component) -> dict | None:
         payload = json.loads(_record_path(root, mod).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return _live_record(payload)
+
+
+def _live_record(payload: Any) -> dict | None:
+    """The record's payload when it names a daemon that is ALIVE right now (None
+    otherwise): the shape check and the pid check every reader of a record makes,
+    in one place, because a record outlives the daemon that wrote it."""
     if not isinstance(payload, dict) or payload.get("version") != RECORD_VERSION:
         return None
     port, pid, token = payload.get("port"), payload.get("pid"), payload.get("token")

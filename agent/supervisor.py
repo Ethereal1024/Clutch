@@ -15,11 +15,20 @@ Component install (the install layer's receiving half — a component always
 belongs to the machine its server runs on, so this process is who a client
 installs ONTO, whether it is this desktop or a device behind a tunnel):
 
-    GET  /api/components         -> {components: [{name, version, interface, digest}]}
-    POST /api/components/install -> take one artifact; the manifest rides in the
-                                    X-Clutch-Component header (base64 of its
-                                    JSON), the artifact is the
-                                    body -> {status: "installed"|"current", ...}
+    GET    /api/components          -> {components: [{name, version, interface, digest}]}
+    GET    /api/components/versions -> ?name= -> one record per installed version
+    POST   /api/components/install  -> take one artifact; the manifest rides in the
+                                       X-Clutch-Component header (base64 of its
+                                       JSON), the artifact is the
+                                       body -> {status: "installed"|"current", ...}
+    DELETE /api/components/<name>   -> ?version= names ONE version to drop; without
+                                       it the component goes whole
+                                       -> {status: "removed"|"absent", ...}
+
+The removal verbs are the install endpoint's reverse, and answer the same way: a
+verdict, or the host's own sentence as error-as-data. They refuse while a daemon
+of the component is running that this process did not start (rendezvous.
+stop_for_removal) — see components.remove.
 
 Lifecycle (per product decision):
   - the FIRST window starts the supervisor (Electron probes /api/health and
@@ -61,6 +70,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 from agent.procmgr import kill
 from agent.procmgr.stdio import SafeStdStream, log, make_stdout_nonblocking
@@ -72,7 +82,7 @@ from agent.procmgr.supervise import (
     ProcessSupervisor,
     SpawnSpec,
 )
-from agent.tools import components
+from agent.tools import components, rendezvous
 
 DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
@@ -227,12 +237,33 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
+    def _route(self) -> tuple[str, dict[str, str]]:
+        """The request's path and its single-valued query, in one place.
+
+        A component's own name is a path segment (DELETE /api/components/<name>),
+        so the two are read together rather than compared as one string. A query
+        parameter that is spelled but empty (`?name=`) is absent, not "", which
+        is what makes a missing name a plain refusal.
+        """
+        parsed = urlsplit(self.path)
+        return parsed.path, {key: values[0] for key, values in parse_qs(parsed.query).items()}
+
     def do_GET(self) -> None:
-        if self.path == "/api/health":
+        path, query = self._route()
+        if path == "/api/health":
             self._json({"status": "ok"})
-        elif self.path == "/api/components":
+        elif path == "/api/components":
             # the version gate, host-side: what this machine already runs
             self._json({"components": components.inventory()})
+        elif path == "/api/components/versions":
+            name = query.get("name", "")
+            if not name:
+                self._json({"error": "name is required"}, 400)
+                return
+            try:
+                self._json({"name": name, "versions": components.versions(name)})
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -265,6 +296,28 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": str(err)}, 400)
         finally:
             artifact.unlink(missing_ok=True)
+
+    def _remove_component(self, name: str, version: str = "") -> None:
+        """Take one component (or one of its versions) back OFF this machine.
+
+        The install endpoint's reverse, composed the same way: `components` owns
+        the bytes and the verdict, `rendezvous` owns the one thing the bytes do
+        not tell (`stop_for_removal` — is any of it running, and is that daemon
+        ours to stop). It is asked first, and a refusal is answered before
+        anything is deleted, so a refused removal has no side effects.
+        """
+        try:
+            self._json(components.remove(name, version, stop=rendezvous.stop_for_removal))
+        except (ValueError, OSError) as err:
+            self._json({"error": str(err)}, 400)
+
+    def do_DELETE(self) -> None:
+        path, query = self._route()
+        prefix = "/api/components/"
+        if not path.startswith(prefix) or not path[len(prefix) :]:
+            self._json({"error": "not found"}, 404)
+            return
+        self._remove_component(path[len(prefix) :], query.get("version", ""))
 
     def do_POST(self) -> None:
         sup = self.supervisor
