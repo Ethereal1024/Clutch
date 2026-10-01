@@ -215,8 +215,9 @@ async function openProject(path, readOnly = false) {
     prog.classList.add("hidden");
     stream.classList.remove("loading"); // instant reveal — no fade, no replay
     stream.scrollTop = stream.scrollHeight; // jump straight to the end of the record
-    // re-scope the live stream to the new project; replay=0 (history already rendered)
-    reconnectSSE(false);
+    // re-scope the live stream to the new project; the watermark (streamHighOffset)
+    // now holds this project's tail, so the stream resumes exactly there
+    reconnectSSE();
     refreshTree();
   } catch (e) {
     prog.classList.add("hidden");
@@ -252,7 +253,7 @@ async function createProject(dir, name) {
     clearStream();
     setProjectInfo(data);
     hideWelcome();
-    reconnectSSE(false); // new empty project: nothing to replay, just live events
+    reconnectSSE(); // new empty project: the watermark resets with the stream
     refreshTree();
   } catch (e) {
     notice("Failed to create project: " + e.message);

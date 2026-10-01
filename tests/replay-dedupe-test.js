@@ -2,14 +2,19 @@
 
 // Regression test for the transcript that visibly DOUBLED after a reconnect.
 //
-// Replay is how a reconnecting stream heals: it re-sends the log from its window
-// start, so every event this window already painted arrives a second time. The
-// renderer's answer is a watermark — the highest log offset already rendered
-// (streamHighOffset, declared beside oldestOffset in js/project.js) — and a
-// record at or below it is one of those replays. The offsets are the log's own
-// monotonic byte positions inside the .clc (agent/core/lazy.py appends
-// `self._file_bytes - self._base` per record), so they never restart, not even
-// across a compaction.
+// A reconnecting stream heals by re-reading the log, and the window's answer to
+// "from where" is a watermark — the highest log offset already rendered
+// (streamHighOffset, declared beside oldestOffset in js/project.js), which
+// js/sse-stream.js now sends as `?since=`. Whatever the server sends from there
+// (a window's tail, or — the 0.1.18 compat path — a window that reaches back
+// past it) a record at or below the watermark is one this window already
+// painted. The offsets are the log's own monotonic byte positions inside the
+// .clc (agent/core/lazy.py appends `self._file_bytes - self._base` per record),
+// so they never restart, not even across a compaction.
+//
+// The same block closes with the server's `replayed` frame: a catch-up paints
+// without dragging the view (js/stream-view.js beginCatchUp/endCatchUp), and a
+// `resync` frame (the offset cannot be continued from) restarts the pane.
 //
 // The history paging path is the exception, and must stay one: it walks
 // BACKWARDS through older records into an off-DOM sink (pageSink), so it is
@@ -42,13 +47,16 @@ check(/streamHighOffset = null;/.test(fnBody("clearStream")),
 check(/function addEvent\(ev\)/.test(APP) &&
   /ev\.event && typeof ev\.offset === "number"/.test(fnBody("addEvent")),
   "the runner drives the real thing: a record is {offset, event} on the wire");
-check(/function reconnectSSE\(replay = true\)/.test(APP) &&
-  /connectSSE\(replay\)/.test(APP),
-  "the reconnecting stream still asks for the replay: the watermark is what makes that safe");
+check(/^function reconnectSSE\(\)/m.test(APP) &&
+  /connectSSE\(\)/.test(fnBody("reconnectSSE")),
+  "the reconnecting stream is a plain connect: the watermark is read in one place");
+check(/if \(streamHighOffset !== null\) qs\.set\("since"/.test(fnBody("connectSSE")),
+  "and it asks for exactly the records after that watermark, or for the window when there are none");
 
 // ---- stub environment ----
 const rendered = [];
 const pill = [];
+const pins = []; // every write autoScroll actually makes to the view's scrollTop
 let pagingSink = null;
 global.eventsEl = {
   set innerHTML(v) {
@@ -60,7 +68,18 @@ global.eventsEl = {
   appendChild: (el) => rendered.push(el),
 };
 global.pageSink = null;
-global.stream = { classList: { contains: () => false } };
+// the view: a real element's two scroll fields and nothing else (autoScroll only
+// reads scrollHeight and writes scrollTop while latched)
+global.stream = {
+  classList: { contains: () => false },
+  scrollHeight: 1000,
+  get scrollTop() {
+    return pins.length ? pins[pins.length - 1] : 0;
+  },
+  set scrollTop(v) {
+    pins.push(v);
+  },
+};
 global.streamHighOffset = null;
 global.oldestOffset = null;
 global.olderRemaining = 0;
@@ -79,9 +98,17 @@ global.applyStreamEvent = () => false;
 global.renderEvent = (ev) => ({ ev, matches: () => false });
 global.highlightCode = () => {};
 global.typesetMath = () => {};
-global.autoScroll = () => {};
+// the catch-up bracket (js/stream-view.js): the runner drives the real pair AND
+// the real autoScroll, so the guard is exercised and not re-implemented
+global.catchUp = false;
+global.followTail = true;
+global.gliding = false;
+global.glideRaf = 0;
+global.setJumpVisible = () => {};
 
-for (const name of ["addEvent", "clearStream"]) (0, eval)(fnBody(name));
+for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
+  (0, eval)(fnBody(name));
+}
 
 const frame = (offset, event) => ({ offset, event });
 
@@ -166,5 +193,34 @@ const beforeNotice = rendered.length;
 addEvent({ type: "history", older: 4096 });
 check(rendered.length === beforeNotice && pill[pill.length - 1] === 4096,
   "the replay's 'history' frame restores the older-pill count and paints nothing");
+
+// ---- 7. a catch-up paints in one pass: the view moves once, at its end ----
+// (the block the server brackets between `history` and `replayed`: without the
+// bracket a returning phone scrolls once per replayed record, dragging a user
+// who had scrolled up along with it)
+check(global.catchUp === true, "the 'history' frame opens the catch-up");
+const pinsBefore = pins.length;
+addEvent(frame(50, { type: "user_message", text: "owed" }));
+addEvent(frame(61, { type: "final", status: "ok", summary: "owed" }));
+check(rendered.length === beforeNotice + 2 && pins.length === pinsBefore,
+  "its records are painted without moving the view");
+check(global.catchUp === true, "and the block is still open: only the server closes it");
+addEvent({ type: "replayed", count: 2 });
+check(global.catchUp === false, "the 'replayed' frame closes the catch-up");
+check(pins.length === pinsBefore + 1 && pins[pins.length - 1] === 1000,
+  "and the view moves exactly once, at the end, onto the tail");
+addEvent({ type: "replayed", count: 0 });
+check(pins.length === pinsBefore + 1, "a close with nothing open moves nothing");
+
+// ---- 8. an offset the log cannot continue from restarts the pane ----
+// (the .clc was replaced under this window: appending the served window would
+// leave two transcripts on one screen)
+const beforeResync = rendered.length;
+addEvent(frame(72, { type: "user_message", text: "second transcript" }));
+check(rendered.length === beforeResync + 1, "the served window lands...");
+addEvent({ type: "resync" });
+check(rendered.length === 0 && global.streamHighOffset === null &&
+  global.oldestOffset === null,
+  "...and 'resync' starts it over instead of leaving two on one screen");
 
 summary("replay-dedupe");

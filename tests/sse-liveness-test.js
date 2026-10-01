@@ -32,9 +32,9 @@ check(/es\.onerror = \(\) => \{\n    \/\/ the browser reconnects/.test(src),
   "es.onerror is no longer an empty auto-reconnect stub");
 check(/connectionLost\("could not reach the session to stop the task/.test(src),
   "stop() surfaces the failure instead of an empty catch (through the dialog)");
-check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseFrames = 0;/m.test(src) &&
-  /^let sseErrors = 0;/m.test(src) && /^let sseDown = false;/m.test(src) &&
-  /^let sseWatchdog = null;/m.test(src),
+check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseErrors = 0;/m.test(src) &&
+  /^let sseDown = false;/m.test(src) && /^let sseWatchdog = null;/m.test(src) &&
+  /^let sseSuspended = false;/m.test(src),
   "the liveness state is real module state, not a per-stream local");
 
 // ---- stub environment ----
@@ -75,20 +75,19 @@ global.API_BASE = "http://127.0.0.1:43761";
 global.currentProject = "/tmp/demo.clc";
 global.es = null;
 global.busy = false;
+// how far this window has painted (js/project.js): a fresh window has nothing
+// to ask for, so the stream serves the resident window
+global.streamHighOffset = null;
 // the module-level stream state of the renderer: its let-declarations are NOT
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the block below asserts the source declares it for real)
 global.sseLastFrameAt = 0;
-global.sseFrames = 0;
 global.sseErrors = 0;
 global.sseDown = false;
 global.sseSuspended = false; // the page is running here: android-resume covers the other case
-global.sseHiddenTick = false;
-global.sseProbe = null;
 global.sseWatchdog = null;
 global.SSE_KEEPALIVE_MS = 15000;
-global.SSE_RESUME_PROBE_MS = 2000;
-global.setTimeout = () => 1; // the resume probe is never fired here
+global.setTimeout = () => 1;
 global.clearTimeout = () => {};
 // the watchdog reads visibility now (a hidden page is not a witness); these
 // runners drive one function at a time, so the page state is the runner's
@@ -135,11 +134,12 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
 
 (async () => {
   // ---- 1) a stream is armed: one stream, keepalive listened for BY NAME ----
-  connectSSE(true);
+  connectSSE();
   const es1 = instances[instances.length - 1];
   check(es1 && es1.url.includes("/api/events?"), "connectSSE opens the events stream");
   check((es1.listeners.ping || []).length === 1, "the named keepalive is listened for by name");
-  check(es1.url.includes("replay=1"), "a fresh stream asks for the history replay");
+  check(!/replay/.test(es1.url) && !/[?&]since=/.test(es1.url),
+    "a window that has painted nothing asks for the resident window, not an offset");
 
   // ---- 2) half-open stream: silent past three keepalives, no ES error at all --
   es1.fireOpen();
@@ -175,7 +175,7 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
     "a live stream triggers nothing");
 
   // ---- 5) a base that is GONE: EventSource retries forever in silence ----
-  connectSSE(false);
+  connectSSE();
   const es3 = instances[instances.length - 1];
   es3.fireOpen();
   check(global.sseErrors === 0, "a connect resets the failure count");

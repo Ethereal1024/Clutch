@@ -33,11 +33,32 @@ function setJumpVisible(visible) {
 let followTail = true;
 let lastScrollTop = 0;
 
+// A catch-up (the records a (re)connect is owed, ui/js/sse-stream.js `?since=`)
+// lands as one block between the server's `history` and `replayed` frames. While
+// it is arriving the view does not follow: painting N records one by one would
+// scroll N times (a phone returning from the background drags a whole window's
+// worth), and it would drag a user who had scrolled up down with it. So the
+// block paints in one pass and the view moves once, at the end — and then only
+// through autoScroll(), which respects the latch. beginCatchUp/endCatchUp are
+// bracket calls (ui/js/stream-events.js), not a counter: the frames nest nowhere.
+let catchUp = false;
+
 let gliding = false;
 let glideRaf = 0;
 
+function beginCatchUp() {
+  catchUp = true;
+}
+
+function endCatchUp() {
+  if (!catchUp) return;
+  catchUp = false;
+  autoScroll(); // once, at the block's end: a latched view lands on the tail
+}
+
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
+  if (catchUp && !force) return; // one scroll per catch-up, not one per record
   if (force) {
     // User-initiated jump (message send, ↓, Cmd/Ctrl+Down): tracked = instant pin,
     // untracked = the one smooth glide that re-latches on arrival.

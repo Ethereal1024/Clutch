@@ -110,9 +110,24 @@ function addEvent(ev) {
     if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
     ev = ev.event;
   }
-  // reconnect history line: restore the honest on-disk older count
+  // reconnect history line: restore the honest on-disk older count. It also
+  // OPENS the catch-up block: everything until the `replayed` frame is a record
+  // this window is owed, and the view must not chase each one (js/stream-view.js).
   if (ev && ev.type === "history") {
     setOlderPill(ev.older || 0);
+    beginCatchUp();
+    return;
+  }
+  // the catch-up is over: the view follows again, with a single move
+  if (ev && ev.type === "replayed") {
+    endCatchUp();
+    return;
+  }
+  // the offset this window asked to continue from is past the end of the log
+  // (the .clc was replaced under it): appending the served window would leave
+  // two transcripts on one screen, so the pane starts over instead
+  if (ev && ev.type === "resync") {
+    clearStream();
     return;
   }
   // replayed status/permission events must not drive the live UI
