@@ -56,6 +56,9 @@ let activeConnStatus = null; // status element of the modal currently connecting
 const CONN_STAGES = {
   auth: { pct: 10, label: "Connecting…" },
   probe: { pct: 22, label: "Inspecting remote…" },
+  // the gate's own stage: a remote that already runs our version never reaches
+  // "install", so reconnecting to a healthy server must not claim it does
+  check: { pct: 30, label: "Checking remote server…" },
   install: { pct: 35, label: "Installing remote server…" },
   "install:upload": { pct: 45, label: "Uploading server…" },
   "install:start": { pct: 70, label: "Starting server…" },

@@ -7,10 +7,10 @@
 // — the renderer must never keep posting into a port nobody serves.
 
 const net = require("net");
-const { state, tunnelLog, HEAL_INTERVAL_MS } = require("./tunnel-core");
+const { state, tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunnel-core");
 const { freePort, listen, waitForServer } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
-const { startCommand, stopServerCmd } = require("./tunnel-bootstrap");
+const { startCommand, stopServer } = require("./tunnel-bootstrap");
 const { stopLlmProxy } = require("./llm-proxy");
 const { stopExecBridge } = require("./exec-bridge");
 
@@ -139,9 +139,18 @@ async function collectRemoteDiagnostics() {
 async function restartRemoteServer() {
   if (!state.sshClient || !state.lastStrategy || !state.lastHome) return false;
   tunnelLog("[heal] restarting remote server");
-  await remoteExec(stopServerCmd(state.lastStrategy));
+  // stopServer proves the port came free: a restart that only *tries* to kill
+  // the old process reports "recovered" against the survivor that made the
+  // heal necessary, since the survivor is what answers the health poll.
+  const stopped = await stopServer(state.lastProbe || {}, state.lastStrategy);
+  if (!stopped.ok) {
+    tunnelLog(`[heal] port ${REMOTE_API_PORT} still held after the stop:\n` + stopped.diag);
+    return false;
+  }
   await remoteExec(startCommand(state.lastStrategy, state.lastHome));
-  return waitForServer(state.currentUrl + "/api/health", 20000);
+  const base = state.currentUrl;
+  if (!base) return false;
+  return waitForServer(base + "/api/health", 20000);
 }
 
 async function healOnce() {

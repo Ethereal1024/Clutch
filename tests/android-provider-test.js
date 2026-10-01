@@ -117,7 +117,11 @@ async function main() {
     /failed sha256/,
     "tampered manifest is caught by the recomputed hash"
   );
-  assert.deepStrictEqual(fs.readdirSync(CACHE), [], "a rejected download leaves nothing behind");
+  assert.deepStrictEqual(
+    fs.readdirSync(CACHE).filter((f) => !f.startsWith("pylibs-index-")),
+    [],
+    "a rejected download leaves nothing behind (a cached INDEX is not an artifact)"
+  );
 
   // 4. the good probe: download, verify, land in the desktop's cache
   const { path: p, version } = await provider.ensurePyLibsTar({
@@ -162,6 +166,58 @@ async function main() {
   assert.strictEqual(again.path, p, "cache hit returns the same path");
   assert.strictEqual(again.version, goodHash16, "cache hit still recomputes the gate value");
   assert.strictEqual(tarFetches(), before, "cache hit did NOT re-download the tar");
+
+  // 7. the release host does not answer (the phone is on a LAN with no
+  // internet, or the CDN is blocked). The cached index names the same artifact
+  // and the cache holds it byte-for-byte, so a reconnect to a remote that
+  // already runs this tar must still gate exactly instead of failing with
+  // "cannot obtain wheels for target" — which is what made a reconnect look
+  // like it could never complete.
+  assert(
+    fs.readdirSync(CACHE).some((f) => f.startsWith("pylibs-index-")),
+    "the release index is cached beside the tars"
+  );
+  const offline = createAndroidArtifactProvider({
+    indexUrl: srv.url,
+    fetchIndex: () => Promise.reject(new Error("getaddrinfo ENOTFOUND github.com")),
+  });
+  const offlineHit = await offline.ensurePyLibsTar({
+    os: "linux",
+    arch: "x86_64",
+    libc: "glibc",
+    pyver: "3.12",
+  });
+  assert.strictEqual(offlineHit.version, goodHash16, "offline: the gate value is unchanged");
+  assert.strictEqual(offlineHit.path, p, "offline: the cached tar is the artifact");
+
+  // ...but only for an artifact that is really here: a target whose tar was
+  // never downloaded still reports the network failure rather than guessing
+  await assert.rejects(
+    () => offline.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    /ENOTFOUND/,
+    "offline + no cached tar for this target: the fetch error still surfaces"
+  );
+
+  // ...and a cache written for ANOTHER release (a different index URL, i.e. a
+  // newer APK's tag) is never reused: it could name an older tar and silently
+  // pin the remote to code this app no longer speaks
+  await assert.rejects(
+    () =>
+      createAndroidArtifactProvider({
+        indexUrl: srv.url + "?tag=v9.9.9",
+        fetchIndex: () => Promise.reject(new Error("offline")),
+      }).ensurePyLibsTar({ os: "linux", arch: "x86_64", libc: "glibc", pyver: "3.12" }),
+    /offline/,
+    "a cached index for another release URL is not reused"
+  );
+
+  // 8. a stalled transfer is capped: without a socket timeout a hung fetch
+  // leaves the connect on "Installing remote server…" indefinitely (the
+  // reported "reconnecting just installs the server again and again").
+  assert(
+    /req\.setTimeout\(timeoutMs/.test(PROVIDER_SRC),
+    "a stalled artifact fetch is bounded by a socket timeout"
+  );
 
   await srv.close();
   fs.rmSync(HOME, { recursive: true, force: true });

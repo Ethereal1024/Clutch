@@ -28,6 +28,7 @@ const state = {
   wasDisconnected: true,
   lastStrategy: null,
   lastHome: null,
+  lastProbe: null, // the target's last probe: what a restart has to match
   healTimer: null,
   sessionForwards: new Set(),
   endListeners: new Set(),

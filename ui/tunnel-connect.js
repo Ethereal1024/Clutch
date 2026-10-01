@@ -136,7 +136,23 @@ async function connectTunnel({ host, user, port, password }, progress) {
     // bootstrap: make sure the server exists and is running on the remote
     const probeOut = await remoteExec(PROBE_CMD);
     const probe = parseProbe(probeOut.stdout);
-    if (progress) progress("install");
+    // An exec that timed out (code -1) or came back without the probe's own
+    // markers is NOT "nothing is installed there". Reading it that way sent a
+    // flaky reconnect into a full reinstall it did not need — and, with the old
+    // stop patterns, into a loop it could not leave. Say what actually
+    // happened; the SSH session stays for SSH-tools.
+    if (!probe.os || !probe.home) {
+      const why =
+        probeOut.code === -1
+          ? "the remote shell did not answer the capability probe in time"
+          : `the capability probe came back unreadable (exit ${probeOut.code})`;
+      tunnelLog("[bootstrap] probe unusable: " + why + " :: " + (probeOut.stdout || "").slice(0, 200));
+      state.wasDisconnected = false;
+      return { ok: false, error: why + " — the remote server was left untouched; reconnect." };
+    }
+    // "check", not "install": the gate below decides, and installServer
+    // announces the install itself when there really is one to do
+    if (progress) progress("check");
     const boot = await installServer(probe, { progress });
     if (boot && boot.ok === false) {
       // hard reject: keep the SSH session for SSH-tools degradation; mark the

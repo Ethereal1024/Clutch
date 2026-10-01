@@ -15,6 +15,11 @@ const components = require("./components");
 
 // ---- bootstrap ----
 
+// How long a stopped remote server gets to let go of 8890 before we insist
+// (SIGKILL) and, past even that, report the process that is still holding it.
+// The env override keeps the test suite from spending the grace twice per case.
+const STOP_GRACE_MS = Number(process.env.CLUTCH_TUNNEL_STOP_GRACE_MS || 5000);
+
 const PROBE_CMD = [
   'echo "__OS__"; uname -s',
   'echo "__ARCH__"; uname -m',
@@ -66,10 +71,81 @@ function startCommand(strategy, home) {
 }
 
 function remoteRunningCmd(probe) {
-  if (probe.python) {
+  if (probe && probe.python) {
     return `python3 -c "import socket;s=socket.socket();s.settimeout(1);s.connect(('127.0.0.1',${REMOTE_API_PORT}));print('UP')" 2>/dev/null || echo DOWN`;
   }
-  return `(command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ':${REMOTE_API_PORT} ' && echo UP) || echo DOWN`;
+  // no python3 to ask: try ss, and say UNKNOWN (not DOWN) when even that is
+  // missing — "I could not look" and "nobody is listening" are different
+  // answers, and only one of them justifies replacing the process on the port.
+  return `(command -v ss >/dev/null && (ss -ltn 2>/dev/null | grep -q ':${REMOTE_API_PORT} ' && echo UP || echo DOWN)) || echo UNKNOWN`;
+}
+
+// The far side's OWN health check. A bound port is not a serving server: the
+// wedged survivor of an earlier session keeps the socket bound with nothing
+// behind it, and the port alone cannot tell the two apart — that is how a
+// reconnect used to skip the install, then die at the local health gate with
+// no way back (report: "only restarting the server helps").
+function remoteHealthCmd(probe) {
+  const url = `http://127.0.0.1:${REMOTE_API_PORT}/api/health`;
+  if (probe && probe.python) {
+    return `python3 -c "import urllib.request;print(urllib.request.urlopen('${url}',timeout=3).status)" 2>/dev/null || echo DOWN`;
+  }
+  return `(command -v curl >/dev/null && (curl -fsS -m 3 -o /dev/null '${url}' && echo 200 || echo DOWN)) || echo UNKNOWN`;
+}
+
+// What is on the far side's port: DOWN (nobody), WEDGED (bound, silent),
+// SERVING (answers), UNMEASURABLE (no python3 and no curl to ask with — a
+// remote whose answer we cannot hear must not be mistaken for a dead one).
+async function remoteServingState(probe) {
+  const out = (await remoteExec(remoteRunningCmd(probe))).stdout || "";
+  if (!out.includes("UP")) return out.includes("UNKNOWN") ? "UNMEASURABLE" : "DOWN";
+  const h = (await remoteExec(remoteHealthCmd(probe))).stdout || "";
+  if (h.includes("200")) return "SERVING";
+  if (h.includes("UNKNOWN")) return "UNMEASURABLE";
+  return "WEDGED";
+}
+
+// Wait for the port to go quiet after a stop. The verdict is the last one
+// observed: anything but UP means nothing is holding 8890 any more.
+async function waitForRemotePortFree(probe, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let out = "";
+    try {
+      out = (await remoteExec(remoteRunningCmd(probe))).stdout || "";
+    } catch (e) {
+      tunnelLog("[bootstrap] port check failed: " + ((e && e.message) || e));
+    }
+    if (!out.includes("UP")) return out.includes("UNKNOWN") ? "UNKNOWN" : "DOWN";
+    if (Date.now() >= deadline) return "UP";
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+// Stop the far side's server and PROVE it let go of the port. SIGTERM first,
+// then SIGKILL, then say who is still holding it. A replacement started while
+// the old process still owns 8890 dies with "cannot bind … port in use" — a
+// failure this side used to read as "the install did not come up", retry
+// forever, and never see the real cause of.
+async function stopServer(probe, strategy) {
+  await remoteExec(stopServerCmd(strategy));
+  let verdict = await waitForRemotePortFree(probe, STOP_GRACE_MS);
+  if (verdict !== "UP") return { ok: true, state: verdict };
+  tunnelLog(`[bootstrap] port ${REMOTE_API_PORT} still held after SIGTERM — SIGKILL`);
+  await remoteExec(stopServerCmd(strategy, "-9"));
+  verdict = await waitForRemotePortFree(probe, STOP_GRACE_MS);
+  if (verdict !== "UP") return { ok: true, state: verdict };
+  let diag = "";
+  try {
+    const d = await remoteExec(
+      `ps ax 2>/dev/null | grep -E '[a]gent[.-](supervisor|server)' | head -5; ` +
+        `command -v ss >/dev/null && ss -ltnp 2>/dev/null | grep ':${REMOTE_API_PORT} ' || true`
+    );
+    diag = (d.stdout || "").trim().slice(0, 400);
+  } catch (e) {
+    /* diagnostics are best-effort */
+  }
+  return { ok: false, state: verdict, diag };
 }
 
 // The bundle strategy ships binaries built for THIS host, so it is only valid
@@ -151,13 +227,27 @@ async function installServer(probe, { force, progress } = {}) {
   const dir = `${home}/.clutch-server`;
   state.lastStrategy = strategy;
   state.lastHome = home;
+  state.lastProbe = probe; // the healer restarts with the same target's spellings
 
   let reinstalled = false;
   if (!installed) {
+    // announced HERE, not before this call: a reconnect to a remote that
+    // already runs our version is not an install, and saying "Installing
+    // remote server…" for it was the reported lie on every retry
+    if (progress) progress("install");
     // the NAS refuses to truncate an executing binary in place: stop first
     await remoteExec(`mkdir -p ${dir}`);
     tunnelLog("[bootstrap] stopping old server before reinstall");
-    await remoteExec(stopServerCmd(strategy));
+    const stopped = await stopServer(probe, strategy);
+    if (!stopped.ok) {
+      tunnelLog("[bootstrap] the old server would not let go of the port:\n" + stopped.diag);
+      return {
+        ok: false,
+        error:
+          `the remote still holds port ${REMOTE_API_PORT} after a stop (${stopped.diag || "no owner found"}) — ` +
+          "something is running there that this client cannot replace. Free the port and reconnect.",
+      };
+    }
     if (strategy === "bundle") {
       const { server, supervisor } = artifact;
       tunnelLog(`[bootstrap] uploading bundle ${path.basename(server)} + supervisor`);
@@ -195,26 +285,47 @@ async function installServer(probe, { force, progress } = {}) {
     reinstalled = true;
   }
 
-  // ensure the server runs the freshly installed code
-  const run = await remoteExec(remoteRunningCmd(probe));
-  if (reinstalled || !run.stdout.includes("UP")) {
+  // ensure the server runs the freshly installed code — and that it ANSWERS.
+  // The port alone is not enough: a supervisor left wedged by an earlier
+  // session holds the socket with nothing behind it, so a port-only check
+  // skipped the restart and the connect then died at the health gate on every
+  // attempt, forever, until someone restarted the remote box.
+  const before = await remoteServingState(probe);
+  if (reinstalled || before === "DOWN" || before === "WEDGED") {
+    if (before === "WEDGED") {
+      tunnelLog(`[bootstrap] port ${REMOTE_API_PORT} is bound but not answering — replacing its process`);
+      const stopped = await stopServer(probe, strategy);
+      if (!stopped.ok) {
+        tunnelLog("[bootstrap] the wedged server would not let go of the port:\n" + stopped.diag);
+        return {
+          ok: false,
+          error:
+            `the remote port ${REMOTE_API_PORT} is held by a process that does not answer and cannot be ` +
+            `stopped (${stopped.diag || "no owner found"}). Free the port and reconnect.`,
+        };
+      }
+    }
     tunnelLog("[bootstrap] starting server");
     if (progress) progress("install:start");
     // short timeout: the start command backgrounds the server
     await remoteExec(startCommand(strategy, home), 10000);
-    // wait for it to bind; pylibs cold-start imports the whole wheel stack and
-    // can take >10s on slow servers, so poll for up to 20s (vs the old 6s
+    // wait for it to answer; pylibs cold-start imports the whole wheel stack
+    // and can take >10s on slow servers, so poll for up to 20s (vs the old 6s
     // window that reported a healthy install as "did not come up")
+    let after = "DOWN";
     for (let i = 0; i < 40; i++) {
-      const chk = await remoteExec(remoteRunningCmd(probe));
-      if (chk.stdout.includes("UP")) break;
+      after = await remoteServingState(probe);
+      if (after === "SERVING" || after === "UNMEASURABLE") break;
       await new Promise((r) => setTimeout(r, 500));
     }
-    const up = await remoteExec(remoteRunningCmd(probe));
-    if (!up.stdout.includes("UP")) {
+    if (after !== "SERVING" && after !== "UNMEASURABLE") {
       let diag = "";
       try {
-        const d = await remoteExec(`tail -n 40 /tmp/clutch-server.log 2>/dev/null; ls -la ${dir}/agent-supervisor ${dir}/agent-server 2>&1`);
+        const d = await remoteExec(
+          `tail -n 40 /tmp/clutch-server.log 2>/dev/null; ` +
+            `ls -la ${dir}/agent-supervisor ${dir}/agent-server 2>&1; ` +
+            `ps ax 2>/dev/null | grep -E '[a]gent[.-](supervisor|server)' | head -5`
+        );
         diag = (d.stdout || "").slice(0, 800);
       } catch (e) {
         /* best effort */
@@ -224,24 +335,34 @@ async function installServer(probe, { force, progress } = {}) {
         ok: false,
         error:
           "the remote Clutch supervisor failed to start on port " + REMOTE_API_PORT +
+          ` (state: ${after})` +
           (diag ? ` (remote log: ${diag.replace(/\n/g, " | ")})` : ""),
       };
     }
   } else {
-    tunnelLog("[bootstrap] server already running");
+    tunnelLog(`[bootstrap] server already running (${before.toLowerCase()})`);
   }
   return { installed: true, strategy };
 }
 
-function stopServerCmd(strategy) {
-  // bracket guards avoid pkill matching its own shell; also stops legacy
-  // shared servers on 8890 that would make the supervisor bind-fail
+// Every spelling the far side's server can take. The bracket guards keep pkill
+// from matching its own shell (and the calling exec's), and the list must cover
+// the pip/pylibs spelling too: `python3 -m agent.supervisor` matches NONE of
+// the bundle names. Missing it was the reconnect bug — the old supervisor kept
+// 8890, the replacement died with "cannot bind 127.0.0.1:8890 — port in use",
+// and since the port still answered, every later attempt skipped the install
+// and failed at the health gate: only restarting the remote box cleared it.
+const SERVER_PATTERNS = [
+  "[a]gent-supervisor", // bundle: ~/.clutch-server/agent-supervisor
+  "[a]gent-server", // bundle: ~/.clutch-server/agent-server
+  "[a]gent\\.supervisor", // pylibs: python3 -m agent.supervisor
+  "[a]gent\\.server", // pylibs: python3 -m agent.server (its session children)
+];
+
+function stopServerCmd(strategy, signal = "") {
   void strategy;
-  return (
-    "pkill -f '[a]gent-supervisor' 2>/dev/null; " +
-    "pkill -f '[a]gent-server' 2>/dev/null; " +
-    "pkill -f '[a]gent.server' 2>/dev/null; true"
-  );
+  const flag = signal ? `${signal} ` : "";
+  return SERVER_PATTERNS.map((p) => `pkill ${flag}-f '${p}' 2>/dev/null`).join("; ") + "; true";
 }
 
 // The far side's server is up, and components are code IT runs on ITS machine —
@@ -269,6 +390,9 @@ module.exports = {
   parseProbe,
   startCommand,
   stopServerCmd,
+  stopServer,
+  remoteRunningCmd,
+  remoteServingState,
   chooseStrategy,
   installServer,
   installComponents,

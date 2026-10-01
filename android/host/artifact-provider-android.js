@@ -51,32 +51,73 @@ function sha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
-// tiny GET with redirect following (GitHub release assets redirect to S3)
-function fetchBuf(url, redirects = 0) {
+// tiny GET with redirect following (GitHub release assets redirect to S3).
+// The timeout is the point: without one a stalled TLS/HTTP connection never
+// errors, and the connect sits on "Installing remote server…" for as long as
+// the phone's network cares to hold the socket open — the reported "it keeps
+// installing the server" on a reconnect to a remote that was already ready.
+const INDEX_TIMEOUT_MS = 20000;
+const TAR_TIMEOUT_MS = 180000; // ~30 MB over mobile data
+
+function fetchBuf(url, redirects = 0, timeoutMs = INDEX_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error("too many redirects fetching " + url));
     const mod = url.startsWith("https:") ? https : http;
-    mod
-      .get(url, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          return resolve(fetchBuf(new URL(res.headers.location, url).toString(), redirects + 1));
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        }
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-        res.on("error", reject);
-      })
-      .on("error", reject);
+    const req = mod.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(fetchBuf(new URL(res.headers.location, url).toString(), redirects + 1, timeoutMs));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+      }
+      const chunks = [];
+      res.on("data", (c) => {
+        chunks.push(c);
+        req.setTimeout(timeoutMs); // a download that stalls mid-body is struck too
+      });
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`timed out after ${timeoutMs}ms fetching ${url}`));
+    });
+    req.on("error", reject);
   });
 }
 
 async function fetchJson(url) {
   return JSON.parse((await fetchBuf(url)).toString("utf-8"));
+}
+
+// One cached index per index URL — the URL carries the tag an APK is stamped
+// with (or "latest" for a dev build), so a cached copy can only ever describe
+// the release this app was built from.
+function indexCachePath(indexUrl) {
+  const stamp = crypto.createHash("sha256").update(indexUrl).digest("hex").slice(0, 12);
+  return path.join(cacheDir(), `pylibs-index-${stamp}.json`);
+}
+
+function readCachedIndex(indexUrl) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(indexCachePath(indexUrl), "utf-8"));
+    // the URL is stored inside: a cache written for another release is not ours
+    return parsed && parsed.url === indexUrl && parsed.index ? parsed.index : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeCachedIndex(indexUrl, index) {
+  try {
+    const out = indexCachePath(indexUrl);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out + ".tmp", JSON.stringify({ url: indexUrl, index }));
+    fs.renameSync(out + ".tmp", out);
+  } catch (e) {
+    /* an index we cannot cache is not a failed connect */
+  }
 }
 
 function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchIndex = fetchJson, fetch = fetchBuf } = {}) {
@@ -97,6 +138,7 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
       let index;
       try {
         index = await fetchIndex(indexUrl);
+        writeCachedIndex(indexUrl, index);
       } catch (e) {
         // a 404 here is the supply line, not the network: the release this
         // APK's stamp points at predates the pylibs-matrix job (v0.1.14 did)
@@ -110,7 +152,16 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
               "(docs/android/02 §7)."
           );
         }
-        throw e;
+        // An unreachable release host (the phone sits on a LAN with no
+        // internet, or the release CDN is blocked) is NOT a reason a reconnect
+        // to a remote that already runs this tar must fail: the cached index
+        // names the same artifact, the cache holds it byte-for-byte, and the
+        // hash is recomputed below, so the gate stays exact. Only a cached
+        // index for THIS index URL counts, and only when its tar is here too.
+        const cached = readCachedIndex(indexUrl);
+        const hit = cached && cached[key] && cached[key].file;
+        if (!hit || !fs.existsSync(path.join(cacheDir(), hit))) throw e;
+        index = cached;
       }
       const entry = index && index[key];
       if (!entry || !entry.file || !entry.sha256) {
@@ -123,7 +174,8 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
         // cache hit still returns the RECOMPUTED hash: trust nothing, not even ourselves
         return { path: out, version: sha256(fs.readFileSync(out)).slice(0, 16) };
       }
-      const buf = await fetch(indexUrl.replace(/[^/]*$/, "") + entry.file);
+      // the tar is ~30 MB: give the body transfer its own, longer stall window
+      const buf = await fetch(indexUrl.replace(/[^/]*$/, "") + entry.file, 0, TAR_TIMEOUT_MS);
       const got = sha256(buf);
       if (got !== entry.sha256) {
         throw new Error(`pylibs artifact ${entry.file} failed sha256: expected ${entry.sha256}, got ${got}`);
