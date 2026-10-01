@@ -19,6 +19,10 @@
 // on the first session that answers again, and that session is adopted in place
 // (same project, same transcript) rather than in a fresh window.
 //
+// The door back is the host this window was on and no other: the standing intent
+// says which one that is, and a remote that will not answer keeps its tries. The
+// dialog never quietly swaps hosts under the user (see connLostRecover).
+//
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
 // sees every `const`/`let`/`function` the earlier files declared. It may rely
@@ -39,10 +43,6 @@ const connLostWhyEl = $("#conn-lost-why");
 // into signal must reconnect without the user touching anything, and a host
 // that is simply down must not be hammered: the gap grows to a steady 30s.
 const CONN_LOST_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
-// how many redials a named remote gets before a desktop gives up on it and takes
-// the host's own (local) session instead. The phone has no local session at all
-// (N4), so there the remote keeps its tries forever.
-const CONN_LOST_HOST_FALLBACK_AFTER = 3;
 
 let connLost = false; // this window has no session, and the dialog is up
 let connLostTries = 0; // attempts spent on the outage (drives the backoff)
@@ -147,9 +147,11 @@ async function connLostAttempt() {
   try {
     if (await connLostRecover()) {
       // The door reported success, and that verdict can only come from
-      // connLostProve — which waits for connLost to go false, i.e. for a session
-      // to answer. That answer already took the dialog down (the only closer is
-      // es.onopen in js/sse-stream.js), so there is nothing to close here.
+      // connLostAwaitAnswer — which waits for connLost to go false, i.e. for a
+      // session to answer. That answer already took the dialog down (the only
+      // closer is es.onopen in js/sse-stream.js), so there is nothing to close
+      // here. Had it timed out instead, the notice below says so and the retry
+      // still goes to the same host.
       return;
     }
     verdict = "Not back yet";
@@ -173,20 +175,26 @@ function connLostWhy() {
   return why ? " (" + why + ")" : "";
 }
 
-// One attempt at getting a session back. Two doors:
-//   1. the remote this window was on: re-establish the tunnel BY NAME, from the
-//      standing intent the picker keeps. This is the call "+ New SSH" makes; the
-//      difference is that the user no longer has to re-enter anything (the
-//      reported dead end: an old host introduced as a new one).
-//   2. the host's own session for this window — its heal, a re-claim after a
-//      blip, a local session on the desktop.
+// One attempt at getting a session back, through the ONE door this window has:
+// the host it was on. There are two ways to be on a host, and which one applies
+// is a fact this window holds, not a judgement about the remote:
+//   1. a NAMED remote whose hop is down: the hop is the missing piece, and the
+//      standing intent says exactly what to re-dial — the same call the picker's
+//      own "+ New SSH connection" makes, so the user re-enters nothing. That was
+//      the reported dead end: an old host introduced as a new one.
+//   2. no named remote, or its hop alive: the session this window was on is the
+//      host's to hand back — its heal, a re-claim after a blip, or the local
+//      session of a desktop that never had a remote.
+// Which comes first is not a preference: with the SSH hop dead, asking the host
+// first would hand a desktop a LOCAL session and quietly move the user to a
+// machine they never asked for, and the phone has no local session at all (N4).
 //
-// Which comes first is decided by the tunnel, and the order matters: with the
-// SSH hop dead, asking the host first would hand a desktop a LOCAL session and
-// quietly abandon the remote the user never left (and on the phone there is no
-// local one at all). With the hop alive, the SSH hop is not the thing to redo —
-// re-dialling it would lift a working tunnel — and the dead part is the session
-// behind it, which is the host's to re-claim.
+// What this deliberately does NOT do is give up on the remote after a few tries
+// and switch hosts behind the user's back (a try-counted branch that cleared
+// `clutch_ssh_connected` — their own standing request — and then adopted
+// whatever the host offered). There is no second door here: a window that was on
+// a host stays on that host, and until that host answers the dialog says it is
+// not back yet. The verdict is never the door's to give — see connLostAwaitAnswer.
 //
 // No door is proof on its own: an adopted URL can name a forwarded port nobody
 // serves (that IS the bug this dialog exists for), and a tunnel that came up can
@@ -195,24 +203,14 @@ function connLostWhy() {
 // is only allowed to claim it once that has happened.
 async function connLostRecover() {
   const remote = connLostRemoteIntent();
-  const tunnelUp = await connLostTunnelUp();
-  if (remote && !tunnelUp) {
-    if (await connLostRedial(remote)) return true;
-    // It will not answer. Where a local session can exist at all (the desktop),
-    // the host's own offer is still a recovery — but only once the remote has
-    // spent its tries, and the standing intent goes with it: the picker must
-    // stop claiming a host this window is no longer on.
-    if (IS_ANDROID || connLostTries < CONN_LOST_HOST_FALLBACK_AFTER) return false;
-    localStorage.removeItem("clutch_ssh_connected");
-    localStorage.removeItem("clutch_degrade"); // degrade mode died with the tunnel
-  }
+  if (remote && !(await connLostTunnelUp())) return connLostRedial(remote);
   return connLostAskHost();
 }
 
 // the host's own session for this window, if it holds or can claim one
 async function connLostAskHost() {
   if (!(await switchBackendResolved())) return false; // no session: it said so
-  return connLostProve();
+  return connLostAwaitAnswer();
 }
 
 // the standing remote intent the picker keeps — the host to re-dial, or null
@@ -236,15 +234,18 @@ function connLostTunnelUp() {
 async function connLostRedial(intent) {
   const ok = await handleSshConnect(intent.host, intent.user, intent.port, connLostWhyEl);
   if (!ok) return false;
-  return connLostProve();
+  return connLostAwaitAnswer();
 }
 
-// did a session really answer? It answers by opening a stream, and that is what
-// takes the dialog down, so the question is simply whether the dialog is still up
-// — asked with a bound, because a door that never produces one must not hang the
-// attempt (the wait between attempts is the backoff's job).
-const CONN_LOST_PROOF_MS = 8000;
-function connLostProve(ms = CONN_LOST_PROOF_MS) {
+// How long a door is given to produce the only verdict that counts before the
+// dialog says "Not back yet". This is a NOTICE throttle, not a state change: a
+// window is back when a stream opens (es.onopen, js/sse-stream.js) and never
+// because this wait said so — the question asked here is simply "is the dialog
+// still up?", and its answer only chooses the sentence. The bound exists so that
+// a door which never produces a session cannot hold the attempt (the retry
+// button included) open forever; the wait between attempts is the backoff's job.
+const CONN_LOST_NOTICE_MS = 8000;
+function connLostAwaitAnswer(ms = CONN_LOST_NOTICE_MS) {
   if (!connLost) return Promise.resolve(true);
   const deadline = Date.now() + ms;
   return new Promise((resolve) => {

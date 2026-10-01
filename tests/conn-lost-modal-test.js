@@ -13,8 +13,10 @@
 //     no backdrop press, no Escape, no ×, no Cancel, and on Android no back key;
 //   * the only thing that closes it is proof of life: a session that answered
 //     (a stream that opened), which is also what restores the window in place;
-//   * recovery re-dials the SAME host BY NAME from the standing intent, and the
-//     host's own local session is a desktop-only last resort.
+//   * recovery re-dials the SAME host BY NAME from the standing intent — it
+//     never substitutes another one, and never clears what the user asked for.
+//     The host's own session is reached behind an ALIVE hop (a re-claim), not as
+//     a way out of a remote that will not answer.
 //
 // Source-level checks pin the markup and the wiring; the behavioral section
 // pulls the REAL functions out of the renderer and drives them against stubs
@@ -168,13 +170,12 @@ global.connLostAttempting = false;
 global.connLostTimer = null;
 global.connLostManualOnly = false;
 global.CONN_LOST_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
-global.CONN_LOST_HOST_FALLBACK_AFTER = 3;
-global.CONN_LOST_PROOF_MS = 8000;
+global.CONN_LOST_NOTICE_MS = 8000;
 
 for (const name of [
   "connLostTargetText", "connLostPaint", "connectionLost", "resolveConnectionLost",
   "connLostNeedsUser", "connLostArm", "connLostAttempt", "connLostWhy", "connLostRecover",
-  "connLostAskHost", "connLostRemoteIntent", "connLostTunnelUp", "connLostRedial", "connLostProve",
+  "connLostAskHost", "connLostRemoteIntent", "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer",
 ]) {
   (0, eval)(fnBody(name));
 }
@@ -315,40 +316,37 @@ async function main() {
   calls.length = 0;
   tunnelUp = false;
   intent = null;
-  check((await connLostRecover()) === true && calls.join(",") === "intent,tunnelUp,askHost",
+  check((await connLostRecover()) === true && calls.join(",") === "intent,askHost",
   "with nothing to re-attempt by name, the host is asked (its heal, a re-claim, a local session)");
 
-  // ---- 7. the host's local session is a DESKTOP-only last resort ----
+  // ---- 7. one door: the host this window was on, however many tries it takes ----
+  // (a try-counted branch used to clear the standing intent on the desktop and
+  // take the host's own local session: the user was moved to another machine
+  // without a word, and the picker stopped claiming the host they had asked for.
+  // The remote keeps its tries instead -- on the phone AND on the desktop.)
   intent = { host: "box.example", user: "dev", port: "2222" };
   redialOk = false;
+  store.set("clutch_ssh_connected", "1");
+  store.set("clutch_degrade", "{}");
   global.connLostTries = 1;
   global.IS_ANDROID = false;
   calls.length = 0;
   check((await connLostRecover()) === false && calls.join(",") === "intent,tunnelUp,redial",
-  "a remote that just failed is retried, not abandoned for a local session");
-  check(store.get("clutch_ssh_connected") === "1",
-  "and the standing intent stays: the picker must not pretend the window left the host");
-
-  global.connLostTries = 3;
-  store.set("clutch_degrade", "{}");
-  store.set("clutch_ssh_connected", "1");
-  calls.length = 0;
-  check((await connLostRecover()) === true && calls.join(",") === "intent,tunnelUp,redial,askHost",
-  "after its tries, a desktop does take the host's own session");
-  check(store.get("clutch_ssh_connected") === undefined && store.get("clutch_degrade") === undefined,
-  "and the standing intent goes with it: the window is no longer on that host");
-
-  store.set("clutch_ssh_connected", "1");
-  store.set("clutch_degrade", "{}");
-  global.IS_ANDROID = true;
+  "a remote that just failed is retried by name, not abandoned for another host");
   global.connLostTries = 99;
   calls.length = 0;
   check((await connLostRecover()) === false && calls.join(",") === "intent,tunnelUp,redial",
-  "the phone NEVER falls back: it has no local session to fall back to (N4)");
+  "and it keeps those tries: there is no try-counted door to a second host");
   check(store.get("clutch_ssh_connected") === "1" && store.get("clutch_degrade") === "{}",
-  "so its remote keeps its tries forever, and the intent is kept");
+  "the dialog clears nothing behind the user's back: the intent is theirs to drop");
+
+  global.IS_ANDROID = true;
+  calls.length = 0;
+  check((await connLostRecover()) === false && calls.join(",") === "intent,tunnelUp,redial",
+  "the phone takes the same single path (it has no local session to reach for at all)");
   global.IS_ANDROID = false;
   global.connLostTries = 0;
+  store.delete("clutch_degrade");
 
   // ---- 8. the door itself: the same host, by name, through the picker's path ----
   reload("connLostRemoteIntent"); // §6 stubbed the decision, this section tests the door
@@ -367,7 +365,7 @@ async function main() {
 
   handleCalls = [];
   global.handleAnswer = true;
-  global.connLostProve = async () => true;
+  global.connLostAwaitAnswer = async () => true;
   check((await connLostRedial({ host: "box.example", user: "dev", port: "2222" })) === true,
   "a successful redial is only a door, not the verdict");
   check(handleCalls.length === 1 && handleCalls[0][0] === "box.example" &&
@@ -379,18 +377,19 @@ async function main() {
   check((await connLostRedial({ host: "h", user: "u", port: "22" })) === false,
   "a redial that never produced a session is not a recovery");
 
-  // ---- 9. proof of life is required, and it is bounded ----
-  reload("connLostProve"); // §8 stubbed it
+  // ---- 9. the wait for a real answer is bounded ----
+  reload("connLostAwaitAnswer"); // §8 stubbed it
   global.connLost = true;
-  const proven = connLostProve(5000);
-  global.connLost = false; // a session answered (that is what sets this)
+  const answered = connLostAwaitAnswer(5000);
+  global.connLost = false; // the dialog came down: a stream opened (es.onopen)
   await drainTimers();
-  check((await proven) === true, "the attempt is only a success once a session answered");
+  check((await answered) === true,
+  "the attempt resolves the moment the dialog's cause is gone, not when a door said ok");
   global.connLost = true;
-  const never = connLostProve(500);
+  const never = connLostAwaitAnswer(500);
   await drainTimers();
   check((await never) === false,
-  "a door that never produces one does not hang the attempt: the wait is bounded");
+  "a door that never produces a session does not hang the attempt: the wait is bounded");
   global.connLost = false;
 
   // ---- 10. a declined password stops the retrying ----
@@ -424,9 +423,9 @@ async function main() {
     /^let connLostManualOnly = false;/m.test(CONN_LOST),
   "the outage is module state: several detectors share one dialog");
   check(/const CONN_LOST_BACKOFF_MS = \[2000, 4000, 8000, 15000, 30000\];/.test(CONN_LOST) &&
-    /const CONN_LOST_HOST_FALLBACK_AFTER = 3;/.test(CONN_LOST) &&
-    /const CONN_LOST_PROOF_MS = 8000;/.test(CONN_LOST),
-  "and its constants are the ones this runner pins");
+    /const CONN_LOST_NOTICE_MS = 8000;/.test(CONN_LOST) &&
+    !/CONN_LOST_HOST_FALLBACK_AFTER|CONN_LOST_PROOF_MS/.test(CONN_LOST),
+  "and its constants are the ones this runner pins (one door, no try-counted second host)");
 
   summary("conn-lost-modal");
 }

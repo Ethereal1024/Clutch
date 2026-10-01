@@ -193,13 +193,21 @@ async function main() {
     "the dialog re-attempts the remote the window was on, from the standing intent");
   check(/await handleSshConnect\(intent\.host, intent\.user, intent\.port/.test(fnBody("connLostRedial")),
     "through the picker's own connect path (keys first, password prompt only if asked)");
-  check(/if \(remote && !tunnelUp\)/.test(fnBody("connLostRecover")),
+  check(/if \(remote && !\(await connLostTunnelUp\(\)\)\)/.test(fnBody("connLostRecover")),
     "and the remote goes FIRST while its hop is down, before the host is asked");
 
-  // the host's own session is a DESKTOP-only last resort: asking first would hand
-  // a desktop a local session and abandon the remote, and the phone has none
-  check(/if \(IS_ANDROID \|\| connLostTries < CONN_LOST_HOST_FALLBACK_AFTER\) return false;/.test(fnBody("connLostRecover")),
-    "the host's session is only reached after the remote's tries, and never on Android");
+  // the host is the ONLY other door, and it is not a try-counted fallback: a
+  // window that was on a remote stays on it, and nothing clears the user's own
+  // standing intent behind their back
+  const recover = fnBody("connLostRecover");
+  check(!/CONN_LOST_HOST_FALLBACK_AFTER/.test(APP) && !/CONN_LOST_PROOF_MS/.test(APP),
+    "the try-counted second host is gone for good");
+  check(!/removeItem\("clutch_ssh_connected"\)/.test(recover),
+    "recovering never clears the user's own standing intent");
+  check(!/IS_ANDROID/.test(recover),
+    "and there is no phone/desktop split in the door: one window, one door");
+  check(/return connLostRedial\(remote\);/.test(recover),
+    "the remembered remote is the door, whenever its hop is down");
   check(/if \(!\(await switchBackendResolved\(\)\)\) return false;/.test(fnBody("connLostAskHost")),
     "a host that has nothing to offer is not a recovery (it said so)");
 
