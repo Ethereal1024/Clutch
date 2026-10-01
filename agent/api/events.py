@@ -15,6 +15,8 @@ import json
 import queue
 from pathlib import Path
 
+from ..base import LAGGED
+from ..core.lazy import LazyEventLog
 from ..core.project_lock import ProjectLock
 from ..events import Event, StateUpdateEvent, event_to_json
 from ..project import Project, open_project_lazy
@@ -76,7 +78,33 @@ class EventsMixin:
         except (OSError, ValueError):
             return None
 
-    def _sse(self, project_q: str | None = None, replay: bool = True) -> None:
+    def _sse(self, project_q: str | None = None, replay: bool = True,
+             since: int | None = None) -> None:
+        """One window's view of one project: a status frame, the records it is
+        owed, then the live tail.
+
+        The wire has exactly one way to say "I have painted up to here": ``since``
+        (a .clc byte offset, the same space the log's own offsets live in, and the
+        same one ui/js/stream-events.js keeps as its watermark). Everything this
+        handler sends is a function of that offset and the log:
+
+        * ``since`` absent -- a window that has painted nothing (boot, a fresh
+          project): serve the resident window, and let the older-pill account for
+          the rest. ``replay`` stays the legacy spelling of this (0.1.18 clients).
+        * ``since = N`` -- serve EVERY durable record after N, read from disk as
+          well as memory: the resident window starts at the newest compaction
+          line, so a window that was away longer than that is still owed the
+          records in between. Skipping them would be a silent hole in a
+          transcript, which is the one thing a reconnect may not produce.
+        * ``since`` past the end of the log -- the file was replaced under this
+          window, so its offset cannot be continued from at all: say so
+          (``{"type": "resync"}``, the renderer starts the pane over) and serve
+          the window, rather than answer a request that cannot be honoured.
+
+        Deltas and host-made announcements are never in the log, so a catch-up
+        cannot recover them: their durable outcome (the message they were
+        streaming) is replayed instead.
+        """
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "text/event-stream")
@@ -103,21 +131,38 @@ class EventsMixin:
                     key="execution_status", value="running" if in_flight else "idle"))
                 # replay durable events only (deltas are transient); replay=False
                 # skips it when the UI just rendered the open NDJSON stream
-                if replay:
+                if replay or since is not None:
                     project = self._project_for_sse(project_q)
                     if project is not None:
                         log = project.log
+                        if since is not None and since > log.cpr_start() + log.window_bytes():
+                            # the offset is past the end of this log: the pane can
+                            # not be continued from it, and saying nothing would
+                            # leave two different transcripts on one screen
+                            self._write_sse_raw({"type": "resync"})
+                            since = None
                         # lazy log: resident events replay with byte offsets + the
                         # on-disk older count
                         self._write_sse_raw({"type": "history", "older": max(0, log.cpr_start())})
-                        for off, ev in log.items():
+                        owed = self._owed_records(log, since)
+                        for off, ev in owed:
                             self._write_sse(ev, offset=off)
+                        # the block is closed explicitly: the renderer paints a
+                        # catch-up in one pass and scrolls once, and only this
+                        # frame tells it the block is over
+                        self._write_sse_raw({"type": "replayed", "count": len(owed)})
             except host._SSE_ERR:
                 return  # client went away mid-status/replay: nothing left to stream
             # then live events
             while True:
                 try:
                     ev = q.get(timeout=host.SSE_KEEPALIVE_SEC)
+                    if ev is LAGGED:
+                        # this window stopped draining (a phone in the background
+                        # holds a socket that never errors): ending the stream is
+                        # the honest answer and costs nothing, because every frame
+                        # it missed is in the log it will ask for again
+                        break
                     rp = self._state.run_project
                     if rp and project_q and rp != project_q:
                         continue  # another window's run: don't leak its events here
@@ -132,6 +177,26 @@ class EventsMixin:
                     break
         finally:
             self._broadcaster.unsubscribe(q)
+
+    @staticmethod
+    def _owed_records(log: LazyEventLog, since: int | None) -> list[tuple[int, Event]]:
+        """The durable records a (re)connecting window is owed, in file order.
+
+        Without ``since``: the resident window, which is what a window that has
+        painted nothing wants (the older-pill accounts for the rest). With
+        ``since``: every record after that byte offset, from DISK as well as
+        memory — the resident window starts at the newest compaction line, so a
+        window that was away longer than that would otherwise be handed a
+        transcript with a gap in it, silently.
+        """
+        if since is None:
+            return log.items()
+        start = log.cpr_start()
+        # read_page is [lo, hi): strict, because a record AT the watermark is one
+        # this window has already painted (the renderer skips it either way, but
+        # sending it back is a wire cost with no reader)
+        older = log.read_page(since + 1, start) if since < start else []
+        return older + [(off, ev) for off, ev in log.items() if off > since]
 
     def _write_sse(self, ev: Event, offset: int | None = None) -> None:
         """Emit one SSE event; with ``offset`` the payload is {offset, event} (the

@@ -26,16 +26,52 @@ from .project import Project
 from .tools.registry import ToolRegistry, build_tools
 from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
 
+# A window that stopped draining is not owed an unbounded buffer: every DURABLE
+# event is already in the project log, and the subscriber carries the byte offset
+# it has painted (ui/js/sse-stream.js), so what a slow window needs is not a
+# backlog but its own re-read. Past this depth the queue is emptied and a single
+# LAGGED marker is left: the consumer ends the stream, and the window's reconnect
+# asks for everything after its offset -- idempotent, because the watermark makes
+# a replay of already-painted records a no-op. The bound is depth of *frames*,
+# not bytes: a run's deltas are a few bytes each, so this is tens of KB of text.
+SUBSCRIBER_QUEUE_MAX = 4096
+
+
+class _Lagged:
+    """Marks a subscriber that fell behind: its stream must end so it re-reads.
+
+    A marker and not an event: it is never serialized, never part of the log, and
+    the only thing it means is "the frames you lost are in the log you can
+    re-read from your own offset".
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<broadcaster: subscriber lagged>"
+
+
+LAGGED = _Lagged()
+
+
+def _drain(q: queue.Queue) -> None:
+    """Empty a subscriber's queue, whatever it holds (see SUBSCRIBER_QUEUE_MAX)."""
+    try:
+        while True:
+            q.get_nowait()
+    except queue.Empty:
+        pass
+
 
 class Broadcaster:
-    """Fan events out to subscribers. Each subscriber owns a queue.Queue."""
+    """Fan events out to subscribers. Each subscriber owns a bounded queue."""
 
     def __init__(self) -> None:
         self._subs: set[queue.Queue] = set()
         self._lock = threading.Lock()
 
     def subscribe(self) -> queue.Queue:
-        q: queue.Queue = queue.Queue()
+        q: queue.Queue = queue.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
         with self._lock:
             self._subs.add(q)
         return q
@@ -48,7 +84,16 @@ class Broadcaster:
         with self._lock:
             subs = list(self._subs)
         for q in subs:
-            q.put(event)
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                # One marker, one remedy: the stream ends and the window re-reads
+                # the log after its own offset (agent/api/events.py consumes this).
+                _drain(q)
+                try:
+                    q.put_nowait(LAGGED)
+                except queue.Full:  # another publisher refilled it: it is marked
+                    pass
 
     def count(self) -> int:
         """Number of live SSE subscribers (is anyone watching the UI?)."""

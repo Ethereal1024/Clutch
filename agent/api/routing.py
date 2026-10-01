@@ -24,9 +24,19 @@ class RoutingMixin:
             self._json({"ok": True})
         elif path == "/api/events":
             params = parse_qs(parsed.query)
+            # since=<byte offset>: the highest .clc offset this window has already
+            # painted. Absent (or unusable) means "I have painted nothing", which
+            # is the legacy replay=1; replay=0 is the legacy "the open NDJSON
+            # stream already rendered it" and is kept for 0.1.18 clients.
+            raw_since = (params.get("since") or [None])[0]
+            try:
+                since = max(0, int(raw_since)) if raw_since is not None else None
+            except ValueError:
+                since = None
             self._sse(
                 (params.get("project") or [None])[0],
                 (params.get("replay") or ["1"])[0] != "0",
+                since,
             )
         elif path == "/api/history":
             self._history()

@@ -536,6 +536,135 @@ def _clc_sse_replay(base_url, clc, comp_off) -> None:
     check(st == 200, "switched back to the demo project")
 
 
+def _sse_collect(url: str, timeout: float = 30) -> list[dict]:
+    """Read one SSE stream until its replay block closes (the `replayed` frame).
+
+    The block boundary is a frame of its own (agent/api/events.py) because the
+    renderer paints a catch-up in one pass: without it "the replay is over" is not
+    on the wire, and the only way to guess it is a timeout.
+    """
+    out: list[dict] = []
+    deadline = time.time() + timeout
+    try:
+        with contextlib.closing(urllib.request.urlopen(url, timeout=timeout)) as r:
+            while time.time() < deadline:
+                raw = r.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    ev = json.loads(line[6:])
+                except ValueError:
+                    continue
+                out.append(ev)
+                if ev.get("type") == "replayed":
+                    break
+    except Exception as e:  # noqa: BLE001
+        print(f"  [since] {e}")
+    return out
+
+
+def _records(frames: list[dict]) -> list[dict]:
+    return [f for f in frames if "offset" in f and "event" in f]
+
+
+def _sse_since_offset(base_url, lclc, clc, comp_off) -> None:
+    # 3e-bis. `since=<offset>`: the ONE thing a (re)connecting window says about
+    # what it already has. Every branch the phone's resume path used to carry --
+    # probe the pipe, guess whether a replay is needed, fall back to the window --
+    # is a decision made from a byte offset the client owns and the server can
+    # honour. The window is [cpr_start, end): a `since` inside it is served from
+    # memory, a `since` BEFORE it must also read the disk, or a window that was
+    # away longer than the resident window silently loses the records in between.
+
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(lclc)})
+    check(st == 200, "lazy project reopened for the since= checks")
+
+    win = _sse_collect(f"{base_url}/api/events?project={quote(str(lclc))}")
+    recs = _records(win)
+    check(bool(recs) and recs[0]["offset"] == comp_off,
+          "no since: the resident window is served from its start")
+    win_n = len(recs)
+    last_off = recs[-1]["offset"]
+    check(win[0].get("type") == "state_update" and win[0].get("key") == "execution_status",
+          "every connect opens with the session's own run state, before any record")
+    check(win[1] == {"type": "history", "older": comp_off},
+          "the history line still opens the block with the on-disk count")
+    check(win[-1] == {"type": "replayed", "count": win_n},
+          "and the block is closed by a replayed frame with its record count")
+
+    # a window that has painted the resident window asks for what came after it
+    mid = _sse_collect(f"{base_url}/api/events?project={quote(str(lclc))}&since={comp_off}")
+    mid_recs = _records(mid)
+    check(all(r["offset"] > comp_off for r in mid_recs),
+          "since=<window start>: nothing at or below the watermark comes back")
+    check(len(mid_recs) == win_n - 1 and mid_recs[-1]["offset"] == last_off,
+          "and the rest of the window is still owed, in order")
+    check([r["offset"] for r in mid_recs] == sorted(r["offset"] for r in mid_recs),
+          "replayed records are strictly in log order")
+
+    # a window that was away longer than the resident window reaches the disk
+    zero = _sse_collect(f"{base_url}/api/events?project={quote(str(lclc))}&since=0")
+    zero_recs = _records(zero)
+    on_disk = len(zero_recs) - win_n
+    check(on_disk == 449,
+          f"since=0 reads past the window start into the disk ({on_disk} older records)")
+    check(zero_recs[0]["offset"] > 0,
+          "a since is inclusive: the record AT the watermark is not sent back")
+    check(zero_recs[-1]["offset"] == last_off,
+          "the catch-up runs from the disk, through the window start, to the last record")
+    check([r["offset"] for r in zero_recs] == sorted(r["offset"] for r in zero_recs),
+          "and it is one strictly increasing sequence, not two blocks glued together")
+
+    # at the head: nothing is owed, and the stream still opens (the status frame,
+    # then the tail) -- a window that reconnects while idle must not be dropped
+    end = _sse_collect(f"{base_url}/api/events?project={quote(str(lclc))}&since={last_off + 100000}")
+    check(any(f.get("type") == "resync" for f in end),
+          "a since past the end of the log is reported, not silently ignored")
+    check(len(_records(end)) == win_n,
+          "and the window is served instead of the offset that cannot be honoured")
+
+    # a malformed since is the same as no since (never a silent half-answer)
+    bad = _sse_collect(f"{base_url}/api/events?project={quote(str(lclc))}&since=nonsense")
+    check(len(_records(bad)) == win_n, "an unparsable since falls back to the window")
+
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "switched back to the demo project after the since= checks")
+
+
+def _broadcaster_bounded(broadcaster) -> None:
+    # A subscriber that stops draining must not become an unbounded buffer: every
+    # durable frame is in the log the client can re-read, so the honest answer is
+    # to end its stream (LAGGED), not to hold the run's whole output in memory for
+    # a window that is not reading.
+    from agent.base import LAGGED, SUBSCRIBER_QUEUE_MAX
+
+    q = broadcaster.subscribe()
+    try:
+        for i in range(SUBSCRIBER_QUEUE_MAX):
+            broadcaster.publish({"type": "text_delta", "content": str(i)})
+        check(q.qsize() == SUBSCRIBER_QUEUE_MAX, "a draining-equal subscriber buffers its frames")
+
+        broadcaster.publish({"type": "text_delta", "content": "one too many"})
+        check(q.qsize() == 1, "the frame that overflows the bound drops the backlog")
+        check(q.get_nowait() is LAGGED,
+              "and leaves one marker: the stream ends, the client re-reads the log")
+
+        # the subscriber that DOES drain is untouched: the bound is per queue
+        q2 = broadcaster.subscribe()
+        try:
+            for i in range(SUBSCRIBER_QUEUE_MAX + 50):
+                broadcaster.publish({"type": "text_delta", "content": str(i)})
+                q2.get_nowait()
+            check(q2.empty(), "a subscriber that keeps up is never marked")
+        finally:
+            broadcaster.unsubscribe(q2)
+    finally:
+        broadcaster.unsubscribe(q)
+
+
 def _sse_keepalive(base_url) -> None:
     # ---- SSE keepalive: the idle stream reasserts itself BY NAME ----
     # The mouse hole this closes: the renderer cached the server state
@@ -1138,6 +1267,8 @@ def _run_server_test() -> int:
         appended = _clc_read_and_append(base_url, lclc)
         _clc_patch_memory_index(base_url, lclc, state, appended)
         _clc_sse_replay(base_url, clc, comp_off)
+        _sse_since_offset(base_url, lclc, clc, comp_off)
+        _broadcaster_bounded(broadcaster)
         _sse_keepalive(base_url)
         _connecting_stream_status(base_url, clc, state, broadcaster)
         _live_frame_shape(base_url, clc, state, broadcaster)
