@@ -75,8 +75,15 @@ async function connectTunnel({ host, user, port, password }, progress) {
       username: user,
       tryKeyboard: true,
       readyTimeout: CONNECT_TIMEOUT_MS,
-      keepaliveInterval: 30000,
-      keepaliveCountMax: 3,
+      // The keepalive is this side's only witness that the far side is gone: a
+      // phone's radio can be dropped without a FIN, so no 'end' ever arrives and
+      // nothing else reports it. 30s x 3 meant up to two minutes of a window
+      // posting into a forward nobody served; 5s x 2 gives the same two missed
+      // pings of tolerance in ~10s — the window the remote's own supervisor uses
+      // to reap a session it stopped hearing from (agent/procmgr/supervise.py
+      // STALE_S = 10s), so both ends agree on what "gone" means.
+      keepaliveInterval: 5000,
+      keepaliveCountMax: 2,
       agent: process.env.SSH_AUTH_SOCK,
       debug: (m) => tunnelLog("ssh2: " + m),
     };
@@ -101,6 +108,31 @@ async function connectTunnel({ host, user, port, password }, progress) {
     tunnelLog("[phase] ssh ready");
     if (progress) progress("probe");
 
+    // The connection is over, however it ended. `end` is a FIN and ONLY a FIN:
+    // ssh2 emits it from the socket's own 'end' (node_modules/ssh2/lib/client.js
+    // :806-819), so a dropped radio, a reset, or a keepalive timeout emits
+    // `close` alone. Listening for `end` only is why a dead tunnel kept being
+    // handed out as this window's backend: the teardown never ran, `active`
+    // stayed true, and the renderer had no way to learn the remote was gone
+    // until its next request came back "Failed to fetch".
+    let gone = false;
+    const tunnelGone = (why) => {
+      if (gone) return; // end and close both fire on a clean close
+      gone = true;
+      tunnelLog("[disconnect] tunnel " + why);
+      stopHealing();
+      // only the CURRENT client may tear down shared state
+      if (state.sshClient !== client) return;
+      state.sshClient = null;
+      state.currentUrl = null;
+      if (state.localSrv) {
+        state.localSrv.close();
+        state.localSrv = null;
+      }
+      stopLlmProxy();
+      stopExecBridge();
+      notifyEnd();
+    };
     // runtime handlers (once per connection). Guard mutations of state.sshClient: a
     // stale tunnel's 'end' may fire after a reconnect and must not clobber it.
     client.on("tcp connection", (info, accept, reject) => {
@@ -112,25 +144,16 @@ async function connectTunnel({ host, user, port, password }, progress) {
       const proxy = net.connect(state.llmProxyPort, "127.0.0.1");
       stream.pipe(proxy).pipe(stream);
     });
-    client.on("end", () => {
-      tunnelLog("[disconnect] tunnel ended");
-      stopHealing();
-      // only the CURRENT client may tear down shared state
-      if (state.sshClient === client) {
-        state.sshClient = null;
-        state.currentUrl = null;
-        if (state.localSrv) {
-          state.localSrv.close();
-          state.localSrv = null;
-        }
-        stopLlmProxy();
-        stopExecBridge();
-        notifyEnd();
-      }
-    });
+    client.on("end", () => tunnelGone("ended"));
+    client.on("close", () => tunnelGone("closed"));
     client.on("error", (e) => {
       tunnelLog("[error] runtime: " + e.message);
       console.error("[tunnel]", e.message);
+      // A keepalive timeout (and a socket error) is ssh2 saying the wire is
+      // gone before any 'close' is guaranteed to arrive: this is the only event
+      // that carries the CAUSE, so it tears down here too instead of only being
+      // written to a log nobody reads.
+      if (e && (e.level === "client-timeout" || e.level === "client-socket")) tunnelGone("lost the socket");
     });
 
     // bootstrap: make sure the server exists and is running on the remote
@@ -178,14 +201,23 @@ async function establishForwardAndHealth(localPort) {
     // a request racing the teardown must fail the socket, not the main
     // process: forwardOut on a null client throws before it can answer
     if (!state.sshClient) return sock.destroy();
-    state.sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", REMOTE_API_PORT, (err, stream) => {
-      if (err) {
-        tunnelLog("[error] forwardOut failed: " + (err && err.message));
-        sock.destroy();
-        return;
-      }
-      sock.pipe(stream).pipe(sock);
-    });
+    // ...and a client whose socket is already destroyed but whose teardown has
+    // not run yet throws the same way ("Not connected"), which used to escape
+    // the connection handler and hang the request until the browser called it
+    // "Failed to fetch". Fail THIS socket instead.
+    try {
+      state.sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", REMOTE_API_PORT, (err, stream) => {
+        if (err) {
+          tunnelLog("[error] forwardOut failed: " + (err && err.message));
+          sock.destroy();
+          return;
+        }
+        sock.pipe(stream).pipe(sock);
+      });
+    } catch (e) {
+      tunnelLog("[error] forwardOut threw: " + ((e && e.message) || e));
+      sock.destroy();
+    }
   });
   await listen(state.localSrv, localPort);
   tunnelLog(`[phase] local forward listening 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);

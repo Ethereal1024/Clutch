@@ -62,16 +62,20 @@ function sseFrame() {
   sseDown = false;
 }
 
-// The stream can no longer be trusted: stop vetoing the buttons of the user,
-// and say why. `busy` comes back on its own once a stream is live again: the
-// first frame of every connect is the host's own status (agent/server.py _sse),
-// so a run that is still in flight returns as running instead of leaving the
-// window idle for the rest of the run.
+// The stream can no longer be trusted: this window has no backend, and it says
+// so through the one dialog that owns the way back.
+//
+// This used to slip the badge to idle and raise a notice that dismissed itself
+// after 8 seconds — the reported "the task went idle by itself, silently, while
+// the picker still said Connected". Three missed keepalives is not a hiccup, and
+// a toast is not an announcement. The badge is left alone here on purpose: once
+// a session answers, the host's own status frame says whether the run is still
+// in flight (it is the same frame a reconnecting window gets — agent/api/
+// events.py _sse), which is the only honest answer available.
 function sseDegrade(reason) {
   if (sseDown) return;
   sseDown = true;
-  if (busy) setStatus("idle");
-  notice("lost the live stream (" + reason + ") — reconnecting; the task may still be running");
+  connectionLost("lost the live stream (" + reason + ")");
 }
 
 function sseWatchdogTick() {
@@ -185,6 +189,12 @@ function connectSSE(replay = true) {
   es.onopen = () => {
     sseErrors = 0;
     sseFrame();
+    // A session really answered: this is the ONLY thing that closes the
+    // disconnect dialog (ui/js/conn-lost.js). Nothing else may — an adopted URL
+    // is not a session (the forwarded port can be dead), and with no dialog left
+    // the window would sit on a port nobody serves. An open stream has the
+    // host's own status frame behind it, so a run still in flight stays running.
+    resolveConnectionLost();
     lastTextEl = null;
     lastTextContent = "";
     thinkingEl = null;

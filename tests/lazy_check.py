@@ -18,6 +18,9 @@ Builds a synthetic .clc with a compaction, opens it lazily, and checks:
      (a legacy file cannot persist it, so without the derive every session would
      re-summarize the whole history — the "compressing context every turn"
      failure). The file itself is never rewritten (migration is the script's job)
+  8. a durable append STAMPS the record with the offset a replay/serve will use,
+     and _write_sse puts it on the live frame ({offset, event}) while a transient
+     delta stays bare — the renderer's reconnect watermark rests on this
 
 Run: uv run python -m tests.lazy_check
 """
@@ -29,6 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from agent.api.events import EventsMixin
 from agent.config import Config
 from agent.core.compaction import Compactor
 from agent.core.context import derive_messages
@@ -36,6 +40,7 @@ from agent.core.lazy import LazyEventLog
 from agent.events import (
     AssistantMessageEvent,
     CompactionEvent,
+    TextDeltaEvent,
     UserMessageEvent,
     _line_bytes,
     event_from_dict,
@@ -268,6 +273,57 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             not Compactor(Config(llm_context_window_bytes=200_000), proj2.log, FakeLlm()).should_compact(),
             "no spurious compaction on a legacy file with an existing summary",
         )
+
+    # ---- 8. a live append stamps the offset the replay will send ------------
+    # The renderer skips a replayed record whose offset it already painted (the
+    # transcript visibly doubled after a reconnect). A record painted LIVE has no
+    # replay row to be compared against unless the live frame carries the same
+    # offset, so the log stamps it on the event and _write_sse puts it on the
+    # wire as {offset, event} — the same shape the replay sends.
+    with tempfile.TemporaryDirectory() as d:
+        p4 = Path(d) / "live.clc"
+        build_clc(p4, recent=3)
+        lg = open_project_lazy(p4, workspace=None).log
+        last_before = lg.items()[-1][0]
+        live_ev = AssistantMessageEvent(content="live turn")
+        lg.append(live_ev)
+        live_off = lg.items()[-1][0]
+        check(live_off > last_before, "the appended record sits past the resident window")
+        check(getattr(live_ev, "log_offset", None) == live_off,
+              "the log stamps the record with its own byte offset (the live frame's offset)")
+        delta = TextDeltaEvent(content="tok")
+        lg.append(delta)
+        check(not hasattr(delta, "log_offset"),
+              "a transient delta is never appended, so it carries no offset (a bare frame)")
+
+        # a reopen is the replay's own read: it must resolve the SAME offset
+        reopened = open_project_lazy(p4, workspace=None).log
+        roff, rev = reopened.items()[-1]
+        check(roff == live_off and rev.content == "live turn",
+              "a reopen (the replay's read) resolves the same offset and the same record")
+
+        # ... and the wire shape the live path builds for it
+        class _Wfile:
+            def __init__(self) -> None:
+                self.buf = b""
+
+            def write(self, data: bytes) -> None:
+                self.buf += data
+
+            def flush(self) -> None:
+                pass
+
+        sse = EventsMixin.__new__(EventsMixin)  # _write_sse needs only self.wfile
+        sse.wfile = _Wfile()
+        sse._write_sse(live_ev)
+        frame = json.loads(sse.wfile.buf.decode().split("data: ", 1)[1].strip())
+        check(frame.get("offset") == live_off and frame.get("event", {}).get("content") == "live turn",
+              "the live frame is {offset, event} — the shape the watermark dedupes on")
+        sse.wfile = _Wfile()
+        sse._write_sse(delta)
+        bare = json.loads(sse.wfile.buf.decode().split("data: ", 1)[1].strip())
+        check(bare.get("type") == "text_delta" and "offset" not in bare,
+              "a delta stays a bare frame (nothing to dedupe, nothing replayed)")
 
     print()
     if failures:

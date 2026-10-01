@@ -22,6 +22,7 @@ function clearStream() {
   compactionEl = null;
   retryNoteEl = null;
   oldestOffset = null; // fresh project: no loaded events yet
+  streamHighOffset = null; // and no replayed record to dedupe a reconnect against
   setOlderPill(0);
 }
 
@@ -30,6 +31,10 @@ function clearStream() {
 // never makes the pill lie
 let olderRemaining = 0;
 let oldestOffset = null; // byte offset of the oldest loaded (rendered) non-task event
+// byte offset of the NEWEST rendered event: a reconnecting stream replays the
+// window from its start, and everything at or below this is a record this window
+// already painted (addEvent in js/stream-events.js). Reset with the pane.
+let streamHighOffset = null;
 let paging = false;   // one history fetch at a time
 // when non-null, addEvent appends into this off-DOM sink instead of #events
 let pageSink = null;

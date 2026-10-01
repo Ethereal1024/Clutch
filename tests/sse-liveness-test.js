@@ -30,8 +30,8 @@ check(/const SSE_MAX_ERRORS = 4;/.test(src),
   "a base that stops answering is counted instead of retried in silence");
 check(/es\.onerror = \(\) => \{\n    \/\/ the browser reconnects/.test(src),
   "es.onerror is no longer an empty auto-reconnect stub");
-check(/notice\("could not reach the backend to stop/.test(src),
-  "stop() surfaces the failure instead of an empty catch");
+check(/connectionLost\("could not reach the session to stop the task/.test(src),
+  "stop() surfaces the failure instead of an empty catch (through the dialog)");
 check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseFrames = 0;/m.test(src) &&
   /^let sseErrors = 0;/m.test(src) && /^let sseDown = false;/m.test(src) &&
   /^let sseWatchdog = null;/m.test(src),
@@ -40,6 +40,7 @@ check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseFrames = 0;/m.test(src) 
 // ---- stub environment ----
 const notices = [];
 const statuses = [];
+const losses = []; // connectionLost() calls: the one dialog that owns a loss
 let reconnects = 0;
 let probes = 0;
 const instances = [];
@@ -99,6 +100,12 @@ global.setStatus = (s) => {
   global.busy = s === "running" || s === "waiting";
 };
 global.notice = (m) => notices.push(m);
+// the disconnect funnel: this runner drives sse-stream.js, whose only answer to
+// a dead stream is to raise the dialog (ui/js/conn-lost.js). What the dialog
+// then does is conn-lost-modal-test.js's business.
+global.connectionLost = (reason) => losses.push(reason);
+global.resolveConnectionLost = () => {};
+global.connBusy = false;
 global.reconnectSSE = () => {
   reconnects++;
 };
@@ -140,10 +147,11 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
   check(global.busy === true, "an open stream with a run in flight keeps the button on Stop");
   global.sseLastFrameAt = Date.now() - global.SSE_STALE_MS - 1;
   sseWatchdogTick();
-  check(notices.length === 1 && /lost the live stream/.test(notices[0]),
-    "a silent stream is reported, not painted over");
-  check(global.busy === false && statuses[statuses.length - 1] === "idle",
-    "the cached running state is dropped: the button reacts again");
+  check(losses.length === 1 && /lost the live stream/.test(losses[0]),
+    "a silent stream raises the disconnect dialog, not a self-dismissing toast");
+  check(notices.length === 0, "and nothing is said twice: one funnel, one announcement");
+  check(global.busy === true && statuses[statuses.length - 1] === "running",
+    "the cached run state is left for the host's own status frame to settle");
   check(reconnects === 1, "the dead stream is re-established on this window base");
 
   // ---- 3) one report per outage, not one per tick ----
@@ -152,7 +160,7 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
   global.sseLastFrameAt = Date.now() - global.SSE_STALE_MS - 1;
   const reconnectsAfterOutage = reconnects;
   sseWatchdogTick();
-  check(notices.length === 1, "an ongoing outage is not re-announced every tick");
+  check(losses.length === 1, "an ongoing outage is not re-announced every tick");
   check(reconnects === reconnectsAfterOutage + 1,
     "a window that stays stale retries the link once, not once per tick");
 
@@ -163,7 +171,7 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
   const quietReconnects = reconnects;
   global.sseLastFrameAt = Date.now();
   sseWatchdogTick();
-  check(notices.length === 1 && reconnects === quietReconnects,
+  check(losses.length === 1 && reconnects === quietReconnects,
     "a live stream triggers nothing");
 
   // ---- 5) a base that is GONE: EventSource retries forever in silence ----
@@ -174,20 +182,22 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
   es3.fireError();
   es3.fireError();
   es3.fireError();
-  check(notices.length === 1, "a couple of dropped connects are still just a blip");
+  check(losses.length === 1, "a couple of dropped connects are still just a blip");
   es3.fireError();
-  check(notices.length === 2 && /the backend did not answer/.test(notices[1]),
+  check(losses.length === 2 && /the backend did not answer/.test(losses[1]),
     "a base that never answers is reported once the failures pile up");
-  check(global.busy === false, "no stream, no cached running state");
 
   // ---- 6) Stop that cannot be delivered: the click answers, and heals ----
   fetchImpl = async () => {
     throw new Error("Failed to fetch");
   };
   setStatus("running");
+  const noticesBeforeFailedStop = notices.length;
   await stop();
-  check(/could not reach the backend to stop/.test(notices[notices.length - 1]),
-    "an undeliverable Stop says so (the old catch swallowed it)");
+  check(losses.length === 3 && /could not reach the session to stop the task/.test(losses[2]),
+    "an undeliverable Stop is a LOST SESSION, and the dialog (not a toast) says so");
+  check(notices.length === noticesBeforeFailedStop,
+    "no toast competes with the dialog for the same failure");
   check(global.busy === false && statuses[statuses.length - 1] === "idle",
     "an undeliverable Stop stops pretending the window is running it");
   check(probes === 1, "an undeliverable Stop re-resolves this session (the heal)");

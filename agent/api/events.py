@@ -137,7 +137,17 @@ class EventsMixin:
         """Emit one SSE event; with ``offset`` the payload is {offset, event} (the
         lazy replay/open wire shape), otherwise the bare event JSON. event_to_json
         already returns a serialized string, so only the wrapped shape is
-        re-serialized (no double encoding)."""
+        re-serialized (no double encoding).
+
+        A DURABLE event carries its own log offset, stamped when the log appended
+        it (agent/core/lazy.py), so the live frame is the same {offset, event}
+        shape the replay sends: the renderer's watermark can then skip what this
+        window already painted instead of painting the whole window again after a
+        reconnect. Deltas and host-made announcements (a status, a permission
+        ask, a crashed run's final) are never appended, so they stay bare.
+        """
+        if offset is None:
+            offset = getattr(ev, "log_offset", None)
         if offset is not None:
             payload = json.dumps({"offset": offset, "event": json.loads(event_to_json(ev))})
         else:

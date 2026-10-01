@@ -126,6 +126,29 @@
     </div>
   </div>
 
+  <!-- The one door a lost session comes back through. Deliberately NOT
+       dismissable: no backdrop press, no Escape, no ×, no Cancel — the only way
+       out is a session that answers again. Modeled on #perm-modal (which is
+       non-dismissable for the same reason: it is the only way to answer a
+       question the agent is blocked on). -->
+  <div id="conn-lost-modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>Connection lost</h3>
+      <p id="conn-lost-reason" class="muted"></p>
+      <p id="conn-lost-target" class="muted"></p>
+      <p id="conn-lost-status" class="muted"></p>
+      <!-- the connect flow's own verdict (the stage it reached, or why it
+           failed): its line, kept apart from the dialog's progress above -->
+      <p id="conn-lost-why" class="muted"></p>
+      <p class="muted">This window reconnects on its own, and keeps this
+        session's project and transcript on screen. The dialog closes with the
+        first session that answers.</p>
+      <div class="modal-actions">
+        <button id="conn-lost-retry" class="primary">Reconnect now</button>
+      </div>
+    </div>
+  </div>
+
   <div id="fs-modal" class="modal hidden">
     <div class="modal-box">
       <h3 id="fs-title">Open project</h3>
@@ -370,6 +393,7 @@
   <script src="js/components-panel.js"></script>
   <script src="js/backend-lifecycle.js"></script>
   <script src="js/conn-flow.js"></script>
+  <script src="js/conn-lost.js"></script>
   <script src="js/permissions.js"></script>
   <script src="js/workspace-panel.js"></script>
   <script src="js/sse-stream.js"></script>

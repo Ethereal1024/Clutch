@@ -128,11 +128,24 @@ async function waitForRemotePortFree(probe, timeoutMs) {
 // failure this side used to read as "the install did not come up", retry
 // forever, and never see the real cause of.
 async function stopServer(probe, strategy) {
-  await remoteExec(stopServerCmd(strategy));
+  // The wire may already be gone: ssh2's exec throws 'Not connected' the moment
+  // the socket is dead, and a healer that dies HERE never reaches its "the port
+  // is still held" verdict — it rejects, and the caller's teardown is skipped.
+  // An unreachable wire is reported as a stop that could not be proven, with the
+  // reason, which is what the caller acts on.
+  try {
+    await remoteExec(stopServerCmd(strategy));
+  } catch (e) {
+    return { ok: false, state: "UNREACHABLE", diag: "the tunnel could not run the stop: " + ((e && e.message) || e) };
+  }
   let verdict = await waitForRemotePortFree(probe, STOP_GRACE_MS);
   if (verdict !== "UP") return { ok: true, state: verdict };
   tunnelLog(`[bootstrap] port ${REMOTE_API_PORT} still held after SIGTERM — SIGKILL`);
-  await remoteExec(stopServerCmd(strategy, "-9"));
+  try {
+    await remoteExec(stopServerCmd(strategy, "-9"));
+  } catch (e) {
+    return { ok: false, state: "UNREACHABLE", diag: "the tunnel died holding the port: " + ((e && e.message) || e) };
+  }
   verdict = await waitForRemotePortFree(probe, STOP_GRACE_MS);
   if (verdict !== "UP") return { ok: true, state: verdict };
   let diag = "";

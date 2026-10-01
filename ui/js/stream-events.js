@@ -96,6 +96,17 @@ function addEvent(ev) {
   // lazy wire shape: {offset, event} carries each durable event's byte offset
   // so the UI can page the earlier records
   if (ev && typeof ev === "object" && ev.event && typeof ev.offset === "number") {
+    // Replay HEALS, it does not re-render. A reconnecting stream replays the log
+    // from its window start, so every event this window already painted arrives
+    // again (the transcript visibly doubled after a reconnect). Offsets are the
+    // log's own monotonic byte positions inside the .clc (agent/core/lazy.py),
+    // so a record at or below the highest one already rendered is one of those.
+    // The history paging path (pageSink) walks BACKWARDS through older records
+    // on purpose and is exempt: it never moves this watermark.
+    if (!pageSink) {
+      if (streamHighOffset !== null && ev.offset <= streamHighOffset) return;
+      streamHighOffset = Math.max(streamHighOffset === null ? 0 : streamHighOffset, ev.offset);
+    }
     if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
     ev = ev.event;
   }

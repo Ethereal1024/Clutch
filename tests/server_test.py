@@ -640,6 +640,79 @@ def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
         server_mod.SSE_KEEPALIVE_SEC = probe_keepalive_saved
 
 
+def _live_frame_shape(base_url, clc, state, broadcaster) -> None:
+    import agent.server as server_mod
+    from agent.events import AssistantMessageEvent, StateUpdateEvent, TextDeltaEvent
+
+    # ---- a LIVE durable frame is stamped with the offset a replay will use ----
+    # The renderer's reconnect watermark is the highest log offset it has already
+    # painted: a replayed record at or below it is one this window has seen. A
+    # record painted AS IT STREAMED must therefore arrive with the same offset a
+    # replay of it would carry (the log stamps it at append; agent/api/events.py
+    # wraps the frame), or nothing was recorded, and every reconnect repaints the
+    # whole window — the transcript visibly doubled. A transient delta and a
+    # host-made announcement are never appended: they stay bare, since they are
+    # never replayed and there is nothing to dedupe.
+    frames: list[dict] = []
+    seen = threading.Event()
+
+    def live_reader() -> None:
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/events?replay=0", timeout=20) as r:
+                for raw in r:
+                    line = raw.decode().strip()
+                    if not line.startswith("data: "):
+                        continue
+                    ev = json.loads(line[6:])
+                    frames.append(ev)
+                    if ev.get("type") == "text_delta":
+                        seen.set()  # published last: everything before it is in
+                        return
+        except Exception as e:  # noqa: BLE001
+            print(f"  [live] {e}")
+
+    subscribers_before = broadcaster.count()
+    live_saved = server_mod.SSE_KEEPALIVE_SEC
+    server_mod.SSE_KEEPALIVE_SEC = 0.2  # reap this probe's subscriber (see above)
+    try:
+        threading.Thread(target=live_reader, daemon=True).start()
+        deadline = time.time() + 10
+        while broadcaster.count() <= subscribers_before and time.time() < deadline:
+            time.sleep(0.05)
+        check(broadcaster.count() > subscribers_before, "the live-frame probe subscribed")
+
+        # exactly what Agent._emit does: append the durable record, then publish
+        live = AssistantMessageEvent(content="live frame probe")
+        state.project.log.append(live)
+        broadcaster.publish(live)
+        delta = TextDeltaEvent(content="tok")
+        state.project.log.append(delta)  # transient: never recorded
+        broadcaster.publish(delta)
+        broadcaster.publish(StateUpdateEvent(value="running"))  # host-made, never appended
+
+        check(seen.wait(timeout=15), "the live stream delivered the frames")
+        wrapped = [
+            f for f in frames
+            if isinstance(f.get("event"), dict) and f["event"].get("content") == "live frame probe"
+        ]
+        own = state.project.log.items()[-1][0]  # the log's own offset for that record
+        check(bool(wrapped) and wrapped[0].get("offset") == own,
+              f"a live durable frame is {{offset, event}} at the log's offset ({own})")
+        deltas = [f for f in frames if f.get("type") == "text_delta"]
+        check(len(deltas) == 1 and "offset" not in deltas[0],
+              "a transient delta stays a bare frame (never replayed, nothing to dedupe)")
+        statuses = [f for f in frames if f.get("type") == "state_update"]
+        check(bool(statuses) and "offset" not in statuses[0],
+              "a host-made status stays a bare frame")
+        deadline = time.time() + 10
+        while broadcaster.count() > subscribers_before and time.time() < deadline:
+            time.sleep(0.05)
+        check(broadcaster.count() <= subscribers_before,
+              "the live-frame probe hangs up cleanly (no subscriber left behind)")
+    finally:
+        server_mod.SSE_KEEPALIVE_SEC = live_saved
+
+
 def _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster) -> Path:
     # ---- multi-window isolation: two SSE subscribers on different projects ----
     from agent.events import FinalEvent
@@ -963,13 +1036,17 @@ def _collect_run_events(base_url) -> None:
 
     def sse_reader() -> None:
         try:
-            with urllib.request.urlopen(f"{base_url}/api/events", timeout=90) as r:
+            # replay=0: this reader is after THIS run's frames, and a live durable
+            # frame is wrapped in {offset, event} exactly like a replayed one, so
+            # without the replay there is no second, historical copy to sort out
+            with urllib.request.urlopen(f"{base_url}/api/events?replay=0", timeout=90) as r:
                 for raw in r:
                     line = raw.decode().strip()
                     if line.startswith("data: "):
                         ev = json.loads(line[6:])
+                        # a durable record arrives with its log offset on it
                         if "event" in ev and isinstance(ev["event"], dict):
-                            continue  # replay row: wrapped history, not this run
+                            ev = ev["event"]
                         events.append(ev)
                         if ev.get("type") == "final":
                             done.set()
@@ -1063,6 +1140,7 @@ def _run_server_test() -> int:
         _clc_sse_replay(base_url, clc, comp_off)
         _sse_keepalive(base_url)
         _connecting_stream_status(base_url, clc, state, broadcaster)
+        _live_frame_shape(base_url, clc, state, broadcaster)
         clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)
         _write_lock_one_writer(base_url, clc, clc2, state)
         _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir)

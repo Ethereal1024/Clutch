@@ -16,6 +16,11 @@
 // end, and the phone re-attempts the REMOTE it lost instead of pretending a
 // local one exists.
 //
+// That re-attempt is now the disconnect dialog's job (ui/js/conn-lost.js), not a
+// private retry loop in the tunnel-end handler: every detected loss funnels into
+// connectionLost(), which re-dials the same host BY NAME from the standing
+// intent — the user re-enters nothing, and the one door back is the dialog.
+//
 // Like android-resume-test.js, the renderer part pulls the REAL functions out of
 // the renderer and drives them against stubs; the host part drives the REAL
 // android-host.js handlers against a fake tunnel.
@@ -154,35 +159,49 @@ async function main() {
   check(url === "http://127.0.0.1:31001", `tunnel up -> the forwarded session port (got ${url})`);
   check(url !== "http://127.0.0.1:8890", "and never the supervisor's lifecycle port");
 
-  // ---- 3. a dropped tunnel re-attempts the REMOTE instead of going local ----
+  // ---- 3. a dropped tunnel reaches the dialog, which re-dials the REMOTE ----
   check(/const SUPERVISOR_BASE = "http:\/\/127\.0\.0\.1:8890";/.test(APP),
     "the renderer names the lifecycle port once, as a sentinel");
   check(/sseSuspend/.test(APP) && /clean === SUPERVISOR_BASE/.test(fnBody("switchBackend")),
     "and refuses it in the one place a base is adopted");
 
   const at = APP.indexOf("window.clutchTunnel.onEnd");
+  const afterEnd = APP.indexOf("// the main process re-established", at);
   check(at > 0, "the tunnel-end handler exists");
-  const onEnd = APP.slice(at, at + 1600);
-  check(/dropStaleBackend\(\)/.test(onEnd),
-    "a tunnel end drops the dead forwarded port (no posting into nothing)");
+  const onEnd = APP.slice(at, afterEnd > at ? afterEnd : at + 1200);
+  check(/removeItem\("clutch_degrade"\)/.test(onEnd),
+    "a tunnel end drops degrade mode: it died with the exec bridge");
+  check(!/if \(IS_ANDROID\)/.test(onEnd),
+    "the handler is ONE path for phone and desktop: no local fallback to split off");
+  check(/if \(!localStorage\.getItem\("clutch_ssh_connected"\)\) return;/.test(onEnd),
+    "a disconnect the user asked for is not a loss: no dialog for it");
+  check(!/removeItem\("clutch_ssh_connected"\)/.test(onEnd),
+    "and the standing SSH intent survives the loss (dropping it killed every retry)");
+  check(/connectionLost\("lost the remote connection"\)/.test(onEnd),
+    "the loss goes to the one dialog that owns the way back");
+  check(!/notice\(|reconnectRemote|switchBackendResolved/.test(onEnd),
+    "nothing else answers it behind the dialog's back");
 
-  const androidStart = onEnd.indexOf("if (IS_ANDROID)");
-  const desktopFlagDrop = onEnd.indexOf('localStorage.removeItem("clutch_ssh_connected")');
-  check(androidStart > 0 && desktopFlagDrop > androidStart,
-    "the handler splits the phone from the desktop");
-  const phoneBranch = onEnd.slice(androidStart, desktopFlagDrop);
-  check(/reconnectRemote\(/.test(phoneBranch),
-    "the phone re-attempts the REMOTE it lost");
-  check(!/removeItem\("clutch_ssh_connected"\)/.test(phoneBranch),
-    "and keeps the standing SSH intent (dropping it killed every retry)");
-  check(!/resetBackendLocal/.test(phoneBranch),
-    "and never resets a local backend that does not exist on the phone");
-  check(!/switchBackendResolved/.test(phoneBranch),
-    "and never re-routes the phone to the local backend");
+  // the deleted route stays deleted: the retry loop with its own counters, and
+  // the local reset that pointed the phone at a port nobody serves
+  check(!/reconnectRemote/.test(APP), "the deleted local-fallback retry is not back");
+  check(!/REMOTE_RETRY_TRIES|REMOTE_RETRY_GAP_MS/.test(APP),
+    "nor its counters: the dialog's own bounded backoff replaced them");
 
-  check(new RegExp("const REMOTE_RETRY_TRIES = \\d+;").test(APP) &&
-    /await new Promise\(\(r\) => setTimeout\(r, REMOTE_RETRY_GAP_MS\)\)/.test(fnBody("reconnectRemote")),
-    "a blip longer than one SSH keepalive is retried, spaced, and bounded");
+  // the door the dialog opens is the SAME host, BY NAME (the user re-enters nothing)
+  check(/if \(!host \|\| !user \|\| !localStorage\.getItem\("clutch_ssh_connected"\)\) return null;/.test(fnBody("connLostRemoteIntent")),
+    "the dialog re-attempts the remote the window was on, from the standing intent");
+  check(/await handleSshConnect\(intent\.host, intent\.user, intent\.port/.test(fnBody("connLostRedial")),
+    "through the picker's own connect path (keys first, password prompt only if asked)");
+  check(/if \(remote && !tunnelUp\)/.test(fnBody("connLostRecover")),
+    "and the remote goes FIRST while its hop is down, before the host is asked");
+
+  // the host's own session is a DESKTOP-only last resort: asking first would hand
+  // a desktop a local session and abandon the remote, and the phone has none
+  check(/if \(IS_ANDROID \|\| connLostTries < CONN_LOST_HOST_FALLBACK_AFTER\) return false;/.test(fnBody("connLostRecover")),
+    "the host's session is only reached after the remote's tries, and never on Android");
+  check(/if \(!\(await switchBackendResolved\(\)\)\) return false;/.test(fnBody("connLostAskHost")),
+    "a host that has nothing to offer is not a recovery (it said so)");
 
   // the phone's picker never claims a backend it does not have
   check(/"Not connected — no backend"/.test(APP),

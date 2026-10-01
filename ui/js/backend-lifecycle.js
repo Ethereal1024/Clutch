@@ -5,7 +5,8 @@
 // old "fallback") was a guaranteed "Failed to fetch". Degrade mode re-points a
 // live local session at the remote exec bridge; a remote that goes away is
 // re-attempted (reconciled, re-connected, retried) instead of being replaced by
-// a local backend the phone does not have.
+// a local backend the phone does not have — and the announcement of that loss,
+// with the one way back from it, belongs to ui/js/conn-lost.js (connectionLost).
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
@@ -176,24 +177,6 @@ async function autoReconnectAndroid() {
   return Boolean(ok);
 }
 
-// A dropped remote is re-attempted, never replaced. The phone has no local
-// backend (N4) and on a desktop a wrong "fallback" only hides the outage, so
-// the one recovery that makes sense is the remote itself: retry the standing
-// SSH host a few times, spaced, so a blip longer than one SSH keepalive lands
-// instead of leaving the app pointed at nothing.
-const REMOTE_RETRY_TRIES = 3;
-const REMOTE_RETRY_GAP_MS = 4000;
-async function reconnectRemote(tries = REMOTE_RETRY_TRIES) {
-  for (let i = 0; i < tries; i++) {
-    // another attempt (or a heal) may already have won the race
-    const s = await window.clutchTunnel.status().catch(() => null);
-    if (s && s.active) return true;
-    if (await autoReconnectAndroid()) return true;
-    if (i < tries - 1) await new Promise((r) => setTimeout(r, REMOTE_RETRY_GAP_MS));
-  }
-  return false;
-}
-
 // The backend this window was talking to is gone: drop the stale session URL so
 // nothing keeps posting into a port nobody serves, and the picker stops
 // claiming a connection. The standing intent (clutch_ssh_connected) is the
@@ -208,33 +191,25 @@ function dropStaleBackend() {
   reconnectSSE(); // closes the dead stream; connectSSE bails on a null base
 }
 
-// The tunnel died mid-session. A dropped remote is NOT a reason to quietly
-// point the window at a local port: on the phone there is no local backend to
-// point at (N4), so that "fallback" could only produce "Failed to fetch" while
-// the picker claimed 127.0.0.1:8890 — a port that answers no API. So the host
-// gets the decision (it knows whether a local session is even possible) and, on
-// the phone, the REMOTE that was lost gets re-established instead.
+// The tunnel died mid-session. A dropped remote is neither a reason to quietly
+// point the window at a local port (on the phone there is no local backend to
+// point at — N4 — so that "fallback" could only produce "Failed to fetch" while
+// the picker claimed 127.0.0.1:8890, a port that answers no API) nor a toast that
+// dismisses itself: this window has no session, and the ONLY door back is the
+// dialog ui/js/conn-lost.js raises — it re-attempts this very host, by name, so
+// the user never has to introduce an old host as a new one.
 if (window.clutchTunnel) {
-  window.clutchTunnel.onEnd(async () => {
+  window.clutchTunnel.onEnd(() => {
     // the tunnel (and its exec bridge) is gone: any degrade mode dies with it
     localStorage.removeItem("clutch_degrade");
-    // no flag = the user's own disconnect: leave their intent alone
+    // no flag = the user's own disconnect (the picker's Cancel/Disconnect):
+    // they left the remote on purpose, so there is no lost session to announce
     if (!localStorage.getItem("clutch_ssh_connected")) return;
-    dropStaleBackend(); // the forwarded port is dead; stop talking to it
-    if (IS_ANDROID) {
-      // keep clutch_ssh_connected: it is the user's standing intent and the
-      // reconnect below reads it. Clearing it (as the old code did) is what
-      // killed every retry and left the picker claiming a local backend.
-      notice("lost the remote connection — reconnecting");
-      const back = await reconnectRemote();
-      if (!back) notice("could not reach " + (localStorage.getItem("clutch_ssh_host") || "the host") + " — open the picker to retry");
-      if (!fsModal.classList.contains("hidden")) refreshPicker();
-      return;
-    }
-    localStorage.removeItem("clutch_ssh_connected");
-    resetBackendLocal(); // end any SSH degradation on the local server
-    await switchBackendResolved(); // the host re-claims a local session, if it has one
-    if (!fsModal.classList.contains("hidden")) refreshPicker();
+    const pickerOpen = !fsModal.classList.contains("hidden");
+    connectionLost("lost the remote connection");
+    // the picker must not keep claiming a connection that does not exist; with
+    // a session on its way back it re-lists itself (see loadDir's waitBackend)
+    if (pickerOpen) refreshPicker();
   });
 }
 
@@ -242,5 +217,10 @@ if (window.clutchTunnel) {
 if (window.clutchApi && window.clutchApi.onBaseChanged) {
   window.clutchApi.onBaseChanged((url) => {
     if (url) switchBackend(url);
+    // null is an answer too, and the honest one: the host looked and this window
+    // has no session (no tunnel, and no local one either). Staying on the dead
+    // URL was the reported "Connected: http://127.0.0.1:4xxxx" that answered
+    // nothing — the dialog is what replaces it.
+    else connectionLost("the host has no session for this window");
   });
 }

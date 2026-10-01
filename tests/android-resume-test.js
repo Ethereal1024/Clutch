@@ -48,6 +48,11 @@ check(!/sseDegrade|setStatus|notice\(/.test(fnBody("sseResume")),
 // ---- stub environment ----
 const notices = [];
 const statuses = [];
+// the one funnel for a detected disconnect (js/conn-lost.js): a lost stream is
+// announced there, not by a toast, and its dialog is closed by proof of life
+// (the stream's own onopen)
+const losses = [];
+let resolved = 0;
 let reconnects = 0;
 const instances = [];
 let timers = []; // one-shot timers (the resume probe) fired by hand
@@ -105,6 +110,11 @@ global.setStatus = (s) => {
   global.busy = s === "running" || s === "waiting";
 };
 global.notice = (m) => notices.push(m);
+global.connectionLost = (m) => losses.push(m);
+global.resolveConnectionLost = () => {
+  resolved++;
+};
+global.connBusy = false; // no connect attempt in flight in this runner
 global.reconnectSSE = () => {
   reconnects++;
 };
@@ -136,6 +146,8 @@ function fireProbe() {
 connectSSE(true);
 const es1 = instances[instances.length - 1];
 es1.fireOpen();
+check(resolved === 1,
+  "a live session closes the disconnect dialog: the open is the proof, not the URL");
 setStatus("running");
 check(global.busy === true, "a live run has the button on Stop");
 
@@ -173,6 +185,7 @@ sseResume();
 fireProbe();
 check(reconnects === 1, "a pipe that stays silent after the return is replaced");
 check(notices.length === 0, "the replacement is silent: the page was away, nothing was lost");
+check(losses.length === 0, "and it raises no dialog: the user lost nothing while away");
 check(global.busy === true, "and the cached run state survives the replacement");
 check(global.sseProbe === null, "the probe disarms itself");
 
@@ -184,12 +197,15 @@ check(timers.length === 0, "away for less than one keepalive: nothing to probe")
 
 // ---- 5) a stream that stays silent after the return is STILL reported ----
 // (the fix forgives the background, it does not blind the watchdog)
+const statusesBeforeLoss = statuses.length;
 global.sseLastFrameAt = Date.now() - global.SSE_STALE_MS - 1;
 sseWatchdogTick();
-check(notices.length === 1 && /lost the live stream/.test(notices[0]),
+check(losses.length === 1 && /lost the live stream/.test(losses[0]),
   "a pipe that never speaks again is reported, not painted over");
-check(global.busy === false && statuses[statuses.length - 1] === "idle",
-  "and only then does the cached running state go");
+check(notices.length === 0,
+  "and it is the disconnect dialog that says so: no toast competes with it");
+check(statuses.length === statusesBeforeLoss && global.busy === true,
+  "the badge is left for the host's own status frame once a session answers");
 
 // ---- 6) resume without a suspension is a no-op ----
 const reconnectsBefore = reconnects;

@@ -88,14 +88,22 @@ function openSessionForward(remotePort) {
       (localPort) => {
         const srv = net.createServer((sock) => {
           if (!state.sshClient) return sock.destroy();
-          state.sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", remotePort, (err, stream) => {
-            if (err) {
-              tunnelLog("[session] forwardOut failed: " + (err && err.message));
-              sock.destroy();
-              return;
-            }
-            sock.pipe(stream).pipe(sock);
-          });
+          // ssh2 throws synchronously on a client whose socket is already gone
+          // ("Not connected"); a request racing the teardown must fail its own
+          // socket, not escape this handler and hang until the browser gives up
+          try {
+            state.sshClient.forwardOut("127.0.0.1", 0, "127.0.0.1", remotePort, (err, stream) => {
+              if (err) {
+                tunnelLog("[session] forwardOut failed: " + (err && err.message));
+                sock.destroy();
+                return;
+              }
+              sock.pipe(stream).pipe(sock);
+            });
+          } catch (e) {
+            tunnelLog("[session] forwardOut threw: " + ((e && e.message) || e));
+            sock.destroy();
+          }
         });
         listen(srv, localPort).then(
           () => {
@@ -153,28 +161,44 @@ async function restartRemoteServer() {
   return waitForServer(base + "/api/health", 20000);
 }
 
+// One heal tick: poll, restart, and — if the restart cannot even be attempted —
+// tear down instead of dying silently. `healOnce` awaits work on a wire that may
+// already be gone, so it can REJECT (ssh2's exec throws 'Not connected' inside
+// remoteExec's promise). Under a bare `setInterval` that rejection went nowhere:
+// no teardown, no notification, and the window kept the dead session URL right
+// up to its next "Failed to fetch". Whatever happens in here, the renderer is
+// told.
 async function healOnce() {
   if (!state.sshClient || !state.currentUrl) return;
-  const up = await waitForServer(state.currentUrl + "/api/health", 3000);
-  if (up) return;
-  tunnelLog("[heal] backend unreachable through the live tunnel");
-  const ok = await restartRemoteServer();
-  if (!ok) {
-    tunnelLog("[heal] restart did not recover; collecting diagnostics + tearing down");
-    await collectRemoteDiagnostics();
-    // notify: this teardown is not the renderer's own. stopTunnel nulls
-    // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
-    // currency guard and would never tell anyone: without the flag the
-    // renderer keeps a dead session URL and its Stop button posts into it.
-    await stopTunnel(true); // onEnd -> renderer drops the stale URL + re-claims
-  } else {
-    tunnelLog("[heal] backend recovered");
+  let why = null;
+  try {
+    const up = await waitForServer(state.currentUrl + "/api/health", 3000);
+    if (up) return;
+    tunnelLog("[heal] backend unreachable through the live tunnel");
+    const ok = await restartRemoteServer();
+    if (ok) {
+      tunnelLog("[heal] backend recovered");
+      return;
+    }
+    why = "the restart did not recover";
+  } catch (e) {
+    why = "the tunnel could not be used (" + ((e && e.message) || e) + ")";
   }
+  tunnelLog("[heal] " + why + "; collecting diagnostics + tearing down");
+  await collectRemoteDiagnostics();
+  // notify: this teardown is not the renderer's own. stopTunnel nulls
+  // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
+  // currency guard and would never tell anyone: without the flag the
+  // renderer keeps a dead session URL and its Stop button posts into it.
+  await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
 }
 
 function startHealing() {
   stopHealing();
-  state.healTimer = setInterval(healOnce, HEAL_INTERVAL_MS);
+  state.healTimer = setInterval(() => {
+    // the timer is the caller of last resort: a rejection here has no one else
+    healOnce().catch((e) => tunnelLog("[heal] tick failed: " + ((e && e.message) || e)));
+  }, HEAL_INTERVAL_MS);
 }
 function stopHealing() {
   if (state.healTimer) {

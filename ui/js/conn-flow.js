@@ -31,6 +31,10 @@ function showPasswordPrompt(label) {
 function closePasswordPrompt() {
   // resolve immediately (the connect flow is waiting); only the visual close animates
   closeModal(passModal);
+  // A declined password is not "keep trying": the user answered the one question
+  // the reconnect had, so the disconnect dialog stops retrying behind them and
+  // waits for the button (see connLostNeedsUser in js/conn-lost.js)
+  connLostNeedsUser();
   if (passResolve) passResolve(null);
   passResolve = null;
 }
@@ -170,9 +174,12 @@ connSelect.addEventListener("change", async () => {
   const v = connSelect.value;
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {
-      await window.clutchTunnel.disconnect();
+      // the standing intent goes FIRST: the disconnect below ends the tunnel and
+      // the host announces that as "tunnel:ended", which the renderer reads as a
+      // LOST session unless the intent is already gone (backend-lifecycle.js)
       localStorage.removeItem("clutch_ssh_connected");
       localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
+      await window.clutchTunnel.disconnect();
       await resetBackendLocal(); // end any SSH degradation on the local server
       await switchBackendResolved(); // stay in the picker, back to the local backend
       refreshPicker();
@@ -180,11 +187,13 @@ connSelect.addEventListener("change", async () => {
     return;
   }
   if (v.startsWith("ssh:") && !v.includes("__connected__")) {
-    // switching: drop any current tunnel first, then connect to the new host
+    // switching: drop any current tunnel first, then connect to the new host.
+    // The intent is cleared before the drop, for the same reason as above: the
+    // user is leaving this host on purpose, so it is not a lost session.
     if (localStorage.getItem("clutch_ssh_connected")) {
-      await window.clutchTunnel.disconnect();
       localStorage.removeItem("clutch_ssh_connected");
       localStorage.removeItem("clutch_degrade");
+      await window.clutchTunnel.disconnect();
     }
     const [user, hostPort] = v.slice(4).split("@");
     const [host, port] = hostPort.split(":");

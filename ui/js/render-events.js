@@ -151,6 +151,12 @@ async function run() {
     if (data.workspace) els.workspace.textContent = data.workspace;
     refreshTree();
   } catch (e) {
+    // No .status = the request itself never landed (a refused port, an aborted
+    // 30s wait): this window has no session, which is the dialog's business and
+    // not a one-line transcript error nobody can act on. The event still goes in
+    // so the record of the attempt survives the reconnect. A .status means the
+    // session answered and refused (e.g. already busy) — that stays inline.
+    if (!e.status) connectionLost("could not reach the session to start the task (" + ((e && e.message) || e) + ")");
     addEvent({ type: "final", status: "error", summary: "run failed: " + e.message });
   }
 }
@@ -163,7 +169,15 @@ async function stop() {
     // cannot be delivered the window must stop pretending that it was.
     await apiFetch("/api/stop", { method: "POST", timeout: 8000 }); // bodyless
   } catch (e) {
-    notice("could not reach the backend to stop (" + ((e && e.message) || e) + ") — the task may still be running");
+    const msg = (e && e.message) || e;
+    if (!e.status) {
+      // the request never landed: this is the reported "Failed to fetch", and
+      // the dialog (not an 8-second toast) is what owns "this window has no
+      // session". The task may still be running on a host we cannot reach.
+      connectionLost("could not reach the session to stop the task (" + msg + ")");
+    } else {
+      notice("the backend refused to stop the task (" + msg + ") — it may still be running");
+    }
     setStatus("idle"); // the button belongs to the user again: retry Stop, or Run
     // the link itself may be recoverable: re-resolve the session of this
     // window (the tunnel or the supervisor may have re-claimed one under us)

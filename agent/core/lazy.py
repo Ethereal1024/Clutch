@@ -178,8 +178,17 @@ class LazyEventLog:
 
     def append(self, event: Event) -> Event:
         if event.type in DURABLE_TYPES:
+            off = self._file_bytes - self._base
             self._events.append(event)
-            self._offsets.append(self._file_bytes - self._base)
+            self._offsets.append(off)
+            # Stamp the record's own offset on it, so the LIVE SSE frame carries
+            # the same {offset, event} shape a replay does (agent/api/events.py).
+            # Without it a window that painted these events as they streamed
+            # cannot tell which of them a later replay has already shown it: the
+            # replay restarts at the window start, so the whole transcript would
+            # be painted a second time. A transient delta is never appended here,
+            # so it keeps its bare frame (and is never replayed).
+            event.log_offset = off  # type: ignore[attr-defined]
             self._file_bytes += _line_bytes(event)
             if self._path:
                 append_jsonl(self._path, event_to_json(event), self._writer)
