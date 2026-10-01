@@ -30,20 +30,20 @@
   font-weight: 100 900;
   font-display: swap;
 }
-/* The UI's chrome icons (▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −) are NOT in Archivo
+/* The UI's chrome icons (▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ↻ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −) are NOT in Archivo
    or JetBrains Mono (both are latin subsets; see the cmap check in
    tests/ui_fonts_check.py), so each platform used to draw them from its own
    symbol font — Segoe UI Symbol on Windows, Apple Symbols on macOS, whatever
    fontconfig picks on Linux — i.e. a different size and shape per OS.
-   clutch-icons.woff2 is a 21-codepoint subset of Symbola (see its
+   clutch-icons.woff2 is a 22-codepoint subset of Symbola (see its
    LICENSE.txt) that ships with the app, so the icons are pixel-identical
    everywhere. It is listed FIRST in both stacks, which is safe *because* its
-   cmap holds exactly those 21 codepoints: it can never shadow a text
+   cmap holds exactly those 22 codepoints: it can never shadow a text
    character, and anything new that is added to ui/ without a matching glyph
    fails loudly in tests/ui_fonts_check.py instead of silently falling back to
    the OS font. `font-display: block` (not swap) so an icon is never briefly
    drawn in the OS face before the bundled one arrives.
-   `unicode-range` is the same 21 codepoints written out in CSS. It is what
+   `unicode-range` is the same 22 codepoints written out in CSS. It is what
    makes "cannot shadow text" a property of the declaration instead of a
    promise about the font's cmap: the browser will not even consider this face
    for a codepoint outside the list. The test pins it to the font's own
@@ -54,9 +54,9 @@
   font-weight: 400 900; /* one outline for all weights: no synthetic emboldening */
   font-display: block;
   unicode-range:
-    U+2192, U+2193, U+21B6, U+2212, U+25A0, U+25A3, U+25A4, U+25A6, U+25B6,
-    U+25B8, U+25BE, U+2630, U+2699, U+26A0, U+270E, U+2713, U+2715, U+27E6,
-    U+27E7, U+FF0B, U+1F6E1;
+    U+2192, U+2193, U+21B6, U+21BB, U+2212, U+25A0, U+25A3, U+25A4, U+25A6,
+    U+25B6, U+25B8, U+25BE, U+2630, U+2699, U+26A0, U+270E, U+2713, U+2715,
+    U+27E6, U+27E7, U+FF0B, U+1F6E1;
 }
 
 :root {

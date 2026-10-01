@@ -2,26 +2,27 @@
 """Build ui/vendor/fonts/clutch-icons.woff2 — the UI's cross-platform icon font.
 
 Why this exists: the UI draws its chrome icons with Unicode symbol glyphs
-(▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −). None of them are in the bundled
+(▣ ▦ ＋ ⚙ ▶ ▸ ▾ ↓ → ✓ ↶ ↻ ✎ ⚠ ⟦ ⟧ ■ ☰ ▤ ✕ −). None of them are in the bundled
 Archivo / JetBrains Mono (both are ~230-glyph latin subsets), so each platform
 resolved them from ITS OWN symbol font — Segoe UI Symbol on Windows, Apple
 Symbols on macOS, whatever fontconfig picks on Linux — which is why buttons and
-carets were a different size/shape on every OS. This script bakes those 21 codepoints
+carets were a different size/shape on every OS. This script bakes those 22 codepoints
 into one small font the app ships, so every platform draws identical icons.
 
 Source: Symbola (George Douros), "fonts are free for any use; they may be
 opened, edited, modified, regenerated, packaged and redistributed" — vendored
 from the Debian package fonts-symbola 2.60-1.1 (checksum pinned below). Survey
-(fontTools cmap; table in ui/vendor/fonts/README.md): Symbola 20/21 native and
-DejaVu Sans 19/21 native. BOTH lack U+FF0B, so either needs the ASCII "+"
+(fontTools cmap; table in ui/vendor/fonts/README.md): Symbola 21/22 native and
+DejaVu Sans 20/22 native. BOTH lack U+FF0B, so either needs the ASCII "+"
 remap below; first place still went to Symbola because DejaVu falls one glyph
 further behind (no U+1F6E1) and because Symbola is a symbol-only face — DejaVu
 Sans is the platforms' own text font, so a subset of it would be
 indistinguishable from the OS fallback it replaces.
-Others: Noto Sans Symbols 2 13/21, Noto Sans Symbols 3/21, the vendored Archivo /
-JetBrains Mono 2/21.
+Others: Noto Sans Symbols 2 13/21, Noto Sans Symbols 3/21 (both measured in the
+original 21-codepoint survey, and U+21BB — an ordinary arrow — cannot close a
+gap of 8), the vendored Archivo / JetBrains Mono 2/22.
 
-The subset keeps EXACTLY the 21 codepoints used by ui/ and nothing else, so it
+The subset keeps EXACTLY the 22 codepoints used by ui/ and nothing else, so it
 can sit first in --font-display / --font-mono without ever shadowing a normal
 character. Symbola has no U+FF0B (fullwidth plus), so its ASCII "+" outline is
 remapped to U+FF0B — the markup keeps using ＋ and ASCII "+" still comes from
@@ -74,6 +75,7 @@ ICONS = {
     0x25BE: "▾ tree caret-down",
     0x25B6: "▶ run button",
     0x21B6: "↶ revert/undo",
+    0x21BB: "↻ plugin tab: re-read the target machine and the market",
     0x25A0: "■ stop button",
     0x26A0: "⚠ warning",
     0x27E6: "⟦ tool-args bracket open",
