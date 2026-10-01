@@ -116,8 +116,13 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     },
   };
 
-  // tell every renderer the moment a tunnel dies (drops its stale API URL)
-  tunnel.onTunnelEnd(() => bus.broadcast("tunnel:ended"));
+  // tell every renderer the moment a tunnel dies (drops its stale API URL) — and
+  // drop the forwards that URL named first: they died with the tunnel, so a
+  // re-claim racing this broadcast must open a fresh one
+  tunnel.onTunnelEnd(async () => {
+    await hostCore.releaseTunnelBackends();
+    bus.broadcast("tunnel:ended");
+  });
 
   async function start() {
     // kill a STALE ready marker BEFORE binding: the Kotlin shell polls this

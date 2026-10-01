@@ -204,7 +204,11 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     // tell every renderer the moment a tunnel dies, so it can drop a stale API URL
-    tunnel.onTunnelEnd(() => {
+    tunnel.onTunnelEnd(async () => {
+      // the session forwards this window's URL named died with the tunnel:
+      // drop them first, so a re-claim that races this notification opens a
+      // FRESH forward instead of handing the window a port nobody serves
+      await hostCore.releaseTunnelBackends();
       for (const w of BrowserWindow.getAllWindows()) {
         if (!w.isDestroyed()) w.webContents.send("tunnel:ended");
       }

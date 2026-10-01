@@ -37,6 +37,8 @@ const { fnBody } = slicer(APP);
 const store = new Map();
 global.SUPERVISOR_BASE = "http://127.0.0.1:8890";
 global.API_BASE = "http://127.0.0.1:31001";
+global.busy = false; // the run state switchBackend reads (see silent-idle-test.js)
+global.sseRunAtRisk = false;
 global.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, String(v)),
@@ -78,6 +80,15 @@ global.dropStaleBackend();
 check(global.API_BASE === null, "a dropped remote leaves no base behind");
 check(store.get("clutch_api_url") === undefined, "the stale URL is forgotten");
 check(reconnects === 2, "the dead stream is closed (connect bails on a null base)");
+
+// a move under a live run is remembered, so the replaced session's idle frame
+// cannot quietly repaint the badge (the whole journey is in silent-idle-test.js)
+global.busy = true;
+global.switchBackend("http://127.0.0.1:31005");
+check(global.sseRunAtRisk === true,
+  "a base move while a run is in flight is remembered for the status frame");
+global.busy = false;
+global.sseRunAtRisk = false;
 
 // ---- 2. the host answers null, never a local placeholder ----
 check(!/DEFAULT_API_BASE/.test(HOST),

@@ -7,7 +7,18 @@
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 // session/start boots a onefile child: cover the supervisor's start timeout
 const SESSION_START_TIMEOUT_MS = 35_000;
-const HEARTBEAT_INTERVAL_MS = 8000; // < supervisor stale timeout (30s)
+const HEARTBEAT_INTERVAL_MS = 8000; // < the supervisor's stale window (10s)
+// A beat that fails is not a dead session. The supervisor reaps a session only
+// once STALE_S (10s) has passed since its LAST beat, so a blip that ends inside
+// that window is survivable by simply beating again sooner — the run behind it
+// keeps going. Handing the failure to onFail() on the FIRST missed beat did the
+// opposite: it released (and therefore stopped) a session whose task was still
+// running, and the window then re-claimed an empty one — the phone's "the task
+// went idle by itself". So retry on the retry cadence, and report the failure
+// only once the silence has outlived the supervisor's own window: by then the
+// host has reaped the session anyway and there is nothing left to keep alive.
+const HEARTBEAT_RETRY_MS = 1000; // get a beat in before the stale window closes
+const HEARTBEAT_STALE_MS = 10000; // must match agent/procmgr/supervise.py STALE_S
 
 async function supervisorProbe(base) {
   // "up" = supervisor shape, "foreign" = another server on the port, "down" = nothing listening
@@ -74,13 +85,17 @@ function supervisorSessionStop(base, sid) {
   } catch { /* supervisor already gone: nothing to tell */ }
 }
 
-// Keep a session alive; onFail fires when the supervisor stops answering
+// Keep a session alive; onFail fires when the supervisor stops answering for
+// longer than its own stale window (see HEARTBEAT_STALE_MS) — i.e. when the
+// session is provably gone, not when one request happened to fail.
 function startSupervisorHeartbeat(base, sid, onFail) {
-  const timer = setInterval(async () => {
+  let stopped = false;
+  let timer = null;
+  let lastOk = Date.now();
+  async function beat() {
     try {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
-      let failed = false;
       try {
         const r = await fetch(`${base}/api/session/heartbeat`, {
           method: "POST",
@@ -88,16 +103,38 @@ function startSupervisorHeartbeat(base, sid, onFail) {
           body: JSON.stringify({ session_id: sid }),
           signal: ctl.signal,
         });
-        failed = !r.ok;
-      } catch {
-        failed = true;
+        return r.ok;
       } finally {
         clearTimeout(t);
       }
-      if (failed && onFail) onFail();
-    } catch { /* heartbeat failures must never throw */ }
-  }, HEARTBEAT_INTERVAL_MS);
-  return { stop: () => clearInterval(timer) };
+    } catch {
+      return false; // never throw: the caller is a timer
+    }
+  }
+  async function tick() {
+    timer = null;
+    if (stopped) return;
+    if (await beat()) {
+      if (stopped) return;
+      lastOk = Date.now();
+      timer = setTimeout(tick, HEARTBEAT_INTERVAL_MS);
+      return;
+    }
+    if (stopped) return;
+    if (Date.now() - lastOk < HEARTBEAT_STALE_MS) {
+      timer = setTimeout(tick, HEARTBEAT_RETRY_MS); // the session is still there; get through
+      return;
+    }
+    if (onFail) onFail(); // outlived the stale window: the host reaped it already
+  }
+  timer = setTimeout(tick, HEARTBEAT_INTERVAL_MS);
+  return {
+    stop: () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+  };
 }
 
 // Ask a supervisor to exit once its sessions are gone (fire-and-forget: it may

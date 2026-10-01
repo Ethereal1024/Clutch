@@ -82,7 +82,16 @@ global.sseFrames = 0;
 global.sseErrors = 0;
 global.sseDown = false;
 global.sseSuspended = false; // the page is running here: android-resume covers the other case
+global.sseHiddenTick = false;
+global.sseProbe = null;
 global.sseWatchdog = null;
+global.SSE_KEEPALIVE_MS = 15000;
+global.SSE_RESUME_PROBE_MS = 2000;
+global.setTimeout = () => 1; // the resume probe is never fired here
+global.clearTimeout = () => {};
+// the watchdog reads visibility now (a hidden page is not a witness); these
+// runners drive one function at a time, so the page state is the runner's
+global.document = { hidden: false };
 global.SSE_STALE_MS = 45000;
 global.SSE_MAX_ERRORS = 4;
 global.setStatus = (s) => {
@@ -113,7 +122,7 @@ let fetchImpl = async () => {
 global.apiFetch = (p, o) => fetchImpl(p, o);
 
 // ---- load the real code ----
-for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "stop"]) {
+for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "sseSuspend", "sseResume", "stop"]) {
   (0, eval)(fnBody(name));
 }
 

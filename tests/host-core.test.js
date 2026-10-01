@@ -243,6 +243,59 @@ async function main() {
     assert.strictEqual(calls, 3, "heal spawned one more session");
   }
 
+  // 12. a tunnel end drops the window's forward with it (the shells call this
+  //     from their tunnel-end notification, BEFORE they tell the renderer)
+  {
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    let closedForwards = 0;
+    const { core, sessions } = makeCore({
+      tunnel: ts,
+      over: {
+        // the port number can repeat across tunnels: the guard cannot lean on it
+        openSessionForward: async () => ({ localPort: 31001, close: () => closedForwards++ }),
+      },
+    });
+    const w = fakeWin(12);
+    assert.strictEqual(await core.ensureWindowBackend(w), "http://127.0.0.1:31001");
+    assert.strictEqual(await core.releaseTunnelBackends(), 1, "the end drops the window's forward");
+    assert.strictEqual(closedForwards, 1, "and the forward is actually closed");
+    assert.strictEqual(core.backendCount(), 0, "no window keeps pointing at a hop that is gone");
+    assert.deepStrictEqual(sessions.calls.stopped, [{ base: "http://127.0.0.1:8891", sid: "s1" }],
+      "the session behind it is told to stop");
+    // the tunnel comes back (a new hop, the same port number): a NEW session
+    ts.url = "http://127.0.0.1:9999";
+    assert.strictEqual(await core.ensureWindowBackend(w), "http://127.0.0.1:31001");
+    assert.strictEqual(sessions.calls.started.length, 2, "the returning hop gets its own session child");
+    assert.strictEqual(sessions.calls.started[1].base, "http://127.0.0.1:9999");
+  }
+
+  // 13. the reuse guard: a forward opened through ANOTHER hop is never handed
+  //     back (the notification may race the re-claim that follows it)
+  {
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const { core, sessions } = makeCore({ tunnel: ts });
+    const w = fakeWin(13);
+    const first = await core.ensureWindowBackend(w);
+    assert.strictEqual(await core.ensureWindowBackend(w), first, "the same hop reuses its forward");
+    assert.strictEqual(sessions.calls.started.length, 1, "without spawning a second session");
+    ts.url = "http://127.0.0.1:9999"; // a new hop, same window
+    const again = await core.ensureWindowBackend(w);
+    assert.notStrictEqual(again, first, "a forward from the dead hop is not reused");
+    assert.strictEqual(sessions.calls.started.length, 2, "the new hop is asked for its own session");
+  }
+
+  // 14. a tunnel end leaves a LOCAL backend alone: its session never went through
+  //     the tunnel (the desktop keeps its local claim; the phone has none)
+  {
+    const { core, state } = makeCore();
+    const w = fakeWin(14);
+    const local = await core.ensureWindowBackend(w);
+    assert.strictEqual(await core.releaseTunnelBackends(), 0, "nothing tunnel-shaped to drop");
+    assert.strictEqual(core.backendCount(), 1, "the local session is still this window's backend");
+    assert.strictEqual(await core.ensureWindowBackend(w), local, "and it is still the same URL");
+    assert.strictEqual(state.localStarts.length, 1);
+  }
+
   console.log("host-core: all checks passed");
 }
 

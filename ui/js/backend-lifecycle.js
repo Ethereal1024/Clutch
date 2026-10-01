@@ -25,6 +25,12 @@ function switchBackend(url) {
     console.warn("[backend] refused a non-session base:", url);
     return false;
   }
+  // Moving the base while a run is in flight replaces the SESSION that run lives
+  // in: the host releases the old one (its heartbeat/self-heal, a re-claim, the
+  // user connecting elsewhere), so the new session starts with nothing in flight
+  // and its status frame will honestly say idle. Remember the run, so that frame
+  // cannot slip the badge from running to idle without a word.
+  if (busy && clean !== API_BASE) sseRunAtRisk = true;
   API_BASE = clean;
   localStorage.setItem("clutch_api_url", API_BASE);
   reconnectSSE();
@@ -194,6 +200,9 @@ async function reconnectRemote(tries = REMOTE_RETRY_TRIES) {
 // caller's to keep. The next real URL arrives via switchBackend /
 // backend:base-changed.
 function dropStaleBackend() {
+  // the session this window's run lived in is what just went away: same story as
+  // a base move, and it must not end in a silent idle either
+  if (busy) sseRunAtRisk = true;
   API_BASE = null;
   localStorage.removeItem("clutch_api_url");
   reconnectSSE(); // closes the dead stream; connectSSE bails on a null base

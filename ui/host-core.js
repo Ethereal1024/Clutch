@@ -66,6 +66,9 @@ function createHostCore(deps) {
     const wb = {
       kind: "tunnel",
       sessionId: res.sessionId,
+      // the hop this forward was opened through: stopTunnel closes EVERY session
+      // forward, so a URL from one tunnel names a dead port on the next one
+      tunnelUrl: supBase,
       url: `http://127.0.0.1:${fwd.localPort}`,
       stop: () => {
         hb.stop();
@@ -82,7 +85,13 @@ function createHostCore(deps) {
     const ts = tunnelStatus();
     if (ts.active && ts.url) {
       const existing = windowBackends.get(wc.id);
-      if (existing && existing.kind === "tunnel") return existing.url;
+      // reuse only a forward opened through THIS tunnel: the forward an earlier
+      // tunnel opened died with it, and handing its port out again points the
+      // window at a socket nobody serves — the EventSource then errors into the
+      // phone's "lost the live stream" while the drop already happened
+      if (existing && existing.kind === "tunnel" && existing.tunnelUrl === ts.url) {
+        return existing.url;
+      }
       await releaseWindowBackend(wc.id); // drop any local session first
       let res = await sessions.supervisorSessionStart(
         ts.url,
@@ -175,6 +184,22 @@ function createHostCore(deps) {
     for (const id of [...windowBackends.keys()]) await releaseWindowBackend(id);
   }
 
+  // A tunnel is gone. Every window's forward through it died with it (stopTunnel
+  // closes all of them, and a tunnel whose ssh hop ended serves nothing either),
+  // so no window may keep pointing at one — a cached URL would be the port of a
+  // dead hop. Both shells call this from their tunnel-end notification, BEFORE
+  // they tell the renderer, so the re-claim that follows starts from an empty
+  // table and opens a fresh forward. Returns how many were dropped.
+  async function releaseTunnelBackends() {
+    let dropped = 0;
+    for (const [id, wb] of [...windowBackends]) {
+      if (wb.kind !== "tunnel") continue;
+      await releaseWindowBackend(id);
+      dropped++;
+    }
+    return dropped;
+  }
+
   async function stopAllBackends() {
     await releaseAllBackends();
     // Normal close: tell every supervisor to exit once their sessions are gone
@@ -205,6 +230,7 @@ function createHostCore(deps) {
     ensureWindowBackend,
     releaseWindowBackend,
     releaseAllBackends,
+    releaseTunnelBackends,
     stopAllBackends,
     claimWindowBackend,
     backendKind,

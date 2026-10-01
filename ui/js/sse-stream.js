@@ -44,6 +44,16 @@ let sseWatchdog = null;
 let sseSuspended = false;
 let sseSuspendedAt = 0;
 let sseProbe = null;
+// the watchdog itself saw the page hidden (a WebView may hide without saying so)
+let sseHiddenTick = false;
+// A run was in flight when this window's SESSION was replaced: a tunnel end, the
+// host's self-heal, a re-claim, the user's own connect to another host — the
+// host releases the old session, and the new one starts with nothing in flight.
+// The status frame that follows then honestly says idle, and painting that in
+// silence is the reported "the task went idle by itself": the run is gone and
+// nobody said so. The flag travels from the move (backend-lifecycle.js) to the
+// frame that reveals the outcome (render-events.js).
+let sseRunAtRisk = false;
 
 // any frame (event or keepalive) proves the pipe still carries bytes
 function sseFrame() {
@@ -66,9 +76,26 @@ function sseDegrade(reason) {
 
 function sseWatchdogTick() {
   if (!API_BASE || !es) return;
-  // the page was gone: no JS ran, so nothing could have arrived. That silence is
-  // not evidence about the pipe (see sseSuspend/sseResume).
-  if (sseSuspended) return;
+  // A hidden page is not a witness: some WebViews hide it without ever
+  // announcing a freeze, and whatever they announce, a page nobody is watching
+  // can conclude nothing from silence. So a hidden tick suspends instead of
+  // judging — the same treatment the platform's own signal gets — and the return
+  // goes through sseResume's two-second probe, which finds the pipe either alive
+  // (nothing to do) or gone (replaced without a word). Judging here instead was
+  // the phone's "switch app, come back and the run was idle": the wall-clock gap
+  // of the whole background counted as a dead stream.
+  if (document.hidden) {
+    sseHiddenTick = true;
+    sseSuspend();
+    return;
+  }
+  if (sseSuspended) {
+    // A suspension the PLATFORM announced is the platform's to close (its own
+    // resume fires on the way back). Only the one the watchdog opened has no
+    // other observer, so only that one is closed here.
+    if (!sseHiddenTick) return;
+    sseResume();
+  }
   if (Date.now() - sseLastFrameAt < SSE_STALE_MS) return;
   // re-arm first: one report + one reconnect per stale window, not per tick
   sseLastFrameAt = Date.now();
@@ -100,6 +127,7 @@ function sseResume() {
   if (!sseSuspended) return;
   const awayFor = Date.now() - sseSuspendedAt;
   sseSuspended = false;
+  sseHiddenTick = false; // whoever observed the hide, the page is back
   sseLastFrameAt = Date.now(); // the gap is forgiven, never judged
   if (sseProbe) { clearTimeout(sseProbe); sseProbe = null; }
   // away for less than one keepalive: the pipe owed us nothing yet, and the

@@ -56,7 +56,21 @@ function renderEvent(ev) {
       return buildResultBlock(ui, call.name || "", call.args || {}, ev);
     }
     case "state_update": {
-      if (ev.key === "execution_status" && ev.value) setStatus(ev.value);
+      if (ev.key === "execution_status" && ev.value) {
+        // The first frame of every connect is the host's own status. If this
+        // window was busy when its session was replaced (see sseRunAtRisk), that
+        // frame reveals the outcome: the run does not come back — the host
+        // released the session it ran in — so the honest paint is idle, and the
+        // ONE thing that must not happen is painting it silently. That silence
+        // is the reported "the task went idle by itself".
+        if (ev.value === "idle" && sseRunAtRisk) {
+          sseRunAtRisk = false;
+          notice("the connection to the session running this task was lost — nothing is running now");
+        } else if (ev.value !== "idle") {
+          sseRunAtRisk = false; // the run is still there: nothing was lost after all
+        }
+        setStatus(ev.value);
+      }
       return null;
     }
     case "permission_request": {

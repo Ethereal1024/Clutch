@@ -26,7 +26,7 @@ const { fnBody } = slicer(src);
 // ---- the wire contract with the server (agent/server.py) ----
 check(/const SSE_RESUME_PROBE_MS = 2000;/.test(src),
   "a queued keepalive is given a short window to land after the unfreeze");
-check(/if \(sseSuspended\) return;/.test(fnBody("sseWatchdogTick")),
+check(/sseSuspend/.test(fnBody("sseWatchdogTick")),
   "the watchdog refuses to judge a page that was not running");
 check(/document\.addEventListener\("visibilitychange"/.test(src),
   "background/foreground is observed (visibilitychange)");
@@ -38,6 +38,10 @@ check(/window\.addEventListener\("pagehide", sseSuspend\)/.test(src) &&
   "a bfcache-style suspend is observed as well");
 check(/sseFrames\+\+;/.test(src),
   "liveness is a monotonic counter, so 'a frame arrived' is testable");
+check(/if \(document\.hidden\) \{/.test(fnBody("sseWatchdogTick")),
+  "a hidden page is treated as suspended by the watchdog too (the platform may never say so)");
+check(/sseResume\(\);/.test(fnBody("sseWatchdogTick")),
+  "and the visible tick closes that suspension, so the return probe judges the pipe");
 check(!/sseDegrade|setStatus|notice\(/.test(fnBody("sseResume")),
   "returning from the background announces nothing and resets nothing (probe included)");
 
@@ -90,6 +94,7 @@ global.sseDown = false;
 global.sseSuspended = false;
 global.sseSuspendedAt = 0;
 global.sseProbe = null;
+global.sseHiddenTick = false;
 global.sseWatchdog = null;
 global.SSE_KEEPALIVE_MS = 15000;
 global.SSE_STALE_MS = 45000;
@@ -113,6 +118,8 @@ global.lastTextContent = "";
 global.thinkingEl = null;
 global.thinkingContent = "";
 global.toolGroupEl = null;
+// the watchdog reads the page's own visibility (a hidden page is not a witness)
+global.document = { hidden: false };
 
 // ---- load the real code ----
 for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "sseSuspend", "sseResume"]) {
@@ -189,5 +196,34 @@ const reconnectsBefore = reconnects;
 sseResume();
 check(timers.length === 0 && reconnects === reconnectsBefore,
   "a resume with nothing suspended changes nothing");
+
+// ---- 7) a platform that hides the page without a word is not judged either ----
+// (some WebViews just stop drawing and throttle the timers: no visibilitychange,
+// no freeze — the watchdog has to notice by itself, or the whole background is
+// counted as a dead stream again)
+setStatus("running");
+document.hidden = true;
+const noticesBeforeHide = notices.length;
+const reconnectsBeforeHide = reconnects;
+global.sseLastFrameAt = Date.now() - global.SSE_STALE_MS - 1;
+sseWatchdogTick();
+check(global.sseSuspended === true, "a hidden tick suspends the stream instead of judging it");
+check(notices.length === noticesBeforeHide && reconnects === reconnectsBeforeHide,
+  "and says nothing: silence behind a page nobody sees is not a loss");
+
+// three minutes later, back on screen, the tick is the only observer
+global.sseSuspendedAt = Date.now() - 180000;
+global.sseLastFrameAt = Date.now() - 180000;
+document.hidden = false;
+sseWatchdogTick();
+check(global.sseSuspended === false, "the visible tick closes the suspension");
+check(notices.length === noticesBeforeHide, "the return itself announces nothing");
+check(global.busy === true, "and the run state survives the return");
+check(timers.length === 1, "the judging it handed over is the return probe");
+fireProbe();
+check(reconnects === reconnectsBeforeHide + 1,
+  "a pipe that stayed silent through the hidden spell is replaced");
+check(notices.length === noticesBeforeHide, "silently: the user lost nothing while away");
+check(global.busy === true, "and the cached run state survives the replacement");
 
 summary("android-resume");
