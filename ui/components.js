@@ -18,6 +18,12 @@
 // the only side that knows if something is running it, so its refusal comes back
 // as its own sentence rather than as a status this file interprets.
 //
+// The third verb changes no bytes at all: `hostSetDisabled()` asks a machine to
+// stop DRIVING a component it holds, or to start again. That is a fact about the
+// machine that owns the component — its tools are offered there, or not — so it
+// is stored in that machine's own registry table and asked for over the same
+// channel, never mirrored here.
+//
 // Failure here is never fatal to a session: the pass runs in the background and
 // a tool whose component has not landed is simply not offered (the host keeps
 // no stand-in for it), so every error is reported and the session proceeds.
@@ -465,6 +471,22 @@ async function hostRemove(base, name, version = "", timeoutMs = REQUEST_TIMEOUT_
   return hostJSON(`${base}/api/components/${encodeURIComponent(name)}${q}`, { method: "DELETE", timeoutMs });
 }
 
+// Stop driving ONE component on this machine, or start again. The one verb on
+// this layer that touches no bytes: the component stays installed, stays whole
+// and stays LISTED, and the only thing that changes is whether this machine
+// offers its tools — which is why the bit lives in the machine's own table (the
+// same one its installs are recorded in) and not in this client. `disabled` is
+// the state being asked for, spelled the way the host stores it (true = here,
+// not to be driven), so neither side has to translate a word into its opposite.
+// The verdict is the host's: "disabled"/"enabled" with the bit it now holds, or
+// "absent" when this machine does not hold the component at all (an answer, not
+// a failure: the request is already true there). A refusal arrives as the host's
+// own sentence, thrown.
+async function hostSetDisabled(base, name, disabled, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const verb = disabled ? "disable" : "enable";
+  return hostJSON(`${base}/api/components/${encodeURIComponent(name)}/${verb}`, { method: "POST", timeoutMs });
+}
+
 async function upload(base, spec, timeoutMs) {
   const data = fs.readFileSync(spec.path);
   // the manifest is the component's own declaration with the install facts on
@@ -572,6 +594,7 @@ module.exports = {
   hostInventory,
   hostVersions,
   hostRemove,
+  hostSetDisabled,
   upload,
   CACHE,
   REQUEST_TIMEOUT_MS,

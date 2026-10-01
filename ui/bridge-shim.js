@@ -113,6 +113,7 @@
     install: (name) => call("clutchComponents", "install", [name]),
     versions: (name) => call("clutchComponents", "versions", [name]),
     remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
+    setDisabled: (name, disabled) => call("clutchComponents", "setDisabled", [name, disabled]),
     onProgress: (cb) => subscribe("components:progress", cb),
   });
 

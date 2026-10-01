@@ -18,8 +18,9 @@ contextBridge.exposeInMainWorld("clutchSettings", {
 });
 
 // the plugin tab's channel: what the target machine holds, what this client
-// could give it, and the two writes (one install onto that machine, one removal
-// off it). Everything crosses ui/main.js, which talks to the target machine's
+// could give it, and the three writes (an install onto that machine, a removal
+// off it, and the switch that stops driving a component there or starts it
+// again). Everything crosses ui/main.js, which talks to the target machine's
 // supervisor (ui/components-view.js) — the renderer never writes anything itself.
 contextBridge.exposeInMainWorld("clutchComponents", {
   list: () => ipcRenderer.invoke("components:list"),
@@ -27,6 +28,7 @@ contextBridge.exposeInMainWorld("clutchComponents", {
   install: (name) => ipcRenderer.invoke("components:install", name),
   versions: (name) => ipcRenderer.invoke("components:versions", name),
   remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
+  setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
   onProgress: (cb) => {
     const wrap = (_e, stage) => cb(stage);
     ipcRenderer.on("components:progress", wrap);

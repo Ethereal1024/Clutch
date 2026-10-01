@@ -1,6 +1,6 @@
 // the plugin page's backend: the target machine, what it holds, what this
-// client could give it, and the two writes that move bytes across (an install
-// onto the machine, a removal off it)
+// client could give it, and the three writes that move it (an install onto the
+// machine, a removal off it, and the switch that drives it or stops it)
 //
 // Everything the plugin tab shows crosses this file. The renderer may not touch
 // the filesystem, a supervisor, or a release, so it asks and receives facts.
@@ -238,7 +238,49 @@ function createComponentsView(deps) {
     }
   }
 
-  return { target, list, market: marketList, install, versions, remove, marketCache: () => market };
+  // Stop driving ONE component on the target machine, or start again. The one
+  // write on this layer that touches no bytes, and the only one that is
+  // reversible from the same control — so nothing about it is confirmed, and the
+  // answer says which bit the machine now holds.
+  //
+  // `disabled` is the state being ASKED FOR, spelled the way the host stores it
+  // (true = held, not driven): passing the current state back would be a no-op,
+  // and passing `!held.disabled` at every call site is how a page ends up
+  // inviting the user to "disable" something it is about to start. The verdict is
+  // the host's, and "absent" is one of its shapes: THIS machine does not hold the
+  // component at all, which is an answer rather than a failure — the request was
+  // already true there — and the page has to say so, because it means the machine
+  // it was aimed at was not the machine to switch.
+  async function setDisabled(name, disabled, win = null) {
+    const t = target(win);
+    const problem = why(t);
+    if (problem) return { ok: false, name, error: problem };
+    try {
+      const res = await lib.hostSetDisabled(t.base, name, disabled);
+      return {
+        ok: true,
+        name,
+        status: res.status || (disabled ? "disabled" : "enabled"),
+        // the host's bit when it sent one, and the request's own state otherwise:
+        // a verdict without the field is still an answer about the state asked for
+        disabled: typeof res.disabled === "boolean" ? res.disabled : disabled,
+        target: t,
+      };
+    } catch (e) {
+      return { ok: false, name, error: (e && e.message) || String(e) };
+    }
+  }
+
+  return {
+    target,
+    list,
+    market: marketList,
+    install,
+    versions,
+    remove,
+    setDisabled,
+    marketCache: () => market,
+  };
 }
 
 module.exports = { createComponentsView, MARKET_TTL_MS };

@@ -6,8 +6,9 @@
 // holds, build the artifact a client would send, upload it, and let the HOST
 // land it. No mocks: the gate, the digest and the unpacking are the product's.
 // The same machine answers the reverse direction at the end (which versions it
-// holds for one component, and letting that one go) — the two are the same
-// endpoint read backwards, so they are checked against the same run.
+// holds for one component, letting that one go, and stopping or starting the
+// driving of it) — the three are the same endpoint read three ways, so they are
+// checked against the same run.
 //
 // Two supplies are checked, because they are the two the product has:
 //
@@ -303,9 +304,11 @@ async function main() {
   }
 
   // 9. the reverse verbs, against the same real machine: which versions it holds
-  //    for ONE component (newest first, and the one it would run), and letting
-  //    that component go. The two verdicts that matter are both here — "removed"
-  //    with the versions that went, and "absent" for a request already true.
+  //    for ONE component (newest first, and the one it would run), stopping or
+  //    starting the driving of it, and letting that component go. The verdicts
+  //    that matter are all here — "removed" with the versions that went, "absent"
+  //    for a request already true (twice: switching a component this host does not
+  //    hold, and removing one it no longer does), and the switch's own bit.
   {
     const versions = await components.hostVersions(base, "clutch-memory");
     check(versions.length === 1 && versions[0].resolved === true, "the host lists the versions it holds for one component, and which one it would run");
@@ -318,6 +321,33 @@ async function main() {
       badName = (e && e.message) || "";
     }
     check(/bad component name/.test(badName), "a name that could never be an install is refused in the host's own words");
+
+    // the switch: the third verb, and the only one that moves no bytes. What it
+    // must NOT do is what is checked first — the component stays held, stays
+    // listed and keeps its version, and only the bit changes.
+    const off = await components.hostSetDisabled(base, "clutch-memory", true);
+    check(off.status === "disabled" && off.disabled === true, "the host answers the switch with the bit it now holds");
+    const stopped = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    check(Boolean(stopped) && stopped.disabled === true, "a stopped component is still HELD: it stays listed, marked, with its bytes");
+    check(stopped.version === `0.1.0+${artDigest.slice(0, 16)}`, "and it still names the version that is there");
+    check(fs.existsSync(path.join(hostRoot, "clutch-memory")), "because nothing was deleted");
+    check((await components.hostVersions(base, "clutch-memory")).length === 1, "the finer list still holds its version too");
+
+    const on = await components.hostSetDisabled(base, "clutch-memory", false);
+    check(on.status === "enabled" && on.disabled === false, "and the other direction answers with the other bit");
+    const driving = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    check(driving.disabled === false, "so this machine offers its tools again");
+
+    const notHeld = await components.hostSetDisabled(base, "clutch-nothing", true);
+    check(notHeld.status === "absent", "switching a component this machine does not hold is 'absent' — an answer, not a failure");
+
+    let badSwitch = "";
+    try {
+      await components.hostSetDisabled(base, "../../etc", true);
+    } catch (e) {
+      badSwitch = (e && e.message) || "";
+    }
+    check(/bad component name/.test(badSwitch), "and a name that could never be an install is refused before anything is written");
 
     const removed = await components.hostRemove(base, "clutch-memory", "");
     check(removed.status === "removed" && removed.removed.length === 1, "a removal answers with the versions that went");
@@ -360,7 +390,7 @@ function cleanup() {
 main()
   .then(() => {
     cleanup();
-    summary("components", "all passed (checkout + published supplies, client install + host gate, reverse verbs)");
+    summary("components", "all passed (checkout + published supplies, client install + host gate, reverse verbs incl. the switch)");
   })
   .catch((e) => {
     console.error(e && e.stack ? e.stack : e);

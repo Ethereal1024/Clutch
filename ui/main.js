@@ -181,6 +181,11 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("components:remove", async (e, name, opts) =>
       componentsView.remove(String(name || ""), opts || {}, e.sender)
     );
+    // the switch: the one write here that is reversible, so the state is sent
+    // rather than a verb translated (ui/components-view.js setDisabled)
+    ipcMain.handle("components:set-disabled", async (e, name, disabled) =>
+      componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender)
+    );
     ipcMain.handle("components:install", async (e, name) =>
       componentsView.install(String(name || ""), e.sender, {
         // one line at a time to the window that asked; a closed window is not an

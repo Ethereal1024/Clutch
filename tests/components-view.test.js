@@ -1,9 +1,10 @@
 // ui/components-view.js is what the plugin tab is served by: which machine a
 // request is about, what that machine holds, what this client could give it, and
-// the one install. It is injectable on purpose, so this runner drives the REAL
-// view against a fake install layer — no Electron, no supervisor, no network —
-// and asserts the four answers, the far-side/local target rule, the market cache
-// and every install verdict path.
+// the three writes (an install onto it, a removal off it, and the switch that
+// stops it being driven or starts it again). It is injectable on purpose, so this
+// runner drives the REAL view against a fake install layer — no Electron, no
+// supervisor, no network — and asserts the four answers, the far-side/local
+// target rule, the market cache and every install verdict path.
 // Run: node tests/components-view.test.js
 const { check, summary } = require("./harness.js");
 const components = require("../ui/components");
@@ -27,8 +28,10 @@ function fakeLib(opts = {}) {
     versionsError = null,
     removal = { status: "removed", name: "clutch-memory", removed: [VERSION] },
     removeError = null,
+    switchVerdict = { status: "disabled", name: "clutch-memory", disabled: true },
+    switchError = null,
   } = opts;
-  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [], versionReads: [], removals: [] };
+  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [], versionReads: [], removals: [], switches: [] };
   return {
     calls,
     REQUEST_TIMEOUT_MS: 120000,
@@ -51,6 +54,11 @@ function fakeLib(opts = {}) {
       calls.removals.push({ base, name, version });
       if (removeError) throw new Error(removeError);
       return removal;
+    },
+    hostSetDisabled: async (base, name, disabled) => {
+      calls.switches.push({ base, name, disabled });
+      if (switchError) throw new Error(switchError);
+      return switchVerdict;
     },
     artifactFor: async (spec) => {
       calls.artifacts.push(spec.name);
@@ -304,12 +312,51 @@ async function main() {
     check(!r4.ok && nowhere.lib.calls.removals.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
 
-  // ---- 9. the view's default install layer is the real one, and complete ----
+  // ---- 9. the switch: the state asked for goes out, the host's bit comes back.
+  //         The one write here that touches no bytes, and the only one whose
+  //         verdict can be "absent" — the machine does not hold the component.
+  {
+    const { api, lib } = view({ lib: fakeLib() });
+    const off = await api.setDisabled("clutch-memory", true, EMPTY_WIN);
+    check(off.ok && off.status === "disabled" && off.disabled === true, "the switch reports the host's verdict and the bit it now holds");
+    check(
+      lib.calls.switches[0].disabled === true && lib.calls.switches[0].name === "clutch-memory",
+      "and what went out is the STATE asked for, not a verb the host would have to interpret"
+    );
+    check(lib.calls.switches[0].base === "http://127.0.0.1:8890", "asked of the target machine's supervisor");
+
+    const on = view({ lib: fakeLib({ switchVerdict: { status: "enabled", name: "clutch-memory", disabled: false } }) });
+    const back = await on.api.setDisabled("clutch-memory", false, EMPTY_WIN);
+    check(back.ok && back.disabled === false && on.lib.calls.switches[0].disabled === false, "the other direction sends the other state, and reports the host's bit back");
+
+    // a verdict that carries no bit still answers the state that was asked for
+    const bare = view({ lib: fakeLib({ switchVerdict: { status: "disabled", name: "clutch-memory" } }) });
+    const b = await bare.api.setDisabled("clutch-memory", true, EMPTY_WIN);
+    check(b.ok && b.disabled === true, "a host that sends no bit is still read as the state that was asked for");
+    check(b.target && b.target.base === "http://127.0.0.1:8890", "and the answer names the machine it was about");
+
+    // "absent" is an outcome, not a failure: that machine holds nothing of this name
+    const nowhere = view({ lib: fakeLib({ switchVerdict: { status: "absent", name: "clutch-nothing" } }) });
+    const a = await nowhere.api.setDisabled("clutch-nothing", true, EMPTY_WIN);
+    check(a.ok && a.status === "absent", "a component that machine does not hold answers 'absent' rather than failing");
+
+    // a refusal is the host's sentence — a name that could never be an install,
+    // and the host's own words for it
+    const refused = view({ lib: fakeLib({ switchError: "bad component name: ../../etc" }) });
+    const r = await refused.api.setDisabled("../../etc", true, EMPTY_WIN);
+    check(!r.ok && /bad component name/.test(r.error), "a refusal surfaces with the host's own words");
+
+    const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const n = await unreachable.api.setDisabled("clutch-memory", true, { id: 1 });
+    check(!n.ok && unreachable.lib.calls.switches.length === 0, "a machine with no supervisor URL is refused before anything is sent");
+  }
+
+  // ---- 10. the view's default install layer is the real one, and complete ----
   {
     check(typeof components.upload === "function", "ui/components.js exports the uploader the view calls");
     check(
-      typeof components.hostVersions === "function" && typeof components.hostRemove === "function",
-      "and the two reverse calls (list one component's versions, let one go)"
+      typeof components.hostVersions === "function" && typeof components.hostRemove === "function" && typeof components.hostSetDisabled === "function",
+      "and the three reverse calls (list one component's versions, let one go, stop or start driving it)"
     );
     check(
       Number.isFinite(components.REQUEST_TIMEOUT_MS) && components.REQUEST_TIMEOUT_MS > 0,
@@ -322,7 +369,7 @@ async function main() {
     check(typeof api.marketCache === "function", "the view exposes its market cache (a page can tell what it is showing)");
   }
 
-  summary("components-view", "all passed (target machine, inventory, market cache, install + remove verdicts)");
+  summary("components-view", "all passed (target machine, inventory, market cache, install + remove + switch verdicts)");
 }
 
 main().catch((e) => {

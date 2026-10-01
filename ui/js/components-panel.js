@@ -15,14 +15,17 @@
 // they did not. "No plugins exist" and "the network ate the answer" look exactly
 // alike in an empty list, and that is the one reading this page must not give.
 //
-// The two writes this page can perform are install and remove, and each is
-// offered the way PLUGIN_PLAN.md I5 demands: the button says what it will do to
-// WHICH machine, the confirmation says what the act actually costs (an install
-// writes bytes over whatever version is there; a removal DELETES them — neither
-// is a rollback, because nothing here keeps a copy of what it replaces or takes
-// away), and the outcome is the host's own verdict, quoted. A read that failed
-// never becomes an offer to write: an unreachable target disables the controls
-// instead of pretending the write will land.
+// Three writes this page can perform, offered according to what each one costs
+// (PLUGIN_PLAN.md I5). Every button names WHICH machine it acts on, the
+// confirmations say what the act actually costs (an install writes bytes over
+// whatever version is there; a removal DELETES them — neither is a rollback,
+// because nothing here keeps a copy of what it replaces or takes away), and the
+// outcome is always the host's own verdict, quoted. The switch is the one write
+// that touches no bytes and is reversible from the very control that asks for
+// it, so it asks nothing: teaching the user to click through a confirmation on a
+// free, undoable act is how they learn to click through the two that are neither.
+// A read that failed never becomes an offer to write: an unreachable target
+// disables the controls instead of pretending the write will land.
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
@@ -153,11 +156,64 @@ function plugHeldSection() {
     const chips = [];
     if (h.interface) chips.push([h.interface, ""]);
     if (h.version) chips.push([h.version, "mono"]);
+    // "held" and "driven" are two different facts, and the machine's registry
+    // keeps them apart: a stopped component is still here, still listed, and its
+    // bytes are untouched — only its tools are withheld. The chip states that
+    // instead of leaving the user to infer it from the button's label.
+    if (h.disabled) chips.push(["stopped", "warn"]);
     if (plugState.market && !offered.has(h.name)) chips.push(["not offered by this client", "warn"]);
     const digest = String(h.digest || "");
-    return plugRow(h.name, chips, [digest ? "digest " + digest.slice(0, 16) : ""], [plugRemoveButton(h)]);
+    const lines = [digest ? "digest " + digest.slice(0, 16) : ""];
+    if (h.disabled) lines.push("held on this machine, but not driven: its tools are not offered here");
+    return plugRow(h.name, chips, lines, [plugSwitchButton(h), plugRemoveButton(h)]);
   });
   return plugSection(`On this machine (${plugState.held.length})`, rows, "no component installed");
+}
+
+// What an in-flight write is doing, in one word, for the titles of the controls
+// that are dead behind it. All four verbs share one `busy`, so a control that
+// says the wrong one would send the user after the wrong act: an install carries
+// no verb (it is the default write), and the two directions of the switch differ
+// in what they do, so neither is spelled as the other.
+function plugBusyWord(busy) {
+  if (busy.verb === "remove") return "being removed";
+  if (busy.verb === "disable") return "being stopped";
+  if (busy.verb === "enable") return "being driven again";
+  return "being installed";
+}
+
+// The switch: stop the machine DRIVING one component it holds, or start again.
+// It lives on the held row because that is the row whose fact it changes, and it
+// is offered with the least ceremony of the three writes — it deletes nothing and
+// its own label is the undo, so there is no question to ask. What it must still
+// say is what the user cannot see: which machine is being switched, and that the
+// bytes are not what moves.
+function plugSwitchButton(held) {
+  const busy = plugState.busy && plugState.busy.name === held.name;
+  const stopped = Boolean(held.disabled);
+  const btn = document.createElement("button");
+  btn.className = "plug-switch" + (stopped ? " stopped" : "");
+  btn.type = "button";
+  btn.textContent = busy ? "…" : stopped ? "Enable" : "Disable";
+  if (!plugState.target || !plugState.target.base) {
+    btn.disabled = true;
+    btn.title = "no supervisor URL for the target machine yet";
+  } else if (!window.clutchComponents || !window.clutchComponents.setDisabled) {
+    // a shell without the verb must not draw a control that looks like one
+    btn.disabled = true;
+    btn.title = "this shell cannot switch components on a machine";
+  } else if (plugState.busy) {
+    btn.disabled = true;
+    btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
+  } else if (stopped) {
+    btn.title = `drive ${held.name} on ${plugTargetName(plugState.target)} again — its bytes stay where they are`;
+  } else {
+    btn.title =
+      `stop ${plugTargetName(plugState.target)} driving ${held.name} — it stays installed and listed, ` +
+      "its tools are no longer offered, and nothing is deleted";
+  }
+  btn.addEventListener("click", () => plugSwitch(held));
+  return btn;
 }
 
 // The reverse verb for one installed component: the row IS the thing that can
@@ -176,7 +232,7 @@ function plugRemoveButton(held) {
     btn.title = "no supervisor URL for the target machine yet";
   } else if (plugState.busy) {
     btn.disabled = true;
-    btn.title = plugState.busy.verb === "remove" ? plugState.busy.name + " is being removed" : plugState.busy.name + " is being installed";
+    btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else {
     const version = held.version ? " " + held.version : "";
     btn.title = `remove ${held.name}${version} from ${plugTargetName(plugState.target)}`;
@@ -209,7 +265,7 @@ function plugInstallButton(entry) {
     btn.title = "no supervisor URL for the target machine yet";
   } else if (plugState.busy) {
     btn.disabled = true;
-    btn.title = plugState.busy.name + " is being installed";
+    btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else if (same) {
     btn.title = `this machine already holds ${entry.name} ${held.version}`;
   } else if (plugState.held === null) {
@@ -227,6 +283,10 @@ function plugInstallButton(entry) {
 function plugStageLine(busy) {
   const where = plugTargetName(plugState.target);
   if (busy.verb === "remove") return `removing ${busy.name} from ${where}…`;
+  // the switch is the one write with no bytes to build or send: it has one stage
+  // and one machine, and the sentence says which way it is going
+  if (busy.verb === "disable") return `stopping ${busy.name} on ${where}…`;
+  if (busy.verb === "enable") return `driving ${busy.name} on ${where} again…`;
   switch (busy.stage) {
     case "artifact":
       return `preparing the bytes for ${busy.name}…`;
@@ -270,6 +330,31 @@ function plugRemoveResult(held, res, where) {
   return { ok: true, text: `removed ${held.name}${went} from ${where}` };
 }
 
+// The host's verdict on the switch, in the host's words. Nothing is destroyed
+// here, so there is no cost to recite — but one fact must not be blurred: a
+// stopped component is still HELD, its bytes are where they were, its row stays
+// on this page, and the only thing that changed is whether this machine offers
+// its tools. "absent" is an ANSWER, not a failure: the request was already true
+// on that machine, so there was nothing there to stop or start — which usually
+// means the switch was aimed at a machine that does not hold the component at
+// all, and the page has to say so instead of reporting a phantom success.
+function plugSwitchResult(held, res, where) {
+  if (!res || !res.ok) {
+    return { ok: false, text: `could not switch ${held.name} on ${where} — ${(res && res.error) || "no answer"}` };
+  }
+  if (res.status === "absent") {
+    return { ok: true, text: `${held.name} is not held by ${where} — there was nothing to stop or start` };
+  }
+  // the host's bit when it sent one; otherwise the state that was asked for
+  const now = typeof res.disabled === "boolean" ? res.disabled : !held.disabled;
+  return {
+    ok: true,
+    text: now
+      ? `stopped driving ${held.name} on ${where} — it is still held there, its tools are no longer offered`
+      : `driving ${held.name} on ${where} again — its tools are offered once more`,
+  };
+}
+
 // Ask, then delete. The question is the same shape as the install's and says the
 // harder thing: these bytes are DELETED, and this page keeps no copy to put back.
 async function plugRemove(held) {
@@ -301,6 +386,35 @@ async function plugRemove(held) {
   renderPlugins();
   // the machine's inventory just changed: read both halves back (the counts and
   // the rows), exactly as an install does
+  if (res && res.ok) plugRead();
+}
+
+// Send the state being asked for, then let the host answer. What goes on the
+// wire is the state (`disabled` true = held, not driven), never a verb: the host
+// stores a bit, and a page that sent "toggle" would be asking the machine to
+// guess what this one believed. No question is asked — this write destroys
+// nothing, and the control's own label is the way back — but the page still says
+// what it is doing and then quotes the host, including the "absent" answer.
+async function plugSwitch(held) {
+  const api = window.clutchComponents;
+  if (!api || !api.setDisabled || plugState.busy || !plugState.target || !plugState.target.base) return;
+  const where = plugTargetName(plugState.target);
+  const disabled = !held.disabled; // the state being asked for, not the one it is in
+  plugState.busy = { name: held.name, verb: disabled ? "disable" : "enable", stage: "starting" };
+  plugState.result = null;
+  renderPlugins();
+  let res;
+  try {
+    res = await api.setDisabled(held.name, disabled);
+  } catch (e) {
+    // the IPC hop itself failed: still the failure path, still with a reason
+    res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
+  }
+  plugState.busy = null;
+  plugState.result = plugSwitchResult(held, res, where);
+  renderPlugins();
+  // what this machine offers just changed: read the inventory back, so the row
+  // that was stopped is drawn as stopped rather than as it was a moment ago
   if (res && res.ok) plugRead();
 }
 
@@ -368,7 +482,7 @@ function plugMarketSection() {
   if (plugState.market.entries.length) {
     const caution = document.createElement("p");
     caution.className = "plug-caution";
-    caution.textContent = "install writes files on the target machine and Remove deletes them — neither is a rollback: nothing here keeps a copy of what it replaces or takes away";
+    caution.textContent = "install writes files on the target machine and Remove deletes them — neither is a rollback: nothing here keeps a copy of what it replaces or takes away (the switch on the rows above is the third write: it deletes nothing, and pressing it again is the undo)";
     sec.appendChild(caution);
   }
   // a source that did not answer explains a short market: one line each, in the

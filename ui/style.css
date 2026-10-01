@@ -1059,6 +1059,18 @@ mjx-container[display="true"] {
   color: var(--muted);
 }
 .plug-remove:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+/* the switch: the third write, and the only one that changes no bytes. It sits
+   first on a held row, keeps the same resting weight as its neighbours (it is
+   not the loud one), and reads as stopped when the component it names is being
+   held but not driven */
+.plug-switch {
+  padding: 3px 10px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--muted);
+}
+.plug-switch:hover:not(:disabled) { color: var(--text); }
+.plug-switch.stopped { color: var(--accent); border-color: var(--accent); }
 .plug-caution { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
 .plug-name { font-family: var(--font-mono); font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
 .plug-chip {

@@ -1,13 +1,14 @@
 "use strict";
 
 // The plugin tab is the ONE place this UI can write to a machine (PLUGIN_PLAN.md
-// I5), so both of its write paths are what must not drift silently: which machine
-// a control claims, what the confirmation says, what a refusal looks like, and
-// what the page does afterwards — for the install and for the removal (the
-// reverse verb, which is the one that DELETES, so its wording is checked for the
-// fact that it is not a rollback). Nothing smaller than the page's own file tests
-// that, and the page is DOM code driven by ui/components-view.js over the
-// clutchComponents channel.
+// I5), so all three of its write paths are what must not drift silently: which
+// machine a control claims, what the confirmation says, what a refusal looks
+// like, and what the page does afterwards — for the install, for the removal
+// (the reverse verb, which is the one that DELETES, so its wording is checked for
+// the fact that it is not a rollback), and for the switch (which deletes nothing,
+// is the undo of itself, and therefore must NOT ask). Nothing smaller than the
+// page's own file tests that, and the page is DOM code driven by
+// ui/components-view.js over the clutchComponents channel.
 //
 // So this runner loads ui/js/components-panel.js itself (taken from
 // ui/index.html's script list, so a page that forgets to load it fails here)
@@ -131,10 +132,12 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     marketCalls: 0,
     installCalls: [],
     removeCalls: [],
+    switchCalls: [],
     progress: null,
     control: null,
     reply: null,
     removeReply: { ok: true, status: "removed", removed: ["0.1.0+5f900739"] },
+    switchReply: { ok: true, status: "disabled", disabled: true },
     confirms: [],
     answer: true,
   };
@@ -156,6 +159,11 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       return world.removeReply;
     },
     onProgress: (cb) => { world.progress = cb; },
+    setDisabled: async (name, disabled) => {
+      world.switchCalls.push([name, disabled]);
+      if (world.control) return world.control.promise;
+      return world.switchReply;
+    },
   };
   const ctx = {
     console,
@@ -182,6 +190,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     body: () => dom.byId.get("#plug-body"),
     buttons: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-install/.test(n.className)),
     removes: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-remove/.test(n.className)),
+    switches: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-switch/.test(n.className)),
     note: () => dom.byId.get("#plug-note"),
     text: () => textOf(dom.byId.get("#plug-body")),
     open: async () => { vm.runInContext("pluginTabShown()", ctx); await settle(); },
@@ -423,6 +432,152 @@ const CODE = mod ? mod.code : "";
     check(p.note().textContent !== kept || /reading/.test(p.note().textContent), "a reload replaces the last verdict with what it is doing now");
     await settle();
     check(p.world.marketCalls >= 2, "and it re-reads the sources (force)");
+  }
+
+  // 17. the switch is offered where the held fact is, and it says what it does
+  //     NOT touch: the bytes stay, the row stays, only the tools go
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    check(p.switches().length === 1, "an installed component gets a switch, one per held row");
+    check(ownerName(p.switches()[0]) === "clutch-workspace", "and it belongs to the row whose fact it changes");
+    check(p.switches()[0].textContent === "Disable", "a component the machine is driving offers 'Disable'");
+    check(
+      /stop Local \(this machine\) driving clutch-workspace/.test(p.switches()[0].title),
+      "and its title names the machine it stops, not the bytes"
+    );
+    check(/nothing is deleted/.test(p.switches()[0].title), "the title says the bytes are untouched");
+    check(!/stopped/.test(p.text().split("clutch-memory")[0]), "nothing is drawn as stopped while the machine is driving it");
+
+    // a component the machine holds but does not drive says so as a state, not
+    // as a hint: the chip and the line both carry it
+    const held = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
+    await held.open();
+    check(held.switches()[0].textContent === "Enable", "a component that is held but not driven offers 'Enable'");
+    check(/drive clutch-workspace on Local \(this machine\) again/.test(held.switches()[0].title), "and its title names the machine it drives again");
+    check(/its bytes stay where they are/.test(held.switches()[0].title), "still saying the bytes are what does not move");
+    check(/clutch-workspace 0\.1\.0\+5f900739 stopped/.test(held.text()), "the row carries a 'stopped' chip beside the version");
+    check(/held on this machine, but not driven/.test(held.text()), "and a line saying it is still held (so 'stopped' is not read as 'gone')");
+    check(held.removes().length === 1, "a stopped component is still listed and can still be removed");
+  }
+
+  // 18. the switch asks NOTHING: it deletes nothing and its own label is the way
+  //     back, so a confirmation here would only teach the user to click through
+  //     the two that are not free
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    const before = p.world.listCalls;
+    p.world.switchReply = { ok: true, status: "disabled" }; // no bit on the verdict
+    p.switches()[0].click();
+    await settle();
+    check(p.world.confirms.length === 0, "switching asks no question (nothing is destroyed and the act is its own undo)");
+    check(JSON.stringify(p.world.switchCalls) === JSON.stringify([["clutch-workspace", true]]), "the state asked for goes on the wire, not a verb");
+    check(
+      /^stopped driving clutch-workspace on Local \(this machine\) — it is still held there, its tools are no longer offered$/.test(p.note().textContent),
+      "the verdict says the component is still held (the machine's own bit, when it sent one, else the state asked for)"
+    );
+    check(p.note().className.includes("error") === false, "a completed switch is not drawn as a failure");
+    check(p.world.listCalls > before, "the machine is read back after the switch, so the row is drawn as it now is");
+  }
+
+  // 19. the other direction sends the other state, and says the tools are back
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
+    await p.open();
+    p.world.switchReply = { ok: true, status: "enabled", disabled: false };
+    p.switches()[0].click();
+    await settle();
+    check(JSON.stringify(p.world.switchCalls) === JSON.stringify([["clutch-workspace", false]]), "an Enable sends disabled=false — the state, the way the host spells it");
+    check(
+      /^driving clutch-workspace on Local \(this machine\) again — its tools are offered once more$/.test(p.note().textContent),
+      "and the verdict says the tools are offered again"
+    );
+    check(p.world.confirms.length === 0, "starting a component again is as unceremonious as stopping it");
+  }
+
+  // 20. "absent" is an ANSWER, not a failure: that machine holds nothing of this
+  //     name, so there was nothing to stop or start — which usually means the
+  //     switch was aimed at a machine that is not the one holding it
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.switchReply = { ok: true, status: "absent", disabled: false };
+    p.switches()[0].click();
+    await settle();
+    check(
+      /^clutch-workspace is not held by Local \(this machine\) — there was nothing to stop or start$/.test(p.note().textContent),
+      "a component that machine does not hold is reported as nothing to switch"
+    );
+    check(p.note().className.includes("error") === false, "and it is not drawn as a failure");
+  }
+
+  // 21. a refusal is the host's sentence, quoted, and a broken hop is a failure
+  //     with a reason
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.switchReply = {
+      ok: false,
+      name: "clutch-workspace",
+      error: "component name clutch-workspace is declared 'data': it holds no tools to stop",
+    };
+    p.switches()[0].click();
+    await settle();
+    check(p.note().textContent.includes("it holds no tools to stop"), "the host's own refusal reaches the page verbatim");
+    check(p.note().className.includes("error"), "and is drawn as a failure");
+    check(p.switches()[0].disabled === false, "the control comes back once the write failed");
+
+    const broken = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await broken.open();
+    broken.ctx.window.clutchComponents.setDisabled = async () => { throw new Error("main process is gone"); };
+    broken.switches()[0].click();
+    await settle();
+    check(/could not switch clutch-workspace .*main process is gone/.test(broken.note().textContent), "a channel that threw is reported as the switch's reason");
+  }
+
+  // 22. one write at a time, across all three directions: a switch in flight
+  //     stops the installs and the removal too, and each dead control says which
+  //     act is the one holding it up
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    p.world.control = defer();
+    p.switches()[0].click();
+    await settle(3);
+    check(/stopping clutch-workspace on Local \(this machine\)…/.test(p.note().textContent), "the note says what is being stopped, while it is being stopped");
+    check(/is being stopped/.test(p.removes()[0].title), "and the removal control names the act that is holding it up, not 'installed'");
+    check(p.switches().every((b) => b.disabled), "the switch is dead for the duration");
+    check(p.buttons().every((b) => b.disabled), "so is every install control");
+    p.world.control.res({ ok: true, status: "disabled", disabled: true });
+    await settle();
+    check(p.switches().every((b) => !b.disabled), "and the switch comes back once the write is over");
+
+    const back = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
+    await back.open();
+    back.world.control = defer();
+    back.switches()[0].click();
+    await settle(3);
+    check(/driving clutch-workspace on Local \(this machine\) again…/.test(back.note().textContent), "the other direction has its own sentence");
+    back.world.control.res({ ok: true, status: "enabled", disabled: false });
+    await settle();
+  }
+
+  // 23. a target the page cannot name is no target: no supervisor URL, no switch
+  {
+    const died = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }], target: { kind: "remote", base: "" } });
+    await died.open();
+    check(died.switches().every((b) => b.disabled), "a tunnel with no supervisor URL leaves the switch dead");
+    check(/no supervisor URL/.test(died.switches()[0].title), "and it says why");
+  }
+
+  // 24. a shell that never got the verb draws no control that looks like one
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    p.ctx.window.clutchComponents.setDisabled = undefined;
+    await p.open();
+    check(p.switches()[0].disabled, "a shell without setDisabled leaves the switch dead rather than silently inert");
+    check(/cannot switch components/.test(p.switches()[0].title), "and it says the shell cannot, not that the machine refused");
   }
 
   summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");
