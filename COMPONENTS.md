@@ -27,6 +27,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 | --- | --- | --- |
 | dev 检出 | 仓库根旁的兄弟目录 `<name>/component.json` | 开发路径：改了就生效，重启宿主即可，无需安装 |
 | 已安装工件 | `<components 根>/<name>/<version>/component.json` | 安装层落地的记录：工件自带声明 + 安装事实（version/digest）合并而成 |
+| 已装登记表 | `<components 根>/registry.json` | 这台机器**持有**什么的唯一名册：每 `(name, version)` 一条，带 `interface` / `digest` / `location` / `disabled`。表里有就是有——目录躺在根下而表里没有登记的，不算这台机器的组件；`disabled` 只住在这里（磁盘上没有它的形状，见第八节末） |
 | 用户注册 | `~/.clutch/components/catalog.d/*.json` | 圈外逃生门：代码在别处（任意目录、本地构建的二进制），一份 JSON 即注册 |
 
 目录可分别用环境变量重指：安装根 `CLUTCH_COMPONENTS_DIR`，注册目录
@@ -282,20 +283,23 @@ token：`skills`（技能库目录表）——它正是宿主过去自己扫 `*/
 
 **不可用的组件不提供工具，也没有替身**：`registry.build_tools` 对缺席组件贡献零
 schema（提示词片段同理，`registry._drivable` 是同一道筛选），客户端用
-`unavailable_reason()` 向用户解释（声明 `ui.status: true` 的才解释，其余安静缺席）。
+`unavailable_reason()` 向用户解释（声明 `ui.status: true` 的才解释，其余安静缺席）。**停用**
+走的是同一道门、同一条解释路径：字节能读、声明完整，只是这台机器决定不驱动它（第八节末）。
 
-## 八、安装与卸载 wire 协议
+## 八、安装、卸载与停用/启用的 wire 协议
 
 组件属于**要运行它的那台机器**。客户端把工件装到那台机器的 supervisor，也让那台机器把组件
-交出来——**同一个门，两个方向读**：
+交出来、说停不停——**同一个门，三个方向**：
 
 ```
 POST   /api/components/install
   X-Clutch-Component: <base64(UTF-8 JSON)>   声明 + 安装事实
   body: <工件字节流>
-GET    /api/components                        该机器已装清单（name/version/interface/digest）
+GET    /api/components                        该机器已装清单（name/version/interface/digest/disabled）
 GET    /api/components/versions?name=<name>    这一个组件的每一版，新→旧，resolved 标出会跑的那一版
 DELETE /api/components/<name>[?version=]       让这个组件（或它的某一版）离开这台机器
+POST   /api/components/<name>/disable          停用：这台机器不再驱动它（字节一律不动）
+POST   /api/components/<name>/enable           启用：重新驱动
 ```
 
 `versions` 的**顺序也是宿主的决定**（就是 `resolve()` 的选择依据），客户端照抄不重排：哪一版
@@ -306,7 +310,7 @@ DELETE /api/components/<name>[?version=]       让这个组件（或它的某一
 - 400 带宿主原文——名字不合法、`?version=` 指向没装的版本、或**有不是本次进程启动的 daemon
   正在跑它**。
 
-三条规则，缺一条都不算实现对：
+四条规则，缺一条都不算实现对：
 
 1. **`absent` 是答案，`?version=` 没装是拒绝**。两者都"没删到东西"，但一个是请求已经为真，
    一个是请求本身说错了对象——后者一删就要 400，且**不许**顺手删掉别的版本。
@@ -317,6 +321,10 @@ DELETE /api/components/<name>[?version=]       让这个组件（或它的某一
    收养的句柄（`proc is None`）或只在磁盘上有活记录的一律拒绝，并把 **pid 写进句子**——
    "磁盘上读到的 pid 不是开枪许可"。已知边界：一个**记录被删掉**的活 daemon 查不出来，
    记录是宿主唯一的名册（PLUGIN_PLAN.md 零之三.5）。
+4. **停用不是删除，删不掉的东西不用二次确认**。`disabled` 与"在不在"正交：`inventory()` 照
+   列出（多带 `disabled:true`）、`DELETE` 照能删，没有任何一条路径因为停用去动一个字节；重复
+   停用/启用是幂等的。反向也成立——它撤得回来，所以它是协议里唯一**不要求**用户确认的写入
+   （PLUGIN_PLAN.md I5 只约束撤不回来的动作）。
 
 头的值必须是 base64——HTTP 头是 ByteString（每个码点 ≤ 0xFF），而声明按设计就是
 组件自己的语言（中文照写），裸 JSON 过不去。解码在宿主端只有一处：
@@ -325,7 +333,7 @@ DELETE /api/components/<name>[?version=]       让这个组件（或它的某一
 要点：
 
 - **版本门是内容**：manifest 携带工件 sha256（`digest`），而**安装版本号 = 组件自报版本
-  + 内容摘要**（`0.1.0+<hex16>`，宿主 `_VERSION_RE` 一直认这个形状，见第 79 行）。摘要
+  + 内容摘要**（`0.1.0+<hex16>`，宿主 `_VERSION_RE` 一直认这个形状，见第 80 行）。摘要
   前缀本身仍是合法版本——一个手里只有字节、说不出版本的客户端就发那个（`installVersion()`
   的兜底）。同版本不同字节 = 重建过 = 必须重装；同版本同摘要 = 什么都不传。
 - **宿主先验字节**：落地前先对收到的字节算摘要，不符即拒绝（错误即数据，400）。
@@ -342,6 +350,46 @@ DELETE /api/components/<name>[?version=]       让这个组件（或它的某一
   事的本地形态：直接读仓库旁的 `component.json`。发布包因此**不含任何一个组件的字节**
   ——声明随 manifest 走，一个 tar（或 onefile）+ 旁边一份 `component.json` 即完整组件；
   往哪台机器装、装哪个版本，由来源清单和模块自己的 release 决定（第一节末）。
+
+### 停用（disabled）：唯一不动字节的写入
+
+停用是"这台机器留着它、但不驱动它"。这个状态**只在一个地方落脚**：持有组件的那台机器的
+登记表 `<components 根>/registry.json`（第一节），既不落进组件目录，也不是客户端的某个键。
+理由与登记表同源——它是"有什么"的唯一名册（表里有就是有，一个没有表项的目录不是组件），
+"这台机器现在驱动什么"跟着名册走，于是只有一个答案者，不需要两边对账。
+
+唯一的反例是 `reindex()`：它**忘掉 `disabled`**。重建的语义是"重新相信磁盘"，而磁盘上没有
+这个形状，所以重建之后一切重新驱动——要停，重建之后再说一次。
+
+它抑制的东西只有一样：**工具**。字节能读（`rendezvous.resolve()` 照旧解析出这一版）、
+清单照列（`GET /api/components` 的那条记录多带 `disabled:true`，所以"没装"和"不驱动"
+分得开）、`versions()` 照报每一版、`DELETE` 照能删。拦截点只有一个，而且**故意晚于解析、
+早于交付**：在 `rendezvous.unavailable_reason()` 里先问 `components.disabled()` 再谈别的，
+于是 **dev 检出也递不上替身**——否则会出现最难看的组合：页面写着已停用，工具却还在，
+因为真正跑的是检出那一份（PLUGIN_PLAN.md 零之三.7）。与安装的关系是正交的：装新版本时
+组件的 `disabled` 位**跟着过去**（换版本不会偷偷把机器重新驱动起来），而停用本身幂等，
+重复一次不产生第二次效果。
+
+回答三种形状，和 `DELETE` 一样都是**答案**：
+
+- `{"status":"disabled"|"enabled","name":…,"disabled":true|false}`——位出去了，也**报回来**
+  （回显的是表里现在存的值，不是客户端要求的值）；
+- `{"status":"absent","name":…}`——这台机器根本没有它，**不是错误**："确保它在这台机器上
+  停着"在没有它的机器上已经为真；
+- 400 带宿主原文——名字不合法或试图穿越路径，与安装/卸载同一道门（`_check_name`）。
+
+**与 VS Code 的一处有意的偏离**：VS Code 把"停没停"记在**客户端**
+（`extensionsIdentifiers/disabled` / `…enabled`，写进 `IStorageService` 的
+`StorageScope.PROFILE` + `StorageTarget.MACHINE`，`extensionManagement.ts:645-646`），
+因为它的客户端自己握着已装清单。Clutch **没有客户端侧的已装清单**（页面每次都问机器，
+PLUGIN_PLAN.md 零之四.3），位只能住在机器上；反过来说，住在机器上正是这份清单要求的：
+第二个客户端连上来时，看到的是这台机器真实在驱动什么，而不是"我没停过，所以它在跑"。
+
+页面侧（`ui/js/components-panel.js`）：持有但停用的行，在版本号之后多一个 `stopped` 标记
+和一句 "held on this machine, but not driven"，动作变成**开关 + 卸载**。开关出去的是**状态**
+（`{"disabled":false}` 即"重新驱动"，动词由位决定：`ui/components.js` 的 `hostSetDisabled`
+按位选 `/disable` 与 `/enable`），**不弹确认**——它删不掉任何东西，而**标签本身就是 undo**；
+`absent` 渲染成"这台机器没持有它，没有可开关的东西"，不渲染成错误。
 
 ## 九、开发工作流
 
