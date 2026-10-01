@@ -14,7 +14,16 @@ host's own sentence as error-as-data): what versions this machine holds
 (GET /api/components/versions), and letting one go (DELETE /api/components/…),
 which refuses to delete a component's bytes while a daemon of it is running that
 this process did not start — nothing goes out from under a running process, and
-nothing is signalled or deleted on the way to a refusal.
+nothing is signalled or deleted on the way to a refusal. The third verb changes
+no bytes at all (POST /api/components/<name>/disable|enable): it decides whether
+this machine DRIVES the component, which is why it lives in the same table the
+installs are recorded in, and why a component this machine does not hold is
+answered `absent` rather than refused.
+
+It also pins the table itself — `<root>/registry.json`, the single source of
+truth for what this host holds: a component directory placed in the root by hand
+is not an install until the table says so (`reindex()` is the deliberate way back
+to the disk), and a read on a host with no root creates nothing.
 
 Isolation: CLUTCH_COMPONENTS_DIR points at a temp root, so the run never touches
 the components installed for the user running it.
@@ -75,9 +84,27 @@ def _delete(url: str) -> tuple[int, str]:
         return e.code, e.read().decode()
 
 
+def _post_verb(url: str) -> tuple[int, str]:
+    """One state request, exactly as a client sends it: the verb names the
+    component and the state in the path and carries no body at all — there is
+    nothing to send for a switch that touches no bytes."""
+    req = urllib.request.Request(url, data=b"", method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
 def _sleeper() -> subprocess.Popen:
     """A live pid nothing in this suite owns: the stand-in for a daemon."""
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def _entries_of(records: list[dict]) -> list[tuple[str, str]]:
+    """The identity of each table entry, without the fields under test: which
+    component it names and which of its versions this host believes it holds."""
+    return [(str(record["name"]), str(record["version"])) for record in records]
 
 
 def _tar_checkout(name: str, into: Path) -> Path:
@@ -153,8 +180,56 @@ def main() -> int:
             "a single-file artifact lands named after its component",
         )
         check(components.inventory() == [
-            {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": components.digest_of(blob2)}
+            {
+                "name": "clutch-memory",
+                "version": "1.0.0",
+                "interface": "cli",
+                "digest": components.digest_of(blob2),
+                "disabled": False,
+            }
         ], "the inventory is the manifest's claims plus the install's real digest")
+
+        # 3c. the table itself: what this host believes it holds is a FILE, not a
+        #     walk of the root, and it says where each payload is (relative, so the
+        #     whole root can be repointed without rewriting it).
+        table = json.loads((Path(root) / components.REGISTRY).read_text(encoding="utf-8"))
+        check(
+            table["schema"] == components.REGISTRY_SCHEMA and len(table["components"]) == 1,
+            "one install leaves one entry in this host's table",
+        )
+        entry = table["components"][0]
+        check(
+            entry["name"] == "clutch-memory"
+            and entry["version"] == "1.0.0"
+            and entry[components.DISABLED_FIELD] is False
+            and entry[components.LOCATION_FIELD] == "clutch-memory/1.0.0",
+            "the entry names the component, its version, whether it is driven, and its payload's place",
+        )
+        check(
+            _entries_of(components.entries()) == [("clutch-memory", "1.0.0")],
+            "and entries() answers straight out of it",
+        )
+        # the table is the truth: a directory nobody recorded is NOT an install,
+        # even though the manifests in it are perfectly readable
+        planted = components.component_root("clutch-planted") / "1.0.0"
+        planted.mkdir(parents=True)
+        (planted / components.MANIFEST).write_text(
+            json.dumps({"name": "clutch-planted", "version": "1.0.0", "interface": "cli"}),
+            encoding="utf-8",
+        )
+        check(
+            components.installed("clutch-planted") is None and not components.versions("clutch-planted"),
+            "a component directory nobody recorded is not an install: the table is what says so",
+        )
+        check(
+            _entries_of(components.reindex()) == [("clutch-memory", "1.0.0"), ("clutch-planted", "1.0.0")],
+            "reindex() is the deliberate way back to the disk, and it finds both",
+        )
+        check(
+            components.installed("clutch-planted") is not None,
+            "after which the planted component IS one this host holds",
+        )
+        components.remove("clutch-planted")
 
         # 3b. the version a CLIENT sends is `<the component's own>+<digest16>`:
         #     the client records a version it can list, and the host reads the
@@ -337,6 +412,9 @@ def main() -> int:
         # 8. the reverse verbs. Library first: a host can hold more than one
         #    version (an install prunes, but nothing forces a machine to hold only
         #    what one install made), and letting go is aimed at ONE of them.
+        #    The versions below are put in the root BY HAND, so the table has to
+        #    be told to believe the disk (reindex): a directory nobody recorded is
+        #    not an install, which is exactly what 3c pinned.
         hand = components.component_root("clutch-handmade")
         for ver in ("1.0.0", "2.0.0"):
             (hand / ver).mkdir(parents=True)
@@ -344,6 +422,7 @@ def main() -> int:
                 json.dumps({"name": "clutch-handmade", "version": ver, "interface": "cli", "digest": ver * 8}),
                 encoding="utf-8",
             )
+        components.reindex()
         held = components.versions("clutch-handmade")
         check(
             [record["version"] for record in held] == ["2.0.0", "1.0.0"],
@@ -505,6 +584,60 @@ def main() -> int:
         check(st == 200 and json.loads(body_json)["status"] == "absent", "removing it again is absent, not an error")
         st, _body = _delete(f"{base}/api/components/")
         check(st == 404, "a removal that names no component is not found")
+
+        # 8d. the switch: the third verb on this layer, and the only one that
+        #     writes to the table without touching a byte. "Stop driving this on
+        #     THAT machine" is a fact about the machine that owns the component,
+        #     so the bit lives in the same table its installs are recorded in,
+        #     and a page reads it back out of GET /api/components.
+        installed_dir = components.installed(modules.MEMORY)
+        check(installed_dir is not None, "clutch-memory is installed for this host before the switch")
+        st, body_json = _post_verb(f"{base}/api/components/{modules.MEMORY}/disable")
+        check(
+            st == 200
+            and json.loads(body_json) == {"status": "disabled", "name": modules.MEMORY, "disabled": True},
+            "disabling a component is a verdict, in the machine's own words",
+        )
+        listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
+        check(
+            [c["disabled"] for c in listed if c["name"] == modules.MEMORY] == [True],
+            "a stopped component stays listed, and the listing says which one is stopped",
+        )
+        check(
+            (installed_dir / modules.MEMORY).read_bytes() == blob,
+            "with its bytes exactly where they were: the switch is not a removal",
+        )
+        check(not rendezvous.available(modules.MEMORY), "and this host stops offering its tools while it is stopped")
+        st, body_json = _post_verb(f"{base}/api/components/{modules.MEMORY}/enable")
+        check(
+            st == 200
+            and json.loads(body_json) == {"status": "enabled", "name": modules.MEMORY, "disabled": False},
+            "starting it again is the same verb the other way — nothing here is irreversible",
+        )
+        check(
+            rendezvous.available(modules.MEMORY) and (installed_dir / modules.MEMORY).read_bytes() == blob,
+            "with its tools back and its bytes still the same ones",
+        )
+
+        # a component this machine does not hold is an ANSWER, not an error: the
+        # request was aimed at the machine that owns the directory, and "make
+        # sure it is stopped here" is already true when it is not here at all.
+        st, body_json = _post_verb(f"{base}/api/components/clutch-nothing/disable")
+        check(
+            st == 200 and json.loads(body_json) == {"status": "absent", "name": "clutch-nothing"},
+            "stopping a component this host does not hold is answered, not refused",
+        )
+        check(
+            all(record["name"] != "clutch-nothing" for record in components.entries()),
+            "and nothing was recorded for it",
+        )
+        st, body_json = _post_verb(f"{base}/api/components/..%2F..%2Fetc/disable")
+        check(
+            st == 400 and "bad component name" in json.loads(body_json)["error"],
+            "a name that could never be an install is refused before anything is read or written",
+        )
+        st, _body = _post_verb(f"{base}/api/components/disable")
+        check(st == 404, "a switch that names no component is not found, not a component called ''")
 
         srv.shutdown()
     finally:

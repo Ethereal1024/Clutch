@@ -251,10 +251,20 @@ def unavailable_reason(module: str) -> str:
     a daemon is spoken to through a `curl` statement — a POSIX shell), and the
     missing one is named here rather than left to be inferred from a mysterious
     failure later.
+
+    `disabled` is asked HERE rather than in `resolve()`, and that placement is
+    the whole point: the switch is about the COMPONENT, not about one copy of it,
+    so a stopped component's tools are gone even when the code that would run is
+    the dev checkout beside the repo. Left to resolve(), a disabled component on
+    a dev machine would still hand the model its tools — "disabled in the page,
+    and the tool is still there" — which is the one reading the flag exists to
+    prevent.
     """
     mod = catalog.table().get(module)
     if mod is None:
         return f"unknown component: {module}"
+    if components.disabled(mod.name):
+        return f"{mod.name} is disabled on this host (its tools are off; the bytes stay)"
     resolved = resolve(module)
     if resolved is None:
         return f"{mod.name} is not installed on this host"

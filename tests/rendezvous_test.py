@@ -11,6 +11,10 @@ what we started.
 It then drives the same statements through the registry, so the executor's path
 (guard -> the component's statement, and nothing else) is pinned too: with the
 component gone the host has no tool, only the component's name in a refusal.
+The switch is pinned the same way, and in the one place it can bite: a component
+this host has STOPPED offers no tools, even when the code that would run is the
+dev checkout beside the repo (which is the whole reason the check is asked
+before resolution, not inside it).
 
 Isolation: CLUTCH_WORKSPACE_DISCOVERY_DIR points at a temp dir, so the run
 never reads or writes the user's ~/.clutch-workspace, and
@@ -149,6 +153,100 @@ def _install_probe() -> None:
         )
 
 
+def _disabled_probe() -> None:
+    """2c. STOPPING a component takes its tools away without taking its bytes.
+
+    The bit lives in the host's own table (components.set_disabled) and is asked
+    BEFORE resolution picks a copy to run (rendezvous.unavailable_reason), which
+    is the whole point of the placement: a stopped component has no tools even
+    when the code that would run is the dev checkout beside the repo. Asked
+    after resolution instead, a dev box would go on handing the model a tool the
+    page says is stopped — the one reading the flag exists to prevent.
+
+    Nothing here is destroyed and nothing is confirmed: the payload is checked
+    byte for byte across a stop and a start, because the switch is reversible,
+    which is also why the page confirms an install and a removal but not this.
+    """
+    with tempfile.TemporaryDirectory() as host_root:
+        previous = os.environ.get(components.ROOT_ENV)
+        os.environ[components.ROOT_ENV] = host_root
+        try:
+            stopped = f"{modules.MEMORY} is disabled on this host (its tools are off; the bytes stay)"
+            artifact = Path(host_root) / "cli-artifact"
+            artifact.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            payload = components.install(
+                artifact, {"name": modules.MEMORY, "version": "1.0.0", "interface": catalog.CLI}
+            )
+            digest = components.installed_digest(modules.MEMORY)
+            check("disabled" not in rendezvous.unavailable_reason(modules.MEMORY), "nothing is stopped to begin with")
+
+            verdict = components.set_disabled(modules.MEMORY)
+            check(
+                verdict == {"status": "disabled", "name": modules.MEMORY, "disabled": True},
+                "stopping a component is a verdict, not an assumption that it worked",
+            )
+            check(
+                rendezvous.unavailable_reason(modules.MEMORY) == stopped and not rendezvous.available(modules.MEMORY),
+                "a stopped component's tools are gone, and the sentence says why",
+            )
+            check(
+                (payload / modules.MEMORY).is_file() and components.installed_digest(modules.MEMORY) == digest,
+                "and not one byte of it moved: stopping is not a removal",
+            )
+            check(
+                [record for record in components.inventory() if record["name"] == modules.MEMORY]
+                == [
+                    {
+                        "name": modules.MEMORY,
+                        "version": "1.0.0",
+                        "interface": catalog.CLI,
+                        "digest": digest,
+                        "disabled": True,
+                    }
+                ],
+                "it is still HELD — listed, marked stopped, its payload and digest intact",
+            )
+
+            back = components.set_disabled(modules.MEMORY, False)
+            check(
+                back == {"status": "enabled", "name": modules.MEMORY, "disabled": False},
+                "and driving it again is the same verb the other way: a stopped component is not a lost one",
+            )
+            check(
+                "disabled" not in rendezvous.unavailable_reason(modules.MEMORY)
+                and components.installed_digest(modules.MEMORY) == digest,
+                "with its tools back and its bytes still the same ones",
+            )
+
+            # the copy a host would run is decided AFTER the switch, so taking
+            # the payload away (a hand-deleted install root, the state nothing
+            # in Clutch creates but nothing guards against either) does not send
+            # resolution off to the checkout of a component the user stopped —
+            # and the workspace component is the one checkout this suite knows is
+            # on the host, because it skips itself when there is none.
+            ws_artifact = Path(host_root) / "daemon-artifact"
+            ws_artifact.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            ws_payload = components.install(
+                ws_artifact, {"name": modules.WORKSPACE, "version": "9.9.9", "interface": catalog.DAEMON}
+            )
+            components.set_disabled(modules.WORKSPACE)
+            shutil.rmtree(ws_payload)
+            check(
+                rendezvous.resolve(modules.WORKSPACE) is not None,
+                "with the payload gone, the copy left to run is the checkout beside the repo",
+            )
+            check(
+                rendezvous.unavailable_reason(modules.WORKSPACE)
+                == f"{modules.WORKSPACE} is disabled on this host (its tools are off; the bytes stay)",
+                "and a stopped component is not driven through the checkout either",
+            )
+        finally:
+            if previous is None:
+                os.environ.pop(components.ROOT_ENV, None)
+            else:
+                os.environ[components.ROOT_ENV] = previous
+
+
 def main() -> int:
     if not rendezvous.available(modules.WORKSPACE):
         print("SKIP: no clutch-workspace checkout / POSIX shell / curl on this host")
@@ -208,6 +306,7 @@ def main() -> int:
         check(checkout.installed or checkout.template, "a resolved CLI is an install or a template, never neither")
         check(rendezvous.unavailable_reason(modules.MEMORY) == "", "a checked-out CLI with an interpreter is available")
     _install_probe()
+    _disabled_probe()
 
     state = tempfile.mkdtemp(prefix="clutch-rendezvous-")
     workspace = tempfile.mkdtemp(prefix="clutch-ws-")

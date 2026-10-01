@@ -311,6 +311,20 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError) as err:
             self._json({"error": str(err)}, 400)
 
+    def _set_component_state(self, name: str, disabled: bool) -> None:
+        """Stop driving one component on THIS machine, or start again.
+
+        The one write on this layer that touches no bytes: `components` owns the
+        table entry (and the rule that a component this host does not hold is
+        `absent` — an answer, not an error), so this is only the wire face of it.
+        A name that could never be an install is refused before anything is read
+        or written, exactly as the removal verb refuses one.
+        """
+        try:
+            self._json(components.set_disabled(name, disabled))
+        except ValueError as err:
+            self._json({"error": str(err)}, 400)
+
     def do_DELETE(self) -> None:
         path, query = self._route()
         prefix = "/api/components/"
@@ -321,7 +335,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         sup = self.supervisor
-        if self.path == "/api/session/start":
+        path, _query = self._route()
+        if path == "/api/session/start":
             body = self._read_body()
             sess = sup.start_session(
                 base_url=body.get("base_url") or None,
@@ -334,23 +349,45 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"error": "session start failed"}, 500)
             else:
                 self._json({"session_id": sess.session_id, "port": sess.port})
-        elif self.path == "/api/session/stop":
+        elif path == "/api/session/stop":
             sid = self._read_body().get("session_id")
             ok = sup.stop_session(sid)
             self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
-        elif self.path == "/api/session/heartbeat":
+        elif path == "/api/session/heartbeat":
             sid = self._read_body().get("session_id")
             ok = sup.heartbeat(sid)
             self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
-        elif self.path == "/api/components/install":
+        elif path == "/api/components/install":
             self._install_component()
-        elif self.path == "/api/shutdown":
+        elif path.startswith("/api/components/") and path.endswith("/disable"):
+            self._toggle_component(path, "/disable", True)
+        elif path.startswith("/api/components/") and path.endswith("/enable"):
+            self._toggle_component(path, "/enable", False)
+        elif path == "/api/shutdown":
             # normal close: exit once no sessions remain (arm-only-when-empty
             # lives in the generic layer: a sticky flag could kill a re-claim)
             sup.request_idle_exit()
             self._json({"status": "ok"})
         else:
             self._json({"error": "not found"}, 404)
+
+    def _toggle_component(self, path: str, suffix: str, disabled: bool) -> None:
+        """`/api/components/<name>/disable|enable`: the switch, not the bytes.
+
+        `disabled` is the bit the table STORES (True: here, and not to be
+        driven), so each route passes what its own word MEANS — `/disable` True,
+        `/enable` False — instead of a state this layer would have to translate
+        back, which is exactly how a switch ends up upside down.
+
+        The name is a path segment (the removal verb's own shape), so it is read
+        out of the same prefix; a request that names nothing (`/disable` alone) is
+        not found rather than a component called "".
+        """
+        name = path[len("/api/components/") : -len(suffix)]
+        if not name:
+            self._json({"error": "not found"}, 404)
+            return
+        self._set_component_state(name, disabled)
 
 
 def _agent_cmd_default() -> list[str]:

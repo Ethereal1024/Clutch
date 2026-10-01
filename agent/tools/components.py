@@ -23,6 +23,30 @@ zipapp, a wheel unpacked by whoever built it — the shape is the component's ow
 business. Only the manifest and the published interface are the host's (R4), so
 `verify` refuses a manifest whose name or interface contradicts the host's own
 table BEFORE the artifact is used.
+
+Where a host keeps track of all this — the registry table
+--------------------------------------------------------
+`<root>/registry.json` is the single source of truth for what this host holds:
+one entry per installed (name, version), plus the one bit that is not a
+filesystem fact at all — `disabled`, a component that is HERE and is not to be
+driven. Reads resolve by the table (表里有就是有): a component directory placed
+in the root by hand is not an install until the table says so. The disk is
+scanned exactly twice — at bootstrap (no table yet: a host that has held
+components since before there was one) and by an explicit `reindex()` — because
+"a directory nobody recorded" and "a component of this host" are not the same
+thing, and only the table may tell them apart. A rebuild believes the disk, so
+the one thing the disk cannot carry — `disabled` — is forgotten with it, which
+is the whole cost of a reindex and the reason it is never automatic. A table
+that exists and cannot be READ is a loud refusal, not a silent rescan: the bytes
+would survive a rescan but what this host believes it holds would not.
+
+Two deviations from VS Code's own registry are deliberate, and both are noted
+where they bite: the table lives beside the payloads rather than in a user-data
+directory (this module has ONE root, repointable by ROOT_ENV, and tests redirect
+it — a second location would be a second thing to keep in step), and the bytes
+go before the entry does (VS Code drops the entry first and sweeps the leftovers
+later with a `.obsolete` pass; Clutch has no sweeper, so a dropout there would
+be a component that vanished from the table and stayed on the disk forever).
 """
 
 from __future__ import annotations
@@ -35,6 +59,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import threading
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -54,6 +79,17 @@ DIGEST_FIELD = "digest"  # the manifest's record of the artifact's content hash
 ARTIFACT_FIELD = "artifact"  # the artifact's own file name (its shape, by suffix)
 SCRATCH = ".incoming"  # where a body lands while it is being received
 CHUNK = 1 << 20  # bytes read from a body per pass
+
+REGISTRY = "registry.json"  # the table beside the payload dirs: what this host holds
+REGISTRY_SCHEMA = 1  # the table's own version, so a future shape is refused by name
+DISABLED_FIELD = "disabled"  # here but not driven: the bytes stay, the tools go
+LOCATION_FIELD = "location"  # the payload directory, relative to the root, "/"-joined
+
+# One writer, and it is this process: the supervisor is threaded (a request per
+# thread) and every write is a read-modify-write of one file. Two installs racing
+# each other would otherwise each write back a table it read before the other
+# changed it, and one of the two components would be silently forgotten.
+_TABLE_LOCK = threading.RLock()
 
 
 def manifest_from_header(raw: str | None) -> dict[str, Any]:
@@ -116,6 +152,226 @@ def component_root(name: str) -> Path:
     return root() / name
 
 
+# -- the table: what this host holds, and the one bit that is not a file fact --
+
+
+def registry_path() -> Path:
+    """The table's own file, beside the payload directories it describes."""
+    return root() / REGISTRY
+
+
+def _entry_directory(record: dict[str, Any]) -> Path:
+    """The payload directory one table entry names.
+
+    The entry's location is relative to the root, so the whole root can be moved
+    or repointed (ROOT_ENV) without rewriting the table — which is not a
+    convenience: a test redirects the root, and a table holding absolute paths
+    would then describe another machine's filesystem.
+    """
+    location = str(record.get(LOCATION_FIELD) or "")
+    if not location:
+        return component_root(str(record.get("name", ""))) / str(record.get("version", ""))
+    return root() / location
+
+
+def _entry(
+    name: str,
+    version: str,
+    directory: Path,
+    manifest: dict[str, Any],
+    *,
+    disabled: bool = False,
+) -> dict[str, Any]:
+    """One table entry: which component, which version, what its bytes hash to,
+    where its payload is, and whether this host is to drive it."""
+    try:
+        location = directory.relative_to(root()).as_posix()
+    except ValueError:  # a payload outside the root: recorded as it is, not guessed
+        location = directory.as_posix()
+    return {
+        "name": name,
+        "version": version,
+        "interface": str(manifest.get("interface", "")),
+        DIGEST_FIELD: str(manifest.get(DIGEST_FIELD, "")),
+        LOCATION_FIELD: location,
+        DISABLED_FIELD: bool(disabled),
+    }
+
+
+def _scan_entries() -> list[dict[str, Any]]:
+    """What the root ACTUALLY holds, read off the disk: the bootstrap scan.
+
+    Every version directory that carries a usable manifest naming its own parent
+    component, in name order. This is not how a read resolves a component — the
+    table is (see the module docstring) — so it runs only when there is no table
+    yet, and when `reindex()` is asked for one deliberately.
+    """
+    base = root()
+    if not base.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for child in sorted(base.iterdir()):
+        if not child.is_dir() or child.name == SCRATCH:
+            continue
+        for version_dir in sorted(child.iterdir()):
+            if not version_dir.is_dir() or version_dir.name.endswith(".installing"):
+                continue
+            manifest = read_manifest(version_dir)
+            if manifest is None or manifest["name"] != child.name:
+                continue
+            out.append(_entry(child.name, str(manifest["version"]), version_dir, manifest))
+    return out
+
+
+def _read_table() -> list[dict[str, Any]] | None:
+    """The stored table, or None when this host has no table yet.
+
+    A table that cannot be read is NOT quietly re-derived from the disk: the
+    bytes would still be there, but what this host believes it holds would change
+    under it — a component could reappear from a stale directory, or a disable
+    could evaporate. So a broken table is a loud refusal, and `reindex()` is the
+    deliberate way to rebuild one.
+    """
+    path = registry_path()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise ValueError(f"{path} could not be read: {err}") from err
+    try:
+        payload = json.loads(raw)
+    except ValueError as err:
+        raise ValueError(f"{path} is not valid JSON ({err}) — reindex() rebuilds it from the disk") from err
+    if not isinstance(payload, dict) or payload.get("schema") != REGISTRY_SCHEMA:
+        raise ValueError(f"{path} is not a schema-{REGISTRY_SCHEMA} component registry")
+    listed = payload.get("components")
+    if not isinstance(listed, list):
+        raise ValueError(f"{path} carries no component list")
+    out: list[dict[str, Any]] = []
+    for record in listed:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str) or not record["name"]:
+            raise ValueError(f"{path} has an entry that names no component")
+        out.append(
+            {
+                "name": record["name"],
+                "version": str(record.get("version", "")),
+                "interface": str(record.get("interface", "")),
+                DIGEST_FIELD: str(record.get(DIGEST_FIELD, "")),
+                LOCATION_FIELD: str(record.get(LOCATION_FIELD, "")),
+                DISABLED_FIELD: bool(record.get(DISABLED_FIELD, False)),
+            }
+        )
+    return out
+
+
+def _write_table(entries: list[dict[str, Any]]) -> None:
+    """Lay the table down atomically: a reader sees the whole old table or the
+    whole new one, never half of either — the discipline `install` uses for a
+    payload. Written INSIDE the root, so it travels with what it describes."""
+    path = registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"schema": REGISTRY_SCHEMA, "components": entries}
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix="." + REGISTRY + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _update_table(mutate: Callable[[list[dict[str, Any]]], list[dict[str, Any]]]) -> None:
+    """One read-modify-write of the table, under the one lock (_TABLE_LOCK)."""
+    with _TABLE_LOCK:
+        _write_table(mutate(entries()))
+
+
+def entries() -> list[dict[str, Any]]:
+    """What this host holds, one record per (name, version): the table itself.
+
+    The single source of truth, so a read never has to look at the install root:
+    a directory nobody recorded is not a component of this host, and a recorded
+    one stays listed even while its payload is being replaced. The disk is read
+    ONCE, when there is no table at all — a host that has held components since
+    before there was one — and what is found is written down, so the bootstrap
+    happens once per machine rather than once per read.
+
+    A read on a host with no root at all answers [] and creates nothing: reading
+    is not installing, and a machine with no component directory has nothing.
+    """
+    with _TABLE_LOCK:
+        stored = _read_table()
+        if stored is not None:
+            return stored
+        scanned = _scan_entries()
+        if root().is_dir():
+            _write_table(scanned)
+        return scanned
+
+
+def reindex() -> list[dict[str, Any]]:
+    """Rebuild the table from what the root actually holds, and answer with it.
+
+    The deliberate counterpart of the bootstrap scan: a component directory put
+    in the root by hand — a copy from another machine, a fixture in a test, a
+    host whose table was lost — is not an install until the table says so. This
+    forgets what the table believed and believes the disk instead, which is the
+    only thing that may make a component appear out of nowhere.
+    """
+    with _TABLE_LOCK:
+        scanned = _scan_entries()
+        _write_table(scanned)
+        return scanned
+
+
+def disabled(name: str) -> bool:
+    """True when this host holds `name` and is NOT to drive it.
+
+    Here but not driven (see `set_disabled`): the bytes are untouched and the
+    component stays listed, and the ONE thing this decides is whether its tools
+    exist. `rendezvous.unavailable_reason` is where it bites, which is also what
+    keeps a dev checkout from standing in for a component the user stopped —
+    otherwise the worst pair there is: "disabled" in the page, and the tool still
+    there because what ran was the checkout.
+    """
+    return any(str(record["name"]) == name and bool(record.get(DISABLED_FIELD)) for record in entries())
+
+
+def set_disabled(name: str, state: bool = True) -> dict[str, Any]:
+    """Stop driving `name`, or start driving it again — a verdict, and nothing else.
+
+    The reverse verb that is not a removal: the bytes stay exactly where they are,
+    the component stays in the inventory (marked), and the only thing that
+    changes is whether this host offers its tools. Nothing here is irreversible,
+    so nothing here is confirmed — an install rewrites bytes, a removal deletes
+    them, this one just stops asking for them.
+
+    VS Code keeps the same bit on the CLIENT (a storage key, nothing written into
+    the extension directory); Clutch keeps it in the table of the machine that
+    OWNS the component, because that is the machine a page is talking to and the
+    one place installs are already recorded. A component this host does not hold
+    is "absent" — an ANSWER, not an error: "make sure it is stopped here" is
+    already true when it is not here at all, and the machine that was asked is
+    simply not the machine that holds it.
+    """
+    _check_name(name)
+    with _TABLE_LOCK:
+        table = entries()
+        held = [record for record in table if str(record["name"]) == name]
+        if not held:
+            return {"status": "absent", "name": name}
+        for record in held:
+            record[DISABLED_FIELD] = bool(state)
+        _write_table(table)
+    return {"status": "disabled" if state else "enabled", "name": name, DISABLED_FIELD: bool(state)}
+
+
 def read_manifest(directory: Path | str) -> dict[str, Any] | None:
     """The manifest of an installed component directory, or None when there is
     none, it is not valid JSON, or it is missing a required field."""
@@ -131,36 +387,43 @@ def read_manifest(directory: Path | str) -> dict[str, Any] | None:
     return payload
 
 
+def _resolve_records(
+    name: str, records: list[dict[str, Any]]
+) -> tuple[dict[str, Any], Path, dict[str, Any]] | None:
+    """The winning table entry of ONE component, with its directory and manifest.
+
+    Newest by the entry's own version string, not by directory mtime: an install
+    is a copy of a directory tree, so its mtime says when the copy happened, not
+    which artifact is newer. The manifest is still READ, because the manifest is
+    what the host launches by (its `launch` shape, the tools it declares) — so a
+    recorded version whose payload cannot be read is not resolvable: the table
+    says this host holds it, and bytes nobody can read are not a component this
+    host can run.
+
+    Record, directory and manifest come back together because callers need more
+    than one of them: `resolve` wants two, `inventory` wants the record's own
+    `disabled`, the catalog wants the manifest.
+    """
+    if not records:
+        return None
+    record = max(records, key=lambda candidate: str(candidate["version"]))
+    directory = _entry_directory(record)
+    manifest = read_manifest(directory)
+    if manifest is None or str(manifest["name"]) != name:
+        return None
+    return record, directory, manifest
+
+
 def resolve(name: str) -> tuple[Path, dict[str, Any]] | None:
     """(directory, manifest) of the newest installed version of `name`, or None.
 
-    Newest by the manifest's own version string, not by directory mtime: an
-    install is a copy of a directory tree, so its mtime says when the copy
-    happened, not which artifact is newer. A directory without a manifest — or
-    one whose manifest names another component — is not an installed component
-    (a half-finished install, a stray directory, a checkout that happens to sit
-    here) and is never resolved.
-
-    The manifest is returned WITH the directory it was resolved by: picking the
-    winner means reading every candidate's manifest, and every caller needs that
-    same manifest (the host's launch, the catalog's declaration), so it is read
-    once here instead of again by whoever asked.
+    Table-driven: WHICH versions this host holds is the table's answer, and this
+    picks the newest of them. The manifest is returned WITH the directory it was
+    resolved by — picking the winner means reading it, and every caller needs it
+    (the host's launch, the catalog's declaration).
     """
-    base = component_root(name)
-    if not base.is_dir():
-        return None
-    found: list[tuple[str, Path, dict[str, Any]]] = []
-    for child in base.iterdir():
-        if not child.is_dir() or child.name.endswith(".installing"):
-            continue
-        manifest = read_manifest(child)
-        if manifest is None or manifest["name"] != name:
-            continue
-        found.append((str(manifest["version"]), child, manifest))
-    if not found:
-        return None
-    _version, directory, manifest = max(found, key=lambda found: found[0])
-    return directory, manifest
+    found = _resolve_records(name, [record for record in entries() if str(record["name"]) == name])
+    return (found[1], found[2]) if found else None
 
 
 def installed(name: str) -> Path | None:
@@ -169,25 +432,34 @@ def installed(name: str) -> Path | None:
     return resolved[0] if resolved else None
 
 
+def _held() -> list[tuple[dict[str, Any], Path, dict[str, Any]]]:
+    """Every component installed for THIS host, resolved once each: the table
+    entry that won, the directory it names, and the manifest it carries.
+
+    One table read and one manifest read per component (resolve's own rule), in
+    name order so every view built on it is deterministic. The record comes back
+    with the rest because one of the facts a page is shown — `disabled` — lives
+    in the table and nowhere else.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in entries():
+        grouped.setdefault(str(record["name"]), []).append(record)
+    out: list[tuple[dict[str, Any], Path, dict[str, Any]]] = []
+    for name in sorted(grouped):
+        found = _resolve_records(name, grouped[name])
+        if found is not None:
+            out.append(found)
+    return out
+
+
 def installed_records() -> list[tuple[str, Path, dict[str, Any]]]:
     """Every component installed for THIS host, resolved once each: its name, the
     version directory that resolves, and the manifest that directory carries.
 
-    One walk of the install root and one manifest read per component — the two
-    faces built on this (`inventory`, the catalog's registrations) are views of
-    the same records, not two passes over the same files.
+    The two faces built on this (`inventory`, the catalog's registrations) are
+    views of the same records, not two passes over the same files.
     """
-    base = root()
-    if not base.is_dir():
-        return []
-    out: list[tuple[str, Path, dict[str, Any]]] = []
-    for child in sorted(base.iterdir()):
-        if not child.is_dir() or child.name == SCRATCH:
-            continue
-        resolved = resolve(child.name)
-        if resolved is not None:
-            out.append((child.name, resolved[0], resolved[1]))
-    return out
+    return [(str(record["name"]), directory, manifest) for record, directory, manifest in _held()]
 
 
 def installed_version(name: str) -> str:
@@ -206,15 +478,20 @@ def inventory() -> list[dict[str, Any]]:
     host already holds, and at which version + digest. The gate is answered by
     the machine that would RUN the code, never assumed by the machine that ships
     it. A directory without a usable manifest is not an install and is not listed.
+
+    `disabled` rides along because a page has to be able to say it: a component
+    that is here and stopped is still HELD (it stays listed, with its bytes), and
+    the flag is what separates "not installed" from "not driven".
     """
     return [
         {
-            "name": name,
+            "name": str(record["name"]),
             "version": str(manifest.get("version", "")),
             "interface": str(manifest.get("interface", "")),
             "digest": str(manifest.get(DIGEST_FIELD, "")),
+            DISABLED_FIELD: bool(record.get(DISABLED_FIELD, False)),
         }
-        for name, _directory, manifest in installed_records()
+        for record, _directory, manifest in _held()
     ]
 
 
@@ -255,40 +532,36 @@ def versions(name: str) -> list[dict[str, Any]]:
 
     The finer list `inventory()` is too coarse to give: the inventory names one
     record per component (the one `resolve()` would launch), while a machine can
-    hold an older version beside it — and letting go is aimed at ONE version
-    directory, so it has to be nameable. The order is `resolve()`'s own
-    comparison (newest by the manifest's version string), so the first record is
-    the one this host runs, and `resolved` marks exactly that one. The others
-    are directories this host would never launch — which is what makes them
-    harmless to remove, and removing the RESOLVED one a rollback to the next.
+    hold an older version beside it — and letting go is aimed at ONE version, so
+    it has to be nameable. The order is `resolve()`'s own comparison (newest by
+    the table's version string), so the first record is the one this host runs,
+    and `resolved` marks exactly that one.
 
-    A directory without a usable manifest, or one whose manifest names another
-    component, is not an install (see resolve) and is not listed. A name that
-    could never be an install is refused rather than answered with []: the
-    caller asked about something that cannot exist here, and an empty list would
-    read as "not installed".
+    Table-driven like every read here: the versions listed are the ones the table
+    records, so a version whose directory has gone is still named — and letting
+    go of it is how such a record is cleared (remove() drops the entry with the
+    bytes). A name that could never be an install is refused rather than answered
+    with []: the caller asked about something that cannot exist here, and an empty
+    list would read as "not installed".
     """
     _check_name(name)
-    base = component_root(name)
-    if not base.is_dir():
+    records = [record for record in entries() if str(record["name"]) == name]
+    if not records:
         return []
     resolved = resolve(name)
     resolved_directory = resolved[0] if resolved else None
     out: list[dict[str, Any]] = []
-    for child in base.iterdir():
-        if not child.is_dir() or child.name.endswith(".installing"):
-            continue
-        manifest = read_manifest(child)
-        if manifest is None or manifest["name"] != name:
-            continue
+    for record in records:
+        directory = _entry_directory(record)
         out.append(
             {
                 "name": name,
-                "version": str(manifest["version"]),
-                "interface": str(manifest.get("interface", "")),
-                "digest": str(manifest.get(DIGEST_FIELD, "")),
-                "path": str(child),
-                "resolved": child == resolved_directory,
+                "version": str(record["version"]),
+                "interface": str(record.get("interface", "")),
+                "digest": str(record.get(DIGEST_FIELD, "")),
+                "path": str(directory),
+                "resolved": directory == resolved_directory,
+                DISABLED_FIELD: bool(record.get(DISABLED_FIELD, False)),
             }
         )
     return sorted(out, key=lambda record: record["version"], reverse=True)
@@ -317,6 +590,14 @@ def remove(name: str, version: str = "", *, stop: Callable[[str], str] | None = 
     install left staging inside it (`.installing` is inside that directory, not
     a second thing to remember).
 
+    The bytes go FIRST and the table entry follows (the deviation the module
+    docstring records): a version that is gone from the disk but still recorded
+    would be a component the host believes it holds and cannot run — the whole
+    reason there is a table — while an entry that outlives its bytes by a moment
+    is only a directory the table names and the disk does not have (which
+    `resolve` already refuses). A directory that will not go raises, and then
+    nothing was forgotten either.
+
     `stop` is the one thing this module cannot know: whether a process of the
     component is RUNNING right now, which is not a filesystem fact (rendezvous
     owns it, and owns the rule about daemons this host did not start). It is
@@ -326,7 +607,6 @@ def remove(name: str, version: str = "", *, stop: Callable[[str], str] | None = 
     saying it has already dealt with that.
     """
     _check_name(name)
-    base = component_root(name)
     if version:
         _check_version(version)
         present = {record["version"]: Path(record["path"]) for record in versions(name)}
@@ -336,21 +616,44 @@ def remove(name: str, version: str = "", *, stop: Callable[[str], str] | None = 
         removed = [version]
     else:
         removed = [record["version"] for record in versions(name)]
-        if not base.is_dir():
+        if not removed:
+            # nothing recorded for it: "make sure none of it is here" is already
+            # true. A directory left in the root without a table entry is not a
+            # component of this host (see the module docstring), so this is
+            # absent rather than a number to delete.
             return {"status": "absent", "name": name, "removed": []}
-        victims = [base]
+        victims = [component_root(name)]
     if stop is not None:
         refusal = stop(name)
         if refusal:
             raise ValueError(refusal)
     for victim in victims:
+        if not victim.exists():
+            continue  # the table named bytes that are already gone: the entry still goes
         try:
             shutil.rmtree(victim)
         except OSError as err:
             # the verdict is about what happened, so a directory that would not
             # go is reported and not answered with "removed"
             raise OSError(f"{victim} could not be removed: {err}") from err
+    _forget(name, version if version else "")
     return {"status": "removed", "name": name, "removed": removed}
+
+
+def _forget(name: str, version: str = "") -> None:
+    """Drop the table's record of bytes that are no longer there.
+
+    Called AFTER the directories are gone (remove's own order), so the table
+    never claims less than the disk holds. `version` empty means the whole
+    component: every version of it, exactly what a version-less removal took.
+    """
+    _update_table(
+        lambda table: [
+            record
+            for record in table
+            if not (str(record["name"]) == name and (not version or str(record["version"]) == version))
+        ]
+    )
 
 
 def spool(stream: IO[bytes], length: int, name: str = "") -> Path:
@@ -474,8 +777,15 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
     reader never resolves a half-written component. Running installs of the same
     version replace each other, and every OTHER version of that component is
     dropped: a host runs one version, so a leftover could only be something
-    resolution might pick instead (installed() takes the newest by version string,
-    which is arbitrary for the content-hash versions a client installs).
+    resolution might pick instead (the newest by version string, which is
+    arbitrary for the content-hash versions a client installs).
+
+    The table learns what the disk now holds LAST (see the module docstring's
+    order): the entry is written only after the bytes are in place and the other
+    versions are gone, so a failed install leaves the table saying exactly what
+    is still there. The one bit that is NOT about bytes — `disabled` — rides
+    across: it belongs to the component, not to a version, so reinstalling what a
+    user stopped does not quietly start driving it again.
     """
     artifact = Path(artifact)
     name = str(manifest.get("name", ""))
@@ -510,10 +820,37 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
         shutil.rmtree(target, ignore_errors=True)
         staging.rename(target)
         _prune(name, keep=target)
+        _remember(target, record)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return target
+
+
+def _remember(directory: Path, manifest: dict[str, Any]) -> None:
+    """Record one installed version in the table (see the module docstring).
+
+    Called AFTER the bytes are in place and the older versions are gone, and the
+    entry REPLACES any record of the same (name, version) — an install of a
+    version this host already had is the same component at the same version, so a
+    second entry would only be a way to name the same directory twice. What a
+    name carries across versions is its `disabled` bit: stopping a component is
+    about the component, so an install (a rebuilt 0.1.0, a newer release) does not
+    turn it back on by itself.
+    """
+    name = str(manifest["name"])
+    version = str(manifest["version"])
+
+    def mutate(table: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        stopped = any(str(record["name"]) == name and bool(record.get(DISABLED_FIELD)) for record in table)
+        kept = [
+            record
+            for record in table
+            if not (str(record["name"]) == name and str(record["version"]) == version)
+        ]
+        return [*kept, _entry(name, version, directory, manifest, disabled=stopped)]
+
+    _update_table(mutate)
 
 
 def _merge_declaration(staging: Path, wire: dict[str, Any]) -> dict[str, Any]:
@@ -543,10 +880,24 @@ def _merge_declaration(staging: Path, wire: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prune(name: str, keep: Path) -> None:
-    """Remove every installed version of `name` except `keep` (best effort)."""
+    """Remove every installed version of `name` except `keep` (best effort), and
+    forget the versions whose bytes went with them.
+
+    A host runs one version, so the others are not "older releases it could go
+    back to" — they are directories resolution might pick instead, and the same
+    is true of their table entries.
+    """
+    kept = keep.name
     for child in component_root(name).iterdir():
         if child != keep:
             shutil.rmtree(child, ignore_errors=True)
+    _update_table(
+        lambda table: [
+            record
+            for record in table
+            if not (str(record["name"]) == name and str(record["version"]) != kept)
+        ]
+    )
 
 
 def _unpack(archive: Path, into: Path) -> None:
