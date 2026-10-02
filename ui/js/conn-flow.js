@@ -79,6 +79,12 @@ const CONN_STAGES = {
   // "install", so reconnecting to a healthy server must not claim it does
   check: { pct: 30, label: "Checking remote server…" },
   install: { pct: 35, label: "Installing remote server…" },
+  // the artifact itself: a Release download (or a first-time build on the
+  // desktop), and the only part of an install that can take minutes. It has its
+  // own stage so it cannot hide inside the check above — that is what made a
+  // connect on a phone look like it "only checks the remote server" and never
+  // installs (report #5)
+  "install:fetch": { pct: 40, label: "Preparing remote server…" },
   "install:upload": { pct: 45, label: "Uploading server…" },
   "install:start": { pct: 70, label: "Starting server…" },
   forward: { pct: 90, label: "Starting tunnel…" },

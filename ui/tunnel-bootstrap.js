@@ -10,7 +10,7 @@
 const path = require("path");
 const { state, tunnelLog, REMOTE_API_PORT } = require("./tunnel-core");
 const { remoteExec, uploadFile } = require("./tunnel-remote");
-const { platformTag, ensureBundle, ensurePyLibsTar, hasLocalBundle } = require("./server-bundle");
+const { platformTag, ensureBundle, ensurePyLibsTar, resolvePyLibsVersion, hasLocalBundle } = require("./server-bundle");
 const components = require("./components");
 
 // ---- bootstrap ----
@@ -214,22 +214,21 @@ async function installServer(probe, { force, progress } = {}) {
   }
   // content-hash version is the only install gate: installed iff the remote's
   // VERSION equals our binaries' hash
+  const target = { os: probe.os, arch: probe.arch, libc: probe.libc || "unknown", pyver: probe.python };
   let artifact;  let version;
   if (strategy === "bundle") {
     artifact = await ensureBundle();
     version = artifact.version;
   } else {
+    // the gate asks WHICH artifact this release ships, not for its bytes: on the
+    // phone that is the few-KB release catalogue, so a remote that already runs
+    // this release is recognised without the multi-megabyte tar moving at all.
+    // Fetching the tar here made every check a transfer — and on a phone link
+    // that transfer IS the connect (report #5).
     try {
-      const p = await ensurePyLibsTar({
-        os: probe.os,
-        arch: probe.arch,
-        libc: probe.libc || "unknown",
-        pyver: probe.python,
-      });
-      artifact = p.path;
-      version = p.version;
+      version = await resolvePyLibsVersion(target);
     } catch (e) {
-      tunnelLog("[bootstrap] pylibs build failed: " + e.message);
+      tunnelLog("[bootstrap] pylibs resolve failed: " + e.message);
       return { ok: false, error: "cannot obtain wheels for target: " + e.message };
     }
   }
@@ -248,6 +247,18 @@ async function installServer(probe, { force, progress } = {}) {
     // already runs our version is not an install, and saying "Installing
     // remote server…" for it was the reported lie on every retry
     if (progress) progress("install");
+    if (strategy === "pylibs") {
+      // the bytes, fetched only now that there really is an install to do — and
+      // before the remote's old server is stopped, so a failed transfer leaves
+      // it running
+      if (progress) progress("install:fetch");
+      try {
+        artifact = (await ensurePyLibsTar(target)).path;
+      } catch (e) {
+        tunnelLog("[bootstrap] pylibs fetch failed: " + e.message);
+        return { ok: false, error: "cannot obtain wheels for target: " + e.message };
+      }
+    }
     // the NAS refuses to truncate an executing binary in place: stop first
     await remoteExec(`mkdir -p ${dir}`);
     tunnelLog("[bootstrap] stopping old server before reinstall");
@@ -285,7 +296,7 @@ async function installServer(probe, { force, progress } = {}) {
           `mv -f ${dir}/agent-supervisor.new ${dir}/agent-supervisor`
       );
     } else {
-      // pylibs: the target-platform site-packages tar was already built above
+      // pylibs: the target-platform site-packages tar, fetched when this install was decided
       tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
       if (progress) progress("install:upload");
       await uploadFile(artifact, `${dir}/pylibs.tar.gz`);

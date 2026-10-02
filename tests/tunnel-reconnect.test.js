@@ -85,11 +85,21 @@ function fakeRemoteExec(cmd) {
   return Promise.resolve({ code: 0, stdout: "", stderr: "" });
 }
 
+let tarFetches = 0;
 const fakeArtifacts = {
   platformTag: () => "linux-x86_64",
   hasLocalBundle: () => false,
   ensureBundle: () => Promise.reject(new Error("no bundle on this side")),
-  ensurePyLibsTar: () => Promise.resolve({ path: "/nowhere/pylibs.tar.gz", version: VERSION }),
+  // the gate's question: WHICH artifact this release ships — no bytes. On the
+  // phone this is the few-KB release catalogue.
+  resolvePyLibsVersion: () => Promise.resolve(VERSION),
+  // the bytes, counted: a connect to a remote that already runs this version
+  // must never ask for them (report #5 — the whole transfer used to happen
+  // inside the "Checking remote server…" stage)
+  ensurePyLibsTar: () => {
+    tarFetches++;
+    return Promise.resolve({ path: "/nowhere/pylibs.tar.gz", version: VERSION });
+  },
 };
 
 const VERSION = "aaaaaaaaaaaaaaaa"; // 16 hex, exactly what the gate compares
@@ -177,6 +187,7 @@ async function main() {
 
   // ---- 2. a remote that already runs our version is not an install ----
   uploads = 0;
+  tarFetches = 0;
   remote.reset({ bound: true, serving: true, version: VERSION });
   const progress = [];
   const already = await installServer(probeFor(), {
@@ -187,6 +198,7 @@ async function main() {
   check(!progress.includes("install"), "…and never announces 'Installing remote server…'");
   check(remote.stopped === 0 && remote.started === 0, "…and neither stops nor restarts the server");
   check(uploads === 0, "…and uploads nothing");
+  check(tarFetches === 0, "…and never fetches the pylibs tar: the check is a check (report #5)");
 
   // ---- 3. a bound port with nothing behind it is replaced ----
   remote.reset({ bound: true, serving: false, version: VERSION });
@@ -198,6 +210,7 @@ async function main() {
 
   // ---- 4. a version mismatch IS an install, and it says so ----
   uploads = 0;
+  tarFetches = 0;
   remote.reset({ bound: true, serving: true, version: "bbbbbbbbbbbbbbbb" });
   const stages = [];
   const stale = await installServer(probeFor(), { force: "pylibs", progress: (s) => stages.push(s) });
@@ -206,6 +219,11 @@ async function main() {
   check(remote.stopped >= 1, "…which stops the old server first");
   check(remote.started === 1, "…and starts the new one");
   check(uploads === 1, "…after one artifact upload");
+  check(tarFetches === 1, "…and the tar is fetched exactly once, for that install");
+  check(
+    stages.indexOf("install:fetch") > stages.indexOf("install") && stages.includes("install:upload"),
+    "…with its own 'Preparing remote server…' stage between the announcement and the upload"
+  );
   check(remote.version === VERSION, "…and the VERSION gate file is rewritten");
 
   // ---- 5. a process we cannot kill is reported, not looped on ----
@@ -240,6 +258,19 @@ async function main() {
   check(
     !parseProbe("").os && !parseProbe("").installedVersion,
     "an exec that answered nothing carries no probe markers, so the gate can refuse it by name"
+  );
+  // report #5, asserted on the source because a fake remote cannot show it: the
+  // gate's input is resolved BEFORE it decides, and the tar is fetched only
+  // after an install has been announced — the other order made every check a
+  // multi-megabyte transfer, which is the connect dying on a phone link.
+  check(
+    /version = await resolvePyLibsVersion\(target\)/.test(BOOTSTRAP_SRC),
+    "the gate resolves 'which artifact' without the artifact's bytes"
+  );
+  check(
+    BOOTSTRAP_SRC.indexOf('progress("install")') < BOOTSTRAP_SRC.indexOf("ensurePyLibsTar(target)") &&
+      BOOTSTRAP_SRC.indexOf('progress("install:fetch")') < BOOTSTRAP_SRC.indexOf("ensurePyLibsTar(target)"),
+    "the tar is fetched only after the connect has announced an install, under its own stage"
   );
 
   summary("tunnel-reconnect");

@@ -120,7 +120,61 @@ function writeCachedIndex(indexUrl, index) {
   }
 }
 
+// probe spellings vary (uname -s says "Linux"); the CI index is lowercase
+function indexKey(target) {
+  return `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}-py${target.pyver}`;
+}
+
 function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchIndex = fetchJson, fetch = fetchBuf } = {}) {
+  // The release catalogue for THIS index URL: freshly fetched when the release
+  // host answers, otherwise the copy already cached for this URL — the same
+  // release, because the URL carries the tag. `held` is the caller's test of
+  // whether an offline answer may be honoured at all: the version question needs
+  // nothing beyond the catalogue, while handing over the artifact needs the tar
+  // itself to be on this device. When it cannot be honoured the fetch error
+  // surfaces — an unreachable release must never be dressed up as a catalogue.
+  async function loadIndex(held) {
+    try {
+      const index = await fetchIndex(indexUrl);
+      writeCachedIndex(indexUrl, index);
+      return index;
+    } catch (e) {
+      // a 404 here is the supply line, not the network: the release this
+      // APK's stamp points at predates the pylibs-matrix job (v0.1.14 did)
+      // and simply has no index asset. Say so — "HTTP 404 for …" sent the
+      // user chasing a connectivity ghost.
+      if (/HTTP 404/.test((e && e.message) || "")) {
+        throw new Error(
+          `pylibs index 404 at ${indexUrl}: that release carries no pylibs-matrix ` +
+            "assets (the tag predates the job). Cut a new tag so the release CI " +
+            "publishes the index + tars, or point the stamp at a LAN index " +
+            "(docs/android/02 §7)."
+        );
+      }
+      // An unreachable release host (the phone sits on a LAN with no
+      // internet, or the release CDN is blocked) is NOT a reason a reconnect
+      // to a remote that already runs this tar must fail: the cached index
+      // names the same artifact, the cache holds it byte-for-byte, and the
+      // hash is recomputed below, so the gate stays exact. Only a cached
+      // index for THIS index URL counts, and only when `held` says the answer
+      // it gives can be honoured here.
+      const cached = readCachedIndex(indexUrl);
+      if (!cached || !held(cached)) throw e;
+      return cached;
+    }
+  }
+
+  // One entry, or the supply line's own verdict. `version` is part of the
+  // published index contract (pylibs-index CI writes file + sha256 + version),
+  // so an entry without it is not a catalogue entry.
+  function entryFor(index, key) {
+    const entry = index && index[key];
+    if (!entry || !entry.file || !entry.sha256 || !entry.version) {
+      throw new Error(`no prebuilt pylibs artifact for ${key}: the pylibs-matrix CI job has not published one`);
+    }
+    return entry;
+  }
+
   return {
     // Android never hosts a backend locally (N4): the PyInstaller bundle path
     // is unreachable by construction (chooseStrategy requires platform match);
@@ -129,44 +183,25 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
       throw new Error("no backend bundle on Android: the backend runs on the SSH remote");
     },
 
+    // The version the install gate compares against, from the CATALOGUE alone:
+    // a few KB naming file + sha256 + version per target. No tar, no cache
+    // lookup, no transfer — so "Checking remote server…" is a check, and a
+    // remote that already runs the release's artifact is recognised without
+    // sending anybody the wheel stack.
+    async resolvePyLibsVersion(target) {
+      const key = indexKey(target);
+      return entryFor(await loadIndex(() => true), key).version;
+    },
+
     // target: { os, arch, libc, pyver } — the probe result, exactly what the
     // desktop key is built from. Returns { path, version } like the desktop:
     // version = recomputed content-hash prefix, i.e. the expected VERSION gate.
     async ensurePyLibsTar(target) {
-      // probe spellings vary (uname -s says "Linux"); the CI index is lowercase
-      const key = `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}-py${target.pyver}`;
-      let index;
-      try {
-        index = await fetchIndex(indexUrl);
-        writeCachedIndex(indexUrl, index);
-      } catch (e) {
-        // a 404 here is the supply line, not the network: the release this
-        // APK's stamp points at predates the pylibs-matrix job (v0.1.14 did)
-        // and simply has no index asset. Say so — "HTTP 404 for …" sent the
-        // user chasing a connectivity ghost.
-        if (/HTTP 404/.test((e && e.message) || "")) {
-          throw new Error(
-            `pylibs index 404 at ${indexUrl}: that release carries no pylibs-matrix ` +
-              "assets (the tag predates the job). Cut a new tag so the release CI " +
-              "publishes the index + tars, or point the stamp at a LAN index " +
-              "(docs/android/02 §7)."
-          );
-        }
-        // An unreachable release host (the phone sits on a LAN with no
-        // internet, or the release CDN is blocked) is NOT a reason a reconnect
-        // to a remote that already runs this tar must fail: the cached index
-        // names the same artifact, the cache holds it byte-for-byte, and the
-        // hash is recomputed below, so the gate stays exact. Only a cached
-        // index for THIS index URL counts, and only when its tar is here too.
-        const cached = readCachedIndex(indexUrl);
-        const hit = cached && cached[key] && cached[key].file;
-        if (!hit || !fs.existsSync(path.join(cacheDir(), hit))) throw e;
-        index = cached;
-      }
-      const entry = index && index[key];
-      if (!entry || !entry.file || !entry.sha256) {
-        throw new Error(`no prebuilt pylibs artifact for ${key}: the pylibs-matrix CI job has not published one`);
-      }
+      const key = indexKey(target);
+      // offline, an index we cannot turn into bytes is not a catalogue: the
+      // tar for this target has to be here for the cached copy to be honoured
+      const index = await loadIndex((c) => !!(c[key] && c[key].file && fs.existsSync(path.join(cacheDir(), c[key].file))));
+      const entry = entryFor(index, key);
       const dir = cacheDir();
       fs.mkdirSync(dir, { recursive: true });
       const out = path.join(dir, entry.file);

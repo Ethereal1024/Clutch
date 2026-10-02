@@ -87,6 +87,9 @@ const androidish = {
   ensureBundle: async () => {
     throw new Error("no backend bundle on Android: the backend runs on the SSH remote");
   },
+  resolvePyLibsVersion: async () => {
+    throw new Error("no catalogue in this unit test");
+  },
   ensurePyLibsTar: async () => {
     throw new Error("no download in this unit test");
   },

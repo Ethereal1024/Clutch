@@ -132,11 +132,19 @@ function isPackagedApp() {
 // (no PyInstaller on a phone). ssh-tunnel.js cannot tell the difference.
 // Provider methods may be async (a download is); the defaults are sync and
 // simply wrapped, so existing call sites just await the seam.
-let artifactProvider = null; // { ensureBundle, ensurePyLibsTar }
+//
+// Two questions, two methods, deliberately: WHICH artifact this release ships
+// for the target (resolvePyLibsVersion — the install gate's input) and the
+// BYTES of it (ensurePyLibsTar — an upload's input). A provider that can answer
+// the first without the second must do so: the gate runs on every connect, the
+// bytes are only ever needed when there really is an install to do.
+let artifactProvider = null; // { ensureBundle, ensurePyLibsTar, resolvePyLibsVersion }
 
 function setArtifactProvider(provider) {
-  if (provider && typeof provider.ensurePyLibsTar !== "function") {
-    throw new Error("artifact provider must implement ensurePyLibsTar");
+  if (provider) {
+    for (const m of ["ensurePyLibsTar", "resolvePyLibsVersion"]) {
+      if (typeof provider[m] !== "function") throw new Error("artifact provider must implement " + m);
+    }
   }
   artifactProvider = provider;
 }
@@ -235,10 +243,28 @@ async function ensurePyLibsTar(target) {
   return defaultEnsurePyLibsTar(target);
 }
 
+// The install gate's question — the version of the artifact this release ships
+// for the target — answered WITHOUT the artifact's bytes where that is possible.
+// On the phone it is: the release catalogue names file + sha256 + version per
+// target in a few KB of JSON. That matters beyond speed: the gate runs before
+// every install decision, so a gate that needs the tar makes a check into a
+// multi-megabyte transfer, and on a phone link that transfer IS the connect —
+// the reported "it only checks the remote server and never installs the new
+// version" (the check stage carried the whole download, and a slow or blocked
+// CDN left it there, install never reached, connection dead).
+// The desktop default has no catalogue to read: its artifact is built here, so
+// the file's own hash is the only answer, and resolving it builds/reads the
+// same cache entry it would install anyway.
+async function resolvePyLibsVersion(target) {
+  if (artifactProvider) return artifactProvider.resolvePyLibsVersion(target);
+  return (await defaultEnsurePyLibsTar(target)).version;
+}
+
 module.exports = {
   platformTag,
   ensureBundle,
   ensurePyLibsTar,
+  resolvePyLibsVersion,
   setArtifactProvider,
   hasLocalBundle,
   resolveBash,

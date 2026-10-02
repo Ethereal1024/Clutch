@@ -102,14 +102,33 @@ async function main() {
     "ensureBundle hard-rejects"
   );
 
-  // 2. a probe result the CI matrix never published: reject, do not guess
+  // 2. a probe result the CI matrix never published: reject, do not guess —
+  // and say so to the gate as well as to the upload
   await assert.rejects(
     () => provider.ensurePyLibsTar({ os: "sunos", arch: "riscv64", libc: "glibc", pyver: "3.12" }),
     /no prebuilt pylibs artifact for sunos-riscv64-glibc-py3\.12/,
     "missing index key rejects"
   );
+  await assert.rejects(
+    () => provider.resolvePyLibsVersion({ os: "sunos", arch: "riscv64", libc: "glibc", pyver: "3.12" }),
+    /no prebuilt pylibs artifact for sunos-riscv64-glibc-py3\.12/,
+    "missing index key rejects for the gate's question too"
+  );
 
-  // 3. the manifest LIES about the bad artifact (CI drift simulation): the
+  // 3. report #5: the install gate asks WHICH artifact this release ships, and
+  // the few-KB catalogue answers it — no tar bytes move. Resolving the version
+  // by fetching the tar is what turned every "Checking remote server…" into a
+  // multi-megabyte transfer: on a link that cannot carry it the connect died at
+  // the check, install never reached, and the phone could not connect at all.
+  assert.strictEqual(tarFetches(), 0, "nothing has been downloaded yet");
+  assert.strictEqual(
+    await provider.resolvePyLibsVersion({ os: "Linux", arch: "x86_64", libc: "glibc", pyver: "3.12" }),
+    goodHash16,
+    "the gate value is the index entry's version (uname -s 'Linux' maps onto the lowercase key)"
+  );
+  assert.strictEqual(tarFetches(), 0, "resolving the version downloaded no tar");
+
+  // 4. the manifest LIES about the bad artifact (CI drift simulation): the
   // provider must catch it via its own sha256, not trust the index
   srv.index["linux-aarch64-musl-py3.13"].sha256 = sha256(good); // the lie
   await assert.rejects(
@@ -123,7 +142,7 @@ async function main() {
     "a rejected download leaves nothing behind (a cached INDEX is not an artifact)"
   );
 
-  // 4. the good probe: download, verify, land in the desktop's cache
+  // 5. the good probe: download, verify, land in the desktop's cache
   const { path: p, version } = await provider.ensurePyLibsTar({
     os: "linux",
     arch: "x86_64",
@@ -146,7 +165,7 @@ async function main() {
     "no temp file left after the atomic rename"
   );
 
-  // 5. gate parity: our recomputed version == the desktop fileHash prefix, so
+  // 6. gate parity: our recomputed version == the desktop fileHash prefix, so
   // the remote VERSION gate runs unmodified on an Android-supplied tar
   assert.strictEqual(version, goodHash16, "version is the content-hash prefix");
   assert.strictEqual(
@@ -155,7 +174,7 @@ async function main() {
     "identical to ui/server-bundle.js fileHash().slice(0,16)"
   );
 
-  // 6. cache hit: a second identical probe must not re-download
+  // 7. cache hit: a second identical probe must not re-download
   const before = tarFetches(); // the tampered probe above also fetched once, then rejected
   const again = await provider.ensurePyLibsTar({
     os: "linux",
@@ -167,7 +186,7 @@ async function main() {
   assert.strictEqual(again.version, goodHash16, "cache hit still recomputes the gate value");
   assert.strictEqual(tarFetches(), before, "cache hit did NOT re-download the tar");
 
-  // 7. the release host does not answer (the phone is on a LAN with no
+  // 8. the release host does not answer (the phone is on a LAN with no
   // internet, or the CDN is blocked). The cached index names the same artifact
   // and the cache holds it byte-for-byte, so a reconnect to a remote that
   // already runs this tar must still gate exactly instead of failing with
@@ -190,6 +209,15 @@ async function main() {
   assert.strictEqual(offlineHit.version, goodHash16, "offline: the gate value is unchanged");
   assert.strictEqual(offlineHit.path, p, "offline: the cached tar is the artifact");
 
+  // the version question is answered by the catalogue cached for this release,
+  // so an offline gate still recognises a remote that already runs our artifact
+  // — that recognition is what keeps the tar transfer out of a reconnect
+  assert.strictEqual(
+    await offline.resolvePyLibsVersion({ os: "linux", arch: "x86_64", libc: "glibc", pyver: "3.12" }),
+    goodHash16,
+    "offline: the cached catalogue answers the gate"
+  );
+
   // ...but only for an artifact that is really here: a target whose tar was
   // never downloaded still reports the network failure rather than guessing
   await assert.rejects(
@@ -211,7 +239,7 @@ async function main() {
     "a cached index for another release URL is not reused"
   );
 
-  // 8. a stalled transfer is capped: without a socket timeout a hung fetch
+  // 9. a stalled transfer is capped: without a socket timeout a hung fetch
   // leaves the connect on "Installing remote server…" indefinitely (the
   // reported "reconnecting just installs the server again and again").
   assert(
