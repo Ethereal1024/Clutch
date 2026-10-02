@@ -157,10 +157,14 @@
         <div class="fs-conn-row">
           <div id="conn-select" class="cselect"></div>
           <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
+          <!-- Connect belongs to the FOLDED bar — the welcome page, where nothing
+               is chosen and the host this device was last on is one press away.
+               Choosing a host in the list connects on its own, so while there is a
+               file browser on screen this button is not shown at all (ui/style.css,
+               .fs-conn:has(+ #fs-body.collapsed)): the same button as its
+               neighbour, not a full-width line of its own. -->
+          <button id="conn-connect" class="primary" title="connect to the host you were last on">Connect</button>
         </div>
-        <!-- Choosing a backend and connecting to it are two acts: the picker may
-             not dial a host because it was merely preselected (device report #3) -->
-        <button id="conn-connect" class="primary" title="connect to the selected backend">Connect</button>
         <p id="conn-status" class="muted"></p>
         <div id="conn-progress" class="conn-progress hidden">
           <div class="conn-progress-track"><div id="conn-progress-fill" class="conn-progress-fill"></div></div>

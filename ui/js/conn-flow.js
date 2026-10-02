@@ -42,7 +42,6 @@ function closePasswordPrompt() {
   passResolve = null;
 }
 
-let connBusy = false; // a connect is in flight: ignore re-clicks
 let lastConn = null;  // { host, user, port, statusEl } of the last attempt (Retry)
 
 // Monotonic token for the file listing (loadDir in js/fs-browser.js): a listing
@@ -136,7 +135,7 @@ async function handleSshConnect(host, user, port, statusEl) {
     return;
   }
   lastConn = { host, user, port, statusEl }; // Retry re-uses this on failure
-  connBusy = true;
+  setConnBusy(true); // no second attempt can start while this one is in flight
   setFsConnecting(host, statusEl); // sets the status text + shows the progress bar
   try {
     // try keys/agent first; only prompt for a password if auth fails
@@ -182,17 +181,16 @@ async function handleSshConnect(host, user, port, statusEl) {
   } catch (e) {
     setFsConnectError("connection failed: " + e.message, statusEl);
   } finally {
-    connBusy = false;
+    setConnBusy(false);
   }
 }
 
-// Connect — the user's own act, and the only thing in the picker that dials a
-// host. Choosing an entry and connecting to it are two separate acts (device
-// report #3: the picker used to connect because a host had been SELECTED, so
-// merely opening "Open project" dialled the remembered device). connOnValue
-// (js/conn-store.js) is the backend this window is already on: nothing to do.
-async function connConnect() {
-  const v = connSelect.value;
+// Connect — the user's own act. The picker has two doors onto it: choosing a host
+// in the list (below), and pressing Connect while the body is folded — the welcome
+// state, where nothing is chosen and the host this device was last on is one press
+// away (connTarget() in js/conn-store.js). connOnValue is the backend this window
+// is already on, so a choice that does not move the window is not a dial.
+async function connConnect(v) {
   if (!v || v === connOnValue) return;
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {
@@ -224,7 +222,17 @@ async function connConnect() {
     await handleSshConnect(host, user, port || "22", connStatus);
   }
 }
-$("#conn-connect").addEventListener("click", connConnect);
+// The list's door: choosing a host connects to it, immediately — selection IS the
+// dial (device report #4: the extra press the picker briefly required is gone).
+// The standing intent is not a choice, so opening the picker still dials nothing;
+// the "" entry ("Select a host…", js/conn-store.js) is not a host at all.
+connSelect.addEventListener("change", () => {
+  updateConnConnect(); // the folded bar's Connect follows the new choice
+  connConnect(connSelect.value);
+});
+// The folded bar's door: with nothing chosen, Connect spends the standing intent
+// (connTarget()); with a choice in the list, that same choice is what it dials.
+$("#conn-connect").addEventListener("click", () => connConnect(connTarget()));
 
 // new-connection popup (only shown when the user asks to add an SSH host)
 const connNewModal = $("#conn-new-modal");

@@ -1115,9 +1115,13 @@ mjx-container[display="true"] {
   justify-content: center;
   line-height: 1;
 }
-/* the picker's own Connect button: a full-width line under the host row, so
-   "which backend" and "connect to it" read as two separate acts */
-#conn-connect { width: 100%; margin-top: 8px; }
+/* The picker's own Connect: it belongs to the FOLDED conn bar — the welcome state,
+   where the conn bar is the whole dialog. While the body is up, the file browser is
+   the picker and the choice in the list above is what brought it up: a second door
+   under the row was a full-width line that read as a different kind of control
+   (device report #4). Same box as the row's other button. */
+#conn-connect { display: none; }
+.fs-conn:has(+ #fs-body.collapsed) #conn-connect { display: inline-flex; }
 #conn-status { margin: 8px 0 0; }
 .conn-progress { margin-top: 8px; }
 .conn-progress-track { height: 3px; background: var(--border); overflow: hidden; border-radius: 2px; }
