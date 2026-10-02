@@ -1,0 +1,9 @@
+launch: /usr/bin/google-chrome --headless=new --no-sandbox --disable-dev-shm-usage --no-proxy-server --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --window-size=1440,900 --user-data-dir=/tmp/clutch-bench-hs9g_stt http://127.0.0.1:8731/scripts/ui-render-bench/bench.html
+
+==========================================================================
+RENDER BENCH REPORT
+==========================================================================
+
+experiments posted: 0
+==========================================================================
+elapsed 240.6s  results=0

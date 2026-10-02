@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<!-- Render-pipeline benchmark for ui/app.js.
+
+     Loads the REAL vendored libraries (marked/purify/highlight/mermaid/MathJax)
+     and the REAL stylesheet, and drives verbatim copies of the app's streaming
+     render path (renderMarkdown / highlightCode / renderTextBlock throttle /
+     autoScroll) so the numbers describe the actual app, not a mock.
+
+     Run it via scripts/ui-render-bench/run.py (serves the repo root, launches
+     headless Chrome, prints the JSON the page POSTs back). -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>clutch render bench</title>
+<link rel="stylesheet" href="../../ui/style.css" />
+<link rel="stylesheet" href="../../ui/mobile.css" media="(max-width: 640px)" />
+<style>
+  /* the bench drives the render path by hand; the page must not animate */
+  * { animation: none !important; transition: none !important; }
+  #bench { position: fixed; left: 0; top: 0; z-index: 999; }
+</style>
+</head>
+<body>
+  <header id="topbar">
+    <button id="open-project-btn" title="open a project">▦ Open</button>
+    <div id="project-label" class="project-label muted"></div>
+    <div id="status" class="badge idle">idle</div>
+  </header>
+  <main>
+    <section id="left">
+      <div id="taskbar">
+        <textarea id="task-input" rows="3" placeholder="x"></textarea>
+        <div class="actions">
+          <div class="run-actions">
+            <button id="run-btn" class="primary">▶ Run</button>
+            <button id="mode-btn">work</button>
+            <button id="trust-btn">🛡 Trust</button>
+          </div>
+          <span id="workspace-path" class="muted"></span>
+        </div>
+      </div>
+      <div class="stream-wrap">
+        <div id="stream" class="scroll">
+          <div id="open-progress" class="open-progress hidden">
+            <div class="open-progress-track"><div class="open-progress-fill"></div></div>
+            <span class="open-progress-label">0%</span>
+          </div>
+          <button id="older-pill" class="older-pill hidden" type="button"><span id="older-label"></span></button>
+          <div id="events" class="events"></div>
+        </div>
+        <button id="jump-bottom" class="jump-bottom hidden" type="button">↓</button>
+      </div>
+    </section>
+    <aside id="right">
+      <div class="panel-head"><span>workspace</span></div>
+      <div id="tree" class="scroll"></div>
+    </aside>
+  </main>
+
+<script src="../../ui/vendor/marked.min.js"></script>
+<script src="../../ui/vendor/purify.min.js"></script>
+<script src="../../ui/vendor/highlight.min.js"></script>
+<script src="../../ui/vendor/mermaid.min.js"></script>
+<script>
+  // same shape as index.html's MathJax config, with paths rebased to this page
+  window.MathJax = {
+    startup: {
+      typeset: false,
+      ready: () => {
+        const M = MathJax._ && MathJax._.ui && MathJax._.ui.menu && MathJax._.ui.menu.Menu && MathJax._.ui.menu.Menu.Menu;
+        if (M && M.OPTIONS && M.OPTIONS.settings) {
+          M.OPTIONS.settings.enrich = false;
+          M.OPTIONS.settings.speech = false;
+          M.OPTIONS.settings.braille = false;
+        }
+        MathJax.startup.defaultReady();
+        const doc = MathJax.startup.document;
+        if (doc && doc.options) {
+          doc.options.enableEnrichment = false;
+          doc.options.enableSpeech = false;
+          doc.options.enableBraille = false;
+        }
+      },
+    },
+    tex: { inlineMath: [["$", "$"]], displayMath: [["$$", "$$"]], processEscapes: true },
+    chtml: { adaptiveCSS: false, fontURL: "../../ui/vendor/mathjax-fonts/chtml/woff2" },
+    options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] },
+  };
+</script>
+<script src="../../ui/vendor/mathjax-tex-chtml.js"></script>
+<script src="bench.js"></script>
+</body>
+</html>
