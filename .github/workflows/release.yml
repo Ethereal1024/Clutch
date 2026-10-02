@@ -334,9 +334,11 @@ jobs:
   # THIS tag's pylibs-index.json release asset into the APK, so that URL only
   # resolves after pylibs-index's attach step above has completed (needs =
   # whole job, attach included). The APK is a DEBUG build signed with the
-  # runner's auto-generated keystore: installable and WebView-debuggable;
-  # release signing is a deliberate later step (every build's signature
-  # differs until an upload keystore exists).
+  # PROJECT's own keystore (android/keystore/clutch.jks, wired in
+  # android/app/build.gradle): debug-flavoured to keep the WebView debuggable,
+  # and signed by ONE stable certificate so each release installs over the
+  # previous one — a runner's auto-generated debug keystore gave every release a
+  # key of its own, which turned every "install over" into a reinstall.
   android-apk:
     needs: pylibs-index
     runs-on: ubuntu-latest

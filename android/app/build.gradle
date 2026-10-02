@@ -38,9 +38,38 @@ android {
         jniLibs { useLegacyPackaging = true }
     }
 
+    // ONE signing key for every build, local and CI — because Android refuses to
+    // install an APK over the previous one unless the certificate matches. A
+    // runner's auto-generated debug keystore made the certificate a property of
+    // the BUILD MACHINE: v0.1.21 and v0.1.22 carry different cert digests, and
+    // installing either over the other means uninstalling first (which wipes the
+    // app's data). The key is a project property now, so the same certificate
+    // signs every release forever; passwords live in gradle.properties (a
+    // side-load project with no store listing — the key's job is upgrade
+    // continuity, not protection from a stranger who already has the source).
+    signingConfigs {
+        clutch {
+            // rootProject.file: the property is written relative to android/, so
+            // "keystore/clutch.jks" must resolve there and not against app/
+            storeFile rootProject.file(project.findProperty('SIGNING_STORE_FILE')
+                ?: 'keystore/clutch.jks')
+            storePassword project.findProperty('SIGNING_STORE_PASSWORD') ?: 'clutchsign'
+            keyAlias project.findProperty('SIGNING_KEY_ALIAS') ?: 'clutch'
+            keyPassword project.findProperty('SIGNING_KEY_PASSWORD') ?: 'clutchsign'
+        }
+    }
+
     buildTypes {
+        // BOTH types are signed with the project key: the shipped artifact is
+        // assembleDebug (WebView-debuggable, see scripts/build-android-apk.sh),
+        // and a debug build signed by AGP's machine-local key is exactly the
+        // thing that made each release un-upgradeable.
+        debug {
+            signingConfig signingConfigs.clutch
+        }
         release {
             minifyEnabled false
+            signingConfig signingConfigs.clutch
         }
     }
 

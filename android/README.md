@@ -25,9 +25,21 @@ scripts/build-android-apk.sh <pylibs-index-url> <版本> clutch-android.apk
 # ./gradlew --no-daemon :app:assembleDebug -PAPP_VERSION=<版本> → 拷出 APK
 ```
 
-产物是 **debug 签名 APK**（runner/本机的自动 debug keystore）：可直接安装、
-WebView 可 `chrome://inspect` 调试；正式签名（upload keystore + secrets）是有意
-推迟的一步——在此之前每次构建签名都不同，覆盖安装需先卸载。
+产物是 **debug 签名 APK**，但签名密钥是**项目自己的**（`android/keystore/clutch.jks`，
+`android/app/build.gradle` 的 `signingConfigs.clutch` 同时用在 debug 与 release 上）：
+debug 口味保住 WebView 可 `chrome://inspect` 调试，固定证书则保证**新版本能覆盖安装
+旧版本**。构建脚本在拷出 APK 后用 `apksigner` 把签名者证书指纹与
+`android/keystore/cert-sha256.txt` 对一遍，键不对就直接失败——不让"装不上"留到手机上才发现。
+
+> 历史包袱：v0.1.23 及更早的 Release APK 是 runner 的自动 debug keystore 签的，**每次
+> 构建的证书都不同**（实测 v0.1.21 = `6985f0fe…`、v0.1.22 = `7f924a79…`）。如果手机上
+> 现装的是这类包，它那把私钥已经随 runner 消失，**只能卸载重装一次**（应用数据会丢）；
+> 之后所有版本都同键，覆盖安装即可。若手机上装的是本机构建的包（本机 keystore 指纹
+> `07e0784c…7a1a`，本项目的 `clutch.jks` 就是同一把密钥材料），则**无需卸载**，直接覆盖。
+
+密钥口令写在 `android/gradle.properties`（`SIGNING_STORE_*`/`SIGNING_KEY_*`，可用
+`-P` 覆盖）：这是个不发布到应用商店的侧载项目，这把钥匙的职责是"升级连续性"，不是
+防住一个已经拿到源码的人。
 
 仓库已提交 gradle wrapper 四件套（`android/gradlew*`、`android/gradle/wrapper/*`，
 Gradle 8.7，AGP 8.5.2 的最低版本），所以 `cd android && ./gradlew :app:assembleDebug`
