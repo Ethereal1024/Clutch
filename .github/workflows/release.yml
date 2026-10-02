@@ -379,10 +379,37 @@ jobs:
 
       - name: Build debug APK
         run: |
+          set -o pipefail
           bash scripts/build-android-apk.sh \
             "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/pylibs-index.json" \
             "${GITHUB_REF_NAME#v}" \
-            "clutch-android-${GITHUB_REF_NAME}.apk"
+            "clutch-android-${GITHUB_REF_NAME}.apk" 2>&1 | tee /tmp/clutch-apk-build.log
+
+      # Whose eyes need this? The person who notices a broken APK is holding the
+      # PHONE, and a failure here can also be read by tooling that has no
+      # Actions-log access (the log endpoint wants admin rights). So a failed
+      # build leaves its own tail as a COMMENT ON THE COMMIT — readable by
+      # anyone, from anywhere, with no token.
+      - name: Post the build log where a failure can be read
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          log = pathlib.Path("/tmp/clutch-apk-build.log")
+          tail = log.read_text(errors="replace")[-6000:] if log.exists() else "(no build log was captured)"
+          body = "android-apk build failed (run %s, commit %s)\n\n```\n%s\n```\n" % (
+              os.environ.get("GITHUB_RUN_ID", "?"), os.environ.get("GITHUB_SHA", "?"), tail)
+          pathlib.Path("/tmp/clutch-apk-comment.json").write_text(json.dumps({"body": body}))
+          PY
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            --data @/tmp/clutch-apk-comment.json -o /tmp/clutch-apk-comment.out -w 'comment: HTTP %{http_code}\n' \
+            || echo "could not post the build log (the job already failed; this is only the report)"
 
       - uses: actions/upload-artifact@v4
         with:

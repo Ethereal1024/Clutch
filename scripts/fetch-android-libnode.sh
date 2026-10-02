@@ -18,10 +18,30 @@ CPP=android/app/src/main/cpp
 STAGE=android/.cache/nm-extract
 
 mkdir -p "$(dirname "$ZIP")"
-if [ ! -f "$ZIP" ]; then
-  echo "fetch-android-libnode: downloading v${VERSION} ..."
-  curl -sL --fail -o "$ZIP" "$URL"
-fi
+
+# The cache is only trusted once it VERIFIES. A transfer cut short by a network
+# reset leaves a plausible-looking .cache/ file behind, and the sha256 check
+# below then fails that build — and every later one — permanently, for a reason
+# ("the download had a bad minute") that has nothing to do with this tree.
+# So: retry the transfer, download to a .part file, and treat a digest mismatch
+# as "not cached yet" instead of as a hard error.
+verifies() { [ -f "$ZIP" ] && echo "$SHA256  $ZIP" | sha256sum -c - >/dev/null 2>&1; }
+
+for attempt in 1 2 3; do
+  verifies && { echo "fetch-android-libnode: cached $ZIP verifies"; break; }
+  echo "fetch-android-libnode: downloading v${VERSION} (attempt $attempt) ..."
+  rm -f "$ZIP"
+  if curl -sSL --fail --retry 3 --retry-delay 2 --retry-all-errors -o "$ZIP.part" "$URL"; then
+    mv "$ZIP.part" "$ZIP"
+  else
+    rm -f "$ZIP.part"
+    sleep 3
+  fi
+done
+verifies || {
+  echo "fetch-android-libnode: $ZIP does not match the pinned sha256; see $URL" >&2
+  exit 1
+}
 echo "$SHA256  $ZIP" | sha256sum -c -
 
 rm -rf "$STAGE" "$JNI_LIBS" "$CPP/include"
