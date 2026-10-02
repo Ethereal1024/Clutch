@@ -11,7 +11,12 @@ Endpoints (all JSON except SSE/NDJSON):
   GET  /api/clc?lo&hi         byte range of the active .clc -> {size, b64}
   POST /api/clc/append {line} append one line -> {offset, size}
   POST /api/clc/patch {offset, b64}  in-place byte patch (never grows the file)
-  GET  /api/health         {ok}
+  GET  /api/health         {ok, in_flight}  in_flight: a run is live right now
+
+A session can also be RELEASED from outside (the last window's exit,
+/api/shutdown, a reap that raced a run's start). A SIGTERM with a run in flight
+is therefore answered with one durable final before this process goes — the
+ending the run could not write for itself. See install_release_handler.
 
 CORS is wide open (Access-Control-Allow-Origin: *) so the decoupled UI can live
 on another origin/host. The API key travels in request bodies, not cookies, so a
@@ -25,6 +30,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import sys
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -38,6 +45,7 @@ from .api.settings import SettingsMixin
 from .api.workspace import WorkspaceMixin
 from .base import BaseServer, Broadcaster, RunState
 from .config import API_PROTOCOLS, REASONING_EFFORT_LEVELS, Config, flatten_settings
+from .events import FinalEvent
 from .project import Project
 from .tools.workspace import Workspace
 
@@ -139,6 +147,70 @@ def build(
     return srv
 
 
+# What a released run's durable ending says. The run could not write its own
+# final (nothing of its own code is running any more), and the alternative — a
+# `.clc` tail ending in a tool_result or an assistant_message with no final —
+# is a transcript that cannot settle: the window watches `running` flip to
+# `idle` with nothing to explain it, and the run's outcome is unknowable from
+# the file afterwards.
+RELEASED_SUMMARY = "the host released this session while the run was in flight"
+
+
+def record_release(state: RunState) -> None:
+    """Write the ending a run in flight could not write for itself.
+
+    A session is released from OUTSIDE (the last window's exit, /api/shutdown,
+    a reap that raced the run's start), so no code of the run's own gets to run
+    again: if there was a run in flight, the durable record of how it ended has
+    to be written here, on the way out.
+
+    Deliberately not the cancel path. /api/stop means the user asked, and the
+    loop answers that itself with a cancelled-flavoured final; a release is
+    something only the departing process can report, and it is an ERROR — the
+    work stopped for a reason that had nothing to do with the task.
+
+    The run slot is read without the lock (a signal handler must never block on
+    a lock some worker holds). It cannot change hands underneath us: POST
+    /api/run refuses to replace the active project while busy, so during a run
+    ``state.project`` IS the running project, and ``busy`` only ever goes
+    True -> False.
+    """
+    project = state.project
+    if project is None or not state.busy:
+        return
+    try:
+        project.log.append(FinalEvent(status="error", summary=RELEASED_SUMMARY))
+        print(f"[clutch-server] {RELEASED_SUMMARY}", flush=True)
+    except Exception as e:  # noqa: BLE001 - already going down: never mask why
+        print(f"[clutch-server] cannot record the release: {e}", file=sys.stderr)
+
+
+def install_release_handler(state: RunState) -> None:
+    """Make this process say how a run ended when the host releases it.
+
+    The supervisor's stop ladder opens with a SIGTERM to the process group and
+    waits KILL_GRACE_S before the hard kill (agent/procmgr/kill.py), so there is
+    a window to write one line — and one line is all this takes.
+
+    POSIX-only by construction: the ladder's Windows step is a Job close, which
+    is a hard kill with no deliverable signal. There, a released run leaves the
+    unsettled transcript above, and the client has to cope with a run that
+    simply stops — see ui/js/sse-stream.js's stale-run rule.
+    """
+    if os.name != "posix":
+        return
+
+    def _on_term(_signum, _frame) -> None:
+        record_release(state)
+        # the signal means "go away now", so never resume serving: raising here
+        # unwinds the main thread out of serve_forever, the only way out that
+        # does not need a second thread (shutdown() may not be called by the
+        # thread that is serving)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _on_term)
+
+
 def main() -> int:
     defaults = Config()
     parser = argparse.ArgumentParser(prog="clutch-server")
@@ -208,6 +280,8 @@ def main() -> int:
     state.api_key = api_key
 
     srv = build(config, broadcaster, state)
+    # a session released mid-run still leaves a settled transcript (POSIX)
+    install_release_handler(state)
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.

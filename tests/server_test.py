@@ -1130,6 +1130,146 @@ def _dying_holder_frees_the_lock() -> None:
                 _kill_tree(holder)
 
 
+def _session_release_is_recorded() -> None:
+    # ---- 3i. a session released mid-run still leaves a settled transcript ----
+    # The outage's shape: the host releases a session whose run was in flight
+    # (a stale reap, the last window's exit, /api/shutdown), the run's process
+    # dies mid-turn, and the .clc tail ends in a tool_result or an
+    # assistant_message with NO final — so the window could only watch
+    # `running` flip to `idle`, with nothing anywhere saying what happened.
+    # The release is the one thing no code of the run's own can report, so the
+    # departing process writes it now, through the REAL stop ladder (soft
+    # SIGTERM to the process group, then KILL_GRACE_S) and against a run that
+    # genuinely never finishes: an endpoint that accepts and never answers.
+    import socket
+
+    import agent.procmgr.kill as procmgr_kill
+    import agent.server as server_mod
+    from agent.supervisor import PORT_BANNER_RE
+
+    if os.name != "posix":
+        print("(no deliverable graceful signal on Windows - release section skipped)")
+        return
+
+    hang = socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen(5)  # connect completes; no response ever comes
+    hang_port = hang.getsockname()[1]
+
+    def spawn_session() -> tuple[subprocess.Popen, int]:
+        """A real session child, spawned the way the supervisor spawns one."""
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "agent.server",
+                "--port",
+                "0",
+                "--base-url",
+                f"http://127.0.0.1:{hang_port}/v1",
+                "--model",
+                "hang-model",
+            ],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            # the supervisor's own spawn: own process group, so the ladder's
+            # killpg reaches this child (and its tools) and nothing else
+            start_new_session=True,
+        )
+        port = None
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            line = proc.stdout.readline().decode("utf-8", "replace")
+            if not line:
+                break
+            m = PORT_BANNER_RE.search(line)
+            if m:
+                port = int(m.group(1))
+                break
+        check(port is not None, "released-run session printed its port banner")
+        return proc, port
+
+    def events_in(path: Path) -> list[dict]:
+        """The .clc's durable EVENT lines. A .clc opens with `key=value` meta
+        lines and a `---` separator; only the event region is JSON, and an
+        event line is the bare event dict (no wrapper — the {event: ...} shape
+        belongs to the NDJSON/SSE wire, not the file)."""
+        out: list[dict] = []
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            if not ln.startswith("{"):
+                continue
+            try:
+                ev = json.loads(ln)
+            except ValueError:  # a memory line, or a torn write: not an event
+                continue
+            if isinstance(ev, dict) and "type" in ev:
+                out.append(ev)
+        return out
+
+    try:
+        with tempfile.TemporaryDirectory() as rdir:
+            proc, port = spawn_session()
+            try:
+                base = f"http://127.0.0.1:{port}"
+                st, body = http_post(f"{base}/api/project/new", {"dir": rdir, "name": "released"})
+                check(st == 200, "released-run session owns a project")
+                clc = Path(json.loads(body)["project"])
+                _, body = http_get(f"{base}/api/health")
+                check(json.loads(body).get("in_flight") is False, "health: no run before one starts")
+
+                st, _ = http_post(f"{base}/api/run", {"task": "hold the line", "project": str(clc)})
+                check(st == 200, "run accepted against an endpoint that never answers")
+                _, body = http_get(f"{base}/api/health")
+                check(json.loads(body).get("in_flight") is True, "health: the run is in flight")
+
+                deadline = time.time() + 10
+                while time.time() < deadline and "user_message" not in clc.read_text(encoding="utf-8"):
+                    time.sleep(0.05)
+                evs = events_in(clc)
+                check(evs and evs[-1]["type"] != "final", "the run in flight has no final yet (the outage's shape)")
+
+                t0 = time.time()
+                procmgr_kill.stop_process(proc, None)  # the REAL ladder, not a bare kill
+                took = time.time() - t0
+                check(proc.poll() is not None, "the released session is gone")
+                check(
+                    took < procmgr_kill.KILL_GRACE_S + 2.0,
+                    "the soft signal was enough (the record cost us no hard kill)",
+                )
+
+                final = events_in(clc)[-1]
+                check(final["type"] == "final", "the released run's last durable line is a final")
+                check(final.get("status") == "error", "the release is recorded as an error, not a completion")
+                check(
+                    final.get("summary") == server_mod.RELEASED_SUMMARY,
+                    "the final names the release: the host took the session while the run was in flight",
+                )
+            finally:
+                if proc.poll() is None:
+                    _kill_tree(proc)
+
+            # the record belongs to a RUN, not to every session shutdown: a
+            # released session with nothing in flight writes no ending at all
+            proc2, port2 = spawn_session()
+            try:
+                base2 = f"http://127.0.0.1:{port2}"
+                st, body = http_post(f"{base2}/api/project/new", {"dir": rdir, "name": "idle"})
+                check(st == 200, "idle session owns a project")
+                clc2 = Path(json.loads(body)["project"])
+                procmgr_kill.stop_process(proc2, None)
+                check(proc2.poll() is not None, "the idle session is gone")
+                check(
+                    not any(ev["type"] == "final" for ev in events_in(clc2)),
+                    "a released session with no run in flight invents no ending",
+                )
+            finally:
+                if proc2.poll() is None:
+                    _kill_tree(proc2)
+    finally:
+        hang.close()
+
+
 def _start_real_run(base_url, state) -> bool:
     # 4. real run (only with a key saved in ~/.clutch/settings.json)
     key = _saved_api_key()
@@ -1277,6 +1417,7 @@ def _run_server_test() -> int:
         _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir)
         _remote_workspace_locks_locally()
         _dying_holder_frees_the_lock()
+        _session_release_is_recorded()
         if not _start_real_run(base_url, state):
             return 0
         _duplicate_run_rejected(base_url)
