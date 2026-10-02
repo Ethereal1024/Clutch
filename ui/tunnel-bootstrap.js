@@ -59,15 +59,20 @@ function startCommand(strategy, home) {
   // remote supervisor runs on 8890 like local; session children get --base-url later
   const args = "--port " + REMOTE_API_PORT + " --idle-timeout 25";
   const nohup = "nohup setsid ";
+  // APPEND to the log, never truncate it: the failure worth reading is the one
+  // the previous session died of, and `>` erases exactly that — the evidence is
+  // gone at the moment someone reconnects to look at it (agent/procmgr/stdio.py
+  // stamps every line, so attempts sharing the file stay separable).
+  const logredir = ">>/tmp/clutch-server.log 2>&1 </dev/null &";
   if (strategy === "bundle") {
     // explicit: a onefile's sys.executable cannot locate the sibling agent-server
-    return `${nohup}${home}/.clutch-server/agent-supervisor ${args} --agent-cmd ${home}/.clutch-server/agent-server >/tmp/clutch-server.log 2>&1 </dev/null &`;
+    return `${nohup}${home}/.clutch-server/agent-supervisor ${args} --agent-cmd ${home}/.clutch-server/agent-server ${logredir}`;
   }
   // pylibs: the remote imports the whole wheel stack before binding (cold
   // start can take several seconds on slow disks), so keep the idle reaper
   // at 25s (> the 20s start poll). NOTE: argparse takes the LAST --idle-timeout,
   // so never append a second one after ${args}.
-  return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} >/tmp/clutch-server.log 2>&1 </dev/null &`;
+  return `cd ${home}/.clutch-server && ${nohup}env PYTHONPATH=site-packages python3 -m agent.supervisor ${args} ${logredir}`;
 }
 
 function remoteRunningCmd(probe) {

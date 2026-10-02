@@ -126,7 +126,7 @@ Module._load = function (request, parent, isMain) {
   return origLoad.apply(this, arguments);
 };
 
-const { installServer, stopServerCmd, parseProbe } = require("../ui/tunnel-bootstrap");
+const { installServer, stopServerCmd, startCommand, parseProbe } = require("../ui/tunnel-bootstrap");
 
 const PROBE = {
   os: "Linux",
@@ -184,6 +184,22 @@ async function main() {
     /pkill -9 -f/.test(stopServerCmd("pylibs", "-9")),
     "the escalation signal reaches pkill (-9) when SIGTERM is not enough"
   );
+
+  // ---- the remote log survives the session that died in it ----
+  //
+  // The failure worth reading is the one the PREVIOUS session died of, and a `>`
+  // redirect erases exactly that at the moment someone reconnects to look: the
+  // remote supervisor appends, so the file is a history of attempts rather than
+  // the last one (agent/procmgr/stdio.py stamps each line with its clock, which
+  // is what makes several attempts in one file readable).
+  for (const strategy of ["bundle", "pylibs"]) {
+    const cmd = startCommand(strategy, "/home/u");
+    check(
+      cmd.includes(">>/tmp/clutch-server.log 2>&1") &&
+        !/[^>]>\/tmp\/clutch-server\.log/.test(cmd),
+      `${strategy}: the remote log is appended to, never truncated`
+    );
+  }
 
   // ---- 2. a remote that already runs our version is not an install ----
   uploads = 0;

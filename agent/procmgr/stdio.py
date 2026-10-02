@@ -14,6 +14,19 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
+
+
+def _stamp() -> str:
+    """Local wall clock, prefixed to every log line.
+
+    A daemon's stdout is routinely redirected to ONE file that outlives the
+    process (the remote supervisor appends to /tmp/clutch-server.log across
+    connects), so without a clock the file is a soup of sessions: the line that
+    explains a death cannot be placed against the client's own timeline (the
+    phone's ~/.clutch/tunnel.log), which is the whole point of keeping it.
+    """
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def log(msg: str) -> None:
@@ -26,7 +39,7 @@ def log(msg: str) -> None:
     BlockingIOError instead of blocking; we swallow it and drop the line.
     """
     try:
-        print(msg, flush=True)
+        print(f"{_stamp()} {msg}", flush=True)
     except (OSError, ValueError):  # dead/full stdout: drop the log line
         pass
 

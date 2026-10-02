@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
 import time
+from io import StringIO
 from pathlib import Path
 
+from agent.procmgr.stdio import log
 from agent.supervisor import Supervisor, _SafeStdStream, build_server
 from tests.testsupport import check, http_get, http_post
 
@@ -246,6 +249,23 @@ def main() -> int:
     # ---- 9. dead-parent resilience (orphaned supervisor: stdout is a dead stream) ----
     # prints on the dead stream must not kill the handler / reaper
     import os as _os
+
+    # the line itself must say WHEN it was written: one log file outlives many
+    # sessions (the remote supervisor appends to /tmp/clutch-server.log), so a
+    # line with no clock cannot be placed against the client's own timeline —
+    # which is the only reason the file is kept at all
+    _buf = StringIO()
+    _stamp_out, sys.stdout = sys.stdout, _buf
+    try:
+        log("a line the file keeps")
+    finally:
+        sys.stdout = _stamp_out
+    _line = _buf.getvalue().rstrip("\n")
+    check(
+        re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} a line the file keeps", _line)
+        is not None,
+        f"a log line carries its wall clock ({_line!r})",
+    )
 
     # a pipe whose read end is already closed: writing raises (BrokenPipeError
     # on POSIX, OSError [Errno 22] on Windows). Portable where the old
