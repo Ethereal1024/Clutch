@@ -11,12 +11,37 @@
 //       page preselects no remote host at all (entering the app must not put the
 //       user into a connection they did not ask for), and the one Connect button
 //       left, the conn bar's, exists only while the browser body is folded, in the
-//       row's own form, and is disabled while an attempt is in flight.
+//       row's own form, and is disabled while an attempt is in flight;
+//   and on that bar: a connect folds the body too, so the folded Connect must not
+//       come back the moment an attempt starts. It belongs to the welcome state
+//       (nothing browsed, nothing in flight); while an attempt runs — and after it
+//       fails — the attempt's own chrome (the progress bar; Retry/Cancel) is what
+//       the bar offers, not a second Connect beside the one already running.
+//       An attempt started from the new-connection popup is the popup's own (its own
+//       status line, its own progress bar, its own Connect): the bar underneath takes
+//       no fold and no Retry/Cancel from it, so closing the popup lands back on the
+//       picker the popup was opened from, not on a bar whose Retry would paint into a
+//       closed popup.
+//   and the same fold means one more thing: the picker is WAITING for a listing. That
+//       wait is its own fact (fsListing / setFsListing in js/conn-flow.js), because the
+//       fold alone cannot tell it from the welcome bar — and between a successful
+//       connect's last act and the listing it starts answering, the bar was exactly
+//       that: folded, no attempt in flight, no verdict, so the folded Connect came back
+//       for the whole round-trip and left when the listing landed (device report: a
+//       Connect flashing at the instant a connection succeeded). The wait is opened
+//       where a listing is actually asked for (loadDir, and the picker's own opening,
+//       which settles the backend's URL first) and ended by its answer, by the fold
+//       retiring it, or by the picker closing.
 //
 // The runner drives the REAL renderConnSelector / connTarget / updateConnConnect /
 // connConnect — plus the two wiring statements conn-flow.js installs — against
-// stubs, so neither end of the rule can be dropped on its own: what the list may
-// offer, what a choice dials, and what the folded bar's button can press.
+// stubs, and drives the picker's state functions (hidePickerBody / showPickerBody /
+// setFsConnecting / setFsConnectError / resetConnChrome / setFsListing) to see when that
+// button is on the bar, so neither end of the rule can be dropped on its own: what the
+// list may offer, what a choice dials, what the folded bar's button can press, and when
+// the bar offers it at all. The listing itself is driven for real too (the real loadDir
+// against a deferred apiFetch), because the interesting moment is the one BETWEEN the
+// ask and the answer.
 //
 // Run: node tests/fs-picker-test.js
 
@@ -66,7 +91,20 @@ async function main() {
     },
   };
   const connStatus = { textContent: "" };
-  const connectBtn = {
+  // the nodes the bar/body states touch: a classList (the fold, the connect chrome,
+  // and the button's own on/off) plus the progress fill the bar animates
+  const cls = () => {
+    const set = new Set();
+    return {
+      add: (c) => set.add(c),
+      remove: (c) => set.delete(c),
+      contains: (c) => set.has(c),
+      toggle: (c, on) => (on ? set.add(c) : set.delete(c)),
+    };
+  };
+  const fill = { style: {}, classList: { add() {}, remove() {}, contains: () => false } };
+  const node = (extra) => Object.assign({ classList: cls(), querySelector: () => fill }, extra);
+  const connectBtn = node({
     disabled: false,
     clicks: [],
     addEventListener(ev, fn) {
@@ -75,12 +113,49 @@ async function main() {
     click() {
       for (const fn of this.clicks) fn();
     },
-  };
+  });
   const newConnectBtn = { disabled: false };
+  const fsBody = node({});
+  const fsNew = node({});
+  const connActions = node({});
+  const connProgress = node({});
+  const connNewProgress = node({});
+  // the picker's other nodes: the list loadDir draws into, and the chrome openFsBrowser
+  // sets up. The list is a real (tiny) list so a listing can land in it.
+  const fsList = node({
+    children: [],
+    appendChild(c) {
+      this.children.push(c);
+    },
+  });
+  const fsPathInput = node({ value: "" });
+  const fsTitle = node({ textContent: "" });
+  const fsCreate = node({});
+  const fsNameInput = node({ value: "" });
+  const fsUp = node({});
+  const fsGo = node({});
+  const fsModal = node({});
   global.connSelect = connSelect; // the eval'd bodies read the page's global scope
   global.connStatus = connStatus;
   global.$ = (sel) =>
-    ({ "#conn-select": connSelect, "#conn-connect": connectBtn, "#conn-new-connect": newConnectBtn })[sel];
+    ({
+      "#conn-select": connSelect,
+      "#conn-connect": connectBtn,
+      "#conn-new-connect": newConnectBtn,
+      "#fs-body": fsBody,
+      "#fs-new": fsNew,
+      "#fs-list": fsList,
+      "#fs-path-input": fsPathInput,
+      "#fs-title": fsTitle,
+      "#fs-create": fsCreate,
+      "#fs-name-input": fsNameInput,
+      "#fs-up": fsUp,
+      "#fs-go": fsGo,
+      "#fs-modal": fsModal,
+      "#conn-actions": connActions,
+      "#conn-progress": connProgress,
+      "#conn-new-progress": connNewProgress,
+    })[sel];
   global.document = { createElement: () => ({}) };
   global.API_BASE = null;
   global.IS_ANDROID = true;
@@ -135,6 +210,7 @@ async function main() {
     newConnectBtn.disabled = false;
     global.connOnValue = "";
     global.connBusy = false;
+    global.fsListing = false;
     done.length = 0;
   };
   const HOSTS = [
@@ -271,7 +347,240 @@ async function main() {
     /finally \{\s*setConnBusy\(false\);/.test(fnBody("handleSshConnect")),
     "the one place that runs an attempt is what flags it, and clears it either way");
 
-  // ---- 8) the source: what must NOT be there any more ----
+  // ---- 8) the folded bar's door: the welcome state, never the fold alone ----
+  // The state functions are driven for real, against the bar's own nodes seeded as
+  // the markup has them.
+  global.fsListToken = 0;
+  global.fsListing = false; // the wait for a listing (a `let` in conn-flow.js, so seeded here)
+  global.fsMode = "open";
+  for (const name of [
+    "syncConnConnect",
+    "doorOf",
+    "setFsListing",
+    "hidePickerBody",
+    "showPickerBody",
+    "resetConnChrome",
+    "setFsConnecting",
+    "setFsConnectError",
+  ]) {
+    (0, eval)(fnBody(name));
+  }
+  connActions.classList.add("hidden"); // the markup's starting point: no verdict yet
+  connProgress.classList.add("hidden");
+  connNewProgress.classList.add("hidden");
+  connectBtn.classList.add("hidden");
+  const doorOn = () => !connectBtn.classList.contains("hidden");
+
+  check(!fsBody.classList.contains("collapsed") && !doorOn(),
+    "the body is up with the button off: nothing has said the bar is the picker");
+  hidePickerBody(); // openFsBrowser(): nothing is browsed before a backend answers
+  check(fsBody.classList.contains("collapsed") && doorOn(),
+    "the folded bar is the picker while nothing is browsed, and its Connect is the door");
+  showPickerBody(); // loadDir(): a listing is in hand
+  check(!fsBody.classList.contains("collapsed") && !doorOn(),
+    "a listing up takes it away again: the list is the door");
+
+  setConnBusy(true);
+  setFsConnecting("new.example.com", connStatus, "bar");
+  check(fsBody.classList.contains("collapsed") && !doorOn(),
+    "a connect folds the body but must NOT bring the button back (the reported extra Connect)");
+  check(/^Connecting to new\.example\.com/.test(connStatus.textContent) &&
+    !connProgress.classList.contains("hidden"),
+    "the attempt speaks through the bar's own status line and progress bar instead");
+  check(connActions.classList.contains("hidden"),
+    "with Retry/Cancel still out of the way while it runs");
+
+  setFsConnectError("connection failed: nope", connStatus, "bar");
+  setConnBusy(false); // handleSshConnect's finally
+  check(fsBody.classList.contains("collapsed") && !doorOn(),
+    "and a failure does not bring it back either: Retry is that same press");
+  check(!connActions.classList.contains("hidden") && connProgress.classList.contains("hidden"),
+    "the failure's own doors (Retry/Cancel) own the bar");
+
+  resetConnChrome(); // #conn-cancel -> refreshPicker(): the attempt is over
+  check(doorOn(), "cancelling clears the attempt's chrome and the folded bar's door is back");
+  showPickerBody();
+  check(!doorOn(), "with a listing up it leaves again");
+  hidePickerBody(); // loadDir() with no backend, or one that does not answer
+  check(doorOn(),
+    "an unreachable backend folds the body with no attempt and nothing to pick from the list, and Connect is the door again");
+
+  // ---- 8b) the popup door: an attempt it starts is the popup's own ----
+  // The new-connection popup is a modal with its own status line, its own progress bar
+  // and its own Connect, so the bar underneath is not the actor in an attempt the popup
+  // started. Without that, a failure left Retry/Cancel on the folded bar behind the
+  // modal, pointing at the popup's status element — and closing the popup then landed
+  // on a bar with no door.
+  const popupStatus = { textContent: "" };
+  showPickerBody(); // the picker is browsing, so the bar's door is off
+  connStatus.textContent = "the bar's own line";
+  check(!doorOn() && connActions.classList.contains("hidden"),
+    "nothing is in flight and no verdict is on the bar before the popup opens");
+  setConnBusy(true);
+  setFsConnecting("new.example.com", popupStatus, "popup");
+  check(!fsBody.classList.contains("collapsed"),
+    "a connect from the popup does not fold the body: nothing under the modal is browsed, and the listing in hand is this backend's own");
+  check(!connNewProgress.classList.contains("hidden") && connProgress.classList.contains("hidden"),
+    "the popup's own bar is the one the attempt animates");
+  check(connActions.classList.contains("hidden") && !doorOn(),
+    "and it takes no chrome from the bar underneath: no Retry/Cancel behind the modal, and no folded Connect for a popup it did not start");
+  check(popupStatus.textContent === "Connecting to new.example.com…",
+    "the attempt speaks through the popup's own status line");
+  setFsConnectError("connection failed: nope", popupStatus, "popup");
+  check(popupStatus.textContent === "connection failed: nope" && connNewProgress.classList.contains("hidden"),
+    "a popup failure lands in the popup's own status line, with the popup's own bar retired");
+  check(connStatus.textContent === "the bar's own line" && connActions.classList.contains("hidden"),
+    "and the bar underneath is untouched: its own status line, and no Retry/Cancel left behind the modal");
+  setConnBusy(false); // handleSshConnect's finally
+  syncConnConnect(); // ...which settles the bar's door again
+  check(!fsBody.classList.contains("collapsed") && !doorOn(),
+    "so closing the popup lands back on the listing it was opened from");
+
+  hidePickerBody(); // the other starting point: the welcome bar, nothing browsed
+  check(doorOn(), "the welcome bar's door is up before the popup opens");
+  setConnBusy(true);
+  setFsConnecting("new.example.com", popupStatus, "popup");
+  check(!doorOn(), "a popup attempt stands it down while the attempt is in flight");
+  setFsConnectError("connection failed: nope", popupStatus, "popup");
+  setConnBusy(false);
+  syncConnConnect(); // handleSshConnect's finally
+  check(doorOn() && connActions.classList.contains("hidden"),
+    "and a failure that stays in the popup leaves it standing: closing the popup lands on the welcome bar, not on a bar with no door");
+
+  const popupConnBody = fnBody("setFsConnecting");
+  check(popupConnBody.includes('if (door === "bar") {') &&
+    popupConnBody.indexOf("hidePickerBody()") > popupConnBody.indexOf('if (door === "bar")'),
+    "the source says it too: folding is the bar door's branch, a popup attempt folds nothing");
+  check(popupConnBody.includes('door === "popup" ? $("#conn-new-progress")'),
+    "and the progress bar it animates is its own door's");
+  const popupErrBody = fnBody("setFsConnectError");
+  check(popupErrBody.includes('if (door === "popup") {') &&
+    popupErrBody.indexOf("return;") < popupErrBody.indexOf(`classList.remove("hidden")`),
+    "and a failure the popup owns returns before it reaches the bar's chrome");
+  check(doorOf({ id: "conn-new-status" }) === "popup" && doorOf(connStatus) === "bar",
+    "the two doors are named once, from the status element the attempt reports to");
+  check(fnBody("handleSshConnect").includes('if (door === "bar") lastConn = {'),
+    "the bar's Retry keeps the last attempt made from the bar: a popup attempt does not steal that press");
+  check(fnBody("handleSshConnect").includes("setConnBusy(false);\n    syncConnConnect();"),
+    "with the attempt's end, either door, settling the bar's door again");
+
+  // The button is drawn in ONE place — the invariant that keeps the four reported bugs
+  // from returning as a fifth: every write to its on/off class or to its disabled flag
+  // lives in syncConnConnect (the render) or in updateConnConnect (the armed half that
+  // render asks for). What the rule READS is asserted behaviourally, in 8 / 8b / 8c.
+  const buttonWrites = APP.split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /\$\("#conn-connect"\)\.(classList\.(?:add|remove|toggle)|disabled)/.test(l));
+  check(buttonWrites.length === 2 &&
+    buttonWrites.every((l) => fnBody("syncConnConnect").includes(l) || fnBody("updateConnConnect").includes(l)),
+    `exactly two places write the folded bar's Connect: its render, and the armed half that render asks for (got ${buttonWrites.length})`);
+  check(fnBody("syncConnConnect").includes("updateConnConnect();"),
+    "so 'shown' and 'armed' are one render: the flow asks the store for the second half");
+  check(/\bfsListing\b/.test(fnBody("syncConnConnect")) &&
+    /\bconnBusy\b/.test(fnBody("syncConnConnect")) &&
+    /conn-actions/.test(fnBody("syncConnConnect")),
+    "from the three facts that make a folded bar the welcome bar: no attempt, no listing outstanding, no verdict");
+
+  // ---- 8c) the wait for a listing: folded, but not the welcome bar ----
+  // The reported ghost lives in the gap the fold alone cannot describe: a connect has
+  // succeeded — its `finally` has cleared the attempt — while the listing that success
+  // started has not answered yet. Folded with nothing in flight and nothing to pick,
+  // the bar read as the welcome state, so the folded Connect came back for the whole
+  // round-trip of that listing and left the moment it landed. So the wait is driven FOR
+  // REAL here: the real loadDir, with its answer held until the assertions in between
+  // have had their say. The door is sampled after every render — syncConnConnect is the
+  // one place it is drawn — so a single frame of it being on cannot slip past.
+  global.showHidden = false;
+  global.fsPath = "";
+  global.fsParent = null;
+  global.fsRow = (label, kind) => ({ label, kind });
+  global.openProject = () => {};
+  global.closeModal = () => {};
+  global.fsModal = fsModal;
+  const listings = []; // the listing asks still unanswered, oldest first
+  global.apiFetch = () => new Promise((resolve, reject) => listings.push({ resolve, reject }));
+  (0, eval)(fnBody("loadDir"));
+  (0, eval)(fnBody("closeFsBrowser"));
+  const doorShots = []; // the door, sampled after every render while the gap below is open
+  const realSync = global.syncConnConnect;
+  global.syncConnConnect = () => {
+    realSync();
+    if (doorOn()) doorShots.push(connStatus.textContent);
+  };
+  const answer = (pending, path) =>
+    pending.resolve({ path, parent: null, entries: [{ name: "proj", dir: true, path: path + "/proj" }] });
+
+  global.API_BASE = "http://127.0.0.1:31001"; // the session switchBackendResolved settled
+  hidePickerBody(); // the welcome bar the attempt is made from
+  check(doorOn(), "the welcome bar's door is up before the attempt");
+  setConnBusy(true);
+  setFsConnecting("new.example.com", connStatus, "bar"); // the connect: it folds and takes the bar
+  const listing = loadDir(""); // refreshPicker()'s own ask, made on the way to the `finally`
+  const pending = listings.shift();
+  doorShots.length = 0; // from here on: the attempt ends, its listing has not answered
+  setConnBusy(false);
+  syncConnConnect(); // handleSshConnect's `finally`
+  check(fsBody.classList.contains("collapsed") && !doorOn(),
+    "the attempt is over and its listing has not answered: the fold is a WAIT here, not the welcome bar");
+  await flush(); // nothing in flight, nothing drawn — the bar's own chance to come back
+  check(doorShots.length === 0,
+    `no frame of the folded Connect comes back while the listing is on its way (saw ${doorShots.length})`);
+  answer(pending, "/home/me");
+  await listing;
+  check(!fsBody.classList.contains("collapsed") && !doorOn(),
+    "and the listing landing is what ends the wait: the body unfolds into what it answered with");
+
+  // a listing that comes back after the picker asked for another one is not the answer it
+  // is waiting on: ending the wait with it would unfold the body over a directory the
+  // picker has already left
+  hidePickerBody();
+  const first = loadDir("");
+  const firstPending = listings.shift();
+  const second = loadDir("some/dir"); // the user picked a directory: this ask supersedes the first
+  const secondPending = listings.shift();
+  answer(firstPending, "/stale");
+  await first;
+  check(fsBody.classList.contains("collapsed") && !doorOn(),
+    "a superseded listing's late answer does not call the newer one's wait over");
+  answer(secondPending, "/some/dir");
+  await second;
+  check(!fsBody.classList.contains("collapsed") && !doorOn(),
+    "the ask the picker is actually waiting on is the one that unfolds the body");
+
+  // the other way a wait ends: the listing itself fails, and there is nothing to browse
+  hidePickerBody();
+  localStorage.removeItem("clutch_fs_last_dir"); // no remembered directory to fall back to
+  const failed = loadDir("");
+  const failedPending = listings.shift();
+  failedPending.reject(new Error("no backend"));
+  await failed; // loadDir answers for its own failure; nothing throws out of the picker
+  check(fsBody.classList.contains("collapsed") && doorOn(),
+    "a listing that fails folds the body and hands the bar its door back: nothing browsed, nothing in flight");
+
+  // and closing the picker ends the wait on its own: there is no body left to unfold
+  hidePickerBody();
+  const leftOpen = loadDir("");
+  const openPending = listings.shift();
+  check(!doorOn(), "an ask while folded keeps the bar a wait, not the welcome bar");
+  closeFsBrowser();
+  check(doorOn() && global.fsListing === false,
+    "closing the picker ends the wait: the folded bar is the picker again, with no listing still wanted");
+  answer(openPending, "/late");
+  await leftOpen; // a closed modal draws nothing the user sees; settling it keeps the runner clean
+
+  // the two facts the block above cannot see: where the wait is opened, and that it can
+  // never be left open (a wait that outlived its listing would take the door away for good)
+  const loadBody8c = fnBody("loadDir");
+  check(loadBody8c.indexOf("setFsListing(true)") > loadBody8c.indexOf("loading…") &&
+    loadBody8c.indexOf("setFsListing(true)") < loadBody8c.indexOf("await apiFetch"),
+    "loadDir opens the wait where it asks, not where it draws: the wait covers the round-trip");
+  check(/finally \{[\s\S]*?if \(token === fsListToken\) setFsListing\(false\);/.test(loadBody8c),
+    "and only the listing the picker is still waiting for may end it: a superseded one leaves it to whoever took over");
+  check(/function hidePickerBody\(\) \{\s*fsListToken\+\+;\s*setFsListing\(false\);/.test(fnBody("hidePickerBody")) &&
+    /function closeFsBrowser\(\) \{\s*setFsListing\(false\);/.test(fnBody("closeFsBrowser")),
+    "the fold retires the wait, and so does closing the picker: the door comes back either way");
+
+  // ---- 9) the source: what must NOT be there any more ----
   check(!/autoReconnectAndroid/.test(APP),
     "nothing dials a remembered host on its own any more (boot, picker and lifecycle alike)");
   check(!/waitBackend/.test(APP),
@@ -336,9 +645,11 @@ async function main() {
     "the picker's Connect is a button of the host row, next to ＋ New SSH connection");
   check(!/width: 100%/.test(connBar) && !/#conn-connect[^{]*\{[^}]*width:/.test(CSS),
     "and it no longer spans the window: the same box as the row's other button");
-  check(/#conn-connect \{ display: none; \}/.test(CSS) &&
-    /\.fs-conn:has\(\+ #fs-body\.collapsed\) #conn-connect \{ display: inline-flex; \}/.test(CSS),
-    "it exists only while the file-browser body is folded, and not while a listing is up");
+  check(/<button id="conn-connect" class="primary hidden"/.test(connRow),
+    "off in the markup, so the flow is what turns it on");
+  check(/#conn-connect:not\(\.hidden\) \{ display: inline-flex; \}/.test(CSS) &&
+    !/:has\(\+ #fs-body\.collapsed\)[^{]*#conn-connect/.test(CSS),
+    "and the stylesheet states its form, not its state: a fold is not the welcome page on its own");
   check(!/id="conn-connect"[^>]*\n[^<]*<\/button>\s*\n\s*<p id="conn-status"/.test(HTML) ||
     connBar.indexOf('id="conn-connect"') < connBar.indexOf('id="conn-status"'),
     "and it stays above the picker's own status line");

@@ -71,10 +71,11 @@ function connTarget() {
 let connBusy = false; // a connect is in flight: it cannot be taken twice
 
 // Both buttons that start a connect read the same two facts: is one already in
-// flight, and is there anywhere to dial. #conn-connect (the conn bar's) is only
-// ever visible while the browser body is folded (ui/style.css) and
-// #conn-new-connect (the new-connection popup's) while the popup is up; the list
-// carries no button, because choosing an entry in it IS the dial.
+// flight, and is there anywhere to dial. This is the DISABLED half of both of them:
+// the conn bar's Connect is shown or hidden by syncConnConnect (js/conn-flow.js, the
+// file below this one in the page, which asks for this as the other half of its own
+// render), and #conn-new-connect (the new-connection popup's) only exists while the
+// popup is up. The list carries no button, because choosing an entry in it IS the dial.
 function updateConnConnect() {
   $("#conn-connect").disabled = connBusy || !connTarget();
   $("#conn-new-connect").disabled = connBusy;

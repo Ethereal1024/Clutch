@@ -160,10 +160,13 @@
           <!-- Connect belongs to the FOLDED bar — the welcome page, where nothing
                is chosen and the host this device was last on is one press away.
                Choosing a host in the list connects on its own, so while there is a
-               file browser on screen this button is not shown at all (ui/style.css,
-               .fs-conn:has(+ #fs-body.collapsed)): the same button as its
-               neighbour, not a full-width line of its own. -->
-          <button id="conn-connect" class="primary" title="connect to the host you were last on">Connect</button>
+               file browser on screen this button is not shown at all: the same
+               button as its neighbour, not a full-width line of its own. Whether the
+               folded bar IS that welcome state (folded, no attempt in flight, no
+               listing outstanding) is decided in js/conn-flow.js (syncConnConnect) —
+               the fold alone is not the answer, because a connect folds the body too,
+               and so does waiting for a listing. -->
+          <button id="conn-connect" class="primary hidden" title="connect to the host you were last on">Connect</button>
         </div>
         <p id="conn-status" class="muted"></p>
         <div id="conn-progress" class="conn-progress hidden">

@@ -33,6 +33,9 @@ function openFsBrowser(mode) {
   // errors, and report #3: opening the picker dials nothing on its own — loadDir
   // unfolds the body the moment it has a listing to show)
   hidePickerBody();
+  // ...and the listing that will decide it is already wanted: settling the backend's
+  // URL (below) comes first, and the wait for a body is the same wait either way
+  setFsListing(true);
   $("#fs-up").disabled = false;
   $("#fs-go").disabled = false;
   $("#fs-path-input").disabled = false;
@@ -54,6 +57,7 @@ function openFsBrowser(mode) {
 }
 
 function closeFsBrowser() {
+  setFsListing(false); // a closed picker browses nothing: no listing is still wanted
   closeModal(fsModal);
 }
 
@@ -132,6 +136,12 @@ async function loadDir(path, remember = true) {
     return;
   }
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
+  // a listing is on its way: the folded body is this wait, not the welcome bar (the
+  // bar's own door reads it — see syncConnConnect in js/conn-flow.js). The wait is
+  // opened only where something is actually asked for, so it can only end two ways:
+  // this listing answering (the finally below, if it is still the latest), or the
+  // fold retiring it (hidePickerBody)
+  setFsListing(true);
   try {
     const data = await apiFetch(
       "/api/fs/list?path=" + encodeURIComponent(path) + (showHidden ? "&hidden=1" : "")
@@ -182,6 +192,12 @@ async function loadDir(path, remember = true) {
     hidePickerBody();
     connStatus.textContent =
       "Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Connect again below.";
+  } finally {
+    // the wait is over only when THIS listing is still the one the picker is waiting
+    // on: a listing superseded by another directory (or retired by a fold, which ends
+    // the wait itself) leaves it to whoever took over — clearing it here would call
+    // their round-trip over and put the door back mid-listing
+    if (token === fsListToken) setFsListing(false);
   }
 }
 

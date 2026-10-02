@@ -1119,9 +1119,16 @@ mjx-container[display="true"] {
    where the conn bar is the whole dialog. While the body is up, the file browser is
    the picker and the choice in the list above is what brought it up: a second door
    under the row was a full-width line that read as a different kind of control
-   (device report #4). Same box as the row's other button. */
-#conn-connect { display: none; }
-.fs-conn:has(+ #fs-body.collapsed) #conn-connect { display: inline-flex; }
+   (device report #4). Same box as the row's other button.
+
+   Whether the bar is in that state is the flow's fact, not the stylesheet's: folding
+   is ALSO how a connect retires the body, and how the picker waits for a listing, so a
+   rule keyed on `#fs-body.collapsed` alone put the button back the moment an attempt
+   started (a second Connect beside the one already running, greyed only because that
+   attempt had disabled it) and again at the instant one succeeded. The class is
+   js/conn-flow.js's (syncConnConnect); this only states the form the button takes
+   while it is on. */
+#conn-connect:not(.hidden) { display: inline-flex; }
 #conn-status { margin: 8px 0 0; }
 .conn-progress { margin-top: 8px; }
 .conn-progress-track { height: 3px; background: var(--border); overflow: hidden; border-radius: 2px; }
