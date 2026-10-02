@@ -61,6 +61,22 @@ let sseSuspended = false;
 // nobody said so. The flag travels from the move (backend-lifecycle.js) to the
 // frame that reveals the outcome (render-events.js).
 let sseRunAtRisk = false;
+// That frame only REVEALS the outcome; it cannot state it. The departing session
+// appends a final of its own when it releases a run in flight (agent/server.py
+// record_release), and the new session replays every record this window had not
+// painted — so the ending may already be in the block that follows the status
+// frame, and saying "the run was lost here" above the record that explains it
+// would be a second, invented ending. The status frame therefore only ASKS the
+// question (this flag), and the block the server brackets between `history` and
+// `replayed` — its whole answer — is where it is settled (js/stream-events.js).
+let sseRunLostPending = false;
+// Whether the transcript has painted the current run's ending: opened by the
+// task that starts a run, closed by the `final` that ends it, live or replayed.
+// The answer above is never invented while this says the log already gave one.
+let runSettled = false;
+// what the window says when the log it is owed ends the run with nothing
+const SSE_RUN_LOST = "the session running this task went away while it was in " +
+  "flight — nothing is running now";
 
 // any frame (event or keepalive) proves the pipe still carries bytes
 function sseFrame() {

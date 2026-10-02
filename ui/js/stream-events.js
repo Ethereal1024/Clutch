@@ -92,6 +92,23 @@ function clearRetryNote() {
   }
 }
 
+// ---- the run-settled ledger, and the one announcement that reads it ----
+//
+// The ledger itself (sseRunLostPending / runSettled, declared in js/sse-stream.js
+// beside sseRunAtRisk) is written in exactly one place, because a run has one
+// shape here: a task opens it and a `final` closes it, live or replayed, and both
+// walk addEvent. What the window says about a run it lost is the transcript's
+// business — a run must not end without a record of it, and a toast that
+// dismisses itself leaves none.
+function announceRunLost() {
+  sseRunLostPending = false; // asked once, answered once
+  if (runSettled) return; // the log already ended this run: never a second ending
+  // the shape the local failed run uses (js/render-events.js run): the
+  // completion divider exists for exactly this, and it is durable, re-readable,
+  // and impossible to miss on a phone nobody was holding
+  addEvent({ type: "final", status: "error", summary: SSE_RUN_LOST });
+}
+
 function addEvent(ev) {
   // lazy wire shape: {offset, event} carries each durable event's byte offset
   // so the UI can page the earlier records
@@ -110,6 +127,18 @@ function addEvent(ev) {
     if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
     ev = ev.event;
   }
+  // the ledger behind announceRunLost, above: a task opens a run, a final closes
+  // it — whichever way the record arrived
+  if (ev && ev.type === "user_message") {
+    // A task the user starts now closes the question a released run left open
+    // (the session never served the window the log that would have answered it):
+    // the window has moved on, and the loss belongs ABOVE the new task's row, as
+    // the record of what happened to the run before it.
+    if (sseRunLostPending) announceRunLost();
+    runSettled = false;
+  } else if (ev && ev.type === "final") {
+    runSettled = true;
+  }
   // reconnect history line: restore the honest on-disk older count. It also
   // OPENS the catch-up block: everything until the `replayed` frame is a record
   // this window is owed, and the view must not chase each one (js/stream-view.js).
@@ -121,6 +150,13 @@ function addEvent(ev) {
   // the catch-up is over: the view follows again, with a single move
   if (ev && ev.type === "replayed") {
     endCatchUp();
+    // The block that just closed is the log's whole answer to the question the
+    // status frame asked (sse-stream.js sseRunLostPending): a final inside it
+    // ended the run and said so — the departing session writes one when it is
+    // released mid-run (agent/server.py record_release) — and its absence is the
+    // window's own ending to state. Only the `replayed` frame can tell the two
+    // apart, which is why the flag waits for it and never guesses earlier.
+    if (sseRunLostPending) announceRunLost();
     return;
   }
   // the offset this window asked to continue from is past the end of the log

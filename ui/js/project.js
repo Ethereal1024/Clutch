@@ -23,6 +23,7 @@ function clearStream() {
   retryNoteEl = null;
   oldestOffset = null; // fresh project: no loaded events yet
   streamHighOffset = null; // and no replayed record to dedupe a reconnect against
+  runSettled = false; // a fresh pane holds no run's ending (js/stream-events.js)
   setOlderPill(0);
 }
 

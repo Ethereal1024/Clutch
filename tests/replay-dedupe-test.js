@@ -105,6 +105,10 @@ global.followTail = true;
 global.gliding = false;
 global.glideRaf = 0;
 global.setJumpVisible = () => {};
+// the run-settled ledger addEvent writes (js/stream-events.js): no run is at
+// stake here — what the window says about a LOST one is tests/silent-idle-test.js
+global.sseRunLostPending = false;
+global.runSettled = false;
 
 for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
   (0, eval)(fnBody(name));

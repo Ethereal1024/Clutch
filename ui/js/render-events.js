@@ -63,9 +63,15 @@ function renderEvent(ev) {
         // released the session it ran in — so the honest paint is idle, and the
         // ONE thing that must not happen is painting it silently. That silence
         // is the reported "the task went idle by itself".
+        //
+        // The frame is not the announcement, though, and a toast that dismisses
+        // itself is not one either (a phone that is not being looked at when it
+        // fires has learned nothing). The run's ending belongs in the transcript
+        // with everything else, so this frame records the question and the
+        // record the new session replays answers it (js/stream-events.js).
         if (ev.value === "idle" && sseRunAtRisk) {
           sseRunAtRisk = false;
-          notice("the connection to the session running this task was lost — nothing is running now");
+          sseRunLostPending = true;
         } else if (ev.value !== "idle") {
           sseRunAtRisk = false; // the run is still there: nothing was lost after all
         }
