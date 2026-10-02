@@ -166,11 +166,21 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
 
   // One entry, or the supply line's own verdict. `version` is part of the
   // published index contract (pylibs-index CI writes file + sha256 + version),
-  // so an entry without it is not a catalogue entry.
+  // and it IS the sha256's first 16 hex chars: the tar's content hash is the one
+  // source of truth for the gate, the index only publishes it twice. An entry
+  // whose halves disagree would gate every connect against a version no bytes can
+  // satisfy — an install on every reconnect — so it is refused here, before the
+  // gate ever reads it.
   function entryFor(index, key) {
     const entry = index && index[key];
     if (!entry || !entry.file || !entry.sha256 || !entry.version) {
       throw new Error(`no prebuilt pylibs artifact for ${key}: the pylibs-matrix CI job has not published one`);
+    }
+    if (entry.version !== entry.sha256.slice(0, 16)) {
+      throw new Error(
+        `pylibs index entry for ${key} disagrees with itself: version ${entry.version} is not the ` +
+          `sha256 prefix ${entry.sha256.slice(0, 16)}`
+      );
     }
     return entry;
   }
@@ -198,9 +208,10 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
     // version = recomputed content-hash prefix, i.e. the expected VERSION gate.
     async ensurePyLibsTar(target) {
       const key = indexKey(target);
-      // offline, an index we cannot turn into bytes is not a catalogue: the
-      // tar for this target has to be here for the cached copy to be honoured
-      const index = await loadIndex((c) => !!(c[key] && c[key].file && fs.existsSync(path.join(cacheDir(), c[key].file))));
+      // offline, an index we cannot turn into bytes is not a catalogue: the tar
+      // for this target has to be here for the cached copy to be honoured
+      const bytesHere = (c) => !!(c[key] && c[key].file && fs.existsSync(path.join(cacheDir(), c[key].file)));
+      const index = await loadIndex(bytesHere);
       const entry = entryFor(index, key);
       const dir = cacheDir();
       fs.mkdirSync(dir, { recursive: true });

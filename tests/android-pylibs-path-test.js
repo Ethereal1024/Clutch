@@ -197,15 +197,22 @@ async function main() {
   "index without the key rejects cleanly (→ strategy falls back, no partial state)"
 );
 
+      // fetch is injected so the fake host need not serve the body. The index is
+      // SELF-CONSISTENT (version = sha256 prefix, as CI publishes it) and the
+      // download is the thing that lies: the provider recomputes the hash of the
+      // bytes it got and must refuse them, never trust the catalogue (nor the
+      // file name) — and an index that contradicted itself would be refused
+      // before any download at all.
+      const lieBytes = crypto.createHash("sha256").update(Buffer.from("tampered")).digest("hex");
       const tampered = await serveIndex(
-        JSON.stringify({ [KEY]: { file: ciName + ".evil", sha256: "0".repeat(64), version: "x" } }),
+        JSON.stringify({
+          [KEY]: { file: ciName + ".evil", sha256: lieBytes, version: lieBytes.slice(0, 16) },
+        }),
         {}
       );
-      // fetch is injected so the fake host need not serve the body: the index
-      // (fetched over real HTTP) says sha256=000…0, the body is "tampered"
       const evilProvider = createAndroidArtifactProvider({
         indexUrl: `http://127.0.0.1:${tampered.server.address().port}/pylibs-index.json`,
-        fetch: () => Promise.resolve(Buffer.from("tampered")),
+        fetch: () => Promise.resolve(Buffer.from("not the bytes this index names")),
       });
       let hashFail = null;
       try {

@@ -129,8 +129,15 @@ async function main() {
   assert.strictEqual(tarFetches(), 0, "resolving the version downloaded no tar");
 
   // 4. the manifest LIES about the bad artifact (CI drift simulation): the
-  // provider must catch it via its own sha256, not trust the index
-  srv.index["linux-aarch64-musl-py3.13"].sha256 = sha256(good); // the lie
+  // provider must catch it via its own sha256, not trust the index. The lie is
+  // kept self-consistent — sha256 and version agree on a hash the served bytes
+  // do not have — because an entry that contradicted itself would be refused
+  // before any download (next check).
+  srv.index["linux-aarch64-musl-py3.13"] = {
+    file: `agent-pylibs-linux-aarch64-musl-py3.13-${badHash16}.tar.gz`,
+    sha256: sha256(good), // the lie: this file holds `bad`, not `good`
+    version: goodHash16,
+  };
   await assert.rejects(
     () => provider.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
     /failed sha256/,
@@ -141,6 +148,29 @@ async function main() {
     [],
     "a rejected download leaves nothing behind (a cached INDEX is not an artifact)"
   );
+
+  // 4a. an index entry that disagrees with ITSELF is not a catalogue entry: the
+  // gate would compare against a version no bytes can ever satisfy, i.e. an
+  // install on every reconnect. It is refused before any download, and the
+  // gate's question is refused with the same verdict — a version string is not
+  // worth guessing from half an entry.
+  srv.index["linux-aarch64-musl-py3.13"] = {
+    file: `agent-pylibs-linux-aarch64-musl-py3.13-${badHash16}.tar.gz`,
+    sha256: sha256(bad),
+    version: goodHash16, // ≠ sha256.slice(0,16)
+  };
+  const downloadsBeforeDrift = tarFetches();
+  await assert.rejects(
+    () => provider.ensurePyLibsTar({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    /disagrees with itself/,
+    "an index entry that contradicts its own sha256 is refused"
+  );
+  await assert.rejects(
+    () => provider.resolvePyLibsVersion({ os: "linux", arch: "aarch64", libc: "musl", pyver: "3.13" }),
+    /disagrees with itself/,
+    "…and the gate is never handed that version"
+  );
+  assert.strictEqual(tarFetches(), downloadsBeforeDrift, "…without downloading anything");
 
   // 5. the good probe: download, verify, land in the desktop's cache
   const { path: p, version } = await provider.ensurePyLibsTar({
