@@ -84,7 +84,11 @@ Release 索引下载。四处改动：
    `CLUTCH_PYLIBS_INDEX_URL` env → 同目录盖章文件 `pylibs-index-url.txt`（release CI
    用 APK 自己的 tag 写入）→ releases/latest（dev 兜底）。索引必须与 APK 同 commit：
    tar 内嵌 agent/ 源码，漂移会有协议错配风险。下载后本地复算 sha256，远端 VERSION
-   门（=tar 哈希前 16 hex）原样复用。
+   门（=tar 哈希前 16 hex）原样复用。**供给 seam 是两问**：`resolvePyLibsVersion(target)`
+   只回答"这一版发的是哪个制品"——读几 KB 索引，零字节下载，VERSION 门问的是它；
+   `ensurePyLibsTar(target)` 才给字节，只在真安装时调用（`ui/tunnel-bootstrap.js`
+   的 `install:fetch` 阶段）。两者缺一，`setArtifactProvider` 直接拒绝。索引条目还会
+   自校验 `version === sha256[0:16]`：条目自相矛盾时在下载任何字节之前就被拒。
 3. **CI**：`.github/workflows/release.yml` 增 `pylibs-matrix`（py3.10–3.13 ×
    x86_64/aarch64 × glibc/musl = 16 格，`pip download --platform` 纯下载，无需
    submodules/QEMU）+ `pylibs-index`（聚合校验：文件名哈希==内容哈希，生成
@@ -98,6 +102,9 @@ Release 索引下载。四处改动：
 sha256 逐字节相同；CI 命名 tar 过假索引服务器 → 真 provider → 真 `ensurePyLibsTar`
 seam，落盘沙箱 `~/.clutch/bundles`，`version === fileHash(tar).slice(0,16)`；二次调用
 tar 零下载（索引 JSON 每次重读是设计行为）；缺键干净拒绝；篡改下载过不了 sha256 门。
+`tests/android-provider-test.js` 第 3 节钉住门不再搬字节：只有索引、没有 tar 时
+VERSION 门照过，`tarFetches` 仍为 0；第 4 节钉住索引撒谎（自洽条目 / 自相矛盾条目）
+在下载前被拒。
 `tests/remote-strategy-test.js` 补 N4：注册 provider 后同平台远端也走 pylibs、无
 python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
 
