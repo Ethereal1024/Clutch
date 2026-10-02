@@ -21,7 +21,11 @@ class RoutingMixin:
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/api/health":
-            self._json({"ok": True})
+            # in_flight is what the supervisor's stale-session rule asks: a run
+            # in flight is the child's own liveness evidence, so a window that
+            # went silent (a phone in the background, its timers frozen) must
+            # not cost an in-flight run its session.
+            self._json({"ok": True, "in_flight": bool(self._state.busy)})
         elif path == "/api/events":
             params = parse_qs(parsed.query)
             # since=<byte offset>: the highest .clc offset this window has already

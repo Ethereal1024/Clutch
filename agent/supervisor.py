@@ -35,7 +35,10 @@ Lifecycle (per product decision):
     spawns it when down); the LAST window's exit ends it — each window stops
     its session on close, and the supervisor self-exits after an idle grace
     once no sessions remain. A stale-session reaper also clears sessions whose
-    window crashed (heartbeat stops).
+    window crashed (heartbeat stops) — but silence is a question, not a
+    verdict: it asks the child (GET /api/health -> in_flight) and a run in
+    flight outvotes it, so a frozen window (a phone in the background, with no
+    timers) cannot cost a live run its session.
   - on Windows each session child is assigned to a kill-on-close Job by the
     generic layer (agent.procmgr.kill): a supervisor that dies without reaping
     (crash, TerminateProcess, Electron's tree going down with it) would orphan
@@ -69,8 +72,10 @@ import sys
 import threading
 import time
 import uuid
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+from urllib.request import urlopen
 
 from agent.procmgr import kill
 from agent.procmgr.stdio import SafeStdStream, log, make_stdout_nonblocking
@@ -87,6 +92,24 @@ from agent.tools import components, rendezvous
 DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
 SESSION_START_TIMEOUT_S = 30.0  # child port banner: onefile extraction is slow on a remote
+HEALTH_PROBE_TIMEOUT_S = 1.0  # a live child answers at once; a wedged one is no evidence
+
+
+def session_in_flight(port: int | None) -> bool:
+    """Ask a session child whether a run is in flight, over its /api/health.
+
+    False on ANY doubt — no port, connection refused, a timeout, an answer we
+    cannot read. This is corroboration, never the contract: only a positive
+    answer ever keeps a silent window's session alive.
+    """
+    if not port:
+        return False
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=HEALTH_PROBE_TIMEOUT_S) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except (OSError, ValueError, HTTPException):
+        return False
+    return bool(body.get("in_flight")) if isinstance(body, dict) else False
 
 # session-specific names for the generic layer's timers (kept for greppability:
 # the UI's heartbeat budget is defined against SESSION_STALE_S)
@@ -206,6 +229,29 @@ class SessionSupervisor(ProcessSupervisor):
 
     def _log_stale(self, key: str) -> None:
         log(f"[supervisor] reaping stale session {key}")
+
+    def _stale(self, record: Session, now: float) -> bool:
+        """A session is stale only when its window went silent AND the child
+        reports nothing in flight.
+
+        The heartbeat contract is with the WINDOW, and a window goes silent
+        without dying: an Android app in the background is frozen, its timers
+        included, so no beat can be sent while the run it started is still
+        going. Reaping then does not clear a dead window — it kills a live run
+        mid-flight, which is exactly the "run silently flips to idle" outage.
+        So silence is a question, not a verdict: the child lives on this
+        machine and answers about itself in-process. A run in flight is the
+        child's own liveness evidence, so refresh the beat and leave it alone
+        however long the run takes — deliberately unbounded, because a run
+        that never ends is a wedged run (its own bug, and its own Stop
+        button), not a reason to kill a session that is still working."""
+        if not super()._stale(record, now):
+            return False
+        if not session_in_flight(record.port):
+            return True
+        log(f"[supervisor] session {record.key} has a run in flight - not reaping")
+        self.beat(record.key)  # the child vouches for itself: normal contract resumes next pass
+        return False
 
 
 # legacy name: tests, entry scripts and older docs all say Supervisor

@@ -12,6 +12,10 @@ residents later. It owns, thread-safely:
   that declare ``beat_required``
 - reap_loop: stale-child reaping + idle self-exit; never raises (a broken pass
   must not kill the reaper — that would leak every remaining child)
+- stale rule: ``_stale(record, now)`` — the one question the reaper asks per
+  record. The base answer is the heartbeat contract; a tenant overrides it to
+  let the child's own evidence overrule a silent window (agent/supervisor.py
+  asks ``/api/health`` before reaping a session with a run in flight).
 
 It deliberately knows nothing about sessions: the caller supplies identity
 keys, the child command, and the policy knobs (heartbeat on/off, kill
@@ -237,17 +241,26 @@ class ProcessSupervisor:
         while not self.exit_event.is_set():
             try:
                 now = time.time()
-                stale: list[str] = []
+                # judge outside the lock: a tenant's stale rule may put a
+                # question to the child (the session supervisor asks
+                # /api/health), and no blocking probe runs with the lock held
                 with self._lock:
-                    for key, record in list(self.processes.items()):
-                        if record.beat_required and now - record.last_beat > self.stale_s:
-                            stale.append(key)
+                    records = list(self.processes.values())
+                stale = [r.key for r in records if self._stale(r, now)]
+                for key in stale:
+                    # judging took a probe (a tenant may ask the child), so the
+                    # window may have stopped this one meanwhile: reaping what
+                    # is no longer here would log a kill that never happened
+                    with self._lock:
+                        known = key in self.processes
+                    if not known:
+                        continue
+                    self._log_stale(key)
+                    self.stop(key)
+                with self._lock:
                     n = len(self.processes)
                     exit_when_idle = self.exit_when_idle
                     last_activity = self.last_activity
-                for key in stale:
-                    self._log_stale(key)
-                    self.stop(key)
                 if n == 0 and (exit_when_idle or now - last_activity > self.idle_timeout_s):
                     log(f"[{self.label}] idle, exiting")
                     self.exit_event.set()
@@ -274,3 +287,14 @@ class ProcessSupervisor:
 
     def _log_stale(self, key: str) -> None:
         log(f"[{self.label}] reaping stale {key}")
+
+    def _stale(self, record: ManagedProcess, now: float) -> bool:
+        """Is this record reclaimable as stale? The base rule IS the heartbeat
+        contract: a ``beat_required`` child that has not beaten within
+        ``stale_s``. Tenants override it to add evidence the CHILD can give
+        about itself — the heartbeat's counterparty is the window, which can go
+        silent for reasons that have nothing to do with the child's work (a
+        phone in the background has no timers). A rule that finds the child
+        alive should refresh ``last_beat`` rather than invent a grace number:
+        the record then re-enters the normal contract on the next pass."""
+        return record.beat_required and now - record.last_beat > self.stale_s

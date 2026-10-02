@@ -547,6 +547,76 @@ def main() -> int:
             beat2 = hb.stat().st_mtime_ns if hb.exists() else 0
             check(beat1 == beat2, "the refused session's child was killed (no orphan-in-waiting)")
 
+    # ---- 15. a run in flight outvotes a silent window (phone in the background) ----
+    # The heartbeat contract is with the WINDOW, and a window goes silent
+    # without dying: an Android app in the background is frozen, its timers
+    # included, so no beat can be sent while the run it started is still going.
+    # The reaper used to kill exactly that run mid-flight (the phone saw
+    # running flip to idle, the .clc tail had no final). Silence is now a
+    # QUESTION — the reaper asks the child (GET /api/health -> in_flight), and
+    # a run in flight is the child's own liveness evidence. Real child, real
+    # endpoint that accepts and never answers: a genuine run in flight that no
+    # LLM call ever completes.
+    import socket as _socket
+
+    hang = _socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen(5)  # connect completes; no response ever comes
+    hang_port = hang.getsockname()[1]
+    try:
+        sup15, port15, _ = start_supervisor(stale_s=0.6, idle_timeout_s=60)
+        base15 = f"http://127.0.0.1:{port15}"
+        st, body = http_post(
+            f"{base15}/api/session/start",
+            {"base_url": f"http://127.0.0.1:{hang_port}/v1", "model": "hang-model"},
+        )
+        check(st == 200, "session for the in-flight case started")
+        d15 = json.loads(body)
+        sid15, sport15 = d15["session_id"], d15["port"]
+        s15 = f"http://127.0.0.1:{sport15}"
+
+        with tempfile.TemporaryDirectory() as tdir15:
+            st, body = http_post(f"{s15}/api/project/new", {"dir": tdir15, "name": "inflight"})
+            check(st == 200, "the in-flight session owns a project")
+            clc15 = json.loads(body)["project"]
+            # beat while setting up (a window does exactly this)...
+            st, _ = http_post(f"{base15}/api/session/heartbeat", {"session_id": sid15})
+            check(st == 200, "heartbeat accepted before the run")
+            # ...then go silent for good: the frozen-phone case
+            st, body = http_post(f"{s15}/api/run", {"task": "hold the line", "project": clc15})
+            check(st == 200, "run accepted against an endpoint that never answers")
+            st, body = http_get(f"{s15}/api/health")
+            check(
+                st == 200 and json.loads(body).get("in_flight") is True,
+                "the child reports its run in flight (GET /api/health -> in_flight)",
+            )
+
+            # three stale windows with no beat at all: the child's answer is the
+            # only thing between this session and a reap
+            time.sleep(3.0)
+            check(sid15 in sup15.sessions, "a silent window's session survives because a run is in flight")
+            check(
+                sid15 in sup15.sessions and sup15.sessions[sid15].proc.poll() is None,
+                "the run's child is the same live process (never reaped, never restarted)",
+            )
+            st, body = http_get(f"{s15}/api/health")
+            check(
+                st == 200 and json.loads(body).get("in_flight") is True,
+                "the run is still in flight (the reap deferred, it did not disappear)",
+            )
+
+        # the rule DEFERS, it does not disable: the very same supervisor still
+        # reaps an idle session whose window went silent
+        st, _ = http_post(f"{base15}/api/session/stop", {"session_id": sid15})
+        check(st == 200, "the in-flight session stops on request")
+        st, body = http_post(f"{base15}/api/session/start")
+        sid15b = json.loads(body)["session_id"]
+        ok = wait_until(lambda: sid15b not in sup15.sessions, 10.0, "idle session reaped")
+        check(ok, "an idle session with the same silent window is still reaped")
+        sup15.shutdown_all()
+    finally:
+        hang.close()
+
     print("\nSUPERVISOR TESTS PASSED")
     return 0
 
