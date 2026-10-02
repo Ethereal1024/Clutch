@@ -27,7 +27,12 @@ function openFsBrowser(mode) {
   $("#fs-title").textContent = mode === "new" ? "New project" : "Open project";
   $("#fs-create").classList.toggle("hidden", mode !== "new");
   $("#fs-name-input").value = "";
-  showPickerBody(); // normal browsing: path bar + file list + (new-project area)
+  // Nothing is browsed until a backend answers: open with the body folded, the
+  // conn bar showing what there is to connect to and the user's Connect as the
+  // only door (report #1: the file list must never carry connection chatter or
+  // errors, and report #3: opening the picker dials nothing on its own — loadDir
+  // unfolds the body the moment it has a listing to show)
+  hidePickerBody();
   $("#fs-up").disabled = false;
   $("#fs-go").disabled = false;
   $("#fs-path-input").disabled = false;
@@ -40,12 +45,11 @@ function openFsBrowser(mode) {
       notice("could not reach the backend: " + (e && e.message ? e.message : e));
       return null;
     })
-    .then(async (url) => {
+    .then((url) => {
       if (url) switchBackend(url);
+      renderConnSelector();
       // reopen where the user last left the browser instead of the home directory
       loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
-      renderConnSelector();
-      await autoReconnectAndroid(); // report #2: bring the remembered host back
     });
 }
 
@@ -54,9 +58,9 @@ function closeFsBrowser() {
 }
 
 // Row activation is DELEGATED to #fs-list and keyed to pointerup, not to a
-// per-row click listener. Why: a background re-list replaces every row (the
-// phone's remembered SSH backend arriving a moment after the dialog opened
-// re-fetches the directory), and a click whose mousedown target has been
+// per-row click listener. Why: a background re-list replaces every row (a
+// backend connected from the picker re-fetches the directory a moment after the
+// list is up), and a click whose mousedown target has been
 // removed from the document is never dispatched at all — the tap does nothing
 // at all, silently (device report: "opening another project on the phone does
 // nothing"). pointerup still fires and still reaches the list, so the tap lands
@@ -111,38 +115,28 @@ $("#fs-list").addEventListener("pointercancel", () => {
   fsPress = null;
 });
 
-// wait for the backend to be claimed (cold start: supervisor spawn + session
-// child boot take a few seconds) so a click during that window just works
-// instead of telling the user to close and re-click
-function waitBackend(ms = 20000) {
-  if (API_BASE) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const t0 = Date.now();
-    const iv = setInterval(() => {
-      if (API_BASE || Date.now() - t0 >= ms) {
-        clearInterval(iv);
-        resolve(Boolean(API_BASE));
-      }
-    }, 200);
-  });
-}
-
+// Draw the directory the backend answered with. The listing FOLLOWS the base: a
+// picker that is already open re-lists the moment the host announces one
+// (backend-lifecycle.js, backend:base-changed), and no base at all means no
+// listing to draw.
 async function loadDir(path, remember = true) {
   const listEl = $("#fs-list");
+  const token = ++fsListToken; // latest listing request: a stale answer must not paint
   if (!API_BASE) {
-    // backend not claimed yet (supervisor mid-spawn): show progress and pick
-    // the listing up automatically the moment the session is up
-    listEl.innerHTML = '<div class="fs-row plain">connecting to backend…</div>';
-    if (!(await waitBackend())) {
-      listEl.innerHTML = '<div class="fs-row error-row">backend did not come up — close this dialog and retry</div>';
-      return;
-    }
+    // no session, so nothing to browse: the body stays folded and the file list
+    // stays empty (report #1 — a status line about the connection was drawn as if
+    // it were a directory entry, and "wait for the backend then list" made the
+    // list a place where a backend appears rather than a place that lists one)
+    listEl.innerHTML = "";
+    hidePickerBody();
+    return;
   }
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
   try {
     const data = await apiFetch(
       "/api/fs/list?path=" + encodeURIComponent(path) + (showHidden ? "&hidden=1" : "")
     );
+    if (token !== fsListToken) return; // superseded while the listing was in flight
     fsPath = data.path;
     fsParent = data.parent;
     // remember the last browsed directory (re-lists pass remember=false)
@@ -168,7 +162,11 @@ async function loadDir(path, remember = true) {
       }
     }
     if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
+    // there IS something to browse: the body (path bar + list + actions) is the
+    // picker now
+    showPickerBody();
   } catch (e) {
+    if (token !== fsListToken) return;
     // a remembered last directory may be gone: forget it and retry from home once
     const remembered = localStorage.getItem("clutch_fs_last_dir");
     if (remembered && path === remembered) {
@@ -176,24 +174,14 @@ async function loadDir(path, remember = true) {
       loadDir("");
       return;
     }
+    // the base answers nothing: there is no listing to draw, so the body folds
+    // and the reason goes on the conn bar. Reaching the local machine, or another
+    // host, is the Connect button's job (the old reset row that used to live here
+    // was both a fake directory entry AND a second door).
     listEl.innerHTML = "";
-    listEl.appendChild(
-      fsRow(
-        "Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Reconnect SSH or check the backend URL.",
-        "error-row"
-      )
-    );
-    if (!IS_ANDROID) {
-      // report #2: there is no local backend to reset to on the phone
-      listEl.appendChild(
-        fsRow("Reset to local backend", "action", async () => {
-          localStorage.removeItem("clutch_ssh_connected");
-          localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
-          await switchBackendResolved();
-          refreshPicker();
-        })
-      );
-    }
+    hidePickerBody();
+    connStatus.textContent =
+      "Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Connect again below.";
   }
 }
 

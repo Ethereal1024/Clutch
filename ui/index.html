@@ -158,6 +158,9 @@
           <div id="conn-select" class="cselect"></div>
           <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
         </div>
+        <!-- Choosing a backend and connecting to it are two acts: the picker may
+             not dial a host because it was merely preselected (device report #3) -->
+        <button id="conn-connect" class="primary" title="connect to the selected backend">Connect</button>
         <p id="conn-status" class="muted"></p>
         <div id="conn-progress" class="conn-progress hidden">
           <div class="conn-progress-track"><div id="conn-progress-fill" class="conn-progress-fill"></div></div>

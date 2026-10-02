@@ -75,6 +75,9 @@ function customSelect(root) {
 
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
+    // an empty picker is DISABLED, and a disabled control does not open: the
+    // button is a real <button>, so only the class marks it (report #3)
+    if (root.classList.contains("disabled")) return;
     root.classList.toggle("open");
   });
   document.addEventListener("click", (e) => {

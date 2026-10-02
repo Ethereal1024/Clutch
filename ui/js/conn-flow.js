@@ -11,9 +11,12 @@
 
 "use strict";
 
-// restore the picker's normal browsing state after a connect/disconnect
+// restore the picker after a connect/disconnect: the bar's connect chrome is over,
+// and the body follows whatever the listing the picker is about to ask for answers
+// with (loadDir owns that visibility — a folded body is folded only until a
+// backend answers, and no answer means it stays folded)
 function refreshPicker() {
-  showPickerBody();
+  resetConnChrome();
   loadDir("", false); // re-list the (new) backend from home; keep the remembered dir
   renderConnSelector();
 }
@@ -42,13 +45,26 @@ function closePasswordPrompt() {
 let connBusy = false; // a connect is in flight: ignore re-clicks
 let lastConn = null;  // { host, user, port, statusEl } of the last attempt (Retry)
 
-// collapse the picker body during a connect/failure; only the conn bar remains
+// Monotonic token for the file listing (loadDir in js/fs-browser.js): a listing
+// that comes back after the user asked for something else — another directory, a
+// connect that folded the body — must not paint itself, nor unfold the body, over
+// the newer intent.
+let fsListToken = 0;
+
+// collapse the picker body during a connect/failure; only the conn bar remains.
+// Folding is also what retires a listing that is still in flight.
 function hidePickerBody() {
+  fsListToken++;
   $("#fs-body").classList.add("collapsed");
 }
 function showPickerBody() {
   $("#fs-body").classList.remove("collapsed");
   $("#fs-new").classList.toggle("hidden", fsMode !== "new");
+  resetConnChrome();
+}
+// the connect chrome on the conn bar (progress, Retry/Cancel) belongs to an attempt
+// that is over the moment the picker is back in its browsing state
+function resetConnChrome() {
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");
   $("#conn-actions").classList.add("hidden");
@@ -170,8 +186,14 @@ async function handleSshConnect(host, user, port, statusEl) {
   }
 }
 
-connSelect.addEventListener("change", async () => {
+// Connect — the user's own act, and the only thing in the picker that dials a
+// host. Choosing an entry and connecting to it are two separate acts (device
+// report #3: the picker used to connect because a host had been SELECTED, so
+// merely opening "Open project" dialled the remembered device). connOnValue
+// (js/conn-store.js) is the backend this window is already on: nothing to do.
+async function connConnect() {
   const v = connSelect.value;
+  if (!v || v === connOnValue) return;
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {
       // the standing intent goes FIRST: the disconnect below ends the tunnel and
@@ -181,9 +203,11 @@ connSelect.addEventListener("change", async () => {
       localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
       await window.clutchTunnel.disconnect();
       await resetBackendLocal(); // end any SSH degradation on the local server
-      await switchBackendResolved(); // stay in the picker, back to the local backend
-      refreshPicker();
     }
+    // this machine's own session, by asking the host for it: with no session yet
+    // the honest answer is still "not connected", never a guessed local port
+    await switchBackendResolved();
+    refreshPicker();
     return;
   }
   if (v.startsWith("ssh:") && !v.includes("__connected__")) {
@@ -199,7 +223,8 @@ connSelect.addEventListener("change", async () => {
     const [host, port] = hostPort.split(":");
     await handleSshConnect(host, user, port || "22", connStatus);
   }
-});
+}
+$("#conn-connect").addEventListener("click", connConnect);
 
 // new-connection popup (only shown when the user asks to add an SSH host)
 const connNewModal = $("#conn-new-modal");

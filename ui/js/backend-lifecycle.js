@@ -143,8 +143,9 @@ async function reconciledBackendUrl() {
       // the phone — there is no agent behind 127.0.0.1, so that branch pointed
       // the app at a dead port while the picker still showed the saved host
       // (the reported "selected SSH client but 127.0.0.1:8891 + connection
-      // error"). Keep the flag: it is the user's standing intent, and
-      // autoReconnectAndroid() re-establishes the host with it.
+      // error"). Keep the flag: it is the user's standing intent, and the picker
+      // preselects exactly that host for the user's own Connect press
+      // (js/conn-store.js) — nothing here dials it behind their back.
       return null;
     }
     // stale SSH leftover: fall back to the local backend via the main process
@@ -153,28 +154,6 @@ async function reconciledBackendUrl() {
     return null; // switchBackendResolved already switched
   }
   return null;
-}
-
-// device report #2: a phone that was on an SSH backend must come back to it.
-// Re-entry runs the same path as the user's own connect (keys first, password
-// prompt only if the host demands one) instead of leaving the UI pointed at a
-// local backend that cannot exist there.
-async function autoReconnectAndroid() {
-  if (!IS_ANDROID || !window.clutchTunnel) return false;
-  // no flag = the user left the picker disconnected on purpose
-  if (!localStorage.getItem("clutch_ssh_connected")) return false;
-  const host = localStorage.getItem("clutch_ssh_host");
-  const user = localStorage.getItem("clutch_ssh_user");
-  if (!host || !user) return false;
-  const s = await window.clutchTunnel.status().catch(() => null);
-  if (s && s.active) return true; // tunnel survived: already the active backend
-  const ok = await handleSshConnect(host, user, localStorage.getItem("clutch_ssh_port") || "22", connStatus);
-  if (!ok) {
-    // never leave the picker claiming a host we are not on
-    renderConnSelector();
-    connStatus.textContent = "Not connected — " + user + "@" + host + " did not come back.";
-  }
-  return Boolean(ok);
 }
 
 // The backend this window was talking to is gone: drop the stale session URL so
@@ -207,8 +186,9 @@ if (window.clutchTunnel) {
     if (!localStorage.getItem("clutch_ssh_connected")) return;
     const pickerOpen = !fsModal.classList.contains("hidden");
     connectionLost("lost the remote connection");
-    // the picker must not keep claiming a connection that does not exist; with
-    // a session on its way back it re-lists itself (see loadDir's waitBackend)
+    // the picker must not keep claiming a connection that does not exist: with the
+    // base gone it folds to the conn bar, and the session the host announces when
+    // the dialog gets it back re-lists it (see the base-changed handler below)
     if (pickerOpen) refreshPicker();
   });
 }
@@ -216,11 +196,21 @@ if (window.clutchTunnel) {
 // the main process re-established this window's session: point the app at the new URL
 if (window.clutchApi && window.clutchApi.onBaseChanged) {
   window.clutchApi.onBaseChanged((url) => {
-    if (url) switchBackend(url);
-    // null is an answer too, and the honest one: the host looked and this window
-    // has no session (no tunnel, and no local one either). Staying on the dead
-    // URL was the reported "Connected: http://127.0.0.1:4xxxx" that answered
-    // nothing — the dialog is what replaces it.
-    else connectionLost("the host has no session for this window");
+    // the host's answer: a URL is this window's session, and null is an answer
+    // too — the honest one, meaning the host looked and this window has no
+    // session (no tunnel, and no local one either). Staying on the dead URL was
+    // the reported "Connected: http://127.0.0.1:4xxxx" that answered nothing, so
+    // the dialog the announcement raises is what replaces it.
+    if (url) {
+      switchBackend(url);
+      // A picker that is already open lists the backend it is pointed at: this
+      // announcement IS the session it was waiting for, so the listing follows the
+      // base instead of a timer polling for it (the picker opens folded — see
+      // openFsBrowser in js/fs-browser.js — and unfolds on this first listing)
+      if (!fsModal.classList.contains("hidden")) {
+        renderConnSelector();
+        loadDir(fsPath, false);
+      }
+    } else connectionLost("the host has no session for this window");
   });
 }

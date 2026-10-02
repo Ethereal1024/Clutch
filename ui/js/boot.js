@@ -77,8 +77,6 @@ async function loadHostDefaults() {
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
-  // report #2: bring the phone's remembered SSH backend back in the background.
-  // Fire-and-forget: the UI is live either way, and a successful reconnect
-  // switches the base (and thus the SSE stream) in place.
-  autoReconnectAndroid();
+  // Nothing dials a host on startup: a remembered remote stays a PRESELECTION in
+  // the picker (js/conn-store.js) until the user presses Connect there.
 })();

@@ -47,6 +47,16 @@ function connLabel(c) {
   return `${c.user}@${c.host}:${c.port}`;
 }
 
+// The option whose backend this window is ALREADY on ("" = none). renderConnSelector
+// computes it from the same state it draws the list from, so the picker cannot
+// offer to "connect" to where it already is — choosing and connecting are two acts
+// (device report #3: the picker used to dial a host merely because it was selected).
+let connOnValue = "";
+function updateConnConnect() {
+  $("#conn-connect").disabled = !connSelect.value || connSelect.value === connOnValue;
+}
+connSelect.addEventListener("change", updateConnConnect);
+
 function renderConnSelector() {
   const override = localStorage.getItem("clutch_api_url");
   const connected = override && localStorage.getItem("clutch_ssh_connected");
@@ -74,6 +84,7 @@ function renderConnSelector() {
     connSelect.appendChild(opt);
     if (isConnected) connectedValue = opt.value;
   }
+  let onValue = "";
   if (connected) {
     if (connectedValue) {
       connSelect.value = connectedValue;
@@ -87,23 +98,25 @@ function renderConnSelector() {
       connSelect.appendChild(opt);
       connSelect.value = "ssh:__connected__";
     }
+    onValue = connSelect.value;
   } else if (IS_ANDROID) {
-    // report #2: with no Local entry, land the picker on the most recent saved
-    // host (display only — connecting still requires the user's change event);
-    // nothing saved yet: a placeholder whose "" value the change handler skips
+    // report #2/#3: with no Local entry, land the picker on the most recent saved
+    // host. Preselecting is not connecting: nothing is dialled here, the user
+    // presses Connect (a placeholder would be the only other option, and an
+    // empty list is DISABLED instead — see below)
     const saved = sshConns();
-    if (saved.length) {
-      connSelect.value = "ssh:" + connLabel(saved[0]);
-    } else {
-      const ph = document.createElement("option");
-      ph.value = "";
-      ph.textContent = "— add an SSH connection —";
-      connSelect.appendChild(ph);
-      connSelect.value = "";
-    }
+    if (saved.length) connSelect.value = "ssh:" + connLabel(saved[0]);
   } else {
     connSelect.value = "local";
+    // this machine's own session: where the window is, once it has a base at all
+    if (API_BASE) onValue = "local";
   }
+  connOnValue = onValue;
+  // nothing to pick from = a disabled picker, not a placeholder entry dressed up
+  // as a backend (report #3). "＋ New SSH connection" is the way to the first
+  // host; Connect mirrors whatever the list can actually offer.
+  connSelect.disabled = !connSelect.value;
+  updateConnConnect();
   // never claim "Using <url>" when there is no session: with the supervisor's
   // port refused as a base, API_BASE is either a real session or null
   connStatus.textContent = connected

@@ -1115,6 +1115,9 @@ mjx-container[display="true"] {
   justify-content: center;
   line-height: 1;
 }
+/* the picker's own Connect button: a full-width line under the host row, so
+   "which backend" and "connect to it" read as two separate acts */
+#conn-connect { width: 100%; margin-top: 8px; }
 #conn-status { margin: 8px 0 0; }
 .conn-progress { margin-top: 8px; }
 .conn-progress-track { height: 3px; background: var(--border); overflow: hidden; border-radius: 2px; }
