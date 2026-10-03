@@ -19,8 +19,9 @@ installs ONTO, whether it is this desktop or a device behind a tunnel):
     GET    /api/components/versions -> ?name= -> one record per installed version
     POST   /api/components/install  -> take one artifact; the manifest rides in the
                                        X-Clutch-Component header (base64 of its
-                                       JSON), the artifact is the
-                                       body -> {status: "installed"|"current", ...}
+                                       JSON), the artifact is either the
+                                       body or an artifact_url this host fetches
+                                       -> {status: "installed"|"current", ...}
     DELETE /api/components/<name>   -> ?version= names ONE version to drop; without
                                        it the component goes whole
                                        -> {status: "removed"|"absent", ...}
@@ -317,8 +318,8 @@ class _Handler(BaseHTTPRequestHandler):
         """Take one component artifact onto THIS machine.
 
         The install layer's HTTP face (agent/tools/components.py owns the logic):
-        the manifest rides in a header as base64 of its JSON, the artifact IS
-        the body, and the
+        the manifest rides in a header as base64 of its JSON, the artifact is the
+        request body or an `artifact_url` this host fetches for itself, and the
         answer is a verdict — the client never gets to assume its upload landed.
         A component belongs to the machine its server runs on, so the supervisor
         is where a client installs it: this process IS that machine's resident
@@ -332,10 +333,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": str(err)}, 400)
             return
         length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0:
-            self._json({"error": "no artifact in the request body"}, 400)
+        try:
+            artifact = components.receive(self.rfile, length, manifest)
+        except (ValueError, OSError) as err:
+            # a body-less request that names no URL, a URL that is not http(s),
+            # a fetch that failed or overran: all the same shape of answer
+            self._json({"error": str(err)}, 400)
             return
-        artifact = components.spool(self.rfile, length, name=str(manifest.get(components.ARTIFACT_FIELD) or ""))
         try:
             self._json(components.accept(artifact, manifest))
         except (ValueError, OSError) as err:

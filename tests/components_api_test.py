@@ -9,6 +9,14 @@ taken (POST /api/components/install) — plus the discipline that makes the gate
 trustworthy: the artifact's DIGEST decides, never the manifest's claim, and a
 body that lies or ends early leaves the host exactly as it was.
 
+The artifact reaches a host two ways, and both go through that one gate: the
+request's body (a client that alone holds the bytes — a checkout, a prebuilt
+artifact) or an `artifact_url` the host fetches FOR ITSELF, which is the default
+because the machine that will run the bytes is the one that needs them
+(PLUGIN_PLAN.md 零之四.4). The fetch is exercised over a real socket, not a patched
+`urlopen`: only http(s) is spoken, the response is capped and never read whole,
+and what arrives is weighed against the declared digest like any other body.
+
 It also pins the reverse half, which answers the same way (a verdict, or the
 host's own sentence as error-as-data): what versions this machine holds
 (GET /api/components/versions), and letting one go (DELETE /api/components/…),
@@ -42,6 +50,8 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.supervisor import Supervisor, build_server
@@ -71,6 +81,42 @@ def _post_artifact(base: str, name: str, data: bytes, *, digest: str, artifact: 
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def _post_manifest(base: str, name: str, *, digest: str, data: bytes = b"", **extra) -> tuple[int, str]:
+    """One install request that carries NO bytes: the manifest in the header names
+    the artifact's URL (`artifact_url`) and the host fetches it for itself. This is
+    the default shape of an install (PLUGIN_PLAN.md 零之四.4); `_post_artifact`
+    above is the fallback, for when the client alone holds the bytes."""
+    manifest = {"name": name, "version": digest[:16], "interface": "cli", "digest": digest, **extra}
+    header = base64.b64encode(json.dumps(manifest).encode("utf-8")).decode("ascii")
+    req = urllib.request.Request(
+        f"{base}/api/components/install",
+        data=data,
+        headers={components.MANIFEST_HEADER: header},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+class _SilentFiles(SimpleHTTPRequestHandler):
+    """A file server that does not narrate: this suite's output is its checks."""
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+def _serve(directory: Path) -> tuple[str, ThreadingHTTPServer]:
+    """A throwaway HTTP file server over `directory`, the stand-in for a release
+    host: the fetch path is then exercised over a real socket — a real URL, a real
+    response, the real 404 — rather than against a patched urlopen."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_SilentFiles, directory=str(directory)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}", server
 
 
 def _delete(url: str) -> tuple[int, str]:
@@ -408,6 +454,113 @@ def main() -> int:
             {c["name"] for c in listed} == {modules.MEMORY, modules.WEBSEARCH},
             "the inventory grew by each install and by neither refusal",
         )
+
+        # 7b. the other way an artifact arrives (PLUGIN_PLAN.md 零之四.4): a request
+        #     with NO body that names the URL its bytes are at, so the machine that
+        #     will RUN them fetches them itself. The gate afterwards is the same one
+        #     — the digest the request declared is measured against what arrived —
+        #     so a URL is the default way the bytes get here, not a way around the
+        #     version gate, and the direction a request came from changes nothing
+        #     downstream of `receive`.
+        served = Path(root) / "served"
+        served.mkdir(parents=True, exist_ok=True)
+        local_file = served / "clutch-remote"
+        local_file.write_bytes(b"#!/bin/sh\necho remote\n")
+        filesource, files = _serve(served)
+        remote_digest = components.digest_of(local_file.read_bytes())
+        try:
+            st, body_json = _post_manifest(
+                base,
+                "clutch-remote",
+                digest=remote_digest,
+                artifact="clutch-remote",
+                artifact_url=f"{filesource}/clutch-remote",
+            )
+            check(
+                st == 200 and json.loads(body_json)["status"] == "installed",
+                "a body-less request that names a URL is installed: this host fetched the bytes itself",
+            )
+            landed = components.installed("clutch-remote")
+            check(
+                landed is not None and (landed / "clutch-remote").read_bytes() == local_file.read_bytes(),
+                "and what landed is exactly what the URL served",
+            )
+            check(
+                list((components.root() / components.SCRATCH).iterdir()) == [],
+                "the fetch left no scratch file behind",
+            )
+            st, body_json = _post_manifest(
+                base,
+                "clutch-remote",
+                digest=remote_digest,
+                artifact="clutch-remote",
+                artifact_url=f"{filesource}/clutch-remote",
+            )
+            check(
+                st == 200 and json.loads(body_json)["status"] == "current",
+                "and asking again is gated out on the digest this machine already holds",
+            )
+
+            st, body_json = _post_manifest(
+                base,
+                "clutch-remote",
+                digest="0" * 64,
+                artifact="clutch-remote",
+                artifact_url=f"{filesource}/clutch-remote",
+            )
+            check(
+                st == 400 and "hashes to" in json.loads(body_json)["error"],
+                "fetched bytes that do not hash to the declared digest are refused: the pin is the gate, not the URL",
+            )
+            st, body_json = _post_manifest(
+                base,
+                "clutch-remote",
+                digest=remote_digest,
+                artifact="clutch-remote",
+                artifact_url=f"file://{local_file}",
+            )
+            check(
+                st == 400 and "http(s)" in json.loads(body_json)["error"],
+                "a file: URL is refused: the install endpoint is not a way to read this host's own disk",
+            )
+            st, body_json = _post_manifest(base, "clutch-remote", digest=remote_digest, artifact="clutch-remote")
+            check(
+                st == 400 and "no artifact" in json.loads(body_json)["error"],
+                "a request with neither a body nor a URL has nothing to install",
+            )
+            check(
+                components.installed("clutch-remote") is not None,
+                "and not one of those refusals touched what is already installed",
+            )
+
+            # the cap and the timeout are what keep a fetch from being a way to
+            # fill this host's disk or wedge its request thread. Both live in
+            # components.download, so they are pinned there, against the same real
+            # server: one artifact past the cap, and one URL that is not there.
+            cap = 1 << 20
+            (served / "too-big").write_bytes(b"x" * (2 * cap))
+            try:
+                components.download(f"{filesource}/too-big", limit=cap)
+                check(False, "an artifact past the cap is refused rather than spooled")
+            except ValueError as err:
+                check("larger than 1 MiB" in str(err), "an artifact past the cap is refused, in the cap's own words")
+            try:
+                components.download(f"{filesource}/not-here")
+                check(False, "a URL that answers 404 is refused rather than installed")
+            except OSError as err:
+                check("404" in str(err), "a URL that answers 404 is refused rather than installed")
+            check(
+                list((components.root() / components.SCRATCH).iterdir()) == [],
+                "and neither refusal leaves a half-written file in the scratch directory",
+            )
+
+            st, body_json = _delete(f"{base}/api/components/clutch-remote")
+            check(
+                st == 200 and json.loads(body_json)["status"] == "removed",
+                "a component that arrived by URL is removable like any other",
+            )
+        finally:
+            files.shutdown()
 
         # 8. the reverse verbs. Library first: a host can hold more than one
         #    version (an install prunes, but nothing forces a machine to hold only

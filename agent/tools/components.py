@@ -14,8 +14,14 @@ Two properties are deliberate.
 Machine-local and host-relative, exactly like the daemon discovery records: a
 component installed for a host belongs to that host's filesystem, whether the
 host is this desktop or a remote machine. Nothing in the install path is
-"remote" or "local" — one client uploads the same artifact to whichever host it
-is talking to, and this module is the receiving half.
+"remote" or "local" — whichever host is being installed onto receives the
+artifact, and this module is the receiving half. It receives it two ways
+(`receive`): the request's own body, or an `artifact_url` the host fetches
+ITSELF — the default, because the machine that will RUN the bytes is the one that
+needs them, and a client no longer has to hold a 30 MB copy to install one
+(PLUGIN_PLAN.md 零之四.4). A client that alone holds the bytes (a checkout, a
+prebuilt artifact beside the app) still sends them. Either way one gate decides:
+`accept` measures what arrived against the `digest` the request declared.
 
 Shape-agnostic: `install` takes opaque bytes plus a manifest and lays them down
 atomically. The artifact may be a PyInstaller onefile, an archive of scripts, a
@@ -64,6 +70,8 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 MANIFEST = "component.json"
 ROOT_ENV = "CLUTCH_COMPONENTS_DIR"  # repoints the whole root (tests, unusual layouts)
@@ -72,13 +80,17 @@ ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar", ".zip")
 # The wire contract between a client and the host it installs FOR: the manifest
 # rides in a header — base64 of the JSON's UTF-8 bytes, because a header value
 # is a ByteString (every code point <= 0xFF) and a declaration speaks the
-# component's own language — and the artifact is the request body. The host's
-# side of it is this module; the client's is ui/components.js.
+# component's own language — and the artifact is either the request body or the
+# URL that header names (ARTIFACT_URL_FIELD), which this host then fetches for
+# itself. The host's side of it is this module; the client's is ui/components.js.
 MANIFEST_HEADER = "X-Clutch-Component"
 DIGEST_FIELD = "digest"  # the manifest's record of the artifact's content hash
 ARTIFACT_FIELD = "artifact"  # the artifact's own file name (its shape, by suffix)
+ARTIFACT_URL_FIELD = "artifact_url"  # where those bytes are, when THIS host fetches them
 SCRATCH = ".incoming"  # where a body lands while it is being received
-CHUNK = 1 << 20  # bytes read from a body per pass
+CHUNK = 1 << 20  # bytes read from a body, or from a fetch, per pass
+FETCH_TIMEOUT = 30  # seconds this host waits between reads of the bytes it fetches
+FETCH_LIMIT = 64 << 20  # the most of them it will take: a 30 MB onefile, with room
 
 REGISTRY = "registry.json"  # the table beside the payload dirs: what this host holds
 REGISTRY_SCHEMA = 1  # the table's own version, so a future shape is refused by name
@@ -656,25 +668,35 @@ def _forget(name: str, version: str = "") -> None:
     )
 
 
+def _scratch(name: str = "") -> Path:
+    """An empty scratch file inside the install root; the caller deletes it.
+
+    `name` is the artifact's own file name when the request declared one — the
+    shape of an artifact is read from its suffix (an archive is unpacked,
+    anything else is one executable), so that name has to survive being spooled
+    under a scratch one.
+    """
+    scratch = root() / SCRATCH
+    scratch.mkdir(parents=True, exist_ok=True)
+    suffixes = "".join(Path(name).suffixes) if name else ""
+    fd, path = tempfile.mkstemp(dir=str(scratch), prefix="artifact-", suffix=suffixes)
+    os.close(fd)
+    return Path(path)
+
+
 def spool(stream: IO[bytes], length: int, name: str = "") -> Path:
     """Write an incoming body to a scratch file in the install root; the caller
     deletes it.
 
     Streamed in chunks rather than read whole: an artifact is a PyInstaller
     onefile (tens of megabytes) and the receiving host needs no more of it in
-    memory than the hashing pass touches. `name` is the artifact's own file name
-    when the uploader declared one — the shape of an artifact is read from its
-    suffix (an archive is unpacked, anything else is one executable), so that
-    name has to survive being spooled under a scratch name.
+    memory than the hashing pass touches.
 
     A body that ends early is not an error here: `accept` refuses it on its
     digest, which is the same verdict a body that lied would get.
     """
-    scratch = root() / SCRATCH
-    scratch.mkdir(parents=True, exist_ok=True)
-    suffixes = "".join(Path(name).suffixes) if name else ""
-    fd, path = tempfile.mkstemp(dir=str(scratch), prefix="artifact-", suffix=suffixes)
-    with os.fdopen(fd, "wb") as fh:
+    path = _scratch(name)
+    with open(path, "wb") as fh:
         remaining = max(int(length), 0)
         while remaining > 0:
             chunk = stream.read(min(CHUNK, remaining))
@@ -682,7 +704,67 @@ def spool(stream: IO[bytes], length: int, name: str = "") -> Path:
                 break
             fh.write(chunk)
             remaining -= len(chunk)
-    return Path(path)
+    return path
+
+
+def download(url: str, name: str = "", *, timeout: float = FETCH_TIMEOUT, limit: int = FETCH_LIMIT) -> Path:
+    """Fetch ONE artifact off the network into the install root's scratch; the
+    caller deletes it.
+
+    The receiving host does this ITSELF, and that is the point of it: the machine
+    that will RUN the bytes is the one that needs them, so the client ordering an
+    install does not have to hold a copy — a phone on a slow uplink is no longer
+    in the path. Nothing here verifies anything: `accept` is the single gate, and
+    the `digest` the request declared is what these bytes are weighed against, so
+    an artifact that arrives over the wire is held to exactly the pin a body
+    would have been held to.
+
+    Three things keep a URL from being an open door: only http(s) is spoken (a
+    `file:` URL would make the install endpoint a way to read this host's disk),
+    the response is streamed with a byte cap instead of being read whole, and
+    every read has a timeout. The rest is trust that is already spent — the URL
+    arrives in a manifest whose digest the sender declared, and a sender can
+    hand this host its own bytes anyway, so nothing new is granted here.
+    """
+    scheme = urlsplit(str(url)).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"a component artifact is fetched over http(s), not {scheme or str(url)!r}")
+    path = _scratch(name)
+    try:
+        with urlopen(str(url), timeout=timeout) as res, open(path, "wb") as fh:
+            total = 0
+            while True:
+                chunk = res.read(CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise ValueError(f"the artifact at {url} is larger than {limit >> 20} MiB")
+                fh.write(chunk)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def receive(stream: IO[bytes], length: int, manifest: dict[str, Any]) -> Path:
+    """The artifact ONE install request brought, from whichever direction it came.
+
+    A request carries the bytes itself (`length` > 0: a client that holds them —
+    a checkout, a prebuilt artifact — sending them over the tunnel) or names them
+    (`ARTIFACT_URL_FIELD`: the default, the host fetches them itself, see
+    `download`). Both land in one scratch file and go through the same gate, so
+    nothing downstream of this function has to know which way it arrived; a
+    request that does neither is refused in the host's own words, because "there
+    was nothing to install" is the only thing the caller can act on.
+    """
+    name = str(manifest.get(ARTIFACT_FIELD) or "")
+    if length > 0:
+        return spool(stream, length, name=name)
+    url = str(manifest.get(ARTIFACT_URL_FIELD) or "")
+    if not url:
+        raise ValueError("no artifact in the request body")
+    return download(url, name=name)
 
 
 def accept(artifact: Path | str, manifest: dict[str, Any]) -> dict[str, Any]:
