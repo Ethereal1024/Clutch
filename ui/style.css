@@ -347,7 +347,11 @@ select option { background-color: var(--bg2); color: var(--text); }
   transition: border-color .15s ease, background-color .15s ease;
 }
 .cselect-btn:hover, .cselect.open .cselect-btn { border-color: var(--accent); }
-.cselect-value { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.cselect-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+/* an option's MARK (the ✓ of the host/profile this window is on): its own column,
+   never part of the name — so it cannot wrap onto a second line, and it is still
+   there when a long label is the thing that gives way (…) */
+.cselect-mark { flex: none; }
 .cselect-arrow {
   flex: none;
   width: 8px;
@@ -356,21 +360,42 @@ select option { background-color: var(--bg2); color: var(--text); }
   transition: transform .15s ease;
 }
 .cselect.open .cselect-arrow { transform: rotate(180deg); }
+/* The popup is about its CONTENT, not about the box it hangs from. The picker's own
+   row is shared with real buttons (＋ New SSH connection, Connect), which squeezes
+   the closed control to a sliver on a narrow screen — and the popup used to inherit
+   that sliver, so an unbreakable user@host:port spilled sideways and turned the list
+   into a horizontal scrollbar while the ✓ it ended with wrapped (device report). So
+   the popup GROWS to its widest option: min-width keeps the short case flush with the
+   button, the cap keeps it inside the dialog it was opened from, and beyond the cap it
+   is the LABEL that gives way (…) — the popup itself never scrolls sideways. */
 .cselect-pop {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  right: 0;
+  min-width: 100%;
+  width: max-content;
+  max-width: min(460px, 80vw);
   z-index: 20;
   background: var(--bg2);
   border: 1px solid var(--border);
   max-height: 240px;
   overflow-y: auto;
+  overflow-x: hidden;
   display: none;
 }
 .cselect.open .cselect-pop { display: block; animation: cselect-in .15s ease-out; }
 @keyframes cselect-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-.cselect-opt { padding: 6px 10px; cursor: pointer; color: var(--text); font-size: 13px; font-family: var(--font-mono); }
+.cselect-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+.cselect-opt-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cselect-opt:hover, .cselect-opt.active { background: var(--accent); color: #0F0F10; }
 .cselect.disabled .cselect-btn { opacity: 0.4; cursor: default; }
 .cselect.disabled .cselect-btn:hover { border-color: var(--border); }

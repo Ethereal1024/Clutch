@@ -33,6 +33,16 @@ els.task.addEventListener("input", autoGrowTask);
 
 // ---- API settings modal ----
 // endpoint persisted on the backend + client proxy; profiles pick the backend
+//
+// An option is { value, text } plus an optional MARK (opt.mark): a symbol (the
+// SSH list's ✓, the profile list's ✓) drawn in a column of its own at the end of
+// the row — and of the button — instead of being glued into the label. The
+// difference is what happens to a name too long for the row: the LABEL is what
+// gives way (…), so a marker can never wrap onto a second line, and can never
+// drag the popup into a horizontal scrollbar. Both happened when the ✓ was the
+// last characters of the text: unbreakable user@host:port labels overflowed to
+// the right, and the space before the ✓ was the only break opportunity there
+// was, so the tick dropped to the next line (device report).
 function customSelect(root) {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -40,9 +50,12 @@ function customSelect(root) {
   if (root.getAttribute("title")) btn.title = root.getAttribute("title");
   const valueEl = document.createElement("span");
   valueEl.className = "cselect-value";
+  const markEl = document.createElement("span"); // the selected option's mark, if it has one
+  markEl.className = "cselect-mark";
   const arrow = document.createElement("span");
   arrow.className = "cselect-arrow";
   btn.appendChild(valueEl);
+  btn.appendChild(markEl);
   btn.appendChild(arrow);
   const pop = document.createElement("div");
   pop.className = "cselect-pop";
@@ -50,18 +63,28 @@ function customSelect(root) {
   root.appendChild(btn);
   root.appendChild(pop);
 
-  const opts = []; // {value, text}
+  const opts = []; // {value, text, mark}
   let selected = null;
   const listeners = [];
 
   function render() {
     const o = opts.find((x) => x.value === selected);
     valueEl.textContent = o ? o.text : "";
+    markEl.textContent = (o && o.mark) || "";
     pop.innerHTML = "";
     for (const opt of opts) {
       const row = document.createElement("div");
       row.className = "cselect-opt" + (opt.value === selected ? " active" : "");
-      row.textContent = opt.text;
+      const label = document.createElement("span");
+      label.className = "cselect-opt-label";
+      label.textContent = opt.text;
+      row.appendChild(label);
+      if (opt.mark) {
+        const mark = document.createElement("span");
+        mark.className = "cselect-mark";
+        mark.textContent = opt.mark;
+        row.appendChild(mark); // outside the label: it cannot wrap with it
+      }
       row.addEventListener("click", () => {
         const changed = opt.value !== selected;
         selected = opt.value;
@@ -89,7 +112,7 @@ function customSelect(root) {
 
   return {
     set innerHTML(_v) { opts.length = 0; selected = null; render(); }, // only ever cleared
-    appendChild(opt) { opts.push({ value: opt.value, text: opt.textContent }); render(); },
+    appendChild(opt) { opts.push({ value: opt.value, text: opt.textContent, mark: opt.mark || "" }); render(); },
     get value() { return selected || ""; },
     set value(v) { selected = v; render(); },
     get disabled() { return root.classList.contains("disabled"); },
@@ -147,7 +170,8 @@ function renderLlmProfiles(activeName) {
   for (const name of names) {
     const opt = document.createElement("option");
     opt.value = name;
-    opt.textContent = name === activeName ? name + " ✓" : name;
+    opt.textContent = name;
+    if (name === activeName) opt.mark = "✓"; // the tick is a marker, not part of the name
     profileSelect.appendChild(opt);
   }
   // empty list = no profiles: disable the picker

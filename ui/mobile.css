@@ -136,7 +136,14 @@
   .fs-conn-row {
     flex-wrap: wrap;
   }
+  /* ...and the picker takes a line of its own. Sharing one with ＋ New SSH
+     connection and Connect left it a sliver narrower than any user@host:port —
+     a control that could not show what it was set to, and a popup hanging under
+     it inherited that sliver as its own width (device report: a host list pinned
+     to a horizontal scrollbar, with the ✓ of the connected host wrapped onto a
+     second line). The two buttons share the line below it. */
   .fs-conn-row .cselect {
+    flex: 1 0 100%;
     min-width: 0;
   }
   .fs-toolbar {
