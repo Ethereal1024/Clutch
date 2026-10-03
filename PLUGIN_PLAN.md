@@ -8,11 +8,11 @@
 
 | # | 不变量 | 现状依据 |
 | --- | --- | --- |
-| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（4 行）、`components.sources()` `ui/components.js:107` |
-| I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()` `ui/components.js:187` |
+| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（4 行）、`components.sources()` `ui/components.js:111` |
+| I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()` `ui/components.js:191` |
 | I3 | **声明说词、宿主释义**：能力词汇（access / gate / mode）归宿主 | `agent/tools/gates.py:1-20`（导入期 `_check_vocabulary` 断言） |
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
-| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"a removal DELETES bytes…neither act is a rollback"（`ui/js/components-panel.js:435`），卸载确认说"This cannot be undone from here"（`:365`），市场常驻警告说"neither is a rollback"（`:485`）。P3c 补上第三条写入后，同一条界线依然清楚：**停用开关是协议里唯一不要求确认的写入**——它一个字节都不删，**按钮标签本身就是撤销路径**（§一、§零之四.2） |
+| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"a removal DELETES bytes…neither act is a rollback"（`ui/js/components-panel.js:440`），卸载确认说"This cannot be undone from here"（`:374`），市场常驻警告说"neither is a rollback"（`:490`）。P3c 补上第三条写入后，同一条界线依然清楚：**停用开关是协议里唯一不要求确认的写入**——它一个字节都不删，**按钮标签本身就是撤销路径**（§一、§零之四.2） |
 
 ## 零之二、进度（随施工更新）
 
@@ -24,6 +24,7 @@
 | P3a 反向动词（宿主侧） | **已完成** | `90140ea` | `versions()` / `remove()` + `GET …/versions`、`DELETE …/<name>`；先停后删、非我启动的 daemon 拒绝 |
 | P3b 反向动词（页面） | **已完成** | `11f6ce4` | 每行卸载按钮 + 二次确认 + 宿主裁定回显（`removed`/`absent`/拒绝原文）+ 装完/卸完重读清单；I5 改由文案承担 |
 | P3c 停用/启用 | **已完成** | `9f53b9c`（宿主）+ `1df203d`（页面） | 登记表 `<components 根>/registry.json` 承载组件级 `disabled` 位；`POST /api/components/<name>/disable`、`…/enable`；`GET /api/components` 多带 `disabled`；页面每行一个开关（**不确认**，标签即撤销），停用行仍列出、仍可卸载 |
+| 零之四.4 目标机自取字节 | **已完成** | `0899dc8`（宿主）+ `abab8cb`（页面） | 安装请求两种形状：body 有字节 = `upload()` 兜底（客户端独有的字节），空 body + `artifact_url` = 目标机自取（默认）；同一道 `accept` 门按 `digest` 量**取到的**字节；客户端不再下载 release，只带走几百字节的声明 |
 | P4 工具集 | 未动工 | — | — |
 | P5 静态索引 | 未动工 | — | — |
 
@@ -55,11 +56,20 @@ P3c 的端到端实测：`node tests/components.test.js` 第 9 节对着一个�
 那份检出，但停用位在它之前说话，工具不出现）。页面侧 17–24 节覆盖开关的三种写法与三条纪律
 （见下）。
 
+零之四.4 的端到端实测：`node tests/components.test.js` 第 8 节对着一个真文件服务器发布一份
+release —— `artifactFor()` 交回的是 **URL + 钉死的摘要**（本机缓存里只有那份几百字节的声明，
+工件一个字节都没经过本机）→ 空 body + `artifact_url` 装上（宿主自取，版本
+`0.1.0+<hex16>`）→ 再装一次 `current`；**摘要说谎** → 400 `hashes to …, not the declared …`，
+而且是**取字节的那台机器**拒绝的（字节根本不经客户端）；`file://` → 400 `http(s)`；既无 body
+又无 URL → 400 `no artifact`；64 MiB 封顶与 404 各自报出自己的句子，且都不留 scratch。
+`tests/components_api_test.py` 7b 是宿主侧同一件事（`PYTHONPATH=. python3
+tests/components_api_test.py` 全绿）。
+
 ## 零之三、本轮新发现（P1/P2/P3 施工中得到；P3c 的两条是 7、8）
 
 1. **组件端点长在 supervisor 上，不在 session API 上**（最关键的一条）：
-   `GET /api/components`（`agent/supervisor.py:255`）与 `POST /api/components/install`
-   （`:360`）属于 supervisor 进程（本机 `127.0.0.1:8890`，远端 = 隧道的
+   `GET /api/components`（`agent/supervisor.py:302`）与 `POST /api/components/install`
+   （`:410`）属于 supervisor 进程（本机 `127.0.0.1:8890`，远端 = 隧道的
    `tunnelStatus().url`）。**窗口的 session base 是另一个端口、另一个进程，对组件一无所知**。
    照 session base 去写这个页面会"看起来正确"——每个机器都显示"没有装任何组件"。所以：
    * 页面写入的 base 一律取 supervisor（`ui/components-view.js:46 target()`）；
@@ -105,7 +115,7 @@ P3c 的端到端实测：`node tests/components.test.js` 第 9 节对着一个�
    参数名原来叫 `state`——两个方向读起来都对——而单测只钉了组件层（`set_disabled` 本身没错），
    一直到把两条路由都对着真 supervisor 各跑一次才暴露。现在参数一律叫 `disabled`（**表里存的
    那个位**），每条路由传自己那个词的**含义**：`/disable` → True、`/enable` → False
-   （`agent/supervisor.py:362-390`）。教训与零之三.6 同类：**名字和动词是两条独立的信息，
+   （`agent/supervisor.py:364-429`）。教训与零之三.6 同类：**名字和动词是两条独立的信息，
    极性错位的时候两边都读得通**。
 
 ## 零之四、已冻结的五个决定（本轮拍板，施工据此）
@@ -117,13 +127,18 @@ P3c 的端到端实测：`node tests/components.test.js` 第 9 节对着一个�
    谁为准。停用不是删除：字节不动、行还在、仍可卸载，而且**不要求确认**（I5 只约束撤不回来
    的动作，它的标签本身就是撤销路径）。
 3. **手机端不镜像远端的表**：页面**没有任何远端清单缓存**，每问一次就发一次请求
-   （`hostInventory()` `ui/components.js:450` / `hostVersions()` `:459`）。清单是机器的判断
+   （`hostInventory()` `ui/components.js:472` / `hostVersions()` `:481`）。清单是机器的判断
    （哪一版会赢、哪一版被停），客户端存一份就成了"第二份真相"，而且会把"读不到"画成"没有"。
-4. **字节默认由目标机自己取，手机端的 `upload()` 只是兜底**（`ui/components.js:490`）：manifest
-   带着声明与钉死的摘要，目标机本来就能自己去 source 取（`pinnedAsset()` `:309` /
-   `downloadPinned()` `:283`）。**这一条已冻结，实现留作下一批**：现在的写入路径仍是客户端把
-   字节送上去（`POST /api/components/install` 空 body → 400，`agent/supervisor.py:288`），
-   换成"目标机自取"要动安装端点与页面两侧。
+4. **字节默认由目标机自己取，手机端的 `upload()` 只是兜底**（**已实现**，宿主 `0899dc8` /
+   页面 `abab8cb`）：安装请求**两种形状**，一条端点一个 header——body 有字节（`upload()`
+   `ui/components.js:563`，**只有这台客户端独有的字节**才这样送：检出、预编译产物），或 body
+   为空而 manifest 带 `artifact_url`（`fetchInstall()` `:576`，**默认**），目标机自己去取
+   （`components.receive()` `agent/tools/components.py:750` → `download()` `:710`）。只走
+   http(s)（`file:` 与本地路径一律拒绝——那是这台机器自己的盘）、30 秒读超时、64 MiB 封顶、
+   流进 scratch 再过同一道门：`accept()` `:770` 量的是**取到的字节 vs 请求声明的 `digest`**，
+   所以 URL 不比 body 更松。客户端这边 `artifactFor()` 不再下载 release
+   （`publishedArtifact()` `ui/components.js:335`，交出去的是位置 + 钉死的摘要），只有几百字节
+   的 `declaration` 还从客户端过一趟（宿主要读组件形状）。
 5. **注册表位置 / G1 / G2 / G4 一律"按照 VS Code 的逻辑来"**：结论落在第八节各行——G1 = 由
    目标机自己的二进制按需起服务（VS Code 的 `cli/src/tunnels/code_server.rs:322-350`）、
    G2 = 目标端注册同一个通道（`src/vs/server/node/serverServices.ts:403-409`）、G4 = 版本一致性
@@ -147,9 +162,9 @@ P3c 的端到端实测：`node tests/components.test.js` 第 9 节对着一个�
 | # | 断点 | 证据 | 目标形态 |
 | --- | --- | --- | --- |
 | 1 | 渲染层无通道 | `ui/preload.js:25`（`clutchComponents` 全无）；`ui/main.js:173-190`（`components:*` 的 handler 全无） | 新增 `clutchComponents` IPC —— **已交付**（P1 起，P3b/P3c 各加动词，今天是六个 + 一个 `onProgress`） |
-| 2 | 只有读 + 一个无反动词的写 | `agent/supervisor.py:255,360`（清单 + 装上）；`agent/` 内 `uninstall` 零命中 | 卸载 / 停用 / 启用 / 版本列表 —— **已交付**（`90140ea`、`9f53b9c`）；**prune 未做**（`install()` 自己就在清，见 P3 末） |
-| 3 | 安装版本是裸摘要前缀 | `ui/components.js:386-387`（`version: digest.slice(0,16)`） | `<声明版本>+<摘要16>`（宿主 `_VERSION_RE` 已认这个形状，`agent/tools/components.py:112`） |
-| 4 | 纯声明包递不进去 | `agent/supervisor.py:288` 空 body → 400；`INTERFACES = ("daemon","cli")` `agent/tools/components.py:133` | `interface: "data"`（**并入 P4**，理由见下） |
+| 2 | 只有读 + 一个无反动词的写 | `agent/supervisor.py:302,410`（清单 + 装上）；`agent/` 内 `uninstall` 零命中 | 卸载 / 停用 / 启用 / 版本列表 —— **已交付**（`90140ea`、`9f53b9c`）；**prune 未做**（`install()` 自己就在清，见 P3 末） |
+| 3 | 安装版本是裸摘要前缀 | `ui/components.js:386-387`（`version: digest.slice(0,16)`） | `<声明版本>+<摘要16>`（宿主 `_VERSION_RE` 已认这个形状，`agent/tools/components.py:124`） |
+| 4 | 纯声明包递不进去 | 当初安装路由对空 body 直接 400（该拒绝已随零之四.4 移走，空 body 有了自己的含义）；`INTERFACES = ("daemon","cli")` `agent/tools/components.py:145` | 空 body 现在**是合法请求**（零之四.4：它意味着"字节在 `artifact_url` 那里"）；`interface: "data"`（**并入 P4**，理由见下） |
 
 ## 三、阶段
 
@@ -171,7 +186,7 @@ flowchart LR
 与退回也就无从问起。
 
 改法：安装版本 = 组件**自报版本** + 内容摘要，即 `0.1.0+<digest16>`。这不是新协议：宿主
-正则早就认这个形状（`agent/tools/components.py:110`："…content digest (`0.2.0+<hex>`),
+正则早就认这个形状（`agent/tools/components.py:124`："…content digest (`0.2.0+<hex>`),
 which is how the client's install gate works"），`COMPONENTS.md` 第 80 行同样写着"安装版可
 携带内容摘要"。
 
@@ -208,7 +223,8 @@ which is how the client's install gate works"），`COMPONENTS.md` 第 80 行同
 - 目标机语义**不复用** `#conn-select`：那个选择器描述的是"这个窗口连到哪台机器的会话"，而
   组件要送到**supervisor**（见零之三.1）。现在由窗口的会话种类推导（`backendKind`），页面
   只显示结果。
-- 新增 `components:install`（走 `upload()` `:490`）与 `components:progress`；`askConfirm`
+- 新增 `components:install`（当时走 `upload()`，今 `ui/components.js:563`；零之四.4 之后它是
+  兜底，默认形状是目标机自取）与 `components:progress`；`askConfirm`
   二次确认，文案明说"**这个页面不能撤销它**"（I5）；市场行自带一行常驻警告，不只藏在弹窗里。
 - 幂等来自宿主：`components.accept()` 的 `current()` 门 → `"current"`，重连不重传；客户端
   还先查一次清单，同版本同摘要**连上传都不发生**。
@@ -277,10 +293,10 @@ P3b 交付（`11f6ce4`）：
 宿主（`9f53b9c`）：
 
 - **落点是登记表**：`<components 根>/registry.json` 每条记录多一个组件级 `disabled`
-  （`agent/tools/components.py:83-86`），与安装事实同一张表、同一个写者（`_TABLE_LOCK`），
+  （`agent/tools/components.py:97`），与安装事实同一张表、同一个写者（`_TABLE_LOCK`），
   于是"这台机器驱动什么"只有一个答案者。它**不落进组件目录**：登记表是"有什么"的唯一名册
   ——表里有就是有，一个没有表项的目录不是组件（`reindex()` 是唯一的重建入口）。
-- **两条路由**：`POST /api/components/<name>/disable` / `…/enable`（`agent/supervisor.py:362-365`）
+- **两条路由**：`POST /api/components/<name>/disable` / `…/enable`（`agent/supervisor.py:412-415`）
   → `{"status":"disabled"|"enabled","name":…,"disabled":bool}`；这台机器根本没有它 →
   `{"status":"absent"}`（**答案**，不是错误：要求已经成立）；名字不合法/穿越 → 400 宿主原文；
   只发一个开关而不点名（`/api/components/disable`）→ 404（不是"叫空名字的组件"）。
@@ -294,11 +310,11 @@ P3b 交付（`11f6ce4`）：
 页面（`1df203d`）：
 
 - 客户端出去的**是状态、不是动词**：`ui/components.js` 的 `hostSetDisabled(base,name,disabled)`
-  （`:485`）按位选 `/disable` 与 `/enable`；`ui/main.js:186` 的 `components:set-disabled`、
+  （`:507`）按位选 `/disable` 与 `/enable`；`ui/main.js:186` 的 `components:set-disabled`、
   `ui/preload.js:31` 与 `ui/bridge-shim.js:116` 同名同参（`tests/bridge-shim.test.js` 自动钉住这
-  条平价）。`ui/components-view.js:254` 的 `setDisabled()` 先解目标机，失败装在结果里。
+  条平价）。`ui/components-view.js:264` 的 `setDisabled()` 先解目标机，失败装在结果里。
 - 页面：持有但停用的行，在版本号之后多一个 `stopped` 标记 + 一句 "held on this machine, but not
-  driven"，动作变成**开关 + 卸载**（`ui/js/components-panel.js:146-176`）。开关**不弹确认**——
+  driven"，动作变成**开关 + 卸载**（`ui/js/components-panel.js:146-224`）。开关**不弹确认**——
   它一个字节都不删、**标签本身就是撤销路径**（I5）；三种死法都要说得出原因（没有目标机的
   supervisor URL、这个 shell 没有这个动词、另一个写入正在飞，`plugBusyWord` `:178`）。
 - 一个只在活体里露头的 Bug 随这条一起修掉（零之三.8）：supervisor 路由曾把**反的极性**传给
@@ -313,7 +329,8 @@ supervisor 跑 `hostSetDisabled()`（清单仍在、目录仍在、版本仍是�
 `tests/rendezvous_test.py` 的 `_disabled_probe()`（句子、清单、检出顶不上来、启用后回到原样）与
 `tests/components_api_test.py`（两条路由、`absent`、坏名字 400、裸开关 404）。实测见零之二末段。
 
-**还没做的（下一批）**：`prune`、页面上的"版本明细"视图、零之四.4 的"目标机自取字节"。
+**还没做的（下一批）**：`prune`、页面上的"版本明细"视图。（零之四.4 的"目标机自取字节"已经
+落地：宿主 `0899dc8` / 页面 `abab8cb`，见 §零之四.4。）
 
 ### P4 工具集（`interface: "data"`）
 
@@ -337,9 +354,11 @@ supervisor 跑 `hostSetDisabled()`（清单仍在、目录仍在、版本仍是�
 
 - **索引**：market 仓库里的静态 `index.json`（搜索/分类/精选），页面读它做展示，**权威仍是
   各模块的 manifest**；零服务器。
-- **私有源**：`downloadPinned()` `:283` 与 `readManifest()` `:150` 的 `fetch(url, {signal})`
+- **私有源**：`downloadPinned()` `:290` 与 `readManifest()` `:154` 的 `fetch(url, {signal})`
   **不带任何 header**，要支持 token 必须改；来源项从字符串扩成对象时保持 `readSourceList()`
-  `:91` 的 `schema: 1` 兼容。
+  `:95` 的 `schema: 1` 兼容。零之四.4 之后**字节是目标机去取**（`download()`
+  `agent/tools/components.py:710`，同样不带任何 header），所以 token 不光要给客户端，还得递到
+  每一台要装的机器上——私有源至今是"没做"，不是"快有了"。
 - **撤销**：签名过的静态撤销列表（可选）。
 
 ## 四、验证
@@ -371,7 +390,7 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 ```
 
 本机网络约束（硬条件）：`github.com` 的 HTTPS 不通（curl 28），`api.github.com` 可达。所以
-任何"从 Release 下载"的用法都必须有**本地目录 source** 的对照（`isRemote()` `:118` 为假时
+任何"从 Release 下载"的用法都必须有**本地目录 source** 的对照（`isRemote()` `:122` 为假时
 直接读文件），发布物只能用 `api.github.com` 的资产接口验证。
 
 ## 五、风险
@@ -386,9 +405,10 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 
 ## 六、为什么不需要自建服务器
 
-- 分发：sha256 钉死（`pinnedAsset()` `ui/components.js:309`）⇒ 托管方不可信也安全；asset
-  相对 source（`assetLocation()` `:125`）⇒ 换托管零成本。
-- 发现：来源列表是数据文件（`:91`），第 5 个模块 = 多一行 URL，宿主零代码改动。
+- 分发：sha256 钉死（`pinnedAsset()` `ui/components.js:316`）⇒ 托管方不可信也安全——而且钉子
+  是在**取字节的那台机器**上兑现的（`accept()` `agent/tools/components.py:770` 量它取到的
+  字节）；asset 相对 source（`assetLocation()` `:129`）⇒ 换托管零成本。
+- 发现：来源列表是数据文件（`readSourceList()` `:95`），第 5 个模块 = 多一行 URL，宿主零代码改动。
 - 安装：`POST /api/components/install` 长在**目标机**的 supervisor 上，没有账号、配额、
   每机器注册表。
 - 只有"账号 / 付费 / 统计 / 集中发布"才逼出服务器，而每一项都与 I1 / I2 冲突，需单独决策。
@@ -410,9 +430,13 @@ curl -s http://127.0.0.1:8899/api/components          # 空
    **仍列出**它（多带 `disabled:true`，否则"没装"和"不驱动"分不开）、`resolve()` 照旧解析出
    那一版（字节能读）、工具**不出现**、重复切换幂等、**dev 检出也压得住**（拦截点放在
    `unavailable_reason()`）。完整理由见 §零之四，落点与验收见 P3c。
-6. **"目标机自取字节"什么时候做**：已冻结（§零之四.4），实现未开始——现在仍是客户端把字节
-   `upload()` 上去。要动安装端点（宿主自取时 body 允许为空）与页面（来源清单得让目标机也能读到
-   同一份 URL）。
+6. ~~**"目标机自取字节"什么时候做**~~ → **已决并已做**（§零之四.4）：宿主 `0899dc8`、页面
+   `abab8cb`。安装端点认两种形状（body 有字节 / 空 body + `artifact_url`），页面按"字节在哪"
+   选一条（`file.path ? upload : fetchInstall`，`ui/components.js:625`）。来源清单**不必两边都
+   读到**：URL 是客户端从清单里解出来的（`assetLocation` `ui/components.js:129`），跟着 manifest
+   递给目标机——目标机只认 URL，不认清单。已知边界：来源清单点名**磁盘上的**清单时，解出来的
+   工件位置也是本地路径，而宿主只取 http(s)（`download()` 拒绝 `file:`），这种来源今天装不上
+   （清单本身照读；`upload()` 兜底覆盖的是检出与预编译产物，不是镜像目录）。
 
 ## 八、待办（本轮明确留着的缺口）
 
