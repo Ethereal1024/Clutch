@@ -132,12 +132,22 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     marketCalls: 0,
     installCalls: [],
     removeCalls: [],
+    removeOpts: [],
     switchCalls: [],
+    versionsCalls: [],
     progress: null,
     control: null,
     reply: null,
     removeReply: { ok: true, status: "removed", removed: ["0.1.0+5f900739"] },
     switchReply: { ok: true, status: "disabled", disabled: true },
+    versionsControl: null,
+    versionsReply: {
+      versions: [
+        { name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000", path: "/home/u/.clutch/components/clutch-workspace/0.1.0+bbbb", resolved: true, disabled: false },
+        { name: "clutch-workspace", version: "0.1.0+aaaa", digest: "aaaa0000aaaa0000", path: "/home/u/.clutch/components/clutch-workspace/0.1.0+aaaa", resolved: false, disabled: false },
+      ],
+      error: null,
+    },
     confirms: [],
     answer: true,
   };
@@ -153,10 +163,16 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       if (world.control) return world.control.promise;
       return world.reply;
     },
-    remove: async (name) => {
+    remove: async (name, opts) => {
       world.removeCalls.push(name);
+      world.removeOpts.push(opts || null);
       if (world.control) return world.control.promise;
       return world.removeReply;
+    },
+    versions: async (name) => {
+      world.versionsCalls.push(name);
+      if (world.versionsControl) return world.versionsControl.promise;
+      return world.versionsReply;
     },
     onProgress: (cb) => { world.progress = cb; },
     setDisabled: async (name, disabled) => {
@@ -190,6 +206,8 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     body: () => dom.byId.get("#plug-body"),
     buttons: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-install/.test(n.className)),
     removes: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-remove/.test(n.className)),
+    ones: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-remove-one/.test(n.className)),
+    versionBtns: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-versions/.test(n.className)),
     switches: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-switch/.test(n.className)),
     note: () => dom.byId.get("#plug-note"),
     text: () => textOf(dom.byId.get("#plug-body")),
@@ -588,6 +606,177 @@ const CODE = mod ? mod.code : "";
     await p.open();
     check(p.switches()[0].disabled, "a shell without setDisabled leaves the switch dead rather than silently inert");
     check(/cannot switch components/.test(p.switches()[0].title), "and it says the shell cannot, not that the machine refused");
+  }
+
+  // 25. the version list is a disclosure on the held row: the machine's own
+  //     answer, in the machine's own order, one row per version — and each
+  //     version row names ITSELF as what its control takes
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await p.open();
+    check(p.versionBtns().length === 1, "one disclosure per held row opens the versions behind it");
+    check(ownerName(p.versionBtns()[0]) === "clutch-workspace", "and it belongs to the row whose versions it would show");
+    check(p.versionBtns()[0].textContent === "Versions", "closed, it offers to open");
+    check(/newest first/.test(p.versionBtns()[0].title), "its title says what will be shown");
+    check(/the marked one is what that machine runs/.test(p.versionBtns()[0].title), "and which mark is the one that matters");
+    check(p.ones().length === 0, "nothing per-version is drawn before it is asked for");
+    p.versionBtns()[0].click();
+    await settle();
+    check(p.world.versionsCalls.join(",") === "clutch-workspace", "opening reads that one component from the machine that holds it");
+    check(/this machine runs it/.test(p.text()), "the version the host resolved is marked as the one that runs");
+    check(/held beside it/.test(p.text()), "and the others are drawn as held beside it, not as failures");
+    check(/0\.1\.0\+bbbb/.test(p.text()) && /0\.1\.0\+aaaa/.test(p.text()), "every version the machine named is drawn");
+    check(
+      ownerName(p.ones()[0]) === "0.1.0+bbbb" && ownerName(p.ones()[1]) === "0.1.0+aaaa",
+      "in the host's own order, newest first — this page never re-sorts it"
+    );
+    check(p.ones().length === 2, "each version gets its own removal control");
+    check(ownerName(p.ones()[0]) === "0.1.0+bbbb", "and each control belongs to the version row that names what it takes");
+    check(/remove clutch-workspace 0\.1\.0\+bbbb from Local \(this machine\)/.test(p.ones()[0].title), "its title names the machine that would lose those bytes");
+    check(/the versions beside it stay/.test(p.ones()[0].title), "and says the versions beside it stay — one version is not the whole component");
+    p.versionBtns()[0].click();
+    await settle();
+    check(p.versionBtns()[0].textContent === "Versions" && p.ones().length === 0, "the second click closes it again");
+    check(p.world.versionsCalls.length === 1, "closing reads nothing — the list was read once, on open");
+  }
+
+  // 26. the version rows carry what the machine said: the digest it is pinned
+  //     by, where it is kept, and the stop bit of a component that is held but
+  //     not driven
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await p.open();
+    p.world.versionsReply = {
+      versions: [
+        { name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000", path: "/home/u/.clutch/components/clutch-workspace/0.1.0+bbbb", resolved: true, disabled: true },
+      ],
+      error: null,
+    };
+    p.versionBtns()[0].click();
+    await settle();
+    check(/digest bbbb0000bbbb0000/.test(p.text()), "each version carries the digest the host records for it");
+    check(/at \/home\/u\/\.clutch\/components\/clutch-workspace\/0\.1\.0\+bbbb/.test(p.text()), "and where on that machine it is kept");
+    check(/0\.1\.0\+bbbb stopped/.test(p.text()), "a version of a component the machine holds but does not drive is marked here too");
+    check(p.ones().length === 1, "and a stopped version can still be let go of");
+  }
+
+  // 27. a read that failed is a reason, never an empty list: "no versions" and
+  //     "the machine could not be asked" are not the same fact
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await p.open();
+    p.world.versionsReply = { versions: [], error: "the supervisor did not answer" };
+    p.versionBtns()[0].click();
+    await settle();
+    check(/could not be read — the supervisor did not answer/.test(p.text()), "the reason the read failed is what is drawn");
+    check(!/no version of it is held/.test(p.text()), "an unreadable list is never drawn as an empty one");
+    check(p.ones().length === 0, "and no control is drawn for versions the page has not heard of");
+
+    const broken = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await broken.open();
+    broken.ctx.window.clutchComponents.versions = async () => { throw new Error("main process is gone"); };
+    broken.versionBtns()[0].click();
+    await settle();
+    check(/could not be read — main process is gone/.test(broken.text()), "a channel that threw is reported as the read's reason");
+
+    const gone = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await gone.open();
+    gone.world.versionsReply = { versions: [], error: null };
+    gone.versionBtns()[0].click();
+    await settle();
+    check(/no version of it is held here now/.test(gone.text()), "an empty list the machine DID answer with is drawn as one");
+  }
+
+  // 28. the disclosure is a read and stays live behind a write, but a target
+  //     the page cannot name is no target — and a shell without the verb draws
+  //     no control that looks like one
+  {
+    const died = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }], target: { kind: "remote", base: "" } });
+    await died.open();
+    check(died.versionBtns().every((b) => b.disabled), "a tunnel with no supervisor URL leaves the disclosure dead");
+    check(/no supervisor URL/.test(died.versionBtns()[0].title), "and it says why");
+
+    const deaf = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    deaf.ctx.window.clutchComponents.versions = undefined;
+    await deaf.open();
+    check(deaf.versionBtns()[0].disabled, "a shell without versions leaves the disclosure dead rather than silently inert");
+    check(/cannot read the versions/.test(deaf.versionBtns()[0].title), "and it says the shell cannot, not that the machine refused");
+  }
+
+  // 29. letting ONE version go: asks first, names that version, and quotes the
+  //     host — a version not installed is a REFUSAL, not "absent" (the host's
+  //     rule: `?version=` naming what is not there is a request that is wrong)
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await p.open();
+    p.versionBtns()[0].click();
+    await settle();
+    p.world.answer = false;
+    p.ones()[0].click();
+    await settle();
+    const ask = p.world.confirms[0];
+    check(p.world.confirms.length === 1 && ask.ok === "Remove", "removing one version asks first, with the verb on the button");
+    check(ask.title === "Remove clutch-workspace 0.1.0+bbbb?", "and the question is about that one version");
+    check(/exactly the version named/.test(ask.text), "it says exactly that version goes");
+    check(/the versions beside it stay/.test(ask.text), "and that the versions beside it stay — this is not the whole component");
+    check(/cannot be undone from here/.test(ask.text), "while still saying what a deletion costs (I5)");
+    check(p.world.removeCalls.length === 0, "a declined removal deletes nothing");
+    check(p.note().textContent === "", "and leaves no verdict behind");
+
+    const go = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await go.open();
+    go.versionBtns()[0].click();
+    await settle();
+    const before = go.world.listCalls;
+    go.world.removeReply = { ok: true, status: "removed", removed: ["0.1.0+bbbb"] };
+    go.ones()[0].click();
+    await settle();
+    check(go.world.removeCalls.join(",") === "clutch-workspace", "the name goes to the channel like any removal");
+    check(go.world.removeOpts[0] && go.world.removeOpts[0].version === "0.1.0+bbbb", "and the version names which one — the whole-component removal sends no such thing");
+    check(/^removed clutch-workspace 0\.1\.0\+bbbb from Local \(this machine\)$/.test(go.note().textContent), "the host's verdict names the version that went");
+    check(go.world.listCalls > before, "the machine's inventory is read again after it changed");
+    check(go.world.versionsCalls.length === 2, "and so is the open version list — what it shows is what the machine now holds");
+
+    const refused = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await refused.open();
+    refused.versionBtns()[0].click();
+    await settle();
+    refused.world.removeReply = { ok: false, name: "clutch-workspace", error: "no such version of clutch-workspace here: 0.1.0+zzzz" };
+    refused.ones()[0].click();
+    await settle();
+    check(refused.note().textContent.includes("no such version of clutch-workspace here"), "the host's own refusal reaches the page verbatim");
+    check(refused.note().className.includes("error"), "and is drawn as a failure");
+    check(refused.ones()[0].disabled === false, "the control comes back once the write failed");
+  }
+
+  // 30. one write at a time reaches the per-version controls too, in both
+  //     directions — and a version removal says WHICH version it is taking
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await p.open();
+    p.versionBtns()[0].click();
+    await settle();
+    p.world.control = defer();
+    p.switches()[0].click();
+    await settle(3);
+    check(p.ones().every((b) => b.disabled), "a switch in flight leaves every per-version removal dead");
+    check(/is being stopped/.test(p.ones()[0].title), "and each names the act that is holding it up");
+    check(p.versionBtns()[0].disabled === false, "the disclosure is a read: it stays live behind a write");
+    p.world.control.res({ ok: true, status: "disabled", disabled: true });
+    await settle();
+
+    const one = page({ held: [{ name: "clutch-workspace", version: "0.1.0+bbbb", digest: "bbbb0000bbbb0000" }] });
+    await one.open();
+    one.versionBtns()[0].click();
+    await settle();
+    one.world.control = defer();
+    one.ones()[0].click();
+    await settle(3);
+    check(/removing clutch-workspace 0\.1\.0\+bbbb from Local \(this machine\)/.test(one.note().textContent), "a removal of ONE version names that version while it happens");
+    check(one.removes().every((b) => b.disabled) && one.switches().every((b) => b.disabled) && one.buttons().every((b) => b.disabled), "one write at a time, across every control");
+    one.world.control.res({ ok: true, status: "removed", removed: ["0.1.0+bbbb"] });
+    await settle();
+    check(one.removes().every((b) => !b.disabled), "and the controls come back once the write is over");
   }
 
   summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");

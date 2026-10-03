@@ -49,6 +49,9 @@ const plugState = {
   pending: 0, // in-flight reads: the note line is derived from them
   busy: null, // {name, verb, stage} — a write in flight, nothing else may start
   result: null, // {ok, text} — the host's verdict on the last write
+  versions: null, // {name, rows, error} — the one open version list, as just read
+  versionsPending: null, // name whose version list is being read right now
+  versionsSeq: 0, // which version-list read is the current one (closing bumps it)
 };
 
 // The machine this page is about, named the way the rest of the UI names it: the
@@ -72,8 +75,9 @@ function plugChip(text, cls) {
   return el;
 }
 
-// one row: the name, what it is, and whatever it makes of the target machine
-function plugRow(name, chips, lines, actions = []) {
+// one row: the name, what it is, and whatever it makes of the target machine;
+// `extra` is whatever hangs under the row (a version list), or nothing
+function plugRow(name, chips, lines, actions = [], extra = null) {
   const row = document.createElement("div");
   row.className = "plug-row";
   const head = document.createElement("div");
@@ -97,6 +101,7 @@ function plugRow(name, chips, lines, actions = []) {
     el.textContent = line;
     row.appendChild(el);
   }
+  if (extra) row.appendChild(extra);
   return row;
 }
 
@@ -165,7 +170,13 @@ function plugHeldSection() {
     const digest = String(h.digest || "");
     const lines = [digest ? "digest " + digest.slice(0, 16) : ""];
     if (h.disabled) lines.push("held on this machine, but not driven: its tools are not offered here");
-    return plugRow(h.name, chips, lines, [plugSwitchButton(h), plugRemoveButton(h)]);
+    return plugRow(
+      h.name,
+      chips,
+      lines,
+      [plugVersionsButton(h), plugSwitchButton(h), plugRemoveButton(h)],
+      plugVersionRows(h)
+    );
   });
   return plugSection(`On this machine (${plugState.held.length})`, rows, "no component installed");
 }
@@ -241,6 +252,108 @@ function plugRemoveButton(held) {
   return btn;
 }
 
+// The disclosure for one held row: what every version of this component looks
+// like ON THE MACHINE that holds it. It is a READ, not a write — so it is never
+// dead behind a write in flight (the reload is not either), and what it opens is
+// the machine's own answer, kept only as long as the block is open: this page
+// keeps no second copy of a machine's truth (frozen decision 3).
+function plugVersionsButton(held) {
+  const open = Boolean(plugState.versions && plugState.versions.name === held.name);
+  const reading = plugState.versionsPending === held.name;
+  const btn = document.createElement("button");
+  btn.className = "plug-versions";
+  btn.type = "button";
+  btn.textContent = reading ? "…" : open ? "Hide versions" : "Versions";
+  if (!plugState.target || !plugState.target.base) {
+    btn.disabled = true;
+    btn.title = "no supervisor URL for the target machine yet";
+  } else if (!window.clutchComponents || !window.clutchComponents.versions) {
+    // a shell without the verb must not draw a control that looks like one
+    btn.disabled = true;
+    btn.title = "this shell cannot read the versions a machine holds";
+  } else if (reading) {
+    btn.disabled = true;
+    btn.title = `reading the versions of ${held.name} on ${plugTargetName(plugState.target)}…`;
+  } else if (open) {
+    btn.title = `close the version list for ${held.name}`;
+  } else {
+    btn.title =
+      `every version of ${held.name} that ${plugTargetName(plugState.target)} holds, newest first — ` +
+      "the marked one is what that machine runs";
+  }
+  btn.addEventListener("click", () => plugVersionsToggle(held));
+  return btn;
+}
+
+// The version list under one held row, in the HOST's order (newest first, with
+// `resolved` marking the one it runs — the page repeats that order and never
+// re-sorts it, because which version wins is the host's knowledge). Each version
+// is its own row naming ITSELF, so the remove beside it takes exactly that one:
+// taking the whole component is a different act and is drawn on the row above.
+function plugVersionRows(held) {
+  const reading = plugState.versionsPending === held.name;
+  const state = plugState.versions;
+  if (!reading && !(state && state.name === held.name)) return null;
+  const box = document.createElement("div");
+  box.className = "plug-versions-box";
+  const line = (text) => {
+    const el = document.createElement("div");
+    el.className = "plug-line";
+    el.textContent = text;
+    box.appendChild(el);
+  };
+  if (reading) {
+    line("reading the versions this machine holds…");
+    return box;
+  }
+  if (state.error) {
+    // a read that failed is a reason, never an empty list: "no versions" and
+    // "the machine could not be asked" are not the same fact
+    line("could not be read — " + state.error);
+    return box;
+  }
+  if (!state.rows.length) {
+    line("no version of it is held here now");
+    return box;
+  }
+  for (const record of state.rows) {
+    const version = String(record.version || "no version");
+    const chips = [];
+    if (record.disabled) chips.push(["stopped", "warn"]);
+    chips.push([record.resolved ? "this machine runs it" : "held beside it", record.resolved ? "accent" : ""]);
+    const lines = [record.digest ? "digest " + String(record.digest).slice(0, 16) : ""];
+    if (record.path) lines.push("at " + record.path);
+    box.appendChild(plugRow(version, chips, lines, [plugRemoveOneButton(held, record)]));
+  }
+  return box;
+}
+
+// The removal of ONE version. Same discipline as the whole-component one — dead
+// while the machine is unknown or another write is flying, and asking first —
+// but its title and its question name the version, because that is the ONLY
+// thing it takes: the versions beside it stay. The host still decides what a
+// name and version mean (a version not installed is a refusal, not "absent"),
+// and its verdict is quoted as usual.
+function plugRemoveOneButton(held, record) {
+  const version = String(record.version || "");
+  const busy = plugState.busy && plugState.busy.name === held.name;
+  const btn = document.createElement("button");
+  btn.className = "plug-remove plug-remove-one";
+  btn.type = "button";
+  btn.textContent = busy ? "…" : "Remove";
+  if (!plugState.target || !plugState.target.base) {
+    btn.disabled = true;
+    btn.title = "no supervisor URL for the target machine yet";
+  } else if (plugState.busy) {
+    btn.disabled = true;
+    btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
+  } else {
+    btn.title = `remove ${held.name} ${version} from ${plugTargetName(plugState.target)} — the versions beside it stay`;
+  }
+  btn.addEventListener("click", () => plugRemoveVersion(held, record));
+  return btn;
+}
+
 // The install control for one market row. The label is derived from what the
 // target already holds, so pressing it is never a surprise: a version the
 // machine already carries says "Reinstall" (the same bytes are rewritten), and
@@ -283,7 +396,7 @@ function plugInstallButton(entry) {
 // verdicts differ in what they cost.
 function plugStageLine(busy) {
   const where = plugTargetName(plugState.target);
-  if (busy.verb === "remove") return `removing ${busy.name} from ${where}…`;
+  if (busy.verb === "remove") return `removing ${busy.name}${busy.version ? " " + busy.version : ""} from ${where}…`;
   // the switch is the one write with no bytes to build or send: it has one stage
   // and one machine, and the sentence says which way it is going
   if (busy.verb === "disable") return `stopping ${busy.name} on ${where}…`;
@@ -391,7 +504,91 @@ async function plugRemove(held) {
   renderPlugins();
   // the machine's inventory just changed: read both halves back (the counts and
   // the rows), exactly as an install does
-  if (res && res.ok) plugRead();
+  if (res && res.ok) {
+    plugRead();
+    plugRefreshVersions();
+  }
+}
+
+// Ask, then delete ONE version. The question names the version, says the ones
+// beside it stay, and says the thing this page never hides: these bytes are
+// DELETED and nothing here keeps a copy (I5).
+async function plugRemoveVersion(held, record) {
+  const api = window.clutchComponents;
+  if (!api || !api.remove || plugState.busy || !plugState.target || !plugState.target.base) return;
+  const where = plugTargetName(plugState.target);
+  const version = String(record.version || "");
+  const go = await askConfirm({
+    title: `Remove ${held.name} ${version}?`,
+    text:
+      `${held.name} ${version} is deleted from ${where}'s component directory — exactly the version named;` +
+      " the versions beside it stay." +
+      " This cannot be undone from here: nothing in this app keeps a copy of what it removes," +
+      " so putting it back means installing it again from a source.",
+    ok: "Remove",
+  });
+  if (!go) return;
+  plugState.busy = { name: held.name, verb: "remove", stage: "removing", version };
+  plugState.result = null;
+  renderPlugins();
+  let res;
+  try {
+    res = await api.remove(held.name, { version });
+  } catch (e) {
+    // the IPC hop itself failed: still the failure path, still with a reason
+    res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
+  }
+  plugState.busy = null;
+  plugState.result = plugRemoveResult(held, res, where);
+  renderPlugins();
+  if (res && res.ok) {
+    plugRead();
+    plugRefreshVersions();
+  }
+}
+
+// One component's version list, straight from the machine that holds it. A read
+// supersedes an older read of the same list, and closing the block bumps the
+// sequence: a late answer must never reopen what the user closed.
+function plugReadVersions(name) {
+  const api = window.clutchComponents;
+  if (!api || !api.versions) return;
+  const seq = ++plugState.versionsSeq;
+  plugState.versionsPending = name;
+  renderPlugins();
+  let out;
+  Promise.resolve()
+    .then(() => api.versions(name))
+    .then((r) => {
+      out = { name, rows: (r && Array.isArray(r.versions) ? r.versions : []), error: (r && r.error) || null };
+    })
+    .catch((e) => {
+      out = { name, rows: [], error: (e && e.message) || String(e) };
+    })
+    .then(() => {
+      if (seq !== plugState.versionsSeq) return; // superseded, or the block was closed
+      plugState.versionsPending = null;
+      plugState.versions = out;
+      renderPlugins();
+    });
+}
+
+function plugVersionsToggle(held) {
+  if (plugState.versionsPending === held.name) return; // that read is already running
+  if (plugState.versions && plugState.versions.name === held.name) {
+    plugState.versions = null;
+    plugState.versionsSeq++; // a late answer must not reopen what was closed
+    renderPlugins();
+    return;
+  }
+  plugReadVersions(held.name);
+}
+
+// An open version list is about what a machine HOLDS, so after any write that
+// changed that, it is read again rather than trusted as it was.
+function plugRefreshVersions() {
+  const name = (plugState.versions && plugState.versions.name) || plugState.versionsPending;
+  if (name) plugReadVersions(name);
 }
 
 // Send the state being asked for, then let the host answer. What goes on the
@@ -420,7 +617,10 @@ async function plugSwitch(held) {
   renderPlugins();
   // what this machine offers just changed: read the inventory back, so the row
   // that was stopped is drawn as stopped rather than as it was a moment ago
-  if (res && res.ok) plugRead();
+  if (res && res.ok) {
+    plugRead();
+    plugRefreshVersions();
+  }
 }
 
 // Ask, then write. The question names the machine and states the one fact the
@@ -461,7 +661,10 @@ async function plugInstall(entry) {
   // the machine's inventory just changed: read it back. The market is cached
   // (ui/components-view.js MARKET_TTL_MS), so this is one local HTTP call, not a
   // second pass over the network.
-  if (res && res.ok) plugRead();
+  if (res && res.ok) {
+    plugRead();
+    plugRefreshVersions();
+  }
 }
 
 function plugMarketSection() {
