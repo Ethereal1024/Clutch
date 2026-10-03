@@ -291,7 +291,9 @@ module.exports = {
   onTunnelEnd,
   tunnelStatus,
   openSessionForward,
+  reopenForward,
   restartRemoteServer,
+  healOnce,
   startHealing,
   stopHealing,
 };

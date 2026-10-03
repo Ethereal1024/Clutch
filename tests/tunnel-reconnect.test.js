@@ -250,7 +250,78 @@ async function main() {
   check(remote.started === 0, "…and does not start a supervisor that would bind-fail");
   check(remote.commands.some((c) => c.startsWith("pkill -9")), "…after escalating to SIGKILL");
 
-  // ---- 6. the paths a fake remote cannot reach, asserted on the source ----
+  // ---- 6. a stale forward over a still-serving far side is rebound, never killed ----
+  //
+  // The field report's second death: the phone froze in the background, came
+  // back to a stale local forward, and the healer read "nothing answers" as
+  // "the far server died" — `restartRemoteServer` pkill'ed the supervisor AND
+  // every session child under it, ending a run in flight (the run's record then
+  // said "the host released this session while the run was in flight"). A
+  // failed poll is a QUESTION: the far host is asked about ITSELF over exec (a
+  // path the dead forward does not share), and a far host that answers is never
+  // touched — its forward is rebound on the same local port the claims name.
+  {
+    const http = require("http");
+    const net = require("net");
+    const { state } = require("../ui/tunnel-core");
+    const { freePort } = require("../ui/tunnel-net");
+    const { healOnce } = require("../ui/tunnel-lifecycle");
+
+    // the far supervisor as the rebound forward reaches it: the fake ssh
+    // client's forwardOut pipes whatever crosses the local listener here
+    const far = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"ok": true, "in_flight": true}');
+    });
+    await new Promise((r) => far.listen(0, "127.0.0.1", r));
+    let forwardedTo = null;
+    const fakeClient = {
+      forwardOut(_src, _sport, _dst, dport, cb) {
+        forwardedTo = dport;
+        const s = net.connect(far.address().port, "127.0.0.1");
+        s.once("connect", () => cb(null, s));
+        s.once("error", (e) => cb(e));
+      },
+    };
+
+    remote.reset({ bound: true, serving: true, version: VERSION }); // answers about itself
+    const port = await freePort();
+    state.sshClient = fakeClient;
+    state.localSrv = null;
+    state.lastProbe = probeFor();
+    state.lastStrategy = "pylibs";
+    state.currentUrl = `http://127.0.0.1:${port}`; // nothing bound: the stale forward
+
+    await healOnce();
+
+    check(forwardedTo === 8890, "the rebound forward targets the far supervisor's port");
+    check(
+      remote.stopped === 0 && remote.started === 0 && !remote.commands.some((c) => c.includes("pkill")),
+      "a far side that answers about itself is never stopped, restarted, or pkilled"
+    );
+    check(state.currentUrl === `http://127.0.0.1:${port}`, "the window's URL survives the bounce unchanged");
+    check(
+      state.localSrv && state.localSrv.listening && state.localSrv.address().port === port,
+      "the forward is rebound on the same local port the window claims name"
+    );
+    const code = await new Promise((resolve) => {
+      http
+        .get(state.currentUrl + "/api/health", (r) => {
+          r.resume();
+          resolve(r.statusCode);
+        })
+        .on("error", () => resolve(0));
+    });
+    check(code === 200, "and the claim's own URL answers again through it");
+
+    // the heal is not a teardown: unwind its listeners by hand
+    state.localSrv.close();
+    state.localSrv = null;
+    state.sshClient = null;
+    await new Promise((r) => far.close(r));
+  }
+
+  // ---- 7. the paths a fake remote cannot reach, asserted on the source ----
   check(
     !/progress\("install"\)/.test(CONNECT_SRC),
     "connectTunnel no longer announces an install before the gate decides"
