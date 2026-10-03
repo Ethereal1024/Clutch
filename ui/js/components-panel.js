@@ -278,8 +278,9 @@ function plugInstallButton(entry) {
 }
 
 // Where an in-flight install is, in words the user can act on: the two slow
-// steps differ in kind (building bytes off a local checkout vs sending them over
-// the tunnel), and the two host verdicts differ in what they cost.
+// steps differ in kind (building bytes off a local checkout and sending them over
+// the tunnel, vs the target machine fetching its own copy), and the two host
+// verdicts differ in what they cost.
 function plugStageLine(busy) {
   const where = plugTargetName(plugState.target);
   if (busy.verb === "remove") return `removing ${busy.name} from ${where}…`;
@@ -292,6 +293,10 @@ function plugStageLine(busy) {
       return `preparing the bytes for ${busy.name}…`;
     case "upload":
       return `sending ${busy.name} ${busy.version || ""} to ${where}…`.replace("  ", " ");
+    case "fetch":
+      // no bytes are in flight from here: the machine that will run the component
+      // is getting them from the release, which is why this says so
+      return `${where} is fetching ${busy.name} ${busy.version || ""}…`.replace("  ", " ");
     case "current":
       return `${busy.name} is already current on ${where} — nothing was sent`;
     case "installed":

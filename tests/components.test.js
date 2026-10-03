@@ -16,8 +16,10 @@
 //     (so bash + tar are required; without them those checks SKIP — an
 //     environment limit), and
 //   - a module's PUBLISHED release manifest, fetched over http from a server
-//     this test runs: the file it names is relative to the manifest, pinned by
-//     the sha256 the manifest carries, and installed only if the bytes match.
+//     this test runs: the file it names is relative to the manifest and pinned by
+//     the sha256 the manifest carries, and the HOST is the one that fetches it —
+//     the install request carries the URL and the pin, no bytes (PLUGIN_PLAN.md
+//     零之四.4), and nothing lands unless what the host fetched matches the pin.
 //
 // The run gets its own HOME: the client caches downloads in ~/.clutch/artifacts,
 // so pointing the cache at a temp directory keeps the user's real one untouched
@@ -211,10 +213,11 @@ async function main() {
   const dead = await components.ensureComponents("http://127.0.0.1:1");
   check(dead.errors.length === 1 && dead.installed.length === 0, "an unreachable host is a report, not a crash");
 
-  // 8. the published supply: a module's release manifest, its artifact downloaded
-  //    over http and pinned by the digest the manifest carries. The bytes are a
-  //    DELIBERATELY different artifact than the checkout (one extra file), so the
-  //    install is the download and not a cache hit.
+  // 8. the published supply: a module's release manifest, whose artifact the
+  //    TARGET MACHINE fetches for itself (PLUGIN_PLAN.md 零之四.4 — this client
+  //    never holds those bytes), pinned by the digest the manifest carries. The
+  //    bytes are a DELIBERATELY different artifact than the checkout (one extra
+  //    file), so the install is a fetch and not a cache hit.
   const pub = tmp("clutch-components-pub-");
   const pubSrc = path.join(pub, "clutch-memory");
   fs.mkdirSync(pubSrc);
@@ -250,9 +253,43 @@ async function main() {
       "a checkout outranks the release it came from, but keeps the release reachable under it"
     );
 
+    // the default direction, pinned from the client side: a release is handed over
+    // as the URL its bytes are at plus the digest that pins them, and this machine
+    // keeps no copy at all
+    // what this client's own cache holds before anything is asked of it: the
+    // check below is about what an install adds to it
+    const cacheBefore = fs.existsSync(components.CACHE) ? fs.readdirSync(components.CACHE).sort() : [];
+    const handed = await components.artifactFor(
+      { ...(await components.readManifest(source)), checkout: false },
+      { checkout: false }
+    );
+    check(
+      !handed.path && handed.url === `${pubServer.base}/clutch-memory-any.tar.gz`,
+      "a published release is handed over as a URL: nothing is downloaded here"
+    );
+    check(
+      handed.digest === artDigest && handed.artifact === "clutch-memory-any.tar.gz",
+      "carrying the digest the release pinned and the file's own name (a host reads the artifact's shape from its suffix)"
+    );
+    check(
+      handed.version === `0.1.0+${artDigest.slice(0, 16)}`,
+      "and the version it would be recorded under: the release's own, with the content digest appended"
+    );
+
     const pinned = await components.ensureComponents(base, { checkout: false, sources: [source], progress: null });
     check(pinned.errors.length === 0, `a published artifact installs (${JSON.stringify(pinned.errors)})`);
-    check(pinned.installed.includes("clutch-memory"), "and it is the download that lands, not the checkout beside the repo");
+    check(pinned.installed.includes("clutch-memory"), "and it is the release that lands, not the checkout beside the repo");
+    // Only the DECLARATION comes through this client (a few hundred bytes, pinned
+    // like everything else); the artifact itself is tens of megabytes and the
+    // target machine fetches it. So exactly one cache file is new, and it is the
+    // declaration — an artifact download here would show up as a second entry.
+    const fetchedJustNow = (fs.existsSync(components.CACHE) ? fs.readdirSync(components.CACHE).sort() : []).filter(
+      (f) => !cacheBefore.includes(f)
+    );
+    check(
+      fetchedJustNow.length === 1 && fetchedJustNow[0] === `clutch-memory-${declDigest.slice(0, 16)}-component.json`,
+      `installing it fetched the declaration and nothing else: the artifact never came through this client (${fetchedJustNow.join(", ")})`
+    );
     const published = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
     check(
       published.length === 1 && published[0] === `0.1.0+${artDigest.slice(0, 16)}`,
@@ -268,8 +305,9 @@ async function main() {
     const repinned = await components.ensureComponents(base, { checkout: false, sources: [source] });
     check(repinned.installed.length === 0 && repinned.current.includes("clutch-memory"), "a second pass against the same pin uploads nothing");
 
-    // a manifest that pins nothing, or pins the wrong bytes, is refused rather
-    // than trusted — the pin is the only thing that makes a download safe
+    // a manifest that pins nothing is refused rather than trusted: the pin is the
+    // only thing that makes a fetch safe, and this client will not hand over an
+    // artifact that nothing pins.
     let refused = "";
     try {
       await components.artifactFor({ name: "clutch-nothing", interface: "cli", artifacts: { any: "x.tar.gz" } });
@@ -278,18 +316,30 @@ async function main() {
     }
     check(/pins no sha256/.test(refused), "an unpinned artifact is refused, not guessed at");
 
-    let lied = "";
-    try {
-      await components.artifactFor({
-        name: "clutch-nothing",
+    // the other half of the same rule — a manifest that pins the WRONG bytes — is
+    // not this client's to catch any more: the bytes no longer pass through here,
+    // so the machine that fetched them measures them against the pin and refuses.
+    // (The URL is served, so the pin is the only thing wrong with the request.)
+    fs.writeFileSync(
+      path.join(pub, "lying.json"),
+      JSON.stringify({
+        schema: 1,
+        name: "clutch-memory",
         interface: "cli",
-        source,
+        version: "0.1.0",
         artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: "0".repeat(64) } },
-      });
-    } catch (e) {
-      lied = (e && e.message) || "";
-    }
-    check(/sha256 [0-9a-f]+, not the [0-9a-f]+ its manifest pins/.test(lied), "bytes that do not hash to the pin are refused");
+      })
+    );
+    const deceived = await components.ensureComponents(base, {
+      checkout: false,
+      sources: [`${pubServer.base}/lying.json`],
+      progress: null,
+    });
+    check(
+      deceived.errors.length === 1 && /hashes to/.test(deceived.errors[0].reason),
+      `bytes that do not hash to the pin are refused by the host that fetched them (${JSON.stringify(deceived.errors)})`
+    );
+    check(deceived.installed.length === 0, "and nothing lands: the host keeps what it already held, unpinned bytes are never recorded");
 
     fs.writeFileSync(path.join(pub, "future.json"), JSON.stringify({ schema: 2, name: "x", artifacts: {} }));
     let unknown = "";

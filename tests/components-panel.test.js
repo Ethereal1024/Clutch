@@ -278,6 +278,16 @@ const CODE = mod ? mod.code : "";
     p.world.progress({ stage: "upload", name: "clutch-memory" });
     check(/sending clutch-workspace/.test(p.note().textContent), "a stage from another window's install is ignored");
 
+    // the other shape: no bytes travel from this machine at all, so the stage says
+    // which machine is doing the moving
+    p.world.progress({ stage: "fetch", name: "clutch-workspace", version: "0.1.0+5f900739" });
+    check(
+      /Local \(this machine\) is fetching clutch-workspace 0\.1\.0\+5f900739/.test(p.note().textContent),
+      "the fetch stage says the target machine is getting its own bytes, not receiving ours"
+    );
+    p.world.progress({ stage: "fetch", name: "clutch-memory" });
+    check(/is fetching clutch-workspace/.test(p.note().textContent), "and a fetch stage is read per window like every other one");
+
     p.world.control.res({ ok: true, status: "installed", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", path: "/home/u/.clutch/components/clutch-workspace" });
     await settle();
     check(/^installed clutch-workspace 0\.1\.0\+5f900739 on Local \(this machine\) · \/home\/u/.test(p.note().textContent), "the verdict is the host's, with the path it landed at");

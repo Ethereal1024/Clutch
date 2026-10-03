@@ -129,10 +129,11 @@ function createComponentsView(deps) {
   // Hand ONE component to the target machine.
   //
   // The verdict is the host's, not this client's: the bytes are measured against
-  // the digest the declaration pinned before they are sent, and the machine that
-  // would RUN the code decides whether it needed them ("current") or landed them
+  // the digest the declaration pinned — whichever way they reached that machine,
+  // in the request body or by its own fetch — and the machine that would RUN the
+  // code decides whether it needed them ("current") or landed them
   // ("installed"). The gate is checked here first as well, so a component the
-  // target already holds at exactly this version and digest costs no upload —
+  // target already holds at exactly this version and digest costs no transfer —
   // the same shortcut the automatic pass takes.
   async function install(name, win = null, { progress = null } = {}) {
     const say = (stage, extra = {}) => {
@@ -180,9 +181,18 @@ function createComponentsView(deps) {
       return { ok: true, name, status: "current", version: file.version, digest: file.digest, target: t };
     }
 
-    say("upload", { version: file.version, digest: file.digest });
+    // Which shape this install takes is decided by where the bytes ARE
+    // (ui/components.js `artifactFor`): the target machine fetches a published
+    // release for itself — the default, because that machine is the one that will
+    // run them — and only bytes this client alone holds travel as a body. The
+    // page is told which one is happening, since that is the slow step and it is
+    // not the same step.
+    const sends = Boolean(file.path);
+    say(sends ? "upload" : "fetch", { version: file.version, digest: file.digest });
     try {
-      const res = await lib.upload(t.base, file, lib.REQUEST_TIMEOUT_MS);
+      const res = sends
+        ? await lib.upload(t.base, file, lib.REQUEST_TIMEOUT_MS)
+        : await lib.fetchInstall(t.base, file, lib.REQUEST_TIMEOUT_MS);
       say(res.status === "current" ? "current" : "installed", { version: file.version });
       return {
         ok: true,

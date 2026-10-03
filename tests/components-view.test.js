@@ -4,7 +4,8 @@
 // stops it being driven or starts it again). It is injectable on purpose, so this
 // runner drives the REAL view against a fake install layer — no Electron, no
 // supervisor, no network — and asserts the four answers, the far-side/local
-// target rule, the market cache and every install verdict path.
+// target rule, the market cache and every install verdict path, in both shapes an
+// install takes (bytes in the request body, or a URL the target machine fetches).
 // Run: node tests/components-view.test.js
 const { check, summary } = require("./harness.js");
 const components = require("../ui/components");
@@ -24,6 +25,7 @@ function fakeLib(opts = {}) {
     artifactError = null,
     verdict = { status: "installed", name: "clutch-memory", version: VERSION, digest: DIGEST, path: "/root/0.1.0" },
     uploadError = null,
+    fetchError = null,
     versions = [{ name: "clutch-memory", version: VERSION, interface: "cli", digest: DIGEST, path: "/root/0.1.0", resolved: true }],
     versionsError = null,
     removal = { status: "removed", name: "clutch-memory", removed: [VERSION] },
@@ -31,7 +33,7 @@ function fakeLib(opts = {}) {
     switchVerdict = { status: "disabled", name: "clutch-memory", disabled: true },
     switchError = null,
   } = opts;
-  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [], versionReads: [], removals: [], switches: [] };
+  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [], fetches: [], versionReads: [], removals: [], switches: [] };
   return {
     calls,
     REQUEST_TIMEOUT_MS: 120000,
@@ -68,6 +70,13 @@ function fakeLib(opts = {}) {
     upload: async (base, f, timeoutMs) => {
       calls.uploads.push({ base, timeoutMs, version: f.version, digest: f.digest });
       if (uploadError) throw new Error(uploadError);
+      return verdict;
+    },
+    // the default shape: no bytes here to send — the URL is what travels, and the
+    // TARGET machine fetches what it will run
+    fetchInstall: async (base, f, timeoutMs) => {
+      calls.fetches.push({ base, timeoutMs, url: f.url, artifact: f.artifact, version: f.version, digest: f.digest });
+      if (fetchError) throw new Error(fetchError);
       return verdict;
     },
   };
@@ -256,6 +265,51 @@ async function main() {
     check(!r4.ok, "no window and no tunnel still installs to this machine");
   }
 
+  // ---- 6. the fetch shape: no bytes leave this client ----
+  {
+    // a published release is a LOCATION plus its pin, not bytes, so the machine
+    // that will RUN it fetches them for itself and nothing is uploaded from here
+    const URLFILE = {
+      name: "clutch-skills",
+      url: "https://example.invalid/clutch-skills.tar.gz",
+      artifact: "clutch-skills.tar.gz",
+      digest: DIGEST,
+      version: VERSION,
+    };
+    const stages = [];
+    const fetched = view({ lib: fakeLib({ specs: [RELEASE], file: URLFILE, held: [] }) });
+    const r = await fetched.api.install("clutch-skills", EMPTY_WIN, { progress: (s) => stages.push(s.stage) });
+    check(r.ok && r.status === "installed", "an install whose bytes are a URL is still an install onto the target machine");
+    check(
+      fetched.lib.calls.fetches.length === 1 && fetched.lib.calls.uploads.length === 0,
+      "the URL is handed over and no bytes are uploaded from this client"
+    );
+    check(
+      fetched.lib.calls.fetches[0].url === "https://example.invalid/clutch-skills.tar.gz" &&
+        fetched.lib.calls.fetches[0].artifact === "clutch-skills.tar.gz",
+      "the request names the release's own URL and the artifact's own file name"
+    );
+    check(
+      fetched.lib.calls.fetches[0].base === "http://127.0.0.1:8890" && fetched.lib.calls.fetches[0].timeoutMs > 0,
+      "and it goes to the target machine's supervisor, with a bounded timeout"
+    );
+    check(
+      stages.includes("fetch") && !stages.includes("upload"),
+      "the page is told it is a fetch, not a send (" + stages.join(" → ") + ")"
+    );
+
+    // what the target machine refuses is the host's own words, either way
+    const refused = view({
+      lib: fakeLib({
+        specs: [RELEASE],
+        file: URLFILE,
+        fetchError: "the artifact hashes to 608f3392, not the declared f7ca6bc5",
+      }),
+    });
+    const r2 = await refused.api.install("clutch-skills", EMPTY_WIN, {});
+    check(!r2.ok && /hashes to/.test(r2.error), "a fetch the target machine refuses arrives as its own sentence");
+  }
+
   // ---- 7. the reverse verbs: what one machine holds, and letting it go ----
   {
     // the versions of ONE component, in the host's own order and with the
@@ -353,7 +407,10 @@ async function main() {
 
   // ---- 10. the view's default install layer is the real one, and complete ----
   {
-    check(typeof components.upload === "function", "ui/components.js exports the uploader the view calls");
+    check(
+      typeof components.upload === "function" && typeof components.fetchInstall === "function",
+      "ui/components.js exports both ways the view sends an install: the body uploader and the URL handover"
+    );
     check(
       typeof components.hostVersions === "function" && typeof components.hostRemove === "function" && typeof components.hostSetDisabled === "function",
       "and the three reverse calls (list one component's versions, let one go, stop or start driving it)"

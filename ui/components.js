@@ -49,10 +49,13 @@
 //     (scripts/build-component-tar.sh). A contributor's edit therefore beats the
 //     published release, which is what makes module development possible.
 //   - a dev build:  dist/components/<name>-<platform>  (a onefile built by hand)
-//   - a published release: the module's manifest -> its per-platform asset,
-//     downloaded once into ~/.clutch/artifacts and pinned by the sha256 the
-//     module's own manifest carries (an unpinned artifact is refused, not
-//     guessed at).
+//   - a published release: the module's manifest -> its per-platform asset. Its
+//     bytes are fetched by the TARGET machine itself, and the sha256 the module's
+//     own manifest pinned is what that machine weighs them against (an unpinned
+//     artifact is refused here, not guessed at) — so this client never has to
+//     hold the tens of megabytes it is installing, which is what makes an
+//     install from a phone sane (PLUGIN_PLAN.md 零之四.4). Bytes only this
+//     machine has (the two sources above) still travel in the request body.
 //
 // The declaration comes from the same places: the checkout's own component.json,
 // the release's component.json asset (digest-pinned the same way), or — for an
@@ -71,6 +74,7 @@ const REPO = path.join(__dirname, "..");
 const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
 const TAR_SCRIPT = path.join(REPO, "scripts", "build-component-tar.sh");
 const MANIFEST_HEADER = "X-Clutch-Component"; // agent/tools/components.py's contract: base64 of UTF-8 JSON
+const ARTIFACT_URL_FIELD = "artifact_url"; // where the bytes are, when the host fetches them for itself
 const REQUEST_TIMEOUT_MS = 120_000; // a onefile over a slow link
 const MANIFEST_TIMEOUT_MS = 30_000; // a few KB of JSON, from a release
 const BUDGET_MS = 300_000; // the whole pass; beyond it the rest is deferred
@@ -278,8 +282,11 @@ function checkoutComponents() {
 // ----------------------------------------------------------- remote source --
 
 // Download once, into a name that carries the digest the manifest pinned: a
-// second pass finds the file and sends nothing, and a manifest that changes its
-// bytes changes the name.
+// second pass finds the file and needs no network, and a manifest that changes
+// its bytes changes the name. What still comes down through here is the
+// DECLARATION (a few hundred bytes, and it has to be inlined into the manifest a
+// host reads); an ARTIFACT's bytes are the target machine's to fetch, not this
+// client's (PLUGIN_PLAN.md 零之四.4).
 async function downloadPinned(url, sha256, dest, timeoutMs = REQUEST_TIMEOUT_MS) {
   if (fs.existsSync(dest)) return dest;
   const ctl = new AbortController();
@@ -319,15 +326,18 @@ function pinnedAsset(entry, what, name) {
 // The artifact a published manifest points at for THIS platform, or why there is
 // none: the exact platform key, else `any` (a shape that needs no per-platform
 // build — the tar of a pure-Python component is one).
-async function remoteArtifact(manifest) {
+//
+// What comes back is a LOCATION plus the digest the release pinned it with, not
+// bytes: the machine that will RUN the component fetches it and is measured
+// against that pin (PLUGIN_PLAN.md 零之四.4). So this client can hand over an
+// install it has never held, which is the point — and the pin keeps a URL from
+// being a weaker promise than a body.
+function publishedArtifact(manifest) {
   const tag = platformTag();
   const entry = manifest.artifacts[tag] || manifest.artifacts.any;
   if (!entry) return { problem: `no artifact for ${tag} in its manifest` };
   const { asset, sha256 } = pinnedAsset(entry, "artifact", manifest.name);
-  const dest = path.join(CACHE, `${manifest.name}-${sha256.slice(0, 16)}-${path.basename(asset)}`);
-  const url = assetLocation(manifest.source, asset);
-  await downloadPinned(url, sha256, dest);
-  return { path: dest, digest: sha256 };
+  return { url: assetLocation(manifest.source, asset), artifact: path.basename(asset), digest: sha256 };
 }
 
 // The declaration that rode with a release: its component.json asset, pinned by
@@ -390,10 +400,21 @@ function installVersion(named, digest) {
   return version.includes("+") ? version : `${version}+${short}`;
 }
 
-// The artifact this client would send for one component, or null when it has
-// none: `checkout` is false for the machine that already holds the checkout
-// beside the host repo (there is nothing to send it that it does not have, so a
-// checkout spec falls back to the release its module published, if any).
+// The artifact one install would hand over, or null when there is none. Where the
+// bytes ARE decides which of the two shapes the install takes (PLUGIN_PLAN.md
+// 零之四.4):
+//
+//   - `path`: bytes on THIS machine — a checkout beside the host repo, a prebuilt
+//     artifact beside the app. There is nothing to fetch them from, so they travel
+//     in the request body (`upload()` at the bottom of this file).
+//   - `url`: the release published them, and the TARGET machine fetches them
+//     itself (`fetchInstall()`). `artifact` is the file's own name, because its
+//     suffix is how a host reads the artifact's shape, and `digest` is the pin the
+//     release declared — the receiving host measures what it fetched against it.
+//
+// `checkout` is false for the machine that already holds the checkout beside the
+// host repo (there is nothing to send it that it does not have, so a checkout
+// spec falls back to the release its module published, if any).
 async function artifactFor(spec, { checkout = true } = {}) {
   const local = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
   if (local) {
@@ -406,7 +427,7 @@ async function artifactFor(spec, { checkout = true } = {}) {
   }
   const published = spec.published || (spec.checkout ? null : spec);
   if (!published || !published.artifacts) return null; // nothing here and nothing published
-  const remote = await remoteArtifact(published);
+  const remote = publishedArtifact(published);
   if (remote.problem) throw new Error(remote.problem);
   const declaration = await remoteDeclaration(published);
   return {
@@ -414,7 +435,8 @@ async function artifactFor(spec, { checkout = true } = {}) {
     // the published bytes are described by the published declaration, never by a
     // checkout's (the two can disagree the moment a contributor edits one)
     declaration,
-    path: remote.path,
+    url: remote.url, // the target machine's own fetch: no copy of this here
+    artifact: remote.artifact, // its own file name, so the host reads its shape
     digest: remote.digest,
     // the release's own manifest names its version too, and a manifest that pins
     // no separate declaration is a legal (thinner) install
@@ -487,19 +509,26 @@ async function hostSetDisabled(base, name, disabled, timeoutMs = REQUEST_TIMEOUT
   return hostJSON(`${base}/api/components/${encodeURIComponent(name)}/${verb}`, { method: "POST", timeoutMs });
 }
 
-async function upload(base, spec, timeoutMs) {
-  const data = fs.readFileSync(spec.path);
-  // the manifest is the component's own declaration with the install facts on
-  // top — a remote host that never saw the checkout still receives a component
-  // it can drive, because the declaration rode with the artifact
-  const manifest = {
+// The manifest ONE install request carries: the component's own declaration with
+// the install facts on top — a host that never saw the checkout still receives a
+// component it can drive, because the declaration rode with the request.
+// `artifact` is the artifact's own file name (the receiving host reads its shape
+// from the suffix: an archive is unpacked, anything else is one executable).
+function manifestFor(spec) {
+  return {
     ...(spec.declaration || {}),
     name: spec.name,
     version: spec.version,
     interface: spec.interface || (spec.declaration && spec.declaration.interface) || "",
     digest: spec.digest,
-    artifact: path.basename(spec.path), // its suffix is how the host reads the shape
+    artifact: spec.path ? path.basename(spec.path) : spec.artifact || "",
   };
+}
+
+// The install request itself, whichever way the bytes travel: one endpoint, one
+// header, one answer — the host's verdict, or the host's own sentence thrown so
+// the page can quote the machine that refused.
+async function postInstall(base, manifest, body, timeoutMs) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -508,23 +537,45 @@ async function upload(base, spec, timeoutMs) {
       headers: {
         [MANIFEST_HEADER]: Buffer.from(JSON.stringify(manifest), "utf8").toString("base64"),
         "Content-Type": "application/octet-stream",
-        "Content-Length": String(data.length),
+        "Content-Length": String(body.length),
       },
-      body: data,
+      body,
       signal: ctl.signal,
     });
     const text = await r.text();
-    let body = {};
+    let out = {};
     try {
-      body = JSON.parse(text);
+      out = JSON.parse(text);
     } catch (e) {
       /* a non-JSON body is reported below as the status */
     }
-    if (!r.ok) throw new Error(body.error || `install refused (${r.status})`);
-    return body;
+    if (!r.ok) throw new Error(out.error || `install refused (${r.status})`);
+    return out;
   } finally {
     clearTimeout(t);
   }
+}
+
+// The fallback shape: the bytes go in the body, because this machine is the only
+// place they are (`api/components.js` decides with `artifactFor`: a checkout, or a
+// prebuilt artifact beside the app). A release's artifact does NOT come through
+// here unless a caller has it locally — the target machine fetches its own.
+async function upload(base, spec, timeoutMs) {
+  if (!spec.path) {
+    throw new Error(`this client holds no bytes for ${spec.name} to upload: it has neither a local artifact nor a URL`);
+  }
+  return postInstall(base, manifestFor(spec), fs.readFileSync(spec.path), timeoutMs);
+}
+
+// The default shape (PLUGIN_PLAN.md 零之四.4): the request carries NO bytes and
+// names the URL the release published, and the machine that will RUN the
+// component fetches it for itself. That machine is the one that needs the bytes,
+// so a client on a slow uplink — a phone — never has to hold the tens of
+// megabytes it is installing. The digest travels with the URL, so the host weighs
+// what it fetched against exactly the pin a body would have been weighed against.
+async function fetchInstall(base, spec, timeoutMs) {
+  const manifest = { ...manifestFor(spec), [ARTIFACT_URL_FIELD]: spec.url };
+  return postInstall(base, manifest, Buffer.alloc(0), timeoutMs);
 }
 
 // Make sure `base`'s machine holds every component this client can give it.
@@ -569,8 +620,11 @@ async function ensureComponents(base, { checkout = true, sources: list = null, p
       out.deferred.push(spec.name);
       continue;
     }
+    // the machine that will RUN it fetches its own bytes when this client has
+    // none; only bytes that exist here and nowhere else travel in the body
+    const send = file.path ? upload : fetchInstall;
     try {
-      const res = await upload(base, file, Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
+      const res = await send(base, file, Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
       (res.status === "current" ? out.current : out.installed).push(spec.name);
       say(`${spec.name} ${res.status}`);
     } catch (e) {
@@ -596,6 +650,7 @@ module.exports = {
   hostRemove,
   hostSetDisabled,
   upload,
+  fetchInstall,
   CACHE,
   REQUEST_TIMEOUT_MS,
   SOURCES_FILE,
