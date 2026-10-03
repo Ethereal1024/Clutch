@@ -85,6 +85,32 @@ function supervisorSessionStop(base, sid) {
   } catch { /* supervisor already gone: nothing to tell */ }
 }
 
+// One heartbeat, AWAITED: "does this supervisor still hold this session?"
+// True = the session is still there — and the beat just told the reaper a
+// window is watching it again, so a claim that outlived its tunnel (the
+// session is a process on the far host; only this client's forward to it
+// died) can be re-opened instead of replaced. False = gone or unreachable.
+async function supervisorSessionHeartbeat(base, sid) {
+  if (!sid) return false;
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${base}/api/session/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sid }),
+        signal: ctl.signal,
+      });
+      return r.ok;
+    } finally {
+      clearTimeout(t);
+    }
+  } catch {
+    return false;
+  }
+}
+
 // Keep a session alive; onFail fires when the supervisor stops answering for
 // longer than its own stale window (see HEARTBEAT_STALE_MS) — i.e. when the
 // session is provably gone, not when one request happened to fail.
@@ -149,6 +175,7 @@ module.exports = {
   supervisorProbe,
   supervisorSessionStart,
   supervisorSessionStop,
+  supervisorSessionHeartbeat,
   startSupervisorHeartbeat,
   supervisorShutdown,
 };

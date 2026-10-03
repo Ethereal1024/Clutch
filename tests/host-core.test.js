@@ -1,7 +1,8 @@
 // Hermetic check of the session-claim state machine (ui/host-core.js).
 // Everything platform-shaped is faked, so the machine that main.js AND the
 // future Android host both run is exercised directly: claim/dedup, tunnel
-// vs local paths, heartbeat self-heal, supersede guards, shutdown fan-out.
+// vs local paths, heartbeat self-heal, re-bind over a bounced hop, supersede
+// guards, shutdown fan-out.
 // Run: node tests/host-core.test.js
 const assert = require("assert");
 const { createHostCore } = require("../ui/host-core");
@@ -10,17 +11,25 @@ const tick = () => new Promise((r) => setImmediate(r));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function fakeSessions() {
-  const calls = { started: [], stopped: [], shutdown: [], forwards: [] };
+  const calls = { started: [], stopped: [], shutdown: [], forwards: [], heartbeats: [] };
   let seq = 0;
   const beats = [];
-  return {
+  const self = {
     calls,
     beats,
+    // what the supervisor answers to "is this session still there?" — the
+    // re-claim's first question. Scenarios flip it to say the far host really
+    // dropped the session instead of just this client's forward to it.
+    sessionAlive: true,
     supervisorSessionStart: async (base, baseUrl, model, knobs) => {
       calls.started.push({ base, baseUrl, model, knobs });
       return { sessionId: "s" + ++seq, port: 30000 + seq };
     },
     supervisorSessionStop: (base, sid) => calls.stopped.push({ base, sid }),
+    supervisorSessionHeartbeat: async (base, sid) => {
+      calls.heartbeats.push({ base, sid });
+      return self.sessionAlive;
+    },
     startSupervisorHeartbeat: (base, sid, onFail) => {
       const h = { base, sid, onFail, stopped: false };
       beats.push(h);
@@ -28,6 +37,7 @@ function fakeSessions() {
     },
     supervisorShutdown: (base) => calls.shutdown.push(base),
   };
+  return self;
 }
 
 function fakeWin(id) {
@@ -143,9 +153,15 @@ async function main() {
     assert.ok(url, "retry succeeds");
   }
 
-  // 6. tunnel heartbeat failure: release + re-claim + base-changed with the NEW url
+  // 6. tunnel heartbeat failure with the session STILL on the far host: the
+  //    dead thing is this client's own forward — re-bind the SAME session over
+  //    the current hop (stop + start here is what SIGTERMed runs in flight)
   {
-    const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    let n = 0;
+    const { core, sessions } = makeCore({
+      tunnel: { active: true, url: "http://127.0.0.1:8891" },
+      over: { openSessionForward: async () => ({ localPort: 31000 + ++n, close: () => {} }) },
+    });
     const w = fakeWin(6);
     const first = await core.ensureWindowBackend(w);
     sessions.beats[0].onFail(); // supervisor stopped answering
@@ -154,8 +170,12 @@ async function main() {
     await tick();
     const sent = w.sent.find(([ch]) => ch === "backend:base-changed");
     assert(sent, "self-heal pushes base-changed");
-    assert.notStrictEqual(sent[1], first, "the pushed URL is the re-claimed one");
-    assert.strictEqual(sessions.calls.started.length, 2, "exactly one re-claim");
+    assert.notStrictEqual(sent[1], first, "the pushed URL is the re-opened forward, never the dead one");
+    assert.strictEqual(sessions.calls.started.length, 1,
+      "the SAME session is kept: no stop + start over work in flight");
+    assert.deepStrictEqual(sessions.calls.stopped, [], "and the far-side session is never told to stop");
+    assert.deepStrictEqual(sessions.calls.heartbeats, [{ base: "http://127.0.0.1:8891", sid: "s1" }],
+      "the re-claim asks the supervisor first: it alone knows the session is still there");
   }
 
   // 7. supersede guard: a heartbeat from a replaced backend must not fire
@@ -243,37 +263,53 @@ async function main() {
     assert.strictEqual(calls, 3, "heal spawned one more session");
   }
 
-  // 12. a tunnel end drops the window's forward with it (the shells call this
-  //     from their tunnel-end notification, BEFORE they tell the renderer)
+  // 12. a tunnel end drops the window's forward but NOT its claim: the session
+  //     is a process on the far host that outlives the hop (a run in flight
+  //     must outlive it too), so the returning hop re-opens a forward over the
+  //     SAME session — never stop + start over work in flight (the shells call
+  //     this from their tunnel-end notification, BEFORE they tell the renderer)
   {
     const ts = { active: true, url: "http://127.0.0.1:8891" };
     let closedForwards = 0;
+    let n = 0;
     const { core, sessions } = makeCore({
       tunnel: ts,
       over: {
         // the port number can repeat across tunnels: the guard cannot lean on it
-        openSessionForward: async () => ({ localPort: 31001, close: () => closedForwards++ }),
+        openSessionForward: async () => ({ localPort: 31000 + ++n, close: () => closedForwards++ }),
       },
     });
     const w = fakeWin(12);
-    assert.strictEqual(await core.ensureWindowBackend(w), "http://127.0.0.1:31001");
+    const first = await core.ensureWindowBackend(w);
     assert.strictEqual(await core.releaseTunnelBackends(), 1, "the end drops the window's forward");
-    assert.strictEqual(closedForwards, 1, "and the forward is actually closed");
-    assert.strictEqual(core.backendCount(), 0, "no window keeps pointing at a hop that is gone");
-    assert.deepStrictEqual(sessions.calls.stopped, [{ base: "http://127.0.0.1:8891", sid: "s1" }],
-      "the session behind it is told to stop");
-    // the tunnel comes back (a new hop, the same port number): a NEW session
+    assert.strictEqual(closedForwards, 1, "and the forward is closed exactly once: a detach is idempotent");
+    assert.strictEqual(core.backendCount(), 1, "the CLAIM survives the hop: it names the far-side process, not the dead forward");
+    assert.deepStrictEqual(sessions.calls.stopped, [],
+      "the session behind it is not told to stop: its run is in flight and the reaper collects it when idle");
+    // the tunnel comes back (a new hop): the claim re-binds over the same session
     ts.url = "http://127.0.0.1:9999";
-    assert.strictEqual(await core.ensureWindowBackend(w), "http://127.0.0.1:31001");
-    assert.strictEqual(sessions.calls.started.length, 2, "the returning hop gets its own session child");
-    assert.strictEqual(sessions.calls.started[1].base, "http://127.0.0.1:9999");
+    const again = await core.ensureWindowBackend(w);
+    assert.strictEqual(sessions.calls.started.length, 1, "the returning hop keeps the session child it had");
+    assert.deepStrictEqual(sessions.calls.heartbeats, [{ base: "http://127.0.0.1:9999", sid: "s1" }],
+      "re-bound only after the supervisor vouched for the session");
+    assert.notStrictEqual(again, first, "and the window is handed the re-opened forward, never the dead hop's port");
   }
 
   // 13. the reuse guard: a forward opened through ANOTHER hop is never handed
-  //     back (the notification may race the re-claim that follows it)
+  //     back (the notification may race the re-claim that follows it) — what is
+  //     handed back is a forward the CURRENT hop opened, over the same session
   {
     const ts = { active: true, url: "http://127.0.0.1:8891" };
-    const { core, sessions } = makeCore({ tunnel: ts });
+    const opened = [];
+    const { core, sessions } = makeCore({
+      tunnel: ts,
+      over: {
+        openSessionForward: async (port) => {
+          opened.push(port);
+          return { localPort: 31000 + opened.length, close: () => {} };
+        },
+      },
+    });
     const w = fakeWin(13);
     const first = await core.ensureWindowBackend(w);
     assert.strictEqual(await core.ensureWindowBackend(w), first, "the same hop reuses its forward");
@@ -281,7 +317,9 @@ async function main() {
     ts.url = "http://127.0.0.1:9999"; // a new hop, same window
     const again = await core.ensureWindowBackend(w);
     assert.notStrictEqual(again, first, "a forward from the dead hop is not reused");
-    assert.strictEqual(sessions.calls.started.length, 2, "the new hop is asked for its own session");
+    assert.strictEqual(sessions.calls.started.length, 1,
+      "and the session is kept across the hop: never stop + start over work in flight");
+    assert.strictEqual(opened.length, 2, "the new hop's own forward is the answer");
   }
 
   // 14. a tunnel end leaves a LOCAL backend alone: its session never went through
@@ -294,6 +332,67 @@ async function main() {
     assert.strictEqual(core.backendCount(), 1, "the local session is still this window's backend");
     assert.strictEqual(await core.ensureWindowBackend(w), local, "and it is still the same URL");
     assert.strictEqual(state.localStarts.length, 1);
+  }
+
+  // 15. heartbeat failure and the session is PROVABLY gone: only then is it
+  //     replaced — "re-bind first" answers a stale forward, never a stale guess
+  {
+    const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    const w = fakeWin(15);
+    await core.ensureWindowBackend(w);
+    sessions.sessionAlive = false; // the supervisor no longer holds it
+    sessions.beats[0].onFail();
+    await tick();
+    await tick();
+    await tick();
+    assert.strictEqual(sessions.calls.started.length, 2, "a provably gone session is replaced");
+    assert.strictEqual(sessions.calls.started[1].base, "http://127.0.0.1:8891");
+    const sent = w.sent.find(([ch]) => ch === "backend:base-changed");
+    assert(sent, "and the window is pointed at the replacement");
+  }
+
+  // 16. the re-bind supersede guard: a claim that changed hands while the
+  //     question was in flight is not replaced behind the new holder's back
+  {
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const sessions = fakeSessions();
+    const slow = { ...sessions };
+    slow.supervisorSessionHeartbeat = async (base, sid) => {
+      await sleep(30);
+      return sessions.supervisorSessionHeartbeat(base, sid);
+    };
+    const { core } = makeCore({ tunnel: ts, over: { sessions: slow } });
+    const w = fakeWin(16);
+    await core.ensureWindowBackend(w);
+    sessions.beats[0].onFail(); // the re-claim puts its question...
+    await tick();
+    await core.releaseWindowBackend(w.id); // ...and the window goes away mid-ask
+    await sleep(60);
+    assert.strictEqual(core.backendCount(), 0, "the closed window keeps no claim");
+    assert.strictEqual(sessions.calls.started.length, 1, "and no session is spawned for it");
+  }
+
+  // 17. the reuse guard keys on the HOP, never the port number: a new hop with
+  //     the same local port on offer still re-opens a forward of its own
+  {
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const opened = [];
+    const { core, sessions } = makeCore({
+      tunnel: ts,
+      over: {
+        openSessionForward: async (port) => {
+          opened.push(port);
+          return { localPort: 31001, close: () => {} };
+        },
+      },
+    });
+    const w = fakeWin(17);
+    await core.ensureWindowBackend(w);
+    ts.url = "http://127.0.0.1:9999";
+    await core.ensureWindowBackend(w);
+    assert.deepStrictEqual(opened, [30001, 30001],
+      "the dead hop's forward is not reused, even for the same port number: a new one is opened over the same session");
+    assert.deepStrictEqual(sessions.calls.heartbeats.map((h) => h.sid), ["s1"], "and the re-open went through the supervisor's answer");
   }
 
   console.log("host-core: all checks passed");

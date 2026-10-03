@@ -186,8 +186,10 @@ async function main() {
     "the announcement follows the port teardown, not the reverse");
   check(/await stopTunnel\(true\)/.test(fnBody("healOnce")),
     "the healer announces the teardown of its last resort");
-  check(/if \(!state\.sshClient\) return sock.destroy\(\);/.test(fnBody("openSessionForward")),
-    "a session request racing the teardown fails its own socket");
+  check(/if \(!state\.sshClient\) return sock.destroy\(\);/.test(fnBody("forwardServer")),
+    "a request racing the teardown fails its own socket (the guard lives in the shared forward factory)");
+  check(/forwardServer\(remotePort\)/.test(fnBody("openSessionForward")),
+    "…and a session forward is that factory, so the guard covers it too");
   const fwdBody = slicer(TUNNEL_SRC).region("async function establishForwardAndHealth", "establishForwardAndHealth");
   check(/if \(!state\.sshClient\) return sock.destroy\(\);/.test(fwdBody),
     "a stale local forward fails its socket instead of throwing in the main process");

@@ -51,31 +51,109 @@ function createHostCore(deps) {
     }
   }
 
-  async function registerTunnelBackend(wc, supBase, res) {
-    const fwd = await openSessionForward(res.port);
-    const hb = sessions.startSupervisorHeartbeat(supBase, res.sessionId, () => {
+  // this claim's heartbeat gave up on its session. Re-bind FIRST — the
+  // failure can be THIS client's own stale forward while the far host kept
+  // running the session all along (the phone returning from the background is
+  // exactly that) — and only replace the session when the old one is provably
+  // gone.
+  function tunnelClaimOnFail(wc, supBase, sessionId) {
+    return () => {
       log(`[backend] window ${wc.id} session heartbeat failed; re-establishing`);
       (async () => {
         const cur = windowBackends.get(wc.id);
-        if (!cur || cur.sessionId !== res.sessionId) return; // superseded / closed
+        if (!cur || cur.sessionId !== sessionId) return; // superseded / closed
+        const kept = await rebindTunnelBackend(wc, supBase, cur);
+        if (kept) {
+          if (!wc.isDestroyed()) wc.send(BASE_CHANGED, kept);
+          return;
+        }
+        if (windowBackends.get(wc.id) !== cur) return; // the claim changed hands while we were asking: replacing now would spawn a session nobody is waiting for
         await releaseWindowBackend(wc.id);
         const url = await ensureWindowBackend(wc);
         if (!wc.isDestroyed()) wc.send(BASE_CHANGED, url);
       })();
-    });
+    };
+  }
+
+  // the shape of a tunnel claim. What survives a hop is the SESSION — its id
+  // and the remote port it listens on name a process on the far host — and
+  // what the hop owns is the local half (the forward and its URL, the
+  // heartbeat). `detach` drops exactly that half, ONCE: a detached claim is
+  // detached again when it is stopped or re-bound, and one close is all a
+  // forward needs.
+  function tunnelClaim(supBase, sessionId, sessionPort, fwd, hb) {
+    let dropped = false;
     const wb = {
       kind: "tunnel",
-      sessionId: res.sessionId,
+      sessionId,
+      // the REMOTE port the session listens on: the session is a process on
+      // the far host and outlives any hop to it, so a bounced tunnel re-opens
+      // this forward instead of replacing the session (rebindTunnelBackend)
+      sessionPort,
       // the hop this forward was opened through: stopTunnel closes EVERY session
       // forward, so a URL from one tunnel names a dead port on the next one
       tunnelUrl: supBase,
       url: `http://127.0.0.1:${fwd.localPort}`,
-      stop: () => {
+      // drop this claim's LOCAL half (heartbeat + forward) and nothing else:
+      // the far-side session is left to its own lifecycle, and the claim stays
+      // re-bindable (session id + remote port name it, not the dead forward)
+      detach: () => {
+        if (dropped) return;
+        dropped = true;
         hb.stop();
         fwd.close();
-        sessions.supervisorSessionStop(supBase, res.sessionId);
+        wb.url = null; // never hand out a port whose forward is gone
+      },
+      stop: () => {
+        wb.detach();
+        sessions.supervisorSessionStop(supBase, sessionId);
       },
     };
+    return wb;
+  }
+
+  async function registerTunnelBackend(wc, supBase, res) {
+    const fwd = await openSessionForward(res.port);
+    const hb = sessions.startSupervisorHeartbeat(supBase, res.sessionId, tunnelClaimOnFail(wc, supBase, res.sessionId));
+    const wb = tunnelClaim(supBase, res.sessionId, res.port, fwd, hb);
+    windowBackends.set(wc.id, wb);
+    return wb.url;
+  }
+
+  // A claim that outlived its hop. The SESSION is a process on the far host
+  // and survives every tunnel bounce; what died is only this client's local
+  // forward to it (and the URL that forward had). So re-open the forward to
+  // the SAME session through the current hop instead of stop + start: stop
+  // SIGTERMs the session mid-run (agent/server.py record_release writes "the
+  // host released this session while the run was in flight" into work nobody
+  // abandoned) and start hands the window a second session while the first
+  // one is still working. Returns the new URL, or null when the session is
+  // really gone — then the caller replaces it the old way.
+  async function rebindTunnelBackend(wc, supBase, existing) {
+    if (!existing || existing.kind !== "tunnel" || !existing.sessionId || !existing.sessionPort) {
+      return null;
+    }
+    if (typeof existing.detach === "function") existing.detach(); // the old forward/heartbeat are dead weight
+    // the supervisor is the authority on "is the session still there", and the
+    // beat doubles as the re-claim: it re-arms the window contract the reaper
+    // judges staleness by
+    const alive = await sessions.supervisorSessionHeartbeat(supBase, existing.sessionId);
+    if (!alive) return null;
+    let fwd;
+    try {
+      fwd = await openSessionForward(existing.sessionPort);
+    } catch (e) {
+      log(`[backend] session ${existing.sessionId} forward failed: ${(e && e.message) || e}`);
+      return null;
+    }
+    const hb = sessions.startSupervisorHeartbeat(supBase, existing.sessionId, tunnelClaimOnFail(wc, supBase, existing.sessionId));
+    const wb = tunnelClaim(supBase, existing.sessionId, existing.sessionPort, fwd, hb);
+    if (windowBackends.get(wc.id) !== existing) {
+      // superseded while we worked (a newer claim, or the window closed):
+      // what we opened serves nobody
+      wb.detach();
+      return null;
+    }
     windowBackends.set(wc.id, wb);
     return wb.url;
   }
@@ -85,12 +163,22 @@ function createHostCore(deps) {
     const ts = tunnelStatus();
     if (ts.active && ts.url) {
       const existing = windowBackends.get(wc.id);
-      // reuse only a forward opened through THIS tunnel: the forward an earlier
-      // tunnel opened died with it, and handing its port out again points the
-      // window at a socket nobody serves — the EventSource then errors into the
-      // phone's "lost the live stream" while the drop already happened
-      if (existing && existing.kind === "tunnel" && existing.tunnelUrl === ts.url) {
-        return existing.url;
+      if (existing && existing.kind === "tunnel") {
+        // reuse only a forward opened through THIS tunnel: the forward an earlier
+        // tunnel opened died with it, and handing its port out again points the
+        // window at a socket nobody serves — the EventSource then errors into the
+        // phone's "lost the live stream" while the drop already happened
+        if (existing.tunnelUrl === ts.url && existing.url) {
+          return existing.url;
+        }
+        // a different hop (or a claim whose forward went with the last one):
+        // the far-side session outlives every hop, so re-open its forward —
+        // never stop + start, which is what killed runs in flight
+        const kept = await rebindTunnelBackend(wc, ts.url, existing);
+        if (kept) {
+          if (notify && !wc.isDestroyed()) wc.send(BASE_CHANGED, kept);
+          return kept;
+        }
       }
       await releaseWindowBackend(wc.id); // drop any local session first
       let res = await sessions.supervisorSessionStart(
@@ -188,13 +276,18 @@ function createHostCore(deps) {
   // closes all of them, and a tunnel whose ssh hop ended serves nothing either),
   // so no window may keep pointing at one — a cached URL would be the port of a
   // dead hop. Both shells call this from their tunnel-end notification, BEFORE
-  // they tell the renderer, so the re-claim that follows starts from an empty
-  // table and opens a fresh forward. Returns how many were dropped.
+  // they tell the renderer, so nothing races a half-closed forward. The CLAIMS
+  // themselves survive: session id + remote port name a process on the far host
+  // that outlives the hop (a run in flight must outlive it too — the session is
+  // left running and the reaper collects it when it goes idle), so a re-claim
+  // after the reconnect re-opens its forward instead of starting a new session
+  // over the old one's work. Returns how many were dropped from their forwards.
   async function releaseTunnelBackends() {
     let dropped = 0;
     for (const [id, wb] of [...windowBackends]) {
       if (wb.kind !== "tunnel") continue;
-      await releaseWindowBackend(id);
+      if (typeof wb.detach === "function") wb.detach();
+      else await releaseWindowBackend(id); // no detach on this claim: full stop
       dropped++;
     }
     return dropped;

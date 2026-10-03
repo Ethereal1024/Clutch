@@ -40,7 +40,8 @@ function fakeTunnel() {
     restartRemoteServer: async () => true,
     openSessionForward: async (port) => {
       state.forwards.push(port);
-      return { localPort: port + 1000, close: () => (state.forwardClosed = true) };
+      // OS-assigned local port: a fresh one per open, like the real forwarder
+      return { localPort: 31000 + state.forwards.length, close: () => (state.forwardClosed = true) };
     },
     connectTunnel: async (cfg, onProgress) => {
       state.connects.push(cfg);
@@ -56,17 +57,22 @@ function fakeTunnel() {
 }
 
 function fakeSessions() {
-  const calls = { started: [], stopped: [], shutdown: [] };
+  const calls = { started: [], stopped: [], shutdown: [], heartbeats: [] };
   let seq = 0;
   const beats = [];
-  return {
+  const self = {
     calls,
     beats,
+    sessionAlive: true,
     supervisorSessionStart: async (base, baseUrl) => {
       calls.started.push({ base, baseUrl });
       return { sessionId: "s" + ++seq, port: 30000 + seq };
     },
     supervisorSessionStop: (base, sid) => calls.stopped.push({ base, sid }),
+    supervisorSessionHeartbeat: async (base, sid) => {
+      calls.heartbeats.push({ base, sid });
+      return self.sessionAlive;
+    },
     startSupervisorHeartbeat: (base, sid, onFail) => {
       const h = { base, sid, onFail };
       beats.push(h);
@@ -74,6 +80,7 @@ function fakeSessions() {
     },
     supervisorShutdown: (base) => calls.shutdown.push(base),
   };
+  return self;
 }
 
 // ---- a lean SSE client over real HTTP: same frames the WebView consumes ----
@@ -265,14 +272,32 @@ async function main() {
   tunnel.state.progress("probe");
   await eventually(() => assert.deepStrictEqual(got.progress, ["probe"], "progress via real SSE"));
 
-  // 4. backend:base-changed: kill the session heartbeat -> host-core re-claims
-  //    and the SAME window handle pushes the new URL through SSE (N5 mapping)
+  // 4. backend:base-changed: the session heartbeat gives up -> the claim is
+  //    re-bound to the SAME far-side session (the SESSION survived the drop;
+  //    only this client's forward died) and the SAME window handle pushes the
+  //    new URL through SSE (N5 mapping)
   sessions.beats[0].onFail();
   await eventually(() => {
     assert.strictEqual(got.base.length, 1, "base-changed arrived once");
-    assert.strictEqual(got.base[0], "http://127.0.0.1:31002", "the re-claimed URL is pushed");
+    assert.strictEqual(got.base[0], "http://127.0.0.1:31002", "the re-bound forward's URL is pushed, never the dead one");
   });
-  assert.deepStrictEqual(tunnel.state.forwards, [30001, 30002], "self-heal opened a new forward");
+  assert.deepStrictEqual(tunnel.state.forwards, [30001, 30001], "re-bind re-opened the forward to the SAME far-side session");
+  assert.strictEqual(sessions.calls.started.length, 1, "no stop + start over work in flight");
+  assert.deepStrictEqual(sessions.calls.stopped, [], "the far-side session is never told to stop");
+  assert.deepStrictEqual(sessions.calls.heartbeats, [{ base: "http://127.0.0.1:8891", sid: "s1" }],
+    "the re-claim asks the supervisor first: it alone knows the session is still there");
+
+  // 4b. the session is PROVABLY gone (the supervisor says no): only then is
+  //     the claim replaced the old way — stop the husk, start a new session
+  sessions.sessionAlive = false;
+  sessions.beats[1].onFail();
+  await eventually(() => {
+    assert.strictEqual(got.base.length, 2, "second base-changed for the replacement");
+    assert.strictEqual(got.base[1], "http://127.0.0.1:31003", "the replacement session's URL is pushed");
+  });
+  assert.deepStrictEqual(tunnel.state.forwards, [30001, 30001, 30002], "a new forward for the new session");
+  assert.deepStrictEqual(sessions.calls.stopped.map((s) => s.sid), ["s1"], "the dead session's husk is stopped");
+  sessions.sessionAlive = true;
 
   // 5. tunnel:ended broadcast
   tunnel.state.endCbs.forEach((cb) => cb());
@@ -283,7 +308,7 @@ async function main() {
   await eventually(() => assert.strictEqual(tunnel.state.stopped, 1, "tunnel stopped"));
   assert.deepStrictEqual(
     sessions.calls.stopped.map((s) => s.sid),
-    ["s1", "s2"], // s1 died in the self-heal above, s2 in this disconnect
+    ["s1", "s2"], // s1 replaced in the provably-gone step above, s2 in this disconnect
     "both live sessions were stopped"
   );
   assert.deepStrictEqual(sessions.calls.shutdown, [], "no supervisor shutdown on disconnect (that is stopAllBackends' job)");
