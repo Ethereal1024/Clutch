@@ -52,20 +52,20 @@ function connLabel(c) {
 // offer to "connect" to where it already is.
 let connOnValue = "";
 
-// The host this window would connect to: the one the user has chosen, or — with
-// nothing chosen, which is how the phone's welcome page opens (device report #4:
-// no remote host is preselected) — the host this device was last on. That standing
-// intent is not a selection: nothing is chosen, so nothing is dialled behind the
-// user's back, and no host is dressed up as the answer. `connTarget()` is where
-// the folded conn bar's Connect spends it, by the user's own press. "" = nothing
-// to dial.
+// The host this window would connect to: the one the picker holds. The list IS the
+// choice — a phone with saved hosts opens on its first (most recent) one, and the
+// desktop always has this machine's own session — so "nothing chosen" means a list
+// with nothing IN it, and that is a disabled picker (below) with an empty list's
+// worth of targets: none. Connect therefore has nothing to dial exactly when the
+// user has nothing to choose from, instead of reaching for a remembered host the
+// list does not offer. Choosing is still NOT dialling: the welcome page opens on
+// the first host without anything being dialled behind the user's back, and the
+// user's own press — the folded conn bar's Connect, or another entry in the list —
+// is what spends the choice (connTarget(), by that press). "" = nothing to dial.
 function connTarget() {
   const chosen = connSelect.value;
-  if (chosen) return chosen === connOnValue ? "" : chosen;
-  const host = localStorage.getItem("clutch_ssh_host");
-  const user = localStorage.getItem("clutch_ssh_user");
-  if (!localStorage.getItem("clutch_ssh_connected") || !host || !user) return "";
-  return "ssh:" + connLabel({ host, user, port: localStorage.getItem("clutch_ssh_port") || "22" });
+  if (!chosen || chosen === connOnValue) return "";
+  return chosen;
 }
 
 let connBusy = false; // a connect is in flight: it cannot be taken twice
@@ -89,9 +89,10 @@ function renderConnSelector() {
   const override = localStorage.getItem("clutch_api_url");
   // a session, not a memory: the standing intent survives a restart (that is what
   // the phone's old auto-reconnect spent), so the ✓ and the selection follow the
-  // backend this window is actually on. With no session nothing is selected — the
-  // welcome page opens on no host at all (device report #4: entering the app must
-  // not put the user into a connection to a host they did not choose).
+  // backend this window is actually on. With no session the picker still opens ON
+  // a host — the first of the list, which is the most recent one — but being
+  // selected is not being connected: nothing is dialled until the user asks (the
+  // folded conn bar's Connect, or choosing another entry).
   const connected = !!(override && localStorage.getItem("clutch_ssh_connected") && API_BASE);
   const cHost = localStorage.getItem("clutch_ssh_host");
   const cUser = localStorage.getItem("clutch_ssh_user");
@@ -106,17 +107,9 @@ function renderConnSelector() {
     localOpt.textContent = "Local (this machine)";
     connSelect.appendChild(localOpt);
   }
-  // Nothing chosen is the phone's welcome state, and the list has to SAY so instead
-  // of landing on a saved host. The entry carries "" — it is not a backend, nothing
-  // is dialled from it, and no host is dressed up as the answer; the real hosts
-  // follow it, and choosing one is what connects.
-  if (IS_ANDROID && !connected && hosts.length) {
-    const ph = document.createElement("option");
-    ph.value = "";
-    ph.textContent = "Select a host…";
-    connSelect.appendChild(ph);
-    connSelect.value = "";
-  }
+  // No placeholder entry: a list that has hosts is a list of hosts, and Connect is
+  // the door that dials what it holds. An entry that is not a backend ("Select a
+  // host…") only padded the list with something no host could be chosen from.
   // keep the connected host entry selected instead of adding a synthetic URL
   let connectedValue = null;
   for (const c of hosts) {
@@ -125,7 +118,11 @@ function renderConnSelector() {
       connected && c.host === cHost && c.user === cUser && String(c.port) === String(cPort);
     const opt = document.createElement("option");
     opt.value = "ssh:" + label;
-    opt.textContent = isConnected ? label + " ✓" : label;
+    opt.textContent = label;
+    // The ✓ is the option's MARK, not part of its name: the widget draws it in a
+    // column of its own, so a long user@host:port truncates (…) instead of pushing
+    // the tick onto a second line (device report).
+    if (isConnected) opt.mark = "✓";
     connSelect.appendChild(opt);
     if (isConnected) connectedValue = opt.value;
   }
@@ -138,8 +135,9 @@ function renderConnSelector() {
       const opt = document.createElement("option");
       opt.value = "ssh:__connected__";
       opt.textContent = cHost
-        ? cUser + "@" + cHost + (cPort ? ":" + cPort : "") + " ✓"
-        : "SSH: " + override + " ✓";
+        ? cUser + "@" + cHost + (cPort ? ":" + cPort : "")
+        : "SSH: " + override;
+      opt.mark = "✓";
       connSelect.appendChild(opt);
       connSelect.value = "ssh:__connected__";
     }
@@ -148,9 +146,15 @@ function renderConnSelector() {
     connSelect.value = "local";
     // this machine's own session: where the window is, once it has a base at all
     if (API_BASE) onValue = "local";
+  } else if (hosts.length) {
+    // the phone's welcome page opens ON a host: the list is most recent first, so
+    // its first entry is the host this device was last on, and a picker with
+    // something to pick from never comes up blank. The entry carries the host's
+    // own value — a real choice, not a placeholder: landing in the picker still
+    // dials nothing, the folded bar's Connect (or choosing another entry) is the
+    // user's own press.
+    connSelect.value = "ssh:" + connLabel(hosts[0]);
   }
-  // (the phone with no session keeps the "" of the "Select a host…" entry above:
-  // the welcome page preselects no remote host)
   connOnValue = onValue;
   // nothing to pick from = a disabled picker, not a placeholder entry dressed up
   // as a backend: on the phone, before the first host is saved, "＋ New SSH

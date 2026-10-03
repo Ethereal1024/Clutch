@@ -49,6 +49,24 @@ check(!/dismissOnOverlayPress\(connLostModal/.test(APP),
   "no backdrop press answers for the user");
 check(!/popstate/.test(CONN_LOST),
   "no history hook either: the Android back key cannot cancel it");
+check(/tabindex="-1"/.test(modalMarkup),
+  "the dialog itself can hold the keys: its one button is off screen while an attempt runs");
+
+// ---- 1b. it says state, not advice ----
+// The reported dialog was three lines of prose around one line of state. What is
+// left is the title and the lines the window writes as it goes: the cause, the host
+// it is going back to, the attempt's own progress, and the flow's verdict when there
+// is one. A paragraph explaining that it reconnects on its own (in a dialog whose
+// whole content is a reconnect in progress) is the part that went.
+const dialogLines = [...modalMarkup.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)].map((m) => m[1]);
+check(dialogLines.length === 4 && dialogLines.every((t) => t.trim() === ""),
+  "its only static text is the title: the four lines under it are state, and every one starts empty");
+check(!/reconnects on its own|keeps this|The dialog closes with/.test(modalMarkup),
+  "the paragraph explaining the reconnect is gone: the dialog is doing it, not describing it");
+check(/id="conn-lost-progress" class="conn-progress hidden">\s*<div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"/.test(modalMarkup),
+  "the reconnect has the picker's own progress bar markup, classes and all: nothing new to style");
+check(/id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-retry"/.test(modalMarkup),
+  "and Reconnect is wrapped in the shared actions row, hidden until it is the user's turn");
 
 const closeCalls = CONN_LOST.match(/closeModal\(connLostModal\)/g) || [];
 check(closeCalls.length === 1 && /closeModal\(connLostModal\)/.test(connFn("resolveConnectionLost")),
@@ -108,7 +126,7 @@ global.clearTimeout = () => {};
 const focuses = [];
 function fakeEl(id) {
   const cls = new Set(["hidden"]);
-  return {
+  const el = {
     id,
     textContent: "",
     classList: {
@@ -118,10 +136,18 @@ function fakeEl(id) {
         c.forEach((x) => cls.delete(x));
       },
       contains: (c) => cls.has(c),
+      toggle: (c, on) => {
+        if (on === undefined ? !cls.has(c) : on) cls.add(c);
+        else cls.delete(c);
+      },
     },
     focus: () => focuses.push(id),
     addEventListener: () => {},
   };
+  // the bar's fill (connBarWaiting / updateConnProgress reach for it): one per bar
+  const fill = { style: {}, classList: { add() {}, remove() {}, contains: () => false } };
+  el.querySelector = () => fill;
+  return el;
 }
 let opens = 0;
 const els = new Map();
@@ -135,6 +161,11 @@ const connLostReasonEl = (global.connLostReasonEl = $("#conn-lost-reason"));
 const connLostTargetEl = (global.connLostTargetEl = $("#conn-lost-target"));
 const connLostStatusEl = (global.connLostStatusEl = $("#conn-lost-status"));
 const connLostWhyEl = (global.connLostWhyEl = $("#conn-lost-why"));
+// the dialog's own chrome: the bar an attempt in flight animates, and the button
+// that is the way back once it is over
+const connLostProgressEl = (global.connLostProgressEl = $("#conn-lost-progress"));
+const connLostActionsEl = (global.connLostActionsEl = $("#conn-lost-actions"));
+const connLostRetryEl = (global.connLostRetryBtn = $("#conn-lost-retry"));
 
 let drops = 0;
 let selects = 0;
@@ -171,11 +202,20 @@ global.connLostTimer = null;
 global.connLostManualOnly = false;
 global.CONN_LOST_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
 global.CONN_LOST_NOTICE_MS = 8000;
+global.CONN_LOST_WAITING = "Waiting for you";
+// the bar helper lives in js/conn-flow.js (above this file in the page); the one
+// thing the dialog asks of it is "animate this bar until a stage arrives"
+let barWaits = 0;
+global.connBarWaiting = (bar) => {
+  barWaits++;
+  bar.classList.remove("hidden");
+};
 
 for (const name of [
-  "connLostTargetText", "connLostPaint", "connectionLost", "resolveConnectionLost",
-  "connLostNeedsUser", "connLostArm", "connLostAttempt", "connLostWhy", "connLostRecover",
-  "connLostAskHost", "connLostRemoteIntent", "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer",
+  "connLostTargetText", "connLostPaint", "connLostChrome", "connectionLost",
+  "resolveConnectionLost", "connLostNeedsUser", "connLostArm", "connLostAttempt",
+  "connLostRecover", "connLostAskHost", "connLostRemoteIntent", "connLostTunnelUp",
+  "connLostRedial", "connLostAwaitAnswer",
 ]) {
   (0, eval)(fnBody(name));
 }
@@ -216,7 +256,11 @@ async function main() {
   check(connLostWhyEl.textContent === "", "with no stale verdict from an earlier outage");
   check(drops === 1 && selects === 1,
     "the dead base is dropped and the picker stops claiming a connection");
-  check(focuses.includes("conn-lost-retry"), "and the dialog takes the keys, so Escape lands here");
+  check(focuses.includes("conn-lost-modal") && !focuses.includes("conn-lost-retry"),
+    "the dialog takes the keys itself: the first attempt starts in this same task, and the button is not on screen for it");
+  check(connLostActionsEl.classList.contains("hidden") && !connLostProgressEl.classList.contains("hidden"),
+    "what it shows instead is the attempt's own progress bar");
+  check(barWaits === 1, "animating from the first frame: an attempt with no stage yet is not a still bar");
   await flush();
   check(global.connLostTries === 1 && timers.length === 1,
     "the first recovery attempt is already under way");
@@ -253,11 +297,15 @@ async function main() {
   // ---- 5. the bounded backoff: a host that is down is not hammered ----
   global.connLostRecover = async () => false;
   connectionLost("lost the remote connection");
+  connLostWhyEl.textContent = "Installing remote server…"; // the flow's line, mid-attempt
   await flush();
   check(global.connLostTries === 1 && timers.length === 1 && timers[0].ms === 2000,
     "the first retry waits the first backoff step");
   check(/^Not back yet/.test(connLostStatusEl.textContent),
     "and says so, instead of claiming the window is back");
+  check(!/Installing/.test(connLostStatusEl.textContent) &&
+    /Installing/.test(connLostWhyEl.textContent),
+    "nor is the flow's own line: it has a line of its own, and the two do not say the same thing twice");
   await drainTimers(1);
   await flush();
   check(global.connLostTries === 2 && timers.length === 1 && timers[0].ms === 4000,
@@ -271,9 +319,18 @@ async function main() {
   const inflight = connLostAttempt();
   await flush();
   check(/attempt 3/.test(connLostStatusEl.textContent), "and the dialog counts the attempts");
+  check(!connLostProgressEl.classList.contains("hidden") &&
+    connLostActionsEl.classList.contains("hidden"),
+    "an attempt in flight shows the bar and takes Reconnect away with it: there is no second reconnect to start");
+  check(connLostWhyEl.textContent === "",
+    "and the last attempt's verdict is not carried into this one");
   releaseRecover(false);
   await inflight;
   await flush();
+  check(connLostProgressEl.classList.contains("hidden") &&
+    !connLostActionsEl.classList.contains("hidden") &&
+    focuses[focuses.length - 1] === "conn-lost-retry",
+  "the moment it is over the bar goes down, the button comes back, and the keys go with it");
   timers.length = 0;
   global.connLostTries = 40;
   connLostArm();
@@ -405,6 +462,9 @@ async function main() {
   check(/Waiting for you/.test(connLostStatusEl.textContent) &&
     !/retrying/.test(connLostStatusEl.textContent),
   "an attempt that fails afterwards does not claim it is retrying");
+  check(!connLostActionsEl.classList.contains("hidden") &&
+    connLostProgressEl.classList.contains("hidden"),
+  "and Reconnect is on screen for them: the dialog is not trying anything of its own");
   global.connLost = false;
   global.connLostManualOnly = false;
 
@@ -415,6 +475,8 @@ async function main() {
   check(/connLostTries = 0;/.test(btnHandler) && /connLostManualOnly = false;/.test(btnHandler),
   "and it forgets the backoff and the declined prompt: the user asked");
   check(/connLostAttempt\(\);/.test(btnHandler), "then it tries");
+  check(/if \(!connLost \|\| connLostAttempting\) return;/.test(btnHandler),
+  "and a press cannot land on an attempt already in flight: the button is off screen then, and this is why that is safe");
 
   // ---- 12. the module state is real, not a per-call local ----
   check(/^let connLost = false;/m.test(CONN_LOST) &&
@@ -426,6 +488,14 @@ async function main() {
     /const CONN_LOST_NOTICE_MS = 8000;/.test(CONN_LOST) &&
     !/CONN_LOST_HOST_FALLBACK_AFTER|CONN_LOST_PROOF_MS/.test(CONN_LOST),
   "and its constants are the ones this runner pins (one door, no try-counted second host)");
+  const chromeFn = connFn("connLostChrome");
+  check(/connLostActionsEl\.classList\.toggle\("hidden", connLostAttempting\)/.test(chromeFn) &&
+    /connBarWaiting\(connLostProgressEl\)/.test(chromeFn),
+  "the dialog's chrome is drawn in one place, from the one fact that decides it: an attempt in flight");
+  check((connFn("connLostAttempt").match(/connLostChrome\(\);/g) || []).length === 2,
+  "and the attempt itself is what raises it and takes it down again");
+  check(!/connLostWhy\(\)/.test(CONN_LOST),
+  "nothing quotes the flow's line back into the dialog's own line");
 
   summary("conn-lost-modal");
 }

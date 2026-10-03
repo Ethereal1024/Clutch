@@ -68,14 +68,14 @@ function setFsListing(on) {
 }
 
 // The folded bar's Connect is the welcome state's own door (ui/index.html): with nothing
-// browsed, the conn bar IS the picker and the host this device was last on is one press
-// away. The fold alone is not that state — a connect folds the body to retire it, and a
-// listing in flight folds it to wait — so the button follows the three facts that make the
-// bar the picker: no attempt in flight (connBusy, js/conn-store.js), no listing
-// outstanding (fsListing above), and no failure verdict on the bar (Retry/Cancel,
-// setFsConnectError below). Reading the fold alone is what put the button back the instant
-// an attempt started: a second Connect beside the one already running, greyed only because
-// that attempt had disabled it.
+// browsed, the conn bar IS the picker and the host this device was last on — the list's
+// first entry — is one press away. The fold alone is not that state — a connect folds the
+// body to retire it, and a listing in flight folds it to wait — so the button follows the
+// three facts that make the bar the picker: no attempt in flight (connBusy,
+// js/conn-store.js), no listing outstanding (fsListing above), and no failure verdict on
+// the bar (Retry/Cancel, setFsConnectError below). Reading the fold alone is what put the
+// button back the instant an attempt started: a second Connect beside the one already
+// running, greyed only because that attempt had disabled it.
 //
 // This is the ONE place the button is drawn, both halves of it, so that "shown" and
 // "armed" cannot disagree: the armed half is js/conn-store.js's (updateConnConnect, the
@@ -134,7 +134,7 @@ const CONN_STAGES = {
 function updateConnProgress(stage) {
   const s = CONN_STAGES[stage];
   if (activeConnStatus) activeConnStatus.textContent = s ? s.label : "Working…";
-  for (const bar of [$("#conn-progress"), $("#conn-new-progress")]) {
+  for (const bar of [$("#conn-progress"), $("#conn-new-progress"), $("#conn-lost-progress")]) {
     if (bar.classList.contains("hidden")) continue;
     const fill = bar.querySelector(".conn-progress-fill");
     if (s) {
@@ -147,26 +147,57 @@ function updateConnProgress(stage) {
   }
 }
 
+// One bar, one way to say "no stage yet": it animates until the tunnel reports
+// where it is (updateConnProgress above). Every door that puts a bar up says it
+// through this call, so no door can leave a bar that never moves — and there is one
+// place to change how a bar waits.
+function connBarWaiting(bar) {
+  bar.classList.remove("hidden");
+  const fill = bar.querySelector(".conn-progress-fill");
+  fill.classList.add("indeterminate");
+  fill.style.width = "";
+}
+
 // An attempt reports to the status element of the door that started it: the picker's
-// own line (#conn-status) or the new-connection popup's (#conn-new-status). The two
-// carry different chrome, and the popup has all of its own: its status line, its
-// progress bar, its Connect to press again. So the bar underneath is not the actor in
-// a popup attempt (and a popup attempt is not the bar's): it takes no fold from it,
-// no progress bar, no Retry/Cancel, and leaves the folded bar's Connect where the
-// fold put it. Reading an attempt as one thing is what left a failed popup attempt
-// with Retry/Cancel on the folded bar behind the modal, pointing at the popup's
-// status element: closing the popup then showed a bar whose Retry painted the next
-// attempt into a closed popup, with no Connect door back.
+// own line (#conn-status), the new-connection popup's (#conn-new-status), or the
+// disconnect dialog's (#conn-lost-why). The three carry different chrome, and each
+// door owns its own: the popup has its status line, its progress bar, its Connect to
+// press again; the disconnect dialog has its line, its bar, and the Reconnect that
+// js/conn-lost.js renders from the attempt itself. So the bar underneath is not the
+// actor in a popup attempt, nor in the dialog's own reconnect — and an attempt of
+// theirs is not the bar's: it takes no fold from it, no progress bar, no
+// Retry/Cancel, and leaves the folded bar's Connect where the fold put it. Reading an
+// attempt as one thing is what left a failed popup attempt with Retry/Cancel on the
+// folded bar behind the modal, pointing at the popup's status element: closing the
+// popup then showed a bar whose Retry painted the next attempt into a closed popup,
+// with no Connect door back.
 //
 // The door's name is read once, where the attempt starts (handleSshConnect), and the
 // functions below are TOLD which door they are acting for instead of each reading it
 // back out of the DOM node they were handed.
 function doorOf(statusEl) {
-  return statusEl && statusEl.id === "conn-new-status" ? "popup" : "bar";
+  if (!statusEl) return "bar";
+  if (statusEl.id === "conn-new-status") return "popup";
+  // the disconnect dialog: a re-dial of the host this window was on (js/conn-lost.js)
+  // reports here, and it is a door of its own for one more reason — the picker's Retry
+  // re-uses the last attempt made FROM THE BAR, and a reconnect is not that press
+  if (statusEl.id === "conn-lost-why") return "lost";
+  return "bar";
 }
 
 function setFsConnecting(host, statusEl, door) {
   activeConnStatus = statusEl;
+  if (door === "lost") {
+    // The disconnect dialog is its own chrome, and it is already the whole UI: its
+    // line says "Reconnecting…", the host it is going back to is on the line above
+    // it, and its bar and button come from the attempt itself (connLostChrome,
+    // js/conn-lost.js) — so what the flow adds here is the stage it reaches
+    // (updateConnProgress paints it into this line), not a second "connecting to
+    // <host>" and not a second bar. The picker's own door still stands down: an
+    // attempt is in flight, whichever door it came from.
+    syncConnConnect();
+    return;
+  }
   statusEl.textContent = "Connecting to " + host + "…";
   if (door === "bar") {
     $("#conn-actions").classList.add("hidden"); // an attempt replaces the last verdict
@@ -175,11 +206,7 @@ function setFsConnecting(host, statusEl, door) {
     hidePickerBody();
   }
   // animate the bar under the active modal (the new-connection popup has its own)
-  const bar = door === "popup" ? $("#conn-new-progress") : $("#conn-progress");
-  bar.classList.remove("hidden");
-  const fill = bar.querySelector(".conn-progress-fill");
-  fill.classList.add("indeterminate");
-  fill.style.width = "";
+  connBarWaiting(door === "popup" ? $("#conn-new-progress") : $("#conn-progress"));
   syncConnConnect(); // an attempt is in flight, either door: the door stands down
 }
 
@@ -191,6 +218,14 @@ function setFsConnectError(msg, statusEl, door) {
     // the bar underneath keeps whatever it was already offering, and keeps it once
     // the popup closes
     $("#conn-new-progress").classList.add("hidden");
+    return;
+  }
+  if (door === "lost") {
+    // the verdict is the dialog's own line, and the dialog renders the rest of
+    // itself (its bar goes down and its Reconnect comes back the moment this attempt
+    // returns — connLostChrome). Retry/Cancel belong to the picker's bar, which this
+    // attempt never took: leaving them there would be a second door onto a second
+    // attempt, behind a dialog that is still up.
     return;
   }
   $("#conn-progress").classList.add("hidden");
@@ -275,9 +310,9 @@ async function handleSshConnect(host, user, port, statusEl) {
 
 // Connect — the user's own act. The picker has two doors onto it: choosing a host
 // in the list (below), and pressing Connect while the body is folded — the welcome
-// state, where nothing is chosen and the host this device was last on is one press
-// away (connTarget() in js/conn-store.js). connOnValue is the backend this window
-// is already on, so a choice that does not move the window is not a dial.
+// state, where the list's first entry (the host this device was last on) is one
+// press away (connTarget() in js/conn-store.js). connOnValue is the backend this
+// window is already on, so a choice that does not move the window is not a dial.
 async function connConnect(v) {
   if (!v || v === connOnValue) return;
   if (v === "local") {
@@ -312,14 +347,15 @@ async function connConnect(v) {
 }
 // The list's door: choosing a host connects to it, immediately — selection IS the
 // dial (device report #4: the extra press the picker briefly required is gone).
-// The standing intent is not a choice, so opening the picker still dials nothing;
-// the "" entry ("Select a host…", js/conn-store.js) is not a host at all.
+// The selection the picker LANDS on is not a choice — a list of hosts opens on its
+// first entry (js/conn-store.js) and dials nothing, because only the user's own act
+// fires this listener; the folded bar's Connect below spends that same entry.
 connSelect.addEventListener("change", () => {
   updateConnConnect(); // the folded bar's Connect follows the new choice
   connConnect(connSelect.value);
 });
-// The folded bar's door: with nothing chosen, Connect spends the standing intent
-// (connTarget()); with a choice in the list, that same choice is what it dials.
+// The folded bar's door: it dials what the picker holds (connTarget()), so it can
+// never dial more than the list offers — an empty list leaves it with nothing.
 $("#conn-connect").addEventListener("click", () => connConnect(connTarget()));
 
 // new-connection popup (only shown when the user asks to add an SSH host)

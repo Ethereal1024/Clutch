@@ -6,12 +6,16 @@
 //   #2  the phone has no "Local (this machine)" escape hatch, because there is no
 //       backend behind 127.0.0.1 there to escape to;
 //   #3  opening the picker dials nothing on its own: a remembered host is not a
-//       connection, and no host is dressed up as the answer the picker landed on;
-//   #4  choosing a host in the list CONNECTS to it — one act, not two — the welcome
-//       page preselects no remote host at all (entering the app must not put the
-//       user into a connection they did not ask for), and the one Connect button
-//       left, the conn bar's, exists only while the browser body is folded, in the
-//       row's own form, and is disabled while an attempt is in flight;
+//       connection, and a selection is not a dial;
+//   #4  choosing a host in the list CONNECTS to it — one act, not two — while the
+//       selection the picker LANDS on is not a choice: a list of hosts opens on its
+//       first entry (most recent first, i.e. the host this device was last on) with
+//       no ✓ on it, nothing dialled, and the one Connect button left — the conn
+//       bar's, which exists only while the browser body is folded, in the row's own
+//       form, and is disabled while an attempt is in flight — armed to spend that
+//       entry. A list with nothing in it is DISABLED, Connect with it: no
+//       placeholder entry dressed up as a backend, and no remembered host dialled
+//       in its place — Connect's target is what the list holds, or nothing;
 //   and on that bar: a connect folds the body too, so the folded Connect must not
 //       come back the moment an attempt starts. It belongs to the welcome state
 //       (nothing browsed, nothing in flight); while an attempt runs — and after it
@@ -239,24 +243,22 @@ async function main() {
   check(connStatus.textContent === "Not connected — no backend",
     "the picker says what it is (nothing) instead of claiming a host");
 
-  // ---- 2) the welcome page chooses NO host, and says so ----
+  // ---- 2) the welcome page opens ON the first host, and dials nothing ----
   seed(HOSTS, {});
   renderConnSelector();
-  check(connSelect.opts.length === 3,
-    `the saved hosts are all listed (got ${connSelect.opts.length} entries)`);
-  check(connSelect.opts.every((o) => o.value === "" || /^ssh:me@/.test(o.value)),
-    "one entry per saved host, and no Local entry on the phone");
-  check(connSelect.value === "" && connSelect.opts[0].value === "",
-    `nothing is preselected: entering the app must not land on a host (got ${JSON.stringify(connSelect.value)})`);
-  check(connSelect.textOf("") === "Select a host…",
-    `the list says what its empty choice means (got ${JSON.stringify(connSelect.textOf(""))})`);
-  check(!connSelect.opts.some((o) => /✓/.test(o.textContent || "")),
-    "and no host is shown as the one this window is on");
+  check(connSelect.opts.length === 2,
+    `the saved hosts are all listed, and nothing else (got ${connSelect.opts.length} entries)`);
+  check(connSelect.opts.every((o) => /^ssh:me@/.test(o.value)),
+    "one entry per saved host, no Local entry on the phone, and no placeholder entry");
+  check(connSelect.value === "ssh:me@new.example.com:22",
+    `the list opens on its first entry (most recent first) instead of coming up blank (got ${JSON.stringify(connSelect.value)})`);
+  check(!connSelect.opts.some((o) => o.mark),
+    "and no host is shown as one this window is on: nothing is connected");
   check(connSelect.disabled === false, "with hosts to pick from, the list is live");
-  check(connectBtn.disabled === true,
-    "Connect is disabled while there is nothing to dial: no session, no host last on");
-  check(store.get("clutch_ssh_connected") === undefined,
-    "opening the picker connects to nothing (nothing dialled, nothing moved)");
+  check(connectBtn.disabled === false && connTarget() === "ssh:me@new.example.com:22",
+    `Connect is armed on the host the list landed on: it is the user's press that dials it (got ${JSON.stringify(connTarget())})`);
+  check(done.length === 0 && store.get("clutch_ssh_connected") === undefined,
+    "while landing there connects to nothing (nothing dialled, nothing moved)");
 
   // ---- 3) choosing a host in the list IS the connection ----
   global.API_BASE = "http://127.0.0.1:31001";
@@ -264,7 +266,7 @@ async function main() {
   renderConnSelector();
   check(connSelect.value === "ssh:me@new.example.com:22",
     `a live session shows the host this window is on (got ${JSON.stringify(connSelect.value)})`);
-  check(/✓$/.test(connSelect.textOf("ssh:me@new.example.com:22") || ""),
+  check(connSelect.opts.find((o) => o.value === "ssh:me@new.example.com:22").mark === "✓",
     "and it is the one marked with the ✓");
   check(connectBtn.disabled === true,
     "Connect is not armed on where the window already is: there is nowhere to move to");
@@ -281,25 +283,28 @@ async function main() {
     "the standing intent goes before the drop, so the move is not announced as a loss");
   global.API_BASE = null;
 
-  // ---- 4) the "nothing chosen" entry is not a host ----
-  seed(HOSTS, INTENT);
+  // ---- 4) a list with nothing in it offers nothing to choose, and nothing to dial ----
+  seed(null, INTENT);
   renderConnSelector();
-  connSelect.value = "";
-  connSelect.fire();
-  await flush();
-  check(done.length === 0, `choosing "Select a host…" dials nothing (got ${done.join(",")})`);
-
-  // ---- 5) the phone's welcome page: no host chosen, the last host one press away ----
-  seed(HOSTS, INTENT);
-  renderConnSelector();
+  check(connSelect.opts.length === 0 && connSelect.disabled === true,
+    "a phone whose saved hosts are gone has an empty, disabled picker");
   check(connSelect.value === "",
-    `a device that was last on a host still chooses nothing on the welcome page (got ${JSON.stringify(connSelect.value)})`);
-  check(!connSelect.opts.some((o) => /✓/.test(o.textContent || "")),
-    "the standing intent is not shown as a session this window has");
-  check(connectBtn.disabled === false,
-    "…which is what the folded bar's Connect is for: it spends the standing intent");
-  check(connTarget() === "ssh:me@new.example.com:22",
-    `Connect's target is the host this device was last on (got ${JSON.stringify(connTarget())})`);
+    `and no entry stands in for a host: nothing is chosen (got ${JSON.stringify(connSelect.value)})`);
+  connSelect.fire(); // a change on a list with nothing in it (it cannot happen by hand)
+  await flush();
+  check(done.length === 0, `and a change with nothing chosen dials nothing (got ${done.join(",")})`);
+  check(connTarget() === "" && connectBtn.disabled === true,
+    `Connect is off with it: a remembered host the list no longer holds is not a target (got ${JSON.stringify(connTarget())})`);
+
+  // ---- 5) the phone's welcome page opens ON the host this device was last on ----
+  seed(HOSTS, INTENT);
+  renderConnSelector();
+  check(connSelect.value === "ssh:me@new.example.com:22",
+    `a device that was last on a host opens on it: the list's first entry is that host (got ${JSON.stringify(connSelect.value)})`);
+  check(!connSelect.opts.some((o) => o.mark),
+    "the standing intent is not shown as a session this window has: no ✓ before a connect");
+  check(connectBtn.disabled === false && connTarget() === "ssh:me@new.example.com:22",
+    `…which is what the folded bar's Connect is for: it spends that entry (got ${JSON.stringify(connTarget())})`);
   await connectBtn.click();
   await flush();
   check(/dial:"new\.example\.com" "me" "22"/.test(done.join("|")),
@@ -360,6 +365,7 @@ async function main() {
     "hidePickerBody",
     "showPickerBody",
     "resetConnChrome",
+    "connBarWaiting",
     "setFsConnecting",
     "setFsConnectError",
   ]) {
@@ -463,6 +469,51 @@ async function main() {
     "the bar's Retry keeps the last attempt made from the bar: a popup attempt does not steal that press");
   check(fnBody("handleSshConnect").includes("setConnBusy(false);\n    syncConnConnect();"),
     "with the attempt's end, either door, settling the bar's door again");
+
+  // ---- 8d) the disconnect dialog's door: a reconnect reports to the dialog ----
+  // The dialog (ui/js/conn-lost.js) is the whole UI while it is up, and an attempt it
+  // starts reports to its own line (#conn-lost-why) and owns its own chrome: the bar
+  // and the Reconnect under it, both rendered from the attempt itself. The picker
+  // underneath is neither its actor nor its chrome — Retry/Cancel there would be a
+  // second door onto a second attempt behind a dialog that is still up, and the bar's
+  // Retry re-uses the last attempt made FROM THE BAR (lastConn), which a reconnect is
+  // not.
+  const lostStatus = { textContent: "" };
+  const foldedBefore = fsBody.classList.contains("collapsed");
+  const doorBefore = doorOn();
+  connActions.classList.add("hidden");
+  connProgress.classList.add("hidden");
+  setConnBusy(true);
+  setFsConnecting("box.example", lostStatus, "lost");
+  check(fsBody.classList.contains("collapsed") === foldedBefore && !doorOn(),
+    "a reconnect folds nothing and stands the picker's own door down while it runs, like any attempt in flight");
+  check(lostStatus.textContent === "",
+    "and adds no second 'connecting to <host>' line: the dialog's own line says it, with the host on the line above");
+  check(connProgress.classList.contains("hidden") && connNewProgress.classList.contains("hidden") &&
+    connActions.classList.contains("hidden"),
+    "the picker's chrome is left exactly as it was: no bar, no Retry/Cancel behind a dialog that is still up");
+  setFsConnectError("connection failed: nope", lostStatus, "lost");
+  setConnBusy(false);
+  syncConnConnect();
+  check(lostStatus.textContent === "connection failed: nope" &&
+    connActions.classList.contains("hidden") && fsBody.classList.contains("collapsed") === foldedBefore &&
+    doorOn() === doorBefore,
+    "its failure lands in the dialog's own line, with the picker untouched and its door back where it was");
+
+  const lostConnBody = fnBody("setFsConnecting");
+  check(lostConnBody.includes('if (door === "lost") {') &&
+    lostConnBody.indexOf("connBarWaiting(") > lostConnBody.indexOf('if (door === "lost") {'),
+    "the source says it too: the dialog's door returns before it reaches any of the picker's chrome");
+  const lostErrBody = fnBody("setFsConnectError");
+  check(lostErrBody.includes('if (door === "lost") {') &&
+    lostErrBody.indexOf("return;") < lostErrBody.indexOf(`classList.remove("hidden")`),
+    "and a verdict the dialog owns returns before it can offer the picker's Retry/Cancel");
+  check(doorOf({ id: "conn-lost-why" }) === "lost", "the dialog is a door of its own");
+  check(fnBody("updateConnProgress").includes('$("#conn-lost-progress")'),
+    "the stage the tunnel reports is painted into the dialog's bar like any other");
+  check(APP.includes('connBarWaiting(door === "popup" ? $("#conn-new-progress")') &&
+    APP.includes("connBarWaiting(connLostProgressEl)"),
+    "and every door arms its bar through the one helper: a bar that never moves is nobody's to create");
 
   // The button is drawn in ONE place — the invariant that keeps the four reported bugs
   // from returning as a fifth: every write to its on/off class or to its disabled flag
@@ -626,8 +677,14 @@ async function main() {
     "both Connect buttons are disabled by one function, from the same two facts");
   check(/connSelect\.disabled = IS_ANDROID && !hosts\.length;/.test(CONN_STORE),
     "an empty phone list is disabled at the source, and a list with hosts stays live");
-  check(!/connSelect\.value = "ssh:" \+ connLabel\(saved\[0\]\)/.test(CONN_STORE),
-    "the phone's most recent host is no longer preselected: the welcome page chooses nothing");
+  check(/connSelect\.value = "ssh:" \+ connLabel\(hosts\[0\]\);/.test(CONN_STORE),
+    "the phone opens on its first (most recent) host: a list with hosts never comes up blank");
+  check(!/Select a host/.test(CONN_STORE) && !/Select a host/.test(HTML),
+    "and no placeholder entry stands in for a host: not in the list's source, not in the markup");
+  check(/opt\.mark = "✓";/.test(CONN_STORE),
+    "the ✓ rides the option as a MARK of its own, never glued into its label");
+  check(!/clutch_ssh_connected|clutch_ssh_host/.test(fnBody("connTarget")),
+    "and Connect dials what the list holds and nothing else: a remembered host the list no longer offers is not a target");
 
   // a disabled custom picker must not open: the button is a real <button>, so only
   // the class marks it (the profile picker sets disabled and still opened)

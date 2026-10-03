@@ -131,7 +131,9 @@
        out is a session that answers again. Modeled on #perm-modal (which is
        non-dismissable for the same reason: it is the only way to answer a
        question the agent is blocked on). -->
-  <div id="conn-lost-modal" class="modal hidden">
+  <!-- tabindex: the dialog holds the keys even while its one button is off
+       screen (an attempt in flight has the progress bar and nothing to press) -->
+  <div id="conn-lost-modal" class="modal hidden" tabindex="-1">
     <div class="modal-box">
       <h3>Connection lost</h3>
       <p id="conn-lost-reason" class="muted"></p>
@@ -140,10 +142,15 @@
       <!-- the connect flow's own verdict (the stage it reached, or why it
            failed): its line, kept apart from the dialog's progress above -->
       <p id="conn-lost-why" class="muted"></p>
-      <p class="muted">This window reconnects on its own, and keeps this
-        session's project and transcript on screen. The dialog closes with the
-        first session that answers.</p>
-      <div class="modal-actions">
+      <!-- the same bar the picker's attempts animate (and the same markup):
+           js/conn-flow.js paints its fill from the tunnel's stages -->
+      <div id="conn-lost-progress" class="conn-progress hidden">
+        <div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"></div></div>
+      </div>
+      <!-- the user's own door back, and it is on screen ONLY while no attempt is
+           in flight: a second press could only start a second reconnect (both are
+           rendered from that one fact — connLostChrome in js/conn-lost.js) -->
+      <div id="conn-lost-actions" class="modal-actions hidden">
         <button id="conn-lost-retry" class="primary">Reconnect now</button>
       </div>
     </div>
@@ -157,16 +164,16 @@
         <div class="fs-conn-row">
           <div id="conn-select" class="cselect"></div>
           <button id="conn-new" title="create a new SSH connection">＋ New SSH connection</button>
-          <!-- Connect belongs to the FOLDED bar — the welcome page, where nothing
-               is chosen and the host this device was last on is one press away.
-               Choosing a host in the list connects on its own, so while there is a
+          <!-- Connect belongs to the FOLDED bar — the welcome page, where the host
+               this device was last on is already the picker's selection and one press
+               away. Choosing a host in the list connects on its own, so while there is a
                file browser on screen this button is not shown at all: the same
                button as its neighbour, not a full-width line of its own. Whether the
                folded bar IS that welcome state (folded, no attempt in flight, no
                listing outstanding) is decided in js/conn-flow.js (syncConnConnect) —
                the fold alone is not the answer, because a connect folds the body too,
                and so does waiting for a listing. -->
-          <button id="conn-connect" class="primary hidden" title="connect to the host you were last on">Connect</button>
+          <button id="conn-connect" class="primary hidden" title="connect to the host chosen above">Connect</button>
         </div>
         <p id="conn-status" class="muted"></p>
         <div id="conn-progress" class="conn-progress hidden">

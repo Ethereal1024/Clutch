@@ -23,6 +23,12 @@
 // says which one that is, and a remote that will not answer keeps its tries. The
 // dialog never quietly swaps hosts under the user (see connLostRecover).
 //
+// It reads as little as possible, and what it shows is state, not advice: the
+// cause, the host it is going back to, what the attempt is doing (its own line
+// and its own progress bar — the same bar the picker's attempts animate), and the
+// flow's verdict when there is one. The button is on screen only between attempts:
+// a live "Reconnect now" during one is an invitation to start a second.
+//
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
 // sees every `const`/`let`/`function` the earlier files declared. It may rely
@@ -34,15 +40,27 @@ const connLostModal = $("#conn-lost-modal");
 const connLostReasonEl = $("#conn-lost-reason");
 const connLostTargetEl = $("#conn-lost-target");
 const connLostStatusEl = $("#conn-lost-status");
-// the connect flow's verdict, in its own line: the dialog paints its progress
-// into #conn-lost-status, so reading that back as "why" quoted the dialog's own
-// "Reconnecting…" at the user ("Not back yet — retrying. (Reconnecting…)")
+// the flow's verdict, in its own line: the dialog paints its progress into
+// #conn-lost-status, so reading that back as "why" quoted the dialog's own
+// "Reconnecting…" at the user ("Not back yet — retrying. (Reconnecting…)"). It is
+// the stage the attempt reached, or why it failed — never quoted into the
+// progress line beside it (that would be the same fact twice).
 const connLostWhyEl = $("#conn-lost-why");
+// the dialog's own chrome: the progress bar an attempt in flight animates, and the
+// button that is the way back once it is over (connLostChrome, below)
+const connLostProgressEl = $("#conn-lost-progress");
+const connLostActionsEl = $("#conn-lost-actions");
+const connLostRetryBtn = $("#conn-lost-retry");
 
 // how long to wait before the next automatic attempt. A phone that comes back
 // into signal must reconnect without the user touching anything, and a host
 // that is simply down must not be hammered: the gap grows to a steady 30s.
 const CONN_LOST_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
+
+// the dialog's one line for "nothing is running: it is your move" (a declined
+// password, or an attempt that came back after one). One string, one meaning — the
+// button under it says what the move is.
+const CONN_LOST_WAITING = "Waiting for you";
 
 let connLost = false; // this window has no session, and the dialog is up
 let connLostTries = 0; // attempts spent on the outage (drives the backoff)
@@ -61,6 +79,25 @@ function connLostTargetText() {
 
 function connLostPaint(status) {
   connLostStatusEl.textContent = status || "";
+}
+
+// The dialog's chrome, drawn from the ONE fact that decides it — is an attempt in
+// flight? The picker makes the same swap between #conn-progress and #conn-actions,
+// and for the same reason: while a reconnect runs there is nothing to press, so
+// there must be nothing that looks pressable (the old dialog kept "Reconnect now"
+// on screen through the whole attempt and swallowed the press, which reads as a
+// dead button and invites a second reconnect). The bar is the attempt's own: it
+// animates until js/conn-flow.js paints a stage into its fill.
+function connLostChrome() {
+  connLostActionsEl.classList.toggle("hidden", connLostAttempting);
+  if (connLostAttempting) {
+    connBarWaiting(connLostProgressEl);
+  } else {
+    connLostProgressEl.classList.add("hidden");
+    // the attempt is over and the dialog is still up: the keys belong to the button
+    // that just came back (it is the only thing left to press)
+    if (connLost) connLostRetryBtn.focus();
+  }
 }
 
 // ---- the dialog is NOT dismissable ----
@@ -98,9 +135,12 @@ function connectionLost(reason) {
   connLostWhyEl.textContent = ""; // fresh outage: nothing carried over from the last
   connLostPaint("Reconnecting…");
   connLostModal.classList.remove("hidden", "closing");
-  // the dialog is the whole UI now: give it the keys (its own Escape swallow is
-  // a listener on the box, and this is what makes a keydown reach it)
-  $("#conn-lost-retry").focus();
+  // the dialog is the whole UI now: give it the keys (its own Escape swallow is a
+  // listener on the box, and this is what makes a keydown reach it). The button is
+  // not on screen while an attempt runs, so the keys go to the dialog itself and
+  // the attempt below paints its chrome (bar up, nothing to press) in this same
+  // task: the user never sees a Reconnect it cannot honour.
+  connLostModal.focus();
   connLostAttempt();
 }
 
@@ -122,7 +162,7 @@ function resolveConnectionLost() {
 function connLostNeedsUser() {
   if (!connLost) return;
   connLostManualOnly = true;
-  connLostPaint("Waiting for you: reconnect when ready.");
+  connLostPaint(CONN_LOST_WAITING);
 }
 
 function connLostArm() {
@@ -142,6 +182,10 @@ async function connLostAttempt() {
   connLostAttempting = true;
   connLostTries += 1;
   connLostTimer = null;
+  // this attempt's verdict is this attempt's to write: the flow's last line (a stage,
+  // or why the last one failed) is not evidence about this one
+  connLostWhyEl.textContent = "";
+  connLostChrome(); // bar up, button down: an attempt is in flight
   if (connLostTries > 1) connLostPaint(`Reconnecting (attempt ${connLostTries})…`);
   let verdict = "";
   try {
@@ -159,20 +203,12 @@ async function connLostAttempt() {
     verdict = "reconnect failed: " + ((e && e.message) || e);
   } finally {
     connLostAttempting = false;
+    connLostChrome(); // and the user's door back is on screen again
   }
   // The password prompt may have been declined while this attempt ran: then the
   // user owns the next move (connLostNeedsUser), and "retrying" would be a lie.
-  connLostPaint(connLostManualOnly
-    ? "Waiting for you: reconnect when ready" + connLostWhy()
-    : verdict + " — retrying." + connLostWhy());
+  connLostPaint(connLostManualOnly ? CONN_LOST_WAITING : verdict + " — retrying.");
   connLostArm();
-}
-
-// the connect flow writes its own verdict into this element (the stage it
-// reached, or why it failed): keep it, it is the only specific reason there is
-function connLostWhy() {
-  const why = (connLostWhyEl.textContent || "").trim();
-  return why ? " (" + why + ")" : "";
 }
 
 // One attempt at getting a session back, through the ONE door this window has:
