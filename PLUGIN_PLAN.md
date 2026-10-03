@@ -12,7 +12,7 @@
 | I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()` `ui/components.js:191` |
 | I3 | **声明说词、宿主释义**：能力词汇（access / gate / mode）归宿主 | `agent/tools/gates.py:1-20`（导入期 `_check_vocabulary` 断言） |
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
-| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"a removal DELETES bytes…neither act is a rollback"（`ui/js/components-panel.js:440`），卸载确认说"This cannot be undone from here"（`:374`），市场常驻警告说"neither is a rollback"（`:490`）。P3c 补上第三条写入后，同一条界线依然清楚：**停用开关是协议里唯一不要求确认的写入**——它一个字节都不删，**按钮标签本身就是撤销路径**（§一、§零之四.2） |
+| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"a removal DELETES bytes…neither act is a rollback"（`ui/js/components-panel.js:640-641`），卸载确认说"This cannot be undone from here"（`:487`），市场常驻警告说"neither is a rollback"（`:693`）。P3c 补上第三条写入后，同一条界线依然清楚：**停用开关是协议里唯一不要求确认的写入**——它一个字节都不删，**按钮标签本身就是撤销路径**（§一、§零之四.2）。P3d 的逐版卸载同样先问、同一句"This cannot be undone from here"，且问题点名那一版（`plugRemoveVersion` `:526`） |
 
 ## 零之二、进度（随施工更新）
 
@@ -162,7 +162,7 @@ tests/components_api_test.py` 全绿）。
 | # | 断点 | 证据 | 目标形态 |
 | --- | --- | --- | --- |
 | 1 | 渲染层无通道 | `ui/preload.js:25`（`clutchComponents` 全无）；`ui/main.js:173-190`（`components:*` 的 handler 全无） | 新增 `clutchComponents` IPC —— **已交付**（P1 起，P3b/P3c 各加动词，今天是六个 + 一个 `onProgress`） |
-| 2 | 只有读 + 一个无反动词的写 | `agent/supervisor.py:302,410`（清单 + 装上）；`agent/` 内 `uninstall` 零命中 | 卸载 / 停用 / 启用 / 版本列表 —— **已交付**（`90140ea`、`9f53b9c`）；**prune 未做**（`install()` 自己就在清，见 P3 末） |
+| 2 | 只有读 + 一个无反动词的写 | `agent/supervisor.py:302,410`（清单 + 装上）；`agent/` 内 `uninstall` 零命中 | 卸载 / 停用 / 启用 / 版本列表 —— **已交付**（`90140ea`、`9f53b9c`）；**prune 拍板不做**（理由见 P3 末），页面"版本明细"已交付（P3d `cdc1625`） |
 | 3 | 安装版本是裸摘要前缀 | `ui/components.js:386-387`（`version: digest.slice(0,16)`） | `<声明版本>+<摘要16>`（宿主 `_VERSION_RE` 已认这个形状，`agent/tools/components.py:124`） |
 | 4 | 纯声明包递不进去 | 当初安装路由对空 body 直接 400（该拒绝已随零之四.4 移走，空 body 有了自己的含义）；`INTERFACES = ("daemon","cli")` `agent/tools/components.py:145` | 空 body 现在**是合法请求**（零之四.4：它意味着"字节在 `artifact_url` 那里"）；`interface: "data"`（**并入 P4**，理由见下） |
 
@@ -175,7 +175,8 @@ flowchart LR
   P1 --> P3['P3 反向动词<br/>卸载已通 ✅']
   P2 --> P3
   P3 --> P3c['P3c 停用/启用<br/>留着但不驱动 ✅']
-  P3c --> P4['P4 工具集<br/>interface data']
+  P3c --> P3d['P3d 版本明细<br/>每版点名 ✅']
+  P3d --> P4['P4 工具集<br/>interface data']
   P4 --> P5['P5 可选<br/>静态索引 / 私有源']
 ```
 
@@ -281,8 +282,7 @@ P3b 交付（`11f6ce4`）：
 真 supervisor 跑 `hostVersions()`/`hostRemove()`（改盘之后再读清单为空、第二次删是 `absent`、
 坏名字 400）。实测见零之二末段。
 
-**没做的（下一批，需要拍板）**：`prune`、页面上的"版本明细"视图。`prune` 目前意义
-不大——`install()` 自己已经在清（`_prune`），一个组件目录正常只有一版。
+**当时留下的两件**：`prune`（P3d 拍板**不做**，理由见 P3d 末）与页面上的"版本明细"视图（P3d 已交付，`cdc1625`）。
 
 ### P3c 第三条写入：留着，但不驱动（**已完成**，宿主 `9f53b9c` / 页面 `1df203d`）
 
