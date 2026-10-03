@@ -255,10 +255,11 @@ async function handleSshConnect(host, user, port, statusEl) {
   setConnBusy(true); // no second attempt can start while this one is in flight
   setFsConnecting(host, statusEl, door); // status text + progress bar, on that door's chrome
   try {
-    // try keys/agent first; only prompt for a password if auth fails
+    // try keys/agent first (plus any secret the tunnel has cached for this
+    // host); only prompt when auth still fails
     let res = await window.clutchTunnel.connect({ host, user, port: Number(port) });
     if (!res.ok && res.error && /authentication/i.test(res.error)) {
-      const pw = await showPasswordPrompt("Password for " + user + "@" + host);
+      const pw = await showPasswordPrompt("Password / key passphrase for " + user + "@" + host);
       if (!pw) {
         setFsConnectError("connection cancelled", statusEl, door);
         return;

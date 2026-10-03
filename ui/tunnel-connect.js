@@ -19,6 +19,7 @@ const { PROBE_CMD, parseProbe, installServer, installComponents } = require("./t
 const { stopTunnel, notifyEnd, startHealing, stopHealing } = require("./tunnel-lifecycle");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
+const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
 
 function defaultKey() {
   for (const name of ["id_ed25519", "id_ecdsa", "id_rsa"]) {
@@ -36,6 +37,12 @@ function friendlyError(e) {
   const m = String((e && e.message) || e);
   if (m.includes("All configured authentication methods failed")) {
     return "authentication failed (wrong password or no matching SSH key)";
+  }
+  // an encrypted key and no agent: ssh2 refuses to parse it without its
+  // passphrase. Auth-class on purpose, so the prompt (and the ssh_secrets
+  // cache) covers a key passphrase exactly like a password.
+  if (/Cannot parse privateKey|bad passphrase|Encrypted (private )?OpenSSH key/i.test(m)) {
+    return "authentication failed (the SSH key needs its passphrase)";
   }
   if (m.includes("Timed out while waiting for handshake")) {
     return "SSH handshake timed out";
@@ -60,9 +67,15 @@ async function connectTunnel({ host, user, port, password }, progress) {
     tunnelLog("[connect] existing tunnel is dead or still starting; resetting");
     await stopTunnel();
   }
+  // the auth secret, resolved the way llm-proxy resolves the API key: an
+  // explicit value from the caller first, then the ssh_secrets cache in the
+  // settings mirror (typed once per host, reused on reconnect/restart)
+  const cached = password ? "" : getSshSecret(host, user, port);
+  const secret = password || cached;
   state.sftpUnavailable = false; // SFTP capability is per connection/host
+  // never log the secret itself — only whether one is being offered
   tunnelLog(
-    `[connect] attempt host=${host} user=${user} port=${port || 22} password=${JSON.stringify(password || "")}`
+    `[connect] attempt host=${host} user=${user} port=${port || 22} secret=${secret ? "yes" : "no"}${cached ? " (cached)" : ""}`
   );
   try {
     const localPort = await freePort();
@@ -88,9 +101,9 @@ async function connectTunnel({ host, user, port, password }, progress) {
       debug: (m) => tunnelLog("ssh2: " + m),
     };
     // the same value covers both password auth and an encrypted-key passphrase
-    if (password) {
-      opts.password = password;
-      opts.passphrase = password;
+    if (secret) {
+      opts.password = secret;
+      opts.passphrase = secret;
     }
     const key = defaultKey();
     if (key) opts.privateKey = key;
@@ -102,10 +115,12 @@ async function connectTunnel({ host, user, port, password }, progress) {
       state.sshClient = client;
       client.on("ready", resolve);
       client.on("error", reject);
-      client.on("keyboard-interactive", (_n, _i, _l, _p, finish) => finish(password ? [password] : []));
+      client.on("keyboard-interactive", (_n, _i, _l, _p, finish) => finish(secret ? [secret] : []));
       client.connect(opts);
     });
     tunnelLog("[phase] ssh ready");
+    // the secret that authenticated is what the next connect reuses
+    if (password) saveSshSecret(host, user, port, password);
     if (progress) progress("probe");
 
     // The connection is over, however it ended. `end` is a FIN and ONLY a FIN:
@@ -189,9 +204,13 @@ async function connectTunnel({ host, user, port, password }, progress) {
     return await establishForwardAndHealth(localPort);
   } catch (e) {
     const raw = (e && e.message) || String(e);
-    tunnelLog(`[error] connect failed: ${raw} -> ${friendlyError(e)}`);
+    const friendly = friendlyError(e);
+    tunnelLog(`[error] connect failed: ${raw} -> ${friendly}`);
+    // a cached secret that no longer authenticates is worse than none: drop it
+    // so this path prompts again (and a typed one can take its place)
+    if (cached && /authentication/i.test(friendly)) forgetSshSecret(host, user, port);
     stopTunnel();
-    return { ok: false, error: friendlyError(e) };
+    return { ok: false, error: friendly };
   }
 }
 

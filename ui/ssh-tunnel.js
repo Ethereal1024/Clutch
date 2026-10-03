@@ -1,7 +1,7 @@
 // SSH tunnel (ssh2) to a remote clutch-server, embedded in the Electron main
 // process: local forward to the remote supervisor API + reverse forward to the
-// client-side LLM proxy. Debug logging appends to ~/.clutch/tunnel.log (NOTE:
-// the password is written in plaintext).
+// client-side LLM proxy. Debug logging appends to ~/.clutch/tunnel.log (the
+// auth secret itself is never written there — only whether one is offered).
 //
 // This file is the module's public face and nothing else. The tunnel itself is
 // six modules over one state object: tunnel-core.js owns the state and the log,

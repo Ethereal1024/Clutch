@@ -3,6 +3,12 @@
 // is what session children + the LLM proxy actually read. os.homedir()
 // resolves per platform (Android: N2 sets HOME to the app's filesDir before
 // Node boots, so the same call lands in the right place on both).
+//
+// ssh_secrets (below) is the one map whose source of truth IS this file: the
+// tunnel layer caches the per-host auth secret (password or key passphrase)
+// here, the same shape api_key already has — an explicit caller value first,
+// then this file (cf. llm-proxy.js getApiKey). Like api_key it is plaintext
+// in a 0600 file; forgetSshSecret (or deleting the map) clears it.
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -16,6 +22,7 @@ function writeSettingsMirror(data) {
   } catch (e) {
     /* first save: start from an empty file */
   }
+  const secrets = cur && cur.ssh_secrets; // not profile state: must survive the fold below
   if (cur && cur.profiles) {
     cur = cur.profiles[cur.active] || {}; // legacy map: keep the active profile's values
   }
@@ -28,6 +35,7 @@ function writeSettingsMirror(data) {
   if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
   if (data && data.api_protocol !== undefined) upd.api_protocol = data.api_protocol;
   const flat = Object.assign({}, cur, upd);
+  if (secrets) flat.ssh_secrets = secrets;
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(flat, null, 2), { mode: 0o600 });
 }
@@ -64,4 +72,62 @@ function readSettings() {
   return cur && typeof cur === "object" ? cur : {};
 }
 
-module.exports = { writeSettingsMirror, ensureSettingsMirror, readSettings };
+// ---- the per-host SSH secret cache (ssh_secrets) ----
+//
+// One entry per host, keyed the way the picker labels a host: user@host:port.
+// Written when a typed secret authenticates, read back on the next connect —
+// the same "explicit value first, then this file" read llm-proxy does for
+// api_key. Empty string = nothing cached.
+
+function sshSecretId(host, user, port) {
+  return `${user}@${host}:${port || 22}`;
+}
+
+function readRawSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8")) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function getSshSecret(host, user, port) {
+  const cur = readRawSettings();
+  const v = cur.ssh_secrets && cur.ssh_secrets[sshSecretId(host, user, port)];
+  return typeof v === "string" ? v : "";
+}
+
+// what worked is reused next time (reconnect, app restart, either shell)
+function saveSshSecret(host, user, port, secret) {
+  const p = path.join(os.homedir(), ".clutch", "settings.json");
+  const cur = readRawSettings();
+  const secrets = Object.assign({}, cur.ssh_secrets || {});
+  const id = sshSecretId(host, user, port);
+  if (secrets[id] === String(secret)) return; // already this value: no rewrite
+  secrets[id] = String(secret);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(Object.assign({}, cur, { ssh_secrets: secrets }), null, 2), {
+    mode: 0o600,
+  });
+}
+
+// a cached secret that stops working is dropped (and one the user replaces is
+// overwritten by saveSshSecret) — never a stale secret that keeps prompting
+function forgetSshSecret(host, user, port) {
+  const p = path.join(os.homedir(), ".clutch", "settings.json");
+  const cur = readRawSettings();
+  const id = sshSecretId(host, user, port);
+  if (!cur.ssh_secrets || !(id in cur.ssh_secrets)) return;
+  delete cur.ssh_secrets[id];
+  fs.writeFileSync(p, JSON.stringify(cur, null, 2), { mode: 0o600 });
+}
+
+module.exports = {
+  writeSettingsMirror,
+  ensureSettingsMirror,
+  readSettings,
+  sshSecretId,
+  getSshSecret,
+  saveSshSecret,
+  forgetSshSecret,
+};
