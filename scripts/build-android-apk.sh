@@ -76,19 +76,44 @@ fi
 PIN=android/keystore/cert-sha256.txt
 [ -f "$PIN" ] || { echo "build-android-apk: no $PIN to check against" >&2; exit 1; }
 EXPECT=$(tr -d '[:space:]' < "$PIN")
+
+# Which apksigner? A machine can have several build-tools installed, and the
+# newest one is not automatically the right one: the CI runner image ships
+# 37.0.0, whose apksigner names its output differently ("V2 Signer: certificate
+# SHA-256 digest") from 34.0.0's ("Signer #1 certificate SHA-256 digest"). So
+# prefer the version this script's prerequisites name and fall back to the rest,
+# saying which binary answered — a check that cannot explain itself is not one.
 BUILD_TOOLS="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}/build-tools"
-APKSIGNER=$(ls -1 "$BUILD_TOOLS"/*/apksigner 2>/dev/null | sort | tail -1)
-[ -x "$APKSIGNER" ] || {
+PREFERRED=34.0.0
+APKSIGNER=""
+for cand in "$BUILD_TOOLS/$PREFERRED/apksigner" $(ls -1 "$BUILD_TOOLS"/*/apksigner 2>/dev/null | sort -r); do
+  [ -x "$cand" ] && { APKSIGNER=$cand; break; }
+done
+[ -n "$APKSIGNER" ] || {
   echo "build-android-apk: no apksigner under $BUILD_TOOLS - cannot verify the signature" >&2
   exit 1
 }
-GOT=$("$APKSIGNER" verify --print-certs "$OUT" 2>/dev/null \
-  | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1)
+
+# Keep BOTH streams and the exit code: apksigner reports a failure ("DOES NOT
+# VERIFY" + what failed) on STDERR, so reading only stdout used to turn "could
+# not check for an environment reason" into a silent, wrong "not signed".
+set +e
+APKSIGNER_OUT=$("$APKSIGNER" verify --print-certs "$OUT" 2>&1)
+APKSIGNER_RC=$?
+set -e
+# Every output shape seen so far — "Signer #1", "V2 Signer", ... — carries the
+# same tail, so match the tail and not the prefix that version 37 changed.
+GOT=$(printf '%s\n' "$APKSIGNER_OUT" \
+  | sed -n 's/.*certificate SHA-256 digest: \([0-9a-fA-F]\{64\}\).*/\1/p' \
+  | head -1 | tr 'A-Z' 'a-z')
+
 if [ "$GOT" != "$EXPECT" ]; then
   echo "build-android-apk: SIGNED WITH THE WRONG KEY" >&2
   echo "  expected $EXPECT" >&2
-  echo "  got      ${GOT:-<nothing: the APK is not signed by scheme v2>}" >&2
+  echo "  got      ${GOT:-<no signer certificate could be read>}" >&2
+  echo "  $APKSIGNER (exit $APKSIGNER_RC) said:" >&2
+  printf '%s\n' "$APKSIGNER_OUT" | sed 's/^/    /' >&2
   echo "  an install over the previous release would be refused; see android/README.md" >&2
   exit 1
 fi
-echo "build-android-apk: signature is the project key (cert sha256 $GOT)"
+echo "build-android-apk: signature is the project key (cert sha256 $GOT, apksigner ${APKSIGNER#"$BUILD_TOOLS/"})"
