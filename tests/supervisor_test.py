@@ -627,8 +627,11 @@ def main() -> int:
 
         # the rule DEFERS, it does not disable: the very same supervisor still
         # reaps an idle session whose window went silent
-        st, _ = http_post(f"{base15}/api/session/stop", {"session_id": sid15})
-        check(st == 200, "the in-flight session stops on request")
+        st, body = http_post(f"{base15}/api/session/stop", {"session_id": sid15})
+        check(
+            st == 200 and json.loads(body).get("status") == "detached",
+            "the in-flight session is RELEASED, not ended (POST /api/session/stop -> detached)",
+        )
         st, body = http_post(f"{base15}/api/session/start")
         sid15b = json.loads(body)["session_id"]
         ok = wait_until(lambda: sid15b not in sup15.sessions, 10.0, "idle session reaped")
@@ -636,6 +639,73 @@ def main() -> int:
         sup15.shutdown_all()
     finally:
         hang.close()
+
+    # ---- 16. a release names what became of the child: stopped / detached / unknown ----
+    # A window leaving its session is not the user's Stop — it happens on a
+    # re-claim, a tunnel end, a window close — and none of those asked to end
+    # the work. So the verdict is the CHILD's own state: "stopped" only where
+    # the child PROVED itself idle (the eager cleanup a release is for),
+    # "detached" where a run may be live (left running for the reaper — a
+    # SIGTERM here writes "the host released this session while the run was in
+    # flight" into work nobody abandoned), "unknown" where there never was a
+    # session to release. On the wire the answer keeps the old shape and gains
+    # the middle value: {"status": "ok" | "detached" | "unknown"}.
+    hang16 = _socket.socket()
+    hang16.bind(("127.0.0.1", 0))
+    hang16.listen(5)  # connect completes; no response ever comes
+    hang16_port = hang16.getsockname()[1]
+    try:
+        sup16, port16, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
+        base16 = f"http://127.0.0.1:{port16}"
+        try:
+            # an idle child answers the release with eager cleanup
+            st, body = http_post(f"{base16}/api/session/start")
+            sid16a = json.loads(body)["session_id"]
+            st, body = http_post(f"{base16}/api/session/stop", {"session_id": sid16a})
+            check(
+                st == 200 and json.loads(body).get("status") == "ok",
+                "an idle child is stopped as eager cleanup (POST /api/session/stop -> ok)",
+            )
+            check(sid16a not in sup16.sessions, "the stopped child is gone: no record left behind")
+
+            # a run in flight is never what a release ends
+            st, body = http_post(
+                f"{base16}/api/session/start",
+                {"base_url": f"http://127.0.0.1:{hang16_port}/v1", "model": "hang-model"},
+            )
+            d16 = json.loads(body)
+            sid16b, s16 = d16["session_id"], f"http://127.0.0.1:{d16['port']}"
+            with tempfile.TemporaryDirectory() as tdir16:
+                st, body = http_post(f"{s16}/api/project/new", {"dir": tdir16, "name": "detached"})
+                check(st == 200, "the detached case owns a project")
+                clc16 = json.loads(body)["project"]
+                st, _ = http_post(f"{s16}/api/run", {"task": "hold the line", "project": clc16})
+                check(st == 200, "run accepted against an endpoint that never answers")
+                st, body = http_get(f"{s16}/api/health")
+                check(
+                    st == 200 and json.loads(body).get("in_flight") is True,
+                    "the child reports its run in flight (GET /api/health -> in_flight)",
+                )
+                st, body = http_post(f"{base16}/api/session/stop", {"session_id": sid16b})
+                check(
+                    st == 200 and json.loads(body).get("status") == "detached",
+                    "a run in flight OUTLIVES the release (POST /api/session/stop -> detached)",
+                )
+                check(
+                    sid16b in sup16.sessions and sup16.sessions[sid16b].proc.poll() is None,
+                    "the detached child is left RUNNING for the reaper — never SIGTERMed mid-run",
+                )
+
+            # a name that is no session is an answer, not a crash
+            st, body = http_post(f"{base16}/api/session/stop", {"session_id": "nope"})
+            check(
+                st == 404 and json.loads(body).get("status") == "unknown",
+                "releasing a session that is not there answers 'unknown' (POST /api/session/stop -> 404)",
+            )
+        finally:
+            sup16.shutdown_all()
+    finally:
+        hang16.close()
 
     print("\nSUPERVISOR TESTS PASSED")
     return 0

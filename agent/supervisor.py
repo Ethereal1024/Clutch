@@ -7,7 +7,8 @@ its own tunnel forward) — the supervisor never proxies traffic, it only owns
 the lifecycle:
 
     POST /api/session/start      -> {session_id, port}
-    POST /api/session/stop       -> kill the session child
+    POST /api/session/stop       -> release the session child; a run in flight
+                                    is LEFT RUNNING (detached), never killed
     POST /api/session/heartbeat  -> keep the session alive (stale ones die)
     GET  /api/health             -> ok
 
@@ -96,21 +97,37 @@ SESSION_START_TIMEOUT_S = 30.0  # child port banner: onefile extraction is slow 
 HEALTH_PROBE_TIMEOUT_S = 1.0  # a live child answers at once; a wedged one is no evidence
 
 
-def session_in_flight(port: int | None) -> bool:
+def session_run_state(port: int | None) -> bool | None:
     """Ask a session child whether a run is in flight, over its /api/health.
+
+    THREE answers, because the two callers need opposite doubts: True = a run
+    is live, False = the child PROVED itself idle, None = it could not be told
+    apart (no port, connection refused, a timeout, an answer we cannot read).
+    The reaper treats a doubt as idle — an unreachable child is garbage to
+    collect (see session_in_flight); a release treats a doubt as busy — a stop
+    must never end what may be a live run, and the reaper collects the child
+    later, once it can prove the child idle.
+    """
+    if not port:
+        return None
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=HEALTH_PROBE_TIMEOUT_S) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except (OSError, ValueError, HTTPException):
+        return None
+    if not isinstance(body, dict) or "in_flight" not in body:
+        return None
+    return bool(body["in_flight"])
+
+
+def session_in_flight(port: int | None) -> bool:
+    """Whether a run is provably live in this child (the reaper's question).
 
     False on ANY doubt — no port, connection refused, a timeout, an answer we
     cannot read. This is corroboration, never the contract: only a positive
     answer ever keeps a silent window's session alive.
     """
-    if not port:
-        return False
-    try:
-        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=HEALTH_PROBE_TIMEOUT_S) as resp:
-            body = json.loads(resp.read().decode("utf-8", "replace"))
-    except (OSError, ValueError, HTTPException):
-        return False
-    return bool(body.get("in_flight")) if isinstance(body, dict) else False
+    return session_run_state(port) is True
 
 # session-specific names for the generic layer's timers (kept for greppability:
 # the UI's heartbeat budget is defined against SESSION_STALE_S)
@@ -207,11 +224,32 @@ class SessionSupervisor(ProcessSupervisor):
         log(f"[supervisor] session {record.key} on port {record.port}")
         return record  # a Session: _make_record builds the session shape
 
-    def stop_session(self, session_id: str | None) -> bool:
-        ok = self.stop(session_id)
-        if ok:
+    def stop_session(self, session_id: str | None) -> str:
+        """A window is leaving its session; say what became of the child.
+
+        Returns "stopped", "detached" or "unknown". The window's departure is
+        NOT the user's Stop: it happens on a re-claim, a tunnel end, a window
+        close — none of which asked to end the work. A run in flight must
+        outlive all three (the run writes its own final; SIGTERM here writes
+        "the host released this session while the run was in flight" into work
+        nobody abandoned), so a child that reports a live run — or one that
+        cannot be understood at all — is LEFT RUNNING: the claim is gone,
+        heartbeats stop with it, and the reaper collects the child when it can
+        finally prove it idle (see _stale). Only a child that PROVED itself
+        idle is stopped here, which is the eager cleanup the call is for.
+        """
+        with self._lock:
+            record = self.processes.get(session_id) if session_id else None
+        if record is None:
+            return "unknown"
+        run = session_run_state(record.port)
+        if run is False:
+            self.stop(session_id)
             log(f"[supervisor] session {session_id} stopped")
-        return ok
+            return "stopped"
+        why = "has a run in flight" if run else "is not answering"
+        log(f"[supervisor] session {session_id} {why} - left running for the reaper")
+        return "detached"
 
     def heartbeat(self, session_id: str | None) -> bool:
         return self.beat(session_id)
@@ -401,8 +439,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"session_id": sess.session_id, "port": sess.port})
         elif path == "/api/session/stop":
             sid = self._read_body().get("session_id")
-            ok = sup.stop_session(sid)
-            self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
+            verdict = sup.stop_session(sid)
+            if verdict == "unknown":
+                self._json({"status": "unknown"}, 404)
+            else:
+                # "detached" is not an error: the release was honoured, the
+                # run (if any) simply outlives it — exactly what the client
+                # leaving wanted
+                self._json({"status": "ok" if verdict == "stopped" else "detached"})
         elif path == "/api/session/heartbeat":
             sid = self._read_body().get("session_id")
             ok = sup.heartbeat(sid)
