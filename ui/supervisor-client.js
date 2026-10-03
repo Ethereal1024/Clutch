@@ -85,13 +85,20 @@ function supervisorSessionStop(base, sid) {
   } catch { /* supervisor already gone: nothing to tell */ }
 }
 
-// One heartbeat, AWAITED: "does this supervisor still hold this session?"
-// True = the session is still there — and the beat just told the reaper a
-// window is watching it again, so a claim that outlived its tunnel (the
-// session is a process on the far host; only this client's forward to it
-// died) can be re-opened instead of replaced. False = gone or unreachable.
+// One heartbeat, AWAITED: "does this supervisor still hold this session?" —
+// three answers, because the question has three fates. TRUE = the session is
+// still there — and the beat just told the reaper a window is watching it
+// again, so a claim that outlived its tunnel (the session is a process on the
+// far host; only this client's forward to it died) can be re-opened instead of
+// replaced. FALSE = the supervisor ANSWERED and no longer holds it (its own
+// 404 "unknown"): provably gone — the one verdict that may replace a claim.
+// NULL = the question could not be asked (no route to the supervisor right
+// now). A dead hop is not a dead session, so null is doubt: the claim is kept
+// and re-bound when a hop returns, never replaced — replacing it would start a
+// second session over the old one's work, which the far host then reports as
+// "this project is already open in another window".
 async function supervisorSessionHeartbeat(base, sid) {
-  if (!sid) return false;
+  if (!sid) return false; // nothing to re-bind to: gone is the honest answer
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
@@ -102,12 +109,13 @@ async function supervisorSessionHeartbeat(base, sid) {
         body: JSON.stringify({ session_id: sid }),
         signal: ctl.signal,
       });
-      return r.ok;
+      if (r.ok) return true;
+      return r.status === 404 ? false : null; // 404 is the supervisor's own "unknown"
     } finally {
       clearTimeout(t);
     }
   } catch {
-    return false;
+    return null; // unreachable: doubt, never a verdict
   }
 }
 

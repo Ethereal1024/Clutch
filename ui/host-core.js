@@ -55,19 +55,34 @@ function createHostCore(deps) {
   // failure can be THIS client's own stale forward while the far host kept
   // running the session all along (the phone returning from the background is
   // exactly that) — and only replace the session when the old one is provably
-  // gone.
+  // gone. Silence is not that proof: when the supervisor cannot be ASKED (the
+  // hop is down — this beat failing is usually the hop's dying breath), the
+  // claim is kept, parked, for the next hop to re-bind.
   function tunnelClaimOnFail(wc, supBase, sessionId) {
     return () => {
       log(`[backend] window ${wc.id} session heartbeat failed; re-establishing`);
       (async () => {
         const cur = windowBackends.get(wc.id);
         if (!cur || cur.sessionId !== sessionId) return; // superseded / closed
-        const kept = await rebindTunnelBackend(wc, supBase, cur);
-        if (kept) {
-          if (!wc.isDestroyed()) wc.send(BASE_CHANGED, kept);
+        // ask through the hop that is up NOW: the failing beat was the OLD
+        // hop's, and a question asked into a dead hop can only say "unreachable"
+        const ts = tunnelStatus();
+        const hop = ts.active && ts.url ? ts.url : supBase;
+        const verdict = await rebindTunnelBackend(wc, hop, cur);
+        if (verdict.verdict === "kept") {
+          if (!wc.isDestroyed()) wc.send(BASE_CHANGED, verdict.url);
           return;
         }
         if (windowBackends.get(wc.id) !== cur) return; // the claim changed hands while we were asking: replacing now would spawn a session nobody is waiting for
+        if (verdict.verdict !== "gone") {
+          // doubt (no route to the supervisor): NOT provably gone, so the
+          // claim stays — its forward and heartbeat are already dropped — and
+          // the next claim (the reconnect's api:base) re-binds it. Replacing it
+          // here would start a second session over the first one's work, which
+          // the far host reports as "this project is already open in another window"
+          log(`[backend] window ${wc.id} session ${sessionId} not provably gone; keeping the claim for the next hop`);
+          return;
+        }
         await releaseWindowBackend(wc.id);
         const url = await ensureWindowBackend(wc);
         if (!wc.isDestroyed()) wc.send(BASE_CHANGED, url);
@@ -127,35 +142,47 @@ function createHostCore(deps) {
   // SIGTERMs the session mid-run (agent/server.py record_release writes "the
   // host released this session while the run was in flight" into work nobody
   // abandoned) and start hands the window a second session while the first
-  // one is still working. Returns the new URL, or null when the session is
-  // really gone — then the caller replaces it the old way.
+  // one is still working. The verdict is three-way, and only one of the three
+  // may ever replace a claim:
+  //   { verdict: "kept", url } — the forward is back on the SAME session
+  //   { verdict: "gone" }      — the supervisor answered that it no longer
+  //                              holds the session (the one proof there is)
+  //   { verdict: "doubt" }     — the question could not be asked, or the
+  //                              answer could not be acted on (no route to the
+  //                              supervisor, a forward that would not open, a
+  //                              claim that changed hands mid-ask): the claim
+  //                              is kept, detached, for the next hop
   async function rebindTunnelBackend(wc, supBase, existing) {
     if (!existing || existing.kind !== "tunnel" || !existing.sessionId || !existing.sessionPort) {
-      return null;
+      return { verdict: "gone" };
     }
     if (typeof existing.detach === "function") existing.detach(); // the old forward/heartbeat are dead weight
     // the supervisor is the authority on "is the session still there", and the
     // beat doubles as the re-claim: it re-arms the window contract the reaper
     // judges staleness by
     const alive = await sessions.supervisorSessionHeartbeat(supBase, existing.sessionId);
-    if (!alive) return null;
+    if (alive == null) return { verdict: "doubt" }; // unreachable is not gone
+    if (!alive) return { verdict: "gone" };
     let fwd;
     try {
       fwd = await openSessionForward(existing.sessionPort);
     } catch (e) {
       log(`[backend] session ${existing.sessionId} forward failed: ${(e && e.message) || e}`);
-      return null;
+      // the session PROVED itself alive above; a forward that will not open is
+      // this hop's failing, not the session's — keep the claim and try again
+      return { verdict: "doubt" };
     }
     const hb = sessions.startSupervisorHeartbeat(supBase, existing.sessionId, tunnelClaimOnFail(wc, supBase, existing.sessionId));
     const wb = tunnelClaim(supBase, existing.sessionId, existing.sessionPort, fwd, hb);
     if (windowBackends.get(wc.id) !== existing) {
       // superseded while we worked (a newer claim, or the window closed):
-      // what we opened serves nobody
+      // what we opened serves nobody, and what changed hands is not replaced
+      // behind the new holder's back
       wb.detach();
-      return null;
+      return { verdict: "doubt" };
     }
     windowBackends.set(wc.id, wb);
-    return wb.url;
+    return { verdict: "kept", url: wb.url };
   }
 
   // Decide (and, if needed, re-create) this window's backend URL.
@@ -175,9 +202,15 @@ function createHostCore(deps) {
         // the far-side session outlives every hop, so re-open its forward —
         // never stop + start, which is what killed runs in flight
         const kept = await rebindTunnelBackend(wc, ts.url, existing);
-        if (kept) {
-          if (notify && !wc.isDestroyed()) wc.send(BASE_CHANGED, kept);
-          return kept;
+        if (kept.verdict === "kept") {
+          if (notify && !wc.isDestroyed()) wc.send(BASE_CHANGED, kept.url);
+          return kept.url;
+        }
+        if (kept.verdict !== "gone") {
+          // doubt: the session is not provably gone, so no second session may
+          // be started over its work — the window waits at "not running" for
+          // the next claim to re-bind it
+          return null;
         }
       }
       await releaseWindowBackend(wc.id); // drop any local session first
@@ -219,6 +252,14 @@ function createHostCore(deps) {
 
     const existing = windowBackends.get(wc.id);
     if (existing && existing.kind === "local") return existing.url;
+    if (existing && existing.kind === "tunnel") {
+      // a parked tunnel claim is not provably gone (its hop died mid-ask, and
+      // only a supervisor that ANSWERS may retire it). A local session here
+      // would be the second window over the far session's work — the exact
+      // "already open in another window" conflict — so wait instead: the
+      // reconnect's claim re-binds this one
+      return null;
+    }
     await releaseWindowBackend(wc.id);
     let s;
     const onFail = () => {

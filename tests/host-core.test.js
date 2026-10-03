@@ -18,8 +18,11 @@ function fakeSessions() {
     calls,
     beats,
     // what the supervisor answers to "is this session still there?" — the
-    // re-claim's first question. Scenarios flip it to say the far host really
-    // dropped the session instead of just this client's forward to it.
+    // re-claim's first question, in the client's own three states: true (it
+    // vouches for the session), false (it says it no longer holds it) and null
+    // (the question could not be asked — no route to the supervisor). Scenarios
+    // flip it to say the far host really dropped the session instead of just
+    // this client's forward to it.
     sessionAlive: true,
     supervisorSessionStart: async (base, baseUrl, model, knobs) => {
       calls.started.push({ base, baseUrl, model, knobs });
@@ -393,6 +396,61 @@ async function main() {
     assert.deepStrictEqual(opened, [30001, 30001],
       "the dead hop's forward is not reused, even for the same port number: a new one is opened over the same session");
     assert.deepStrictEqual(sessions.calls.heartbeats.map((h) => h.sid), ["s1"], "and the re-open went through the supervisor's answer");
+  }
+
+  // 18. hop unreachable is NOT "session gone": the supervisor could not be
+  //     asked, so the claim is kept (parked) and the NEXT claim re-binds it.
+  //     Replacing it on a guess starts a second session over the first one's
+  //     work — the far host then reports "this project is already open in
+  //     another window", which is exactly the ssh-drop -> reconnect outage
+  {
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    let n = 0;
+    const { core, sessions } = makeCore({
+      tunnel: ts,
+      over: { openSessionForward: async () => ({ localPort: 31000 + ++n, close: () => {} }) },
+    });
+    const w = fakeWin(18);
+    await core.ensureWindowBackend(w);
+    sessions.sessionAlive = null; // no route to the supervisor (the hop is down)
+    sessions.beats[0].onFail();
+    await tick();
+    await tick();
+    await tick();
+    assert.strictEqual(core.backendCount(), 1, "an unconfirmed claim is kept, not replaced");
+    assert.strictEqual(sessions.calls.started.length, 1, "no second session over the old one's work");
+    assert.deepStrictEqual(sessions.calls.stopped, [], "and nothing is told to stop on a guess");
+    // the hop returns: the next claim (the reconnect's api:base) re-binds
+    ts.url = "http://127.0.0.1:9999";
+    sessions.sessionAlive = true;
+    const again = await core.ensureWindowBackend(w);
+    assert.strictEqual(sessions.calls.started.length, 1, "the returning hop keeps the session child it had");
+    assert.deepStrictEqual(
+      sessions.calls.heartbeats.map((h) => h.base),
+      ["http://127.0.0.1:8891", "http://127.0.0.1:9999"],
+      "the re-claim asked the supervisor through the hop that is up now",
+    );
+    assert.ok(again, "and the window is handed a live forward again");
+  }
+
+  // 19. the local fallback never takes over a parked tunnel claim: while the
+  //     far session is not provably gone, a local session is the second window
+  //     over its work. "Not running" is state, not advice — wait for the hop
+  {
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const { core, sessions, state } = makeCore({ tunnel: ts });
+    const w = fakeWin(19);
+    await core.ensureWindowBackend(w);
+    sessions.sessionAlive = null;
+    sessions.beats[0].onFail();
+    await tick();
+    await tick();
+    await tick();
+    ts.active = false;
+    ts.url = null; // the hop is gone again before any claim ran
+    assert.strictEqual(await core.ensureWindowBackend(w), null, "no local session over an unconfirmed far one");
+    assert.strictEqual(state.localStarts.length, 0, "the local fallback did not fire");
+    assert.strictEqual(core.backendCount(), 1, "the parked claim still names the far session");
   }
 
   console.log("host-core: all checks passed");
