@@ -52,6 +52,52 @@ check(/const SESSION_START_TIMEOUT_MS = [\d_]+;/.test(SRC), "sanity: the module 
 check(!/failed = true;/.test(SRC),
   "a beat failure is no longer an immediate verdict on the session");
 
+// ---- the ladder: every "the wire is dead" claim is made from the outside in --
+// Being told "the connection is lost" is a claim about the WIRE, and three
+// independent timers decide when to make it, in three different files:
+//
+//   ssh keepalive   tunnel-connect.js  15s x 3  -> the far end of the tunnel is gone
+//   SSE stale       ui/js/sse-stream.js  45s    -> this window's event stream is dead
+//   supervisor reaps                      300s  -> the host takes the session down
+//
+// They must be stair-stepped, not stacked: an inner timer that outlived the
+// outer one would let a window keep painting a live frame off a socket that is
+// already known to be dead, and the operator gets the original complaint back —
+// a task that "went idle by itself". The tunnel is also the shortest deliberately
+// (see the comment at the keepalive above) so a hop that dies is a CLAIM to
+// re-bind, well inside the session's life on the host.
+const TUN = fs.readFileSync(path.join(ROOT, "ui", "tunnel-connect.js"), "utf8");
+const SSE = fs.readFileSync(path.join(ROOT, "ui", "js", "sse-stream.js"), "utf8");
+const SRV = fs.readFileSync(path.join(ROOT, "agent", "server.py"), "utf8");
+
+const kaMs = num(/keepaliveInterval: (\d+),/, TUN, "ssh keepalive interval");
+const kaCount = num(/keepaliveCountMax: (\d+),/, TUN, "ssh keepalive miss budget");
+const sseBeatMs = num(/const SSE_KEEPALIVE_MS = (\d+);/, SSE, "server keepalive cadence");
+// SSE_STALE_MS is WRITTEN as a multiple of the keepalive: read the multiplier, so
+// a bare relabelling cannot silently decouple the two.
+const sseStaleMul = num(/const SSE_STALE_MS = SSE_KEEPALIVE_MS \* (\d+);/, SSE,
+  "the multiple of missed keepalives that counts as dead");
+const sseStaleMs = sseBeatMs * sseStaleMul;
+const srvBeatS = num(/^SSE_KEEPALIVE_SEC = ([\d.]+)$/m, SRV, "host's own keepalive cadence");
+
+const tunnelDeadMs = kaMs * kaCount;
+check(Number.isFinite(tunnelDeadMs) && tunnelDeadMs > 0,
+  "the tunnel declares its far end dead on a real budget");
+check(tunnelDeadMs <= sseStaleMs,
+  `a dead tunnel is called out no later than the stream that rides it ` +
+  `(ssh ${tunnelDeadMs}ms <= SSE stale ${sseStaleMs}ms)`);
+check(sseStaleMs <= giveUpMs,
+  `the stream goes stale well inside the window the host still holds the session ` +
+  `(${sseStaleMs}ms <= ${giveUpMs}ms)`);
+check(tunnelDeadMs < giveUpMs,
+  `a hop that dies is a claim to re-bind, not a session to replace ` +
+  `(${tunnelDeadMs}ms < ${giveUpMs}ms)`);
+check(sseBeatMs / 1000 === srvBeatS,
+  `the keepalive the window watches is the one the host sends ` +
+  `(SSE_KEEPALIVE_MS ${sseBeatMs} vs SSE_KEEPALIVE_SEC ${srvBeatS})`);
+check(sseStaleMul > 1,
+  `one missed keepalive is a hiccup, not death (x${sseStaleMul})`);
+
 // ---- the loop itself, on a fake clock and a fake network ----
 const realNow = Date.now;
 let clock = 1_000_000; // far from 0 so a zeroed timestamp cannot pass by accident
