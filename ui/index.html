@@ -126,13 +126,14 @@
     </div>
   </div>
 
-  <!-- The one door a lost session comes back through. Deliberately NOT
-       dismissable: no backdrop press, no Escape, no ×, no Cancel — the only way
-       out is a session that answers again. Modeled on #perm-modal (which is
-       non-dismissable for the same reason: it is the only way to answer a
-       question the agent is blocked on). -->
-  <!-- tabindex: the dialog holds the keys even while its one button is off
-       screen (an attempt in flight has the progress bar and nothing to press) -->
+  <!-- The two doors out of a lost session, and both are deliberate: a session
+       that answers again (the dialog's own job), and this Cancel — an explicit,
+       labelled act, unlike the ×, the Escape key and the backdrop press the
+       dialog still refuses. There is no silent way out. Modeled on #perm-modal
+       (which is non-dismissable for the same reason: it is the only way to answer
+       a question the agent is blocked on). -->
+  <!-- tabindex: the dialog holds the keys even while its buttons are off screen
+       (an attempt in flight has the progress bar and nothing to press) -->
   <div id="conn-lost-modal" class="modal hidden" tabindex="-1">
     <div class="modal-box">
       <h3>Connection lost</h3>
@@ -147,10 +148,13 @@
       <div id="conn-lost-progress" class="conn-progress hidden">
         <div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"></div></div>
       </div>
-      <!-- the user's own door back, and it is on screen ONLY while no attempt is
-           in flight: a second press could only start a second reconnect (both are
-           rendered from that one fact — connLostChrome in js/conn-lost.js) -->
+      <!-- the user's own doors, and they are on screen ONLY while no attempt is
+           in flight: a second press could only start a second reconnect, and the
+           Cancel would be offered to abort the user's own redial at the one
+           moment there is nothing of theirs to abort (both rows are rendered from
+           that one fact — connLostChrome in js/conn-lost.js) -->
       <div id="conn-lost-actions" class="modal-actions hidden">
+        <button id="conn-lost-cancel" title="stop reconnecting — the window stays with no session">Cancel</button>
         <button id="conn-lost-retry" class="primary">Reconnect now</button>
       </div>
     </div>

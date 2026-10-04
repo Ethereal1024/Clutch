@@ -13,11 +13,18 @@
 // nothing offered the user a way back.
 //
 // So: every way a disconnect is detected funnels into connectionLost(), and the
-// dialog it raises IS the reconnect entry. It cannot be dismissed — no backdrop
-// press, no Escape, no ×, no Cancel — because dismissing it would leave the
-// window exactly where it started: pointed at a port nobody serves. It closes
-// on the first session that answers again, and that session is adopted in place
-// (same project, same transcript) rather than in a fresh window.
+// dialog it raises IS the reconnect entry. It has exactly TWO exits and both are
+// deliberate: the first session that answers again (adopted in place — same
+// project, same transcript — rather than in a fresh window), and the user's own
+// Cancel, which is the picker's Disconnect in another dress (see connLostCancel).
+// There is still no backdrop press, no Escape and no ×: a stray key or a missed
+// tap must not abandon a reconnect. What a dismissable modal lacked was not an
+// exit, it was a LABELLED one.
+//
+// The redial behind it has no end of its own any more (the backoff grows to a
+// steady 128s and keeps trying — a phone that comes back into signal must
+// reconnect with nobody touching anything), and a dialog with no upper bound and
+// no labelled way out is a window held hostage: that is what the Cancel is for.
 //
 // The door back is the host this window was on and no other: the standing intent
 // says which one that is, and a remote that will not answer keeps its tries. The
@@ -26,8 +33,10 @@
 // It reads as little as possible, and what it shows is state, not advice: the
 // cause, the host it is going back to, what the attempt is doing (its own line
 // and its own progress bar — the same bar the picker's attempts animate), and the
-// flow's verdict when there is one. The button is on screen only between attempts:
-// a live "Reconnect now" during one is an invitation to start a second.
+// flow's verdict when there is one. Its two buttons are on screen only between
+// attempts: a live "Reconnect now" during one is an invitation to start a second,
+// and a live Cancel would be offered while there is nothing of the user's own to
+// stop (the attempt is bounded, and the gap that follows it is theirs to break).
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
@@ -47,15 +56,21 @@ const connLostStatusEl = $("#conn-lost-status");
 // progress line beside it (that would be the same fact twice).
 const connLostWhyEl = $("#conn-lost-why");
 // the dialog's own chrome: the progress bar an attempt in flight animates, and the
-// button that is the way back once it is over (connLostChrome, below)
+// two buttons that are the user's once it is over (connLostChrome, below)
 const connLostProgressEl = $("#conn-lost-progress");
 const connLostActionsEl = $("#conn-lost-actions");
 const connLostRetryBtn = $("#conn-lost-retry");
+const connLostCancelBtn = $("#conn-lost-cancel");
 
-// how long to wait before the next automatic attempt. A phone that comes back
-// into signal must reconnect without the user touching anything, and a host
-// that is simply down must not be hammered: the gap grows to a steady 30s.
-const CONN_LOST_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
+// How long to wait before the next automatic attempt: the same ladder the LLM
+// client redials on and the same one the ssh hop uses (js/../tunnel-connect.js),
+// 1,2,4,...,128s, held at the top. A phone that comes back into signal must
+// reconnect with nobody touching anything — and a reconnect that has already
+// been running for a minute is exactly the one the far side is closest to
+// answering, so the gap must not settle at a "steady 30s" and hammer a host that
+// is simply down either: doubling is what keeps both cheap. Nothing here gives
+// up; the way out of a redial that never lands is the user's Cancel.
+const CONN_LOST_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000];
 
 // the dialog's one line for "nothing is running: it is your move" (a declined
 // password, or an attempt that came back after one). One string, one meaning — the
@@ -89,21 +104,27 @@ function connLostPaint(status) {
 // dead button and invites a second reconnect). The bar is the attempt's own: it
 // animates until js/conn-flow.js paints a stage into its fill.
 function connLostChrome() {
+  // The dialog can come down while an attempt is still finishing (the user's own
+  // Cancel): there is no chrome to paint for a dialog nobody is looking at, and
+  // focusing a button inside a hidden modal would take the keys nowhere.
+  if (!connLost) return;
   connLostActionsEl.classList.toggle("hidden", connLostAttempting);
   if (connLostAttempting) {
     connBarWaiting(connLostProgressEl);
   } else {
     connLostProgressEl.classList.add("hidden");
-    // the attempt is over and the dialog is still up: the keys belong to the button
-    // that just came back (it is the only thing left to press)
-    if (connLost) connLostRetryBtn.focus();
+    // the attempt is over and the dialog is still up: the keys belong to the door
+    // that just came back (Reconnect, the first thing to press)
+    connLostRetryBtn.focus();
   }
 }
 
-// ---- the dialog is NOT dismissable ----
+// ---- no accidental exit ----
 // Escape is swallowed here so that neither this box nor anything behind it can
-// answer for the user: the ONE way out is a session that answers again. Nothing
-// registers dismissOnOverlayPress on this modal, and there is no close button.
+// answer for the user: a stray keystroke must not drop a reconnect that is in
+// progress. Nothing registers dismissOnOverlayPress on this modal, and there is
+// no × either. The two things that do end it are both deliberate acts: a session
+// that answered (resolveConnectionLost) and the user's own Cancel (below).
 connLostModal.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   e.preventDefault();
@@ -163,6 +184,46 @@ function connLostNeedsUser() {
   if (!connLost) return;
   connLostManualOnly = true;
   connLostPaint(CONN_LOST_WAITING);
+}
+
+// The user's own exit — the picker's Disconnect, in the dialog's dress. It is an
+// explicit, labelled act, which is the difference between this and the × the
+// dialog does not have: it ends the outage the USER has been told about, so
+// nothing here may keep asking.
+//
+// What it does, and why each part is needed:
+//   * the standing intent goes FIRST, exactly as the picker's own Cancel does
+//     (js/conn-flow.js): the hop this window asked for is no longer wanted, so
+//     the teardown that follows is not a LOST session — the renderer reads
+//     "tunnel:ended" as a loss only while the intent is there
+//     (backend-lifecycle.js), and this is what keeps a detector from raising the
+//     dialog again for an outage the user has just ended;
+//   * the redial timer is disarmed: no attempt of ours is left armed;
+//   * the badge is settled to idle, and it is NOT the invented idle sseDegrade
+//     refuses to paint: with no session this window has nothing to show and
+//     nothing to stop, and leaving a stale "running" would be worse than a lie —
+//     it would block the picker (openFsBrowser refuses while a run is active)
+//     and make Stop raise this very dialog again. The run's real fate is not
+//     guessed here: sseRunAtRisk is already set, so the next session's own
+//     history settles it (see js/stream-events.js);
+//   * the dead base is already gone (connectionLost dropped it), so the window
+//     is left honestly session-less, and the picker's own Connect — one press on
+//     the host it still remembers — is the way back in.
+function connLostCancel() {
+  if (!connLost) return;
+  localStorage.removeItem("clutch_ssh_connected");
+  localStorage.removeItem("clutch_degrade"); // exiting the degrade mode too
+  if (connLostTimer) {
+    clearTimeout(connLostTimer);
+    connLostTimer = null;
+  }
+  connLost = false;
+  connLostManualOnly = false;
+  connLostPaint("");
+  connLostWhyEl.textContent = "";
+  setStatus("idle");
+  renderConnSelector(); // the picker claims no connection: there is none
+  closeModal(connLostModal);
 }
 
 function connLostArm() {
@@ -299,4 +360,13 @@ $("#conn-lost-retry").addEventListener("click", () => {
   connLostTries = 0; // the user asked: forget the backoff, and the declined prompt
   connLostManualOnly = false;
   connLostAttempt();
+});
+
+// The other door, and the only one this window opens on its own account (see
+// connLostCancel): it is on screen exactly when Reconnect is, so a press cannot
+// land on an attempt in flight — and the "is an attempt running" guard below is
+// what makes that structural rather than a matter of the button's CSS.
+$("#conn-lost-cancel").addEventListener("click", () => {
+  if (connLostAttempting) return;
+  connLostCancel();
 });

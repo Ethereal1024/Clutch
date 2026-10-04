@@ -9,14 +9,20 @@
 // The contract under test (ui/js/conn-lost.js):
 //   * every detected disconnect funnels into connectionLost(), one idempotent
 //     announcement named by the cause that got there first;
-//   * the dialog it raises IS the reconnect entry, and it CANNOT be dismissed —
-//     no backdrop press, no Escape, no ×, no Cancel, and on Android no back key;
-//   * the only thing that closes it is proof of life: a session that answered
-//     (a stream that opened), which is also what restores the window in place;
+//   * the dialog it raises IS the reconnect entry, and it has exactly TWO exits,
+//     both deliberate: proof of life (a session that answered — a stream that
+//     opened — which is also what restores the window in place), and the user's
+//     own Cancel. There is still no backdrop press, no Escape and no ×: a stray
+//     key or a missed tap must not abandon a reconnect.
+//   * Cancel is the picker's Disconnect in the dialog's dress: it drops the
+//     standing intent (so the teardown it causes is not read back as a loss),
+//     disarms the redial, settles the badge honestly and leaves the window
+//     session-less with the picker's Connect as the way back in;
 //   * recovery re-dials the SAME host BY NAME from the standing intent — it
-//     never substitutes another one, and never clears what the user asked for.
-//     The host's own session is reached behind an ALIVE hop (a re-claim), not as
-//     a way out of a remote that will not answer.
+//     never substitutes another one, and an OUTAGE never clears what the user
+//     asked for (only the user's own Cancel does). The host's own session is
+//     reached behind an ALIVE hop (a re-claim), not as a way out of a remote
+//     that will not answer.
 //
 // Source-level checks pin the markup and the wiring; the behavioral section
 // pulls the REAL functions out of the renderer and drives them against stubs
@@ -35,22 +41,22 @@ const CONN_LOST = fs.readFileSync(path.join(ROOT, "ui", "js", "conn-lost.js"), "
 const { fnBody } = slicer(APP);
 const { fnBody: connFn } = slicer(CONN_LOST);
 
-// ---- 1. the dialog is not dismissable, by construction ----
+// ---- 1. the dialog has no accidental exit ----
 const modalMarkup = HTML.slice(
   HTML.indexOf('id="conn-lost-modal"'),
   HTML.indexOf("</div>", HTML.indexOf('id="conn-lost-retry"'))
 );
 check(/class="modal hidden"/.test(modalMarkup),
   "the dialog is in the page, hidden until a loss is detected");
-check((modalMarkup.match(/<button/g) || []).length === 1 &&
-  /id="conn-lost-retry"/.test(modalMarkup),
-  "its one control is Reconnect: no ×, no Cancel, nothing else to press");
+check((modalMarkup.match(/<button/g) || []).length === 2 &&
+  /id="conn-lost-cancel"/.test(modalMarkup) && /id="conn-lost-retry"/.test(modalMarkup),
+  "its two controls are Reconnect and Cancel — still no ×, nothing else to press");
 check(!/dismissOnOverlayPress\(connLostModal/.test(APP),
   "no backdrop press answers for the user");
 check(!/popstate/.test(CONN_LOST),
   "no history hook either: the Android back key cannot cancel it");
 check(/tabindex="-1"/.test(modalMarkup),
-  "the dialog itself can hold the keys: its one button is off screen while an attempt runs");
+  "the dialog itself can hold the keys: its buttons are off screen while an attempt runs");
 
 // ---- 1b. it says state, not advice ----
 // The reported dialog was three lines of prose around one line of state. What is
@@ -65,12 +71,14 @@ check(!/reconnects on its own|keeps this|The dialog closes with/.test(modalMarku
   "the paragraph explaining the reconnect is gone: the dialog is doing it, not describing it");
 check(/id="conn-lost-progress" class="conn-progress hidden">\s*<div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"/.test(modalMarkup),
   "the reconnect has the picker's own progress bar markup, classes and all: nothing new to style");
-check(/id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-retry"/.test(modalMarkup),
-  "and Reconnect is wrapped in the shared actions row, hidden until it is the user's turn");
+check(/id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-cancel"[\s\S]{0,160}<button id="conn-lost-retry" class="primary"/.test(modalMarkup),
+  "and both doors are wrapped in the shared actions row, hidden until they are the user's");
 
 const closeCalls = CONN_LOST.match(/closeModal\(connLostModal\)/g) || [];
-check(closeCalls.length === 1 && /closeModal\(connLostModal\)/.test(connFn("resolveConnectionLost")),
-  "the dialog only ever closes where a session answered");
+check(closeCalls.length === 2 &&
+  /closeModal\(connLostModal\)/.test(connFn("resolveConnectionLost")) &&
+  /closeModal\(connLostModal\)/.test(connFn("connLostCancel")),
+  "the dialog comes down in exactly two places: a session that answered, and the user's own Cancel");
 check(/connLostModal\.addEventListener\("keydown"/.test(CONN_LOST) &&
   /e\.key !== "Escape"/.test(CONN_LOST) &&
   /e\.preventDefault\(\)/.test(CONN_LOST),
@@ -79,15 +87,21 @@ check(!/Escape[\s\S]{0,120}closeModal/.test(CONN_LOST) &&
   !/addEventListener\("click"/.test(connFn("resolveConnectionLost")),
   "and no key or press handler reaches a close");
 
-// the ONLY closer is proof of life: the dialog's state changes in exactly one
-// place, and that place is the stream opening
+// one of the two exits is proof of life: the dialog resolves itself in exactly
+// one place, and that place is the stream opening
 const closerCalls = APP.match(/(?<!function )resolveConnectionLost\(\)/g) || [];
 const SSESRC = fs.readFileSync(path.join(ROOT, "ui", "js", "sse-stream.js"), "utf8");
-const onOpen = SSESRC.slice(SSESRC.indexOf("es.onopen = ()"), SSESRC.indexOf("es.onerror = ()"));
+const onOpen = SSESRC.slice(SSESRC.indexOf("es.onopen = ()"), SSESRC.indexOf("es.onerror = "));
 check(closerCalls.length === 1 && /resolveConnectionLost\(\)/.test(onOpen),
-  "the only closer is a stream that OPENED (an adopted URL is not a session)");
+  "a stream that OPENED is what resolves the outage (an adopted URL is not a session)");
 check(!/sseDegrade|reconnectSSE/.test(onOpen),
   "and an open stream does not announce anything: it is the answer, not a question");
+// ...and the other exit is the user's own act, never a silent one: the standing
+// intent (the one thing that would have every detector re-raise this dialog for
+// an outage that is over) goes in exactly one place, and it is connLostCancel
+check((CONN_LOST.match(/removeItem\("clutch_ssh_connected"\)/g) || []).length === 1 &&
+  /removeItem\("clutch_ssh_connected"\)/.test(connFn("connLostCancel")),
+  "the standing intent goes in exactly ONE place, and it is the user's own Cancel");
 
 // ---- 2. one funnel: every detector announces through the same door ----
 check(/connectionLost\("lost the live stream/.test(fnBody("sseDegrade")),
@@ -161,20 +175,28 @@ const connLostReasonEl = (global.connLostReasonEl = $("#conn-lost-reason"));
 const connLostTargetEl = (global.connLostTargetEl = $("#conn-lost-target"));
 const connLostStatusEl = (global.connLostStatusEl = $("#conn-lost-status"));
 const connLostWhyEl = (global.connLostWhyEl = $("#conn-lost-why"));
-// the dialog's own chrome: the bar an attempt in flight animates, and the button
-// that is the way back once it is over
+// the dialog's own chrome: the bar an attempt in flight animates, and the two
+// buttons that are the user's once it is over
 const connLostProgressEl = (global.connLostProgressEl = $("#conn-lost-progress"));
 const connLostActionsEl = (global.connLostActionsEl = $("#conn-lost-actions"));
 const connLostRetryEl = (global.connLostRetryBtn = $("#conn-lost-retry"));
+const connLostCancelEl = (global.connLostCancelBtn = $("#conn-lost-cancel"));
 
 let drops = 0;
 let selects = 0;
 let closes = 0;
+let statuses = [];
 global.dropStaleBackend = () => {
   drops++;
 };
 global.renderConnSelector = () => {
   selects++;
+};
+// the badge (js/stream-view.js): Cancel settles it, because a window with no
+// session has no run to show and none to stop
+global.setStatus = (s) => {
+  statuses.push(s);
+  global.busy = s === "running" || s === "waiting";
 };
 global.closeModal = (el) => {
   closes++;
@@ -200,7 +222,7 @@ global.connLostTries = 0;
 global.connLostAttempting = false;
 global.connLostTimer = null;
 global.connLostManualOnly = false;
-global.CONN_LOST_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
+global.CONN_LOST_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000];
 global.CONN_LOST_NOTICE_MS = 8000;
 global.CONN_LOST_WAITING = "Waiting for you";
 // the bar helper lives in js/conn-flow.js (above this file in the page); the one
@@ -213,9 +235,9 @@ global.connBarWaiting = (bar) => {
 
 for (const name of [
   "connLostTargetText", "connLostPaint", "connLostChrome", "connectionLost",
-  "resolveConnectionLost", "connLostNeedsUser", "connLostArm", "connLostAttempt",
-  "connLostRecover", "connLostAskHost", "connLostRemoteIntent", "connLostTunnelUp",
-  "connLostRedial", "connLostAwaitAnswer",
+  "resolveConnectionLost", "connLostCancel", "connLostNeedsUser", "connLostArm",
+  "connLostAttempt", "connLostRecover", "connLostAskHost", "connLostRemoteIntent",
+  "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer",
 ]) {
   (0, eval)(fnBody(name));
 }
@@ -294,12 +316,16 @@ async function main() {
   timers.length = 0;
   resolveConnectionLost();
 
-  // ---- 5. the bounded backoff: a host that is down is not hammered ----
+  // ---- 5. the growing backoff: a host that is down is not hammered ----
+  // (it no longer stops at a small number of tries: the ladder doubles to a held
+  // 128s and the dialog keeps trying, because a phone that comes back into signal
+  // must reconnect with nobody touching anything. The user's labelled way out is
+  // Cancel, below — not exhaustion.)
   global.connLostRecover = async () => false;
   connectionLost("lost the remote connection");
   connLostWhyEl.textContent = "Installing remote server…"; // the flow's line, mid-attempt
   await flush();
-  check(global.connLostTries === 1 && timers.length === 1 && timers[0].ms === 2000,
+  check(global.connLostTries === 1 && timers.length === 1 && timers[0].ms === 1000,
     "the first retry waits the first backoff step");
   check(/^Not back yet/.test(connLostStatusEl.textContent),
     "and says so, instead of claiming the window is back");
@@ -308,7 +334,7 @@ async function main() {
     "nor is the flow's own line: it has a line of its own, and the two do not say the same thing twice");
   await drainTimers(1);
   await flush();
-  check(global.connLostTries === 2 && timers.length === 1 && timers[0].ms === 4000,
+  check(global.connLostTries === 2 && timers.length === 1 && timers[0].ms === 2000,
     "the gap doubles while the host stays down");
   check(!/Reconnecting…\)/.test(connLostStatusEl.textContent),
     "the verdict is not quoted back at the user as the reason");
@@ -332,10 +358,15 @@ async function main() {
     focuses[focuses.length - 1] === "conn-lost-retry",
   "the moment it is over the bar goes down, the button comes back, and the keys go with it");
   timers.length = 0;
+  global.connLostTries = 6;
+  connLostArm();
+  check(timers.length === 1 && timers[0].ms === 32000,
+    "and the ladder is the same one the LLM client and the ssh hop redial on");
+  timers.length = 0;
   global.connLostTries = 40;
   connLostArm();
-  check(timers.length === 1 && timers[0].ms === 30000,
-    "and it stops growing: a remote that stays down settles at the longest gap");
+  check(timers.length === 1 && timers[0].ms === 128000,
+    "it stops growing at the top instead of running away: a remote that stays down settles at the longest gap");
   timers.length = 0;
   resolveConnectionLost();
 
@@ -484,10 +515,10 @@ async function main() {
     /^let connLostAttempting = false;/m.test(CONN_LOST) &&
     /^let connLostManualOnly = false;/m.test(CONN_LOST),
   "the outage is module state: several detectors share one dialog");
-  check(/const CONN_LOST_BACKOFF_MS = \[2000, 4000, 8000, 15000, 30000\];/.test(CONN_LOST) &&
+  check(/const CONN_LOST_BACKOFF_MS = \[1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000\];/.test(CONN_LOST) &&
     /const CONN_LOST_NOTICE_MS = 8000;/.test(CONN_LOST) &&
     !/CONN_LOST_HOST_FALLBACK_AFTER|CONN_LOST_PROOF_MS/.test(CONN_LOST),
-  "and its constants are the ones this runner pins (one door, no try-counted second host)");
+  "and its constants are the ones this runner pins (one door, no try-counted second host, no upper bound on the tries)");
   const chromeFn = connFn("connLostChrome");
   check(/connLostActionsEl\.classList\.toggle\("hidden", connLostAttempting\)/.test(chromeFn) &&
     /connBarWaiting\(connLostProgressEl\)/.test(chromeFn),
@@ -496,6 +527,75 @@ async function main() {
   "and the attempt itself is what raises it and takes it down again");
   check(!/connLostWhy\(\)/.test(CONN_LOST),
   "nothing quotes the flow's line back into the dialog's own line");
+
+  // ---- 13. the user's own exit: Cancel ends the outage ----
+  // The redial has no end of its own any more, so the labelled exit is what keeps
+  // the dialog from holding the window hostage. It is the picker's Disconnect in
+  // the dialog's dress, and the ORDER is the load-bearing part: the standing intent
+  // goes before anything else, because the teardown it causes is announced as
+  // "tunnel:ended" and the renderer reads that as a LOST session only while the
+  // intent is still there (js/backend-lifecycle.js).
+  check(/^function connLostCancel\(\) \{\n  if \(!connLost\) return;\n  localStorage\.removeItem\("clutch_ssh_connected"\);/m.test(CONN_LOST),
+  "Cancel is a no-op with no outage up, and its FIRST act is to drop the standing intent");
+  check(!/window\.clutchTunnel\.disconnect/.test(connFn("connLostCancel")),
+  "it does not tear the tunnel down under a redial that is still in flight: a session that lands is welcome, whichever door it used");
+  check(!/switchBackendResolved/.test(connFn("connLostCancel")),
+  "and it asks the host for nothing: an adopted URL would arrive as a new base and raise this very dialog straight back up");
+
+  const lifecycle = fs.readFileSync(path.join(ROOT, "ui", "js", "backend-lifecycle.js"), "utf8");
+  check(/if \(!localStorage\.getItem\("clutch_ssh_connected"\)\) return;/.test(lifecycle),
+  "which is exactly why the intent goes first: the renderer's own detector ignores a teardown with no intent behind it");
+
+  // and it holds, driven: a live outage, a redial already armed, then the Cancel
+  store.set("clutch_ssh_connected", "1");
+  store.set("clutch_degrade", "{}");
+  let switchCalls = 0;
+  global.switchBackendResolved = async () => {
+    switchCalls++;
+    return true;
+  };
+  global.connLostRecover = async () => false; // a host that stays down
+  const dropsBefore = drops;
+  const selectsBefore = selects;
+  const closesBefore = closes;
+  timers.length = 0;
+  connectionLost("lost the remote connection");
+  await flush();
+  check(global.connLost === true && timers.length === 1,
+  "an outage is up and a redial is already armed — that is the state the user gets out of");
+  check(drops === dropsBefore + 1,
+  "and the dead base was dropped on the way in, so nothing keeps posting into a port nobody serves");
+  connLostCancel();
+  check(global.connLost === false && global.connLostTimer === null,
+  "Cancel ends the outage and disarms the attempt behind it");
+  check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
+  "the intent and the degrade mode it implied are both dropped, in that order");
+  check(statuses[statuses.length - 1] === "idle",
+  "the badge is settled honestly: no session means nothing to show and nothing to stop");
+  check(global.busy === false,
+  "and the picker's own Connect is reachable again: openFsBrowser refuses while a run is active");
+  check(closes === closesBefore + 1 && connLostModal.classList.contains("hidden"),
+  "and the dialog comes down — this is the second and last place that closes it");
+  check(connLostStatusEl.textContent === "" && connLostWhyEl.textContent === "",
+  "with nothing left over to greet the next outage");
+  check(selects === selectsBefore + 2, "the picker claims no connection: there is none to claim");
+  check(drops === dropsBefore + 1, "and nothing is dropped twice: the Cancel has no base left to retire");
+  check(switchCalls === 0 && connLostRemoteIntent() === null,
+  "and nothing goes looking for a session: with the intent gone there is no host left to re-dial by name");
+  check(store.get("clutch_ssh_host") === "box.example",
+  "the Cancel ends this window's outage; it does not forget the host it was on");
+
+  // the window is now honestly session-less: nothing raises the dialog again on
+  // its own account, and the detector the teardown feeds decides by the intent
+  check(global.connLost === false, "no detector re-raises it for the outage the user just ended");
+
+  const cancelHandler = CONN_LOST.slice(
+    CONN_LOST.lastIndexOf('$("#conn-lost-cancel").addEventListener("click"')
+  );
+  check(/if \(connLostAttempting\) return;/.test(cancelHandler) && /connLostCancel\(\);/.test(cancelHandler),
+  "the button is wired, and an attempt in flight closes it: the chrome takes both doors off screen then, and this is what makes that structural");
+  check(/if \(!connLost\) return;/.test(connFn("connLostChrome")),
+  "and the chrome is not painted for a dialog that is already out of the user's way");
 
   summary("conn-lost-modal");
 }
