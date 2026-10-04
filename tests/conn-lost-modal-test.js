@@ -71,8 +71,14 @@ check(!/reconnects on its own|keeps this|The dialog closes with/.test(modalMarku
   "the paragraph explaining the reconnect is gone: the dialog is doing it, not describing it");
 check(/id="conn-lost-progress" class="conn-progress hidden">\s*<div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"/.test(modalMarkup),
   "the reconnect has the picker's own progress bar markup, classes and all: nothing new to style");
-check(/id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-cancel"[\s\S]{0,160}<button id="conn-lost-retry" class="primary"/.test(modalMarkup),
-  "and both doors are wrapped in the shared actions row, hidden until they are the user's");
+check(/id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-cancel"[\s\S]{0,240}<button id="conn-lost-retry" class="primary"/.test(modalMarkup),
+  "both doors sit in the shared actions row, which is up for the whole outage (only the modal starts hidden)");
+check(!/id="conn-lost-cancel"[^>]*hidden/.test(modalMarkup) &&
+  !/connLostCancelBtn\./.test(CONN_LOST),
+  "and Cancel is never taken off screen by anyone: it belongs to the outage, not to the gap between two attempts");
+check(/id="conn-lost-cancel" title="[^"]*welcome page[^"]*"/.test(modalMarkup) &&
+  /<button id="conn-lost-cancel"[^>]*>Cancel<\/button>/.test(modalMarkup),
+  "the label still says what the press does, and the title says where it lands: a window that starts fresh, as quitting and reopening would");
 
 const closeCalls = CONN_LOST.match(/closeModal\(connLostModal\)/g) || [];
 check(closeCalls.length === 2 &&
@@ -204,7 +210,17 @@ global.closeModal = (el) => {
 };
 global.connBusy = false;
 global.IS_ANDROID = false;
-global.window = {};
+// the window itself: the user's exit tears the main process's tunnel down and
+// reloads the page (connLostQuit), and both halves are counted here
+let reloads = 0;
+let disconnects = 0;
+global.window = {
+  location: { reload: () => { reloads++; } },
+  clutchTunnel: {
+    disconnect: async () => { disconnects++; },
+    status: async () => ({ active: false }),
+  },
+};
 global.switchBackendResolved = async () => global.switchAnswer;
 global.switchAnswer = false;
 let handleCalls = [];
@@ -225,6 +241,7 @@ global.connLostManualOnly = false;
 global.CONN_LOST_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000];
 global.CONN_LOST_NOTICE_MS = 8000;
 global.CONN_LOST_WAITING = "Waiting for you";
+global.CONN_LOST_EXIT_MS = 2000;
 // the bar helper lives in js/conn-flow.js (above this file in the page); the one
 // thing the dialog asks of it is "animate this bar until a stage arrives"
 let barWaits = 0;
@@ -237,7 +254,7 @@ for (const name of [
   "connLostTargetText", "connLostPaint", "connLostChrome", "connectionLost",
   "resolveConnectionLost", "connLostCancel", "connLostNeedsUser", "connLostArm",
   "connLostAttempt", "connLostRecover", "connLostAskHost", "connLostRemoteIntent",
-  "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer",
+  "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer", "connLostQuit",
 ]) {
   (0, eval)(fnBody(name));
 }
@@ -280,8 +297,9 @@ async function main() {
     "the dead base is dropped and the picker stops claiming a connection");
   check(focuses.includes("conn-lost-modal") && !focuses.includes("conn-lost-retry"),
     "the dialog takes the keys itself: the first attempt starts in this same task, and the button is not on screen for it");
-  check(connLostActionsEl.classList.contains("hidden") && !connLostProgressEl.classList.contains("hidden"),
-    "what it shows instead is the attempt's own progress bar");
+  check(!connLostActionsEl.classList.contains("hidden") &&
+    connLostRetryEl.classList.contains("hidden") && !connLostProgressEl.classList.contains("hidden"),
+    "what it shows instead is the attempt's own progress bar, with Reconnect off the row — and the labelled exit still on it");
   check(barWaits === 1, "animating from the first frame: an attempt with no stage yet is not a still bar");
   await flush();
   check(global.connLostTries === 1 && timers.length === 1,
@@ -346,7 +364,7 @@ async function main() {
   await flush();
   check(/attempt 3/.test(connLostStatusEl.textContent), "and the dialog counts the attempts");
   check(!connLostProgressEl.classList.contains("hidden") &&
-    connLostActionsEl.classList.contains("hidden"),
+    connLostRetryEl.classList.contains("hidden"),
     "an attempt in flight shows the bar and takes Reconnect away with it: there is no second reconnect to start");
   check(connLostWhyEl.textContent === "",
     "and the last attempt's verdict is not carried into this one");
@@ -354,7 +372,7 @@ async function main() {
   await inflight;
   await flush();
   check(connLostProgressEl.classList.contains("hidden") &&
-    !connLostActionsEl.classList.contains("hidden") &&
+    !connLostRetryEl.classList.contains("hidden") &&
     focuses[focuses.length - 1] === "conn-lost-retry",
   "the moment it is over the bar goes down, the button comes back, and the keys go with it");
   timers.length = 0;
@@ -493,7 +511,7 @@ async function main() {
   check(/Waiting for you/.test(connLostStatusEl.textContent) &&
     !/retrying/.test(connLostStatusEl.textContent),
   "an attempt that fails afterwards does not claim it is retrying");
-  check(!connLostActionsEl.classList.contains("hidden") &&
+  check(!connLostRetryEl.classList.contains("hidden") &&
     connLostProgressEl.classList.contains("hidden"),
   "and Reconnect is on screen for them: the dialog is not trying anything of its own");
   global.connLost = false;
@@ -520,9 +538,11 @@ async function main() {
     !/CONN_LOST_HOST_FALLBACK_AFTER|CONN_LOST_PROOF_MS/.test(CONN_LOST),
   "and its constants are the ones this runner pins (one door, no try-counted second host, no upper bound on the tries)");
   const chromeFn = connFn("connLostChrome");
-  check(/connLostActionsEl\.classList\.toggle\("hidden", connLostAttempting\)/.test(chromeFn) &&
+  check(/connLostRetryBtn\.classList\.toggle\("hidden", connLostAttempting\)/.test(chromeFn) &&
     /connBarWaiting\(connLostProgressEl\)/.test(chromeFn),
   "the dialog's chrome is drawn in one place, from the one fact that decides it: an attempt in flight");
+  check(/connLostActionsEl\.classList\.remove\("hidden"\)/.test(chromeFn),
+  "and the actions row is on screen for the whole outage, not just in the gaps: the exit is not something the user has to wait for");
   check((connFn("connLostAttempt").match(/connLostChrome\(\);/g) || []).length === 2,
   "and the attempt itself is what raises it and takes it down again");
   check(!/connLostWhy\(\)/.test(CONN_LOST),
@@ -530,17 +550,31 @@ async function main() {
 
   // ---- 13. the user's own exit: Cancel ends the outage ----
   // The redial has no end of its own any more, so the labelled exit is what keeps
-  // the dialog from holding the window hostage. It is the picker's Disconnect in
-  // the dialog's dress, and the ORDER is the load-bearing part: the standing intent
-  // goes before anything else, because the teardown it causes is announced as
-  // "tunnel:ended" and the renderer reads that as a LOST session only while the
-  // intent is still there (js/backend-lifecycle.js).
+  // the dialog from holding the window hostage. It is not "stop this attempt": it
+  // leaves the outage for good, and it lands where a fresh start lands — the
+  // welcome page, with no session, no dialog and nothing dialled. Three orders are
+  // load-bearing: the standing intent goes before anything else (the teardown it
+  // causes is announced as "tunnel:ended", and the renderer reads that as a LOST
+  // session only while the intent is still there, js/backend-lifecycle.js), the
+  // dialog goes down before the page does, and the teardown goes before the reload
+  // (a reload that left the main process's tunnel up would be handed the very
+  // session the user just left).
   check(/^function connLostCancel\(\) \{\n  if \(!connLost\) return;\n  localStorage\.removeItem\("clutch_ssh_connected"\);/m.test(CONN_LOST),
   "Cancel is a no-op with no outage up, and its FIRST act is to drop the standing intent");
-  check(!/window\.clutchTunnel\.disconnect/.test(connFn("connLostCancel")),
-  "it does not tear the tunnel down under a redial that is still in flight: a session that lands is welcome, whichever door it used");
   check(!/switchBackendResolved/.test(connFn("connLostCancel")),
   "and it asks the host for nothing: an adopted URL would arrive as a new base and raise this very dialog straight back up");
+
+  const quitFn = connFn("connLostQuit");
+  check(!/window\.clutchTunnel/.test(connFn("connLostCancel")) &&
+    /window\.clutchTunnel && window\.clutchTunnel\.disconnect/.test(quitFn),
+  "the teardown has exactly one owner, and it is the exit: Cancel ends the outage in place, connLostQuit is what leaves");
+  check(quitFn.indexOf("clutchTunnel.disconnect") < quitFn.indexOf("location.reload()"),
+  "and the exit tears the tunnel down BEFORE it reloads: a page that reloaded over a live tunnel would be handed its old session back (claimWindowBackend) and raise this dialog again within seconds");
+  check(/const CONN_LOST_EXIT_MS = 2000;/.test(CONN_LOST) &&
+    /Promise\.race\(/.test(quitFn) && /CONN_LOST_EXIT_MS/.test(quitFn),
+  "the wait for it is bounded: a teardown that never answers is not a reason the user cannot leave");
+  check(/closeModal\(connLostModal\);\n  connLostQuit\(\);/.test(connFn("connLostCancel")),
+  "and leaving is the LAST thing Cancel does: nothing of this dialog is still painting while the page goes");
 
   const lifecycle = fs.readFileSync(path.join(ROOT, "ui", "js", "backend-lifecycle.js"), "utf8");
   check(/if \(!localStorage\.getItem\("clutch_ssh_connected"\)\) return;/.test(lifecycle),
@@ -565,6 +599,8 @@ async function main() {
   "an outage is up and a redial is already armed — that is the state the user gets out of");
   check(drops === dropsBefore + 1,
   "and the dead base was dropped on the way in, so nothing keeps posting into a port nobody serves");
+  const reloadsBefore = reloads;
+  const disconnectsBefore = disconnects;
   connLostCancel();
   check(global.connLost === false && global.connLostTimer === null,
   "Cancel ends the outage and disarms the attempt behind it");
@@ -585,15 +621,70 @@ async function main() {
   check(store.get("clutch_ssh_host") === "box.example",
   "the Cancel ends this window's outage; it does not forget the host it was on");
 
+  // ...and then the window itself goes: tunnel down, page reloaded. That is what
+  // makes the exit equal to quitting and reopening — and the page that comes back
+  // must dial nothing, or it would boot straight back into an outage.
+  await flush();
+  check(disconnects === disconnectsBefore + 1 && reloads === reloadsBefore + 1,
+  "and the window leaves the outage the way a fresh start arrives: the tunnel is torn down and the page reloaded");
+  check(timers.filter((t) => t.ms === CONN_LOST_EXIT_MS).length === 1,
+  "the reload waited on nothing but its own bound: a host that never answers cannot keep the user in the dialog");
+
+  // the page that comes back: boot asks reconciledBackendUrl (js/boot.js), and with
+  // the tunnel down and the intent gone there is nothing for it to dial
+  (0, eval)(fnBody("reconciledBackendUrl"));
+  check(!store.has("clutch_ssh_connected"),
+  "the standing intent — the one thing that would re-dial the remote — is gone by the time the page reloads");
+  check((await reconciledBackendUrl()) === null,
+  "so the new page resolves no base and opens on the welcome page: a window with no session, which is what a fresh start looks like");
+  const hideCalls = APP.match(/(?<!function )hideWelcome\(\)/g) || [];
+  check(/id="welcome" class="welcome">/.test(HTML) && hideCalls.length === 2,
+  "and the welcome page is what that is: it ships visible in the markup, and the only two calls that hide it are the two ways a project gets opened (js/project.js)");
+  check(/function hideWelcome\(\) \{\n  document\.getElementById\("welcome"\)\.classList\.add\("hidden"\);/.test(APP),
+  "no boot path, no reload path and no restore hides it: the window the user lands on is the fresh one");
+
   // the window is now honestly session-less: nothing raises the dialog again on
   // its own account, and the detector the teardown feeds decides by the intent
   check(global.connLost === false, "no detector re-raises it for the outage the user just ended");
 
+  // ---- 13b. the exit is usable WHILE an attempt is in flight ----
+  // The press the old handler dropped on the floor ("an attempt is running, wait
+  // for the gap"). It is the same act either way, so the user must not have to
+  // wait out an attempt — let alone a 128s ladder — to leave; and the attempt that
+  // comes back to a window that has left has nothing to say.
   const cancelHandler = CONN_LOST.slice(
     CONN_LOST.lastIndexOf('$("#conn-lost-cancel").addEventListener("click"')
   );
-  check(/if \(connLostAttempting\) return;/.test(cancelHandler) && /connLostCancel\(\);/.test(cancelHandler),
-  "the button is wired, and an attempt in flight closes it: the chrome takes both doors off screen then, and this is what makes that structural");
+  check(!/connLostAttempting/.test(cancelHandler) && /connLostCancel\(\);/.test(cancelHandler),
+  "the Cancel button is wired to the exit and to nothing else: no 'an attempt is running' guard, in the handler or on the row");
+
+  store.set("clutch_ssh_connected", "1");
+  let releaseAttempt = null;
+  global.connLostRecover = () => new Promise((r) => { releaseAttempt = r; });
+  timers.length = 0;
+  const reloadsBefore2 = reloads;
+  const closesBefore2 = closes;
+  connectionLost("lost the remote connection");
+  await flush();
+  check(global.connLostAttempting === true && connLostRetryEl.classList.contains("hidden") &&
+    !connLostActionsEl.classList.contains("hidden"),
+  "an attempt in flight is exactly when Reconnect is off the row — and the exit is still on it");
+  check(!focuses.includes("conn-lost-cancel"),
+  "and nothing puts the keys on the way out: a stray tap must not quit the window, so nothing focuses it");
+  connLostCancel(); // the press the old handler swallowed
+  await flush();
+  check(global.connLost === false && closes === closesBefore2 + 1 && reloads === reloadsBefore2 + 1,
+  "the press lands mid-attempt: the outage ends and the page reloads, with no gap to wait for");
+  const timersAfterExit = timers.length;
+  releaseAttempt(false); // the attempt's own door answers at last: too late
+  await flush();
+  check(global.connLostAttempting === false && timers.length === timersAfterExit,
+  "and the attempt that comes back late arms no redial behind the exit");
+  check(connLostStatusEl.textContent === "" && connLostModal.classList.contains("hidden"),
+  "nor writes its verdict into a dialog that is gone: the user left, and this attempt has nothing to say");
+  check(reloads === reloadsBefore2 + 1 && !store.has("clutch_ssh_connected"),
+  "one exit, one reload — and the new page still finds no intent to re-dial");
+
   check(/if \(!connLost\) return;/.test(connFn("connLostChrome")),
   "and the chrome is not painted for a dialog that is already out of the user's way");
 

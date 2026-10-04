@@ -132,8 +132,8 @@
        dialog still refuses. There is no silent way out. Modeled on #perm-modal
        (which is non-dismissable for the same reason: it is the only way to answer
        a question the agent is blocked on). -->
-  <!-- tabindex: the dialog holds the keys even while its buttons are off screen
-       (an attempt in flight has the progress bar and nothing to press) -->
+  <!-- tabindex: the dialog holds the keys even while the Reconnect button is off
+       screen (an attempt in flight has the progress bar and no second door) -->
   <div id="conn-lost-modal" class="modal hidden" tabindex="-1">
     <div class="modal-box">
       <h3>Connection lost</h3>
@@ -148,13 +148,13 @@
       <div id="conn-lost-progress" class="conn-progress hidden">
         <div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"></div></div>
       </div>
-      <!-- the user's own doors, and they are on screen ONLY while no attempt is
-           in flight: a second press could only start a second reconnect, and the
-           Cancel would be offered to abort the user's own redial at the one
-           moment there is nothing of theirs to abort (both rows are rendered from
-           that one fact — connLostChrome in js/conn-lost.js) -->
+      <!-- the user's own doors. Cancel is on screen for the whole outage, attempt
+           in flight or not: the redial has no end of its own, so the labelled way
+           out cannot be something the user has to wait for a gap to press. Only
+           Reconnect is held back while an attempt runs (a second reconnect is not
+           a thing) — both drawn from that one fact by connLostChrome, js/conn-lost.js -->
       <div id="conn-lost-actions" class="modal-actions hidden">
-        <button id="conn-lost-cancel" title="stop reconnecting — the window stays with no session">Cancel</button>
+        <button id="conn-lost-cancel" title="leave this outage for good — the window restarts on the welcome page (what quitting and reopening would do)">Cancel</button>
         <button id="conn-lost-retry" class="primary">Reconnect now</button>
       </div>
     </div>
