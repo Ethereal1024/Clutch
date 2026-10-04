@@ -246,6 +246,77 @@ function connLostCancel() {
 // the point: "the host did not answer" must not be a reason the user cannot leave.
 const CONN_LOST_EXIT_MS = 2000;
 
+// ---- the note the exit leaves for the page that follows it ----
+//
+// The reload is what gets a clean page, and it is also the ONE thing that can hand
+// the new page the very session the user just left: its boot asks the host for a
+// session (app.js resolveApiBase, and js/backend-lifecycle.js reconciledBackendUrl
+// when the tunnel still answers), and the host is what hands sessions out. That ask
+// is answered by claimWindowBackend from what the host still holds for this window —
+// so a teardown that has not finished yet (and the bound above exists precisely for
+// the case where it does not finish) is still holding the old claim when the new
+// page asks for one.
+//
+// So the exit also leaves a mark, and the page that follows reads it BEFORE it asks
+// anything (connLostExitPending): it finishes the teardown the exit began (idempotent
+// — the exit's own call either landed or is still queued) and claims nothing, which
+// is what the exit promised: a boot with no session, no dialog, nothing dialled.
+// sessionStorage, not localStorage: the mark belongs to this page life (a real quit
+// takes it with it), and the user's own Connect clears it (js/conn-flow.js) — so the
+// only boot it can ever hold back is one nobody asked for.
+const CONN_LOST_EXIT_KEY = "clutch_conn_lost_exit";
+// the successor's own bound on that teardown: shorter than the exit's, because this
+// one is not holding a user's press down — and it must never keep a boot open.
+const CONN_LOST_EXIT_BOOT_MS = 1500;
+
+function connLostExitMark() {
+  try {
+    sessionStorage.setItem(CONN_LOST_EXIT_KEY, "1");
+  } catch (e) {
+    /* no storage (a harness, or a browser with it switched off): the teardown is
+       still the exit — only the successor's guard is missing */
+  }
+}
+
+// the user's own Connect: they asked for a session, so the exit's note is spent
+// (js/conn-flow.js, the two doors every connect goes through)
+function connLostExitClear() {
+  try {
+    sessionStorage.removeItem(CONN_LOST_EXIT_KEY);
+  } catch (e) {
+    /* nothing to clear without storage */
+  }
+}
+
+// read by the boot path before it asks the host for anything (app.js,
+// js/backend-lifecycle.js)
+function connLostExitPending() {
+  try {
+    return sessionStorage.getItem(CONN_LOST_EXIT_KEY) === "1";
+  } catch (e) {
+    return false;
+  }
+}
+
+// the successor's half of the exit: once per page life, bounded like the exit's own
+// wait, and never allowed to throw into the boot path. The call is idempotent by
+// nature (the host releases a claim it no longer holds and stopTunnel nulls what it
+// closes), so asking twice is the same as asking once.
+let connLostExitToreDown = false;
+function connLostExitBootTeardown() {
+  if (connLostExitToreDown) return Promise.resolve();
+  connLostExitToreDown = true;
+  try {
+    if (!window.clutchTunnel || !window.clutchTunnel.disconnect) return Promise.resolve();
+    return Promise.race([
+      Promise.resolve(window.clutchTunnel.disconnect()).catch(() => {}),
+      new Promise((r) => setTimeout(r, CONN_LOST_EXIT_BOOT_MS)),
+    ]);
+  } catch (e) {
+    return Promise.resolve();
+  }
+}
+
 // Exit the window — the second half of Cancel, and the one that makes it equal to
 // quitting and reopening. The reload is what gets a clean page (no session, no
 // dialog, no redial: the welcome page is what a page with nothing claimed boots
@@ -263,6 +334,7 @@ const CONN_LOST_EXIT_MS = 2000;
 // desktop). Two seconds is far longer than a teardown takes, and the alternative —
 // waiting without a bound — is exactly the dead end this exit exists to end.
 async function connLostQuit() {
+  connLostExitMark(); // FIRST: the reload must never outrun the note it leaves behind
   let bye = Promise.resolve();
   try {
     if (window.clutchTunnel && window.clutchTunnel.disconnect) {
@@ -279,6 +351,13 @@ function connLostArm() {
   if (connLostTimer) clearTimeout(connLostTimer);
   if (!connLost) return;
   if (connLostManualOnly) return; // the user said no: the button is the way back
+  // A window nobody is looking at has nothing to reconnect FOR yet: the stream
+  // itself is suspended while the page is hidden (js/sse-stream.js), and a try from
+  // behind it only wakes the phone's radio for an answer nobody can see. The arm
+  // waits; the listener below fires the attempt the moment the user looks, so the
+  // redial still needs nobody touching anything — it just stops paying for a page
+  // that is not there.
+  if (typeof document !== "undefined" && document.hidden) return;
   // the first attempt is immediate, so the gap that follows it is the FIRST step
   const idx = Math.max(0, Math.min(connLostTries - 1, CONN_LOST_BACKOFF_MS.length - 1));
   connLostTimer = setTimeout(() => {
@@ -406,6 +485,20 @@ function connLostAwaitAnswer(ms = CONN_LOST_NOTICE_MS) {
       setTimeout(tick, 250);
     };
     tick();
+  });
+}
+
+// The other half of the hidden-page rule in connLostArm: an arm that was withheld
+// because nobody was looking fires the moment the user looks — so the redial still
+// needs nobody touching anything (no press, no click), it just stops paying for a
+// page that is not there. An attempt already in flight, or a wait already armed for
+// this outage, is left alone: this listener is the withheld arm's door, not a second
+// one that could put two attempts on the wire.
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("visibilitychange", () => {
+    if (typeof document !== "undefined" && document.hidden) return;
+    if (!connLost || connLostAttempting || connLostTimer) return;
+    connLostAttempt();
   });
 }
 

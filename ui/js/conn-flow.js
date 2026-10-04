@@ -235,6 +235,10 @@ function setFsConnectError(msg, statusEl, door) {
 }
 
 async function handleSshConnect(host, user, port, statusEl) {
+  // same door as connConnect, reached from the picker's New-connection popup, the
+  // bar's Retry and the outage redial (js/conn-lost.js): every one of them is an
+  // attempt to BE on a host, so the exit's note is spent before it is made
+  connLostExitClear();
   if (!window.clutchTunnel) {
     statusEl.textContent = "SSH requires the desktop app (Electron).";
     return;
@@ -315,6 +319,11 @@ async function handleSshConnect(host, user, port, statusEl) {
 // press away (connTarget() in js/conn-store.js). connOnValue is the backend this
 // window is already on, so a choice that does not move the window is not a dial.
 async function connConnect(v) {
+  // The user's own Connect: a session is what they just asked for, so the exit's
+  // note (js/conn-lost.js) is spent — this is the door that pays it. Cleared before
+  // the guards below on purpose: the note is about what the NEXT boot may claim, and
+  // no press of this button is a boot nobody asked for.
+  connLostExitClear();
   if (!v || v === connOnValue) return;
   if (v === "local") {
     if (localStorage.getItem("clutch_ssh_connected")) {

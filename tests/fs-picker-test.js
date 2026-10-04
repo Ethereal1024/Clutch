@@ -190,6 +190,10 @@ async function main() {
   };
   global.resetBackendLocal = async () => done.push("resetBackendLocal");
   global.refreshPicker = () => done.push("refreshPicker");
+  // the door also spends the exit's note (js/conn-lost.js connLostExitClear) before
+  // it validates: that note belongs to its own runner, and this one only needs the
+  // call to exist and to stay out of the sequence it is counting
+  global.connLostExitClear = () => {};
   (0, eval)(fnBody("connConnect"));
 
   // the REAL wiring from conn-flow.js: the list's change listener and the folded
@@ -668,7 +672,7 @@ async function main() {
     "the list's change listener hands the choice straight to the door");
   check(/\$\("#conn-connect"\)\.addEventListener\("click", \(\) => connConnect\(connTarget\(\)\)\);/.test(CONN_FLOW),
     "and the folded bar's button presses the same door with the target it can dial");
-  check(/async function connConnect\(v\) \{\s*if \(!v \|\| v === connOnValue\) return;/.test(CONN_FLOW),
+  check(/async function connConnect\(v\) \{[\s\S]{0,400}?if \(!v \|\| v === connOnValue\) return;/.test(CONN_FLOW),
     "which validates: nowhere to dial, or dialling where the window already is, is not a dial");
   check(!/connBusy\s*=/.test(CONN_FLOW),
     "the in-flight flag has one owner (js/conn-store.js); the flow only asks it to change");

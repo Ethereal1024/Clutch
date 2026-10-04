@@ -22,6 +22,18 @@ let DEFAULT_BASE = SUPERVISOR_BASE; // this machine's session base, once resolve
 let API_BASE = null; // resolved in resolveApiBase() before the app starts
 
 async function resolveApiBase() {
+  // The window before this one left (conn-lost Cancel, js/conn-lost.js): it tore its
+  // tunnel down and reloaded, and this is the ask that reload could still win by a
+  // nose — baseUrl() is answered from what the host still holds FOR THIS WINDOW, so a
+  // claim that landed before the teardown finished hands back the very session the
+  // user just left. The note that exit left is read HERE, before anything is asked:
+  // finish its teardown (bounded, idempotent) and claim nothing. The note is spent by
+  // the user's own Connect (js/conn-flow.js) — a boot nobody asked for is the only
+  // one it can ever hold back, which is exactly the boot this is.
+  if (connLostExitPending()) {
+    await connLostExitBootTeardown();
+    return null; // no session claimed: js/boot.js sees null and dials nothing
+  }
   if (window.clutchApi && window.clutchApi.baseUrl) {
     // null/8890 = session not claimed yet (supervisor mid-spawn); retry
     for (let attempt = 0; attempt < 3; attempt++) {

@@ -125,6 +125,12 @@ async function resetBackendLocal() {
 // authoritative, a dead-tunnel leftover falls back to the local backend
 async function reconciledBackendUrl() {
   if (!window.clutchTunnel) return null;
+  // The second claim entry, and the one that fires when the tunnel still answers
+  // (s.active below asks the host for THIS window's session). Same note, same read-
+  // before-ask as app.js: a boot that follows the exit claims nothing. No teardown is
+  // started here — resolveApiBase runs first in js/boot.js and owns that wait; this
+  // guard only refuses the claim (js/fs-browser.js reaches here without a boot too).
+  if (connLostExitPending()) return null;
   const s = await window.clutchTunnel.status();
   const override = localStorage.getItem("clutch_api_url");
   const flag = localStorage.getItem("clutch_ssh_connected");

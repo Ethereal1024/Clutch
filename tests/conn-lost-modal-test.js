@@ -71,7 +71,16 @@ check(!/reconnects on its own|keeps this|The dialog closes with/.test(modalMarku
   "the paragraph explaining the reconnect is gone: the dialog is doing it, not describing it");
 check(/id="conn-lost-progress" class="conn-progress hidden">\s*<div class="conn-progress-track"><div id="conn-lost-progress-fill" class="conn-progress-fill"/.test(modalMarkup),
   "the reconnect has the picker's own progress bar markup, classes and all: nothing new to style");
-check(/id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-cancel"[\s\S]{0,240}<button id="conn-lost-retry" class="primary"/.test(modalMarkup),
+// Read from the row's own opening tag to the end of the dialog markup — which
+// stops right after the last door — so the check says the invariant it means
+// ("both doors are the actions row's children, Cancel on the left") instead of a
+// character budget the title's prose would have to be trimmed to fit. A third
+// control squeezed in between the two fails here, as it should.
+const actionsRow = (() => {
+  const at = modalMarkup.indexOf('<div id="conn-lost-actions" class="modal-actions hidden">');
+  return at < 0 ? "" : modalMarkup.slice(at);
+})();
+check(/^<div id="conn-lost-actions" class="modal-actions hidden">\s*<button id="conn-lost-cancel"[^>]*>Cancel<\/button>\s*<button id="conn-lost-retry" class="primary"/.test(actionsRow),
   "both doors sit in the shared actions row, which is up for the whole outage (only the modal starts hidden)");
 check(!/id="conn-lost-cancel"[^>]*hidden/.test(modalMarkup) &&
   !/connLostCancelBtn\./.test(CONN_LOST),
@@ -131,6 +140,16 @@ global.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, String(v)),
   removeItem: (k) => store.delete(k),
+};
+
+// the exit's note (connLostExit*): sessionStorage, and that is the point — it
+// belongs to THIS page life, so a reload keeps it and a real quit takes it away,
+// which is exactly the window in which the successor must not claim a session
+const session = new Map();
+global.sessionStorage = {
+  getItem: (k) => (session.has(k) ? session.get(k) : null),
+  setItem: (k, v) => session.set(k, String(v)),
+  removeItem: (k) => session.delete(k),
 };
 
 let clock = 1000000;
@@ -242,6 +261,10 @@ global.CONN_LOST_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 1280
 global.CONN_LOST_NOTICE_MS = 8000;
 global.CONN_LOST_WAITING = "Waiting for you";
 global.CONN_LOST_EXIT_MS = 2000;
+// the exit's note and the successor's own bound on the teardown it finishes
+global.CONN_LOST_EXIT_KEY = "clutch_conn_lost_exit";
+global.CONN_LOST_EXIT_BOOT_MS = 1500;
+global.connLostExitToreDown = false;
 // the bar helper lives in js/conn-flow.js (above this file in the page); the one
 // thing the dialog asks of it is "animate this bar until a stage arrives"
 let barWaits = 0;
@@ -255,6 +278,8 @@ for (const name of [
   "resolveConnectionLost", "connLostCancel", "connLostNeedsUser", "connLostArm",
   "connLostAttempt", "connLostRecover", "connLostAskHost", "connLostRemoteIntent",
   "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer", "connLostQuit",
+  "connLostExitMark", "connLostExitClear", "connLostExitPending",
+  "connLostExitBootTeardown",
 ]) {
   (0, eval)(fnBody(name));
 }
@@ -637,6 +662,11 @@ async function main() {
   "the standing intent — the one thing that would re-dial the remote — is gone by the time the page reloads");
   check((await reconciledBackendUrl()) === null,
   "so the new page resolves no base and opens on the welcome page: a window with no session, which is what a fresh start looks like");
+  check(session.get(CONN_LOST_EXIT_KEY) === "1",
+  "and the exit really did leave its note behind: the reload cannot outrun it (it is written before anything is torn down)");
+  session.clear(); // the intent alone, with no note from any exit behind it
+  check((await reconciledBackendUrl()) === null,
+  "the note is not what makes that null: with the intent gone the stale-remote branch has nothing to dial either");
   const hideCalls = APP.match(/(?<!function )hideWelcome\(\)/g) || [];
   check(/id="welcome" class="welcome">/.test(HTML) && hideCalls.length === 2,
   "and the welcome page is what that is: it ships visible in the markup, and the only two calls that hide it are the two ways a project gets opened (js/project.js)");
@@ -687,6 +717,129 @@ async function main() {
 
   check(/if \(!connLost\) return;/.test(connFn("connLostChrome")),
   "and the chrome is not painted for a dialog that is already out of the user's way");
+
+  // ---- 13c. the note the exit leaves for the page behind it ----
+  // The reload IS the exit, and it is also the one thing that can hand the new page
+  // the very session the user just left: the host answers "what is this window's
+  // session?" from what it still holds for it (claimWindowBackend), so a boot that
+  // asked before the teardown finished takes the old session back and this dialog is
+  // up again within seconds — the dead end, one reload later. So the exit writes a
+  // note BEFORE it tears anything down, and the page that comes back reads it before
+  // it asks anything at all.
+  const quitFn2 = connFn("connLostQuit");
+  check(/^async function connLostQuit\(\) \{\n  connLostExitMark\(\);/m.test(CONN_LOST) &&
+    quitFn2.indexOf("connLostExitMark()") < quitFn2.indexOf("clutchTunnel.disconnect"),
+  "the exit writes its note FIRST: the reload must never outrun the word it leaves behind");
+  const markFn = connFn("connLostExitMark");
+  check(/sessionStorage\.setItem\(CONN_LOST_EXIT_KEY, "1"\)/.test(markFn) &&
+    /try \{/.test(markFn) && /catch \(e\) \{/.test(markFn),
+  "the note is one key of this page life's own storage — gone with a real quit — and a browser that refuses it costs only the guard");
+  check(/const CONN_LOST_EXIT_KEY = "clutch_conn_lost_exit";/.test(CONN_LOST),
+  "and the key is the one this runner pins");
+
+  // Both doors a boot can take a session through, and both read the note BEFORE they
+  // ask: baseUrl() is the ask (it is answered from what the host holds for this
+  // window), so a read after it would already be too late.
+  const resolveFn = fnBody("resolveApiBase");
+  check(/connLostExitPending\(\)\) \{\n    await connLostExitBootTeardown\(\);\n    return null;/.test(resolveFn),
+  "the boot's own claim (app.js) reads the note, finishes the teardown the exit began, and claims nothing");
+  check(resolveFn.indexOf("connLostExitPending()") < resolveFn.indexOf("window.clutchApi.baseUrl()"),
+  "and it reads before it asks — the ask is what hands the old session back");
+  const reconciledFn = fnBody("reconciledBackendUrl");
+  check(/connLostExitPending\(\)\) return null;/.test(reconciledFn) &&
+    reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("window.clutchApi.baseUrl()"),
+  "the second claim entry (a tunnel that still answers) refuses for the same note, also before it asks");
+  check(/if \(!API_BASE\) return;/.test(fnBody("connectSSE")),
+  "and the stream the boot opens next refuses to open on nothing: no null/api/events ever leaves the window");
+  const connConnectFn = fnBody("connConnect");
+  check(connConnectFn.indexOf("connLostExitClear()") > -1 &&
+    connConnectFn.indexOf("connLostExitClear()") < connConnectFn.indexOf("if (!v || v === connOnValue) return;"),
+  "the note is spent by the user's own Connect, before any guard: no press of that button is a boot nobody asked for");
+  const sshFn = fnBody("handleSshConnect");
+  check(sshFn.indexOf("connLostExitClear()") > -1 &&
+    sshFn.indexOf("connLostExitClear()") < sshFn.indexOf("window.clutchTunnel"),
+  "and the SSH door (the popup, the bar's Retry, the outage redial — js/conn-flow.js) spends it before its first guard");
+
+  // driven: the note itself, and the boot that reads it
+  session.clear();
+  check(connLostExitPending() === false,
+  "with no exit behind it nothing is held back: an ordinary boot claims its session as always");
+  connLostExitMark();
+  check(connLostExitPending() === true && session.get(CONN_LOST_EXIT_KEY) === "1",
+  "the exit's note is one thing to write and one thing to read");
+  connLostExitClear();
+  check(connLostExitPending() === false && !session.has(CONN_LOST_EXIT_KEY),
+  "and the user's own Connect spends it");
+
+  // the page that follows the exit asks the host for NOTHING — and finishes the half
+  // of the teardown a reload can beat
+  (0, eval)(fnBody("resolveApiBase"));
+  (0, eval)(fnBody("reconciledBackendUrl"));
+  let asks = 0;
+  global.window.clutchApi = { baseUrl: async () => { asks++; return "http://127.0.0.1:40555"; } };
+  global.window.clutchTunnel.status = async () => ({ active: true }); // it still answers: the live-tunnel entry is reached
+  global.connLostExitToreDown = false; // a fresh page life
+  const disconnectsBefore3 = disconnects;
+  connLostExitMark();
+  check((await resolveApiBase()) === null && asks === 0,
+  "a boot with the note behind it claims nothing: the ask that would hand back the old session is never made");
+  check((await reconciledBackendUrl()) === null && asks === 0,
+  "the second entry too — the tunnel still answers, and it still claims nothing");
+  check(disconnects === disconnectsBefore3 + 1,
+  "and the successor finishes the teardown the exit began: the claim the reload beat is released, once");
+  await connLostExitBootTeardown();
+  check(disconnects === disconnectsBefore3 + 1,
+  "asking twice is asking once: the host releases a claim it no longer holds");
+  check(/Promise\.race\(/.test(connFn("connLostExitBootTeardown")) &&
+    /CONN_LOST_EXIT_BOOT_MS/.test(connFn("connLostExitBootTeardown")) &&
+    /const CONN_LOST_EXIT_BOOT_MS = 1500;/.test(CONN_LOST) &&
+    timers.some((t) => t.ms === CONN_LOST_EXIT_BOOT_MS),
+  "and the successor's wait is bounded too: a claim this window refuses is never a reason a boot cannot finish");
+  global.window.clutchTunnel.status = async () => ({ active: false });
+
+  // ...and the user's own Connect is what un-holds the next boot
+  session.clear();
+  connLostExitMark();
+  store.delete("clutch_ssh_connected"); // the local door: nothing to tear down first
+  (0, eval)(fnBody("connConnect"));
+  global.connOnValue = null;
+  let pickerPaints = 0;
+  global.refreshPicker = () => { pickerPaints++; };
+  const switchCallsBefore = switchCalls;
+  await connConnect("local");
+  check(connLostExitPending() === false && !session.has(CONN_LOST_EXIT_KEY),
+  "the user's own Connect is what spends the note: the next boot claims a session as it always did");
+  check(switchCalls === switchCallsBefore + 1 && pickerPaints === 1,
+  "and that press really is a claim on the host (js/backend-lifecycle.js), not just a note cleared");
+
+  // ---- 13d. a page nobody is looking at does not pay for the redial ----
+  // The arm waits while the page is hidden (the stream itself is suspended then,
+  // js/sse-stream.js): a try from behind it only wakes the phone's radio for an answer
+  // nobody can see. The redial still needs nobody touching anything — the listener
+  // fires the withheld arm the moment the user looks.
+  global.document = { hidden: true };
+  global.connLost = true;
+  global.connLostTries = 0;
+  global.connLostManualOnly = false;
+  timers.length = 0;
+  connLostArm();
+  check(timers.length === 0,
+  "an arm that lands while the page is hidden arms nothing: the radio is not woken for an answer nobody can see");
+  global.document = { hidden: false };
+  connLostArm();
+  check(timers.length === 1 && timers[0].ms === 1000,
+  "the moment the page is visible the redial is armed exactly as before, with nobody touching anything");
+  timers.length = 0;
+  global.connLostTimer = null;
+  global.connLost = false;
+  delete global.document;
+  check(/^  if \(typeof document !== "undefined" && document\.hidden\) return;$/m.test(connFn("connLostArm")),
+  "the rule lives in the arm itself, and it is written for the harnesses too: no document, no rule");
+  check(/^if \(typeof document !== "undefined" && document\.addEventListener\) \{$/m.test(CONN_LOST),
+  "the listener is registered only where a document can take one: a runner with no document is not a special case to remember");
+  const visListener = CONN_LOST.slice(CONN_LOST.lastIndexOf('document.addEventListener("visibilitychange"'));
+  check(/if \(typeof document !== "undefined" && document\.hidden\) return;\n    if \(!connLost \|\| connLostAttempting \|\| connLostTimer\) return;\n    connLostAttempt\(\);/.test(visListener),
+  "and it is guarded on all three facts — hidden, already trying, already armed: a door for the withheld arm, never a second attempt on the wire");
 
   summary("conn-lost-modal");
 }
