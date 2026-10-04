@@ -64,21 +64,27 @@ def _drain(q: queue.Queue) -> None:
 
 
 class Broadcaster:
-    """Fan events out to subscribers. Each subscriber owns a bounded queue."""
+    """Fan events out to subscribers. Each subscriber owns a bounded queue.
+
+    A subscriber also names the project it watches (None = every project): the
+    live fan-out filters another window's run out of its stream, so a stream
+    watching a different project is no audience for this one's permission
+    prompt — count() can say so (see PermissionGate.is_attached).
+    """
 
     def __init__(self) -> None:
-        self._subs: set[queue.Queue] = set()
+        self._subs: dict[queue.Queue, str | None] = {}
         self._lock = threading.Lock()
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, project: str | None = None) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=SUBSCRIBER_QUEUE_MAX)
         with self._lock:
-            self._subs.add(q)
+            self._subs[q] = project
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
-            self._subs.discard(q)
+            self._subs.pop(q, None)
 
     def publish(self, event: Any) -> None:
         with self._lock:
@@ -95,10 +101,16 @@ class Broadcaster:
                 except queue.Full:  # another publisher refilled it: it is marked
                     pass
 
-    def count(self) -> int:
-        """Number of live SSE subscribers (is anyone watching the UI?)."""
+    def count(self, project: str | None = None) -> int:
+        """Number of live SSE subscribers (is anyone watching the UI?).
+
+        With a project: only the subscribers that would actually SEE that
+        project's events — its own watchers plus the unfiltered ones — because
+        a window on another project cannot answer this project's prompt."""
         with self._lock:
-            return len(self._subs)
+            if project is None:
+                return len(self._subs)
+            return sum(1 for watched in self._subs.values() if not watched or watched == project)
 
 
 class RunState:
@@ -259,6 +271,11 @@ class BaseServer(ABC):
             evaluator=PermissionEvaluator(),
             on_ask=on_ask,
             auto_allow=cfg.non_interactive,
+            # a prompt is only answerable by a UI watching THIS project: when
+            # that stream is gone for good (a wrongly-closed connection), the
+            # gate denies instead of holding the run — and with it the project's
+            # write lock — forever
+            is_attached=lambda: self.broadcaster.count(str(project.path)) > 0,
         )
         return Agent(
             llm=llm,

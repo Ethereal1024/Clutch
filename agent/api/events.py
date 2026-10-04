@@ -112,7 +112,9 @@ class EventsMixin:
         self.send_header("Connection", "keep-alive")
         self.end_headers()
         host = self._server_module()  # the pacing constant and the ping frame live there
-        q = self._broadcaster.subscribe()
+        # the subscription names the project this stream watches: it is the
+        # audience for that project's prompts (and no other's)
+        q = self._broadcaster.subscribe(project_q)
         try:
             # the status frame is a RESET for a window that has nothing in
             # flight (a project switch, an interrupted run) — and it is also

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -183,6 +184,16 @@ def _parse_args(args_repr: str) -> dict:
         return {}
 
 
+# How often a waiting ask re-checks that a UI is still attached, and how long
+# the UI must be GONE before the ask is given up on. The grace is the point: an
+# EventSource retry or a tunnel redial drops the SSE subscriber for a few
+# seconds while the renderer's dialog is still on screen — a gap must not deny a
+# prompt the user is about to answer. A connection that is gone for good (the
+# wrongly-closed one) crosses it in ~half a minute and the ask stops wedging.
+ATTACH_POLL_S = 1.0
+DETACH_GRACE_S = 30.0
+
+
 class PermissionGate:
     """Bridge between the agent thread and the UI.
 
@@ -191,9 +202,10 @@ class PermissionGate:
     UI responds via `resolve(request_id, allow)` — it waits as long as the user
     needs (no timeout, so the model never sees a spurious "permission request
     timed out"). The only ways out of the wait: the user allows/denies, the
-    server's Stop resolves every pending ask as denied, or `on_ask` reports that
-    no UI is attached (returns False), in which case the action is denied rather
-    than left hanging.
+    server's Stop resolves every pending ask as denied, `on_ask` reports that
+    no UI is attached (returns False), or `is_attached` reports that the UI
+    this prompt was published to is gone and stayed gone — in both UI-less
+    cases the action is denied rather than left hanging.
     """
 
     def __init__(
@@ -201,12 +213,20 @@ class PermissionGate:
         evaluator: PermissionEvaluator,
         on_ask: Callable[[str, str, str, str], bool | None] | None = None,
         auto_allow: bool = False,
+        is_attached: Callable[[], bool] | None = None,
+        detach_grace_s: float = DETACH_GRACE_S,
+        attach_poll_s: float = ATTACH_POLL_S,
     ) -> None:
         self.evaluator = evaluator
         # (request_id, tool, args_repr, reason) -> None to block, False when no
         # UI is attached to confirm (the gate then denies instead of hanging)
         self.on_ask = on_ask
         self.auto_allow = auto_allow
+        # is a UI that can answer still there? asked again while a prompt waits
+        # (None = nothing to ask, the wait is the plain blocking one)
+        self.is_attached = is_attached
+        self.detach_grace_s = detach_grace_s
+        self.attach_poll_s = attach_poll_s
         self._pending: dict[str, threading.Event] = {}
         self._decisions: dict[str, bool] = {}
         self._lock = threading.Lock()
@@ -252,7 +272,18 @@ class PermissionGate:
                 self._pending.pop(request_id, None)
                 self._decisions.pop(request_id, None)
             raise PermissionRequired(request_id, tool, args_repr, "no user interface connected to confirm this action")
-        ev.wait()  # no timeout: the prompt stays up until the user confirms
+        if not self._await_decision(ev):
+            # the UI this prompt was published to is gone and never came back:
+            # nobody is left who CAN confirm, so answer exactly like on_ask's
+            # "no UI attached" instead of wedging the run — an unanswered ask
+            # keeps busy set forever, which keeps the supervisor from reaping
+            # the session and the .clc write-locked with no window anywhere
+            with self._lock:
+                self._pending.pop(request_id, None)
+                self._decisions.pop(request_id, None)
+            raise PermissionRequired(
+                request_id, tool, args_repr, "no user interface connected to confirm this action"
+            )
         allowed = self._decisions.get(request_id, False)
         with self._lock:
             self._pending.pop(request_id, None)
@@ -260,6 +291,29 @@ class PermissionGate:
         if not allowed:
             raise PermissionRequired(request_id, tool, args_repr, "denied by user")
         workspace.allow(escapes)
+
+    def _await_decision(self, ev: threading.Event) -> bool:
+        """Wait for the user's answer; False when the audience is gone for good.
+
+        No timeout while a UI is attached: the prompt stays up until the user
+        confirms, however long that takes (a frozen phone in the background is
+        still attached — its socket keeps the stream alive). What must NOT be
+        waited out is a UI that is gone: a wrongly-closed connection leaves a
+        prompt nobody can ever answer. So attachment is re-checked as the wait
+        goes on, and only a gap longer than `detach_grace_s` counts as gone —
+        see DETACH_GRACE_S for why a short gap is not a verdict.
+        """
+        gone_since: float | None = None
+        while not ev.wait(self.attach_poll_s):
+            if self.is_attached():
+                gone_since = None
+                continue
+            now = time.monotonic()
+            if gone_since is None:
+                gone_since = now
+            elif now - gone_since >= self.detach_grace_s:
+                return False
+        return True
 
     def resolve(self, request_id: str, allow: bool) -> bool:
         """Called by the server when the UI responds. Returns True if found."""

@@ -66,8 +66,8 @@ class RunMixin:
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
             # publish the permission request to the UI; with no SSE subscriber
-            # the gate denies instead of blocking forever
-            if self._broadcaster.count() == 0:
+            # watching this project the gate denies instead of blocking forever
+            if self._broadcaster.count(str(project.path)) == 0:
                 return False
             self._broadcaster.publish(
                 PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason)
