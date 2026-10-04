@@ -36,7 +36,18 @@ from dataclasses import dataclass
 from agent.procmgr import kill
 from agent.procmgr.stdio import log
 
-STALE_S = 10.0  # no heartbeat for this long -> reap (the UI beats every 8s)
+# No heartbeat for this long -> reap the session. The window has to cover the
+# case the field reports kept naming: a phone (or a laptop lid) that went away
+# with a run still in flight. At 10s the host reaped the session before the
+# client could come back, so the window that returned had nothing to re-bind to
+# and the run was simply gone. 300s is the room a backgrounded app needs, and it
+# is NOT the same question as "is the ssh hop alive" (ui/tunnel-connect.js declares
+# a hop dead in ~45s): a session is a process on this host that outlives every hop
+# to it, and a hop that died is a claim to re-bind (ui/host-core.js
+# rebindTunnelBackend), not a reason to reap what nothing asked to stop.
+# ui/supervisor-client.js HEARTBEAT_STALE_MS mirrors this value: a client that
+# gave up sooner would be declaring the session gone while the host still holds it.
+STALE_S = 300.0
 REAP_INTERVAL_S = 2.0
 IDLE_TIMEOUT_S = 8.0  # no children for this long -> self-exit
 

@@ -7,18 +7,22 @@
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 // session/start boots a onefile child: cover the supervisor's start timeout
 const SESSION_START_TIMEOUT_MS = 35_000;
-const HEARTBEAT_INTERVAL_MS = 8000; // < the supervisor's stale window (10s)
+const HEARTBEAT_INTERVAL_MS = 8000; // << the supervisor's stale window (300s)
 // A beat that fails is not a dead session. The supervisor reaps a session only
-// once STALE_S (10s) has passed since its LAST beat, so a blip that ends inside
-// that window is survivable by simply beating again sooner — the run behind it
-// keeps going. Handing the failure to onFail() on the FIRST missed beat did the
-// opposite: it released (and therefore stopped) a session whose task was still
-// running, and the window then re-claimed an empty one — the phone's "the task
-// went idle by itself". So retry on the retry cadence, and report the failure
-// only once the silence has outlived the supervisor's own window: by then the
-// host has reaped the session anyway and there is nothing left to keep alive.
+// once STALE_S (300s: a phone that went away with a run in flight must find its
+// session still there when it comes back) has passed since its LAST beat, so a
+// blip that ends inside that window is survivable by simply beating again sooner —
+// the run behind it keeps going. Handing the failure to onFail() on the FIRST
+// missed beat did the opposite: it released (and therefore stopped) a session
+// whose task was still running, and the window then re-claimed an empty one — the
+// phone's "the task went idle by itself". So retry on the retry cadence, and
+// report the failure only once the silence has outlived the supervisor's own
+// window: by then the host has reaped the session anyway and there is nothing left
+// to keep alive. Reporting it earlier is not harmless even now (onFail re-binds or
+// re-claims a session the host still holds), and the two numbers are one contract
+// — tests/session-heartbeat-test.js fails if they drift apart.
 const HEARTBEAT_RETRY_MS = 1000; // get a beat in before the stale window closes
-const HEARTBEAT_STALE_MS = 10000; // must match agent/procmgr/supervise.py STALE_S
+const HEARTBEAT_STALE_MS = 300000; // must match agent/procmgr/supervise.py STALE_S
 
 async function supervisorProbe(base) {
   // "up" = supervisor shape, "foreign" = another server on the port, "down" = nothing listening

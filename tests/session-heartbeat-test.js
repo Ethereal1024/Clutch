@@ -2,7 +2,7 @@
 
 // Regression test for the reported "the task went idle by itself" after a blip.
 //
-// The window's session lives on a supervisor that reaps it once STALE_S (10s,
+// The window's session lives on a supervisor that reaps it once STALE_S (300s,
 // agent/procmgr/supervise.py) has passed since its LAST heartbeat. The client
 // beat every 8s and handed the FIRST failed beat to onFail(), which releases the
 // session — i.e. it stopped (killed) a session whose task was still running and
@@ -131,8 +131,10 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
     "and the ordinary 8s cadence is back");
 
   // ---- 3) real silence: report it exactly once, when the host has reaped ----
+  // (the window is 300s now, so the fake clock has to cover it: the point of the
+  // check is that nothing is reported while the host still holds the session)
   network = false;
-  await advance(60_000);
+  await advance(giveUpMs + 60_000);
   check(fails === 1, "a session silent past the stale window is reported (once, not per beat)");
   check(clock - lastOk >= giveUpMs,
     "and only then — the host has reaped the session by now, so nothing alive was dropped");
