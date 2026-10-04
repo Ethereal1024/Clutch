@@ -54,6 +54,12 @@ from ..client import LlmError
 
 GUARD_POLL_S = 0.25  # how often the guard checks Stop while an attempt is parked in a read
 
+# The redial ladder's cap: a retry waits 1,2,4,...,64,128s and holds at 128s
+# after that. Doubling is what makes a budget this long cheap (a handful of
+# tries), and holding is what keeps a long outage from turning into a
+# once-an-hour probe.
+MAX_REDIAL_BACKOFF_S = 128.0
+
 
 @dataclass
 class Attempt:
@@ -112,8 +118,18 @@ def run_streaming(
     re-running a request whose text already reached a caller that does not
     discard would duplicate that text.
     """
+    # A budget counted in ATTEMPTS is a budget in seconds — three attempts used to
+    # span ~3.5s — while this call's counterparty is the CLIENT's own proxy across
+    # the tunnel: exactly the piece that goes away when the phone is backgrounded
+    # or the radio drops. Giving up after seconds is what made a reconnect that
+    # DID succeed recover nothing (the run it belonged to was already dead), so
+    # ``max_retries <= 0`` means redial until the run's own Stop — which is woven
+    # through every wait below — and the ladder holds at MAX_REDIAL_BACKOFF_S.
+    unbounded = int(max_retries) <= 0
     attempts = max(1, int(max_retries))
-    for attempt_no in range(attempts):
+    budget = 0 if unbounded else attempts  # 0 = no fixed budget; the notice shows "…"
+    attempt_no = 0
+    while unbounded or attempt_no < attempts:
         delivered = False
         if cancel is not None and cancel.is_set():
             raise _cancelled("stop requested before the attempt started")
@@ -149,8 +165,9 @@ def run_streaming(
             # promised to discard what it already took (mid_stream_retry);
             # otherwise the text that reached it would sit in the transcript twice
             rerunnable = not delivered or mid_stream_retry
-            if not last_err.retryable or not rerunnable or attempt_no == attempts - 1:
-                if last_err.retryable and attempt_no == attempts - 1:
+            exhausted = not unbounded and attempt_no == attempts - 1
+            if not last_err.retryable or not rerunnable or exhausted:
+                if last_err.retryable and exhausted:
                     # all attempts exhausted: say so instead of a bare transport message
                     last_err.message = f"{last_err.message} (after {attempts} attempts)"
                 raise last_err from e
@@ -161,13 +178,13 @@ def run_streaming(
             yield {
                 "type": "retry",
                 "attempt": attempt_no + 1,
-                "max": attempts,
+                "max": budget,
                 "code": last_err.code,
                 "discard": delivered,
-                "message": f"{last_err.message} — retrying ({attempt_no + 1}/{attempts})",
+                "message": f"{last_err.message} — retrying ({attempt_no + 1}/{budget or '…'})",
             }
-            # backoff waits ON the event: a Stop during the wait short-circuits
-            delay = (2**attempt_no) + attempt_no * 0.5
+            # the ladder: 1,2,4,...,MAX_REDIAL_BACKOFF_S and hold there
+            delay = min(MAX_REDIAL_BACKOFF_S, 2.0**attempt_no)
             if cancel is not None:
                 if cancel.wait(delay):
                     # the stop is its own event, not a consequence of the error
@@ -186,3 +203,4 @@ def run_streaming(
                 events_close = getattr(turn.events, "close", None)
                 if events_close is not None:
                     events_close()
+        attempt_no += 1

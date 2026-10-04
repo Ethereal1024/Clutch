@@ -44,7 +44,12 @@ class Config:
     # timed out". Connect stays tight (fail fast on dead routes) and reads get
     # their own generous budget; see llm_clients/openai_client.py.
     llm_read_timeout: float = 240.0
-    llm_max_retries: int = 3
+    # 0 = redial until the run is stopped by hand (the default): the LLM call's
+    # counterparty is the CLIENT's proxy across the tunnel, so a budget counted
+    # in attempts is a budget in seconds spent while the reconnect that would
+    # fix everything is still dialing. Positive = that many attempts total, on
+    # the same 1,2,4,...,128s ladder (see llm_clients/stream_runner.py).
+    llm_max_retries: int = 0
     llm_retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
     # None = leave the request unset (server default); otherwise one of REASONING_EFFORT_LEVELS
     llm_reasoning_effort: str | None = None

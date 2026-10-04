@@ -31,6 +31,7 @@ import openai
 # stub so the checks never actually wait (scoped to that module, not global time)
 import agent.llm.llm_clients.stream_runner as runner_mod
 from agent.llm.client import LlmError
+from agent.llm.llm_clients.stream_runner import MAX_REDIAL_BACKOFF_S
 from agent.llm.llm_clients.openai_client import OpenaiLlmClient
 from agent.llm.llm_clients.openai_responses_client import (
     OpenaiResponsesLlmClient,
@@ -651,6 +652,52 @@ def main() -> int:
     check(err is not None and err.code == "cancelled", "a Stop during backoff cancels instead of retrying")
     check(comps.calls == 1, "no second request after a cancelled backoff")
     check([e["type"] for e in evs] == ["retry"], "the retry notice was already out when Stop landed")
+
+    # 4d. the redial ladder and the unbounded budget. Giving up after a couple of
+    #     attempts is what made a tunnel reconnect useless: the counterparty is the
+    #     CLIENT's proxy, so the redial has to outlast the outage. The ladder is
+    #     1,2,4,...,128s and then HOLDS at 128s — doubling keeps a long budget cheap,
+    #     holding keeps a long outage from turning into a once-an-hour probe — and
+    #     max_retries <= 0 means "keep redialing until the run's own Stop".
+    class _CountingStop:
+        """A duck-typed Stop that trips on the Nth backoff: walks the whole ladder
+        with no thread and no real waiting."""
+        def __init__(self, trip_after: int) -> None:
+            self.waits: list[float] = []
+            self._trip = trip_after
+        def is_set(self) -> bool:
+            return False  # only wait() ever trips it
+        def wait(self, delay: float) -> bool:
+            self.waits.append(delay)
+            return len(self.waits) >= self._trip
+
+    ladder = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+    held = ladder + [MAX_REDIAL_BACKOFF_S] * 3  # 1,2,4,...,128,128,128,128
+    waited: list[float] = []
+    real_time = runner_mod.time
+    runner_mod.time = SimpleNamespace(sleep=waited.append)
+    try:
+        # bounded: the ladder climbs, then holds, and exhaustion still says so
+        client, comps = _client(12, [_fail_stream] * 12)
+        evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+    finally:
+        runner_mod.time = real_time
+    check(waited == held, f"a fixed budget walks the ladder and holds at the cap (got {waited})")
+    check([e["type"] for e in evs] == ["retry"] * 11, "every redial before the cap is announced")
+    check(evs[0]["max"] == 12 and "retrying (1/12)" in evs[0]["message"], "a fixed budget shows its count")
+    check(err is not None and "after 12 attempts" in err.message, "a fixed budget still says when it gave up")
+    check(comps.calls == 12, "a fixed budget issues exactly its attempts")
+    # unbounded: same ladder, no give-up, and the Stop is the only thing that ends it
+    stop = _CountingStop(trip_after=11)
+    client, comps = _client(0, [_fail_stream] * 11)
+    evs, err = _collect(client.stream([{"role": "user", "content": "hi"}], cancel=stop))
+    check(stop.waits == held, f"an unbounded redial climbs the same ladder and holds at the cap (got {stop.waits})")
+    check(comps.calls == 11, "each backoff bought one more attempt, right up to the Stop")
+    check(err is not None and err.code == "cancelled", "nothing but the Stop ends an unbounded redial")
+    check([e["type"] for e in evs] == ["retry"] * 11, "every unbounded redial is announced too")
+    check(evs[0]["max"] == 0 and "retrying (1/…)" in evs[0]["message"],
+          "with no fixed budget the notice shows an open-ended count instead of a lie")
+    check("retrying (11/…)" in evs[-1]["message"], "the open-ended notice keeps counting up")
 
     # 5. responses protocol: the same contract over a different wire format
     _check_responses_protocol()
