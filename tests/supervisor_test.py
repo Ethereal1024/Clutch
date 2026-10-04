@@ -707,6 +707,76 @@ def main() -> int:
     finally:
         hang16.close()
 
+    # ---- 16b. a RELEASED session's run does not hold its child forever ----
+    # The verdict above leaves a live run running, and that is the point. What it
+    # must not leave behind is a child nobody owns, holding the project's kernel
+    # lock for the rest of the host's life with no window able to see or stop it:
+    # "a run is in flight" is evidence for a session whose window can still come
+    # back for it, and a RELEASED claim has no such window. So the release marks
+    # the record and the plain heartbeat window applies from then on — the same
+    # 300s a backgrounded phone gets (see STALE_S), not a try limit on the client's
+    # reconnect ladder: that is why only a release sets it, and why the control
+    # case below must still hold an unreleased run past three stale windows.
+    hang16b = _socket.socket()
+    hang16b.bind(("127.0.0.1", 0))
+    hang16b.listen(5)  # connect completes; no response ever comes
+    hang16b_port = hang16b.getsockname()[1]
+    try:
+        sup16b, port16b, _ = start_supervisor(stale_s=1.0, idle_timeout_s=60)
+        base16b = f"http://127.0.0.1:{port16b}"
+
+        def live_run_session(tdir, name) -> str:
+            """A session on sup16b with a run in flight against the endpoint that
+            never answers: the shape a release leaves behind."""
+            st, body = http_post(
+                f"{base16b}/api/session/start",
+                {"base_url": f"http://127.0.0.1:{hang16b_port}/v1", "model": "hang-model"},
+            )
+            d = json.loads(body)
+            sid, child = d["session_id"], f"http://127.0.0.1:{d['port']}"
+            st, body = http_post(f"{child}/api/project/new", {"dir": tdir, "name": name})
+            clc = json.loads(body)["project"]
+            st, _ = http_post(f"{child}/api/run", {"task": "hold the line", "project": clc})
+            check(st == 200, f"a run is in flight for {name}")
+            return sid
+
+        try:
+            with tempfile.TemporaryDirectory() as released_dir:
+                sid16b = live_run_session(released_dir, "released")
+                check(
+                    sup16b.sessions[sid16b].detached is False,
+                    "a session its window still holds is not marked released",
+                )
+                st, body = http_post(f"{base16b}/api/session/stop", {"session_id": sid16b})
+                check(
+                    st == 200 and json.loads(body).get("status") == "detached",
+                    "releasing it with a run in flight still says detached",
+                )
+                check(
+                    sup16b.sessions[sid16b].detached is True,
+                    "and the record is MARKED: no window owns this child any more",
+                )
+                check(
+                    wait_until(lambda: sid16b not in sup16b.sessions, 15.0, "released session reaped"),
+                    "a released session is reaped after its stale window even with a run in flight",
+                )
+
+            with tempfile.TemporaryDirectory() as held_dir:
+                sid16c = live_run_session(held_dir, "held")
+                time.sleep(3.0)  # three stale windows, with nobody beating
+                check(
+                    sid16c in sup16b.sessions and sup16b.sessions[sid16c].detached is False,
+                    "an UNRELEASED session with a run in flight is still never reaped: the in-flight exemption is intact",
+                )
+                check(
+                    sup16b.sessions[sid16c].proc.poll() is None,
+                    "and that child is still alive: the release mark is the only thing that bounds it",
+                )
+        finally:
+            sup16b.shutdown_all()
+    finally:
+        hang16b.close()
+
     print("\nSUPERVISOR TESTS PASSED")
     return 0
 

@@ -77,6 +77,15 @@ class ManagedProcess:
     guarantee: int | None
     last_beat: float
     beat_required: bool  # False: the reaper never reaps this one by staleness
+    # No window holds this child any more: whoever claimed it said so (a window
+    # releasing its session, agent/supervisor.py stop_session) and did not stop it.
+    # That is the one case where "a run is in flight" is NOT evidence for the child:
+    # there is nobody left to come back for the run, so the tenant's staleness rule
+    # must not let it refresh its own beat forever (see SessionSupervisor._stale).
+    # detach() alone leaves this False: a detached-but-rebindable claim (a dead ssh
+    # hop, ui/host-core.js rebindTunnelBackend) is still waited out unbounded, because
+    # the re-bind is exactly what the in-flight evidence is protecting.
+    detached: bool = False
 
 
 def wait_port(proc: subprocess.Popen, banner_re: re.Pattern, timeout_s: float) -> int | None:

@@ -237,6 +237,13 @@ class SessionSupervisor(ProcessSupervisor):
         heartbeats stop with it, and the reaper collects the child when it can
         finally prove it idle (see _stale). Only a child that PROVED itself
         idle is stopped here, which is the eager cleanup the call is for.
+
+        Leaving it running is not the same as leaving it forever, though: this
+        call is the window saying it will not be back. So the record is marked
+        ``detached`` and the reaper holds it to the plain heartbeat window from
+        then on (see _stale) — otherwise a run that never ends would hold the
+        child, and the project lock it took, for the rest of the host's life,
+        with no window on earth able to see or stop it.
         """
         with self._lock:
             record = self.processes.get(session_id) if session_id else None
@@ -248,6 +255,9 @@ class SessionSupervisor(ProcessSupervisor):
             log(f"[supervisor] session {session_id} stopped")
             return "stopped"
         why = "has a run in flight" if run else "is not answering"
+        with self._lock:
+            if self.processes.get(session_id) is record:
+                record.detached = True  # no window owns this one any more
         log(f"[supervisor] session {session_id} {why} - left running for the reaper")
         return "detached"
 
@@ -283,9 +293,24 @@ class SessionSupervisor(ProcessSupervisor):
         child's own liveness evidence, so refresh the beat and leave it alone
         however long the run takes — deliberately unbounded, because a run
         that never ends is a wedged run (its own bug, and its own Stop
-        button), not a reason to kill a session that is still working."""
+        button), not a reason to kill a session that is still working.
+
+        The exception is a record its window RELEASED (stop_session marked it
+        ``detached``): there is no window to come back for the run, so the
+        child's own evidence has nothing to protect and no one to report to —
+        a run there can only be one nobody can see or stop. Those are held to
+        the plain heartbeat window (``now - last_beat > stale_s``), so the
+        child, and the project lock it took, come back within one window of the
+        release. Note what is NOT done here: the child is not stopped at release
+        (its run still gets to write its own final, and a re-claim inside the
+        window can still re-bind to it), and this is not a try limit on the
+        reconnect ladder — the window is the same 300s a backgrounded phone
+        gets."""
         if not super()._stale(record, now):
             return False
+        if record.detached:
+            log(f"[supervisor] session {record.key} was released - reaping after its stale window")
+            return True
         if not session_in_flight(record.port):
             return True
         log(f"[supervisor] session {record.key} has a run in flight - not reaping")
