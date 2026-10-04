@@ -107,13 +107,13 @@ global.busy = false;
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the source checks above assert the declarations exist)
 global.sseLastFrameAt = 0;
-global.sseErrors = 0;
+global.sseErrorsSince = 0;
 global.sseDown = false;
 global.sseSuspended = false;
 global.sseWatchdog = null;
 global.SSE_KEEPALIVE_MS = 15000;
 global.SSE_STALE_MS = 45000;
-global.SSE_MAX_ERRORS = 4;
+global.SSE_ERROR_WINDOW_MS = 30000;
 global.setStatus = (s) => {
   statuses.push(s);
   global.busy = s === "running" || s === "waiting";

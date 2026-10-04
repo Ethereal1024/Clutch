@@ -24,7 +24,8 @@ let es = null;
 //     agent/server.py SSE_PING_FRAME), so silence past three of them is proof
 //     of death, not a slow run;
 //   * a base that is gone (tunnel torn down, session reaped): EventSource
-//     retries forever in silence, so the failures are counted instead;
+//     retries forever in silence, so the failures are timed instead — a count
+//     would be a budget in seconds, and seconds are what a redial is spending;
 //   * a Stop click that could not be delivered (see stop()).
 // Every recovery is announced: a silent one is indistinguishable from a freeze.
 // The one exception is a recovery the USER caused by leaving: coming back from a
@@ -46,9 +47,16 @@ let es = null;
 // good — the probe that used to decide, and the `replay` flag it fed, are gone.
 const SSE_KEEPALIVE_MS = 15000; // must match agent/server.py SSE_KEEPALIVE_SEC
 const SSE_STALE_MS = SSE_KEEPALIVE_MS * 3; // one missed keepalive is not death
-const SSE_MAX_ERRORS = 4; // EventSource retries ~3s apart: ~12s of a dead base
+// How long a base may keep failing to answer before the window stops believing
+// it has a session. A COUNT of failures was a budget in seconds — EventSource
+// retries ~3s apart, so four of them was ~12s — and the seconds it spent were
+// exactly the seconds a phone's tunnel takes to redial after a blip: the window
+// declared the base dead while the reconnect that would have restored it was
+// still running, and the dialog it raised outlived the outage. Time is the
+// honest question, and a burst of quick refusals is not an answer to it.
+const SSE_ERROR_WINDOW_MS = 30000; // failing for this long, uninterruptedly = dead base
 let sseLastFrameAt = 0; // last byte the stream actually delivered
-let sseErrors = 0; // consecutive failed connects; reset by es.onopen
+let sseErrorsSince = 0; // when the current run of failed connects began (0 = none)
 let sseDown = false; // told once per outage, not once per tick
 let sseWatchdog = null;
 // the PAGE is gone (phone backgrounded): see sseSuspend/sseResume
@@ -205,7 +213,7 @@ function connectSSE() {
   es.addEventListener("ping", sseFrame);
   // on (re)connect the server replays stored history: reset the streaming state
   es.onopen = () => {
-    sseErrors = 0;
+    sseErrorsSince = 0;
     sseFrame();
     // A session really answered: this is the ONLY thing that closes the
     // disconnect dialog (ui/js/conn-lost.js). Nothing else may — an adopted URL
@@ -225,10 +233,12 @@ function connectSSE() {
   };
   es.onerror = () => {
     // the browser reconnects on its own, but a base that is GONE retries
-    // forever without a word: past a few failures the cached "running" is a
-    // claim we can no longer support, so it goes and the button reacts
-    sseErrors++;
-    if (sseErrors >= SSE_MAX_ERRORS) sseDegrade("the backend did not answer");
+    // forever without a word: a cached "running" past that window is a claim
+    // we can no longer support, so it goes and the button reacts
+    if (!sseErrorsSince) sseErrorsSince = Date.now();
+    if (Date.now() - sseErrorsSince >= SSE_ERROR_WINDOW_MS) {
+      sseDegrade("the backend did not answer for " + Math.round(SSE_ERROR_WINDOW_MS / 1000) + "s");
+    }
   };
   startSseWatchdog();
 }

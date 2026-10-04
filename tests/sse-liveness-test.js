@@ -26,13 +26,13 @@ check(/es\.addEventListener\("ping", sseFrame\)/.test(src),
   "the keepalive is consumed as a NAMED event: an idle stream can prove it lives");
 check(/const SSE_STALE_MS = SSE_KEEPALIVE_MS \* 3;/.test(src),
   "three missed keepalives (not one) are the threshold for a dead stream");
-check(/const SSE_MAX_ERRORS = 4;/.test(src),
-  "a base that stops answering is counted instead of retried in silence");
+check(/const SSE_ERROR_WINDOW_MS = 30000;/.test(src),
+  "a base that stops answering is TIMED, not counted: a count is a budget in seconds");
 check(/es\.onerror = \(\) => \{\n    \/\/ the browser reconnects/.test(src),
   "es.onerror is no longer an empty auto-reconnect stub");
 check(/connectionLost\("could not reach the session to stop the task/.test(src),
   "stop() surfaces the failure instead of an empty catch (through the dialog)");
-check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseErrors = 0;/m.test(src) &&
+check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseErrorsSince = 0;/m.test(src) &&
   /^let sseDown = false;/m.test(src) && /^let sseWatchdog = null;/m.test(src) &&
   /^let sseSuspended = false;/m.test(src),
   "the liveness state is real module state, not a per-stream local");
@@ -82,7 +82,7 @@ global.streamHighOffset = null;
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the block below asserts the source declares it for real)
 global.sseLastFrameAt = 0;
-global.sseErrors = 0;
+global.sseErrorsSince = 0;
 global.sseDown = false;
 global.sseSuspended = false; // the page is running here: android-resume covers the other case
 global.sseWatchdog = null;
@@ -93,7 +93,7 @@ global.clearTimeout = () => {};
 // runners drive one function at a time, so the page state is the runner's
 global.document = { hidden: false };
 global.SSE_STALE_MS = 45000;
-global.SSE_MAX_ERRORS = 4;
+global.SSE_ERROR_WINDOW_MS = 30000;
 global.setStatus = (s) => {
   statuses.push(s);
   global.busy = s === "running" || s === "waiting";
@@ -178,14 +178,20 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
   connectSSE();
   const es3 = instances[instances.length - 1];
   es3.fireOpen();
-  check(global.sseErrors === 0, "a connect resets the failure count");
+  check(global.sseErrorsSince === 0, "a connect opens a fresh failure window");
   es3.fireError();
   es3.fireError();
   es3.fireError();
   check(losses.length === 1, "a couple of dropped connects are still just a blip");
+  // a burst of quick refusals is not a verdict: the question is how long the
+  // base has been silent, and a phone whose tunnel is mid-redial fails a whole
+  // handful of connects in the first seconds of the outage
+  for (let i = 0; i < 20; i++) es3.fireError();
+  check(losses.length === 1, "twenty more failures in the same second are still one blip");
+  global.sseErrorsSince = Date.now() - global.SSE_ERROR_WINDOW_MS - 1;
   es3.fireError();
-  check(losses.length === 2 && /the backend did not answer/.test(losses[1]),
-    "a base that never answers is reported once the failures pile up");
+  check(losses.length === 2 && /the backend did not answer for 30s/.test(losses[1]),
+    "a base that has not answered for the whole window is reported once");
 
   // ---- 6) Stop that cannot be delivered: the click answers, and heals ----
   fetchImpl = async () => {
