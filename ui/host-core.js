@@ -307,8 +307,13 @@ function createHostCore(deps) {
     return p;
   }
 
-  // window close/disconnect: drop this window's session WITHOUT asking any
-  // supervisor to exit (the machine may still serve other windows)
+  // Every window's claim at once, WITHOUT asking any supervisor to exit (the
+  // machine may still serve other windows — their sessions keep running on it).
+  // Machine-wide acts only: app shutdown, and the picker's own Disconnect, which
+  // IS the user leaving the machine. A window leaving an outage releases its OWN
+  // claim instead (releaseWindowBackend, through the `session:release` handler):
+  // dropping every window's session because one of them pressed Cancel is how a
+  // disconnect in one window used to take the other windows' work down with it.
   async function releaseAllBackends() {
     for (const id of [...windowBackends.keys()]) await releaseWindowBackend(id);
   }
@@ -322,16 +327,32 @@ function createHostCore(deps) {
   // that outlives the hop (a run in flight must outlive it too — the session is
   // left running and the reaper collects it when it goes idle), so a re-claim
   // after the reconnect re-opens its forward instead of starting a new session
-  // over the old one's work. Returns how many were dropped from their forwards.
+  // over the old one's work.
+  //
+  // Returns the WINDOW IDS whose forward it dropped — not a count. The tunnel is
+  // one process-wide resource and the session is not: a shell's tunnel-end
+  // notification has to name the windows the hop actually owned, or every other
+  // window is told it lost a session that is still running fine (see the
+  // `lost` flag the shells compute from this list).
   async function releaseTunnelBackends() {
-    let dropped = 0;
+    const affected = [];
     for (const [id, wb] of [...windowBackends]) {
       if (wb.kind !== "tunnel") continue;
       if (typeof wb.detach === "function") wb.detach();
       else await releaseWindowBackend(id); // no detach on this claim: full stop
-      dropped++;
+      affected.push(id);
     }
-    return dropped;
+    return affected;
+  }
+
+  // Is any window still working over the tunnel? The tunnel is a shared resource
+  // and stopping it is a machine-wide act, so only a caller that is about to
+  // release the LAST window on it may stop it (ui/main.js `session:release`).
+  function anyTunnelWindow() {
+    for (const wb of windowBackends.values()) {
+      if (wb.kind === "tunnel") return true;
+    }
+    return false;
   }
 
   async function stopAllBackends() {
@@ -365,6 +386,7 @@ function createHostCore(deps) {
     releaseWindowBackend,
     releaseAllBackends,
     releaseTunnelBackends,
+    anyTunnelWindow,
     stopAllBackends,
     claimWindowBackend,
     backendKind,

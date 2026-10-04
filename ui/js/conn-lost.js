@@ -246,6 +246,31 @@ function connLostCancel() {
 // the point: "the host did not answer" must not be a reason the user cannot leave.
 const CONN_LOST_EXIT_MS = 2000;
 
+// ---- one teardown, two callers ----
+//
+// The exit (connLostQuit) and the page it reloaded into (connLostExitBootTeardown)
+// make the SAME call — "release this window's session" — and the difference between
+// them is only how long each may hold its caller: a user's press can wait, a boot
+// cannot. The IPC itself runs to completion in the main process whatever the
+// renderer does (a reload included), so both halves are bounded rather than awaited.
+//
+// The verb is WINDOW-scoped, and that is the point of it (ui/main.js
+// `session:release`): the tunnel is ONE resource for the whole process, while a
+// session belongs to the window that claimed it. Cancelling an outage in one window
+// is not a reason to end another window's session, so the host releases the claim of
+// the window that asked — and stops the tunnel only when no window is left on it.
+async function boundedDisconnect(ms) {
+  let bye = Promise.resolve();
+  try {
+    if (window.clutchApi && window.clutchApi.releaseSession) {
+      bye = Promise.resolve(window.clutchApi.releaseSession()).catch(() => {});
+    }
+  } catch (e) {
+    /* the teardown is best effort, the reload is not */
+  }
+  return Promise.race([bye, new Promise((r) => setTimeout(r, ms))]);
+}
+
 // ---- the note the exit leaves for the page that follows it ----
 //
 // The reload is what gets a clean page, and it is also the ONE thing that can hand
@@ -306,44 +331,28 @@ let connLostExitToreDown = false;
 function connLostExitBootTeardown() {
   if (connLostExitToreDown) return Promise.resolve();
   connLostExitToreDown = true;
-  try {
-    if (!window.clutchTunnel || !window.clutchTunnel.disconnect) return Promise.resolve();
-    return Promise.race([
-      Promise.resolve(window.clutchTunnel.disconnect()).catch(() => {}),
-      new Promise((r) => setTimeout(r, CONN_LOST_EXIT_BOOT_MS)),
-    ]);
-  } catch (e) {
-    return Promise.resolve();
-  }
+  return boundedDisconnect(CONN_LOST_EXIT_BOOT_MS);
 }
 
 // Exit the window — the second half of Cancel, and the one that makes it equal to
 // quitting and reopening. The reload is what gets a clean page (no session, no
 // dialog, no redial: the welcome page is what a page with nothing claimed boots
-// into, js/boot.js), and it only works if the tunnel is down FIRST: the tunnel
-// lives in the MAIN process (Electron, ui/preload.js) or in the Android host
-// (bridge-shim → android-host), so a reload that left it up would boot into the
+// into, js/boot.js), and it only works if THIS window's claim is released FIRST: a
+// claim survives in the main process (Electron, ui/preload.js) or in the Android
+// host (bridge-shim → android-host), so a reload that left it would boot into the
 // very session the user just left — the new page's own claimWindowBackend would
-// hand it back and this dialog would be up again within seconds. So: disconnect,
-// then reload.
+// hand it back and this dialog would be up again within seconds. So: release, then
+// reload. The tunnel goes with it exactly when this window was the last one on it.
 //
-// The teardown is bounded, and that is the one place this exit is not literally a
-// restart: the IPC call runs to completion in the main process whatever the
-// renderer does, but a reload that beat it could hand the new page the OLD session
-// one beat before it dies (its own claim on Android, resolveApiBase on the
-// desktop). Two seconds is far longer than a teardown takes, and the alternative —
-// waiting without a bound — is exactly the dead end this exit exists to end.
+// The teardown is bounded (boundedDisconnect), and that is the one place this exit
+// is not literally a restart: the IPC call runs to completion in the main process
+// whatever the renderer does, but a reload that beat it could hand the new page the
+// OLD claim one beat before it dies. Two seconds is far longer than a teardown
+// takes, and the alternative — waiting without a bound — is exactly the dead end
+// this exit exists to end.
 async function connLostQuit() {
   connLostExitMark(); // FIRST: the reload must never outrun the note it leaves behind
-  let bye = Promise.resolve();
-  try {
-    if (window.clutchTunnel && window.clutchTunnel.disconnect) {
-      bye = Promise.resolve(window.clutchTunnel.disconnect()).catch(() => {});
-    }
-  } catch (e) {
-    /* the teardown is best effort, the reload is not */
-  }
-  await Promise.race([bye, new Promise((r) => setTimeout(r, CONN_LOST_EXIT_MS))]);
+  await boundedDisconnect(CONN_LOST_EXIT_MS);
   window.location.reload();
 }
 

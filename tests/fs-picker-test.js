@@ -62,11 +62,22 @@ async function main() {
   const CONN_FLOW = uiModules().find((m) => m.file === "js/conn-flow.js").code;
 
   // ---- stub environment (the picker's own nodes, and nothing else) ----
+  // Two storages, because the app uses two: the saved hosts and the standing SSH
+  // intent are one profile for every window (localStorage), while the URL of the
+  // session this window is on names THIS window alone (sessionStorage — see the
+  // renderConnSelector comment). The stub keeps them apart so a mix-up is visible
+  // here rather than in the second window of a real app.
   const store = new Map();
   global.localStorage = {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => store.set(k, String(v)),
     removeItem: (k) => store.delete(k),
+  };
+  const session = new Map();
+  global.sessionStorage = {
+    getItem: (k) => (session.has(k) ? session.get(k) : null),
+    setItem: (k, v) => session.set(k, String(v)),
+    removeItem: (k) => session.delete(k),
   };
 
   // the picker's <select>: options in, a value in, a disabled flag out, and the
@@ -209,8 +220,14 @@ async function main() {
   const flush = () => new Promise((r) => setTimeout(r, 0));
   const seed = (hosts, extra) => {
     store.clear();
+    session.clear();
     if (hosts) store.set("clutch_ssh_connections", JSON.stringify(hosts));
-    for (const [k, v] of Object.entries(extra || {})) store.set(k, v);
+    for (const [k, v] of Object.entries(extra || {})) {
+      // the session URL is this window's, and it is remembered per window: every
+      // writer of it (js/backend-lifecycle.js, js/conn-lost.js) uses sessionStorage,
+      // so the fixture has to put it where the picker looks for it
+      (k === "clutch_api_url" ? session : store).set(k, v);
+    }
     connSelect.opts.length = 0;
     connSelect.value = "";
     connSelect.disabled = false;
@@ -285,6 +302,25 @@ async function main() {
     `leaving one remote for another drops the tunnel first (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
     "the standing intent goes before the drop, so the move is not announced as a loss");
+  global.API_BASE = null;
+
+  // ---- 3b) a session URL in the SHARED storage is not this window's session ----
+  // one profile, several windows: the URL of the session one window is on used to sit
+  // in localStorage, so the next window read it as its own and the picker claimed
+  // "Connected: <the other window's URL>" over a session it never had (⑤). The URL is
+  // read from sessionStorage now, so a global copy is inert data here.
+  global.API_BASE = "http://127.0.0.1:31001";
+  seed(HOSTS, INTENT);
+  store.set("clutch_api_url", "http://127.0.0.1:31001"); // what an older build wrote
+  renderConnSelector();
+  check(connStatus.textContent !== "Connected: http://127.0.0.1:31001",
+    `a URL another window remembered in the shared storage does not make this one connected (got ${JSON.stringify(connStatus.textContent)})`);
+  check(!connSelect.opts.some((o) => o.mark),
+    "and no host is ticked as one this window is on");
+  check(connSelect.value === "ssh:me@new.example.com:22",
+    `the list still opens on the host it was last on, as a choice and nothing more (got ${JSON.stringify(connSelect.value)})`);
+  check(session.get("clutch_api_url") === undefined,
+    "with the shared copy left where it was: nothing here adopts it, either");
   global.API_BASE = null;
 
   // ---- 4) a list with nothing in it offers nothing to choose, and nothing to dial ----

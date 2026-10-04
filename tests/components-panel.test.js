@@ -125,7 +125,7 @@ const COMPONENTS = [
 ];
 
 // a fresh page: the real panel file, a fresh mini-DOM, a fake channel
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, store = {} } = {}) {
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, store = {}, session = {} } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -189,6 +189,10 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     Promise,
     document: dom.document,
     localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem() {}, removeItem() {} },
+    // the session URL names THIS window's session, so every reader of it uses
+    // sessionStorage (js/backend-lifecycle.js): the panel's ✓ is about the window
+    // the panel is drawn in, not about the machine the profile remembers (⑤)
+    sessionStorage: { getItem: (k) => (k in session ? session[k] : null), setItem() {}, removeItem() {} },
     askConfirm: async (opts) => { world.confirms.push(opts); return world.answer; },
     $: (sel) => dom.document.querySelector(sel),
     renderPlugins: null, // the real one, declared in the file
@@ -275,6 +279,35 @@ const CODE = mod ? mod.code : "";
     check(/neither act is a rollback/.test(ask.text), "and says what the write costs: removable again, but never a rollback (I5)");
     check(p.world.installCalls.length === 0, "a declined install writes nothing");
     check(p.note().textContent === "", "and leaves no verdict behind");
+  }
+
+  // 4b. the ✓ on the remote's label is THIS window's session, not the machine's (⑤)
+  // One profile, several windows: clutch_ssh_connected is one fact for the whole
+  // process, but the URL that says a window is ON the remote belongs to the window
+  // that claimed it — read from localStorage, the next window ticked a machine it
+  // was never on.
+  {
+    const remote = { clutch_ssh_host: "10.0.0.5", clutch_ssh_user: "ubuntu", clutch_ssh_port: "22" };
+    const label = (p) => p.el("plug-target").textContent;
+    const shared = page({
+      store: { ...remote, clutch_ssh_connected: "1", clutch_api_url: "http://127.0.0.1:7788" },
+      target: REMOTE,
+    });
+    await shared.open();
+    check(label(shared) === "SSH ubuntu@10.0.0.5:22",
+      `a URL another window remembered in the shared storage does not tick this one's machine (got ${JSON.stringify(label(shared))})`);
+    const mine = page({
+      store: { ...remote, clutch_ssh_connected: "1" },
+      session: { clutch_api_url: "http://127.0.0.1:7788" },
+      target: REMOTE,
+    });
+    await mine.open();
+    check(label(mine) === "SSH ubuntu@10.0.0.5:22 ✓",
+      `this window's own session does tick it (got ${JSON.stringify(label(mine))})`);
+    const noIntent = page({ store: { ...remote }, session: { clutch_api_url: "http://127.0.0.1:7788" }, target: REMOTE });
+    await noIntent.open();
+    check(label(noIntent) === "SSH ubuntu@10.0.0.5:22",
+      "and a window with a session and no standing intent behind it is not connected either");
   }
 
   // 5. the happy path: stages as they happen, then the host's verdict, then a re-read

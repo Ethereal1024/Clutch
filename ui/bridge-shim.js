@@ -98,6 +98,10 @@
 
   expose("clutchApi", {
     baseUrl: () => call("clutchApi", "baseUrl"),
+    // this window leaving its session (the conn-lost dialog's Cancel). The host
+    // knows which window is asking — on the phone there is exactly one — so the
+    // bridge route takes no window id and the renderer cannot name another one.
+    releaseSession: () => call("clutchApi", "releaseSession"),
     onBaseChanged: (cb) => subscribe("backend:base-changed", cb),
   });
 

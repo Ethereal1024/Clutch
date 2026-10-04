@@ -87,6 +87,14 @@ async function main() {
   assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchApi/baseUrl", "call hits the bridge API route");
   assert.strictEqual(fakes.fetches.at(-1).opts.body, "[]", "no args -> empty JSON array");
 
+  // 2b. releaseSession: the conn-lost Cancel's verb, and it takes NO window id —
+  //     the host reads the caller (one window on the phone, e.sender on the
+  //     desktop), so a renderer cannot name another window's session
+  fakes.next = { json: async () => ({ ok: true, result: { ok: true } }) };
+  assert.deepStrictEqual(await globalThis.clutchApi.releaseSession(), { ok: true }, "releaseSession resolves the result");
+  assert.strictEqual(fakes.fetches.at(-1).url, BRIDGE + "api/clutchApi/releaseSession", "releaseSession hits its own bridge route");
+  assert.strictEqual(fakes.fetches.at(-1).opts.body, "[]", "and names no window: the host knows who asked");
+
   // 3. args travel as a JSON array
   fakes.next = { json: async () => ({ ok: true, result: { ok: true } }) };
   await globalThis.clutchSettings.save({ api_key: "k" });
@@ -104,17 +112,18 @@ async function main() {
   // 5. events: ONE shared SSE stream carries the IPC channel names
   const got = { progress: [], ended: [], base: [] };
   const offP = globalThis.clutchTunnel.onProgress((stage) => got.progress.push(stage));
-  globalThis.clutchTunnel.onEnd(() => got.ended.push(true));
+  globalThis.clutchTunnel.onEnd((info) => got.ended.push(info));
   globalThis.clutchApi.onBaseChanged((url) => got.base.push(url));
   assert.strictEqual(FakeES.instances.length, 1, "all subscriptions share one stream");
   assert.strictEqual(FakeES.instances[0].url, BRIDGE + "events", "stream is the bridge /events route");
 
   FakeES.instances[0].emit("tunnel:progress", ["probe"]);
   FakeES.instances[0].emit("backend:base-changed", ["http://127.0.0.1:45679"]);
-  FakeES.instances[0].emit("tunnel:ended", []);
+  FakeES.instances[0].emit("tunnel:ended", [{ lost: true }]);
   assert.deepStrictEqual(got.progress, ["probe"]);
   assert.deepStrictEqual(got.base, ["http://127.0.0.1:45679"]);
-  assert.deepStrictEqual(got.ended, [true]);
+  assert.deepStrictEqual(got.ended, [{ lost: true }],
+    "the payload travels whole: the host's per-window verdict is what the renderer decides on");
 
   // 6. unsubscribe removes only its own listener
   offP();

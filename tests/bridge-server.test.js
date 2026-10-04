@@ -229,7 +229,7 @@ async function main() {
   const got = { base: [], progress: [], ended: [] };
   globalThis.clutchApi.onBaseChanged((u) => got.base.push(u));
   globalThis.clutchTunnel.onProgress((s) => got.progress.push(s));
-  globalThis.clutchTunnel.onEnd(() => got.ended.push(true));
+  globalThis.clutchTunnel.onEnd((info) => got.ended.push(info));
   await new Promise((r) => setTimeout(r, 250)); // let the SSE connection land
 
   // 1. the M1 acceptance call: baseUrl walks the full stack
@@ -299,13 +299,24 @@ async function main() {
   assert.deepStrictEqual(sessions.calls.stopped.map((s) => s.sid), ["s1"], "the dead session's husk is stopped");
   sessions.sessionAlive = true;
 
-  // 5. tunnel:ended broadcast
+  // 5. tunnel:ended broadcast — with the host's per-window verdict
   tunnel.state.endCbs.forEach((cb) => cb());
-  await eventually(() => assert.deepStrictEqual(got.ended, [true], "tunnel:ended via real SSE"));
+  await eventually(() => assert.deepStrictEqual(got.ended, [{ lost: true }],
+    "tunnel:ended via real SSE, carrying this window's own verdict"));
+
+  // 5b. one window leaving its session (the conn-lost Cancel's verb, `session:release`
+  //     in the shells): over the bridge it is `releaseSession`, it names no window
+  //     (the host knows who asked) and it stops the shared tunnel only when nobody is
+  //     left on it. The claim has to be released either way: the page reloads after
+  //     it, and a claim that outlived the exit is handed straight back to the boot.
+  const stoppedBefore = tunnel.state.stopped;
+  assert.deepStrictEqual(await globalThis.clutchApi.releaseSession(), { ok: true }, "releaseSession resolves over the bridge");
+  assert.strictEqual(tunnel.state.stopped, stoppedBefore + 1,
+    "the claim it just released was the last one on the hop: now the tunnel may stop");
 
   // 6. N4: disconnect releases the session (remote told, no local supervisor touched)
   assert.deepStrictEqual(await globalThis.clutchTunnel.disconnect(), { ok: true }, "disconnect ok");
-  await eventually(() => assert.strictEqual(tunnel.state.stopped, 1, "tunnel stopped"));
+  await eventually(() => assert.strictEqual(tunnel.state.stopped, stoppedBefore + 2, "tunnel stopped"));
   assert.deepStrictEqual(
     sessions.calls.stopped.map((s) => s.sid),
     ["s1", "s2"], // s1 replaced in the provably-gone step above, s2 in this disconnect

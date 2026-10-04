@@ -21,6 +21,36 @@ const SUPERVISOR_BASE = "http://127.0.0.1:8890";
 let DEFAULT_BASE = SUPERVISOR_BASE; // this machine's session base, once resolved
 let API_BASE = null; // resolved in resolveApiBase() before the app starts
 
+// What does the host hold for THIS window right now — its session URL, or nothing?
+//
+// This is the ONE ask, and every reader of this window's session goes through it
+// (resolveApiBase below, js/backend-lifecycle.js switchBackendResolved /
+// tryDegradeToSshTools / reconciledBackendUrl), so the rules that belong to asking
+// exist once instead of once per caller:
+//
+//   * the exit's note is read BEFORE the ask. A window that left an outage
+//     (js/conn-lost.js connLostQuit) claims nothing on the boot its reload opens:
+//     the ask is answered from what the host still holds FOR THIS WINDOW
+//     (claimWindowBackend), so a teardown that has not finished is still holding
+//     the very session the user just left — this is what refuses to be handed it;
+//   * the supervisor's lifecycle port is refused here as everywhere: it is a
+//     SENTINEL for "no session yet", never a URL to talk to;
+//   * null is an ANSWER, not a failure — the host looked and this window has no
+//     session (no tunnel on it, and no local one either). Callers stay where they
+//     are; the real URL, if one is coming, arrives via backend:base-changed.
+async function hostSessionUrl() {
+  if (connLostExitPending()) return null;
+  if (!(window.clutchApi && window.clutchApi.baseUrl)) return null;
+  try {
+    const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
+    const clean = b ? String(b).replace(/\/+$/, "") : "";
+    if (clean && clean !== SUPERVISOR_BASE) return clean;
+  } catch {
+    /* preload unavailable — plain-browser debugging */
+  }
+  return null;
+}
+
 async function resolveApiBase() {
   // The window before this one left (conn-lost Cancel, js/conn-lost.js): it tore its
   // tunnel down and reloaded, and this is the ask that reload could still win by a
@@ -34,22 +64,18 @@ async function resolveApiBase() {
     await connLostExitBootTeardown();
     return null; // no session claimed: js/boot.js sees null and dials nothing
   }
-  if (window.clutchApi && window.clutchApi.baseUrl) {
-    // null/8890 = session not claimed yet (supervisor mid-spawn); retry
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const b = await window.clutchApi.baseUrl(); // IPC: this window's session port
-        const clean = b ? String(b).replace(/\/+$/, "") : "";
-        if (clean && clean !== SUPERVISOR_BASE) {
-          API_BASE = clean;
-          DEFAULT_BASE = clean;
-          return clean;
-        }
-      } catch {
-        /* preload unavailable — plain-browser debugging */
-      }
-      await new Promise((r) => setTimeout(r, 800));
+  // no preload at all (plain-browser debugging): there is nothing to ask, so there
+  // is nothing to wait for
+  if (!(window.clutchApi && window.clutchApi.baseUrl)) return API_BASE; // null
+  // null = session not claimed yet (supervisor mid-spawn); retry
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const url = await hostSessionUrl();
+    if (url) {
+      API_BASE = url;
+      DEFAULT_BASE = url;
+      return url;
     }
+    await new Promise((r) => setTimeout(r, 800));
   }
   // Still unresolved: leave null. 8890 is the supervisor's port (no session
   // API); the main process announces the real URL via backend:base-changed.

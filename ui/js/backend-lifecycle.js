@@ -33,20 +33,24 @@ function switchBackend(url) {
   // cannot slip the badge from running to idle without a word.
   if (busy && clean !== API_BASE) sseRunAtRisk = true;
   API_BASE = clean;
-  localStorage.setItem("clutch_api_url", API_BASE);
+  // sessionStorage, not localStorage: an API URL names THIS window's session, and
+  // localStorage is shared by every window in the process (one Electron instance,
+  // one profile) — a global key here made one window's base the next window's
+  // remembered value. It survives a reload with the page, which is all it is for.
+  sessionStorage.setItem("clutch_api_url", API_BASE);
   reconnectSSE();
   return true;
 }
 
 // Ask the host (main process / Android bridge) for THIS window's session URL
-// and adopt it. null means "no session": there is no second route to guess at,
-// so the window stays on "not running" instead of being pointed at a local port
-// that cannot serve it — the host announces a real URL when it has one
-// (backend:base-changed).
+// and adopt it. The ask is app.js hostSessionUrl() and not baseUrl() directly:
+// that is where the exit's note is read before the ask (a boot after the conn-lost
+// Cancel claims nothing) and where the supervisor sentinel is refused. null means
+// "no session": there is no second route to guess at, so the window stays on
+// "not running" instead of being pointed at a local port that cannot serve it —
+// the host announces a real URL when it has one (backend:base-changed).
 async function switchBackendResolved() {
-  if (!window.clutchApi) return false;
-  const url = await window.clutchApi.baseUrl();
-  if (!switchBackend(url)) return false;
+  if (!switchBackend(await hostSessionUrl())) return false;
   await reapplyDegradeIfNeeded();
   return true;
 }
@@ -88,8 +92,8 @@ async function tryDegradeToSshTools() {
   // degradable only while the tunnel is alive (a dead tunnel has no bridge)
   if (!s.active || !s.execBridge) return false;
   // resolve the current backend first: the main process may have fallen back
-  // to a fresh local session
-  const url = await window.clutchApi.baseUrl();
+  // to a fresh local session (the one ask — see app.js hostSessionUrl)
+  const url = await hostSessionUrl();
   if (!url) return "not running";
   try {
     await apiFetch("/api/backend", {
@@ -132,11 +136,11 @@ async function reconciledBackendUrl() {
   // guard only refuses the claim (js/fs-browser.js reaches here without a boot too).
   if (connLostExitPending()) return null;
   const s = await window.clutchTunnel.status();
-  const override = localStorage.getItem("clutch_api_url");
+  const override = sessionStorage.getItem("clutch_api_url");
   const flag = localStorage.getItem("clutch_ssh_connected");
   if (s.active) {
     // live tunnel: the main process owns this window's session URL — ask it
-    const target = await window.clutchApi.baseUrl();
+    const target = await hostSessionUrl();
     if (target && override !== target) {
       localStorage.setItem("clutch_ssh_connected", "1");
       return target;
@@ -172,7 +176,7 @@ function dropStaleBackend() {
   // a base move, and it must not end in a silent idle either
   if (busy) sseRunAtRisk = true;
   API_BASE = null;
-  localStorage.removeItem("clutch_api_url");
+  sessionStorage.removeItem("clutch_api_url");
   reconnectSSE(); // closes the dead stream; connectSSE bails on a null base
 }
 
@@ -180,13 +184,24 @@ function dropStaleBackend() {
 // point the window at a local port (on the phone there is no local backend to
 // point at — N4 — so that "fallback" could only produce "Failed to fetch" while
 // the picker claimed 127.0.0.1:8890, a port that answers no API) nor a toast that
-// dismisses itself: this window has no session, and the ONLY door back is the
-// dialog ui/js/conn-lost.js raises — it re-attempts this very host, by name, so
-// the user never has to introduce an old host as a new one.
+// dismisses itself: a window that lost its session has no session, and the ONLY
+// door back is the dialog ui/js/conn-lost.js raises — it re-attempts this very
+// host, by name, so the user never has to introduce an old host as a new one.
+//
+// But the hop is ONE resource for the whole process while a session belongs to the
+// window that claimed it, and the end of the hop is announced to every window (they
+// all have to drop what it implied). Only the windows the hop actually owned lost a
+// session with it, and the shells say so per window (`{ lost }`, ui/main.js): a
+// window that was on its own local session hears the news and keeps its session,
+// its stream and its work. Raising the reconnect dialog in THAT window — and
+// re-dialling the host another window was on — was the innocent-window bug.
 if (window.clutchTunnel) {
-  window.clutchTunnel.onEnd(() => {
+  window.clutchTunnel.onEnd((info) => {
     // the tunnel (and its exec bridge) is gone: any degrade mode dies with it
     localStorage.removeItem("clutch_degrade");
+    // the host's verdict for THIS window: false = its session was never on the
+    // hop, so there is no lost session here to announce
+    if (info && info.lost === false) return;
     // no flag = the user's own disconnect (the picker's Cancel/Disconnect):
     // they left the remote on purpose, so there is no lost session to announce
     if (!localStorage.getItem("clutch_ssh_connected")) return;

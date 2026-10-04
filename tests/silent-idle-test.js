@@ -108,6 +108,15 @@ global.localStorage = {
   setItem: (k, v) => store.set(k, String(v)),
   removeItem: (k) => store.delete(k),
 };
+// the session URL is per window (js/backend-lifecycle.js): switchBackend and
+// dropStaleBackend both write it here, and neither may reach for a storage the
+// page did not give it
+const session = new Map();
+global.sessionStorage = {
+  getItem: (k) => (session.has(k) ? session.get(k) : null),
+  setItem: (k, v) => session.set(k, String(v)),
+  removeItem: (k) => session.delete(k),
+};
 global.reconnectSSE = () => {};
 global.notice = (m) => notices.push(m);
 global.setStatus = (s) => {

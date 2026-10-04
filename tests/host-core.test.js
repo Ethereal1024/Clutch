@@ -284,7 +284,8 @@ async function main() {
     });
     const w = fakeWin(12);
     const first = await core.ensureWindowBackend(w);
-    assert.strictEqual(await core.releaseTunnelBackends(), 1, "the end drops the window's forward");
+    assert.deepStrictEqual(await core.releaseTunnelBackends(), [12],
+      "the end drops the window's forward, and names the window it dropped");
     assert.strictEqual(closedForwards, 1, "and the forward is closed exactly once: a detach is idempotent");
     assert.strictEqual(core.backendCount(), 1, "the CLAIM survives the hop: it names the far-side process, not the dead forward");
     assert.deepStrictEqual(sessions.calls.stopped, [],
@@ -331,10 +332,53 @@ async function main() {
     const { core, state } = makeCore();
     const w = fakeWin(14);
     const local = await core.ensureWindowBackend(w);
-    assert.strictEqual(await core.releaseTunnelBackends(), 0, "nothing tunnel-shaped to drop");
+    assert.deepStrictEqual(await core.releaseTunnelBackends(), [], "nothing tunnel-shaped to drop");
     assert.strictEqual(core.backendCount(), 1, "the local session is still this window's backend");
     assert.strictEqual(await core.ensureWindowBackend(w), local, "and it is still the same URL");
     assert.strictEqual(state.localStarts.length, 1);
+  }
+
+  // 14b. the list is a per-window verdict, not a count: the hop's end names the
+  //      windows it owned and no others. That is what the shells turn into
+  //      `{ lost }` for each renderer (ui/main.js `tunnel:ended`), and it is the
+  //      whole difference between "your session is gone" and "a hop you are not
+  //      on went away" — raising the reconnect dialog (and re-dialling a stranger's
+  //      host) in a window that was working fine is the reported bug.
+  {
+    const tunnel = { active: false, url: null };
+    const { core } = makeCore({ tunnel });
+    const mine = fakeWin(21);
+    const theirs = fakeWin(22);
+    const localUrl = await core.ensureWindowBackend(mine); // this machine's own session
+    tunnel.active = true;
+    tunnel.url = "http://127.0.0.1:8891";
+    await core.ensureWindowBackend(theirs); // and this window went over the hop
+    assert.strictEqual(core.backendCount(), 2, "two windows, two sessions");
+    assert.deepStrictEqual(await core.releaseTunnelBackends(), [22],
+      "the hop names the window it owned — the local one is not in the list");
+    assert.strictEqual(core.backendCount(), 2, "and that window's claim outlives its forward");
+    assert.strictEqual(core.backendKind(mine.id), "local",
+      "the untouched window is still on its own session, unharmed by a hop it never used");
+    assert.strictEqual(localUrl, "http://127.0.0.1:40001",
+      "and that session is this machine's own, never the hop's forward");
+  }
+
+  // 14c. only the LAST window on the tunnel may stop it (anyTunnelWindow, the
+  //      `session:release` rule in ui/main.js): releasing one window's claim must
+  //      leave the hop up for the windows still on it
+  {
+    const { core } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
+    const a = fakeWin(31);
+    const b = fakeWin(32);
+    await core.ensureWindowBackend(a);
+    await core.ensureWindowBackend(b);
+    assert.strictEqual(core.anyTunnelWindow(), true, "two windows are on the hop");
+    await core.releaseWindowBackend(a.id);
+    assert.strictEqual(core.anyTunnelWindow(), true,
+      "one window left, so the tunnel is still somebody's: it must not be stopped");
+    assert.strictEqual(core.backendKind(b.id), "tunnel", "and the other window's claim is untouched");
+    await core.releaseWindowBackend(b.id);
+    assert.strictEqual(core.anyTunnelWindow(), false, "nobody is left on it: now the tunnel may go");
   }
 
   // 15. heartbeat failure and the session is PROVABLY gone: only then is it

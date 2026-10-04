@@ -49,6 +49,14 @@ global.localStorage = {
   setItem: (k, v) => store.set(k, String(v)),
   removeItem: (k) => store.delete(k),
 };
+// the session URL is THIS window's (js/backend-lifecycle.js): localStorage is
+// shared by every window in the process, so it must not be written there
+const session = new Map();
+global.sessionStorage = {
+  getItem: (k) => (session.has(k) ? session.get(k) : null),
+  setItem: (k, v) => session.set(k, String(v)),
+  removeItem: (k) => session.delete(k),
+};
 let reconnects = 0;
 global.reconnectSSE = () => {
   reconnects++;
@@ -59,7 +67,18 @@ global.reapplyDegradeIfNeeded = async () => {
 };
 global.window = {};
 
-for (const name of ["switchBackend", "switchBackendResolved", "dropStaleBackend"]) {
+// the one ask (app.js hostSessionUrl) and the two stubs it reaches: switchBackendResolved
+// is driven below, and it must go through that door — not around it
+global.connLostExitPending = () => false;
+let asked = 0;
+global.window.clutchApi = {
+  baseUrl: async () => {
+    asked++;
+    return "http://127.0.0.1:31003";
+  },
+};
+
+for (const name of ["switchBackend", "switchBackendResolved", "dropStaleBackend", "hostSessionUrl"]) {
   (0, eval)(fnBody(name));
 }
 
@@ -67,7 +86,7 @@ check(global.switchBackend("http://127.0.0.1:8890") === false,
   "the supervisor's lifecycle port is refused as a base");
 check(global.API_BASE === "http://127.0.0.1:31001",
   "a refused URL leaves the live session base untouched");
-check(store.get("clutch_api_url") !== "http://127.0.0.1:8890",
+check(session.get("clutch_api_url") !== "http://127.0.0.1:8890",
   "and it is not persisted as this window's backend");
 check(reconnects === 0, "no stream is opened against the lifecycle port");
 
@@ -78,13 +97,19 @@ check(global.switchBackend("http://127.0.0.1:31002/") === true,
   "a real session URL still switches (trailing slash trimmed)");
 check(global.API_BASE === "http://127.0.0.1:31002" && reconnects === 1,
   "the live stream is re-scoped to it");
+check(session.get("clutch_api_url") === "http://127.0.0.1:31002" && store.get("clutch_api_url") === undefined,
+  "and the URL is remembered for THIS window's page life, never in the shared storage");
 
 // dropStaleBackend: the dead forwarded port stops being talked to
-store.set("clutch_api_url", "http://127.0.0.1:31002");
+session.set("clutch_api_url", "http://127.0.0.1:31002");
+store.set("clutch_api_url", "http://127.0.0.1:31002"); // a stale global leftover: not this window's
 global.dropStaleBackend();
 check(global.API_BASE === null, "a dropped remote leaves no base behind");
-check(store.get("clutch_api_url") === undefined, "the stale URL is forgotten");
+check(session.get("clutch_api_url") === undefined, "the stale URL is forgotten");
+check(store.get("clutch_api_url") === "http://127.0.0.1:31002",
+  "and the shared storage is not this window's to write: another window's value is left alone");
 check(reconnects === 2, "the dead stream is closed (connect bails on a null base)");
+store.delete("clutch_api_url");
 
 // a move under a live run is remembered, so the replaced session's idle frame
 // cannot quietly repaint the badge (the whole journey is in silent-idle-test.js)
@@ -139,6 +164,25 @@ function fakeSessions() {
 }
 
 async function main() {
+  // ---- 1b. the one ask: switchBackendResolved goes through app.js hostSessionUrl,
+  // so the sentinel refusal and the read-the-note-before-you-ask rule exist once
+  // instead of once per caller (the exit's note is what a re-claim must not win)
+  global.API_BASE = "http://127.0.0.1:31001";
+  asked = 0;
+  check(await global.switchBackendResolved() === true && asked === 1 && global.API_BASE === "http://127.0.0.1:31003",
+    "the host's answer is adopted through the one ask");
+  global.connLostExitPending = () => true; // the conn-lost exit's note is up
+  asked = 0;
+  check(await global.switchBackendResolved() === false && asked === 0 && global.API_BASE === "http://127.0.0.1:31003",
+    "and a boot behind that exit claims nothing: the note is read BEFORE the host is asked");
+  global.connLostExitPending = () => false;
+  global.window.clutchApi.baseUrl = async () => {
+    asked++;
+    return "http://127.0.0.1:8890"; // the lifecycle port: an answer that is not a session
+  };
+  check(await global.switchBackendResolved() === false && global.API_BASE === "http://127.0.0.1:31003",
+    "the sentinel is refused at the ask itself, so no caller can adopt it");
+
   // tunnel down: no session, and nothing to invent -> null (renderer: "not running")
   const down = createAndroidHost({
     tunnel: fakeTunnel({ active: false, url: null }),

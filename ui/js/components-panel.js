@@ -63,7 +63,9 @@ function plugTargetName(target) {
   const host = localStorage.getItem("clutch_ssh_host");
   const user = localStorage.getItem("clutch_ssh_user");
   const port = localStorage.getItem("clutch_ssh_port");
-  const connected = localStorage.getItem("clutch_api_url") && localStorage.getItem("clutch_ssh_connected");
+  // per-window, like every reader of the session URL: localStorage is shared by
+  // every window in the process (js/backend-lifecycle.js)
+  const connected = sessionStorage.getItem("clutch_api_url") && localStorage.getItem("clutch_ssh_connected");
   const label = host ? `${user ? user + "@" : ""}${host}${port ? ":" + port : ""}` : "the tunneled machine";
   return `SSH ${label}${connected ? " ✓" : ""}`;
 }

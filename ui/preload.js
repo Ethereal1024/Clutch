@@ -4,6 +4,10 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("clutchApi", {
   baseUrl: () => ipcRenderer.invoke("api:base"),
+  // this window leaving its session, named by the window itself: a renderer can
+  // only ever release what it holds (the main process reads e.sender), so the
+  // dialog's Cancel cannot take another window's session down with it
+  releaseSession: () => ipcRenderer.invoke("session:release"),
   onBaseChanged: (cb) => {
     const wrap = (_e, url) => cb(url);
     ipcRenderer.on("backend:base-changed", wrap);

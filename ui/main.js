@@ -202,20 +202,40 @@ if (!app.requestSingleInstanceLock()) {
 
     ipcMain.handle("tunnel:status", async () => tunnel.tunnelStatus());
     ipcMain.handle("tunnel:disconnect", async () => {
-      // stop window backends first, while the tunnel/bridge is still alive
+      // THE MACHINE-WIDE act: the picker's own Disconnect, i.e. the user leaving
+      // this machine. Every window's claim goes, because every window was on the
+      // tunnel the user just dropped.
       await hostCore.releaseAllBackends();
       await tunnel.stopTunnel();
       return { ok: true };
     });
 
-    // tell every renderer the moment a tunnel dies, so it can drop a stale API URL
+    // ONE window leaving its session (the conn-lost dialog's Cancel): release
+    // what THIS renderer holds — the main process knows which window asked, so a
+    // renderer cannot name another one — and stop the tunnel only when nobody is
+    // left on it. Stopping it unconditionally is what made one window's Cancel
+    // tear the other windows' claims down with it.
+    ipcMain.handle("session:release", async (e) => {
+      await hostCore.releaseWindowBackend(e.sender.id);
+      if (!hostCore.anyTunnelWindow()) await tunnel.stopTunnel();
+      return { ok: true };
+    });
+
+    // tell every renderer the moment a tunnel dies, so it can drop a stale API
+    // URL — each one told for ITSELF: `lost` is this window's answer, computed
+    // from the windows the hop actually owned. A window on its own local session
+    // hears about the hop (it still drops what the hop implied, e.g. degrade
+    // mode), but it is not told it lost a session it never had: that answer is
+    // what used to raise the reconnect dialog — and re-dial a stranger's host —
+    // in windows that were working perfectly well.
     tunnel.onTunnelEnd(async () => {
       // the session forwards this window's URL named died with the tunnel:
       // drop them first, so a re-claim that races this notification opens a
       // FRESH forward instead of handing the window a port nobody serves
-      await hostCore.releaseTunnelBackends();
+      const affected = await hostCore.releaseTunnelBackends();
+      const lost = new Set(affected);
       for (const w of BrowserWindow.getAllWindows()) {
-        if (!w.isDestroyed()) w.webContents.send("tunnel:ended");
+        if (!w.isDestroyed()) w.webContents.send("tunnel:ended", { lost: lost.has(w.webContents.id) });
       }
     });
 

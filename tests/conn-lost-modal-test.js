@@ -152,6 +152,10 @@ global.sessionStorage = {
   removeItem: (k) => session.delete(k),
 };
 
+// app.js's own sentinel (the supervisor's lifecycle port — never a session base):
+// the one ask is driven here, so the constant it refuses has to exist
+global.SUPERVISOR_BASE = "http://127.0.0.1:8890";
+
 let clock = 1000000;
 Date.now = () => clock;
 let timers = [];
@@ -229,14 +233,19 @@ global.closeModal = (el) => {
 };
 global.connBusy = false;
 global.IS_ANDROID = false;
-// the window itself: the user's exit tears the main process's tunnel down and
-// reloads the page (connLostQuit), and both halves are counted here
+// the window itself: the user's exit releases THIS window's session in the main
+// process (or the Android host) and reloads the page (connLostQuit), and both
+// halves are counted here. The verb asks by no name at all — the host takes the
+// window from the IPC's own sender (⑤), which is what keeps one window's Cancel
+// from being another window's shutdown.
 let reloads = 0;
 let disconnects = 0;
 global.window = {
   location: { reload: () => { reloads++; } },
+  clutchApi: {
+    releaseSession: async () => { disconnects++; },
+  },
   clutchTunnel: {
-    disconnect: async () => { disconnects++; },
     status: async () => ({ active: false }),
   },
 };
@@ -279,7 +288,7 @@ for (const name of [
   "connLostAttempt", "connLostRecover", "connLostAskHost", "connLostRemoteIntent",
   "connLostTunnelUp", "connLostRedial", "connLostAwaitAnswer", "connLostQuit",
   "connLostExitMark", "connLostExitClear", "connLostExitPending",
-  "connLostExitBootTeardown",
+  "connLostExitBootTeardown", "boundedDisconnect",
 ]) {
   (0, eval)(fnBody(name));
 }
@@ -590,13 +599,19 @@ async function main() {
   "and it asks the host for nothing: an adopted URL would arrive as a new base and raise this very dialog straight back up");
 
   const quitFn = connFn("connLostQuit");
-  check(!/window\.clutchTunnel/.test(connFn("connLostCancel")) &&
-    /window\.clutchTunnel && window\.clutchTunnel\.disconnect/.test(quitFn),
-  "the teardown has exactly one owner, and it is the exit: Cancel ends the outage in place, connLostQuit is what leaves");
-  check(quitFn.indexOf("clutchTunnel.disconnect") < quitFn.indexOf("location.reload()"),
-  "and the exit tears the tunnel down BEFORE it reloads: a page that reloaded over a live tunnel would be handed its old session back (claimWindowBackend) and raise this dialog again within seconds");
+  const byeFn = connFn("boundedDisconnect");
+  check(!/window\.clutchApi|window\.clutchTunnel/.test(connFn("connLostCancel")) &&
+    /boundedDisconnect\(CONN_LOST_EXIT_MS\)/.test(quitFn),
+  "the teardown has exactly one owner, and it is the exit: Cancel ends the outage in place and reaches for no host itself, connLostQuit is what leaves");
+  check(quitFn.indexOf("boundedDisconnect(CONN_LOST_EXIT_MS)") < quitFn.indexOf("location.reload()"),
+  "and the exit tears this window's session down BEFORE it reloads: a page that reloaded over a live claim would be handed its old session back (claimWindowBackend) and raise this dialog again within seconds");
+  check(!/clutchTunnel\.disconnect/.test(CONN_LOST),
+  "and it tears down no MORE than that: the hop is ONE resource for the whole process while the claim is this window's (⑤), so the exit releases its own claim and the host stops the tunnel only when the last window on it has gone");
+  check(/window\.clutchApi\.releaseSession\(\)/.test(byeFn) && !/releaseSession\(\s*[^)]/.test(byeFn),
+  "the verb is that window's session and names no window: the host takes the caller from the IPC's own sender, so no renderer can release another window's claim");
   check(/const CONN_LOST_EXIT_MS = 2000;/.test(CONN_LOST) &&
-    /Promise\.race\(/.test(quitFn) && /CONN_LOST_EXIT_MS/.test(quitFn),
+    /Promise\.race\(/.test(byeFn) && /setTimeout\(r, ms\)/.test(byeFn) &&
+    /CONN_LOST_EXIT_MS/.test(quitFn) && /CONN_LOST_EXIT_BOOT_MS/.test(connFn("connLostExitBootTeardown")),
   "the wait for it is bounded: a teardown that never answers is not a reason the user cannot leave");
   check(/closeModal\(connLostModal\);\n  connLostQuit\(\);/.test(connFn("connLostCancel")),
   "and leaving is the LAST thing Cancel does: nothing of this dialog is still painting while the page goes");
@@ -728,7 +743,7 @@ async function main() {
   // it asks anything at all.
   const quitFn2 = connFn("connLostQuit");
   check(/^async function connLostQuit\(\) \{\n  connLostExitMark\(\);/m.test(CONN_LOST) &&
-    quitFn2.indexOf("connLostExitMark()") < quitFn2.indexOf("clutchTunnel.disconnect"),
+    quitFn2.indexOf("connLostExitMark()") < quitFn2.indexOf("boundedDisconnect("),
   "the exit writes its note FIRST: the reload must never outrun the word it leaves behind");
   const markFn = connFn("connLostExitMark");
   check(/sessionStorage\.setItem\(CONN_LOST_EXIT_KEY, "1"\)/.test(markFn) &&
@@ -738,16 +753,26 @@ async function main() {
   "and the key is the one this runner pins");
 
   // Both doors a boot can take a session through, and both read the note BEFORE they
-  // ask: baseUrl() is the ask (it is answered from what the host holds for this
-  // window), so a read after it would already be too late.
+  // ask: the ask is app.js hostSessionUrl() — the ONE call site of the host's own
+  // answer, and the one that carries this guard — so a read after it would already
+  // be too late.
   const resolveFn = fnBody("resolveApiBase");
   check(/connLostExitPending\(\)\) \{\n    await connLostExitBootTeardown\(\);\n    return null;/.test(resolveFn),
   "the boot's own claim (app.js) reads the note, finishes the teardown the exit began, and claims nothing");
-  check(resolveFn.indexOf("connLostExitPending()") < resolveFn.indexOf("window.clutchApi.baseUrl()"),
+  check(resolveFn.indexOf("connLostExitPending()") < resolveFn.indexOf("hostSessionUrl()"),
   "and it reads before it asks — the ask is what hands the old session back");
+  const hostUrlFn = fnBody("hostSessionUrl");
+  check(/window\.clutchApi\.baseUrl\(\)/.test(hostUrlFn) &&
+    /connLostExitPending\(\)\) return null;/.test(hostUrlFn) &&
+    hostUrlFn.indexOf("connLostExitPending()") < hostUrlFn.indexOf("window.clutchApi.baseUrl()"),
+  "the ask itself reads the note before it asks: one door, so no caller can reach the host's answer without passing that guard");
+  check((APP.match(/window\.clutchApi\.baseUrl\(\)/g) || []).length === 1 &&
+    !/window\.clutchApi\.baseUrl\(\)/.test(resolveFn) &&
+    !/window\.clutchApi\.baseUrl\(\)/.test(fnBody("reconciledBackendUrl")),
+  "and it is the ONLY call site of the host's session ask in the whole renderer: the boot's claim and the tunnel's claim both go through the one that knows the note and the supervisor's sentinel");
   const reconciledFn = fnBody("reconciledBackendUrl");
   check(/connLostExitPending\(\)\) return null;/.test(reconciledFn) &&
-    reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("window.clutchApi.baseUrl()"),
+    reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("hostSessionUrl()"),
   "the second claim entry (a tunnel that still answers) refuses for the same note, also before it asks");
   check(/if \(!API_BASE\) return;/.test(fnBody("connectSSE")),
   "and the stream the boot opens next refuses to open on nothing: no null/api/events ever leaves the window");
@@ -773,10 +798,13 @@ async function main() {
 
   // the page that follows the exit asks the host for NOTHING — and finishes the half
   // of the teardown a reload can beat
+  (0, eval)(fnBody("hostSessionUrl"));
   (0, eval)(fnBody("resolveApiBase"));
   (0, eval)(fnBody("reconciledBackendUrl"));
   let asks = 0;
-  global.window.clutchApi = { baseUrl: async () => { asks++; return "http://127.0.0.1:40555"; } };
+  // the SAME object the release verb lives on: a boot that asks the host for a
+  // session must not lose the teardown's own door (one stub, two facts)
+  global.window.clutchApi.baseUrl = async () => { asks++; return "http://127.0.0.1:40555"; };
   global.window.clutchTunnel.status = async () => ({ active: true }); // it still answers: the live-tunnel entry is reached
   global.connLostExitToreDown = false; // a fresh page life
   const disconnectsBefore3 = disconnects;
@@ -785,16 +813,24 @@ async function main() {
   "a boot with the note behind it claims nothing: the ask that would hand back the old session is never made");
   check((await reconciledBackendUrl()) === null && asks === 0,
   "the second entry too — the tunnel still answers, and it still claims nothing");
+  // ...and the guard lives in the ask itself, not in the callers: driven directly,
+  // it is the note (and nothing else) that decides whether the host is asked at all
+  check((await hostSessionUrl()) === null && asks === 0,
+  "the one ask refuses while the note is up: a caller cannot slip past the guard by asking it themselves");
+  session.delete(CONN_LOST_EXIT_KEY); // spent: the user's own Connect
+  check((await hostSessionUrl()) === "http://127.0.0.1:40555" && asks === 1,
+  "and without it the ask IS the host's answer: the session a boot is allowed to claim comes from here");
+  connLostExitMark(); // back to the boot that follows the exit
   check(disconnects === disconnectsBefore3 + 1,
   "and the successor finishes the teardown the exit began: the claim the reload beat is released, once");
   await connLostExitBootTeardown();
   check(disconnects === disconnectsBefore3 + 1,
   "asking twice is asking once: the host releases a claim it no longer holds");
-  check(/Promise\.race\(/.test(connFn("connLostExitBootTeardown")) &&
-    /CONN_LOST_EXIT_BOOT_MS/.test(connFn("connLostExitBootTeardown")) &&
+  check(/Promise\.race\(/.test(connFn("boundedDisconnect")) &&
+    /boundedDisconnect\(CONN_LOST_EXIT_BOOT_MS\)/.test(connFn("connLostExitBootTeardown")) &&
     /const CONN_LOST_EXIT_BOOT_MS = 1500;/.test(CONN_LOST) &&
     timers.some((t) => t.ms === CONN_LOST_EXIT_BOOT_MS),
-  "and the successor's wait is bounded too: a claim this window refuses is never a reason a boot cannot finish");
+  "and the successor's wait is bounded too (the same one teardown, a shorter bound): a claim this window refuses is never a reason a boot cannot finish");
   global.window.clutchTunnel.status = async () => ({ active: false });
 
   // ...and the user's own Connect is what un-holds the next boot

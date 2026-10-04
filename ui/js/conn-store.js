@@ -86,7 +86,10 @@ function setConnBusy(b) {
 }
 
 function renderConnSelector() {
-  const override = localStorage.getItem("clutch_api_url");
+  // sessionStorage, like every reader of it (js/backend-lifecycle.js): the URL
+  // names THIS window's session, and localStorage is shared by every window in the
+  // process — a global key here made one window's URL the next window's memory
+  const override = sessionStorage.getItem("clutch_api_url");
   // a session, not a memory: the standing intent survives a restart (that is what
   // the phone's old auto-reconnect spent), so the ✓ and the selection follow the
   // backend this window is actually on. With no session the picker still opens ON

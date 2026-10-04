@@ -86,6 +86,15 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
           return null;
         }
       },
+      // the window leaving its session (the conn-lost dialog's Cancel). One
+      // window, so there is no one else to spare — but the same rule as the
+      // desktop shell: release the claim first, stop the tunnel only when no
+      // window is left on it (ui/main.js `session:release`, one for one).
+      releaseSession: async () => {
+        await hostCore.releaseWindowBackend(window.id);
+        if (!hostCore.anyTunnelWindow()) await tunnel.stopTunnel();
+        return { ok: true };
+      },
     },
     clutchSettings: {
       save: async (data) => {
@@ -118,10 +127,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
 
   // tell every renderer the moment a tunnel dies (drops its stale API URL) — and
   // drop the forwards that URL named first: they died with the tunnel, so a
-  // re-claim racing this broadcast must open a fresh one
+  // re-claim racing this broadcast must open a fresh one. `lost` is the same
+  // per-window answer the desktop shell sends (ui/main.js): here the app IS one
+  // window (N5), so it is "was that window's claim one of the hop's?".
   tunnel.onTunnelEnd(async () => {
-    await hostCore.releaseTunnelBackends();
-    bus.broadcast("tunnel:ended");
+    const affected = await hostCore.releaseTunnelBackends();
+    bus.broadcast("tunnel:ended", { lost: affected.includes(window.id) });
   });
 
   async function start() {
