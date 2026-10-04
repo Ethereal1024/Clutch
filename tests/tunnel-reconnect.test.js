@@ -45,6 +45,10 @@ const remote = {
   stopped: 0,
   started: 0,
   commands: [],
+  // how many times the far host was asked about its OWN port over the exec
+  // channel (one per heal round): the count is what says how many rounds the
+  // healer actually spent, instead of a race with the clock
+  selfAsks: 0,
   reset({ bound = false, serving = false, version = null, stubborn = false } = {}) {
     this.bound = bound;
     this.serving = serving;
@@ -53,6 +57,7 @@ const remote = {
     this.stopped = 0;
     this.started = 0;
     this.commands = [];
+    this.selfAsks = 0;
   },
 };
 
@@ -67,6 +72,7 @@ function fakeRemoteExec(cmd) {
     return Promise.resolve({ code: 0, stdout: "", stderr: "" });
   }
   if (cmd.includes("socket") && cmd.includes("connect")) {
+    remote.selfAsks++;
     return Promise.resolve({ code: 0, stdout: remote.bound ? "UP\n" : "DOWN\n", stderr: "" });
   }
   if (cmd.includes("/api/health")) {
@@ -321,6 +327,85 @@ async function main() {
     await new Promise((r) => far.close(r));
   }
 
+  // ---- 6b. one more tick before the verdict: a blip is not a teardown ----
+  //
+  // The healer's last resort ends the tunnel, and the renderer turns that into a
+  // dialog plus a whole reconnect. A round that never suspected the far host
+  // ("this client's own forward is dead") is asked once more first, one step of
+  // the ladder later (HEAL_RETRY_MS = the first step of conn-lost's backoff), so
+  // a phone that lost its radio for a moment gets its session back with nobody
+  // touching anything. The channel below is dead for the first attempts of round
+  // ONE and works afterwards — by CALL COUNT, never by wall clock, so the check
+  // cannot turn into a timing test.
+  {
+    const http = require("http");
+    const net = require("net");
+    const { state } = require("../ui/tunnel-core");
+    const { freePort } = require("../ui/tunnel-net");
+    const { healOnce, onTunnelEnd } = require("../ui/tunnel-lifecycle");
+
+    const far = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"ok": true, "in_flight": true}');
+    });
+    await new Promise((r) => far.listen(0, "127.0.0.1", r));
+    // The channel is dead until the far host has been asked about its own port
+    // TWICE — i.e. until round two — so this blip has a known shape instead of
+    // being a race with the clock. Round one therefore cannot recover, and with
+    // no second tick the only way out of this box would be a teardown.
+    let forwardedTo = null;
+    const flakyClient = {
+      end() {},
+      forwardOut(_src, _sport, _dst, dport, cb) {
+        forwardedTo = dport;
+        if (remote.selfAsks < 2) return cb(new Error("the channel is gone"));
+        const s = net.connect(far.address().port, "127.0.0.1");
+        s.once("connect", () => cb(null, s));
+        s.once("error", (e) => cb(e));
+      },
+    };
+
+    remote.reset({ bound: true, serving: true, version: VERSION }); // answers about itself
+    const port = await freePort();
+    state.sshClient = flakyClient;
+    state.localSrv = null;
+    state.lastProbe = probeFor();
+    state.lastStrategy = "pylibs";
+    state.currentUrl = `http://127.0.0.1:${port}`; // nothing bound: the stale forward
+    // a successful connect has cleared this by now (tunnel-connect.js), so the
+    // teardown this section forbids WOULD announce itself and `ends` means
+    // something: an unset flag would let it end silently and pass by accident
+    state.wasDisconnected = false;
+
+    let ends = 0;
+    const off = onTunnelEnd(() => ends++);
+    await healOnce();
+    off();
+
+    check(ends === 0, "a session that answers on the SECOND tick is healed, not announced as a teardown");
+    check(remote.selfAsks === 2, "the far host was asked about itself twice: one bad round is not a verdict");
+    check(
+      !remote.commands.some((c) => c.includes("pkill")),
+      "and a far host that never stopped serving was never stopped, restarted or pkilled"
+    );
+    const code = await new Promise((resolve) => {
+      http
+        .get(state.currentUrl + "/api/health", (r) => {
+          r.resume();
+          resolve(r.statusCode);
+        })
+        .on("error", () => resolve(0));
+    });
+    check(code === 200, "the rebound forward serves the window's URL again — which is the whole point of waiting");
+    check(forwardedTo === 8890, "…on the far supervisor's own port");
+
+    // the heal is not a teardown: unwind its listeners by hand
+    state.localSrv.close();
+    state.localSrv = null;
+    state.sshClient = null;
+    await new Promise((r) => far.close(r));
+  }
+
   // ---- 7. the paths a fake remote cannot reach, asserted on the source ----
   check(
     !/progress\("install"\)/.test(CONNECT_SRC),
@@ -358,6 +443,28 @@ async function main() {
     BOOTSTRAP_SRC.indexOf('progress("install")') < BOOTSTRAP_SRC.indexOf("ensurePyLibsTar(target)") &&
       BOOTSTRAP_SRC.indexOf('progress("install:fetch")') < BOOTSTRAP_SRC.indexOf("ensurePyLibsTar(target)"),
     "the tar is fetched only after the connect has announced an install, under its own stage"
+  );
+
+  // the healer's retry is the first step of the SAME ladder the dialog redials
+  // on (ui/js/conn-lost.js): two ends of a blinking link have to mean the same
+  // thing by "a first retry", and a hand-picked number here would drift
+  const CONN_LOST_SRC = fs.readFileSync(path.join(UI_DIR, "js", "conn-lost.js"), "utf8");
+  const step1 = Number(/const CONN_LOST_BACKOFF_MS = \[(\d+)/.exec(CONN_LOST_SRC)[1]);
+  const healStep = Number(/const HEAL_RETRY_MS = (\d+);/.exec(LIFECYCLE_SRC)[1]);
+  check(
+    healStep === step1 && healStep > 0,
+    `the healer asks again after the ladder's own first step (${healStep}ms)`
+  );
+  check(
+    /await new Promise\(\(r\) => setTimeout\(r, HEAL_RETRY_MS\)\)/.test(LIFECYCLE_SRC) &&
+      /round\.why && !round\.remoteTouched/.test(LIFECYCLE_SRC),
+    "and the one thing it will not repeat is a round that touched the far server"
+  );
+  const roundSrc = LIFECYCLE_SRC.split("async function healRound")[1].split("async function startHealing")[0];
+  check(
+    (roundSrc.match(/remoteTouched = true;/g) || []).length === 1 &&
+      roundSrc.indexOf("remoteTouched = true;") < roundSrc.indexOf("await restartRemoteServer()"),
+    "which the round marks at the restart and nowhere else: a restart ends runs, a rebound forward does not"
   );
 
   summary("tunnel-reconnect");

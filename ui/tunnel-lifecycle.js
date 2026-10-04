@@ -225,12 +225,49 @@ async function reopenForward() {
 // bare `setInterval` that rejection went nowhere: no teardown, no notification,
 // and the window kept the dead session URL right up to its next "Failed to
 // fetch". Whatever happens in here, the renderer is told.
+//
+// What it is NOT is a verdict on one bad round. A round that never suspected the
+// far host ("the forward is the dead thing", or the exec channel faltering under
+// a radio that just went away) is asked once more before anything is announced:
+// a blip that is over a second later must not cost the user a teardown, a dialog
+// and a whole reconnect. The wait is the FIRST step of the ladder the rest of the
+// client redials on (js/conn-lost.js CONN_LOST_BACKOFF_MS[0] = 1s, the LLM client,
+// the ssh hop), so the ends agree on what a first retry means. The second round
+// is the last: whatever it says, the renderer is told.
+const HEAL_RETRY_MS = 1000;
+
 async function healOnce() {
   if (!state.sshClient || !state.currentUrl) return;
+  let round = await healRound();
+  if (round.why && !round.remoteTouched) {
+    tunnelLog(`[heal] ${round.why}; one more tick in ${HEAL_RETRY_MS}ms`);
+    await new Promise((r) => setTimeout(r, HEAL_RETRY_MS));
+    // the wait may have outlived the tunnel (a teardown, or a fresh connect that
+    // took over): there is nothing left to heal and nothing to announce
+    if (!state.sshClient || !state.currentUrl) return;
+    round = await healRound();
+  }
+  if (!round.why) return;
+  tunnelLog("[heal] " + round.why + "; collecting diagnostics + tearing down");
+  await collectRemoteDiagnostics();
+  // notify: this teardown is not the renderer's own. stopTunnel nulls
+  // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
+  // currency guard and would never tell anyone: without the flag the
+  // renderer keeps a dead session URL and its Stop button posts into it.
+  await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
+}
+
+// One round of the question above, with its own verdict: `why` is null when the
+// session answers again through a forward that is up, and the sentence that says
+// what was wrong when it does not. `remoteTouched` says whether this round ran the
+// far server's OWN restart — the one move here that ends runs in flight, and
+// therefore the one that is not worth repeating on a hunch (see healOnce).
+async function healRound() {
   let why = null;
+  let remoteTouched = false;
   try {
     const up = await waitForServer(state.currentUrl + "/api/health", 3000);
-    if (up) return;
+    if (up) return { why: null, remoteTouched };
     tunnelLog("[heal] backend unreachable through the live tunnel");
     // the far host's own verdict about its port: DOWN (nobody), WEDGED (bound,
     // silent), SERVING (answers) or UNMEASURABLE (no way to look) — asked
@@ -244,7 +281,7 @@ async function healOnce() {
       const ok = await reopenForward();
       if (ok) {
         tunnelLog("[heal] forward rebound; backend recovered");
-        return;
+        return { why: null, remoteTouched };
       }
       // the hop can no longer reach a far side that keeps serving — end the
       // tunnel and let the re-connect re-claim the same remote sessions
@@ -252,23 +289,18 @@ async function healOnce() {
     } else {
       // DOWN (nothing is listening) or WEDGED (bound, not answering): the far
       // server itself is broken, and replacing it is the only way back
+      remoteTouched = true;
       const ok = await restartRemoteServer();
       if (ok) {
         tunnelLog("[heal] backend recovered");
-        return;
+        return { why: null, remoteTouched };
       }
       why = "the restart did not recover";
     }
   } catch (e) {
     why = "the tunnel could not be used (" + ((e && e.message) || e) + ")";
   }
-  tunnelLog("[heal] " + why + "; collecting diagnostics + tearing down");
-  await collectRemoteDiagnostics();
-  // notify: this teardown is not the renderer's own. stopTunnel nulls
-  // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
-  // currency guard and would never tell anyone: without the flag the
-  // renderer keeps a dead session URL and its Stop button posts into it.
-  await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
+  return { why, remoteTouched };
 }
 
 function startHealing() {
