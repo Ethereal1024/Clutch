@@ -91,12 +91,20 @@ async function connectTunnel({ host, user, port, password }, progress) {
       // The keepalive is this side's only witness that the far side is gone: a
       // phone's radio can be dropped without a FIN, so no 'end' ever arrives and
       // nothing else reports it. 30s x 3 meant up to two minutes of a window
-      // posting into a forward nobody served; 5s x 2 gives the same two missed
-      // pings of tolerance in ~10s — the window the remote's own supervisor uses
-      // to reap a session it stopped hearing from (agent/procmgr/supervise.py
-      // STALE_S = 10s), so both ends agree on what "gone" means.
-      keepaliveInterval: 5000,
-      keepaliveCountMax: 2,
+      // posting into a forward nobody served; 5s x 2 turned the other way and
+      // declared the hop dead before a phone that had only lost its radio for a
+      // moment could come back. 15s x 3 gives ~45s of tolerance — two missed
+      // pings, the same shape as before — which is long enough that a handover,
+      // a lift shaft or a backgrounded app is survivable and short enough that a
+      // window is not left talking into a dead forward.
+      //
+      // This is deliberately NOT the far host's own window any more: the session
+      // there outlives every hop (agent/procmgr/supervise.py STALE_S = 300s), so
+      // a hop that dies is a CLAIM to re-bind, not a session to replace
+      // (ui/host-core.js rebindTunnelBackend). Both ends can hold their own
+      // number without having to agree.
+      keepaliveInterval: 15000,
+      keepaliveCountMax: 3,
       agent: process.env.SSH_AUTH_SOCK,
       debug: (m) => tunnelLog("ssh2: " + m),
     };
