@@ -27,6 +27,7 @@ function useUI(name) {
 // shared with the desktop shell — these are THE implementations, not copies
 const { createHostCore } = useUI("host-core.js");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings } = useUI("settings-mirror.js");
+const { createComponentsView } = useUI("components-view.js");
 
 // No base placeholder exists. The desktop's 127.0.0.1:8890 is the supervisor's
 // LIFECYCLE port (it answers /api/session/*, never a window API), and this host
@@ -62,6 +63,21 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     startLocalSession: null, // N4: no local mode; the renderer shows "not running"
     log,
     sessions,
+  });
+
+  // The plugin tab's backend — the same object the desktop shell builds
+  // (ui/main.js:55), fed this host's answers. N4 decides which machine a request
+  // is about: with no local supervisor, `supervisorBase()` is null, so a window
+  // that holds no session has no machine to be about and the view says so in its
+  // own words rather than the page dying on a missing channel. A window whose
+  // session sits on the tunnel targets the far supervisor's URL — components are
+  // installed on the machine that will RUN them, so "install onto the phone" is
+  // never the answer when the tools run on the far side.
+  const componentsView = createComponentsView({
+    supervisorBase: () => null, // N4: no local supervisor on Android
+    tunnelStatus: () => tunnel.tunnelStatus(),
+    windowKind: (w) => hostCore.backendKind(w.id),
+    log,
   });
 
   // N5's minimal window mapping: the whole app is ONE window. host-core sends
@@ -122,6 +138,29 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
         await tunnel.stopTunnel();
         return { ok: true };
       },
+    },
+    // the plugin tab, one for one with the desktop's `components:*` ipcMain
+    // handlers (ui/main.js:173-197). The bridge route names no window — this app
+    // IS one window (N5) — so every verb is asked about THIS window's session,
+    // which is what makes "install onto the machine I am working on" resolve to
+    // the tunnel's far side.
+    clutchComponents: {
+      list: async () => componentsView.list(window),
+      market: async (opts) => componentsView.market(opts || {}),
+      // the reverse verbs, named the way the host names them: `versions` asks what
+      // one machine holds, `remove` asks it to let one go (the host may refuse —
+      // something is running it — and that arrives as the error inside the answer)
+      versions: async (name) => componentsView.versions(String(name || ""), window),
+      remove: async (name, opts) => componentsView.remove(String(name || ""), opts || {}, window),
+      // the switch: the state being ASKED FOR travels, not a verb translated
+      setDisabled: async (name, disabled) =>
+        componentsView.setDisabled(String(name || ""), Boolean(disabled), window),
+      install: async (name) =>
+        componentsView.install(String(name || ""), window, {
+          // one line at a time to the page that asked, on the channel the shim
+          // subscribes to; the window handle fans it out over the bridge's SSE
+          progress: (stage) => window.send("components:progress", stage),
+        }),
     },
   };
 

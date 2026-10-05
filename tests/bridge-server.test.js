@@ -83,6 +83,105 @@ function fakeSessions() {
   return self;
 }
 
+// ---- the target machine's supervisor face: the component endpoints ONLY ----
+// A real HTTP server, because ui/components.js reads a machine's components with
+// fetch, exactly the way it reads the machine on the far side of a tunnel; only
+// the answers are canned. So the loop the phone runs (shim -> bridge -> host ->
+// components-view -> HTTP) is the real one, with one fake at the far end.
+function fakeTargetSupervisor() {
+  // a name no dev checkout beside this repo can shadow: the market row has to be
+  // the release this test publishes, on every machine, not a local edit
+  const NAME = "clutch-probe";
+  const PIN = "b".repeat(64); // what the published manifest pins
+  const VERSION = "0.1.0+" + PIN.slice(0, 16); // what an install of it records
+  const HELD = "c".repeat(64); // other bytes of the same component, already there
+  const HELD_VERSION = "0.1.0+" + HELD.slice(0, 16);
+  const ARTIFACT = `${NAME}.tar.gz`;
+  const state = { calls: [], install: null };
+  const server = http.createServer((req, res) => {
+    state.calls.push(`${req.method} ${req.url}`);
+    const send = (status, obj) => {
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(obj));
+    };
+    // the release: a manifest naming an artifact for `any` platform, so the
+    // target machine is the one that would fetch the bytes (this client has none)
+    if (req.method === "GET" && req.url === "/clutch-component.json") {
+      return send(200, {
+        schema: 1,
+        name: NAME,
+        interface: "cli",
+        version: "0.1.0",
+        artifacts: { any: { asset: ARTIFACT, sha256: PIN } },
+      });
+    }
+    if (req.method === "GET" && req.url === "/api/components") {
+      return send(200, {
+        components: [
+          { name: NAME, version: HELD_VERSION, interface: "cli", digest: HELD, path: `/data/components/${NAME}` },
+        ],
+      });
+    }
+    if (req.method === "GET" && req.url.startsWith("/api/components/versions")) {
+      return send(200, {
+        versions: [
+          { name: NAME, version: HELD_VERSION, interface: "cli", digest: HELD, path: `/data/components/${NAME}`, resolved: true },
+        ],
+      });
+    }
+    if (req.method === "POST" && req.url === `/api/components/${NAME}/disable`) {
+      return send(200, { status: "disabled", name: NAME, disabled: true });
+    }
+    if (req.method === "DELETE" && req.url.startsWith(`/api/components/${NAME}`)) {
+      return send(200, { status: "removed", name: NAME, removed: [HELD_VERSION] });
+    }
+    if (req.method === "POST" && req.url === "/api/components/install") {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        state.install = {
+          bytes: Buffer.byteLength(raw),
+          manifest: JSON.parse(Buffer.from(req.headers["x-clutch-component"] || "", "base64").toString("utf8")),
+        };
+        send(200, {
+          status: "installed",
+          name: NAME,
+          version: VERSION,
+          digest: PIN,
+          path: `/data/components/${NAME}`,
+        });
+      });
+      return;
+    }
+    return send(404, { error: `no such endpoint: ${req.method} ${req.url}` });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      resolve({ state, name: NAME, artifact: ARTIFACT, base, pin: PIN, version: VERSION, held: HELD_VERSION, manifestUrl: `${base}/clutch-component.json`, close: () => new Promise((r) => server.close(r)) });
+    });
+  });
+}
+
+// one raw POST to the bridge, for the calls the shim does not expose (an unknown
+// method), so the sentence from the bug report can be checked at the wire.
+function bridgePost(base, urlPath, args = []) {
+  const body = JSON.stringify(args);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      base.replace(/\/$/, "") + urlPath,
+      { method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+      (res) => {
+        let raw = "";
+        res.on("data", (c) => (raw += c));
+        res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(raw) }));
+      }
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
 // ---- a lean SSE client over real HTTP: same frames the WebView consumes ----
 class TestEventSource {
   constructor(url) {
@@ -336,6 +435,110 @@ async function main() {
 
   // 8. parity with reality: every subscription shared ONE EventSource
   assert.strictEqual(TestEventSource.instances.length, 1, "one shared stream for all channels");
+
+  // 9. the plugin tab on the phone: the SAME `clutchComponents` channel the
+  //    desktop shell serves (ui/main.js:173-197), registered in the Android host.
+  //    Before this, every line of the tab ended at "no such bridge method:
+  //    clutchComponents.list" (PLUGIN_PLAN.md 零之三.3); what the page reads now
+  //    is the target machine's own answers.
+  {
+    const sup = await fakeTargetSupervisor();
+    const realFetch = globalThis.fetch;
+    // This runner has no internet: the shipped source list is four GitHub
+    // releases, so every URL but the fake target machine's is refused. Those
+    // refusals land in the market as its "why is this empty" rows, which keeps
+    // the read deterministic and offline.
+    globalThis.fetch = (url, opts) => {
+      const u = String(url);
+      if (u.startsWith(sup.base) || u.startsWith(BRIDGE)) return realFetch(url, opts);
+      return Promise.reject(new Error("no network in this test"));
+    };
+    try {
+      // this client's OWN list names one manifest, and it names it the way a
+      // release does — a URL. The phone reads it over HTTP, not from disk.
+      const userSources = path.join(HOME, ".clutch", "components.sources.json");
+      fs.mkdirSync(path.dirname(userSources), { recursive: true });
+      fs.writeFileSync(userSources, JSON.stringify({ schema: 1, sources: [sup.manifestUrl] }));
+      // the window's session is on the far side of the tunnel: components are
+      // installed on the machine that will RUN them, so that is the target
+      tunnel.state.status = { active: true, url: sup.base };
+
+      const progress = [];
+      globalThis.clutchComponents.onProgress((stage) => progress.push(stage));
+      await new Promise((r) => setTimeout(r, 250)); // let the subscription land
+
+      // 9a. what the target machine holds — the read that used to be an error
+      const listed = await globalThis.clutchComponents.list();
+      assert.deepStrictEqual(listed.target, { kind: "remote", base: sup.base },
+        "the target is the tunnel's machine, not this phone");
+      assert.strictEqual(listed.error, null, "the inventory answered");
+      assert.strictEqual(listed.held[0].name, sup.name);
+      assert.strictEqual(listed.held[0].version, sup.held);
+      assert(sup.state.calls.includes("GET /api/components"), "the inventory really came from the far supervisor");
+
+      // 9b. the market: what this client could hand that machine
+      const mkt = await globalThis.clutchComponents.market({});
+      const row = mkt.entries.find((e) => e.name === sup.name);
+      assert(row, "the manifest this client holds shows up as a market row");
+      assert.strictEqual(row.origin, "release");
+      assert.strictEqual(row.source, sup.manifestUrl, "the row names where the release is");
+      assert(mkt.errors.length > 0, "an unreadable source is named, never hidden");
+      assert(mkt.errors.every((r) => !r.includes(sup.base)), "the one reachable source never failed");
+
+      // 9c. the one write: the bytes stay on the far side — the request carries
+      //     the URL and the pin, never the tens of megabytes (零之四.4)
+      const res = await globalThis.clutchComponents.install(sup.name);
+      assert.strictEqual(res.ok, true, "install answered: " + JSON.stringify(res));
+      assert.strictEqual(res.status, "installed");
+      assert.strictEqual(res.version, sup.version);
+      assert.deepStrictEqual(res.target, { kind: "remote", base: sup.base });
+      assert.strictEqual(sup.state.install.bytes, 0, "no bytes crossed from the phone");
+      assert.strictEqual(sup.state.install.manifest.artifact_url, `${sup.base}/${sup.artifact}`);
+      assert.strictEqual(sup.state.install.manifest.digest, sup.pin, "the host fetches under the release's own pin");
+      assert.strictEqual(sup.state.install.manifest.name, sup.name);
+      await eventually(() =>
+        assert.deepStrictEqual(progress.map((p) => p.stage), ["artifact", "fetch", "installed"],
+          "install progress reaches the page over the bridge's SSE"));
+
+      // 9d. the reverse verbs, same channel, same answers as the desktop
+      const vers = await globalThis.clutchComponents.versions(sup.name);
+      assert.deepStrictEqual(vers.target, { kind: "remote", base: sup.base });
+      assert.strictEqual(vers.error, null);
+      assert.strictEqual(vers.versions[0].resolved, true, "the machine says which version it would run");
+
+      const off = await globalThis.clutchComponents.setDisabled(sup.name, true);
+      assert.deepStrictEqual(off, {
+        ok: true, name: sup.name, status: "disabled", disabled: true,
+        target: { kind: "remote", base: sup.base },
+      });
+      assert(sup.state.calls.includes(`POST /api/components/${sup.name}/disable`), "the switch was asked of the far machine");
+
+      const gone = await globalThis.clutchComponents.remove(sup.name, { version: sup.held });
+      assert.deepStrictEqual(gone, {
+        ok: true, name: sup.name, status: "removed", removed: [sup.held],
+        target: { kind: "remote", base: sup.base },
+      });
+      assert(sup.state.calls.includes(`DELETE /api/components/${sup.name}?version=${encodeURIComponent(sup.held)}`));
+
+      // 9e. no session and no local supervisor (N4): the tab says WHY in words a
+      //     page can draw — the answer a phone with nothing to install on owes
+      tunnel.state.status = { active: false, url: "" };
+      const offline = await globalThis.clutchComponents.list();
+      assert.deepStrictEqual(offline.target, { kind: "local", base: null });
+      assert.strictEqual(offline.error, "this build has no supervisor URL for the local machine");
+      assert.deepStrictEqual(offline.held, [], "no placeholder port, so no misleading empty machine");
+
+      // 9f. what that sentence is for now: methods that do not exist. The
+      //     namespace is registered, so the tab can tell the two apart.
+      const bogus = await bridgePost(BRIDGE, "/api/clutchComponents/nope");
+      assert.strictEqual(bogus.status, 404);
+      assert.strictEqual(bogus.body.error, "no such bridge method: clutchComponents.nope");
+    } finally {
+      globalThis.fetch = realFetch;
+      tunnel.state.status = { active: true, url: "http://127.0.0.1:8891" };
+      await sup.close();
+    }
+  }
 
   await server.close();
   fs.rmSync(HOME, { recursive: true, force: true });
