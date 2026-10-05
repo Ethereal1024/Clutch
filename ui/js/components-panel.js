@@ -35,6 +35,7 @@
 "use strict";
 
 const plugBodyEl = $("#plug-body");
+const plugFilterEl = $("#plug-filter");
 const plugTargetEl = $("#plug-target");
 const plugBaseEl = $("#plug-base");
 const plugNoteEl = $("#plug-note");
@@ -52,6 +53,8 @@ const plugState = {
   versions: null, // {name, rows, error} — the one open version list, as just read
   versionsPending: null, // name whose version list is being read right now
   versionsSeq: 0, // which version-list read is the current one (closing bumps it)
+  filter: "all", // which slice of the ONE list is on screen (never persisted)
+  query: "", // the name filter, as typed (never persisted)
 };
 
 // The machine this page is about, named the way the rest of the UI names it: the
@@ -78,10 +81,18 @@ function plugChip(text, cls) {
 }
 
 // one row: the name, what it is, and whatever it makes of the target machine;
-// `extra` is whatever hangs under the row (a version list), or nothing
-function plugRow(name, chips, lines, actions = [], extra = null) {
+// `extra` is whatever hangs under the row (a version list), or nothing.
+//
+// `state` is what is happening to THIS row right now — a write in flight or the
+// host's verdict on the last one — and it is drawn here rather than in the page's
+// note line, because a status with no row in it belongs to no component: the user
+// has to find which of ten rows the sentence is about. It may also colour the row
+// itself (`state.row`), which is how "this machine holds it but is not driving
+// it" is said without a second block of text (VS Code: `.disabled` on the row,
+// extensionsList.ts).
+function plugRow(name, chips, lines, actions = [], extra = null, state = null) {
   const row = document.createElement("div");
-  row.className = "plug-row";
+  row.className = "plug-row" + (state && state.row ? " " + state.row : "");
   const head = document.createElement("div");
   head.className = "plug-row-head";
   const nameEl = document.createElement("span");
@@ -96,6 +107,12 @@ function plugRow(name, chips, lines, actions = [], extra = null) {
     head.appendChild(box);
   }
   row.appendChild(head);
+  if (state && state.text) {
+    const el = document.createElement("div");
+    el.className = "plug-line plug-state" + (state.cls ? " " + state.cls : "");
+    el.textContent = state.text;
+    row.appendChild(el);
+  }
   for (const line of lines) {
     if (!line) continue;
     const el = document.createElement("div");
@@ -107,11 +124,18 @@ function plugRow(name, chips, lines, actions = [], extra = null) {
   return row;
 }
 
-function plugSection(title, rows, empty) {
+function plugSection(title, meta, rows, empty) {
   const sec = document.createElement("div");
   sec.className = "plug-section";
   const head = document.createElement("h4");
   head.textContent = title;
+  if (meta) {
+    // the title is the MACHINE; the counts are what is behind it
+    const el = document.createElement("span");
+    el.className = "plug-meta";
+    el.textContent = meta;
+    head.appendChild(el);
+  }
   sec.appendChild(head);
   if (rows.length) {
     for (const r of rows) sec.appendChild(r);
@@ -124,63 +148,341 @@ function plugSection(title, rows, empty) {
   return sec;
 }
 
-// What one market entry says about the target machine. A version is a claim with
-// a content digest hanging off it (`0.1.0+<hex16>`, ui/components.js
-// installVersion), so the release is compared before the `+`.
-function plugMarketLines(entry) {
-  const source = entry.source ? "· " + entry.source : "";
+// The whole list model, and the reason there is only one list: the machine's
+// inventory and the market this client knows are joined BY NAME, so a component
+// that is both held and offered is ONE row. The user never lines up two sections
+// to learn whether something is installed (PLUGIN_UI_PLAN.md, "the panel is about
+// exactly one machine").
+function plugModel() {
+  const byName = new Map();
+  const order = [];
+  const slot = (name) => {
+    if (!byName.has(name)) {
+      byName.set(name, { name, entry: null, held: null });
+      order.push(name);
+    }
+    return byName.get(name);
+  };
+  // the client's known set first (that is the order a user scans), then anything
+  // the machine holds that no source this client reads offers
+  for (const e of plugState.market ? plugState.market.entries : []) slot(e.name).entry = e;
+  for (const h of plugState.held || []) slot(h.name).held = h;
+  return order.map((n) => byName.get(n));
+}
+
+// The five views of the ONE list. A view is a way of LOOKING at what the machine
+// holds and what this client knows, not a fact about either: nothing here is
+// asked of the host, and nothing here is written down (a filter that survived a
+// reload would be a second copy of a state the page does not own).
+const PLUG_FILTERS = [
+  ["all", "All"],
+  ["installed", "Installed"],
+  ["market", "Market"],
+  ["updates", "Updates"],
+  ["stopped", "Stopped"],
+];
+
+// "held here, and this client carries a DIFFERENT release for it." The release is
+// compared before the `+`, like everywhere else on this page: the build id after
+// it differs per machine, and calling that an update would be wrong.
+function plugItemUpdate(item) {
+  if (!item.held || !item.entry) return false;
+  const offered = String(item.entry.version || "");
+  return Boolean(offered) && String(item.held.version || "").split("+")[0] !== offered;
+}
+
+// Whether one component belongs to one view. Kept apart from the name query
+// below because the chips COUNT by this rule: a chip's number is how much that
+// view holds, not how much of it the box above is currently spelling out.
+function plugItemMatches(item, filter) {
+  switch (filter) {
+    case "installed":
+      return Boolean(item.held);
+    case "market":
+      return Boolean(item.entry);
+    case "updates":
+      return plugItemUpdate(item);
+    case "stopped":
+      return Boolean(item.held && item.held.disabled);
+    default:
+      return true;
+  }
+}
+
+function plugItemShown(item) {
+  const q = plugState.query.trim().toLowerCase();
+  if (q && !String(item.name).toLowerCase().includes(q)) return false;
+  return plugItemMatches(item, plugState.filter);
+}
+
+// The filter row: one chip per view, plus a box that filters by name. It is built
+// ONCE and only its state is redrawn — rebuilding it on every read would take the
+// caret out of the box while it is being typed in, which is the one thing a
+// filter may never do.
+let plugFilterChips = null;
+
+function plugFilterRow() {
+  if (plugFilterChips) return plugFilterChips;
+  const box = document.createElement("div");
+  box.className = "plug-filter-chips";
+  plugFilterChips = [];
+  for (const [id, label] of PLUG_FILTERS) {
+    const btn = document.createElement("button");
+    btn.className = "plug-filter-chip";
+    btn.type = "button";
+    btn.textContent = label;
+    btn.title = `show only ${label.toLowerCase()} of what this machine holds and this client knows`;
+    // the count sits beside the label, in the same voice as the title's counts:
+    // "Updates 2" is a reason to click, "Updates" alone is not
+    const count = document.createElement("span");
+    count.className = "plug-filter-count";
+    btn.appendChild(count);
+    btn.addEventListener("click", () => {
+      plugState.filter = id;
+      renderPlugins();
+    });
+    plugFilterChips.push([id, btn, count]);
+    box.appendChild(btn);
+  }
+  const input = document.createElement("input");
+  input.className = "plug-filter-name";
+  input.type = "text";
+  input.value = plugState.query;
+  input.placeholder = "filter by name";
+  input.title = "filter by name";
+  input.addEventListener("input", () => {
+    plugState.query = input.value || "";
+    renderPlugins();
+  });
+  plugFilterEl.appendChild(box);
+  plugFilterEl.appendChild(input);
+  return plugFilterChips;
+}
+
+function plugDrawFilter() {
+  const items = plugModel();
+  for (const [id, btn, count] of plugFilterRow()) {
+    btn.classList.toggle("active", id === plugState.filter);
+    const n = items.filter((item) => plugItemMatches(item, id)).length;
+    // a zero is not a number worth reading on a chip: the empty message under it
+    // already says why nothing is there
+    count.textContent = n ? " " + n : "";
+  }
+}
+
+// One row's chips. The version the machine HOLDS wins over the one a source
+// offers — the first is the fact about that machine, the second a claim. "held"
+// and "driven" are two different facts the machine's registry keeps apart: a
+// stopped component is still here, still listed, its bytes untouched; only its
+// tools are withheld, and the chip says that instead of leaving it to a label.
+function plugItemChips(item) {
+  const chips = [];
+  const iface = item.held ? item.held.interface || "" : (item.entry && item.entry.interface) || "";
+  if (iface) chips.push([iface, ""]);
+  const version = (item.held && item.held.version) || (item.entry && item.entry.version) || "";
+  if (version) chips.push([version, "mono"]);
+  if (item.held && item.held.disabled) chips.push(["stopped", "warn"]);
+  if (item.entry) chips.push([item.entry.origin, item.entry.origin === "checkout" ? "accent" : ""]);
+  if (item.held && !item.entry) chips.push(["not offered by this client", "warn"]);
+  return chips;
+}
+
+// One row's lines: what the two reads say about the same component, said once.
+// A version is a claim with a content digest hanging off it (`0.1.0+<hex16>`,
+// ui/components.js installVersion), so the release is compared before the `+`.
+function plugItemLines(item) {
   const lines = [];
-  const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
-  if (plugState.held === null) {
+  const held = item.held;
+  const entry = item.entry;
+  if (entry && plugState.held === null) {
+    // the machine could not be read at all: "unknown" is a fact, not an empty list
     lines.push("on this machine: unknown" + (plugState.heldError ? " (" + plugState.heldError + ")" : ""));
-  } else if (!held) {
+  } else if (entry && !held) {
     lines.push("not installed on this machine");
-  } else {
+  } else if (entry && held) {
     const own = String(held.version || "");
     const offered = String(entry.version || "");
-    const same = own.split("+")[0] === offered;
-    lines.push(same ? `installed: ${own}` : `installed: ${own} — this source offers ${offered || "an unnamed version"}`);
+    lines.push(
+      own.split("+")[0] === offered
+        ? `installed: ${own}`
+        : `installed: ${own} — this source offers ${offered || "an unnamed version"}`
+    );
   }
-  if (entry.published && entry.published.version) {
+  if (held) {
+    const digest = String(held.digest || "");
+    if (digest) lines.push("digest " + digest.slice(0, 16));
+    if (held.disabled) lines.push("held on this machine, but not driven: its tools are not offered here");
+  }
+  if (entry && entry.published && entry.published.version) {
     // a checkout this client can archive, with the release under it: the release
     // is what a machine that already holds the checkout can still receive
     lines.push(`release under it: ${entry.published.version} · ${entry.published.source}`);
   }
-  if (source) lines.push(source.trim());
+  if (entry && entry.source) lines.push("· " + entry.source);
   return lines;
 }
 
-function plugHeldSection() {
-  if (plugState.held === null) {
-    return plugSection(
-      "On this machine",
-      [],
-      plugState.heldError ? "could not be read — " + plugState.heldError : "reading…"
-    );
+// The controls on one row. The row leads with ONE write, and which one that is
+// follows the row's own state: a component this client can offer leads with the
+// write that puts it on the machine ("Install", or "Reinstall" when the machine
+// already carries that release), while a component only the machine holds has
+// nothing to install and leads with the switch instead. Everything else the row
+// can do sits behind the "…" beside that button, drawn and disabled exactly as it
+// would be on the row: out of the way, never absent (a control that is only shown
+// on a click is a control the page cannot be asked about).
+function plugItemActions(item) {
+  const actions = [];
+  const primary = plugPrimaryButton(item);
+  if (primary) actions.push(primary);
+  const secondary = plugItemMenuItems(item);
+  if (secondary.length) {
+    const menu = plugMenu(secondary);
+    actions.push(plugMoreButton(item.name, menu), menu);
   }
-  const offered = new Set((plugState.market ? plugState.market.entries : []).map((e) => e.name));
-  const rows = plugState.held.map((h) => {
-    const chips = [];
-    if (h.interface) chips.push([h.interface, ""]);
-    if (h.version) chips.push([h.version, "mono"]);
-    // "held" and "driven" are two different facts, and the machine's registry
-    // keeps them apart: a stopped component is still here, still listed, and its
-    // bytes are untouched — only its tools are withheld. The chip states that
-    // instead of leaving the user to infer it from the button's label.
-    if (h.disabled) chips.push(["stopped", "warn"]);
-    if (plugState.market && !offered.has(h.name)) chips.push(["not offered by this client", "warn"]);
-    const digest = String(h.digest || "");
-    const lines = [digest ? "digest " + digest.slice(0, 16) : ""];
-    if (h.disabled) lines.push("held on this machine, but not driven: its tools are not offered here");
-    return plugRow(
-      h.name,
-      chips,
-      lines,
-      [plugVersionsButton(h), plugSwitchButton(h), plugRemoveButton(h)],
-      plugVersionRows(h)
-    );
+  return actions;
+}
+
+function plugPrimaryButton(item) {
+  if (item.entry) return plugInstallButton(item.entry);
+  if (item.held) return plugSwitchButton(item.held);
+  return null;
+}
+
+// What the row can do BESIDE that write, in the order it is offered: the switch
+// when the install is the one leading (stopping a component is not what a row
+// that can be installed is for), then the versions the machine holds, then the
+// removal — the one write that DELETES, which is exactly why it is never the
+// button a row leads with (PLUGIN_PLAN.md I5).
+function plugItemMenuItems(item) {
+  const items = [];
+  if (item.entry && item.held) items.push(plugSwitchButton(item.held));
+  if (item.held) items.push(plugVersionsButton(item.held), plugRemoveButton(item.held));
+  return items;
+}
+
+// One menu: its items are drawn once and shown by a class, so opening it builds
+// nothing and closing it loses nothing. A redraw takes the class away with the
+// row, which is why this page keeps no copy of "which menu is open".
+function plugMenu(items) {
+  const box = document.createElement("span");
+  box.className = "plug-menu";
+  for (const item of items) box.appendChild(item);
+  return box;
+}
+
+// The "…" itself: never a write, so it is live whenever the row is, and its title
+// says the two things its label cannot — which component, and on which machine.
+function plugMoreButton(name, menu) {
+  const btn = document.createElement("button");
+  btn.className = "plug-more";
+  btn.type = "button";
+  btn.textContent = "…";
+  btn.title = `everything else ${name} can do on ${plugTargetName(plugState.target)}`;
+  btn.addEventListener("click", (ev) => {
+    // the document handler below closes every menu on any click, this one
+    // included: the click on the "…" must not reach it (js/settings.js does the
+    // same for its dropdowns). What it opens is decided before that, so pressing
+    // the "…" of an open menu shuts it instead of re-opening it.
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    const open = !menu.classList.contains("open");
+    plugCloseMenus();
+    menu.classList.toggle("open", open);
   });
-  return plugSection(`On this machine (${plugState.held.length})`, rows, "no component installed");
+  return btn;
+}
+
+// One menu at a time, and a click anywhere else closes it. Nothing is kept here:
+// the class IS the state, and a redraw takes it away with the row it belongs to.
+// Guarded because the panel is also driven by a hand-rolled mini-DOM in its own
+// test runner, which has no querySelectorAll.
+function plugCloseMenus() {
+  if (typeof plugBodyEl.querySelectorAll !== "function") return;
+  for (const el of plugBodyEl.querySelectorAll(".plug-menu.open")) el.classList.remove("open");
+}
+document.addEventListener("click", () => plugCloseMenus());
+
+function plugItemRow(item) {
+  return plugRow(
+    item.name,
+    plugItemChips(item),
+    plugItemLines(item),
+    plugItemActions(item),
+    item.held ? plugVersionRows(item.held) : null,
+    plugItemState(item)
+  );
+}
+
+// The one row's own state line, and the reason the page's note line is no longer
+// where a write is reported. Two facts can be said here, and only about this
+// component: a write in flight (the stage, in the same words the note used to
+// carry) and the host's verdict on the last write. The verdict outlives the write
+// because it is what the user must read before deciding again — but it is still
+// the ROW's, so a row that goes away (its bytes were removed, a filter hides it)
+// takes the verdict back to the note with it (plugOrphanLine).
+//
+// A stopped row is coloured here too: "held, not driven" is a state of the row,
+// not a sentence about it.
+function plugItemState(item) {
+  const row = [];
+  if (item.held && item.held.disabled) row.push("stopped");
+  if (plugState.busy && plugState.busy.name === item.name) {
+    row.push("busy");
+    return { text: plugStageLine(plugState.busy), cls: "busy", row: row.join(" ") };
+  }
+  const result = plugState.result && plugState.result.name === item.name ? plugState.result : null;
+  if (result) return { text: result.text, cls: result.ok ? "" : "error", row: row.join(" ") };
+  return { text: "", cls: "", row: row.join(" ") };
+}
+
+// What "nothing to draw" means here. A machine that could not be read is NOT a
+// machine holding nothing: an empty list and an unanswered read must not look
+// alike (a failed read is data on this page). And a filter that hides every row
+// is a third thing again — the machine does hold components, this view is simply
+// not showing them.
+function plugEmptyText(known, shown) {
+  if (plugState.held === null && plugState.market === null) {
+    const why = plugState.heldError || plugState.marketError;
+    return why ? "could not be read — " + why : "reading…";
+  }
+  if (known && !shown) return "no component here matches this filter";
+  return "no component is installed on it or known to this client";
+}
+
+// The one list. Its title is the MACHINE this window is acting on — not "On this
+// machine", which lies the moment the target is the far side of a tunnel — and
+// its counts say how much of the list the machine already holds.
+function plugList() {
+  const items = plugModel();
+  const shown = items.filter(plugItemShown);
+  const meta = [];
+  if (plugState.held !== null) meta.push(`${plugState.held.length} installed`);
+  else if (plugState.heldError) meta.push("inventory unreadable");
+  if (plugState.market) meta.push(`${plugState.market.entries.length} known`);
+  else if (plugState.marketError) meta.push("market unreadable");
+  // a filtered list says so: the count behind the title is about the machine,
+  // this one about what is on screen
+  if (shown.length !== items.length) meta.push(`${shown.length} shown`);
+  const sec = plugSection(
+    plugTargetName(plugState.target),
+    meta.join(" · "),
+    shown.map(plugItemRow),
+    plugEmptyText(items.length, shown.length)
+  );
+  if (plugState.market && plugState.market.entries.length) {
+    const caution = document.createElement("p");
+    caution.className = "plug-caution";
+    caution.textContent = "install writes files on the target machine and Remove deletes them — neither is a rollback: nothing here keeps a copy of what it replaces or takes away (the switch on a row is the third write: it deletes nothing, and pressing it again is the undo)";
+    sec.appendChild(caution);
+  }
+  // a source that did not answer explains a short list: one line each, together
+  // at the end rather than scattered through the rows it shortened
+  for (const reason of (plugState.market && plugState.market.errors) || []) {
+    const el = document.createElement("p");
+    el.className = "plug-source-error";
+    el.textContent = reason;
+    sec.appendChild(el);
+  }
+  return sec;
 }
 
 // What an in-flight write is doing, in one word, for the titles of the controls
@@ -263,7 +565,7 @@ function plugVersionsButton(held) {
   const open = Boolean(plugState.versions && plugState.versions.name === held.name);
   const reading = plugState.versionsPending === held.name;
   const btn = document.createElement("button");
-  btn.className = "plug-versions";
+  btn.className = "plug-versions" + (open ? " open" : "");
   btn.type = "button";
   btn.textContent = reading ? "…" : open ? "Hide versions" : "Versions";
   if (!plugState.target || !plugState.target.base) {
@@ -431,13 +733,13 @@ function plugStageLine(busy) {
 // whether it needed them at all. A refusal here is quoted, not paraphrased.
 function plugInstallResult(entry, res, where) {
   if (!res || !res.ok) {
-    return { ok: false, text: `could not install ${entry.name} on ${where} — ${(res && res.error) || "no answer"}` };
+    return { ok: false, name: entry.name, text: `could not install ${entry.name} on ${where} — ${(res && res.error) || "no answer"}` };
   }
   if (res.status === "current") {
-    return { ok: true, text: `${entry.name} was already current (${res.version}) on ${where} — nothing was sent` };
+    return { ok: true, name: entry.name, text: `${entry.name} was already current (${res.version}) on ${where} — nothing was sent` };
   }
   const path = res.path ? " · " + res.path : "";
-  return { ok: true, text: `installed ${entry.name} ${res.version} on ${where}${path}` };
+  return { ok: true, name: entry.name, text: `installed ${entry.name} ${res.version} on ${where}${path}` };
 }
 
 // The host's verdict on a removal, in the host's words. Three outcomes, and
@@ -446,13 +748,13 @@ function plugInstallResult(entry, res, where) {
 // problem report here would invent one), and a refusal is quoted.
 function plugRemoveResult(held, res, where) {
   if (!res || !res.ok) {
-    return { ok: false, text: `could not remove ${held.name} from ${where} — ${(res && res.error) || "no answer"}` };
+    return { ok: false, name: held.name, text: `could not remove ${held.name} from ${where} — ${(res && res.error) || "no answer"}` };
   }
   if (res.status === "absent") {
-    return { ok: true, text: `${held.name} was not installed on ${where} — there was nothing to remove` };
+    return { ok: true, name: held.name, text: `${held.name} was not installed on ${where} — there was nothing to remove` };
   }
   const went = res.removed && res.removed.length ? " " + res.removed.join(", ") : "";
-  return { ok: true, text: `removed ${held.name}${went} from ${where}` };
+  return { ok: true, name: held.name, text: `removed ${held.name}${went} from ${where}` };
 }
 
 // The host's verdict on the switch, in the host's words. Nothing is destroyed
@@ -465,15 +767,16 @@ function plugRemoveResult(held, res, where) {
 // all, and the page has to say so instead of reporting a phantom success.
 function plugSwitchResult(held, res, where) {
   if (!res || !res.ok) {
-    return { ok: false, text: `could not switch ${held.name} on ${where} — ${(res && res.error) || "no answer"}` };
+    return { ok: false, name: held.name, text: `could not switch ${held.name} on ${where} — ${(res && res.error) || "no answer"}` };
   }
   if (res.status === "absent") {
-    return { ok: true, text: `${held.name} is not held by ${where} — there was nothing to stop or start` };
+    return { ok: true, name: held.name, text: `${held.name} is not held by ${where} — there was nothing to stop or start` };
   }
   // the host's bit when it sent one; otherwise the state that was asked for
   const now = typeof res.disabled === "boolean" ? res.disabled : !held.disabled;
   return {
     ok: true,
+    name: held.name,
     text: now
       ? `stopped driving ${held.name} on ${where} — it is still held there, its tools are no longer offered`
       : `driving ${held.name} on ${where} again — its tools are offered once more`,
@@ -674,61 +977,42 @@ async function plugInstall(entry) {
   }
 }
 
-function plugMarketSection() {
-  if (!plugState.market) {
-    return plugSection(
-      "Market",
-      [],
-      plugState.marketError ? "could not be read — " + plugState.marketError : "reading the sources this build knows…"
-    );
+// The one thing a row cannot carry: a write about a component that is not on
+// screen. That happens for two honest reasons — a filter is hiding the row, or
+// the row went away because the write took it away (the removal emptied it, and
+// the read after it drew the machine as it now is). Either way the page must not
+// go silent about a write it started: the stage, or the host's verdict, falls
+// back here. While the row IS drawn, the note says nothing about the write.
+function plugOrphanLine() {
+  const shown = new Set(plugModel().filter(plugItemShown).map((i) => i.name));
+  if (plugState.busy && !shown.has(plugState.busy.name)) {
+    return { text: plugStageLine(plugState.busy), bad: false };
   }
-  const rows = plugState.market.entries.map((e) => {
-    const chips = [];
-    if (e.interface) chips.push([e.interface, ""]);
-    chips.push([e.version || "no version", "mono"]);
-    chips.push([e.origin, e.origin === "checkout" ? "accent" : ""]);
-    return plugRow(e.name, chips, plugMarketLines(e), [plugInstallButton(e)]);
-  });
-  const sec = plugSection(
-    `Market (${plugState.market.entries.length} of ${plugState.market.sources} source(s))`,
-    rows,
-    "no component is known to this client"
-  );
-  if (plugState.market.entries.length) {
-    const caution = document.createElement("p");
-    caution.className = "plug-caution";
-    caution.textContent = "install writes files on the target machine and Remove deletes them — neither is a rollback: nothing here keeps a copy of what it replaces or takes away (the switch on the rows above is the third write: it deletes nothing, and pressing it again is the undo)";
-    sec.appendChild(caution);
+  if (plugState.result && !shown.has(plugState.result.name)) {
+    return { text: plugState.result.text, bad: !plugState.result.ok };
   }
-  // a source that did not answer explains a short market: one line each, in the
-  // section it shortened
-  for (const reason of plugState.market.errors) {
-    const el = document.createElement("p");
-    el.className = "plug-source-error";
-    el.textContent = reason;
-    sec.appendChild(el);
-  }
-  return sec;
+  return null;
 }
 
 function renderPlugins() {
-  plugBodyEl.innerHTML = ""; // full redraw: two short lists, one state object
+  plugBodyEl.innerHTML = ""; // full redraw: one list, one state object
   plugTargetEl.textContent = plugTargetName(plugState.target);
   plugBaseEl.textContent = plugState.target && plugState.target.base ? plugState.target.base : "";
-  // one line, in order of what the user needs to know right now: a write in
-  // flight outranks its own outcome, which outranks a read that failed, which
-  // outranks a read still running
+  // the note is the PAGE's line now, not the log of a write: what a write is doing
+  // and what the host answered are drawn on the row they are about (plugItemState),
+  // so what is left here is what no row can say — this page's own reads. A read
+  // that failed outranks everything (it is why the list is short), then a write
+  // whose row is not on screen, then a read still running.
   const problem = plugState.heldError || plugState.marketError;
+  const orphan = problem ? null : plugOrphanLine();
   let note = "";
   let bad = false;
-  if (plugState.busy) {
-    note = plugStageLine(plugState.busy);
-  } else if (plugState.result) {
-    note = plugState.result.text;
-    bad = !plugState.result.ok;
-  } else if (problem) {
+  if (problem) {
     note = problem;
     bad = true;
+  } else if (orphan) {
+    note = orphan.text;
+    bad = orphan.bad;
   } else if (plugState.pending) {
     note = "reading…";
   }
@@ -739,8 +1023,8 @@ function renderPlugins() {
     plugNoteEl.textContent = "this shell has no component channel";
     return;
   }
-  plugBodyEl.appendChild(plugHeldSection());
-  plugBodyEl.appendChild(plugMarketSection());
+  plugDrawFilter();
+  plugBodyEl.appendChild(plugList());
 }
 
 // Read both halves, render each as it lands: the machine's own inventory is one

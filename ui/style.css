@@ -1060,10 +1060,54 @@ mjx-container[display="true"] {
 .plug-note { margin: 4px 0 0; font-size: 12px; color: var(--muted); min-height: 15px; overflow-wrap: anywhere; }
 .plug-note.error { color: var(--accent); }
 .plug-body { margin-top: 10px; max-height: 44vh; overflow-y: auto; }
+/* the filter row: the views of the ONE list, plus a box to narrow it by name. It
+   sits OUTSIDE the scrolling list on purpose — which view is on screen must stay
+   on screen while the rows under it move. */
+.plug-filter { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.plug-filter-chips { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.plug-filter-chip {
+  padding: 2px 8px;
+  font-size: 11.5px;
+  background: transparent;
+  color: var(--muted);
+}
+.plug-filter-chip:hover:not(:disabled) { color: var(--text); }
+.plug-filter-chip.active { background: var(--text); border-color: var(--text); color: var(--bg); }
+/* the count behind a chip: the same number as the title's counts, in a quieter
+   voice — it says how much that view holds, not what the view is */
+.plug-filter-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.plug-filter-chip.active .plug-filter-count { color: var(--bg); }
+/* the name box: same weight as the chips, and it gives way before they wrap */
+#plug-filter .plug-filter-name {
+  flex: 1 1 110px;
+  width: auto;
+  min-width: 90px;
+  height: 26px;
+  padding: 3px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+#plug-filter .plug-filter-name:focus { outline: none; border-color: var(--accent); }
 .plug-section { margin-bottom: 16px; }
+/* the counts behind the machine's name: the same line, a quieter voice — they say
+   how much is behind the title, and they must not read as part of the title (the
+   section head is uppercase and spaced; a count never is) */
+.plug-meta {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
 .plug-row { padding: 7px 0; border-top: 1px solid var(--border); }
 .plug-row-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.plug-row-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.plug-row-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; position: relative; }
 /* a write offered from inside a row: smaller than a modal button, and never the
    row's own accent at rest — neither installing nor removing is the page's
    default action */
@@ -1096,6 +1140,49 @@ mjx-container[display="true"] {
 }
 .plug-switch:hover:not(:disabled) { color: var(--text); }
 .plug-switch.stopped { color: var(--accent); border-color: var(--accent); }
+/* the versions read: a READ, so it rests in the same grey as the writes beside it
+   and is never the loud one. `open` is the same control in its second state — the
+   button that opened the list is the button that closes it — so it stays lit
+   while the list under the row is showing. */
+.plug-versions {
+  padding: 3px 10px;
+  font-size: 12px;
+  background: transparent;
+  color: var(--muted);
+}
+.plug-versions:hover:not(:disabled), .plug-versions.open { color: var(--text); }
+/* the row's "…" and the menu behind it: the one write the row leads with stays
+   beside this, and everything else it can do is drawn once and shown by `open`.
+   Nothing is built on a click — an item that exists only while a menu is open
+   cannot be titled, disabled, or asked about at all. */
+.plug-more {
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1;
+  background: transparent;
+  color: var(--muted);
+}
+.plug-more:hover:not(:disabled), .plug-more.open { color: var(--text); border-color: var(--accent); }
+.plug-menu { display: none; }
+.plug-menu.open {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+}
+.plug-menu > button { text-align: left; white-space: nowrap; }
+/* the version list under one held row: it belongs to the row ABOVE it, so it is
+   set in from that row behind a hairline down its left — a nested list, never a
+   second row of the same rank. Without this the versions it names read as
+   components of their own. */
+.plug-versions-box { margin: 6px 0 2px 10px; padding-left: 10px; border-left: 1px solid var(--border); }
 .plug-caution { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
 .plug-name { font-family: var(--font-mono); font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
 .plug-chip {
@@ -1107,6 +1194,24 @@ mjx-container[display="true"] {
 }
 .plug-chip.accent, .plug-chip.warn { color: var(--accent); border-color: var(--accent); }
 .plug-line { margin-top: 3px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+/* the row's OWN state line: what is happening to this one component right now —
+   a write in flight, or the host's verdict on the last one. Every other line in
+   a row is metadata about the component; this one is the answer to "what did I
+   just do", so it is drawn in the row's own colour, not in grey. A refusal keeps
+   the accent that every other failure on this page carries. */
+.plug-line.plug-state { color: var(--text); }
+.plug-line.plug-state.error { color: var(--accent); }
+/* a write in flight: the row it is about recedes — its controls are all dead
+   behind the one-write-at-a-time rule — while the stage line inside it keeps its
+   full weight, because that sentence is the only thing on the row worth reading */
+.plug-row.busy .plug-name,
+.plug-row.busy .plug-chip,
+.plug-row.busy .plug-line:not(.plug-state) { opacity: 0.55; }
+/* a component the machine holds but is not driving: the whole row is grey, and
+   the controls that still work on it (the switch that drives it again, the
+   removal) come back to full weight under the pointer */
+.plug-row.stopped { opacity: 0.62; }
+.plug-row.stopped:hover { opacity: 1; }
 .plug-empty { margin: 0; font-size: 12.5px; color: var(--muted); }
 .plug-source-error { margin: 5px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
 
