@@ -130,6 +130,88 @@ def _attached_prompt_still_waits_for_the_user(tmp: str) -> None:
     check(out.get("err") == "denied by user", f"denial still reaches the run ({out!r})")
 
 
+def _unattached_publish_survives_a_reconnect(tmp: str) -> None:
+    # The publisher's own count can read zero at the instant the ask is handed
+    # over (an EventSource retry, a tunnel redial). That instant is not a
+    # verdict: the UI comes back inside the grace, is offered the prompt again
+    # and answers it — so the call proceeds instead of coming back "denied",
+    # which is the reply that teaches the model to reach for run_command.
+    ws = LocalWorkspace(tmp)
+    attached_at = time.time() + 0.08
+    announces: list[bool] = []
+
+    def _ask(*_a) -> bool:
+        # the run's own adapter shape (agent/api/run.py _on_ask): publish only
+        # while a window watching THIS project is there to answer
+        live = time.time() >= attached_at
+        announces.append(live)
+        return live
+
+    gate = PermissionGate(
+        evaluator=PermissionEvaluator(),
+        on_ask=_ask,
+        is_attached=lambda: time.time() >= attached_at,
+        detach_grace_s=2.0,  # the gap (~0.08s) is far inside it
+        attach_poll_s=0.01,
+        reannounce_s=0.05,  # so the reminder re-offers the prompt once it is back
+    )
+    out: dict = {}
+    t = _require_in_thread(gate, ws, out)
+
+    def _user_answers() -> None:
+        for rid in gate.pending_ids():
+            gate.resolve(rid, True)
+
+    timer = threading.Timer(0.25, _user_answers)
+    timer.start()
+    t.join(timeout=5)
+    timer.join()
+    check(not t.is_alive(), "an ask nobody received at handover still ends")
+    check(out.get("ok"), f"the handover instant is not a verdict ({out.get('err')!r})")
+    check(True in announces, f"the prompt is offered again once a UI is back ({announces})")
+
+
+def _unattached_publish_with_no_return_denies(tmp: str) -> None:
+    # A UI that never comes back must still end the run — but on the GRACE, not
+    # on the instant the handover failed, because that instant is exactly what a
+    # one-second reconnect looks like.
+    ws = LocalWorkspace(tmp)
+    gate = PermissionGate(
+        evaluator=PermissionEvaluator(),
+        on_ask=lambda *a: False,
+        is_attached=lambda: False,
+        detach_grace_s=0.3,
+        attach_poll_s=0.01,
+    )
+    out: dict = {}
+    started = time.monotonic()
+    t = _require_in_thread(gate, ws, out)
+    t.join(timeout=5)
+    elapsed = time.monotonic() - started
+    check(not t.is_alive(), "a UI that never returns still ends the run")
+    check("no user interface connected" in out.get("err", ""), f"and says why ({out.get('err')!r})")
+    check(elapsed >= 0.25, f"the failed handover waits the grace ({elapsed:.2f}s)")
+    check(len(gate.pending_ids()) == 0, "the denied ask leaves no pending entry")
+
+
+def _no_attachment_probe_waits(tmp: str) -> None:
+    # is_attached is optional (None = nothing to ask, __init__): such a gate
+    # cannot judge a detach, so its wait is the plain blocking one — never a
+    # call on None a second into the prompt.
+    ws = LocalWorkspace(tmp)
+    gate = PermissionGate(
+        evaluator=PermissionEvaluator(), on_ask=lambda *a: True, attach_poll_s=0.01
+    )
+    out: dict = {}
+    t = _require_in_thread(gate, ws, out)
+    time.sleep(0.05)  # past the first poll: the loop has to look at the absent probe
+    for rid in gate.pending_ids():
+        gate.resolve(rid, True)
+    t.join(timeout=5)
+    check(not t.is_alive(), "a probe-less gate still ends with the user's answer")
+    check(out.get("ok"), f"an absent attachment probe is not a crash ({out!r})")
+
+
 def _count_is_project_scoped() -> None:
     # "is a UI attached" must count only the streams that would actually SEE
     # this project's events: a window on another project cannot answer its prompt.
@@ -191,6 +273,12 @@ def main() -> int:
         print("ok - a transient stream gap does not deny a live prompt")
         _attached_prompt_still_waits_for_the_user(wtmp)
         print("ok - an attached prompt still waits for the user's answer")
+        _unattached_publish_survives_a_reconnect(wtmp)
+        print("ok - a handover that reached nobody survives a UI coming back inside the grace")
+        _unattached_publish_with_no_return_denies(wtmp)
+        print("ok - a UI that never returns ends the ask, but on the grace")
+        _no_attachment_probe_waits(wtmp)
+        print("ok - a gate with no attachment probe waits instead of raising")
     _count_is_project_scoped()
     print("ok - Broadcaster.count is project-scoped")
     _start_task_wires_the_check()

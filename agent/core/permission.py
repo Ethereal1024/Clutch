@@ -190,6 +190,9 @@ def _parse_args(args_repr: str) -> dict:
 # seconds while the renderer's dialog is still on screen — a gap must not deny a
 # prompt the user is about to answer. A connection that is gone for good (the
 # wrongly-closed one) crosses it in ~half a minute and the ask stops wedging.
+# The same grace covers the moment the prompt is HANDED OVER: a subscriber count
+# of zero is a fact about one instant, and the instant a reconnect is dialing is
+# exactly when it reads zero (see PermissionGate.require).
 ATTACH_POLL_S = 1.0
 DETACH_GRACE_S = 30.0
 
@@ -226,10 +229,13 @@ class PermissionGate:
     UI responds via `resolve(request_id, allow)` — it waits as long as the user
     needs (no timeout, so the model never sees a spurious "permission request
     timed out"). The only ways out of the wait: the user allows/denies, the
-    server's Stop resolves every pending ask as denied, `on_ask` reports that
-    no UI is attached (returns False), or `is_attached` reports that the UI
-    this prompt was published to is gone and stayed gone — in both UI-less
-    cases the action is denied rather than left hanging.
+    server's Stop resolves every pending ask as denied, or the UI is GONE — the
+    prompt could not be handed to anyone (`on_ask` returned False) or the UI it
+    was published to left — and stayed gone for the whole grace, in which case
+    the action is denied rather than left hanging. "Nobody is watching right
+    now" is never a verdict on its own: it is the same fact an EventSource
+    reconnect produces for a second, so it only starts the clock
+    (see DETACH_GRACE_S).
     """
 
     def __init__(
@@ -300,12 +306,28 @@ class PermissionGate:
             self.on_ask(request_id, tool, args_repr, reason)
 
         if self.on_ask and self.on_ask(request_id, tool, args_repr, reason) is False:
-            # renderer disconnected: deny rather than wait forever
-            with self._lock:
-                self._pending.pop(request_id, None)
-                self._decisions.pop(request_id, None)
-            raise PermissionRequired(request_id, tool, args_repr, "no user interface connected to confirm this action")
-        if not self._await_decision(ev, _remind if self.on_ask else None):
+            # nobody to publish to right now. With no attachment probe the
+            # refusal is final (nothing will ever notice the UI coming back), so
+            # deny rather than wait forever. WITH one it is not a verdict: the
+            # zero this reads is a fact about one instant — the instant an
+            # EventSource retry or a tunnel redial is between streams — and
+            # denying there is how a read the user was about to approve comes
+            # back to the model as "denied", which is exactly the reply that
+            # teaches it to reach for run_command instead. So the refusal only
+            # starts the clock: _await_decision gives a UI DETACH_GRACE_S to
+            # (re)attach — the reminder keeps offering the prompt — and denies
+            # with the same words if none does.
+            if self.is_attached is None:
+                with self._lock:
+                    self._pending.pop(request_id, None)
+                    self._decisions.pop(request_id, None)
+                raise PermissionRequired(
+                    request_id, tool, args_repr, "no user interface connected to confirm this action"
+                )
+            unattached_since: float | None = time.monotonic()
+        else:
+            unattached_since = None
+        if not self._await_decision(ev, _remind if self.on_ask else None, unattached_since):
             # the UI this prompt was published to is gone and never came back:
             # nobody is left who CAN confirm, so answer exactly like on_ask's
             # "no UI attached" instead of wedging the run — an unanswered ask
@@ -325,7 +347,8 @@ class PermissionGate:
             raise PermissionRequired(request_id, tool, args_repr, "denied by user")
         workspace.allow(escapes)
 
-    def _await_decision(self, ev: threading.Event, remind: Callable[[], None] | None = None) -> bool:
+    def _await_decision(self, ev: threading.Event, remind: Callable[[], None] | None = None,
+                        gone_since: float | None = None) -> bool:
         """Wait for the user's answer; False when the audience is gone for good.
 
         No timeout while a UI is attached: the prompt stays up until the user
@@ -336,13 +359,16 @@ class PermissionGate:
         goes on, and only a gap longer than `detach_grace_s` counts as gone —
         see DETACH_GRACE_S for why a short gap is not a verdict.
 
+        `gone_since` is the caller's own observation that the prompt reached
+        nobody (a monotonic stamp, or None when it was handed over): a detached
+        start counts against the same grace instead of restarting it.
+
         While the wait lasts, `remind` re-announces the prompt every
         `reannounce_s` (see REANNOUNCE_S): delivery is best-effort, and a run
         must not block forever on a prompt its window never saw. A reminder that
         cannot be delivered is not this loop's verdict — the attachment check
         above owns that.
         """
-        gone_since: float | None = None
         announced = time.monotonic()
         while not ev.wait(self.attach_poll_s):
             now = time.monotonic()
@@ -352,6 +378,9 @@ class PermissionGate:
                     remind()
                 except Exception:  # noqa: BLE001 -- a reminder never ends the wait
                     pass
+            if self.is_attached is None:
+                # no probe (see __init__): the wait is the plain blocking one
+                continue
             if self.is_attached():
                 gone_since = None
                 continue
