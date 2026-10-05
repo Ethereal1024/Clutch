@@ -80,10 +80,18 @@ tests/components_api_test.py` 全绿）。
    由 app 按需重启。于是"本机安装"在 supervisor 没在跑时会直接失败——页面能报出宿主的话，
    **但没有任何东西会为这次安装把它叫起来**（`ui/server-bootstrap.js` 全文没有 components）。
    这是 P2 未补上的已知缺口，留在"待办"里。
-3. **Android 只做了表面齐平**：`ui/bridge-shim.js` 现在暴露 `clutchComponents`（手机端与桌面
-   端 API 同名），但 `android/host/android-host.js` 没有任何 handler，所以手机上调用会以
-   `no such bridge method: clutchComponents.list` 结束，标签页把它当一条错误画出来。
-   真要在手机上用，得在 Android 宿主里实现同一组调用。
+3. **Android 当初只做了表面齐平**（**已修掉**，`f9238b4`，落点是第八节 G2）：`ui/bridge-shim.js` 暴露了
+   `clutchComponents`（手机端与桌面端 API 同名），但 `android/host/android-host.js` 没有任何
+   handler，所以手机上调用会以 `no such bridge method: clutchComponents.list` 结束，标签页把
+   它当一条错误画出来。补法就是"在 Android 宿主里实现同一组调用"，形状与桌面端逐字对齐：
+   * `android-host.js` 建**同一个** `ui/components-view.js`（共享实现，不是副本），
+     `supervisorBase: () => null` 保持 N4（手机上无本机 supervisor），`windowKind` 取
+     `hostCore.backendKind`，于是"装到哪台机器"与桌面端同一条规则：会话在隧道对端 → 装对端；
+     没有会话 → `this build has no supervisor URL for the local machine`，页面画得出来。
+   * 六个动词一个不少，`install` 的进度走 `components:progress`（shim 订阅的那条 SSE）。
+   * 一条**看不见的**前提：`scripts/sync-android-host.sh` 的 `UI_NODE` 手写清单必须包含
+     `components-view.js`（它 require 的 `components.js` 本来就在里面）。漏掉不会报"少个功能"，
+     而是宿主 require 不到、桥还没 bind 就死——所以有了 `tests/android-assets.test.js`。
 4. **本机已装版本还是旧形状**：实测 8890 上四条记录是 `59b12509b19c6759`、
    `c66bb70851a8e165`…，而当前检出算出来的 `clutch-workspace` 是
    `0.1.0+31bc2b7c5f799e5b`。两个事实：旧记录确实停留在裸摘要年代（`install()` 会清掉同组件
@@ -368,6 +376,8 @@ node tests/components-panel.test.js               # 插件标签页：目标机�
 node tests/components-view.test.js                # 主进程插件后端：目标机/清单/市场缓存/安装/卸载/停用切换
 node tests/ui-load-order-test.js                  # ui/index.html 的 19 个脚本装序
 node tests/bridge-shim.test.js                    # 桌面端与手机端暴露同一组名字
+node tests/bridge-server.test.js                  # 手机宿主端到端（桥 + 真实 android-host + 假隧道/假 supervisor），第 9 节 = 插件通道
+node tests/android-assets.test.js                 # 手机资源子集覆盖宿主解析到的每一个模块（含传递 require）
 node tests/components.test.js                      # 客户端 + 宿主端到端（自带 supervisor）
 PYTHONPATH=. python3 tests/components_api_test.py  # 宿主侧安装/解析/门/两条开关路由
 PYTHONPATH=. python3 tests/rendezvous_test.py      # 寻址 + 停用位（`_disabled_probe`）
@@ -443,7 +453,7 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 | # | 缺口 | 影响 | 想修的话落在哪 |
 | --- | --- | --- | --- |
 | G1 | 本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | `ui/server-bootstrap.js`（现在全文无 components）或 `ui/components-view.js` 的 `install()` 前段 |
-| G2 | Android 宿主没有 `clutchComponents` handler | 手机上插件标签页每条读取都是一行错误 | `android/host/android-host.js:78-107` 一带补同组调用 |
+| G2 | ~~Android 宿主没有 `clutchComponents` handler~~ → **已交付**：`android/host/android-host.js:76-165` 建同一个 `ui/components-view.js`，六个动词 + `components:progress` | 手机上插件标签页每条读取都是一行错误 | 落地：`f9238b4`（`android/host/android-host.js`、`scripts/sync-android-host.sh` 的 `UI_NODE` 补 `components-view.js`）；守：`tests/bridge-server.test.js` 第 9 节、`tests/android-assets.test.js` |
 | G3 | 宿主缺反动词（当初是卸载/停用/回滚三件） | 装上是单向的，页面只能靠文案诚实（I5） | **卸载已两头补齐**：宿主 `90140ea`、页面 `11f6ce4`；**停用/启用已补齐**：宿主 `9f53b9c`、页面 `1df203d`。**回滚不是功能**（§一）：回到旧版就是再装一次，页面不画它 |
 | G4 | `clutch-workspace/pyproject.toml` 0.2.0 与其 `component.json` 0.1.0 不一致 | 界面显示 0.1.0，包元数据说 0.2.0 | 模块仓库自身（结论见下） |
 | G5 | 纯声明包（`interface:"data"`）目前 400 | 工具集还递不进去 | P4 |
@@ -464,6 +474,16 @@ G1 / G2 / G4 的答案是同一条：**按照 VS Code 的逻辑来**（零之四
   `android/host/bridge-server.js` 里**一个 `clutchComponents` 命名空间都没有**，于是手机上每条
   读取都结束于 `no such bridge method: clutchComponents.list`（零之三.3）。补法照 VS Code：
   同一组名字、同一组参数，落在那台机器的宿主里。
+  **已交付**（`f9238b4`，形状见零之三.3）：`android-host.js` 实例化的是**同一个**
+  `ui/components-view.js`（桌面的那一个，不是副本），六个动词与桌面端逐字对齐，唯一差别是
+  bridge 路由不带窗口 id（这台机器只有一个窗口，N5），`install` 的进度写进
+  `components:progress` 那条 SSE。`supervisorBase: () => null` 保留 N4：手机没有本机
+  supervisor，"没有会话"于是说成 `this build has no supervisor URL for the local machine`——
+  一句页面能画的话，而不是一个缺方法（`tests/bridge-server.test.js` 第 9 节把这两种句子分开钉住，
+  并真的用隧道 base 去读一台假 supervisor 的清单/版本/开关/卸载，以及"字节不过手机"的
+  `artifact_url` 安装）。另加 `tests/android-assets.test.js`：`UI_NODE` 是手写清单，名字漏了不会
+  少个功能而是**宿主 require 不到、桥还没 bind 就死**（这正是一次真实事故的回声），所以
+  `useUI()` 的每个名字与它们的传递 `require` 都被这一条钉住。
 - **G4 — 版本一致性是模块仓库自己的事**。`clutch-workspace/pyproject.toml`（0.2.0）与
   `component.json`（0.1.0）不一致，界面因此显示 0.1.0。宿主不该猜哪个对——猜错就是把一个发行
   版本号写进安装事实。做法与 VS Code 对扩展 `package.json` 的态度一致：**声明就是版本**，
