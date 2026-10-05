@@ -31,8 +31,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import signal
+import socket
 import sys
+import threading
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -73,6 +77,112 @@ SSE_KEEPALIVE_SEC = 15
 # addEventListener("ping"), which is what lets the renderer prove liveness
 # (ui/js/sse-stream.js SSE_KEEPALIVE_MS must match this value).
 SSE_PING_FRAME = b"event: ping\ndata: {}\n\n"
+
+
+def peer_gone(conn) -> bool:
+    """Whether the client has closed its side of this SSE connection.
+
+    A peer that half-closes — a torn-down tunnel, a window destroyed without a
+    close-notify — leaves the socket in CLOSE-WAIT, and our writes keep
+    succeeding into the kernel buffer (megabytes of keepalives and events,
+    observed live) so the stream looks "attached" long after its window is gone.
+    That count is what answers "is anyone watching this project?" (the gate's
+    is_attached, and the unattended-lock watchdog below), so a ghost subscriber
+    is not cosmetic: it holds the write lock of a .clc nobody is looking at.
+
+    Readability first, then a non-blocking MSG_PEEK: b"" means the peer's FIN
+    has arrived, a byte means the peer sent something (a pipelined request),
+    nothing at all means alive and quiet. Nothing is ever consumed. A socket
+    that refuses MSG_PEEK (an SSL wrapper) is left alone rather than guessed at.
+    """
+    if conn is None:
+        return False
+    try:
+        ready, _, _ = select.select([conn], [], [], 0)
+    except (OSError, ValueError):
+        return True
+    if not ready:
+        return False
+    try:
+        return conn.recv(1, socket.MSG_PEEK) == b""
+    except ValueError:  # no MSG_PEEK on this socket type: cannot tell, assume alive
+        return False
+    except OSError:  # reset/aborted: the connection can no longer be written to
+        return True
+
+
+# How long a project may keep its write lock with no window watching it. The
+# lock arbitrates two windows EDITING one .clc, and a project nobody watches has
+# no editor: the window that opened it is gone (the app quit, the client died,
+# the tunnel will not come back) and the lock left behind is not a claim but a
+# leak — every other window is refused with "already open in another window" for
+# as long as it lasts. That is the state the user reports as "the .clc is locked
+# again", minutes after the window that held it disappeared.
+#
+# Neither zero nor the supervisor's STALE_S (300 s, which must cover a client's
+# whole tunnel-redial ladder): a window is legitimately absent for a moment at a
+# time. This is the same evidence and the same window the permission gate uses to
+# decide a prompt has nobody left to answer it (DETACH_GRACE_S,
+# agent/core/permission.py): a stream gone that long is not a window that comes
+# back to edit. A window that DOES come back re-enters exactly like a run does —
+# its .clc is re-opened for write (/api/run carries the project) — which is also
+# where it learns somebody else took it.
+UNATTENDED_GRACE_S = 30.0
+UNATTENDED_POLL_S = 2.0
+
+
+def unattended_lock_watchdog(
+    state: RunState,
+    broadcaster: Broadcaster,
+    grace_s: float = UNATTENDED_GRACE_S,
+    poll_s: float = UNATTENDED_POLL_S,
+) -> threading.Thread:
+    """Hand back the active project's write lock once its audience is gone.
+
+    Polls "is a window watching the active project?" (the broadcaster's live
+    subscriber count, now that a half-closed peer stops counting) and, after
+    `grace_s` of continuous silence, re-opens the project READ-ONLY — which
+    releases the flock while leaving the window's transcript, tree and SSE scope
+    intact for whoever comes back (RunState.release_write_claim).
+
+    A run in flight is NOT an absent window: it is a writer that is still there
+    (the supervisor keeps a session with a run for the same reason), and it
+    appends to this .clc, so the claim stands for as long as it lasts. It does
+    not stop the clock: when the run ends with still nobody watching, the lock
+    goes on the next tick instead of waiting out the supervisor's stale window.
+    """
+    def _loop() -> None:
+        watched: Path | None = None
+        unattended_since: float | None = None
+        while True:
+            time.sleep(poll_s)
+            project = state.project
+            if project is None or project.read_only or project.lock is None:
+                watched, unattended_since = None, None
+                continue
+            if project.path != watched:
+                watched, unattended_since = project.path, None
+            if state.busy:
+                continue
+            if broadcaster.count(str(project.path)) > 0:
+                unattended_since = None
+                continue
+            now = time.monotonic()
+            if unattended_since is None:
+                unattended_since = now
+                continue
+            if now - unattended_since >= grace_s:
+                if state.release_write_claim():
+                    print(
+                        f"[clutch-server] no window watching {project.path.name}: "
+                        "released its write lock",
+                        flush=True,
+                    )
+                watched, unattended_since = None, None
+
+    thread = threading.Thread(target=_loop, name="clutch-unattended-lock", daemon=True)
+    thread.start()
+    return thread
 
 
 def _settings_path() -> Path:
@@ -282,6 +392,10 @@ def main() -> int:
     srv = build(config, broadcaster, state)
     # a session released mid-run still leaves a settled transcript (POSIX)
     install_release_handler(state)
+    # a window that went away must not keep its project's write lock (see the
+    # watchdog's own comment: waiting out the supervisor's stale window instead
+    # leaves the .clc locked for minutes after its window is gone)
+    unattended_lock_watchdog(state, broadcaster)
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.

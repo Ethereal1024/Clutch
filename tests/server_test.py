@@ -709,6 +709,64 @@ def _sse_keepalive(base_url) -> None:
     )
 
 
+def _ghost_subscriber(base_url, broadcaster) -> None:
+    # ---- a HALF-CLOSED stream must stop counting as an audience ----
+    # The mirror of the keepalive above: a tunnel torn down without a
+    # close-notify (the app quit, the network went away) leaves the socket
+    # writable — every keepalive lands in the kernel buffer of a window that
+    # will never read it, so NO write raises and the server keeps counting a
+    # GHOST as a watcher. That count is what decides whether a project is
+    # watched at all (the permission gate's is_attached, and the watchdog that
+    # hands a .clc's write lock back), so a ghost silently holds the lock of a
+    # project nobody has open. The FIN has to be looked FOR, not waited for.
+    import socket as socket_
+    from urllib.parse import urlsplit
+
+    import agent.server as server_mod
+
+    keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+    server_mod.SSE_KEEPALIVE_SEC = 0.2  # the tick that would notice is patched in globally
+    ghost = None
+    try:
+        # the audience is compared by IDENTITY, not as a count: another
+        # section's stream may end at any moment and would move a plain count
+        # under this test's feet (the identity of the ghost's own queue cannot)
+        before = set(broadcaster._subs)
+
+        def new() -> set:
+            """The subscribers that were not an audience when this section began."""
+            return set(broadcaster._subs) - before
+
+        parts = urlsplit(base_url)
+        ghost = socket_.create_connection((parts.hostname, parts.port), timeout=15)
+        ghost.sendall(b"GET /api/events HTTP/1.1\r\nHost: clutch\r\n\r\n")
+        buf = b""
+        deadline = time.time() + 15
+        while time.time() < deadline and b"event: ping" not in buf:
+            chunk = ghost.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        check(b"event: ping" in buf, "a raw stream subscribes and is streamed to")
+        check(len(new()) == 1, "and it counts as an audience while it is really there")
+
+        # a HALF-close: the client's read side stays open (so the server's
+        # writes keep succeeding — the exact live symptom), while the FIN says
+        # nobody will ever read them
+        ghost.shutdown(socket_.SHUT_WR)
+        deadline = time.time() + 15
+        while time.time() < deadline and new():
+            time.sleep(0.05)
+        check(
+            new() == set(),
+            "a half-closed stream is dropped from the audience (never written into as a ghost)",
+        )
+    finally:
+        if ghost is not None:
+            ghost.close()
+        server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
+
+
 def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
     import agent.server as server_mod
 
@@ -957,6 +1015,21 @@ def _write_lock_one_writer(base_url, clc, clc2, state) -> None:
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
         check(st == 200, "different project opens while another holds demo's lock")
 
+    # a read-only FALLBACK is not a life sentence: the window that held the lock
+    # is gone, so asking for the claim again must succeed instead of answering
+    # "close the other window first" for the rest of the session. Without the
+    # retry the window is stuck read-only even though the .clc is free — the
+    # user's "the project is locked AGAIN" long after the lock was handed back.
+    st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
+    check(st == 200, "a free .clc still opens read-only when the flag is given")
+    check(state.project is not None and state.project.read_only, "the fallback is read-only")
+    check(state.project.lock is None, "and it holds no write lock")
+    state.api_key = None  # no key: the run fails AFTER the claim is (re)taken
+    st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
+    check(st == 500, "a run re-opens a read-only project once its lock is free (never 409)")
+    check(state.project is not None and not state.project.read_only, "the window is writable again")
+    check(state.project.lock is not None, "and it holds the write lock again")
+
     # the other window released -> the demo project opens normally again
     st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
     check(st == 200, "open works after the other window released")
@@ -1128,6 +1201,93 @@ def _dying_holder_frees_the_lock() -> None:
         finally:
             if holder.poll() is None:
                 _kill_tree(holder)
+
+
+def _unattended_lock_watchdog() -> None:
+    # ---- 3h. a .clc's write lock never outlives its audience ----
+    # The flock only dies with the PROCESS, so a window that is GONE — the app
+    # quit, its client was killed, its session was reaped — leaves the .clc
+    # claimed and every other window answered "already open in another window"
+    # for as long as this server lives. What says a window is still there is its
+    # SSE stream, and that stream has to be inspected (a half-closed tunnel
+    # raises nothing on a write, so writes land in a buffer nobody reads):
+    # otherwise a GHOST subscriber keeps the lock of a project nobody is
+    # looking at. This section drives the watchdog and the release it calls on
+    # its OWN state/broadcaster, so no background thread can touch the server
+    # the other sections share.
+    import socket as socket_
+
+    from agent.core.project_lock import ProjectLock
+    from agent.project import create_project, open_project_lazy
+    from agent.server import peer_gone, unattended_lock_watchdog
+    from agent.tools.workspace import LocalWorkspace
+
+    # -- peer_gone: the FIN of a half-closed stream, noticed, nothing consumed
+    alive, far = socket_.socketpair()
+    try:
+        check(peer_gone(None) is False, "no connection is not a gone peer")
+        check(peer_gone(alive) is False, "a quiet open peer is not gone")
+        far.send(b"GET / HTTP/1.1\r\n")
+        check(peer_gone(alive) is False, "a peer with a pending request is not gone (data comes before the FIN)")
+        check(alive.recv(18) == b"GET / HTTP/1.1\r\n", "and peer_gone consumed none of what it peeked")
+        far.close()
+        deadline = time.time() + 5
+        while time.time() < deadline and not peer_gone(alive):
+            time.sleep(0.05)
+        check(peer_gone(alive) is True, "the peer's FIN is seen while the stream still looks writable")
+    finally:
+        alive.close()
+
+    state = RunState()
+    broadcaster = Broadcaster()
+    with tempfile.TemporaryDirectory() as wdir:
+        root = Path(wdir)
+        ws = LocalWorkspace(str(root))
+        project = create_project(root / "watched", "watched", workspace=ws)
+        state.set_project(project, workspace=ws)
+        key = str(state.project.path)
+
+        def claimed() -> bool:
+            """Whether a SECOND independent claim on this .clc is still refused —
+            the kernel's answer, not the server's bookkeeping."""
+            h = ProjectLock._acquire_local(key)
+            if h is None:
+                return True
+            ProjectLock.release(h)
+            return False
+
+        check(not state.project.read_only and state.project.lock is not None, "the active project is write-claimed")
+        check(claimed(), "and the kernel agrees the .clc is locked")
+
+        # -- release_write_claim: the window stays, the claim goes
+        check(state.release_write_claim() is True, "an unattended claim is handed back")
+        check(state.project is not None and str(state.project.path) == key, "the project stays ACTIVE")
+        check(state.project.read_only and state.project.lock is None, "it is read-only and holds no lock")
+        check(not claimed(), "the .clc is free for another window")
+
+        # -- a run in flight IS an editor: its claim must stand
+        state.set_project(open_project_lazy(project.path, workspace=ws), workspace=ws)
+        check(not state.project.read_only and claimed(), "the project is re-claimed for write")
+        state.busy = True
+        check(state.release_write_claim() is False, "a busy server never hands the claim back")
+        check(claimed(), "the claim stands while the run is in flight")
+        state.busy = False
+        check(state.release_write_claim() is True, "and it goes back the moment the run ends")
+
+        # -- the watchdog: a watching window keeps it, silence hands it back
+        state.set_project(open_project_lazy(project.path, workspace=ws), workspace=ws)
+        unattended_lock_watchdog(state, broadcaster, grace_s=0.3, poll_s=0.05)
+        q = broadcaster.subscribe(key)  # a subscriber that publishes nothing is an audience
+        try:
+            time.sleep(1.0)  # several grace windows' worth of ticks
+            check(not state.project.read_only and claimed(), "a watching window keeps the write lock")
+        finally:
+            broadcaster.unsubscribe(q)
+        deadline = time.time() + 10
+        while time.time() < deadline and not state.project.read_only:
+            time.sleep(0.05)
+        check(state.project.read_only, "nobody watching: the watchdog hands the lock back")
+        check(not claimed(), "and the .clc is free again for any other window")
 
 
 def _session_release_is_recorded() -> None:
@@ -1410,6 +1570,7 @@ def _run_server_test() -> int:
         _sse_since_offset(base_url, lclc, clc, comp_off)
         _broadcaster_bounded(broadcaster)
         _sse_keepalive(base_url)
+        _ghost_subscriber(base_url, broadcaster)
         _connecting_stream_status(base_url, clc, state, broadcaster)
         _live_frame_shape(base_url, clc, state, broadcaster)
         clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)
@@ -1417,6 +1578,7 @@ def _run_server_test() -> int:
         _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir)
         _remote_workspace_locks_locally()
         _dying_holder_frees_the_lock()
+        _unattended_lock_watchdog()
         _session_release_is_recorded()
         if not _start_real_run(base_url, state):
             return 0

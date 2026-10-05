@@ -22,7 +22,7 @@ from .core.permission import PermissionEvaluator, PermissionGate
 from .core.project_lock import LockHandle, ProjectLock
 from .llm import LlmClient, create_llm_client
 from .loop import Agent
-from .project import Project
+from .project import Project, open_project_lazy
 from .tools.registry import ToolRegistry, build_tools
 from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
 
@@ -179,6 +179,42 @@ class RunState:
             self.workspace = workspace
             self._retire_lock(prev, keep=project.lock)
             return self.workspace
+
+    def release_write_claim(self) -> bool:
+        """Open the active project READ-ONLY, handing its write lock back.
+
+        The lock arbitrates two windows EDITING one .clc, so a project no window
+        is watching has no editor and must not keep other windows out of the file
+        (agent/server.py's unattended watchdog is the caller). The project stays
+        ACTIVE: whoever comes back keeps its transcript, its tree and its SSE
+        scope, and simply finds that its claim is gone — a run re-opens the
+        project for write anyway (/api/run carries the project), which is the
+        honest place to discover that another window took it.
+
+        A run in flight is a writer that is still there, so this refuses while
+        busy: releasing the lock under a running writer is exactly the two
+        writers the lock exists to prevent. Returns True when the lock was
+        handed back.
+        """
+        with self.lock:
+            if self.busy:
+                return False
+            project, ws = self.project, self.workspace
+        if project is None or project.read_only or project.lock is None:
+            return False
+        try:
+            # read-only first so the file is never unlocked without a project
+            # behind it, then swap: set_project retires the old lock
+            fresh = open_project_lazy(project.path, workspace=ws, read_only=True)
+        except (OSError, ValueError):
+            return False
+        with self.lock:
+            if self.project is not project:  # a window got here first: leave it
+                return False
+            self.project = fresh
+            self.workspace = ws
+            self._retire_lock(project)
+        return True
 
     def _retire_lock(self, prev: Project | None, keep: LockHandle | None = None) -> None:
         """Hand back the write lock of a project that stops being the active one.

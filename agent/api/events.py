@@ -189,6 +189,13 @@ class EventsMixin:
                     self._write_sse(ev)
                 except queue.Empty:
                     try:
+                        # the peer may be gone WITHOUT the write failing (a
+                        # half-closed tunnel: writes land in a buffer nobody
+                        # reads). Notice it, so the subscription ends and the
+                        # count that answers "is anyone watching?" stops
+                        # counting a ghost — see agent/server.py peer_gone.
+                        if host.peer_gone(self.connection):
+                            break
                         self.wfile.write(host.SSE_PING_FRAME)
                         self.wfile.flush()
                     except host._SSE_ERR:

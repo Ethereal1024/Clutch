@@ -60,9 +60,29 @@ class RunMixin:
         if project is None:
             return self._json({"error": "no project open; create or open one first"}, status=400)
         if project.read_only:
-            return self._json(
-                {"error": "project opened read-only; close the other window first"}, status=409
-            )
+            # Read-only is only ever the FALLBACK for a conflict (see
+            # ui/js/project.js): the window that held the write lock may be gone
+            # by now — it quit, its client died, its session was reaped — so ask
+            # for the claim again before refusing. Without the retry a window
+            # that fell back to read-only once can never run a task on that
+            # project again even though the file is free: every run answers
+            # "close the other window first" forever, which is what the user
+            # sees as the project being locked AGAIN long after the lock is gone.
+            if self._state.busy:
+                return self._json({"error": "a run is already active"}, status=409)
+            try:
+                ws = self._state.build_workspace(str(project.path.parent))
+                project = open_project_lazy(project.path, workspace=ws)
+            except ProjectOpenConflict:
+                # somebody really does hold it: the same honest answer as an
+                # open, so the UI can say what happened instead of guessing
+                return self._json(
+                    {"error": "project is open in another window", "code": "project_open_conflict"},
+                    status=409,
+                )
+            except (OSError, ValueError) as e:
+                return self._json({"error": f"cannot open project: {e}"}, status=500)
+            self._state.set_project(project, workspace=ws)
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
             # publish the permission request to the UI; with no SSE subscriber
