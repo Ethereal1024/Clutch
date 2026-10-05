@@ -193,6 +193,30 @@ def _parse_args(args_repr: str) -> dict:
 ATTACH_POLL_S = 1.0
 DETACH_GRACE_S = 30.0
 
+# How often a waiting ask is re-announced to the UI. An ask is not a one-shot
+# frame: it is published ONCE to one stream, and a window can miss that frame —
+# a reload mid-ask, an EventSource between reconnects, a renderer still
+# reconstructing history (which drops live prompts on purpose, see
+# ui/js/stream-events.js). What arrives once can be lost forever, and what is
+# lost leaves the run blocked on a prompt nobody has ever seen. So while the ask
+# waits it is sent again, keyed by the same request_id: a UI that shows it
+# already renders the same dialog in place, one that never saw it finally can.
+REANNOUNCE_S = 15.0
+
+
+@dataclass
+class _Ask:
+    """One waiting prompt: the event its verdict sets, and what to re-announce.
+
+    The details live here (not just the Event) because a prompt must outlast the
+    frame that announced it: pending_asks() hands them to every (re)connecting
+    stream, and the remind loop publishes them again while the ask waits."""
+
+    done: threading.Event
+    tool: str
+    args_repr: str
+    reason: str
+
 
 class PermissionGate:
     """Bridge between the agent thread and the UI.
@@ -216,6 +240,7 @@ class PermissionGate:
         is_attached: Callable[[], bool] | None = None,
         detach_grace_s: float = DETACH_GRACE_S,
         attach_poll_s: float = ATTACH_POLL_S,
+        reannounce_s: float = REANNOUNCE_S,
     ) -> None:
         self.evaluator = evaluator
         # (request_id, tool, args_repr, reason) -> None to block, False when no
@@ -227,7 +252,8 @@ class PermissionGate:
         self.is_attached = is_attached
         self.detach_grace_s = detach_grace_s
         self.attach_poll_s = attach_poll_s
-        self._pending: dict[str, threading.Event] = {}
+        self.reannounce_s = reannounce_s
+        self._pending: dict[str, _Ask] = {}
         self._decisions: dict[str, bool] = {}
         self._lock = threading.Lock()
         self._counter = 0
@@ -264,15 +290,22 @@ class PermissionGate:
             self._counter += 1
             request_id = f"perm-{self._counter}"
             ev = threading.Event()
-            self._pending[request_id] = ev
+            self._pending[request_id] = _Ask(ev, tool, args_repr, reason)
             self._decisions[request_id] = False
+
+        def _remind() -> None:
+            # the same ask again, under the same request_id: a window that
+            # missed the first publish (a reload mid-ask, a reconnect, a
+            # renderer still reconstructing history) finally sees the prompt
+            self.on_ask(request_id, tool, args_repr, reason)
+
         if self.on_ask and self.on_ask(request_id, tool, args_repr, reason) is False:
             # renderer disconnected: deny rather than wait forever
             with self._lock:
                 self._pending.pop(request_id, None)
                 self._decisions.pop(request_id, None)
             raise PermissionRequired(request_id, tool, args_repr, "no user interface connected to confirm this action")
-        if not self._await_decision(ev):
+        if not self._await_decision(ev, _remind if self.on_ask else None):
             # the UI this prompt was published to is gone and never came back:
             # nobody is left who CAN confirm, so answer exactly like on_ask's
             # "no UI attached" instead of wedging the run — an unanswered ask
@@ -292,7 +325,7 @@ class PermissionGate:
             raise PermissionRequired(request_id, tool, args_repr, "denied by user")
         workspace.allow(escapes)
 
-    def _await_decision(self, ev: threading.Event) -> bool:
+    def _await_decision(self, ev: threading.Event, remind: Callable[[], None] | None = None) -> bool:
         """Wait for the user's answer; False when the audience is gone for good.
 
         No timeout while a UI is attached: the prompt stays up until the user
@@ -302,13 +335,26 @@ class PermissionGate:
         prompt nobody can ever answer. So attachment is re-checked as the wait
         goes on, and only a gap longer than `detach_grace_s` counts as gone —
         see DETACH_GRACE_S for why a short gap is not a verdict.
+
+        While the wait lasts, `remind` re-announces the prompt every
+        `reannounce_s` (see REANNOUNCE_S): delivery is best-effort, and a run
+        must not block forever on a prompt its window never saw. A reminder that
+        cannot be delivered is not this loop's verdict — the attachment check
+        above owns that.
         """
         gone_since: float | None = None
+        announced = time.monotonic()
         while not ev.wait(self.attach_poll_s):
+            now = time.monotonic()
+            if remind is not None and now - announced >= self.reannounce_s:
+                announced = now
+                try:
+                    remind()
+                except Exception:  # noqa: BLE001 -- a reminder never ends the wait
+                    pass
             if self.is_attached():
                 gone_since = None
                 continue
-            now = time.monotonic()
             if gone_since is None:
                 gone_since = now
             elif now - gone_since >= self.detach_grace_s:
@@ -316,15 +362,29 @@ class PermissionGate:
         return True
 
     def resolve(self, request_id: str, allow: bool) -> bool:
-        """Called by the server when the UI responds. Returns True if found."""
+        """Called by the server when the UI responds. Returns True if found.
+
+        A resolved ask leaves `_pending` at once: it is no longer waiting, so it
+        is never re-announced or re-delivered again (the decision stays until
+        `require` reads it on its way out)."""
         with self._lock:
-            ev = self._pending.get(request_id)
-            if ev is None:
+            ask = self._pending.pop(request_id, None)
+            if ask is None:
                 return False
             self._decisions[request_id] = allow
-        ev.set()
+        ask.done.set()
         return True
 
     def pending_ids(self) -> list[str]:
         with self._lock:
             return list(self._pending)
+
+    def pending_asks(self) -> list[tuple[str, str, str, str]]:
+        """Every prompt still waiting: (request_id, tool, args_repr, reason).
+
+        What a (re)connecting window is owed the moment its stream opens — an
+        ask is STATE while it waits, not a frame that was sent once (see
+        REANNOUNCE_S), because a prompt a window never saw blocks the run on a
+        dialog nobody can answer."""
+        with self._lock:
+            return [(rid, a.tool, a.args_repr, a.reason) for rid, a in self._pending.items()]

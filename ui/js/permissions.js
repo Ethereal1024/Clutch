@@ -13,7 +13,15 @@
 // ---- permission confirm ----
 const permModal = $("#perm-modal");
 let pendingPerm = null;
+// asks this window has already answered: an ask is re-announced while it waits
+// and re-delivered on every (re)connect (agent/core/permission.py REANNOUNCE_S,
+// agent/api/events.py) — a copy arriving after the verdict must not re-open a
+// prompt the user already answered, and one already on screen is rendered in
+// place, never as a second dialog (or a restarted trust countdown)
+const answeredPerm = new Set();
 function openPerm(ev) {
+  if (answeredPerm.has(ev.request_id)) return;
+  if (pendingPerm && pendingPerm.request_id === ev.request_id) return;
   pendingPerm = ev;
   const reason = permReason(ev.reason);
   $("#perm-tool").textContent = `Tool: ${ev.tool} — ${reason}`;
@@ -49,6 +57,10 @@ async function respondPerm(allow) {
   if (!pendingPerm) return;
   const ev = pendingPerm;
   closePerm();
+  // the verdict is given HERE, not when the POST lands: a re-announced copy of
+  // the ask racing it must never re-open a prompt the user just answered. A
+  // transport failure takes the mark back below and puts the prompt back up.
+  answeredPerm.add(ev.request_id);
   setStatus("running");
   try {
     await apiFetch("/api/permission/respond", {
@@ -63,6 +75,7 @@ async function respondPerm(allow) {
     // a transport failure means the gate is still waiting: put the prompt back.
     console.error("[permission] verdict not delivered", e);
     if (e && e.status) return;
+    answeredPerm.delete(ev.request_id); // the verdict never arrived: prompt it again
     openPerm(ev);
   }
 }

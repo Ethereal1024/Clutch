@@ -18,7 +18,7 @@ from pathlib import Path
 from ..base import LAGGED
 from ..core.lazy import LazyEventLog
 from ..core.project_lock import ProjectLock
-from ..events import Event, StateUpdateEvent, event_to_json
+from ..events import Event, PermissionRequestEvent, StateUpdateEvent, event_to_json
 from ..project import Project, open_project_lazy
 
 
@@ -155,6 +155,24 @@ class EventsMixin:
                         self._write_sse_raw({"type": "replayed", "count": len(owed)})
             except host._SSE_ERR:
                 return  # client went away mid-status/replay: nothing left to stream
+            # every permission ask still waiting. An ask is STATE, not a frame
+            # that was sent once: a window can miss its publish (a reload
+            # mid-ask, an EventSource between reconnects, a renderer still
+            # reconstructing history — which drops live prompts on purpose), and
+            # a prompt nobody has seen blocks the run until the user gives up on
+            # it. So every (re)connect of a stream that can answer the ask is
+            # handed the ones still on the table — the same event, same
+            # request_id, which the UI renders in place (or recovers after a
+            # reload), and the gate re-announces while they wait (REANNOUNCE_S).
+            try:
+                gate = self._state.gate
+                rp = self._state.run_project
+                if gate is not None and not (rp and project_q and rp != project_q):
+                    for request_id, tool, args_repr, reason in gate.pending_asks():
+                        self._write_sse(PermissionRequestEvent(
+                            request_id=request_id, tool=tool, args_repr=args_repr, reason=reason))
+            except host._SSE_ERR:
+                return  # client went away: nothing left to stream
             # then live events
             while True:
                 try:
