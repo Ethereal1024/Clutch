@@ -19,6 +19,17 @@ let pendingPerm = null;
 // prompt the user already answered, and one already on screen is rendered in
 // place, never as a second dialog (or a restarted trust countdown)
 const answeredPerm = new Set();
+// ...and the marks are per RUN, not per page. A request_id belongs to the run
+// whose gate minted it (agent/core/permission.py), and a run's ids are dead the
+// moment it ends. Hosts that predate this fix numbered asks from 1 in EVERY run, so
+// a page-lifetime mark swallowed the next run's first prompt: the frame returned
+// early, no dialog ever appeared, and the run stayed blocked on an answer nobody
+// could give until Stop. The stream calls this at every run boundary
+// (js/stream-events.js), so a copy of a LIVE ask is still deduped while an id
+// the run that just ended used can never mute a new one.
+function forgetAnsweredPerm() {
+  if (answeredPerm.size) answeredPerm.clear();
+}
 function openPerm(ev) {
   if (answeredPerm.has(ev.request_id)) return;
   if (pendingPerm && pendingPerm.request_id === ev.request_id) return;

@@ -180,8 +180,10 @@ def check_permission() -> None:
         import time as _time
 
         _time.sleep(0.2)
-        check(len(gate.pending_ids()) == 1, "ask stays pending while waiting for the user")
-        check(gate.resolve("perm-1", False), "pending ask resolved by the UI")
+        pending = gate.pending_ids()
+        check(len(pending) == 1, "ask stays pending while waiting for the user")
+        check(pending[0].startswith("perm-"), f"the ask carries an id the UI can answer ({pending})")
+        check(gate.resolve(pending[0], False), "pending ask resolved by the UI")
         t.join(timeout=2)
         check(outcome.get("raised") == "denied by user", "denied ask unblocks the agent with 'denied by user'")
 

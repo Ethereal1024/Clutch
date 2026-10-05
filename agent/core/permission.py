@@ -19,10 +19,12 @@ declared. The default action is allow for anything inside the workspace.
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -198,13 +200,29 @@ DETACH_GRACE_S = 30.0
 
 # How often a waiting ask is re-announced to the UI. An ask is not a one-shot
 # frame: it is published ONCE to one stream, and a window can miss that frame —
-# a reload mid-ask, an EventSource between reconnects, a renderer still
-# reconstructing history (which drops live prompts on purpose, see
-# ui/js/stream-events.js). What arrives once can be lost forever, and what is
-# lost leaves the run blocked on a prompt nobody has ever seen. So while the ask
-# waits it is sent again, keyed by the same request_id: a UI that shows it
-# already renders the same dialog in place, one that never saw it finally can.
+# a reload mid-ask, an EventSource between reconnects, a renderer that was busy
+# rebuilding history when the ask was published (see ui/js/stream-events.js,
+# which no longer discards a live prompt but can still have missed one). What
+# arrives once can be lost forever, and what is lost leaves the run blocked on a
+# prompt nobody has ever seen. So while the ask waits it is sent again, keyed by
+# the same request_id: a UI that shows it already renders the same dialog in
+# place, one that never saw it finally can.
 REANNOUNCE_S = 15.0
+
+# Request ids are unique for the LIFE OF THE PROCESS, not just inside one gate.
+#
+# A gate is built per run (agent/base.py start_task), and its own counter started
+# at 1 again — so "perm-1" named the first ask of EVERY run. An id is the only
+# thing a window has to tell "the ask I just answered" from "a new ask", and
+# ui/js/permissions.js remembers the ids it answered for as long as the page
+# lives: with a reused id the next run's prompt was silently swallowed (the mark
+# matched, the frame returned early), the run stayed blocked in
+# PermissionGate.require — which has no timeout by design — and the only way out
+# was Stop, which answers every pending ask "denied by user". One counter for the
+# whole process, tagged per process so a restarted host cannot hand out an id a
+# window still remembers, removes the collision at its source.
+_ASK_IDS = itertools.count(1)
+_PROCESS_TAG = uuid.uuid4().hex[:8]
 
 
 @dataclass
@@ -262,7 +280,6 @@ class PermissionGate:
         self._pending: dict[str, _Ask] = {}
         self._decisions: dict[str, bool] = {}
         self._lock = threading.Lock()
-        self._counter = 0
 
     def require(self, tool: str, args_repr: str, workspace: Workspace, access: str, arg: str = "") -> None:
         """Raise PermissionRequired if the user must confirm (or deny).
@@ -293,8 +310,8 @@ class PermissionGate:
                 raise PermissionRequired("", tool, args_repr, "sandbox escape requires user approval")
             return  # non-escape rule ask auto-allowed (eval harness behavior)
         with self._lock:
-            self._counter += 1
-            request_id = f"perm-{self._counter}"
+            # see _ASK_IDS/_PROCESS_TAG: an id must not repeat across runs
+            request_id = f"perm-{_PROCESS_TAG}-{next(_ASK_IDS)}"
             ev = threading.Event()
             self._pending[request_id] = _Ask(ev, tool, args_repr, reason)
             self._decisions[request_id] = False

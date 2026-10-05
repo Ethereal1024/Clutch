@@ -4,11 +4,12 @@ Run: uv run python -m tests.ask_replay_test
 
 The failure this guards (observed live, more than once): a permission ask is
 published to the broadcaster ONCE. A window that misses that one frame — a
-reload mid-ask, an EventSource between reconnects, or a renderer still
-reconstructing history (which drops live prompts on purpose, see
-ui/js/stream-events.js) — never learns the prompt exists. No dialog appears, the
-run sits blocked in gate.require until the user presses Stop, and Stop answers
-every pending ask "denied by user" — a denial nobody ever saw a prompt for.
+reload mid-ask, an EventSource between reconnects, a renderer that was still
+reconstructing history when the frame arrived (it used to drop live prompts;
+ui/js/stream-events.js no longer discards a live ask) — never learns the prompt
+exists. No dialog appears, the run sits blocked in gate.require until the user
+presses Stop, and Stop answers every pending ask "denied by user" — a denial
+nobody ever saw a prompt for.
 
 So an ask is STATE while it waits, not a frame that was sent once:
 
@@ -18,7 +19,11 @@ So an ask is STATE while it waits, not a frame that was sent once:
   answer them — the reload/reconnect recovery;
 * the gate re-announces the ask while it waits (REANNOUNCE_S) — a prompt that
   was dropped without a reconnect still surfaces, and the UI renders the same
-  request_id in place (ui/js/permissions.js) instead of stacking dialogs.
+  request_id in place (ui/js/permissions.js) instead of stacking dialogs;
+* and that request_id is unique for the life of the process, never per gate: a
+  window remembers the ids it answered for as long as the page lives, so an id
+  a second run reused was a prompt it silently swallowed — the second shape of
+  this same hang (tests/perm-run-scope-test.js drives the window's side).
 """
 
 from __future__ import annotations
@@ -170,6 +175,65 @@ def _ask_is_reannounced_while_it_waits(tmp: str) -> None:
     check(len(calls) == settled, "no announcement is made after the verdict")
 
 
+def _fresh_gate_ids_never_collide(tmp: str) -> None:
+    """Two runs, two gates: an id answered in one must never name the other's ask.
+
+    A gate is built per run (agent/base.py start_task) and its counter started at
+    1 inside each one, so EVERY run's first ask used to be "perm-1" — while a
+    window remembers the ids it answered for as long as the page lives
+    (ui/js/permissions.js answeredPerm). A reused id is therefore a prompt the
+    window swallows silently: no dialog ever appears, gate.require waits (no
+    timeout, by design), and the only way out is Stop. Ids unique for the life of
+    the process are the fix this pins.
+    """
+    seen: list[str] = []
+    for i in range(3):  # three tasks in a row in one window
+        ws = LocalWorkspace(tmp)
+        gate = PermissionGate(
+            evaluator=PermissionEvaluator(),
+            on_ask=lambda *a: True,
+            is_attached=lambda: True,
+        )
+        out: dict = {}
+        t = _require_in_thread(gate, ws, out)
+        asks = _wait_for_pending(gate)
+        check(len(asks) == 1, f"run {i + 1} blocks on its own ask")
+        seen.append(asks[0][0])
+        check(gate.resolve(asks[0][0], True), f"run {i + 1}'s ask is answered")
+        t.join(timeout=5)
+        check(not t.is_alive() and out.get("ok"), f"run {i + 1} continues ({out})")
+    check(len(set(seen)) == len(seen), f"no run reuses an id an earlier one answered ({seen})")
+
+
+def _concurrent_gates_share_one_id_space(tmp: str) -> None:
+    """Several runs at once (windows, projects): a verdict must name one ask."""
+    gates = [
+        PermissionGate(
+            evaluator=PermissionEvaluator(),
+            on_ask=lambda *a: True,
+            is_attached=lambda: True,
+        )
+        for _ in range(4)
+    ]
+    threads: list[threading.Thread] = []
+    outs: list[dict] = []
+    for g in gates:
+        o: dict = {}
+        outs.append(o)
+        threads.append(_require_in_thread(g, LocalWorkspace(tmp), o))
+    ids: list[str] = []
+    for g in gates:
+        asks = _wait_for_pending(g)
+        check(len(asks) == 1, "each concurrent run waits on its own ask")
+        ids.append(asks[0][0])
+    check(len(set(ids)) == len(ids), f"concurrent asks never share an id ({ids})")
+    for g, rid in zip(gates, ids):
+        check(g.resolve(rid, True), f"the verdict finds its own ask ({rid})")
+    for t in threads:
+        t.join(timeout=5)
+    check(all(o.get("ok") for o in outs), f"every concurrent run continues ({outs})")
+
+
 def _publish(broadcaster: Broadcaster, request_id: str, tool: str, args_repr: str, reason: str) -> bool:
     # the run's own on_ask (agent/api/run.py): one publish to the broadcaster
     broadcaster.publish(
@@ -277,6 +341,10 @@ def main() -> int:
         print("ok - a waiting ask is state: listed, re-sendable, dropped on resolve")
         _ask_is_reannounced_while_it_waits(wtmp)
         print("ok - a waiting ask is re-announced, never after its verdict")
+        _fresh_gate_ids_never_collide(wtmp)
+        print("ok - a new run never reuses an id an earlier run's window answered")
+        _concurrent_gates_share_one_id_space(wtmp)
+        print("ok - concurrent runs draw from one id space")
     _sse_streams_redeliver_pending_asks()
     print("ok - SSE streams hand every (re)connect the asks still waiting")
     print("all checks passed")

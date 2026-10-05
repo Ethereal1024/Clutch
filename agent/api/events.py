@@ -186,8 +186,9 @@ class EventsMixin:
                 return  # client went away mid-status/replay: nothing left to stream
             # every permission ask still waiting. An ask is STATE, not a frame
             # that was sent once: a window can miss its publish (a reload
-            # mid-ask, an EventSource between reconnects, a renderer still
-            # reconstructing history — which drops live prompts on purpose), and
+            # mid-ask, an EventSource between reconnects, a renderer that was
+            # still reconstructing history when it was published — which used to
+            # discard live prompts; ui/js/stream-events.js no longer does), and
             # a prompt nobody has seen blocks the run until the user gives up on
             # it. So every (re)connect of a stream that can answer the ask is
             # handed the ones still on the table — the same event, same

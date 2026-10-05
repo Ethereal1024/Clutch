@@ -136,6 +136,8 @@ function addEvent(ev) {
     // the record of what happened to the run before it.
     if (sseRunLostPending) announceRunLost();
     runSettled = false;
+    // a task opens a NEW run: every ask id the run before it handed out is dead
+    forgetAnsweredPerm();
   } else if (ev && ev.type === "final") {
     runSettled = true;
   }
@@ -166,9 +168,14 @@ function addEvent(ev) {
     clearStream();
     return;
   }
-  // replayed status/permission events must not drive the live UI
-  if (stream.classList.contains("loading") &&
-      (ev.type === "state_update" || ev.type === "permission_request")) {
+  // replayed status frames must not drive the live UI — but a LIVE permission
+  // prompt is never a replay, and dropping it is how a run wedges: this frame is
+  // host-made and never persisted (agent/events.py DURABLE_TYPES has no
+  // permission_request), so it can only be the ask a blocked run is waiting on.
+  // While the pane was "loading" (the /api/project/open reconstruction, whose
+  // reader may never finish) such a frame was discarded and the prompt never
+  // appeared — the run then waits with no dialog to answer it.
+  if (stream.classList.contains("loading") && ev.type === "state_update") {
     return;
   }
   // finalize the coalesced text block before any non-text event
@@ -274,6 +281,9 @@ function applyStreamEvent(ev) {
   if (ev.type === "final") {
     // the run is over: dismiss any stale permission prompt
     if (pendingPerm) closePerm();
+    // ...and forget the answers it collected: an id belongs to one run, and this
+    // one can never ask again (see forgetAnsweredPerm)
+    forgetAnsweredPerm();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
     clearRetryNote(); // a lost stream that never recovered leaves no chip behind
     // fences may have closed since the last delta: one final render pass

@@ -170,6 +170,9 @@ global.setJumpVisible = () => {};
 // js/render-events.js appendCompletion: the divider the announcement rides on)
 global.pendingPerm = null;
 global.closePerm = () => {};
+// the answered-ask marks addEvent clears at a run boundary (js/permissions.js):
+// this runner drives the real final/addEvent paths, but no prompt is involved
+global.forgetAnsweredPerm = () => {};
 global.clearStreamPreviews = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};

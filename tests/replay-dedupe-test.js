@@ -109,6 +109,10 @@ global.setJumpVisible = () => {};
 // stake here — what the window says about a LOST one is tests/silent-idle-test.js
 global.sseRunLostPending = false;
 global.runSettled = false;
+// the run-boundary marks addEvent clears (js/permissions.js answeredPerm): this
+// runner cares about offsets, not prompts — what the mark does for a new run is
+// tests/perm-run-scope-test.js
+global.forgetAnsweredPerm = () => {};
 
 for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
   (0, eval)(fnBody(name));
