@@ -55,7 +55,7 @@ const hostCore = createHostCore({
 //
 // `ensureSupervisor` is this machine's wake: the supervisor exits when it is
 // idle, so an install onto THIS machine starts it again instead of failing with
-// "did not answer" (§八 G1). The far side of a tunnel starts its own.
+// "did not answer" (八 G1). The far side of a tunnel starts its own.
 const componentsView = createComponentsView({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
   tunnelStatus: () => tunnel.tunnelStatus(),

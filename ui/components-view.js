@@ -184,7 +184,7 @@ function createComponentsView(deps) {
     // platform) never starts a machine for nothing. And it is only ever the LOCAL
     // one: the far side of a tunnel starts its own supervisor, exactly as it does
     // in VS Code, where installing onto a remote server is part of that machine's
-    // server start rather than the client's (PLUGIN_PLAN §八 G1).
+    // server start rather than the client's (PLUGIN_PLAN 八 G1).
     if (t.kind === "local" && ensureSupervisor) {
       say("wake");
       if (!(await ensureSupervisor())) {
