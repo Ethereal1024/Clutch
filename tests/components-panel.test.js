@@ -324,6 +324,14 @@ const CODE = mod ? mod.code : "";
     p.world.progress({ stage: "artifact", name: "clutch-workspace" });
     check(/preparing the bytes/.test(p.note().textContent), "the building stage is drawn");
 
+    // a local install may have to start this machine's supervisor first (it exits
+    // when it is idle): the page says so, because the first start is the slow one
+    p.world.progress({ stage: "wake", name: "clutch-workspace" });
+    check(
+      /Local \(this machine\) is starting its supervisor/.test(p.note().textContent),
+      "the wake stage says the target machine's supervisor is coming up"
+    );
+
     p.world.progress({ stage: "upload", name: "clutch-workspace", version: "0.1.0+5f900739" });
     check(/sending clutch-workspace 0\.1\.0\+5f900739 to Local \(this machine\)/.test(p.note().textContent), "the upload stage names the bytes and the machine");
     p.world.progress({ stage: "upload", name: "clutch-memory" });

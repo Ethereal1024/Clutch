@@ -13,6 +13,8 @@
 //   supervisorBase()  => "http://127.0.0.1:8890"   THIS machine's supervisor
 //   tunnelStatus()    => {active, url}            a live tunnel's far supervisor
 //   windowKind(win)   => "local" | "tunnel" | null  which session this window holds
+//   ensureSupervisor()=> true | false             start THIS machine's supervisor
+//                      (absent on a host that owns none — the phone, N4)
 //   log(...)          => sink
 //   lib               => ui/components.js (the install layer itself)
 //   now()             => clock (the market cache's TTL)
@@ -31,6 +33,7 @@ function createComponentsView(deps) {
     supervisorBase,
     tunnelStatus = () => ({}),
     windowKind = null,
+    ensureSupervisor = null,
     log = () => {},
     lib = defaultLib,
     now = Date.now,
@@ -165,6 +168,32 @@ function createComponentsView(deps) {
         name,
         error: `this client has no bytes for ${name}: no checkout beside the host repo, and no artifact for this platform in its release`,
       };
+    }
+
+    // The machine's supervisor exits when it is idle (it is the app that starts it
+    // on demand), and the plugin tab can be open before any window holds a session
+    // — so the machine this install is aimed at may not be running. A WRITE is the
+    // user asking that machine to do something, and this client is the one holding
+    // its spawn command: an idle-exited supervisor is started here rather than
+    // reported as "did not answer". A READ stays honest (list() says "not
+    // answering", the page draws that) — waking a machine to answer a question
+    // nobody asked it to answer yet is not this layer's business.
+    //
+    // It happens HERE, at the first moment the machine itself has to answer, so a
+    // request this client refuses on its own (an unknown name, no bytes for this
+    // platform) never starts a machine for nothing. And it is only ever the LOCAL
+    // one: the far side of a tunnel starts its own supervisor, exactly as it does
+    // in VS Code, where installing onto a remote server is part of that machine's
+    // server start rather than the client's (PLUGIN_PLAN §八 G1).
+    if (t.kind === "local" && ensureSupervisor) {
+      say("wake");
+      if (!(await ensureSupervisor())) {
+        return {
+          ok: false,
+          name,
+          error: "this machine's supervisor is not running and could not be started (the app log says why)",
+        };
+      }
     }
 
     let have = [];

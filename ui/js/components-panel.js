@@ -404,6 +404,11 @@ function plugStageLine(busy) {
   if (busy.verb === "disable") return `stopping ${busy.name} on ${where}…`;
   if (busy.verb === "enable") return `driving ${busy.name} on ${where} again…`;
   switch (busy.stage) {
+    case "wake":
+      // the machine's supervisor exits when it is idle, so the write that needs it
+      // starts it again: this is the slow first start (the binary unpacks), not a
+      // step of the install itself
+      return `${where} is starting its supervisor…`;
     case "artifact":
       return `preparing the bytes for ${busy.name}…`;
     case "upload":

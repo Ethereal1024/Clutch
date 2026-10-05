@@ -426,6 +426,103 @@ async function main() {
     check(typeof api.marketCache === "function", "the view exposes its market cache (a page can tell what it is showing)");
   }
 
+  // ---- 11. the local machine's supervisor is this client's to start ----
+  {
+    // The desktop injects the app's own ensureSupervisor (ui/server-bootstrap.js):
+    // a supervisor that exits when idle is started again for the write that needs
+    // it, instead of the user being told the machine "did not answer" with no way
+    // to make it answer.
+    const stages = [];
+    let wakes = 0;
+    // a machine whose supervisor has idle-exited: until it is started, every call
+    // to it is refused at the socket — the "did not answer" the page used to be
+    // left holding with no way to make the machine answer
+    const base = fakeLib({ specs: [CHECKOUT], held: [] });
+    let awake = false;
+    const refused = () => Promise.reject(new Error("connect ECONNREFUSED 127.0.0.1:8890"));
+    const sleeping = {
+      ...base,
+      hostInventory: (b) => (awake ? base.hostInventory(b) : refused()),
+      upload: (b, f, ms) => (awake ? base.upload(b, f, ms) : refused()),
+      fetchInstall: (b, f, ms) => (awake ? base.fetchInstall(b, f, ms) : refused()),
+    };
+    const asleep = view({
+      lib: sleeping,
+      deps: {
+        ensureSupervisor: async () => {
+          wakes++;
+          awake = true;
+          return true;
+        },
+      },
+    });
+    const r = await asleep.api.install("clutch-memory", EMPTY_WIN, { progress: (s) => stages.push(s.stage) });
+    check(r.ok && r.status === "installed", "an install onto this machine lands even though its supervisor had exited");
+    check(wakes === 1, "the machine's supervisor is started exactly once for the write");
+    check(
+      stages.indexOf("wake") > stages.indexOf("artifact") && stages.indexOf("wake") < stages.indexOf("upload"),
+      "and it is started before anything is sent to it (" + stages.join(" → ") + ")"
+    );
+
+    // the wake is the LOCAL machine's: a tunnel's far side starts its own
+    const far = view({
+      lib: fakeLib({ specs: [CHECKOUT], held: [] }),
+      deps: {
+        tunnelStatus: () => ({ active: true, url: "http://127.0.0.1:41000" }),
+        ensureSupervisor: async () => {
+          throw new Error("the far machine's supervisor is not this client's to start");
+        },
+      },
+    });
+    const r2 = await far.api.install("clutch-memory", EMPTY_WIN, {});
+    check(
+      r2.ok && far.lib.calls.uploads[0].base === "http://127.0.0.1:41000",
+      "an install aimed at the far machine never starts this one's supervisor"
+    );
+
+    // a supervisor that will not come up is one sentence, and nothing else is asked
+    // of a machine that is not answering
+    const stuck = view({
+      lib: fakeLib({ specs: [CHECKOUT], held: [] }),
+      deps: { ensureSupervisor: async () => false },
+    });
+    const r3 = await stuck.api.install("clutch-memory", EMPTY_WIN, {});
+    check(
+      !r3.ok && /not running and could not be started/.test(r3.error || ""),
+      "a supervisor that will not start is reported in words the page can draw"
+    );
+    check(
+      stuck.lib.calls.inventories === 0 && stuck.lib.calls.uploads.length === 0 && stuck.lib.calls.fetches.length === 0,
+      "and a machine that is not answering is not asked anything else"
+    );
+
+    // a host that owns no supervisor at all (the phone, N4) passes no such dep and
+    // installs exactly as it did before
+    const plain = view({ lib: fakeLib({ specs: [CHECKOUT], held: [] }) });
+    const r4 = await plain.api.install("clutch-memory", EMPTY_WIN, {});
+    check(r4.ok && r4.status === "installed", "a host with no supervisor of its own (the phone) installs unchanged");
+
+    // nothing is started for a request this client refuses on its own
+    const never = () => {
+      throw new Error("nothing should have been started");
+    };
+    const unknown = view({ lib: fakeLib({ specs: [CHECKOUT] }), deps: { ensureSupervisor: never } });
+    const r5 = await unknown.api.install("clutch-nothing", EMPTY_WIN, {});
+    check(!r5.ok && /not a component this client knows/.test(r5.error), "a name no source offers is refused before any machine is started");
+    const noBytes = view({ lib: fakeLib({ specs: [CHECKOUT], file: null }), deps: { ensureSupervisor: never } });
+    const r6 = await noBytes.api.install("clutch-memory", EMPTY_WIN, {});
+    check(!r6.ok && /no bytes/.test(r6.error || ""), "and so is a component this client has no bytes for");
+
+    // the boundary: a READ does not wake the machine. Reading a machine that is not
+    // running is a fact the page can draw; starting one is a write's act.
+    const read = view({
+      lib: fakeLib({ inventoryError: "the supervisor did not answer" }),
+      deps: { ensureSupervisor: never },
+    });
+    const l = await read.api.list(EMPTY_WIN);
+    check(l.held.length === 0 && /did not answer/.test(l.error || ""), "a read of a machine that is not running stays a sentence, not a wake");
+  }
+
   summary("components-view", "all passed (target machine, inventory, market cache, install + remove + switch verdicts)");
 }
 

@@ -50,7 +50,12 @@ function spawnSupervisorCommand() {
   return { cmd: "uv", args: ["run", "python", ...args], cwd: root };
 }
 
-// Idempotent and race-safe: concurrent spawns lose the bind and exit
+// Idempotent and race-safe: concurrent spawns lose the bind and exit.
+//
+// The plugin tab injects this as its wake (ui/components-view.js): a write aimed
+// at this machine starts its supervisor rather than reporting "did not answer",
+// since the supervisor exits when idle and the plugin tab can be open before any
+// window holds a session.
 async function ensureSupervisor() {
   const probe = await supervisorProbe(localBase);
   if (probe === "up") return true;
@@ -109,5 +114,6 @@ async function startLocalSession(onFail = null) {
 
 module.exports = {
   SUPERVISOR_PORT,
+  ensureSupervisor,
   startLocalSession,
 };

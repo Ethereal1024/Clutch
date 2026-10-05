@@ -148,6 +148,16 @@ async function main() {
   s3.stop();
   await waitFor("supervisor exits after cleanup", async () => !(await supervisorUp()), 20000);
 
+  // ---- the plugin tab's wake: a write aimed at THIS machine starts its
+  // supervisor when it has idle-exited instead of reporting "did not answer"
+  // (ui/components-view.js injects this as its ensureSupervisor dep, PLUGIN_PLAN §八 G1)
+  const { ensureSupervisor } = fresh();
+  assert(typeof ensureSupervisor === "function", "server-bootstrap exports the wake the plugin tab injects");
+  assert(await ensureSupervisor(), "the wake brings an idle-exited supervisor back up");
+  assert(await supervisorUp(), "and it answers after the wake");
+  assert(await ensureSupervisor(), "a second wake on a running supervisor is a probe, not a spawn");
+  await waitFor("supervisor idle-exits after the wake", async () => !(await supervisorUp()), 20000);
+
   console.log("all passed (machine supervisor + per-window sessions)");
 }
 

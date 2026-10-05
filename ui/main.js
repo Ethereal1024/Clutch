@@ -3,7 +3,7 @@
 const { app, BrowserWindow, ipcMain, session, shell } = require("electron");
 const path = require("path");
 const tunnel = require("./ssh-tunnel");
-const { SUPERVISOR_PORT, startLocalSession } = require("./server-bootstrap");
+const { SUPERVISOR_PORT, ensureSupervisor, startLocalSession } = require("./server-bootstrap");
 const { createHostCore } = require("./host-core");
 const { createComponentsView } = require("./components-view");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings } = require("./settings-mirror");
@@ -52,10 +52,15 @@ const hostCore = createHostCore({
 // The plugin tab's backend: which machine is the target, what it holds, what
 // this client could give it, and one install. Facts only — the renderer neither
 // reads a manifest nor uploads bytes itself (ui/components-view.js).
+//
+// `ensureSupervisor` is this machine's wake: the supervisor exits when it is
+// idle, so an install onto THIS machine starts it again instead of failing with
+// "did not answer" (§八 G1). The far side of a tunnel starts its own.
 const componentsView = createComponentsView({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
   tunnelStatus: () => tunnel.tunnelStatus(),
   windowKind: (wc) => hostCore.backendKind(wc.id),
+  ensureSupervisor,
   log: tunnelLog,
 });
 
