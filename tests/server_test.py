@@ -767,6 +767,111 @@ def _ghost_subscriber(base_url, broadcaster) -> None:
         server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
 
 
+def _ghost_writer(base_url, broadcaster) -> None:
+    # ---- a stream nobody can READ must end by itself ----
+    # The keepalive section above drops a ghost by looking for its FIN while the
+    # stream is IDLE. These are the two shapes that survive that check, and both
+    # of them wedge a run: while the subscriber stays in the Broadcaster,
+    # count(project) keeps answering "a UI is watching" — so the gate hands a
+    # permission ask to a queue nobody drains, and its detach grace (the one
+    # thing that ends a prompt nobody can answer) never starts.
+    #
+    #   * the peer CLOSED its socket while a busy run keeps this stream in its
+    #     live branch: the idle tick that looks for the FIN never runs, and the
+    #     kernel buffer swallows writes for megabytes before any of them fails;
+    #   * the peer is merely not READING (a hung window, a tunnel whose client
+    #     side is gone while its kernel keeps ACKing): no FIN ever arrives, so
+    #     the write itself blocks — forever, with no send deadline, which also
+    #     means the handler never reaches its `finally: unsubscribe()` at all.
+    #
+    # Both must end as the same fact the gate depends on: count() back to zero.
+    import socket as socket_
+    from urllib.parse import urlsplit
+
+    import agent.server as server_mod
+    from agent.events import AssistantMessageEvent
+
+    parts = urlsplit(base_url)
+    before = set(broadcaster._subs)
+
+    def new() -> set:
+        """The subscribers that were not an audience when this section began."""
+        return set(broadcaster._subs) - before
+
+    def subscribe(read_open_frames: bool) -> socket_.socket:
+        """A raw SSE subscriber with no event loop behind it: a socket whose
+        bytes are read only if the caller asks (the tiny receive buffer is what
+        makes a reader-less window back up quickly)."""
+        s = socket_.socket()
+        s.setsockopt(socket_.SOL_SOCKET, socket_.SO_RCVBUF, 2048)
+        s.settimeout(15)
+        s.connect((parts.hostname, parts.port))
+        s.sendall(b"GET /api/events HTTP/1.1\r\nHost: clutch\r\n\r\n")
+        if read_open_frames:
+            buf = b""
+            deadline = time.time() + 15
+            while time.time() < deadline and b'"type": "state_update"' not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        return s
+
+    keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+    # the live branch is the one under test: an idle tick must be far away, so
+    # the ONLY thing that can notice this peer's FIN is the write path itself
+    server_mod.SSE_KEEPALIVE_SEC = 30
+    fin_ghost = None
+    try:
+        fin_ghost = subscribe(read_open_frames=True)
+        check(len(new()) == 1, "a busy stream has one subscriber to lose")
+        fin_ghost.shutdown(socket_.SHUT_WR)  # the CLOSE, with events still flowing
+        deadline = time.time() + 10
+        while time.time() < deadline and new():
+            broadcaster.publish(AssistantMessageEvent(content="tick"))
+            time.sleep(0.02)
+        check(
+            new() == set(),
+            "a stream that never idles still drops a peer whose FIN arrived",
+        )
+    finally:
+        if fin_ghost is not None:
+            fin_ghost.close()
+        server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
+
+    # the second shape: nobody ever reads this socket, and nobody closes it (the
+    # hung window, the tunnel whose client side vanished). Nothing is left to
+    # notice but the write itself, so the write has a deadline (armed when the
+    # stream opens — patched small here: the real bound is for a slow link, not
+    # something this test can afford to wait out).
+    write_saved = server_mod.SSE_WRITE_TIMEOUT_S
+    server_mod.SSE_WRITE_TIMEOUT_S = 0.5
+    silent = None
+    try:
+        silent = subscribe(read_open_frames=False)  # never read a byte
+        # nothing is read back, so the subscription is proven by the count, not
+        # by a frame: give the handler its moment to register
+        deadline = time.time() + 10
+        while time.time() < deadline and not new():
+            time.sleep(0.05)
+        check(len(new()) == 1, "the reader-less window is an audience until its buffer fills")
+        for _ in range(12):  # enough to overrun any kernel buffer the pair may hold
+            broadcaster.publish(AssistantMessageEvent(content="x" * 1_000_000))
+            time.sleep(0.05)
+        deadline = time.time() + 20
+        while time.time() < deadline and new():
+            time.sleep(0.1)
+        check(
+            new() == set(),
+            "a stream whose peer stopped reading ends on the send deadline "
+            "(so its handler reaches unsubscribe instead of blocking forever)",
+        )
+    finally:
+        if silent is not None:
+            silent.close()
+        server_mod.SSE_WRITE_TIMEOUT_S = write_saved
+
+
 def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
     import agent.server as server_mod
 
@@ -1571,6 +1676,7 @@ def _run_server_test() -> int:
         _broadcaster_bounded(broadcaster)
         _sse_keepalive(base_url)
         _ghost_subscriber(base_url, broadcaster)
+        _ghost_writer(base_url, broadcaster)
         _connecting_stream_status(base_url, clc, state, broadcaster)
         _live_frame_shape(base_url, clc, state, broadcaster)
         clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)

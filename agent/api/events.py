@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import queue
+import time
 from pathlib import Path
 
 from ..base import LAGGED
@@ -20,6 +21,33 @@ from ..core.lazy import LazyEventLog
 from ..core.project_lock import ProjectLock
 from ..events import Event, PermissionRequestEvent, StateUpdateEvent, event_to_json
 from ..project import Project, open_project_lazy
+
+
+def _arm_send_deadline(host, conn) -> None:
+    """Cap how long ONE frame may take to leave this host (SSE_WRITE_TIMEOUT_S).
+
+    A peer that stopped READING (a hung window, a tunnel whose client side is
+    gone while its kernel still ACKs) makes send() block with nothing to wait
+    for. That is the failure that hid the worst bug this module has had: the
+    handler sits in the write, its `finally: unsubscribe()` never runs, and the
+    Broadcaster goes on counting a subscriber that will never see another byte —
+    so the gate publishes an ask to nobody and holds the run forever.
+
+    With the deadline the blocked frame raises (TimeoutError, in host._SSE_ERR),
+    the live loop breaks, and the subscription ends with it. The cost of ending
+    a stream is zero: every durable frame is in the log the window re-reads from
+    its own offset when it comes back.
+    """
+    timeout = getattr(host, "SSE_WRITE_TIMEOUT_S", 0)
+    if not timeout or conn is None:
+        return
+    try:
+        conn.settimeout(timeout)
+    except OSError:
+        # a socket wrapper that cannot take a deadline (an exotic SSL layer):
+        # peer_gone still catches the closed peer, and a blocked write is no
+        # worse here than it was before
+        pass
 
 
 class EventsMixin:
@@ -111,7 +139,8 @@ class EventsMixin:
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        host = self._server_module()  # the pacing constant and the ping frame live there
+        host = self._server_module()  # the pacing constants and the ping frame live there
+        _arm_send_deadline(host, self.connection)
         # the subscription names the project this stream watches: it is the
         # audience for that project's prompts (and no other's)
         q = self._broadcaster.subscribe(project_q)
@@ -174,6 +203,7 @@ class EventsMixin:
             except host._SSE_ERR:
                 return  # client went away: nothing left to stream
             # then live events
+            peer_check_at = time.monotonic() + host.SSE_PEER_CHECK_SEC
             while True:
                 try:
                     ev = q.get(timeout=host.SSE_KEEPALIVE_SEC)
@@ -186,6 +216,20 @@ class EventsMixin:
                     rp = self._state.run_project
                     if rp and project_q and rp != project_q:
                         continue  # another window's run: don't leak its events here
+                    # A run that streams deltas never falls into the idle branch
+                    # below, which is the only place the keepalive looks for a
+                    # peer that CLOSED its socket. So look here too: the FIN is
+                    # already at the socket (peer_gone), while the kernel buffer
+                    # would keep swallowing writes for megabytes — time in which
+                    # this stream still answers "a UI is watching" (the gate's
+                    # is_attached) to a window that is gone. Paced: a per-token
+                    # stream must not pay a select() per frame for a fact that
+                    # cannot change faster than this.
+                    now = time.monotonic()
+                    if now >= peer_check_at:
+                        peer_check_at = now + host.SSE_PEER_CHECK_SEC
+                        if host.peer_gone(self.connection):
+                            break
                     self._write_sse(ev)
                 except queue.Empty:
                     try:

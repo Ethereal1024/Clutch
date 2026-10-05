@@ -59,8 +59,9 @@ from .tools.workspace import Workspace
 # (ECONNRESET) when the peer is gone, Windows gives ConnectionAbortedError
 # (WSAECONNABORTED/WSAECONNRESET), so leaving it out spams one traceback per
 # closed window on Windows. ValueError covers a write on an already-closed
-# stream.
-_SSE_ERR = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ValueError)
+# stream, TimeoutError the send deadline below (a peer that stopped reading
+# raises nothing at all without it).
+_SSE_ERR = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, ValueError, TimeoutError)
 
 # Idle gap after which the stream reasserts that it is still there. Bounded by
 # nothing on the client side: a half-open TCP connection (writes vanish into a
@@ -77,6 +78,35 @@ SSE_KEEPALIVE_SEC = 15
 # addEventListener("ping"), which is what lets the renderer prove liveness
 # (ui/js/sse-stream.js SSE_KEEPALIVE_MS must match this value).
 SSE_PING_FRAME = b"event: ping\ndata: {}\n\n"
+
+# How long ONE frame may take to leave this host before the stream is declared
+# dead. A peer that stops READING — a window that hung, a half-open tunnel whose
+# client side is gone while its kernel keeps ACKing — makes send() block with
+# nothing to wait for: writes neither fail nor finish. A blocked write is worse
+# than a lost frame, because the handler never returns: its
+# `finally: unsubscribe()` never runs (agent/api/events.py _sse), so the
+# subscriber stays in the Broadcaster and count() keeps answering "a UI is
+# watching" for a window that will never see another byte. That count is what
+# decides whether a permission ask is handed to the UI at all and whether the
+# gate's detach grace starts, so a ghost is not cosmetic — it is how an ask
+# reaches a queue nobody drains and the run wedges (observed live: an ask
+# published at 17:27 unanswered until the user's Stop 8 minutes later).
+#
+# A frame is small (one event) and the recovery is free: a stream that ends
+# leaves its window re-reading the log after its own offset, and that read is
+# idempotent. So the bound only has to be longer than a slow-but-progressing
+# link needs for one frame — seconds — and much shorter than the minutes a
+# wedged run costs.
+SSE_WRITE_TIMEOUT_S = 20
+
+# How often the live loop looks for the peer's FIN (see peer_gone from the busy
+# path in agent/api/events.py _sse). The idle branch checks it on every
+# keepalive, but a run that streams deltas never reaches that branch: without
+# this probe a peer that CLOSED its socket keeps being written into — its kernel
+# buffer swallows megabytes before any write blocks — and goes on counting as an
+# audience that can answer a prompt. Paced because per-token frames must not pay
+# a syscall each; a FIN cannot arrive so fast that a second of delay matters.
+SSE_PEER_CHECK_SEC = 1.0
 
 
 def peer_gone(conn) -> bool:
