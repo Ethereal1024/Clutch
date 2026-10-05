@@ -354,7 +354,10 @@ def check_subprocess(tmp: Path) -> None:
         proc = subprocess.run(
             [sys.executable, "-c", SUBCODE], env=env, capture_output=True, text=True, timeout=120, check=True
         )
-        said_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("[host]")]
+        # the tag, not the line start: procmgr/stdio.py stamps every log line with
+        # a wall clock (see _stamp), so the tag is never the first thing on it —
+        # the in-process assertion above already matches it this way
+        said_lines = [ln for ln in proc.stdout.splitlines() if "[host]" in ln]
         data = json.loads(proc.stdout.splitlines()[-1])
         if expect_defaults:
             check(data["access_args"] == catalog.ACCESS_ARGS, "no document: the built-in words are the vocabulary")
