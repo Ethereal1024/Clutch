@@ -403,12 +403,20 @@ class _Handler(BaseHTTPRequestHandler):
             # a fetch that failed or overran: all the same shape of answer
             self._json({"error": str(err)}, 400)
             return
+        # The scratch file leaves before the verdict does, never after it: a
+        # client acts on the answer the moment it reads it, and one of those
+        # acts is asking whether this host still holds the spooled bytes.
+        # Unlinking BELOW the response (a `finally` around the write) answers
+        # that question with whatever the scheduler did — this machine's own
+        # suite caught it about one run in four — which is no answer at all.
+        # The `finally` stays where it is; only the write moves out of it.
         try:
-            self._json(components.accept(artifact, manifest))
+            answer = (components.accept(artifact, manifest), 200)
         except (ValueError, OSError) as err:
-            self._json({"error": str(err)}, 400)
+            answer = ({"error": str(err)}, 400)
         finally:
             artifact.unlink(missing_ok=True)
+        self._json(*answer)
 
     def _remove_component(self, name: str, version: str = "") -> None:
         """Take one component (or one of its versions) back OFF this machine.
