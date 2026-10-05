@@ -76,10 +76,22 @@ tests/components_api_test.py` 全绿）。
    * "装到哪台机器"由**窗口的会话种类**决定（`ui/main.js:58` 把
      `hostCore.backendKind(wc.id)` 传进去）：会话在隧道对端 → 装对端；其余（包括隧道在线
      但窗口回退到本地会话的情形）→ 装本机；没有窗口也没有隧道 → 本机。
-2. **supervisor 会空闲退出**：本机那个是 `--idle-timeout 25` 起的（见其命令行），空闲即退出，
-   由 app 按需重启。于是"本机安装"在 supervisor 没在跑时会直接失败——页面能报出宿主的话，
-   **但没有任何东西会为这次安装把它叫起来**（`ui/server-bootstrap.js` 全文没有 components）。
-   这是 P2 未补上的已知缺口，留在"待办"里。
+2. **supervisor 会空闲退出**（**已补上唤醒**，`31d5ec6`，落点是第八节 G1）：本机那个是
+   `--idle-timeout 25` 起的（见其命令行），空闲即退出，由 app 按需重启。于是"本机安装"在
+   supervisor 没在跑时会直接失败——页面能报出宿主的话，**但一开始没有任何东西会为这次安装把它
+   叫起来**（`ui/server-bootstrap.js` 全文没有 components）。补法就是"写入自己把那台机器叫起来"：
+   * `ui/server-bootstrap.js` 导出 `ensureSupervisor`（本来就是幂等、探测在前的那一个，
+     `startLocalSession` 用的也是它），桌面 shell 把它当 `ensureSupervisor` 注入
+     `ui/components-view.js`（`ui/main.js:63`）。
+   * 唤醒点在 `install()` 里、**第一次需要目标机自己回答之前**（`ui/components-view.js:188`）：
+     本机 supervisor 没在跑就起它，起不来则是一句页面画得出来的话（`this machine's supervisor is
+     not running and could not be started (the app log says why)`），而不是"没回应"这条死路。
+     进度多一个 `wake` 段（页面画成 `${where} is starting its supervisor…`，首次启动要解包，
+     这一步确实慢）。
+   * 三条界线：**读不叫机器**（`list()` 照旧诚实地说"没回应"，页面画得出来）；**在自己就会拒的请求上
+     不叫机器**（名字不认识、这台机器没有这个平台的字节——绝不为了一个注定被拒的请求去起一台机器）；
+     **只叫本机**（隧道对端自己起自己的，见 G1 里 VS Code 的同一逻辑）。手机端根本不传这个 dep（N4，
+     它没有本机 supervisor），行为与从前逐字相同。
 3. **Android 当初只做了表面齐平**（**已修掉**，`f9238b4`，落点是第八节 G2）：`ui/bridge-shim.js` 暴露了
    `clutchComponents`（手机端与桌面端 API 同名），但 `android/host/android-host.js` 没有任何
    handler，所以手机上调用会以 `no such bridge method: clutchComponents.list` 结束，标签页把
@@ -374,6 +386,7 @@ supervisor 跑 `hostSetDisabled()`（清单仍在、目录仍在、版本仍是�
 ```bash
 node tests/components-panel.test.js               # 插件标签页：目标机、确认、裁定、重读、开关（DOM 假件）
 node tests/components-view.test.js                # 主进程插件后端：目标机/清单/市场缓存/安装/卸载/停用切换
+node tests/server-bootstrap.test.js               # 机器 supervisor + 每窗口会话；收尾用真的 spawn 证一次 G1 的唤醒（空闲退出后再起）
 node tests/ui-load-order-test.js                  # ui/index.html 的 19 个脚本装序
 node tests/bridge-shim.test.js                    # 桌面端与手机端暴露同一组名字
 node tests/bridge-server.test.js                  # 手机宿主端到端（桥 + 真实 android-host + 假隧道/假 supervisor），第 9 节 = 插件通道
@@ -452,7 +465,7 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 
 | # | 缺口 | 影响 | 想修的话落在哪 |
 | --- | --- | --- | --- |
-| G1 | 本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | `ui/server-bootstrap.js`（现在全文无 components）或 `ui/components-view.js` 的 `install()` 前段 |
+| G1 | ~~本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步~~ → **已交付**：`ensureSupervisor` 注入 `ui/components-view.js:188`，本机安装先唤醒、再问；`wake` 是一段进度 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | 落地：`31d5ec6`（`ui/server-bootstrap.js` 导出、`ui/main.js:63` 注入、`ui/components-view.js:188` 唤醒、`ui/js/components-panel.js:407` 的 `wake` 文案）；守：`tests/components-view.test.js` 第 11 节、`tests/server-bootstrap.test.js` 收尾 |
 | G2 | ~~Android 宿主没有 `clutchComponents` handler~~ → **已交付**：`android/host/android-host.js:76-165` 建同一个 `ui/components-view.js`，六个动词 + `components:progress` | 手机上插件标签页每条读取都是一行错误 | 落地：`f9238b4`（`android/host/android-host.js`、`scripts/sync-android-host.sh` 的 `UI_NODE` 补 `components-view.js`）；守：`tests/bridge-server.test.js` 第 9 节、`tests/android-assets.test.js` |
 | G3 | 宿主缺反动词（当初是卸载/停用/回滚三件） | 装上是单向的，页面只能靠文案诚实（I5） | **卸载已两头补齐**：宿主 `90140ea`、页面 `11f6ce4`；**停用/启用已补齐**：宿主 `9f53b9c`、页面 `1df203d`。**回滚不是功能**（§一）：回到旧版就是再装一次，页面不画它 |
 | G4 | `clutch-workspace/pyproject.toml` 0.2.0 与其 `component.json` 0.1.0 不一致 | 界面显示 0.1.0，包元数据说 0.2.0 | 模块仓库自身（结论见下） |
@@ -464,9 +477,12 @@ G1 / G2 / G4 的答案是同一条：**按照 VS Code 的逻辑来**（零之四
   tunnel 在需要时启动（`cli/src/tunnels/code_server.rs:322-350`：`bash -c "<server start
   script> --install-extension=…"`——装扩展本身就是启动参数的一部分），所以"动手之前先保证那台
   机器的服务在跑"是**那台机器的二进制的责任**，不是页面的。Clutch 的对应物是
-  `ui/server-bootstrap.js`（今天全文没有 components）或 `ui/components-view.js` 的 `install()`
-  前段：一次安装应当能**唤醒空闲退出的 supervisor**（本机那个是 `--idle-timeout 25` 起的，
-  零之三.2）。
+  `ui/server-bootstrap.js` 的 `ensureSupervisor`：一次安装应当能**唤醒空闲退出的 supervisor**
+  （本机那个是 `--idle-timeout 25` 起的，零之三.2）。
+  **已交付**（`31d5ec6`，形状见零之三.2）：桌面 shell 把 `ensureSupervisor` 注入
+  `ui/components-view.js`，`install()` 在**第一次需要目标机自己回答之前**唤醒它，起不来就交出
+  一句页面能画的话；读不唤醒、在自己就会拒的请求上不唤醒、只唤醒本机（隧道对端自己起自己的）。
+  手机端不传这个 dep——它没有本机 supervisor（N4），所以逐字不变。
 - **G2 — 目标端注册同一个通道**。VS Code 的 server 端把同一组扩展管理命令注册进 RPC 通道
   （`src/vs/server/node/serverServices.ts:403-409`），客户端因此不需要为"远端"再写一套协议。
   Clutch 的桌面端已经是这个形状（`clutchComponents` 在 preload 与 bridge-shim 里同名同参，
