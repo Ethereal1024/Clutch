@@ -137,11 +137,29 @@ function startLlmProxy(upstream) {
           },
           (pres) => {
             res.writeHead(pres.statusCode, { "Content-Type": pres.headers["content-type"] || "application/json" });
+            // The far side can die MID-BODY (a provider dropping a slow stream, a
+            // reset by the network in between). pipe() alone leaves this response
+            // open forever in that case, and the agent's read sitting on it then
+            // parks until its own 240s budget — the "still thinking after the
+            // network came back" report, seen from the proxy end as an accepted
+            // connection nobody ever answers. Tearing the response down is the
+            // only honest outcome: it makes that read raise now, so the run's own
+            // retry takes over instead of waiting out a budget.
+            pres.on("error", () => res.destroy());
+            pres.on("aborted", () => res.destroy());
             pres.pipe(res);
           }
         );
         preq.setTimeout(UPSTREAM_TIMEOUT_MS, () => preq.destroy(new Error("upstream timed out")));
         preq.on("error", (e) => {
+          if (res.headersSent) {
+            // mid-stream: an SSE body cannot be replaced by a 502, and ending it
+            // cleanly would be worse than failing — a truncated answer would be
+            // read as a complete one. Destroy: the client's read fails, which is
+            // what it can act on.
+            res.destroy();
+            return;
+          }
           try {
             res.writeHead(502, { "Content-Type": "text/plain" });
             res.end("upstream LLM unreachable: " + (e && e.message));
@@ -149,6 +167,14 @@ function startLlmProxy(upstream) {
             /* response already started */
           }
         });
+        // The client hung up mid-response (the app was backgrounded, its window
+        // closed, the tunnel died): stop pumping upstream into a socket nobody is
+        // reading. An unfinished response that is left to sit is a ghost — it
+        // holds a descriptor and any upstream work behind it for nothing.
+        res.on("close", () => {
+          if (!res.writableFinished) preq.destroy();
+        });
+        res.on("error", () => preq.destroy());
         preq.end(body);
       } catch (e) {
         // never let an upstream/parse failure become an uncaught main-process error

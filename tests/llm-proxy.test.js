@@ -110,3 +110,141 @@ try {
 }
 
 summary("llm-proxy");
+
+// ---- 6. a connection that dies mid-stream must not stay open ----
+//
+// The proxy sits between the agent (over the reverse-forward tunnel) and the
+// provider, and both ends can die half-way through a streamed body. The one
+// thing it may never do is leave the response OPEN: an accepted connection that
+// nobody ever answers is exactly what the agent's read parks on until its own
+// 240s budget runs out — the reported "the model sat in thinking long after the
+// network was back". Real sockets below (a real upstream server, a real client
+// request), so the closing behavior is observed, not read off the source.
+const http = require("http");
+const net = require("net");
+const { startLlmProxy, stopLlmProxy } = require("../ui/llm-proxy");
+
+function freePort() {
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+// POST to the proxy and report how the response ENDED: a status, a complete
+// body, or an aborted/errored read — plus whether it never ended at all.
+function post(port, { path = "/v1/chat/completions", onChunk } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      resolve(v);
+    };
+    const req = http.request(
+      { host: "127.0.0.1", port, path, method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" } },
+      (res) => {
+        let body = "";
+        res.on("data", (c) => {
+          body += c;
+          if (onChunk) onChunk(res, body);
+        });
+        res.on("end", () => finish({ status: res.statusCode, body, ended: true }));
+        res.on("aborted", () => finish({ status: res.statusCode, body, ended: false }));
+        res.on("error", (e) => finish({ status: res.statusCode, body, ended: false, error: e }));
+      }
+    );
+    req.on("error", (e) => finish({ status: 0, body: "", ended: false, error: e }));
+    req.end("{}");
+  });
+}
+
+// a real upstream that answers SSE by script; returns its port
+async function upstream(handler) {
+  const srv = http.createServer(handler);
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  return { srv, port: srv.address().port };
+}
+
+(async () => {
+  process.env.CLUTCH_API_KEY = "sk-unit"; // the proxy injects it; asserted below
+  const origUpstream = process.env.CLUTCH_LLM_UPSTREAM;
+  delete process.env.CLUTCH_LLM_UPSTREAM;
+  try {
+    // 6a. the provider drops the body mid-stream: the client's read FAILS FAST
+    {
+      let sawAuth = null;
+      const up = await upstream((req, res) => {
+        sawAuth = req.headers.authorization;
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write('data: {"delta":"he"}\n\n');
+        setTimeout(() => res.socket.destroy(), 60); // the far side goes away
+      });
+      const port = await startLlmProxy("http://127.0.0.1:" + up.port);
+      let partial = "";
+      const t0 = Date.now();
+      const out = await Promise.race([
+        post(port, { onChunk: (_r, b) => (partial = b) }),
+        new Promise((r) => setTimeout(() => r({ hung: true }), 5000)),
+      ]);
+      const ms = Date.now() - t0;
+      check(!out.hung, "an upstream death mid-body does not leave the response open (the agent must not park on it)");
+      check(out.ended === false, "…the response is torn down, not ended as if the stream were complete");
+      check(partial.includes("he"), "…after the bytes that did arrive were delivered");
+      check(ms < 3000, `…and the client learns of it at once, not at a read budget (took ${ms}ms)`);
+      check(sawAuth === "Bearer sk-unit", "the proxy still injects the client's own API key upstream");
+      stopLlmProxy();
+      await new Promise((r) => up.srv.close(r));
+    }
+
+    // 6b. the CLIENT goes away mid-body: the upstream request is released, not
+    //     left pumping into a socket nobody reads
+    {
+      let closedAt = 0;
+      let startedAt = 0;
+      const up = await upstream((req, res) => {
+        startedAt = Date.now();
+        req.on("close", () => (closedAt = Date.now()));
+        res.on("close", () => (closedAt = Date.now()));
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write('data: {"delta":"hi"}\n\n'); // then nothing, forever
+      });
+      const port = await startLlmProxy("http://127.0.0.1:" + up.port);
+      const t0 = Date.now();
+      const out = await post(port, { onChunk: (res) => res.destroy() }); // the agent's window died
+      check(out.ended === false, "the client's own abort ends its request (nothing to wait for)");
+      for (let i = 0; i < 60 && !closedAt; i++) await new Promise((r) => setTimeout(r, 50));
+      check(closedAt > 0, "the upstream request is destroyed when the client hangs up (no ghost upstream work)");
+      check(
+        closedAt === 0 || closedAt - t0 < 3000,
+        `…promptly, not when the upstream timeout expires (${closedAt ? closedAt - t0 + "ms" : "never closed"})`
+      );
+      check(startedAt > 0, "…and the upstream request had really started before the client left");
+      stopLlmProxy();
+      await new Promise((r) => up.srv.close(r));
+    }
+
+    // 6c. an upstream that cannot be reached at all: still a plain 502 (the
+    //     pre-existing behavior — a request that never opened must read as one)
+    {
+      const dead = await freePort(); // nothing listens here
+      const port = await startLlmProxy("http://127.0.0.1:" + dead);
+      const out = await post(port);
+      check(out.status === 502 && /upstream LLM unreachable/.test(out.body),
+            "an upstream that refuses the connection is still answered as 502");
+      stopLlmProxy();
+    }
+  } finally {
+    if (origUpstream === undefined) delete process.env.CLUTCH_LLM_UPSTREAM;
+    else process.env.CLUTCH_LLM_UPSTREAM = origUpstream;
+    delete process.env.CLUTCH_API_KEY;
+  }
+
+  summary("llm-proxy");
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
