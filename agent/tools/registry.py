@@ -47,7 +47,6 @@ from ..memory import MemoryStore
 from ..prompts import render
 from . import catalog, host, inst, rendezvous
 from .answers import (
-    _FACT_GATES,
     _drivable,
     _entries,
     _fact,
@@ -523,7 +522,6 @@ __all__ = [
     "_check_vocabulary",
     "_gate_ok",
     # the host's answers (answers.py)
-    "_FACT_GATES",
     "_drivable",
     "_entries",
     "_fact",

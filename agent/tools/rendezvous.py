@@ -302,10 +302,9 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     names (catalog.Component.vars: "host.port_url" -> {base}).
 
     These are the values only the host knows and only a particular component
-    needs: the project file's content service, and the skills root. The prefix
-    of a CLI line is NOT here — that is the artifact's own launch, rendered by
-    launch_prefix() so a checkout, a package and an installed onefile all drive
-    the same declaration.
+    needs: the project file's content service. The prefix of a CLI line is NOT
+    here — that is the artifact's own launch, rendered by launch_prefix() so a
+    checkout, a package and an installed onefile all drive the same declaration.
     """
     # NB: a key here must never be one of a tool's own argument names — the
     # renderer fills {name} from the CALL's arguments, and a host var of the
@@ -313,7 +312,6 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     # `--title {name}` is exactly that).
     facts = {
         "host.port_url": lambda: f"http://127.0.0.1:{config.port}",
-        "config.skills_dir": lambda: str(getattr(config, "skills_dir", "") or ""),
     }
     out: dict[str, str] = {}
     for name, fact in mod.vars.items():
@@ -323,9 +321,8 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
         resolved = make()
         # A host fact the host has no value for is not a fact: it is left out of
         # `vars` entirely, which is what makes an optional group naming it drop
-        # whole (inst.render) instead of rendering `--root ''` — an empty word the
-        # component would have to read as a root. An unset config.skills_dir means
-        # "the component's own library", and only the component can name it.
+        # whole (inst.render) instead of rendering a placeholder as an empty word
+        # the component would then have to read as a value.
         if resolved:
             out[name] = resolved
     return out

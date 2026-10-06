@@ -663,7 +663,7 @@ def check_unknown_words_are_refused() -> None:
         # shadows the model's when the statement renders, so the declaration is
         # refused rather than quietly dropping the argument the model passed
         data = _third_party("clutch-shadow", tool="say_shadow", directory=str(code))
-        data["vars"] = {"who": "config.skills_dir"}
+        data["vars"] = {"who": "host.port_url"}
         _write_registration(data)
         check("say_shadow" not in offered("say_shadow"), "a vars key that names an argument refuses the tool")
         check(
@@ -672,7 +672,7 @@ def check_unknown_words_are_refused() -> None:
         )
 
         data = _third_party("clutch-shadow-ok", tool="say_unshadowed", directory=str(code))
-        data["vars"] = {"root": "config.skills_dir"}
+        data["vars"] = {"root": "host.port_url"}
         _write_registration(data)
         check("say_unshadowed" in offered("say_unshadowed"), "a vars key no argument names is wired as before")
 
@@ -919,20 +919,20 @@ def check_host_facts_in_schema() -> None:
 def check_a_component_publishes_the_host_fact() -> None:
     """A host fact is ASKED of the component that publishes it — never scanned here.
 
-    `$skills` used to be the host's own work: agent/skills.py walked
-    config.skills_dir, parsed frontmatter and rendered a section. That made the
-    host the second implementation of a library the skills component already
-    serves, and it had the host reading files that are the component's subject.
-    The direction is reversed now (tools/facts.py): a component DECLARES the
-    statement that answers a host fact (`facts: {"skills": ...}`), and the host
-    asks that statement where it spends the fact — in a schema enum, in a
-    sentence, in a prompt fragment, in a gate.
+    `$skills` used to be the host's own work: agent/skills.py walked a skills root
+    the host configured itself, parsed frontmatter and rendered a section. That
+    made the host the second implementation of a library the skills component
+    already serves, and it had the host reading files that are the component's
+    subject. The direction is reversed now (tools/facts.py): a component DECLARES
+    the statement that answers a host fact (`facts: {"skills": ...}`), and the host
+    asks that statement where it spends the fact — in a schema enum, in a sentence,
+    in a prompt fragment, in a gate.
 
     What this check pins is that the three spendings read ONE answer, that the
     answer is the host's shape and not the component's own wire format, that
     every way of failing is fail-CLOSED (no value, the gate shuts, the fragment
-    is dropped) and never silent, and that the knob which governs the fact runs
-    ahead of the question: with skills off the component is never started at all.
+    is dropped) and never silent, and that a library with nothing in it shuts the
+    gate rather than offering an empty enum.
     """
     facts.forget()  # a library laid down out of band is not the last process's
 
@@ -1068,22 +1068,6 @@ def check_a_component_publishes_the_host_fact() -> None:
             any(d.fatal and "cannot publish the host fact" in d.message for d in catalog.diagnostics()),
             "and a daemon declaring one is refused too: only a CLI's statement runs outside a workspace",
         )
-
-    # the knob the fact stands behind runs BEFORE the question: with skills off
-    # nothing is asked, so the component is never started (the log stays empty,
-    # the fragment is dropped and there is nothing to report — no value is not a
-    # problem to complain about)
-    with isolated_host() as root:
-        code = root / "gated-code"
-        code.mkdir()
-        (code / "PROMPT.md").write_text("Available things:\n$skills\n", encoding="utf-8")
-        log = code / "runs.log"
-        _publisher("clutch-gated", code, _answers([("alpha", "d")], log=log), prompt="PROMPT.md")
-        cfg = Config(enable_skills=False)
-        with _reported() as said:
-            check("load_thing" not in [t.name for t in build_tools(cfg)], "with the knob off the gate is shut")
-            check(prompt_section(cfg) == "", "and the fragment is not appended")
-        check(not log.exists() and said == [], "the component is never run, and nothing is reported about it")
     facts.forget()
 
 

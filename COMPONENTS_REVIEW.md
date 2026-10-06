@@ -22,11 +22,11 @@
 - 审计③ 的更深一步：搜索后端的**词汇**仍由宿主持有。第五步把"替组件挑后端"从
   源码搬进了 `host.json`，但"有哪些后端可挑"还没有像技能目录那样由
   clutch-websearch 自己发布。
-- 审计⑤ 的残留（后续已结）：`config.skills_dir` 的缺省值曾是
-  `component_dir(modules.SKILLS)/"skills"`。第六步删掉的是第二份实现；缺省值后来
-  再退一步，改为 `None`——宿主不再替任何组件猜一个根，技能库的位置由组件自己回答，
-  `config.skills_dir` 只是用户**显式钉住**时的覆盖值（`None` 时该事实整个不发布，
-  见 `COMPONENTS.md` 第五节）。
+- 审计⑤ 的残留（已结，连覆盖值一起收了）：`config.skills_dir` 的缺省值曾是
+  `component_dir(modules.SKILLS)/"skills"`；第六步删掉的是第二份实现，缺省值后来改成
+  `None`，再后来这个字段本身也删了——宿主不再持有任何通往技能库的线，库的位置、库的
+  内容、往库里装一个技能都是组件自己的事（`clutch-skills install`，见
+  `COMPONENTS.md` 第五节）。
 
 本文原稿（运行逻辑梳理、P0/P1/P2 问题清单、协议知识审计、各步判据全文、复核
 命令）随收档提交进入 git 历史：`git log --follow -- COMPONENTS_REVIEW.md`。

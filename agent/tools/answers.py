@@ -14,9 +14,7 @@ place a fact is spent or read:
     under (gates._gate_ok), the fragment written around it (prompt._fragment);
   * _drivable is the one filter for what this host can drive at all, so the
     schema and the prose can never disagree about what is here;
-  * _FACT_GATES is the knob each published fact stands behind — a fact a knob
-    governs reads as no value while the knob is off, exactly like the gate that
-    spends it — and _say routes a refusal to the sink that says it once.
+  * _say routes a refusal to the sink that says it once.
 
 Nothing here decides anything about a CALL and nothing here knows the shape of a
 tool: the wiring is registry.py, the words the host honors are gates.py, the
@@ -26,20 +24,10 @@ model-facing text is prompt.py. All three read this module; it reads none of the
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from typing import Any
 
 from ..config import Config
 from . import catalog, facts, rendezvous
-
-# The host-side condition each PUBLISHED fact stands behind (catalog.FACT_TOKENS,
-# tools/facts.py): a fact a knob governs reads as no value while the knob is off,
-# because the tools that spend it are not offered either — the same condition
-# shows up as a gate (catalog.Tool.gate "skills"). The keys are the declaration
-# vocabulary's; the conditions are the host's, and _check_vocabulary keeps the two
-# lists equal.
-_FACT_GATES: dict[str, Callable[[Config], bool]] = {
-    "skills": lambda config: bool(config.enable_skills),
-}
 
 
 # -- declaration -> the schema the model sees ---------------------------------
@@ -135,15 +123,10 @@ def _fact_answer(token: str, config: Config) -> facts.Answer:
     component's own statement, on its own line, through its own transport. What IS
     the host's here is who may answer, and when the question is asked at all:
 
-      * the knob the fact stands behind (_FACT_GATES): turned off, the fact reads
-        as no value, exactly as the gate spending it is shut;
       * only ONE component may publish a token. Two suppliers answer nothing and
         say so: the host cannot tell which library the model is about to pick a
         name from, and picking one is how two truth sources start.
     """
-    condition = _FACT_GATES.get(token)
-    if condition is not None and not condition(config):
-        return facts.Answer(())
     suppliers = [component for component in _drivable() if token in component.facts]
     if not suppliers:
         return facts.Answer(())

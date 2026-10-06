@@ -424,8 +424,8 @@ class Tool:
     host's); `snapshot_arg` names the argument that holds that path (default:
     `access_arg`, else "path"). `modes` are the agent modes the tool is offered
     in. `gate` names a host-side condition that must hold — "project" (a project
-    memory store is open) or "skills" (skills are enabled and there is one to
-    load) — and a shut gate means the tool is simply not offered
+    memory store is open) or "skills" (the skills library has something to load)
+    — and a shut gate means the tool is simply not offered
     (registry._gate_ok).
     """
 

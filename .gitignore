@@ -37,10 +37,6 @@ docs/
 /verify_win_artifact.py
 /watch_ci.sh
 
-# dev-only skills used to live here (/agent/skills/<name>/), gitignored; the
-# library has moved into the clutch-skills module, which ignores its own
-# local-only skills (see clutch-skills/.gitignore)
-
 # local scratch scripts/logs from ad-hoc testing sessions
 /scratch-*.py
 /scratch_*.py

@@ -27,7 +27,7 @@ from typing import Any, Callable
 from ..config import Config
 from ..memory import MemoryStore
 from . import catalog, filesystem, host
-from .answers import _FACT_GATES, _entries
+from .answers import _entries
 from .envelope import Envelope
 from .workspace import Workspace
 
@@ -93,9 +93,9 @@ def gate_project(config: Config, memories: MemoryStore | None) -> bool:
 def gate_skills(config: Config, memories: MemoryStore | None) -> bool:
     """`skills`: the library the `skills` fact publishes has something in it.
 
-    Skills off entirely, or nothing to load: an enum over an empty library is a
-    schema that offers the model nothing to pick. The gate word is also the fact
-    token, so a library the host cannot read shuts this gate too.
+    Nothing to load: an enum over an empty library is a schema that offers the
+    model nothing to pick. The gate word is also the fact token, so a library the
+    host cannot read shuts this gate too.
     """
     return bool(_entries("skills", config))
 
@@ -130,9 +130,9 @@ def _check_vocabulary() -> None:
     """Neither half of the host's vocabulary can drift from the declarations
     behind it silently: every access word the declaration protocol lists must have
     an implementation here (and every implementation a word may name), every named
-    gate a condition, every published fact a condition, and the host's own tool
-    names must be exactly the ones tools/host.py declares. A mismatch is a host
-    bug, not a component's, so it is loud."""
+    gate a condition, and the host's own tool names must be exactly the ones
+    tools/host.py declares. A mismatch is a host bug, not a component's, so it is
+    loud."""
     assert set(ACCESS) == set(catalog.ACCESS_ARGS), (
         f"access vocabulary drift: catalog {sorted(catalog.ACCESS_ARGS)} vs gates.py {sorted(ACCESS)}"
     )
@@ -141,9 +141,6 @@ def _check_vocabulary() -> None:
     )
     assert set(_GATE_IMPLS) == set(catalog.GATE_IMPLS), (
         f"gate implementation drift: catalog {sorted(catalog.GATE_IMPLS)} vs gates.py {sorted(_GATE_IMPLS)}"
-    )
-    assert set(_FACT_GATES) == set(catalog.FACT_TOKENS), (
-        f"fact vocabulary drift: catalog {sorted(catalog.FACT_TOKENS)} vs answers.py {sorted(_FACT_GATES)}"
     )
     assert set(host.names()) == set(catalog.HOST_TOOL_NAMES), (
         f"host tool drift: catalog {sorted(catalog.HOST_TOOL_NAMES)} vs host {sorted(host.names())}"

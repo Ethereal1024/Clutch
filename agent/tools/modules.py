@@ -6,8 +6,7 @@ repo in the dev layout. The host never imports them, and — since the host ship
 no built-in component (see COMPONENTS.md) — the RUNTIME never names them either:
 a component is discovered through its own manifest (tools/catalog.py), and these
 names are kept in one place for the consumers that are allowed to point — the
-tests, `config.skills_dir`'s default (a position to look the library up at), and
-the UI's list of what to ship on install (ui/components.js).
+tests, and the UI's list of what to ship on install (ui/components.js).
 
 Three things every consumer of a module needs, kept in one place:
 

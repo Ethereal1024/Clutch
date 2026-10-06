@@ -1,1 +1,0 @@
-ERROR: unknown skill $skill; available: $available

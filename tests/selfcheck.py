@@ -46,8 +46,8 @@ def check_skills(config: Config) -> None:
     #    clutch-skills publishes it (`facts` in its own component.json, answered
     #    by its --facts mode), the host asks for it wherever it spends the fact
     #    (tools/facts.py) — and the enum, the sentence beside it and the prompt
-    #    fragment all read that one answer. Nothing here reads skills_dir: the
-    #    host keeps no scanner of a library that is not its subject.
+    #    fragment all read that one answer. The host keeps no scanner of a library
+    #    that is not its subject: no root to point at, no directory to walk.
     reg = ToolRegistry(build_tools(config))
     tool = reg.tool("load_skill")
     if tool is None:
@@ -75,15 +75,9 @@ def check_skills(config: Config) -> None:
     system = derive_messages(LazyEventLog.in_memory(), config, "t", components=section)[0]["content"]
     check("load_skill" in system, "and lands in the system prompt the model reads")
 
-    # the knob governs the FACT itself, ahead of the question: with skills off the
-    # fact reads as no value, so the gate shuts, the fragment is dropped and the
-    # tool is gone — the component is never even asked
-    disabled = Config(enable_skills=False)
-    off = prompt_section(disabled)
-    check(header not in off, "no catalog when skills are disabled")
-    check("load_skill" not in ToolRegistry(build_tools(disabled)).names(), "no load_skill tool when disabled")
-    off_system = derive_messages(LazyEventLog.in_memory(), disabled, "t", components=off)[0]["content"]
-    check(header not in off_system, "and no catalog reaches the system prompt either")
+    # The empty-catalog answer (no skill in the component's library) is the
+    # component's own question and is pinned by its suite; the host is never
+    # asked it here.
 
     # The call the model makes is one terminal command: the module's CLI on the
     # APP host. Its bytes are pinned here; that the module ANSWERS (a skill, or

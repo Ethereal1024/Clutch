@@ -22,10 +22,8 @@ jobs:
   win:
     runs-on: windows-latest
     steps:
-      # submodules: the bundled backend carries the skills library it ships
+      # No submodules: the bundle is the HOST's own code and carries no module.
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
@@ -46,7 +44,6 @@ jobs:
           set -euo pipefail
           .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-server \
             --add-data "agent/prompts;agent/prompts" \
-            --add-data "clutch-skills/skills;clutch-skills/skills" \
             --add-data "agent/transport_defaults.json;agent/" \
             scripts/server_entry.py
           .venv/Scripts/python -m PyInstaller --noconfirm --onefile --name agent-supervisor \
