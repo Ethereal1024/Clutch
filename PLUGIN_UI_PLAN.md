@@ -305,7 +305,7 @@ flowchart TD
 
 ## 五、验收与护栏
 
-* **面板自己的测试**：`node tests/components-panel.test.js`（34 组）是这次改造的
+* **面板自己的测试**：`node tests/components-panel.test.js`（35 组，见 §九 9.5）是这次改造的
   唯一硬约束。它的 mini-DOM 按 `plug-row` / `plug-name` 定位（`tests/components-panel.test.js:99-125`
   的 `rowOf()` / `rowNamed()` / `stateOf()`），
   所以 U0 起手就要**保住 `.plug-row` 与 `.plug-name` 这两个类名**（行首是名字），
@@ -321,6 +321,10 @@ flowchart TD
   `scripts/sync-android-host.sh`，再跑 `node tests/android-assets.test.js`。
 * **字体验证**（发布前的 deb 前置守卫）：新增的 UI 文本保持英文；**不要往 `ui/` 的注释里写
   `§`**（v0.1.30 第一次打 tag 就栽在这），改完跑 `.venv/bin/python -m tests.ui_fonts_check`。
+* **无障碍契约（§九 起由测试钉住）**：行的事实由控件行末尾**恰一个** sr-only 节点承载，行里每个控件
+  用 `aria-describedby` 指向它（含菜单项）；`.active` / `.open` / `.busy` 表达的状态同时要有
+  `aria-pressed` / `aria-expanded` / `aria-busy`；`drawnText()` 仍要求行里除了名字与一句话什么都不画
+  （sr-only 不算"画出来"）。改面板时这三条不许破。
 * **端到端手测**（沿用 P2 的配方）：一次性 supervisor（`CLUTCH_COMPONENTS_DIR=/tmp/… --port 8899`），
   真面板指过去，走一遍 装 → 再装（current）→ 停用 → 启用 → 单版卸载 → 全部卸载；
   本机 8890 全程不动。
@@ -484,3 +488,99 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   `.plug-row-actions` 的首个子节点），并补两个方向：held 落后 → 主按钮 `Update` 且 title 说清被替换的版本；
   held + entry 无更新 → 主按钮是 switch、菜单里是 `Reinstall`。断言里都写了 VS Code 出处，便于日后有人
   再"简化"前先看依据。
+
+## 九、0.1.34：每一个事实都要能不带指针地读到
+
+§八 8.2 把行里的版本 / digest / 源路径 / offered release 搬进了行的 `title=`，而 `title=` 只有
+"鼠标停在行上"这一条到达路径：键盘与手机读得到名字、一句话和控件，读不到这行真正在讲的事实。
+同一轮搬迁还留下三处只由 class 表达的状态——哪个 chip 是当前视图（`.active`）、哪个菜单开着
+（`.open`）、哪个展开区摊开着（`.open`）——对看不见 class 变化的人，等于没说。这一轮把"画得出来"
+与"说得清"对齐，**不新增任何画出来的字，不给任何控件加 tab stop**。
+
+### 9.1 行的事实再写一遍（sr-only + `aria-describedby`）
+
+* `plugFactsNode(text)`（`ui/js/components-panel.js:89`）建一个 `class="sr-only"`、
+  `id="plug-row-facts-N"` 的节点；`plugIdSeq`（`:88`）保证每个"要被指向"的节点都有自己的 id。
+  它挂在行的控件行（`.plug-row-actions`）**最后一个子节点**上——所以没有任何控件因此换位置。
+* `plugDescribeTree(el, id)`（`:100`）从控件行开始递归写 `aria-describedby`。**菜单项也要写**：
+  菜单项在菜单打开之前就已经建好（§七 U4 的"常驻 DOM"），一个"后建"的描述等于没有。
+* 节点是**裁切**（`.sr-only`，`ui/style.css:1632`）而不是 `display: none`：无障碍树留得住它，
+  控件不多一个 tab stop，`title=` 原地不动。两处都留着，是因为它们服务两种人（悬停的人 / 读屏的人），
+  不是同一句话的两种画法；行的 `title=` 仍由 `plugItemMeta()` 拼（§八 8.2），sr-only 节点写的
+  **就是它**——一句话，两个出口，不会各自漂。
+
+### 9.2 class 单独扛着的状态改成 ARIA
+
+| 事实 | 原来 | 现在 |
+| --- | --- | --- |
+| 五个过滤 chip 里当前那个 | `.active` | chips 盒子 `role="group"` + `aria-label`（`:316-317`），每个 chip `aria-pressed`（建时 `:324`、重画时 `:363`） |
+| 行的 "…" 开着没有 | `.open` | `aria-label`（点名组件与机器）+ `aria-haspopup` + `aria-controls`（菜单自己的 id）+ `aria-expanded`（建时 `:520-523`、点击时 `:537`，`plugCloseMenus()` 兜底 `:571`） |
+| Versions 展开区 | `.open` | `aria-expanded`（`:770`） |
+| 正在写的那一行 | `.busy` | `aria-busy`（`:144`） |
+| 设置弹窗的 tab | `.active` | `aria-selected`（`ui/js/settings.js:341`；`ui/index.html:67-70` 的 `role="tab"` + `aria-controls`） |
+| 一个清单、一行一条、chips 是一组 | 无 | `role="list"`（`:224`）/ 每行 `role="listitem"`（`:586`）、chips `role="group"`（`:316`） |
+| 面板与它的弹窗 | 无 | `role="tabpanel"` + `aria-labelledby`（`ui/index.html:72`、`:81`）、`role="dialog"` + `aria-modal` + `aria-labelledby`（`:58`） |
+| 名字框 | 只有 `placeholder` | `aria-label`（`:346`）——placeholder 不是名字 |
+| 重读按钮 ↻ | 只有 `title=` | `aria-label`（`ui/index.html:89`） |
+| 面板的说明行 | 无 | `role="status"` + `aria-live="polite"`（`ui/index.html:95`），读失败与孤儿写要说出来 |
+
+* Escape 由 **document** 收菜单（`:575-580`）：菜单挂在"开它的那个控件旁边"，不是一个自成一体的控件，
+  Escape 在按钮上和在菜单里必须同一个意思。
+* 五个"正在写"的控件不再只写一个裸 `…`：`plugBusyLabel()`（`:689-692`）给
+  Installing… / Removing… / Stopping… / Starting… / Reading…，用的是**已有的省略号码位**——
+  图标码位被 `ui/style.css:56-59` 与 `tests/ui_fonts_check.py` 双向锁着，一个字都不许新加。
+
+### 9.3 `opacity` 换成量过的颜色
+
+* 两种"退到后面去"的整行灰原来写的是 `opacity: .55` / `.62`。合成会把行里的分隔线、accent 标记
+  和文字一起拖下去，文字只剩约 **2.5:1**——低于 4.5:1 的底线，而且规则线本身也是被"变淡"画的。
+* 现在是颜色：`--muted` 与新增的 `--dim: #83838B`（`ui/style.css:76`，注释里写着它替代 opacity 的理由）。
+  `--dim` 是**按行真正坐着的那层表面量的**：`.modal-box` 的 `--bg2 #161618` 上 4.81:1、
+  页面 `--bg #0F0F10` 上 5.09:1（先试的 `#7E7E86` 在 `--bg2` 上只有 4.49:1，差一点点不合格）。
+* `.plug-row.stopped:hover` 回满重：停用只是"这台机器不驱动它"，指针指着它时不该还读起来像次要信息。
+* 危险色统一走 `--danger`（`:131`，`var(--accent)` 的另一个名字）。
+
+### 9.4 同一轮的收尾
+
+* **token 化**：插件块是整张表里唯一自带一套 4px 刻度、又在 `ui/mobile.css` 里把每个尺寸抄一遍的地方。
+  现在写的是名字：`--s1..--s6`（`:115`）、`--ctl-h` / `--ctl-h-sm` / `--tap`（`:120-122`）、
+  `--fs-xs..--fs-xl`（`:126`）、`--radius`（`:127`）、`--danger`（`:131`）；手机端只在
+  `ui/mobile.css:197` 的 `#settings-pane-plugins` 上改这几个值。注释同时写明：**旧规则仍带自己的 px**
+  （本轮之前的注释声称全表都遵守刻度，实际不是），新规则一律用 token。
+* **焦点环回归**：块里 4 处 `outline: none` 删掉，`:300` 的全局 `:focus-visible` 环重新照到这些控件。
+* **表头不再被大写**：`.modal-box h4`（`:1031`）给所有 h4 加 `text-transform: uppercase`，于是机器名
+  `SSH ubuntu@box` 在四行下面读成 `SSH UBUNTU@BOX`。`.plug-section-title`（`:1195`）显式
+  `text-transform: none`：这是**数据**，不是标题。
+* `#plug-reload` 的 `font-size` 改 `var(--fs-lg)`；`#plug-base` 加 `min-height: var(--fs-lg)`
+  （与 `.plug-note` 同一守卫：读之前那里不许塌成一个 0 高度的洞）。
+* `scripts/sync-android-host.sh` 重跑，`node tests/android-assets.test.js` 绿：手机资产与桌面同字节。
+
+### 9.5 测试
+
+* `tests/components-panel.test.js` 的 mini-DOM 补上属性 API（`setAttribute` / `getAttribute` /
+  `removeAttribute` / `id` / `attrs`，`:65-70`）。断言的事实一条没放松：**35 组不变，+72 行**。
+* 新增两个读数（`:106-121`）：`drawnText(n)` 跳过 `.sr-only` 子树 = "画出来的文本"；
+  `describedBy(el, root)` 按 id 在**子树内**解析 `aria-describedby`（"从页面别处飘来的 id 不是描述"）。
+  前者正是第 35 组"行里除了名字和一句话什么都没有"现在要问的对象——那句话现在也在树上，只是没被画出来。
+* 第 35 组补：控件行**恰一个** sr-only 节点、内容等于行的 `title=`、位于控件行末子、类名恰是 `sr-only`、
+  能在行子树内解析；第 31 组补 `…` 的 `aria-expanded` false → true → false 与
+  `aria-controls` / `aria-haspopup` / `aria-label`；第 32 组补 chip 的 `aria-pressed` 恰一个 true
+  且随视图移动、chips 的 `group` + `aria-label`、filter input 的 `aria-label`。
+* 收尾全绿：`tests/*test*.js` 40 个、`.venv/bin/python -m tests.ui_fonts_check`。
+  （`eval.harness` 要真 LLM，离线必然红，不算进"离线套件"。）
+
+### 9.6 发布
+
+* 宿主 0.1.34（轻量 tag `v0.1.34`）：`VERSION` + `ui/package.json` + `ui/package-lock.json`
+  三处 bump，`chore(release): 0.1.34`；CI（`.github/workflows/release.yml`，只在 `push tags: v*` 触发）
+  出 deb / dmg / win / apk 并挂到 release。
+* 组件 `clutch-skills` 0.1.1：`component.json` + `pyproject.toml` + `clutch_skills/__init__.py`
+  三处一起 bump（它自己的 release workflow 会核对 tag 与 `component.json` 同名，不一致就拒绝发布），
+  带的是组件自己的 `install` 写动作。宿主只持一个 URL（`ui/components.sources.json` 的
+  `releases/latest`），所以这次宿主一行都没为它改。
+
+### 仍未做（§六 之外新记的）
+
+* 模态级 Escape 与焦点陷阱：`ui/js/settings.js:451` 的 Escape 只在 confirm 可见时响应，
+  `ui/js/conn-lost.js:138` 自己吞掉 Escape；其余 7 个 modal 仍没有 `role="dialog"`。
+  这一轮把设置弹窗与两个 pane 的语义补齐了，剩下的是"焦点该停在哪儿"这一整件事，另开一轮做。
