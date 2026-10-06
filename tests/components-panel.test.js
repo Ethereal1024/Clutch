@@ -233,6 +233,13 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     versionBtns: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-versions/.test(n.className)),
     switches: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-switch/.test(n.className)),
     mores: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-more/.test(n.className)),
+    // the control a row LEADS with: the first child of the first row's action
+    // box. Which control leads is the row's own rule, so this has to be asked of
+    // the drawn row and not inferred from the controls that exist somewhere in it
+    primary: () => {
+      const box = walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-row-actions( |$)/.test(n.className));
+      return box && box.children.length ? box.children[0] : null;
+    },
     menus: () => walk(dom.byId.get("#plug-body")).filter((n) => /plug-menu/.test(n.className)),
     chips: () => walk(dom.byId.get("#plug-filter")).filter((n) => n.tag === "button" && /plug-filter-chip/.test(n.className)),
     // the number behind each chip, as drawn: one entry per chip, "" when the view
@@ -572,7 +579,10 @@ const CODE = mod ? mod.code : "";
     check(held.switches()[0].textContent === "Enable", "a component that is held but not driven offers 'Enable'");
     check(/drive clutch-workspace on Local \(this machine\) again/.test(held.switches()[0].title), "and its title names the machine it drives again");
     check(/its bytes stay where they are/.test(held.switches()[0].title), "still saying the bytes are what does not move");
-    check(/clutch-workspace 0\.1\.0\+5f900739 stopped/.test(held.text()), "the row carries a 'stopped' chip beside the version");
+    check(
+      /^clutch-workspace stopped$/.test(textOf(rowNamed(held.body(), "clutch-workspace").children[0])),
+      "the row carries a 'stopped' chip beside the name"
+    );
     check(
       /(^| )stopped( |$)/.test(rowNamed(held.body(), "clutch-workspace").className),
       "and the whole row is coloured as stopped, not just the chip (U-7)"
@@ -876,21 +886,67 @@ const CODE = mod ? mod.code : "";
   //     it is shut. Opening it builds nothing, so the items can be asked about
   //     (and pressed) without the page first being clicked into a state.
   {
+    // held, and this client offers nothing newer: the write the row leads with is
+    // the switch — the Install action is GONE, not greyed, once the bytes are on
+    // the machine (extensionsActions.ts:472-500)
     const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
     await p.open();
-    check(p.buttons()[0].textContent === "Reinstall", "the row leads with the one write its state calls for");
+    check(p.primary() === p.switches()[0], "the row leads with the one write its state calls for");
+    check(p.primary().textContent === "Disable", "which on an installed component is the switch, not Install");
+    check(
+      walk(rowNamed(p.body(), "clutch-workspace"))
+        .filter((n) => /plug-install/.test(n.className))
+        .every((b) => b.textContent === "Reinstall"),
+      "and nothing on that row says 'Install' any more"
+    );
     check(p.mores().length === 1, "and offers ONE '…' beside it, not a row of controls");
     check(ownerName(p.mores()[0]) === "clutch-workspace", "which belongs to the row whose actions it holds");
     check(p.menus().length === 1, "and holds one menu");
     check(p.menus()[0].classList.contains("open") === false, "closed on the first draw");
     check(
       p.menus()[0].children.length === 3 && p.menus()[0].children.every((c) => c.tag === "button"),
-      "while the items are already in it: the switch, the versions, the removal"
+      "while the items are already in it: the write this client can still make, the versions, the removal"
     );
+    check(p.buttons()[0].textContent === "Reinstall", "the write kept beside the switch is the same release again");
     p.mores()[0].click();
     check(p.menus()[0].classList.contains("open"), "a click opens it");
     p.mores()[0].click();
     check(p.menus()[0].classList.contains("open") === false, "and a second one shuts it again");
+
+    // the list is a box with a bottom edge (item 3), so a menu with no room under
+    // its row is drawn UPWARD: measured against that edge, and only where there is
+    // something to measure — this runner's mini-DOM has no layout at all
+    const near = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await near.open();
+    near.mores()[0].click();
+    check(near.menus()[0].classList.contains("open") && !near.menus()[0].classList.contains("drop-up"), "with no layout to measure the menu opens downward, as before");
+    const box = (bottom) => () => ({ top: 0, bottom, height: bottom, left: 0, right: 500, width: 500 });
+    near.mores()[0].click(); // shut it again
+    near.el("plug-body").getBoundingClientRect = box(400);
+    // the row sits 20px above the bottom edge: less than the menu needs
+    near.mores()[0].getBoundingClientRect = () => ({ top: 364, bottom: 380, height: 16, left: 0, right: 40, width: 40 });
+    near.mores()[0].click();
+    check(near.menus()[0].classList.contains("drop-up"), "a menu with no room below its row is drawn upward instead");
+    near.mores()[0].click();
+    check(near.menus()[0].classList.contains("drop-up") === false, "and closing it drops that decision with it");
+    // the same row with room under it keeps the downward menu
+    near.mores()[0].getBoundingClientRect = () => ({ top: 20, bottom: 36, height: 16, left: 0, right: 40, width: 40 });
+    near.mores()[0].click();
+    check(near.menus()[0].classList.contains("open") && !near.menus()[0].classList.contains("drop-up"), "while a row with room under it opens the way it always did");
+
+    // this client offers a DIFFERENT release: the row leads with Update, it says
+    // what that does to the bytes it replaces, and the switch moves into the menu
+    // — which is where VS Code keeps Enable/Disable once a row has an Update
+    const older = page({ held: [{ name: "clutch-workspace", version: "0.0.9+aaaa0000", digest: "aaaa0000aaaa0000" }] });
+    await older.open();
+    check(older.primary() === older.buttons()[0], "a row whose held release is behind leads with the install family");
+    check(older.primary().textContent === "Update", "and the label says Update, because that is what it is");
+    check(
+      /it holds 0\.0\.9/.test(older.primary().title) && /replaced, not kept/.test(older.primary().title),
+      "and its title says what happens to the release it replaces"
+    );
+    check(older.switches()[0].textContent === "Disable", "with the switch drawn in the menu beside it");
+    check(older.menus()[0].children.length === 3, "which is how many items the menu carries once the update leads");
 
     // a component only this machine holds has nothing to install: the switch is
     // the write that leads, and the menu carries the read and the removal
@@ -1047,6 +1103,48 @@ const CODE = mod ? mod.code : "";
       bare.chips().map((c) => c.textContent).join(",") === "All,Installed,Market,Updates,Stopped",
       "while the chips are still the five views of the one list"
     );
+  }
+
+  // 35. one row says WHO it is and ONE sentence about its state, and nothing else.
+  //     Everything a row used to spell out — the held version, its digest, the
+  //     source path, the offered version, the release under it — is on the row's
+  //     `title=` (U-10) and in the Versions disclosure, which is what VS Code does
+  //     with the same material: the list is name + description + controls
+  //     (extensionsList.ts:70-90; media/extension.css `.description`), and the
+  //     rest is the extension's own page.
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    const row = rowNamed(p.body(), "clutch-workspace");
+    check(row.children[0].children[0].textContent === "clutch-workspace", "the row leads with the component's name");
+    const descs = walk(row).filter((n) => /(^| )plug-row-desc( |$)/.test(n.className));
+    check(descs.length === 1 && descs[0].textContent === "installed — nothing newer is offered here", "then ONE sentence about this row's state");
+    check(!/5f900739|digest|\/home\/|checkout|release/.test(textOf(row)), "and nothing else: no version, digest, path or origin is drawn in the row");
+    check(
+      textOf(row.children[0]).length + descs[0].textContent.length < 80,
+      "the row's own words (name and sentence) stay inside one short line"
+    );
+    check(
+      /held 0\.1\.0\+5f900739/.test(row.title) &&
+        /digest 5f900739e6a35f43/.test(row.title) &&
+        /offered 0\.1\.0/.test(row.title) &&
+        /clutch-workspace/.test(row.title),
+      "the facts it no longer draws are on its title, one hover away"
+    );
+    const foot = row.children[row.children.length - 1];
+    check(
+      /(^| )plug-row-actions( |$)/.test(foot.className) && /plug-switch/.test(foot.children[0].className),
+      "and its controls are their own line under the sentence (VS Code's `.footer`)"
+    );
+    check(row.children.indexOf(descs[0]) < row.children.indexOf(foot), "which comes after the sentence, not beside the name");
+
+    // a row whose component is on the machine but not driven says which of the two
+    // facts it is, and the marks stay beside the name where they belong
+    const stopped = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
+    await stopped.open();
+    const srow = rowNamed(stopped.body(), "clutch-workspace");
+    check(textOf(srow).includes("held on this machine, but not driven"), "a stopped row's sentence says it is still held");
+    check(stopped.switches()[0].textContent === "Enable", "and its control offers the way back, not the way out");
   }
 
   summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");

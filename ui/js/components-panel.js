@@ -80,8 +80,26 @@ function plugChip(text, cls) {
   return el;
 }
 
-// one row: the name, what it is, and whatever it makes of the target machine;
-// `extra` is whatever hangs under the row (a version list), or nothing.
+// ONE row, in the shape VS Code gives one extension (extensionsList.ts:70-90,
+// renderTemplate): a header line — the name, and whatever small state marks belong
+// beside it — then ONE line of description, then the row's controls on their own
+// line under both, then the thing that belongs UNDER the row (a version list), or
+// nothing.
+//
+// What is deliberately NOT here is the pile of facts a row used to carry: the
+// digest, the source path, the "release under it", the offered-versus-held
+// version. That is metadata about the component, not the row's business, and VS
+// Code puts exactly that material one click away (the extension editor) instead of
+// in the list (extensionsList.ts:167-170 gives the description line `.ellipsis`,
+// i.e. one line, cut short; the version/rating counts beside the name are the only
+// numbers the row shows). Here it goes on the row's own `title=`, which is the one
+// place a summary can be complete without being drawn — and into the Versions
+// disclosure, which is the machine's own answer, not ours.
+//
+// `desc` is the row's one sentence (`plugItemDesc`), drawn in a quieter voice and
+// cut to one line; a row that names a version instead of a component (a version
+// row inside the Versions disclosure) passes `lines` and gets them under the name
+// as before — a version's digest and path ARE that row's own facts.
 //
 // `state` is what is happening to THIS row right now — a write in flight or the
 // host's verdict on the last one — and it is drawn here rather than in the page's
@@ -89,10 +107,11 @@ function plugChip(text, cls) {
 // has to find which of ten rows the sentence is about. It may also colour the row
 // itself (`state.row`), which is how "this machine holds it but is not driving
 // it" is said without a second block of text (VS Code: `.disabled` on the row,
-// extensionsList.ts).
-function plugRow(name, chips, lines, actions = [], extra = null, state = null) {
+// extensionsList.ts:185-191).
+function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra = null, state = null, title = "" } = {}) {
   const row = document.createElement("div");
   row.className = "plug-row" + (state && state.row ? " " + state.row : "");
+  if (title) row.title = title;
   const head = document.createElement("div");
   head.className = "plug-row-head";
   const nameEl = document.createElement("span");
@@ -100,17 +119,17 @@ function plugRow(name, chips, lines, actions = [], extra = null, state = null) {
   nameEl.textContent = name;
   head.appendChild(nameEl);
   for (const [text, cls] of chips) head.appendChild(plugChip(text, cls));
-  if (actions.length) {
-    const box = document.createElement("span");
-    box.className = "plug-row-actions";
-    for (const a of actions) box.appendChild(a);
-    head.appendChild(box);
-  }
   row.appendChild(head);
   if (state && state.text) {
     const el = document.createElement("div");
     el.className = "plug-line plug-state" + (state.cls ? " " + state.cls : "");
     el.textContent = state.text;
+    row.appendChild(el);
+  }
+  if (desc) {
+    const el = document.createElement("div");
+    el.className = "plug-row-desc";
+    el.textContent = desc;
     row.appendChild(el);
   }
   for (const line of lines) {
@@ -119,6 +138,17 @@ function plugRow(name, chips, lines, actions = [], extra = null, state = null) {
     el.className = "plug-line";
     el.textContent = line;
     row.appendChild(el);
+  }
+  // the controls get their OWN line, right-aligned under the sentence — VS Code's
+  // row is exactly this (`.details` = `.header-container` -> `.description` ->
+  // `.footer`, media/extension.css, and the footer is the ActionBar). Beside the
+  // name they would fight it for width on a phone, and the name is the one thing
+  // on the row that must never be the part that gives way.
+  if (actions.length) {
+    const foot = document.createElement("div");
+    foot.className = "plug-row-actions";
+    for (const a of actions) foot.appendChild(a);
+    row.appendChild(foot);
   }
   if (extra) row.appendChild(extra);
   return row;
@@ -270,71 +300,107 @@ function plugDrawFilter() {
   }
 }
 
-// One row's chips. The version the machine HOLDS wins over the one a source
-// offers — the first is the fact about that machine, the second a claim. "held"
-// and "driven" are two different facts the machine's registry keeps apart: a
-// stopped component is still here, still listed, its bytes untouched; only its
-// tools are withheld, and the chip says that instead of leaving it to a label.
+// One row's chips. VS Code's header carries only state marks beside the name
+// (restart-required, sync-ignored, install count — extensionsList.ts:81-87), never
+// the version: a version is what the component's own page is for. The one fact
+// that has no other landing place on this page is "stopped", because "held but not
+// driven" is a state of the ROW, and the row says it in colour, in this chip, and
+// in its own sentence (`plugItemDesc`).
 function plugItemChips(item) {
   const chips = [];
-  const iface = item.held ? item.held.interface || "" : (item.entry && item.entry.interface) || "";
-  if (iface) chips.push([iface, ""]);
-  const version = (item.held && item.held.version) || (item.entry && item.entry.version) || "";
-  if (version) chips.push([version, "mono"]);
   if (item.held && item.held.disabled) chips.push(["stopped", "warn"]);
-  if (item.entry) chips.push([item.entry.origin, item.entry.origin === "checkout" ? "accent" : ""]);
-  if (item.held && !item.entry) chips.push(["not offered by this client", "warn"]);
   return chips;
 }
 
-// One row's lines: what the two reads say about the same component, said once.
-// A version is a claim with a content digest hanging off it (`0.1.0+<hex16>`,
-// ui/components.js installVersion), so the release is compared before the `+`.
-function plugItemLines(item) {
-  const lines = [];
+// The row's ONE line: what this component's relationship to the target machine is,
+// in one sentence. VS Code's list gives the description line the same job — one
+// line, cut short (`extensionsList.ts:167-170`, `.description.ellipsis`) — and it
+// is the row's only prose because everything else a row could say (digest, source,
+// path, the versions it holds) is either the machine's own answer in the Versions
+// disclosure or one of the facts below.
+function plugItemDesc(item) {
   const held = item.held;
   const entry = item.entry;
+  if (held && held.disabled) return "held on this machine, but not driven: its tools are not offered here";
+  if (held && entry) {
+    return plugItemUpdate(item)
+      ? `installed — this client offers ${entry.version || "another version"}`
+      : "installed — nothing newer is offered here";
+  }
+  if (held) return "installed — no source this client reads offers it";
   if (entry && plugState.held === null) {
     // the machine could not be read at all: "unknown" is a fact, not an empty list
-    lines.push("on this machine: unknown" + (plugState.heldError ? " (" + plugState.heldError + ")" : ""));
-  } else if (entry && !held) {
-    lines.push("not installed on this machine");
-  } else if (entry && held) {
-    const own = String(held.version || "");
-    const offered = String(entry.version || "");
-    lines.push(
-      own.split("+")[0] === offered
-        ? `installed: ${own}`
-        : `installed: ${own} — this source offers ${offered || "an unnamed version"}`
-    );
+    return "on this machine: unknown";
   }
-  if (held) {
-    const digest = String(held.digest || "");
-    if (digest) lines.push("digest " + digest.slice(0, 16));
-    if (held.disabled) lines.push("held on this machine, but not driven: its tools are not offered here");
-  }
-  if (entry && entry.published && entry.published.version) {
-    // a checkout this client can archive, with the release under it: the release
-    // is what a machine that already holds the checkout can still receive
-    lines.push(`release under it: ${entry.published.version} · ${entry.published.source}`);
-  }
-  if (entry && entry.source) lines.push("· " + entry.source);
-  return lines;
+  return "not installed here";
 }
 
-// The controls on one row. The row leads with ONE write, and which one that is
-// follows the row's own state: a component this client can offer leads with the
-// write that puts it on the machine ("Install", or "Reinstall" when the machine
-// already carries that release), while a component only the machine holds has
-// nothing to install and leads with the switch instead. Everything else the row
-// can do sits behind the "…" beside that button, drawn and disabled exactly as it
-// would be on the row: out of the way, never absent (a control that is only shown
-// on a click is a control the page cannot be asked about).
+// The facts that answer "what exactly is this row about", for the row's `title=`
+// (U-10: the fold VS Code achieves with the extension editor). Same material the
+// row used to draw as lines, minus the prose — a tooltip is read by someone who
+// already asked, so it may be dense. A version is a claim with a content digest
+// hanging off it (`0.1.0+<hex16>`, ui/components.js installVersion), which is why
+// the release is compared before the `+` everywhere on this page.
+function plugItemMeta(item) {
+  const meta = [];
+  const held = item.held;
+  const entry = item.entry;
+  if (held) {
+    meta.push("held " + (held.version || "at an unnamed version"));
+    if (held.digest) meta.push("digest " + String(held.digest).slice(0, 16));
+    if (held.disabled) meta.push("stopped");
+    if (held.interface) meta.push(held.interface);
+  } else if (plugState.held === null && plugState.heldError) {
+    meta.push("what this machine holds could not be read: " + plugState.heldError);
+  }
+  if (entry) {
+    meta.push(`offered ${entry.version || "at an unnamed version"} (${entry.origin}${entry.interface ? ", " + entry.interface : ""})`);
+    if (entry.published && entry.published.version) {
+      // a checkout this client can archive, with the release under it: the release
+      // is what a machine that already holds the checkout can still receive
+      meta.push(`release under it: ${entry.published.version} · ${entry.published.source}`);
+    }
+    if (entry.source) meta.push(entry.source);
+  }
+  return meta;
+}
+
+// Which write a row LEADS with, in VS Code's own order of precedence. Installed is
+// the pivot: `InstallAction.computeAndUpdateEnablement()` hides the Install action
+// outright once the extension is installed (`extensionsActions.ts:472-500` — the
+// button is not drawn, it is not drawn grey), and what is left on an installed
+// extension is the Update action when the gallery is newer
+// (`UpdateAction.computeAndUpdateEnablement()`, `:990-1010`) and the switch (Enable
+// / Disable, in the Manage menu, `ManageExtensionAction.getActionGroups()`,
+// `:1371-1405`) otherwise. Nothing else about the row is expressed by its lead
+// button: a component this client can offer leads with the write that puts it on
+// the machine, and only the machine holds it -> the switch.
+function plugItemLead(item) {
+  if (item.entry && !item.held) return "install";
+  if (item.held && item.entry && plugItemUpdate(item)) return "update";
+  if (item.held) return "switch";
+  return null;
+}
+
+// The controls on one row: ONE leading write, then ONE "…" holding everything else
+// that row can do, drawn and disabled exactly as it would be on the row — out of
+// the way, never absent (a control that is only shown on a click is a control the
+// page cannot be asked about). The lead follows `plugItemLead`; the menu keeps VS
+// Code's own grouping order (ManageExtensionAction: the enable/disable group, then
+// the install-family one, then the removal).
 function plugItemActions(item) {
+  const lead = plugItemLead(item);
   const actions = [];
-  const primary = plugPrimaryButton(item);
+  const primary =
+    lead === "install" || lead === "update"
+      ? item.entry
+        ? plugInstallButton(item.entry)
+        : null
+      : lead === "switch" && item.held
+        ? plugSwitchButton(item.held)
+        : null;
   if (primary) actions.push(primary);
-  const secondary = plugItemMenuItems(item);
+  const secondary = plugItemMenuItems(item, lead);
   if (secondary.length) {
     const menu = plugMenu(secondary);
     actions.push(plugMoreButton(item.name, menu), menu);
@@ -342,21 +408,21 @@ function plugItemActions(item) {
   return actions;
 }
 
-function plugPrimaryButton(item) {
-  if (item.entry) return plugInstallButton(item.entry);
-  if (item.held) return plugSwitchButton(item.held);
-  return null;
-}
-
 // What the row can do BESIDE that write, in the order it is offered: the switch
-// when the install is the one leading (stopping a component is not what a row
-// that can be installed is for), then the versions the machine holds, then the
-// removal — the one write that DELETES, which is exactly why it is never the
-// button a row leads with (PLUGIN_PLAN.md I5).
-function plugItemMenuItems(item) {
+// (unless the switch IS what the row leads with), then the write this client can
+// still make (the same release again — the "Reinstall" an installed component
+// keeps in its menu, the way VS Code keeps "Install Another Version…" in the
+// Manage menu, extensionsActions.ts:1338-1405), then the versions the machine
+// holds, then the removal, which is the one write that DELETES and is exactly why
+// it is never the button a row leads with (PLUGIN_PLAN.md I5). The comparison is
+// by KIND and not by node: the items are built here, so identity would say
+// "different" about two buttons that are the same control.
+function plugItemMenuItems(item, lead) {
   const items = [];
-  if (item.entry && item.held) items.push(plugSwitchButton(item.held));
-  if (item.held) items.push(plugVersionsButton(item.held), plugRemoveButton(item.held));
+  if (!item.held) return items; // a component this machine does not hold has nothing else to offer
+  if (lead !== "switch") items.push(plugSwitchButton(item.held));
+  if (item.entry && lead !== "install" && lead !== "update") items.push(plugInstallButton(item.entry));
+  items.push(plugVersionsButton(item.held), plugRemoveButton(item.held));
   return items;
 }
 
@@ -386,9 +452,30 @@ function plugMoreButton(name, menu) {
     if (ev && ev.stopPropagation) ev.stopPropagation();
     const open = !menu.classList.contains("open");
     plugCloseMenus();
+    // which way it opens is a question about the BOX the row lives in, not about
+    // the row: the list is a region with a bottom edge (the modal no longer grows
+    // to fit it), and a menu drawn past that edge is one the hand cannot reach.
+    menu.classList.toggle("drop-up", open && !plugMenuFitsBelow(btn, menu));
     menu.classList.toggle("open", open);
   });
   return btn;
+}
+
+// Whether the menu can be drawn below the control that opened it, measured against
+// the list's own bottom edge rather than guessed. VS Code measures too: its
+// extension widgets pick the direction from the space the viewport leaves
+// (extensionsWidgets.ts). Where there is no layout to measure — the panel's own
+// test runner draws into a hand-rolled mini-DOM — the plain downward menu is the
+// answer, because that is the one the CSS gives without help.
+function plugMenuFitsBelow(btn, menu) {
+  if (typeof btn.getBoundingClientRect !== "function") return true;
+  if (typeof plugBodyEl.getBoundingClientRect !== "function") return true;
+  const anchor = btn.getBoundingClientRect();
+  const box = plugBodyEl.getBoundingClientRect();
+  // a closed menu has no height: fall back to what three items and their padding
+  // take, which is what the menu holds when it is worth opening at all
+  const need = (typeof menu.getBoundingClientRect === "function" && menu.getBoundingClientRect().height) || 140;
+  return anchor.bottom + need + 8 <= box.bottom;
 }
 
 // One menu at a time, and a click anywhere else closes it. Nothing is kept here:
@@ -397,19 +484,24 @@ function plugMoreButton(name, menu) {
 // test runner, which has no querySelectorAll.
 function plugCloseMenus() {
   if (typeof plugBodyEl.querySelectorAll !== "function") return;
-  for (const el of plugBodyEl.querySelectorAll(".plug-menu.open")) el.classList.remove("open");
+  for (const el of plugBodyEl.querySelectorAll(".plug-menu.open")) {
+    el.classList.remove("open");
+    el.classList.remove("drop-up");
+  }
 }
 document.addEventListener("click", () => plugCloseMenus());
 
 function plugItemRow(item) {
-  return plugRow(
-    item.name,
-    plugItemChips(item),
-    plugItemLines(item),
-    plugItemActions(item),
-    item.held ? plugVersionRows(item.held) : null,
-    plugItemState(item)
-  );
+  return plugRow(item.name, {
+    chips: plugItemChips(item),
+    desc: plugItemDesc(item),
+    actions: plugItemActions(item),
+    extra: item.held ? plugVersionRows(item.held) : null,
+    state: plugItemState(item),
+    // every fact the row no longer DRAWS is still answered, one hover away: the
+    // list is for choosing, the tooltip for confirming (U-10)
+    title: plugItemMeta(item).join(" · "),
+  });
 }
 
 // The one row's own state line, and the reason the page's note line is no longer
@@ -471,7 +563,7 @@ function plugList() {
   if (plugState.market && plugState.market.entries.length) {
     const caution = document.createElement("p");
     caution.className = "plug-caution";
-    caution.textContent = "install writes files on the target machine and Remove deletes them — neither is a rollback: nothing here keeps a copy of what it replaces or takes away (the switch on a row is the third write: it deletes nothing, and pressing it again is the undo)";
+    caution.textContent = "install writes bytes on the target machine and Remove deletes them — neither is a rollback, since nothing here keeps a copy of what it replaces or takes away (the switch is the third write: it deletes nothing, and pressing it again is the undo)";
     sec.appendChild(caution);
   }
   // a source that did not answer explains a short list: one line each, together
@@ -627,7 +719,9 @@ function plugVersionRows(held) {
     chips.push([record.resolved ? "this machine runs it" : "held beside it", record.resolved ? "accent" : ""]);
     const lines = [record.digest ? "digest " + String(record.digest).slice(0, 16) : ""];
     if (record.path) lines.push("at " + record.path);
-    box.appendChild(plugRow(version, chips, lines, [plugRemoveOneButton(held, record)]));
+    box.appendChild(
+      plugRow(version, { chips, lines, actions: [plugRemoveOneButton(held, record)] })
+    );
   }
   return box;
 }
@@ -659,18 +753,24 @@ function plugRemoveOneButton(held, record) {
 }
 
 // The install control for one market row. The label is derived from what the
-// target already holds, so pressing it is never a surprise: a version the
-// machine already carries says "Reinstall" (the same bytes are rewritten), and
-// while any install runs every button is dead — one write at a time, and the
-// page can always name which one.
+// target already holds, the way VS Code derives it from the gallery
+// (`UpdateAction.computeAndUpdateEnablement()`, extensionsActions.ts:990-1010
+// relabels Install to Update when the gallery has a newer version): an offered
+// version this machine does not hold under that name installs, a different
+// release under a name it DOES hold is an update, and the same release again is a
+// reinstall (the same bytes rewritten). While any write runs every button is dead
+// — one write at a time, and the page can always name which one.
 function plugInstallButton(entry) {
   const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
-  const same = Boolean(held) && String(held.version || "").split("+")[0] === String(entry.version || "");
+  const offered = String(entry.version || "");
+  const heldRelease = held ? String(held.version || "").split("+")[0] : "";
+  const same = Boolean(held) && heldRelease === offered;
+  const newer = Boolean(held) && !same;
   const busy = plugState.busy && plugState.busy.name === entry.name;
   const btn = document.createElement("button");
   btn.className = "plug-install";
   btn.type = "button";
-  btn.textContent = busy ? "…" : same ? "Reinstall" : "Install";
+  btn.textContent = busy ? "…" : same ? "Reinstall" : newer ? "Update" : "Install";
   if (!plugState.target) {
     btn.disabled = true;
     // the target is unresolvable (the read is still running, or it failed):
@@ -685,6 +785,10 @@ function plugInstallButton(entry) {
     btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else if (same) {
     btn.title = `this machine already holds ${entry.name} ${held.version}`;
+  } else if (newer) {
+    btn.title =
+      `put ${entry.name} ${offered} on ${plugTargetName(plugState.target)} — ` +
+      `it holds ${held.version} now, and the older one is replaced, not kept`;
   } else if (plugState.held === null) {
     btn.title = "what this machine holds could not be read; the host still decides";
   } else {

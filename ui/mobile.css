@@ -155,12 +155,24 @@
 
   /* modals own fixed pixel widths (420/540/560) — cap them to the viewport */
   .modal-box,
-  #fs-modal .modal-box,
-  #settings-modal .modal-box {
+  #fs-modal .modal-box {
     width: calc(100vw - 24px);
     max-width: 560px;
     max-height: calc(100vh - 24px);
     overflow-y: auto;
+  }
+  /* the settings modal is the one box that does NOT scroll as a whole: it is a
+     flex column with a cap, and the pane inside it (the plugin list) is the scroll
+     region. Capping its height here instead would put a scrollbar inside a
+     scrollbar on the phone. */
+  #settings-modal .modal-box {
+    width: calc(100vw - 24px);
+    /* and it keeps a band of backdrop above and below: the phone is the screen
+       where a box that runs edge to edge reads as a second page rather than as
+       something laid over the one you were reading (the drawer in the right
+       panel is capped for the same reason). What is left of the height goes to
+       the list, which scrolls in itself. */
+    max-height: calc(100vh - 96px);
   }
 
   /* the welcome card is the first thing a fresh install sees on the phone */
@@ -169,12 +181,11 @@
     max-width: 420px;
   }
 
-  /* the settings modal already scrolls as a whole on a phone (the width cap
-     above gives it a max-height): an inner scroll region would nest a second
-     scrollbar inside it, so the plugin lists just grow and the modal scrolls. */
+  /* the plugin list scrolls INSIDE the capped box on a phone too — the head, the
+     filter row and the Close button stay where the thumb can reach them, which is
+     the one thing a full-screen-height list takes away */
   .plug-body {
-    max-height: none;
-    overflow-y: visible;
+    -webkit-overflow-scrolling: touch;
   }
   /* the tab strip's targets are finger-sized here, not pointer-sized */
   .modal-tab { padding: 8px 4px 10px; font-size: 13px; }

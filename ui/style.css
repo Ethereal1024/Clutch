@@ -1015,7 +1015,24 @@ mjx-container[display="true"] {
 
 /* server file browser */
 #fs-modal .modal-box { width: 560px; }
-#settings-modal .modal-box { width: 540px; }
+/* the settings modal is a COLUMN with a height cap of its own: the title, the tab
+   strip and the Close row stay put, and one pane scrolls between them. The box
+   used to be as tall as its contents, which on the plugin tab meant a list that
+   ran the whole screen and pushed the row that FILTERS it off it. VS Code sizes
+   its extension list the same way — a box with its own scrollbar, not a
+   page-length column (extensionsList.ts:29, EXTENSION_LIST_ELEMENT_HEIGHT: the
+   list is a virtualised region, 72px per row). */
+#settings-modal .modal-box {
+  width: 540px;
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* the scroll region is a PANE, never the box */
+}
+#settings-modal .modal-box > h3,
+#settings-modal .modal-tabs,
+#settings-modal .modal-actions { flex: none; }
+#settings-modal .modal-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 /* settings modal: the tab strip over its two panes. The strip is the modal's own
    chrome, so it takes no field spacing and its active rule sits ON the line. */
@@ -1039,7 +1056,11 @@ mjx-container[display="true"] {
   cursor: pointer;
 }
 .modal-tab:hover:not(:disabled) { border-color: transparent; border-bottom-color: var(--border); color: var(--text); }
-.modal-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+/* the tab that is ON keeps its accent rule under the pointer: `.active` alone is
+   outranked by the hover rule above (a tap leaves `:hover` behind on a touch
+   screen), and an underline that vanishes when the tab is pressed is a tab that
+   cannot be told from the one next to it */
+.modal-tab.active, .modal-tab.active:hover:not(:disabled) { color: var(--text); border-color: transparent; border-bottom-color: var(--accent); }
 .modal-pane.hidden { display: none; }
 
 /* plugin tab: the target machine, what it holds, and the market */
@@ -1059,7 +1080,17 @@ mjx-container[display="true"] {
 #plug-base { margin: 6px 0 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .plug-note { margin: 4px 0 0; font-size: 12px; color: var(--muted); min-height: 15px; overflow-wrap: anywhere; }
 .plug-note.error { color: var(--accent); }
-.plug-body { margin-top: 10px; max-height: 44vh; overflow-y: auto; }
+/* the plugin tab: which machine, what it holds, the filter row — and then the ONE
+   list, which is the only thing that scrolls. Those four are `flex: none` so they
+   are always on screen; a list tall enough to carry its own filter row off the
+   screen is a list you cannot filter. */
+#settings-pane-plugins:not(.hidden) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.plug-head, #plug-base, .plug-note, #plug-filter { flex: none; }
+.plug-body { margin-top: 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* the filter row: the views of the ONE list, plus a box to narrow it by name. It
    sits OUTSIDE the scrolling list on purpose — which view is on screen must stay
    on screen while the rows under it move. */
@@ -1072,7 +1103,19 @@ mjx-container[display="true"] {
   color: var(--muted);
 }
 .plug-filter-chip:hover:not(:disabled) { color: var(--text); }
-.plug-filter-chip.active { background: var(--text); border-color: var(--text); color: var(--bg); }
+/* the view that is ON is a solid mark, and that mark has to survive the pointer
+   resting on it: `:hover` STICKS after a tap on a touch screen, and the global
+   `button:hover:not(:disabled)` rule outranks a bare `.active` (it carries a type
+   selector and a second pseudo-class) — which is exactly how the selected view
+   ended up white on white. Same shape, later in the sheet, and every state the
+   mark can be in is named here. */
+.plug-filter-chip.active,
+.plug-filter-chip.active:hover:not(:disabled),
+.plug-filter-chip.active:focus-visible {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
 /* the count behind a chip: the same number as the title's counts, in a quieter
    voice — it says how much that view holds, not what the view is */
 .plug-filter-count { color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -1105,9 +1148,46 @@ mjx-container[display="true"] {
   text-transform: none;
   color: var(--muted);
 }
-.plug-row { padding: 7px 0; border-top: 1px solid var(--border); }
-.plug-row-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.plug-row-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; position: relative; }
+/* one row: a name line — the component's name and the state marks that belong
+   beside it — ONE sentence under it, and the row's controls on their own line
+   under both. That is VS Code's row (`extensionsList.ts:70-90` renderTemplate:
+   `.header-container` with the name, `.description`, then `.footer`; and
+   media/extension.css gives `.header-container` a fixed height of 20px with the
+   name nowrap + ellipsis), minus the 36px icon. */
+.plug-row { padding: 8px 0; border-top: 1px solid var(--border); }
+.plug-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow: hidden; }
+/* the name takes the room the state marks leave and gives up its tail first: it is
+   the one thing on the row that must never be the part that gives way */
+.plug-row-head .plug-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* the row's one sentence: a quieter voice than the name, cut to a single line
+   (VS Code: `.description.ellipsis`, extension.css). A row that grows a paragraph
+   is a row whose neighbours can no longer be compared — the rest of what is known
+   about the component is on the row's `title=` and in the Versions disclosure. */
+.plug-row-desc {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* the controls: the row's OWN line, right-aligned, the way VS Code's ActionBar
+   sits in the list item's `.footer` — beside the name they would fight it for
+   width, which on a phone is a fight the name loses */
+.plug-row-actions {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  position: relative;
+}
 /* a write offered from inside a row: smaller than a modal button, and never the
    row's own accent at rest — neither installing nor removing is the page's
    default action */
@@ -1139,7 +1219,10 @@ mjx-container[display="true"] {
   color: var(--muted);
 }
 .plug-switch:hover:not(:disabled) { color: var(--text); }
-.plug-switch.stopped { color: var(--accent); border-color: var(--accent); }
+/* a stopped switch keeps its accent under the pointer for the same reason the
+   active chip keeps its fill: the hover rule above is the more specific one */
+.plug-switch.stopped,
+.plug-switch.stopped:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 /* the versions read: a READ, so it rests in the same grey as the writes beside it
    and is never the loud one. `open` is the same control in its second state — the
    button that opened the list is the button that closes it — so it stays lit
@@ -1164,6 +1247,10 @@ mjx-container[display="true"] {
 }
 .plug-more:hover:not(:disabled), .plug-more.open { color: var(--text); border-color: var(--accent); }
 .plug-menu { display: none; }
+/* a menu that cannot fit under its row opens UPWARD instead: the list has a bottom
+   edge of its own now, and a menu drawn past it is invisible to the hand that
+   opened it (the direction is measured in js/components-panel.js) */
+.plug-menu.open.drop-up { top: auto; bottom: calc(100% + 4px); }
 .plug-menu.open {
   position: absolute;
   top: calc(100% + 4px);
@@ -1184,7 +1271,10 @@ mjx-container[display="true"] {
    components of their own. */
 .plug-versions-box { margin: 6px 0 2px 10px; padding-left: 10px; border-left: 1px solid var(--border); }
 .plug-caution { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
-.plug-name { font-family: var(--font-mono); font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
+/* the name is the row's loudest mark, and it has to read that way against the
+   sentence under it and the two grey lines below both: VS Code's `.name` is the
+   one semibold thing in an extension row (media/extension.css) */
+.plug-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
 .plug-chip {
   font-family: var(--font-mono);
   font-size: 11px;
