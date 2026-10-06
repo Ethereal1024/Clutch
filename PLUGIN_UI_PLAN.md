@@ -415,4 +415,72 @@ flowchart TD
 
 ### 仍未做
 
-* U-10 次级信息折叠、U-11 来源失败汇总、U-8 远端角标（等 `runs_on=other` 真的出现再挂）。
+* U-10 次级信息折叠 → **0.1.33 已做，见 §八 8.2**；U-11 来源失败汇总、U-8 远端角标（等 `runs_on=other` 真的出现再挂）。
+
+## 八、0.1.33：按 VS Code 的实现回改（用户验收意见五条）
+
+v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**先把 VS Code 源码拉下来**（落盘临时目录
+`.vsc-ref/`：`extensionsList.ts` / `extensionsActions.ts` / `extension.css` / `extensionsWidgets.ts` 等，
+用完即删），再按**实现**回改，不按"精神"猜。
+
+### 8.1 已安装的行不再有 Install（用户第 1 条）
+
+* 依据：`extensionsActions.ts:472-500` `InstallAction.computeAndUpdateEnablement()` 开头
+  `this.enabled = false; this.class = InstallAction.HIDE; this.hidden = true;`，且
+  `if (this.extension.state !== ExtensionState.Uninstalled) return;` —— 安装后 Install 是**不画**，
+  不是画灰；启用/禁用从来不在列表行里内联，而在 `ManageExtensionAction`（`:1338`，齿轮 + 下拉，
+  顺序 Enable(全局/工作区) → Disable → Update → Install Specific Version… → Uninstall）。
+  有更新时行的主操作是 `UpdateAction`（`:957`，label `Update` `:971`）。
+* 落地：`plugItemLead(item)`（`entry && !held` → install；`held && entry && 有更新` → update；`held` → switch）
+  决定行主按钮；`plugInstallButton` 标签改为 **Install / Update / Reinstall**（已装且 release 不同 = Update，
+  title 说清被替换的版本不会被留）；次级动作全进 `…` 菜单（`plugItemMenuItems(item, lead)`：
+  switch → install 家族 → versions → remove）。比较按**种类**而不是节点身份（早先误写成对象身份比较，
+  结果菜单里多出一个 switch，测试 17 当场抓到）。
+* **回退"偏离计划一"（§七 U2）**：`Reinstall` 不再永远占主位。理由：用户要的就是 VS Code 的行为——
+  已装的行主位是启用/禁用（有更新时 Update），"再装一次"是菜单里的次级动作。
+
+### 8.2 行只留"标题 + 一句话"（用户第 2 条）
+
+* 依据：`extensionsList.ts:70-90` `renderTemplate` = `.icon-container`(36px 图标) + `.details > .header`
+  (`span.name`) + `.description.ellipsis` + `.footer`；`media/extension.css`：`.header-container{height:20px}`、
+  `.name` 半粗 + nowrap + ellipsis、`.description{color:var(--vscode-descriptionForeground)}`、
+  `.ellipsis{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}`。行里没有版本号、没有 digest、没有路径。
+* 落地（即 **U-10 次级信息折叠**，§七"仍未做"里那条）：`plugItemChips()` 只留 `stopped`；行内版本 chip /
+  interface chip / origin chip / "not offered by this client" 全部撤销；`plugItemDesc(item)` 出一句话；
+  digest / 源路径 / offered 版本 / release / interface 全部搬进 `plugItemMeta(item)`，拼成行的 `title=`。
+  CSS 补 `.plug-row-desc`（单行 + ellipsis + muted）与 `.plug-row-head .plug-name`（nowrap + ellipsis）。
+* 数据前提（已核实）：发布清单 `clutch-component.json` 只有 `schema/name/interface/version/declaration/artifacts`，
+  **没有 description**（`ui/components.js:272` 的 `parseManifest` 只按 checkout 的 `declaration` 取 `ui.label`），
+  所以行里那句"简介"只能是**按状态推导**的一句，不能凭空造组件简介。
+
+### 8.3 面板不再顶满整屏（用户第 3 条）
+
+* 依据：VS Code 的列表是一个**有底的滚动区**（`extensionsList.ts:29` `EXTENSION_LIST_ELEMENT_HEIGHT = 72`，
+  虚拟化列表），不是页面长度的柱。
+* 落地：`#settings-modal .modal-box` 改 `display:flex; flex-direction:column; max-height:min(78vh, 720px);
+  overflow:hidden`；`h3` / `.modal-tabs` / `.modal-actions` 与 `.plug-head` / `#plug-base` / `.plug-note` /
+  `#plug-filter` 全部 `flex:none`；`#settings-pane-plugins:not(.hidden){display:flex;flex-direction:column;
+  overflow:hidden}`（**必须 `:not(.hidden)`**：id 选择器会压过 `.modal-pane.hidden{display:none}`）；
+  `#plug-body{flex:1 1 auto;min-height:0;overflow-y:auto}`（原 `max-height:44vh` 撤掉）。
+  手机：`ui/mobile.css` 删掉 `.plug-body{max-height:none;overflow-y:visible}` 那条（它正是"顶满整屏"的来源），
+  并把 `#settings-modal .modal-box` 从"整框滚动"那组选择器里摘出来（它整框不滚，滚的是里面的列表），
+  高度上限收到 `calc(100vh - 96px)`：手机上一整块贴边的框读起来像"第二页"，而这个面板是盖在正在读的
+  那页上的；上下各留一段遮罩，剩下的高度给列表。
+
+### 8.4 过滤 chip 高亮时白底白字（用户第 4 条）
+
+* 根因：`button:hover:not(:disabled)`（`ui/style.css:266`，具体度 (0,2,1)）与 `.plug-filter-chip:hover:not(:disabled)`
+  ((0,3,0)) **压过** `.plug-filter-chip.active` ((0,2,0))；安卓 WebView 里点一下 `:hover` 会滞留，于是激活
+  chip 的 `--text` 背景 + 被改回 `--text` 的文字 = 白底白字。
+* 修法：`.plug-filter-chip.active, .plug-filter-chip.active:hover:not(:disabled),
+  .plug-filter-chip.active:focus-visible` 同具体度且置于其后，把三种状态都写全。
+* 同类隐患一并修：`.plug-switch.stopped:hover:not(:disabled)`（hover 会丢 accent）、
+  `.modal-tab.active:hover:not(:disabled)`（hover 会把激活 tab 的 accent 下划线刷成灰）。
+
+### 8.5 测试
+
+* `tests/components-panel.test.js` 的断言随重构更新（**不放松事实**）：第 17 组的"版本 chip"改成"名字旁的
+  stopped chip"（版本已按 8.2 撤出行）；第 31 组改问行**主按钮是哪一个**（新 helper `p.primary()` 读
+  `.plug-row-actions` 的首个子节点），并补两个方向：held 落后 → 主按钮 `Update` 且 title 说清被替换的版本；
+  held + entry 无更新 → 主按钮是 switch、菜单里是 `Reinstall`。断言里都写了 VS Code 出处，便于日后有人
+  再"简化"前先看依据。
