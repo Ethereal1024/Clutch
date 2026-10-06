@@ -406,7 +406,65 @@ async function main() {
     await new Promise((r) => far.close(r));
   }
 
+  // ---- 6c. the far side is given its model path back, or told so ----
+  //
+  // A reconnect reaches the reverse-forward bind seconds after the previous hop
+  // died, when the remote sshd may still be releasing the old listener on 8892.
+  // Fired once, a refused bind left the far side talking into that orphaned
+  // listener — the connection is ACCEPTED, so it looks alive, and nobody ever
+  // answers it. The agent's read then parks until its own read budget, with the
+  // network perfectly fine: the "reconnecting did not help, only Stop did"
+  // report. So the install retries until the bind really lands, stops the
+  // moment a newer connect owns the session, and reports failure instead of
+  // pretending the model path is up.
+  {
+    const { state } = require("../ui/tunnel-core");
+    const { installReverseForward } = require("../ui/tunnel-connect");
+    state.sshClient = null;
+
+    let calls = 0;
+    const flaky = {
+      forwardIn(_host, _port, cb) {
+        calls++;
+        if (calls < 3) return cb(new Error("bind: Address already in use"));
+        cb(null);
+      },
+    };
+    state.sshClient = flaky;
+    const landed = await installReverseForward(flaky, { tries: 5, retryMs: 5, maxWaitMs: 20 });
+    check(landed === true && calls === 3, `a refused reverse-forward bind is retried until it lands (${calls} tries)`);
+
+    // ...and a session that is no longer this client's is left alone: the new
+    // connect installs its own forward, and a late retry must not fight it
+    let late = 0;
+    const replaced = { forwardIn() { late++; } };
+    state.sshClient = flaky; // someone else's session already owns the tunnel
+    const abandoned = await installReverseForward(replaced, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    check(abandoned === false && late === 0, "a replaced session's forward is never installed at all");
+
+    // a host that never frees the port is a FAILURE, never a quiet connect
+    let refused = 0;
+    const held = { forwardIn(_host, _port, cb) { refused++; cb(new Error("bind: Address already in use")); } };
+    state.sshClient = held;
+    const never = await installReverseForward(held, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    check(never === false && refused === 3, "a port that never frees up fails the connect loudly, after its tries");
+    state.sshClient = null;
+  }
+
   // ---- 7. the paths a fake remote cannot reach, asserted on the source ----
+  check(
+    /const reverse = await installReverseForward\(client\)/.test(CONNECT_SRC) &&
+      /establishForwardAndHealth\(localPort, client\)/.test(CONNECT_SRC),
+    "the reverse forward is installed AND awaited before the connect is called good"
+  );
+  check(
+    /if \(!reverse\)/.test(CONNECT_SRC) && /could not be given a listener/.test(CONNECT_SRC),
+    "a far side that never gets its listener is a failed connect, not a silent one"
+  );
+  check(
+    /stream\.on\("error", kill\)/.test(CONNECT_SRC) && /proxy\.on\("error", kill\)/.test(CONNECT_SRC),
+    "either half of the reverse-forward pipe dying takes the other half down with it"
+  );
   check(
     !/progress\("install"\)/.test(CONNECT_SRC),
     "connectTunnel no longer announces an install before the gate decides"

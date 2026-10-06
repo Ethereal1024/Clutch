@@ -159,12 +159,29 @@ async function connectTunnel({ host, user, port, password }, progress) {
     // runtime handlers (once per connection). Guard mutations of state.sshClient: a
     // stale tunnel's 'end' may fire after a reconnect and must not clobber it.
     client.on("tcp connection", (info, accept, reject) => {
-      if (info.destPort !== LLM_PROXY_REMOTE_PORT) {
+      // no live proxy port (it failed to start, or the tunnel is being torn
+      // down): refuse the forward instead of calling net.connect(null), which
+      // throws synchronously inside this handler — an uncaught throw in the main
+      // process takes the whole window down
+      if (info.destPort !== LLM_PROXY_REMOTE_PORT || !state.llmProxyPort) {
         reject();
         return;
       }
       const stream = accept();
       const proxy = net.connect(state.llmProxyPort, "127.0.0.1");
+      // An error on either half must end BOTH halves. A socket left hanging here
+      // is the worst shape there is: the far side's connection has been ACCEPTED,
+      // so it looks alive to whoever is reading it, and nothing will ever answer
+      // it — the agent then parks in its read until its own budget expires. Fail
+      // the pair, so the far side sees a dead connection it can retry.
+      const kill = () => {
+        stream.destroy();
+        proxy.destroy();
+      };
+      stream.on("error", kill);
+      proxy.on("error", kill);
+      stream.on("close", () => proxy.destroy());
+      proxy.on("close", () => stream.destroy());
       stream.pipe(proxy).pipe(stream);
     });
     client.on("end", () => tunnelGone("ended"));
@@ -209,7 +226,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     }
     if (progress) progress("forward");
 
-    return await establishForwardAndHealth(localPort);
+    return await establishForwardAndHealth(localPort, client);
   } catch (e) {
     const raw = (e && e.message) || String(e);
     const friendly = friendlyError(e);
@@ -222,8 +239,57 @@ async function connectTunnel({ host, user, port, password }, progress) {
   }
 }
 
+// Asking the far side to listen on 8892 (and forward what arrives back here, to
+// this window's LLM proxy) is the ONLY way a remote session reaches a model. It
+// used to be fired once and forgotten: the reply was read for an error only to
+// write it to a log, and the connect carried on regardless.
+//
+// That is one half of the field report. A reconnect reaches this line seconds
+// after the previous hop died, and the remote sshd is still holding the old
+// session's 8892 listener while it is released — so the bind comes back refused,
+// nothing retries it, and every LLM request the agent then makes is ACCEPTED by
+// that orphaned listener and answered by nobody. From the agent's side the model
+// is simply not answering: the run sits in "thinking" (a parked read in its own
+// 240s budget) however long the network has been back, and only a Stop — which
+// breaks the read — gets it moving again. So: retry the bind until it really is
+// bound, and let the gate below fail the connect loudly if it never is.
+const REVERSE_FORWARD_TRIES = 6;
+const REVERSE_FORWARD_RETRY_MS = 500; // first step of the ladder
+const REVERSE_FORWARD_MAX_WAIT_MS = 2000; // a port freeing up, not a network: cap it here
+
+function installReverseForward(client, opts = {}) {
+  const tries = opts.tries || REVERSE_FORWARD_TRIES;
+  const first = opts.retryMs || REVERSE_FORWARD_RETRY_MS;
+  const cap = opts.maxWaitMs || REVERSE_FORWARD_MAX_WAIT_MS;
+  return new Promise((resolve) => {
+    let attempt = 0;
+    const tryOnce = () => {
+      // a newer connect owns the session now: this forward belongs to a dead one
+      if (!client || state.sshClient !== client) return resolve(false);
+      attempt++;
+      client.forwardIn("127.0.0.1", LLM_PROXY_REMOTE_PORT, (err) => {
+        if (!err) {
+          tunnelLog(
+            `[phase] reverse forward listening 127.0.0.1:${LLM_PROXY_REMOTE_PORT} -> client proxy :${state.llmProxyPort}` +
+              (attempt > 1 ? ` (try ${attempt})` : "")
+          );
+          return resolve(true);
+        }
+        if (state.sshClient !== client) return resolve(false); // tunnel died under us
+        const wait = Math.min(first * Math.pow(2, attempt - 1), cap);
+        tunnelLog(
+          `[phase] reverse forward failed (try ${attempt}/${tries}, retry in ${wait}ms): ${err.message}`
+        );
+        if (attempt >= tries) return resolve(false);
+        setTimeout(tryOnce, wait);
+      });
+    };
+    tryOnce();
+  });
+}
+
 // Set up the bidirectional forwards and gate on the health check through the tunnel.
-async function establishForwardAndHealth(localPort) {
+async function establishForwardAndHealth(localPort, client) {
   state.localSrv = net.createServer((sock) => {
     // a request racing the teardown must fail the socket, not the main
     // process: forwardOut on a null client throws before it can answer
@@ -248,14 +314,19 @@ async function establishForwardAndHealth(localPort) {
   });
   await listen(state.localSrv, localPort);
   tunnelLog(`[phase] local forward listening 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);
-  state.sshClient.forwardIn("127.0.0.1", LLM_PROXY_REMOTE_PORT, (err) => {
-    if (err) {
-      tunnelLog("[phase] reverse forward failed: " + err.message);
-      console.error("[tunnel] reverse forward failed:", err.message);
-    } else {
-      tunnelLog(`[phase] reverse forward requested 127.0.0.1:${LLM_PROXY_REMOTE_PORT} -> client proxy :${state.llmProxyPort}`);
-    }
-  });
+  // awaited, and retried: without this bind the far side has no way to reach a
+  // model at all (see installReverseForward)
+  const reverse = await installReverseForward(client);
+  if (!reverse) {
+    tunnelLog(`[health] FAIL: the far side could not be given a listener on ${LLM_PROXY_REMOTE_PORT} (the model path is dead)`);
+    stopTunnel();
+    return {
+      ok: false,
+      error:
+        `the remote host would not let us listen on 127.0.0.1:${LLM_PROXY_REMOTE_PORT}, so its model requests ` +
+        "have nowhere to go (an old session's listener is usually holding the port) — wait a moment and reconnect.",
+    };
+  }
   const up = await waitForServer("http://127.0.0.1:" + localPort + "/api/health", CONNECT_TIMEOUT_MS);
   if (!up) {
     tunnelLog("[health] FAIL: backend not reachable on the remote host");
@@ -283,4 +354,5 @@ async function establishForwardAndHealth(localPort) {
 
 module.exports = {
   connectTunnel,
+  installReverseForward,
 };
