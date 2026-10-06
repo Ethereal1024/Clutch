@@ -72,3 +72,35 @@ class BaseOpenaiClient(LlmClient):
         # stream_runner.run_streaming, which announces each one to the UI.
         self.client = OpenAI(api_key=self.api_key, base_url=base_url, http_client=http_client, max_retries=0)
         self.model = model
+        # kept for endpoint_alive below: the probe has to go down the SAME path
+        # as the stream (same base URL, same proxy decision), because that path
+        # — not the provider in the abstract — is what a probe is asked about
+        self.base_url = base_url
+
+    def endpoint_alive(self, timeout: float = 6.0) -> bool:
+        """Is anything still serving this base URL right now?
+
+        Used by stream_runner's watchdog to tell a provider that is thinking from
+        a path that has gone away: a trivial GET down the same path as the stream
+        (same base URL, so the same proxy and the same tunnel hop). ANY HTTP
+        response counts as alive — 200, 401, even a 404 for a route the endpoint
+        does not implement — because the question is whether the transport
+        reaches a peer at all, not what the peer thinks of the URL. A connect
+        failure, a read timeout or a malformed reply is the "gone" verdict.
+
+        It gets its own short-budget client on purpose: the streaming client's
+        read budget (llm_read_timeout, 240s) is a budget for chunk gaps and would
+        make the probe useless as a watchdog."""
+        try:
+            with httpx2.Client(
+                transport=httpx2.HTTPTransport(proxy=get_proxy_for_url(self.base_url), trust_env=False),
+                trust_env=False,
+                timeout=timeout,
+            ) as probe:
+                probe.get(self.base_url.rstrip("/") + "/")
+            return True
+        except httpx2.HTTPError:
+            # transport-level failure (refused / reset / timed out / bad reply)
+            return False
+        except Exception:  # noqa: BLE001 -- an unexpected probe failure is not a health verdict
+            return False

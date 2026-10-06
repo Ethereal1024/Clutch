@@ -48,6 +48,13 @@ class OpenaiLlmClient(BaseOpenaiClient):
             # so a drop in the middle of an answer becomes a reconnect instead
             # of the end of the run
             mid_stream_retry=True,
+            # the watchdog asks the endpoint's own path whether it is still
+            # there while an attempt is silent (see stream_runner.STALL_PROBE_S):
+            # a body that stalls because the client's proxy behind the SSH hop
+            # went away cannot be woken by the client reconnecting, because this
+            # thread is already parked in a read that will not return for the
+            # whole 240s budget
+            probe=self.endpoint_alive,
             cancel=cancel,
         )
 

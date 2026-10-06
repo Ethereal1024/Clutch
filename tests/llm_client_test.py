@@ -180,6 +180,51 @@ def _collect(gen):
     return out, error
 
 
+class _QuietStream:
+    """A body that stays silent for ``quiet`` seconds before its first event, and
+    parks (like a read on a peer that went away without a FIN) once its events run
+    out. ``close()`` is what a real transport then raises from — the watchdog's
+    only lever."""
+
+    def __init__(self, quiet: float, events=()) -> None:
+        self._quiet = quiet
+        self._events = list(events)
+        self._started: float | None = None
+        self.closed = False
+
+    def __iter__(self) -> "_QuietStream":
+        return self
+
+    def __next__(self) -> SimpleNamespace:
+        if self._started is None:
+            self._started = time.monotonic()
+        while time.monotonic() < self._started + self._quiet and not self.closed:
+            time.sleep(0.02)
+        if not self.closed and self._events:
+            return self._events.pop(0)
+        while not self.closed:  # park exactly the way a blocked socket read does
+            time.sleep(0.02)
+        raise httpx2.ReadError("connection closed under us")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _watchdog_probe(  # straight at the thread: it is the lever that has to be right
+    probe, *, delivered: bool, mid_stream_retry: bool, stall_s: float = 0.15, hold: float = 0.5
+):
+    """Arm one attempt's watchdog the way run_streaming does and report whether it
+    used its lever within ``hold``."""
+    closed: list[bool] = []
+    watch = runner_mod._Watch(last=time.monotonic(), probe=probe, delivered=delivered)
+    stop = runner_mod._attempt_watchdog(
+        None, lambda: closed.append(True), watch, mid_stream_retry=mid_stream_retry, stall_s=stall_s
+    )
+    time.sleep(hold)
+    stop.set()
+    return closed, watch
+
+
 # ---- fake Responses API ----------------------------------------------------
 # The typed stream events are pydantic models in the SDK; every handler reads
 # them by attribute, so attribute-carrying namespaces are a faithful stand-in.
@@ -690,6 +735,9 @@ def main() -> int:
     # unbounded: same ladder, no give-up, and the Stop is the only thing that ends it
     stop = _CountingStop(trip_after=11)
     client, comps = _client(0, [_fail_stream] * 11)
+    # the ladder paces retries when the PATH is up and the provider is the one
+    # failing; when the path itself is gone the loop waits it out instead (4e)
+    client.endpoint_alive = lambda: True
     evs, err = _collect(client.stream([{"role": "user", "content": "hi"}], cancel=stop))
     check(stop.waits == held, f"an unbounded redial climbs the same ladder and holds at the cap (got {stop.waits})")
     check(comps.calls == 11, "each backoff bought one more attempt, right up to the Stop")
@@ -698,6 +746,100 @@ def main() -> int:
     check(evs[0]["max"] == 0 and "retrying (1/…)" in evs[0]["message"],
           "with no fixed budget the notice shows an open-ended count instead of a lie")
     check("retrying (11/…)" in evs[-1]["message"], "the open-ended notice keeps counting up")
+
+    # 4e. the endpoint probe: a run parked mid-"thinking" on a path that is GONE
+    #     has nothing left to wake it. The client's socket is held open by the far
+    #     end (or by a dead SSH hop's ghost listener), so the read never returns on
+    #     its own before the 240s read budget — and a reconnect by the client
+    #     cannot reach a read that is already parked. Only a probe down the SAME
+    #     path can tell "the provider is thinking" from "the pipe is dead", so that
+    #     is what the watchdog asks, on silence, and it closes the attempt only
+    #     when the answer is "gone" (events arriving during the probe are proof
+    #     enough that the path is up, whatever the probe made of it).
+    # the watchdog's own decisions first, straight at the thread
+    closed, watch = _watchdog_probe(lambda: False, delivered=False, mid_stream_retry=True)
+    check(closed == [True] and watch.nudged, "a silent attempt on a gone path is closed by the watchdog")
+    closed, watch = _watchdog_probe(lambda: True, delivered=False, mid_stream_retry=True)
+    check(closed == [] and not watch.nudged, "a silent attempt on a live path is left alone (the provider may be thinking)")
+    closed, watch = _watchdog_probe(lambda: False, delivered=True, mid_stream_retry=False)
+    check(closed == [], "an attempt whose partial output the caller cannot discard is never cut off")
+    closed, _ = _watchdog_probe(lambda: False, delivered=True, mid_stream_retry=True)
+    check(closed == [True], "a partly delivered attempt is re-runnable when the caller honors discard")
+
+    real_stall_s, real_poll_s, real_wait_max_s = (
+        runner_mod.STALL_PROBE_S,
+        runner_mod.PATH_POLL_S,
+        runner_mod.PATH_WAIT_MAX_S,
+    )
+    runner_mod.STALL_PROBE_S, runner_mod.PATH_POLL_S = 0.25, 0.05
+    try:
+        # silence while the path is UP is a provider thinking: never interrupted
+        client, comps = _client(3, [lambda: _QuietStream(0.7, [_text_chunk("hi"), _finish_chunk()])])
+        client.endpoint_alive = lambda: True
+        evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+        check(err is None and [e["type"] for e in evs] == ["text", "finish"],
+              "a quiet turn on a live path is never cut off")
+        check(comps.calls == 1, "a live path's silence buys no extra request")
+
+        # the incident: text already streamed ("the model is thinking"), then the
+        # path goes away. The attempt must be broken in seconds and redialed, with
+        # the partial output flagged for discard like any other mid-stream drop
+        runner_mod.PATH_WAIT_MAX_S = 0.2  # the give-up valve, exercised below
+        client, comps = _client(0, [
+            lambda: _QuietStream(0.0, [_text_chunk("partial")]),  # delivers, then parks forever
+            _ok_stream,
+        ])
+        client.endpoint_alive = lambda: False
+        started = time.monotonic()
+        evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+        elapsed = time.monotonic() - started
+        check(err is None, "a turn parked on a gone path is redialed instead of waited out")
+        check([e["type"] for e in evs] == ["text", "retry", "text", "finish"],
+              "the dead attempt's text, its notice, then the recovered turn")
+        check(evs[1]["discard"] is True, "the partial thinking the user already saw is dropped before the retry")
+        check(evs[1]["code"] == "connection" and "endpoint stopped answering" in evs[1]["message"],
+              "the notice names the transport, not an unknown failure")
+        check(elapsed < 3, f"the parked read was broken in seconds, not the 240s budget (took {elapsed:.2f}s)")
+        check(comps.calls == 2, "the run redialed once the read was broken")
+
+        # a redial is never handed a request while the path is provably gone: that
+        # request would park in its own read budget (240s) while the reconnect that
+        # ended the outage went unnoticed — the "still stuck after reconnecting" half
+        # the probe flips on its own a few polls in — that IS the reconnect. The
+        # flip is driven by the poll count, not by a wall clock: this test stubs
+        # runner_mod.time.sleep (the ladder's pace), so the polls run instantly and
+        # a timer would race them and lose.
+        seen = {"polls": 0, "last": False}
+
+        def _path_answers_after_two_polls():
+            seen["polls"] += 1
+            seen["last"] = seen["polls"] > 2
+            return seen["last"]
+
+        def _when_path_answers():
+            check(seen["last"], "the request was issued only after the path answered again")
+            yield _text_chunk("hi")
+            yield _finish_chunk()
+
+        runner_mod.PATH_WAIT_MAX_S = 5.0
+        client, comps = _client(0, [_fail_stream, _when_path_answers])
+        client.endpoint_alive = _path_answers_after_two_polls
+        evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+        check(err is None and comps.calls == 2, "the redial resumes by itself when the path comes back")
+        check([e["type"] for e in evs] == ["retry", "text", "finish"], "and it streams the recovered turn")
+
+        # but a witness is only worth waiting on while it is right: a probe that
+        # never answers must not turn "retry" into "wait forever"
+        runner_mod.PATH_WAIT_MAX_S = 0.2
+        client, comps = _client(0, [_fail_stream, _ok_stream])
+        client.endpoint_alive = lambda: False
+        evs, err = _collect(client.stream([{"role": "user", "content": "hi"}]))
+        check(err is None and comps.calls == 2,
+              "a probe that never answers still lets the redial through (the attempt is its own witness)")
+    finally:
+        runner_mod.STALL_PROBE_S = real_stall_s
+        runner_mod.PATH_POLL_S = real_poll_s
+        runner_mod.PATH_WAIT_MAX_S = real_wait_max_s
 
     # 5. responses protocol: the same contract over a different wire format
     _check_responses_protocol()

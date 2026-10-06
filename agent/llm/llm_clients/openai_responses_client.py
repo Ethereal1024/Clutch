@@ -143,6 +143,9 @@ class OpenaiResponsesLlmClient(BaseOpenaiClient):
             # so a drop in the middle of an answer becomes a reconnect instead
             # of the end of the run
             mid_stream_retry=True,
+            # see OpenaiLlmClient: the same silence watchdog, asked about this
+            # client's own path
+            probe=self.endpoint_alive,
             cancel=cancel,
         )
 
