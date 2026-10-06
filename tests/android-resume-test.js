@@ -125,6 +125,9 @@ global.resolveConnectionLost = () => {
 };
 global.addEvent = () => {};
 global.refreshTree = () => {};
+// the reconnect's own teardown of the dead stream's live blocks (stream-events.js
+// dropOrphanLive) — stubbed here, driven for real by mid-stream-retry-test.js
+global.dropOrphanLive = () => {};
 global.clearRetryNote = () => {};
 global.cancelAnimationFrame = () => {};
 global.textRenderRaf = 0;

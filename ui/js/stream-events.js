@@ -68,6 +68,25 @@ function discardLivePartial() {
   clearStreamPreviews();
 }
 
+// The same teardown, asked for by the WINDOW's own socket instead of by a
+// `discard` notice: a reconnect (js/sse-stream.js es.onopen) restarts the
+// streaming state, and the attempt whose deltas it can no longer receive is as
+// dead to this view as a retried one is — a delta is never stored (agent/events.py
+// keeps finals), so the window cannot continue that block, only abandon it. The
+// agent's own answer to the same failure is to reissue the request and re-stream
+// the turn from its start, and the log replays whatever this window never painted;
+// both draw the turn again, complete.
+//
+// Keeping the nodes instead is the reported freeze: "thinking… 412 chars" left on
+// screen for good under a run that is no longer thinking, a second live block
+// opening beside it, and the turn's own assistant_message rendering a duplicate
+// of the text under the stale first half.
+function dropOrphanLive() {
+  discardLivePartial();
+  toolGroupEl = null;
+  clearRetryNote(); // a reconnect may have skipped the event that would clear it
+}
+
 // transient "connection lost — retrying…" chip. Shown when an LLM stream
 // attempt fails (network drop / read timeout) and the client reconnects with
 // backoff; removed as soon as new tokens arrive, the compaction clears, or the

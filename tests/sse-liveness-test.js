@@ -114,6 +114,14 @@ global.switchBackendResolved = async () => {
 };
 global.addEvent = () => {};
 global.refreshTree = () => {};
+// The reconnect's teardown of the blocks the dead stream drew lives in
+// stream-events.js (dropOrphanLive) and is driven for real by
+// mid-stream-retry-test.js; this runner loads sse-stream.js alone, so it only
+// needs to count that the reconnect ASKS for it.
+let orphansDropped = 0;
+global.dropOrphanLive = () => {
+  orphansDropped++;
+};
 global.clearRetryNote = () => {};
 global.cancelAnimationFrame = () => {};
 global.textRenderRaf = 0;
@@ -143,6 +151,7 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
 
   // ---- 2) half-open stream: silent past three keepalives, no ES error at all --
   es1.fireOpen();
+  check(orphansDropped === 1, "a reconnect drops the live blocks the dead stream left (the frozen 'thinking… N chars')");
   setStatus("running");
   check(global.busy === true, "an open stream with a run in flight keeps the button on Stop");
   global.sseLastFrameAt = Date.now() - global.SSE_STALE_MS - 1;

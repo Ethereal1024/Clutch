@@ -221,13 +221,14 @@ function connectSSE() {
     // the window would sit on a port nobody serves. An open stream has the
     // host's own status frame behind it, so a run still in flight stays running.
     resolveConnectionLost();
-    lastTextEl = null;
-    lastTextContent = "";
-    thinkingEl = null;
-    thinkingContent = "";
-    toolGroupEl = null;
-    clearRetryNote(); // a reconnect may have skipped the event that would clear it
-    if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
+    // A session really answered, and everything the PREVIOUS stream drew is now
+    // un-updatable — the deltas it missed are gone for good. Restart the
+    // streaming state AND take the nodes with it (js/stream-events.js
+    // dropOrphanLive), instead of only forgetting the references: a live partial
+    // left on the page freezes exactly as the user saw it — "thinking… N chars"
+    // over a run that is no longer thinking — and the turn's own durable record
+    // then draws a second copy of the text under the stale first half.
+    dropOrphanLive();
     // the backend (re)connected, possibly after a self-heal restart: resync the tree
     refreshTree();
   };

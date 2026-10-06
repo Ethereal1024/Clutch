@@ -96,4 +96,50 @@ check(branch.indexOf("discardLivePartial()") < branch.indexOf("setRetryNote(ev)"
   "the stale blocks are gone before the retry chip appears");
 check(branch.indexOf("setRetryNote(ev)") >= 0, "the chip is still shown for a plain notice");
 
+// ---- 4) the WINDOW's socket: a reconnect drops the same stale blocks ----
+//
+// The other half of the same failure, with no notice to react to. When the
+// window's own SSE socket dies mid-turn, the deltas it missed are never stored
+// and the agent reissues the request from scratch — so the partial the dead
+// stream drew is exactly as stale as a retried one. The reconnect (es.onopen)
+// used to reset only the REFERENCES, leaving the nodes on the page: the reported
+// freeze, a "thinking… N chars" block that no event can ever update again, with
+// the restarted turn's own block growing beside it and the durable
+// assistant_message rendering a second copy of the text below.
+(0, eval)(fnBody("dropOrphanLive"));
+
+const text2 = fakeNode("div");
+const think2 = fakeNode("div");
+const rowC = fakeNode("div");
+const chip2 = fakeNode("div");
+global.textRenderRaf = 3;
+global.lastTextEl = text2;
+global.lastTextContent = "half a thought";
+global.thinkingEl = think2;
+global.thinkingContent = "weighing it up";
+global.streamRows = { c: { row: rowC } };
+global.retryNoteEl = chip2;
+global.toolGroupEl = fakeNode("div");
+cancelledRaf = [];
+
+dropOrphanLive();
+
+check(text2.removed && global.lastTextEl === null && global.lastTextContent === "",
+  "a reconnect takes the partial text block off the page, not just its reference");
+check(think2.removed && global.thinkingEl === null && global.thinkingContent === "",
+  "…and the frozen reasoning block with it (the 'stuck in thinking' the user saw)");
+check(rowC.removed && Object.keys(global.streamRows).length === 0, "…and any half-streamed tool row");
+check(chip2.removed && global.retryNoteEl === null, "…and the stale retry chip");
+check(cancelledRaf.indexOf(3) >= 0 && global.textRenderRaf === 0, "…cancelling the render it had queued");
+check(global.toolGroupEl === null, "…and closing the tool group it was drawing into");
+
+// wiring: the reconnect reaches that teardown, and no longer just nulls the refs
+const sse = fs.readFileSync(path.join(ROOT, "ui", "js", "sse-stream.js"), "utf8");
+const onopen = sse.slice(sse.indexOf("es.onopen = () => {"));
+const onopenBody = onopen.slice(0, onopen.indexOf("\n  };"));
+check(onopenBody.includes("dropOrphanLive();"),
+  "es.onopen drops the live partial instead of leaving it on the page");
+check(!/lastTextEl = null|thinkingEl = null/.test(onopenBody),
+  "…and does not reset the references alone, which left the frozen nodes behind");
+
 summary("mid-stream-retry-test", "discard semantics hold on the UI side");
