@@ -325,12 +325,21 @@ function closeSettings() {
 // A tab strip over one modal box: "Model" (the LLM profile form) and "Plugins"
 // (ui/js/components-panel.js). Purely visual — this only moves a class; the
 // plugin pane draws itself when it becomes visible.
+//
+// The strip is a real `role="tablist"` in index.html, and `aria-selected` is the
+// half of it a class cannot say: `.active` paints the tab, `aria-selected` is how
+// the pane that is showing is announced. Both tabs stay in the tab order and there
+// are no arrow keys — with two of them, Tab reaches the other one, which is what a
+// reader expects anyway.
 const SETTINGS_TABS = ["llm", "plugins"];
 function showSettingsTab(name) {
   const tab = SETTINGS_TABS.includes(name) ? name : "llm";
   for (const t of SETTINGS_TABS) {
-    $("#settings-tab-" + t).classList.toggle("active", t === tab);
-    $("#settings-pane-" + t).classList.toggle("hidden", t !== tab);
+    const btn = $("#settings-tab-" + t);
+    const on = t === tab;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", String(on));
+    $("#settings-pane-" + t).classList.toggle("hidden", !on);
   }
 }
 for (const t of SETTINGS_TABS) {

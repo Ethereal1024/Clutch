@@ -32,6 +32,7 @@ function makeDocument(ids) {
       tag,
       className: "",
       title: "",
+      attrs: {},
       type: "",
       disabled: false,
       value: "",
@@ -60,6 +61,15 @@ function makeDocument(ids) {
       addEventListener(ev, fn) { (n.handlers[ev] = n.handlers[ev] || []).push(fn); },
       click() { for (const fn of n.handlers.click || []) fn(); },
       focus() {},
+      // what the panel says about a control it cannot show with a class alone
+      // (aria-pressed, aria-expanded, aria-describedby, role): the real DOM API,
+      // one attribute at a time — see cselect-test.js's mini-DOM for the same pair
+      getAttribute(k) { return k in n.attrs ? n.attrs[k] : null; },
+      setAttribute(k, v) { n.attrs[k] = String(v); },
+      removeAttribute(k) { delete n.attrs[k]; },
+      // an element's own text: the panel names its sr-only facts through the id
+      // an aria attribute points at, so a test has to be able to look one up
+      id: "",
       querySelector: () => null,
       get textContent() { return n._text; },
       set textContent(v) { n._text = String(v); n.children = []; },
@@ -91,6 +101,22 @@ function walk(n, out = []) {
 
 function textOf(n) {
   return ((n._text || "") + " " + n.children.map(textOf).join(" ")).replace(/\s+/g, " ").trim();
+}
+
+// what a row PRINTS: everything except the sr-only facts a control points at with
+// `aria-describedby` (U-10 puts them one hover away, and this is that same
+// sentence for whoever cannot hover). "Nothing else is drawn in the row" is a
+// claim about the drawn page, so it is asked of this and not of textOf.
+function drawnText(n) {
+  if (/(^| )sr-only( |$)/.test(n.className)) return "";
+  return ((n._text || "") + " " + n.children.map(drawnText).join(" ")).replace(/\s+/g, " ").trim();
+}
+
+// the sr-only node an aria attribute points at, looked up the way assistive tech
+// resolves it: the id, inside the subtree the attribute was written on
+function describedBy(el, root) {
+  const id = el.getAttribute("aria-describedby");
+  return (id && walk(root).find((n) => n.id === id)) || null;
 }
 
 // the row a control sits in, by walking up the parents the mini-DOM kept. The
@@ -253,7 +279,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       .filter((n) => /(^| )plug-name( |$)/.test(n.className))
       .map((n) => textOf(n)),
     note: () => dom.byId.get("#plug-note"),
-    text: () => textOf(dom.byId.get("#plug-body")),
+    text: () => drawnText(dom.byId.get("#plug-body")),
     // the state line of one component's row, or null when that row is not drawn
     state: (name) => stateOf(dom.byId.get("#plug-body"), name),
     stateText: (name) => {
@@ -908,10 +934,22 @@ const CODE = mod ? mod.code : "";
       "while the items are already in it: the write this client can still make, the versions, the removal"
     );
     check(p.buttons()[0].textContent === "Reinstall", "the write kept beside the switch is the same release again");
+    check(p.mores()[0].getAttribute("aria-expanded") === "false", "the '…' answers for the menu it holds before it is opened");
+    check(
+      p.mores()[0].getAttribute("aria-controls") === p.menus()[0].id && Boolean(p.menus()[0].id),
+      "and names the box it opens, which is why that box carries an id"
+    );
+    check(p.mores()[0].getAttribute("aria-haspopup") === "true", "and says it opens something at all");
+    check(
+      /more actions for clutch-workspace on/.test(p.mores()[0].getAttribute("aria-label") || ""),
+      "and carries a name that says which component's actions it holds"
+    );
     p.mores()[0].click();
     check(p.menus()[0].classList.contains("open"), "a click opens it");
+    check(p.mores()[0].getAttribute("aria-expanded") === "true", "and the '…' reports it open, not just coloured");
     p.mores()[0].click();
     check(p.menus()[0].classList.contains("open") === false, "and a second one shuts it again");
+    check(p.mores()[0].getAttribute("aria-expanded") === "false", "with the '…' reporting that too");
 
     // the list is a box with a bottom edge (item 3), so a menu with no room under
     // its row is drawn UPWARD: measured against that edge, and only where there is
@@ -978,6 +1016,16 @@ const CODE = mod ? mod.code : "";
     await p.open();
     check(p.chips().map((c) => c.textContent).join(",") === "All,Installed,Market,Updates,Stopped", "every view of the list is a chip on one row");
     check(p.chips()[0].classList.contains("active"), "and the list opens on All");
+    const chipGroup = p.chips()[0].parent;
+    check(
+      chipGroup.getAttribute("role") === "group" && /which components to show/.test(chipGroup.getAttribute("aria-label") || ""),
+      "the five views are announced as one group, named for what it chooses between"
+    );
+    check(
+      p.chips().filter((c) => c.getAttribute("aria-pressed") === "true").length === 1 &&
+        p.chips()[0].getAttribute("aria-pressed") === "true",
+      "exactly one chip is pressed, and it is the view drawn as active"
+    );
     const reads = p.world.listCalls + p.world.marketCalls;
     check(
       p.names().join(",") === "clutch-workspace,clutch-memory,clutch-websearch,clutch-skills,solo",
@@ -996,8 +1044,13 @@ const CODE = mod ? mod.code : "";
 
     p.chips()[0].click();
     check(p.names().length === 5, "and going back to All shows the rows the filter only hid");
+    check(
+      p.chips()[0].getAttribute("aria-pressed") === "true" && p.chips()[4].getAttribute("aria-pressed") === "false",
+      "with the pressed mark moving to the view that is now on"
+    );
     const box = p.nameBox();
     check(Boolean(box), "the row carries a box to filter by name");
+    check(box.getAttribute("aria-label") === "filter the list by name", "which has no <label> beside it, so it names itself");
     box.value = "clutch-work";
     box.handlers.input[0]();
     check(p.names().join(",") === "clutch-workspace", "the name filter narrows by name, case and all");
@@ -1119,7 +1172,7 @@ const CODE = mod ? mod.code : "";
     check(row.children[0].children[0].textContent === "clutch-workspace", "the row leads with the component's name");
     const descs = walk(row).filter((n) => /(^| )plug-row-desc( |$)/.test(n.className));
     check(descs.length === 1 && descs[0].textContent === "installed — nothing newer is offered here", "then ONE sentence about this row's state");
-    check(!/5f900739|digest|\/home\/|checkout|release/.test(textOf(row)), "and nothing else: no version, digest, path or origin is drawn in the row");
+    check(!/5f900739|digest|\/home\/|checkout|release/.test(drawnText(row)), "and nothing else: no version, digest, path or origin is drawn in the row");
     check(
       textOf(row.children[0]).length + descs[0].textContent.length < 80,
       "the row's own words (name and sentence) stay inside one short line"
@@ -1138,12 +1191,28 @@ const CODE = mod ? mod.code : "";
     );
     check(row.children.indexOf(descs[0]) < row.children.indexOf(foot), "which comes after the sentence, not beside the name");
 
+    // ...and the facts the row no longer DRAWS are still reachable without a
+    // pointer: a `title=` needs a mouse resting on the row, so the same sentence
+    // also sits on the control line as sr-only text, and every control on that
+    // line — the menu's items included — points at it with `aria-describedby`
+    const controls = walk(foot).filter((n) => n.tag === "button");
+    check(controls.length >= 2, "the row's control line holds the controls, and the facts node is not one of them");
+    check(
+      controls.every((c) => describedBy(c, foot) && describedBy(c, foot).textContent === row.title),
+      "every control on the row announces the row's title= facts, by pointing at the node that carries them"
+    );
+    const facts = walk(foot).filter((n) => /(^| )sr-only( |$)/.test(n.className));
+    check(facts.length === 1 && facts[0].textContent === row.title, "which is ONE sr-only sentence, the row's own title");
+    check(describedBy(controls[0], row) === facts[0], "resolvable inside the row a reader is standing in, not somewhere else on the page");
+    check(foot.children[foot.children.length - 1] === facts[0], "and it is the control line's last child, so no control changes places");
+    check(facts[0].className === "sr-only", "and the class that carries it to a screen reader is the same one that keeps it off the screen");
+
     // a row whose component is on the machine but not driven says which of the two
     // facts it is, and the marks stay beside the name where they belong
     const stopped = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
     await stopped.open();
     const srow = rowNamed(stopped.body(), "clutch-workspace");
-    check(textOf(srow).includes("held on this machine, but not driven"), "a stopped row's sentence says it is still held");
+    check(drawnText(srow).includes("held on this machine, but not driven"), "a stopped row's sentence says it is still held");
     check(stopped.switches()[0].textContent === "Enable", "and its control offers the way back, not the way out");
   }
 

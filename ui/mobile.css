@@ -3,7 +3,9 @@
    no-op by construction — this file does not have to restate a single desktop
    rule, it only shrinks/re-flows what cannot fit a 360-430 CSS-px column.
    Conservative on purpose: every selector here restates one style.css owns;
-   we only touch layout (width/padding/order/display), never colors or type.
+   we only touch layout (width/padding/order/display) and the control/type SCALE
+   itself (the --ctl-*/--fs-* names the plugin tab's rules are written against),
+   never a colour.
 
    M3.5 reports covered here:
    #1 the conn modal grew a horizontal scrollbar (long SSH label + picker)
@@ -187,19 +189,28 @@
   .plug-body {
     -webkit-overflow-scrolling: touch;
   }
+  /* the phone's CONTROL SCALE, said once. The plugin tab's rules in style.css are
+     written against these names — they are the only rules in the sheet that are —
+     so raising the names here replaces the second copy of every size that used to
+     live below: a chip, the filter box, a row button and the reload icon all grow
+     together, which is what a finger needs (36px, not a pointer's 26px). */
+  #settings-pane-plugins {
+    --ctl-h: 40px;
+    --ctl-h-sm: 36px;
+    --tap: 36px;
+    --fs-xs: 12px;
+    --fs-sm: 13px;
+  }
   /* the tab strip's targets are finger-sized here, not pointer-sized */
   .modal-tab { padding: 8px 4px 10px; font-size: 13px; }
-  /* a write button in a row is a finger target too (all three directions) */
-  .plug-install, .plug-remove, .plug-switch, .plug-versions { padding: 7px 12px; font-size: 13px; }
-  /* and so is the "…" that holds the rest of them, and every item in the menu
-     it opens — the row is the whole of the plugin tab on a phone */
-  .plug-more { padding: 7px 12px; font-size: 13px; }
-  .plug-menu > button { padding: 7px 12px; font-size: 13px; }
-  /* the filter row is a finger target too, and the name box grows to the width
-     the phone gives it rather than pushing the chips off the row */
-  .plug-filter { gap: 6px; }
-  .plug-filter-chip { padding: 6px 10px; font-size: 12.5px; }
-  #plug-filter .plug-filter-name { flex: 1 1 100%; min-width: 0; height: 32px; font-size: 13px; }
+  /* a write button in a row is a finger target too: the height comes from the
+     token above, the room around the label from here — all three directions plus
+     the "…" that holds the rest of them, and every item in the menu it opens */
+  .plug-install, .plug-remove, .plug-switch, .plug-versions, .plug-more { padding: 7px 12px; }
+  .plug-menu > button { padding: 7px 12px; font-size: var(--fs-md); }
+  /* the name box takes the width the phone gives it rather than pushing the chips
+     off the row; it is a field, so the taller --ctl-h-sm above already sizes it */
+  #plug-filter .plug-filter-name { flex: 1 1 100%; min-width: 0; }
 
   /* in-page notice: lift it above the ↓ button (bottom 16px + 34px tall), so a
      failure line and the scroll-to-bottom control are never on top of each other */

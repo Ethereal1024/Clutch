@@ -66,6 +66,14 @@
   --border: #26262A;
   --text: #F2F2F4;
   --muted: #8b8b92;
+  /* one step below --muted, and the quietest a body text may go: 4.8:1 on --bg2,
+     which is the surface the plugin rows actually sit on (inside `.modal-box`;
+     on --bg it measures 5.1:1). A row that recedes (a write in flight, a
+     held-but-not-driven component) uses THIS instead of an `opacity`, because
+     opacity composites the row's rules and its accent marks along with its text
+     and takes the text under the 4.5:1 floor — at the 0.55/0.62 those rows used,
+     to about 2.5:1. */
+  --dim: #83838B;
   --accent: #EF4444;
   --green: #6FBF8F; /* diff additions only — the single non-B&W+red exception */
   /* Font stacks are spelled out per platform on purpose. The bundled latin
@@ -99,8 +107,31 @@
     "PingFang SC", "Microsoft YaHei",
     monospace;
   --code-bg: #0b0b0c; /* deeper than --bg, gives scroll/code blocks a visible edge */
-  /* 4px-base spacing scale: 4/8/12/16/20/24 */
+  /* 4px-base spacing scale: 4/8/12/16/20/24 — the six steps the plugin tab is
+     laid out on, and the vocabulary for anything added to this sheet. A box that
+     is a MARK rather than a layout block (`.plug-chip`) pads optically, smaller
+     than the smallest step, and rules older than the scale still carry their own
+     pixels (a stray 6px or 10px is the scale bypassed, not a decision). */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  /* the control scale: ONE height per class of control, so a pane cannot grow a
+     fifth one (the plugin tab alone used 32/26/20/18px). --tap is the floor
+     WCAG 2.2 SC 2.5.8 puts under a target; mobile.css raises these same names
+     instead of re-declaring every rule that uses them. */
+  --ctl-h: 32px;    /* a form control: select, icon button */
+  --ctl-h-sm: 26px; /* a control that lives inside a list row */
+  --tap: 24px;
+  /* the type scale: five steps and no 0.5px steps. The sheet had EIGHT sizes in
+     one modal (11/11.5/12/12.5/13/14/15/16), which is how two rules on the same
+     line stop reading as a pair. */
+  --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 16px;
+  --radius: 0; /* swiss dark: sharp corners are the house style, said once */
+  /* the accent under its other name. A removal, a refusal and a stopped
+     component are the ONE red this palette owns, so calling it --danger where
+     that is what it means keeps a future palette change to a single line. */
+  --danger: var(--accent);
+  /* native widgets (the checkbox, the select popup, the scrollbar gutter)
+     follow the sheet instead of Chromium's light default */
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -423,7 +454,14 @@ main { display: flex; flex: 1; min-height: 0; }
   resize: none; /* height is owned by the auto-grow JS, not the user */
   transition: height .18s ease;
 }
-#task-input:focus { outline: none; border-color: var(--accent); }
+/* The focus ring is :focus-visible's, never :focus's. Every rule below used to
+   say `outline: none` next to its own border colour, which cancelled the global
+   ring for KEYBOARD focus too (`:focus` and `:focus-visible` carry the same
+   weight, and the local rule came later) — so a keyboard user got one 1px border
+   going red and the ring in this sheet was dead code. The border colour stays on
+   `:focus`: the box may light up under the pointer, the RING is what says the
+   keys are here. */
+#task-input:focus { border-color: var(--accent); }
 .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 /* the row is space-between: give the path the slack and ellipsize it — a long
    cwd must never stretch the actions row (on the phone it painted past the
@@ -987,7 +1025,7 @@ mjx-container[display="true"] {
   font-size: 14px;
   margin-bottom: 14px;
 }
-.modal-box input:focus { outline: none; border-color: var(--accent); }
+.modal-box input:focus { border-color: var(--accent); }
 .modal-box p { margin: 10px 0 0; line-height: 1.5; }
 .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
 .modal-box h4 { margin: 20px 0 12px; font-size: 13px; font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); }
@@ -1064,21 +1102,29 @@ mjx-container[display="true"] {
 .modal-pane.hidden { display: none; }
 
 /* plugin tab: the target machine, what it holds, and the market */
-.plug-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.plug-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
 .plug-target { display: flex; flex-direction: column; min-width: 0; }
-.plug-target-label { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-.plug-target-name { font-family: var(--font-display); font-size: 15px; color: var(--text); overflow-wrap: anywhere; }
+/* an eyebrow, the same shape as .modal-box label and .modal-tab: it names a
+   FIELD, and only a label is ever uppercased. The machine's name is DATA and is
+   never set in caps — see .plug-section-title below */
+.plug-target-label { font-size: var(--fs-xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.plug-target-name { font-family: var(--font-display); font-size: var(--fs-lg); color: var(--text); overflow-wrap: anywhere; }
 #plug-reload {
   flex: none;
-  width: 32px;
-  height: 32px;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  /* the glyph is type, so it is sized from the type scale like the name it sits
+     beside — the 14px it carried was a size the scale does not have */
+  font-size: var(--fs-lg);
 }
-#plug-base { margin: 6px 0 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-.plug-note { margin: 4px 0 0; font-size: 12px; color: var(--muted); min-height: 15px; overflow-wrap: anywhere; }
+/* this line's min-height is the same guard the note carries below: the target
+   resolves a beat after the tab opens, and without it the head steps down the
+   moment the URL arrives */
+#plug-base { margin: var(--s2) 0 0; font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
+.plug-note { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
 .plug-note.error { color: var(--accent); }
 /* the plugin tab: which machine, what it holds, the filter row — and then the ONE
    list, which is the only thing that scrolls. Those four are `flex: none` so they
@@ -1090,15 +1136,19 @@ mjx-container[display="true"] {
   overflow: hidden;
 }
 .plug-head, #plug-base, .plug-note, #plug-filter { flex: none; }
-.plug-body { margin-top: 10px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.plug-body { margin-top: var(--s3); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* the filter row: the views of the ONE list, plus a box to narrow it by name. It
    sits OUTSIDE the scrolling list on purpose — which view is on screen must stay
    on screen while the rows under it move. */
-.plug-filter { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.plug-filter-chips { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.plug-filter { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); flex-wrap: wrap; }
+.plug-filter-chips { display: inline-flex; align-items: center; gap: var(--s1); flex-wrap: wrap; }
+/* a chip is a target, so it keeps --tap of height whatever the type scale says:
+   at 2px/11.5px it was a 17px box, i.e. below the floor a hand or a mouse can
+   reliably hit (SC 2.5.8 is 24px) */
 .plug-filter-chip {
-  padding: 2px 8px;
-  font-size: 11.5px;
+  padding: var(--s1) var(--s2);
+  min-height: var(--tap);
+  font-size: var(--fs-sm);
   background: transparent;
   color: var(--muted);
 }
@@ -1125,24 +1175,31 @@ mjx-container[display="true"] {
   flex: 1 1 110px;
   width: auto;
   min-width: 90px;
-  height: 26px;
-  padding: 3px 8px;
+  height: var(--ctl-h-sm);
+  padding: 3px var(--s2);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 0;
+  border-radius: var(--radius);
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
-#plug-filter .plug-filter-name:focus { outline: none; border-color: var(--accent); }
-.plug-section { margin-bottom: 16px; }
+/* the box's focus look is `.modal-box input:focus` a few hundred lines up: the
+   border lights up, and the RING stays :focus-visible's (this rule used to say
+   `outline: none` at a weight that outranked the global ring) */
+.plug-section { margin-bottom: var(--s4); }
+/* the section head is the MACHINE's name — DATA, not a field label — so it is the
+   one heading on this page that must not be set in caps. `.modal-box h4` uppercases
+   every heading it meets, which is right for a label and wrong here: the same
+   screen then read `SSH ubuntu@box` in the head and `SSH UBUNTU@BOX` under it. */
+.plug-section-title { margin: var(--s5) 0 var(--s3); font-size: var(--fs-md); text-transform: none; letter-spacing: 0; }
 /* the counts behind the machine's name: the same line, a quieter voice — they say
    how much is behind the title, and they must not read as part of the title (the
-   section head is uppercase and spaced; a count never is) */
+   section head is the machine; a count never is) */
 .plug-meta {
-  margin-left: 8px;
+  margin-left: var(--s2);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   letter-spacing: 0;
   text-transform: none;
@@ -1154,8 +1211,8 @@ mjx-container[display="true"] {
    `.header-container` with the name, `.description`, then `.footer`; and
    media/extension.css gives `.header-container` a fixed height of 20px with the
    name nowrap + ellipsis), minus the 36px icon. */
-.plug-row { padding: 8px 0; border-top: 1px solid var(--border); }
-.plug-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow: hidden; }
+.plug-row { padding: var(--s2) 0; border-top: 1px solid var(--border); }
+.plug-row-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: nowrap; overflow: hidden; }
 /* the name takes the room the state marks leave and gives up its tail first: it is
    the one thing on the row that must never be the part that gives way */
 .plug-row-head .plug-name {
@@ -1169,8 +1226,8 @@ mjx-container[display="true"] {
    is a row whose neighbours can no longer be compared — the rest of what is known
    about the component is on the row's `title=` and in the Versions disclosure. */
 .plug-row-desc {
-  margin-top: 2px;
-  font-size: 12px;
+  margin-top: var(--s1);
+  font-size: var(--fs-sm);
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1180,44 +1237,39 @@ mjx-container[display="true"] {
    sits in the list item's `.footer` — beside the name they would fight it for
    width, which on a phone is a fight the name loses */
 .plug-row-actions {
-  margin-top: 6px;
+  margin-top: var(--s2);
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--s2);
   position: relative;
 }
-/* a write offered from inside a row: smaller than a modal button, and never the
-   row's own accent at rest — neither installing nor removing is the page's
-   default action */
-.plug-install {
-  padding: 3px 10px;
-  font-size: 12px;
+/* the row's controls are ONE family: same height floor, same type step, same
+   resting grey, and the two writes plus the switch share the same box. They sit
+   beside each other on the row's own line, so a row whose buttons disagree about
+   their height reads as a mistake rather than as a hierarchy. */
+.plug-install,
+.plug-remove,
+.plug-switch,
+.plug-versions {
+  min-height: var(--ctl-h-sm);
+  padding: 3px var(--s2);
+  font-size: var(--fs-sm);
   background: transparent;
   color: var(--muted);
 }
+/* a write offered from inside a row: smaller than a modal button, and never the
+   row's own accent at rest — neither installing nor removing is the page's
+   default action. Box and resting weight come from the row-control family above. */
 .plug-install:hover:not(:disabled) { color: var(--text); }
 /* the reverse write: the same size and the same resting weight as the install
    control, but its hover carries the accent — a removal DELETES, and the row
    must not read as a second install */
-.plug-remove {
-  padding: 3px 10px;
-  font-size: 12px;
-  background: transparent;
-  color: var(--muted);
-}
 .plug-remove:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 /* the switch: the third write, and the only one that changes no bytes. It sits
-   first on a held row, keeps the same resting weight as its neighbours (it is
-   not the loud one), and reads as stopped when the component it names is being
+   first on a held row, and reads as stopped when the component it names is being
    held but not driven */
-.plug-switch {
-  padding: 3px 10px;
-  font-size: 12px;
-  background: transparent;
-  color: var(--muted);
-}
 .plug-switch:hover:not(:disabled) { color: var(--text); }
 /* a stopped switch keeps its accent under the pointer for the same reason the
    active chip keeps its fill: the hover rule above is the more specific one */
@@ -1227,20 +1279,15 @@ mjx-container[display="true"] {
    and is never the loud one. `open` is the same control in its second state — the
    button that opened the list is the button that closes it — so it stays lit
    while the list under the row is showing. */
-.plug-versions {
-  padding: 3px 10px;
-  font-size: 12px;
-  background: transparent;
-  color: var(--muted);
-}
 .plug-versions:hover:not(:disabled), .plug-versions.open { color: var(--text); }
 /* the row's "…" and the menu behind it: the one write the row leads with stays
    beside this, and everything else it can do is drawn once and shown by `open`.
    Nothing is built on a click — an item that exists only while a menu is open
    cannot be titled, disabled, or asked about at all. */
 .plug-more {
-  padding: 3px 8px;
-  font-size: 12px;
+  padding: 3px var(--s2);
+  min-height: var(--ctl-h-sm);
+  font-size: var(--fs-sm);
   line-height: 1;
   background: transparent;
   color: var(--muted);
@@ -1250,40 +1297,57 @@ mjx-container[display="true"] {
 /* a menu that cannot fit under its row opens UPWARD instead: the list has a bottom
    edge of its own now, and a menu drawn past it is invisible to the hand that
    opened it (the direction is measured in js/components-panel.js) */
-.plug-menu.open.drop-up { top: auto; bottom: calc(100% + 4px); }
+.plug-menu.open.drop-up { top: auto; bottom: calc(100% + var(--s1)); animation-name: fadeSlideUp; }
 .plug-menu.open {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + var(--s1));
   right: 0;
   z-index: 6;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 4px;
-  padding: 6px;
+  gap: var(--s1);
+  padding: var(--s2);
   background: var(--bg2);
   border: 1px solid var(--border);
+  /* the popup is a menu, so it arrives the way the picker's own popup arrives
+     (`.cselect.open .cselect-pop`): a display change cannot be transitioned, and
+     a panel that simply appears reads as a glitch next to one that slides in.
+     Opening UPWARD plays the same motion mirrored: `fadeSlideUp` is the same
+     keyframe with the offset on the other side of zero. */
+  animation: cselect-in .15s ease-out;
 }
 .plug-menu > button { text-align: left; white-space: nowrap; }
 /* the version list under one held row: it belongs to the row ABOVE it, so it is
    set in from that row behind a hairline down its left — a nested list, never a
    second row of the same rank. Without this the versions it names read as
    components of their own. */
-.plug-versions-box { margin: 6px 0 2px 10px; padding-left: 10px; border-left: 1px solid var(--border); }
-.plug-caution { margin: 8px 0 0; font-size: 11.5px; color: var(--muted); }
+.plug-versions-box { margin: var(--s2) 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
+.plug-caution { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* the name is the row's loudest mark, and it has to read that way against the
    sentence under it and the two grey lines below both: VS Code's `.name` is the
-   one semibold thing in an extension row (media/extension.css) */
-.plug-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+   one semibold thing in an extension row (media/extension.css). It carries no
+   `overflow-wrap` of its own: every name on this page is drawn inside
+   `.plug-row-head`, which is nowrap + hidden + ellipsis, so a wrapping rule here
+   was a declaration the row above it always won. */
+.plug-name { font-family: var(--font-mono); font-size: var(--fs-md); font-weight: 600; color: var(--text); }
 .plug-chip {
+  /* a mark, not a target: it keeps its own box in a nowrap head — a chip that
+     shrinks or wraps stops being a mark and becomes a layout surprise */
+  flex: none;
+  white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   padding: 1px 6px;
   border: 1px solid var(--border);
   color: var(--muted);
 }
-.plug-chip.accent, .plug-chip.warn { color: var(--accent); border-color: var(--accent); }
-.plug-line { margin-top: 3px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+/* the loud marks beside a name: `.warn` is the state a user has to notice (held,
+   but not driven), `.accent` the same red for any other mark that must read loud
+   without being a warning. One red, named for what it means here — a future
+   palette change to `--danger` then covers both without touching a row rule. */
+.plug-chip.accent, .plug-chip.warn { color: var(--danger); border-color: var(--danger); }
+.plug-line { margin-top: var(--s1); font-size: var(--fs-sm); color: var(--muted); overflow-wrap: anywhere; }
 /* the row's OWN state line: what is happening to this one component right now —
    a write in flight, or the host's verdict on the last one. Every other line in
    a row is metadata about the component; this one is the answer to "what did I
@@ -1291,19 +1355,27 @@ mjx-container[display="true"] {
    the accent that every other failure on this page carries. */
 .plug-line.plug-state { color: var(--text); }
 .plug-line.plug-state.error { color: var(--accent); }
-/* a write in flight: the row it is about recedes — its controls are all dead
+/* a write in flight: the row it is about steps back — its controls are all dead
    behind the one-write-at-a-time rule — while the stage line inside it keeps its
-   full weight, because that sentence is the only thing on the row worth reading */
-.plug-row.busy .plug-name,
-.plug-row.busy .plug-chip,
-.plug-row.busy .plug-line:not(.plug-state) { opacity: 0.55; }
-/* a component the machine holds but is not driving: the whole row is grey, and
-   the controls that still work on it (the switch that drives it again, the
-   removal) come back to full weight under the pointer */
-.plug-row.stopped { opacity: 0.62; }
-.plug-row.stopped:hover { opacity: 1; }
-.plug-empty { margin: 0; font-size: 12.5px; color: var(--muted); }
-.plug-source-error { margin: 5px 0 0; font-size: 12px; color: var(--accent); overflow-wrap: anywhere; }
+   full weight, because that sentence is the only thing on the row worth reading.
+   Stepping back is a COLOUR, not an `opacity`: at 0.55 the composite put the
+   row's own name at ~7:1 but its grey lines and its accent chip at 2.5:1 on
+   --bg, and opacity dims the rules and the chip with the text. */
+.plug-row.busy .plug-name { color: var(--muted); }
+.plug-row.busy .plug-chip { color: var(--dim); border-color: var(--border); }
+.plug-row.busy .plug-line:not(.plug-state) { color: var(--dim); }
+/* a component the machine holds but is not driving: the whole row goes quiet the
+   same way (one voice down, name included), and the controls that still work on
+   it — the switch that drives it again, the removal — come back to full weight
+   under the pointer */
+.plug-row.stopped .plug-name { color: var(--muted); }
+.plug-row.stopped .plug-row-desc,
+.plug-row.stopped .plug-line { color: var(--dim); }
+.plug-row.stopped .plug-chip { color: var(--dim); border-color: var(--border); }
+.plug-row.stopped:hover .plug-name,
+.plug-row.stopped:hover .plug-row-desc { color: var(--text); }
+.plug-empty { margin: 0; font-size: var(--fs-sm); color: var(--muted); }
+.plug-source-error { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--danger); overflow-wrap: anywhere; }
 
 .fs-conn { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 /* when the picker body is collapsed (SSH connect/failure), the conn bar is the
@@ -1323,7 +1395,7 @@ mjx-container[display="true"] {
   font-family: var(--font-mono);
   font-size: 13px;
 }
-.fs-conn-row select:focus { outline: none; border-color: var(--accent); }
+.fs-conn-row select:focus { border-color: var(--accent); }
 .fs-conn-row select:disabled { opacity: 0.4; cursor: default; }
 .fs-conn-row button {
   white-space: nowrap;
@@ -1550,3 +1622,22 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 }
 
 .hidden { display: none !important; }
+
+/* Text that exists for assistive tech and is never drawn. The plugin rows keep
+   their facts on `title=` (U-10) AND in a node carrying this class: a tooltip is
+   reached by a pointer and by nothing else, so a keyboard or touch user could
+   not reach the digest, the source or the offered version at all. Clipped rather
+   than `display: none` so the accessibility tree keeps it, and referenced by the
+   row's own controls through `aria-describedby` (ui/js/components-panel.js). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

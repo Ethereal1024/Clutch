@@ -80,6 +80,29 @@ function plugChip(text, cls) {
   return el;
 }
 
+// ONE row's facts, as a node assistive tech can read and the eye cannot: the same
+// sentence the row's `title=` carries. A `title` needs a pointer resting on the
+// row and is exposed to nobody on a keyboard or a touch screen, and the facts a row
+// no longer PRINTS (U-10) would then be readable by mouse alone. The id is what
+// `aria-describedby` points at, so every row that has facts gets its own.
+let plugIdSeq = 0; // one id per node an aria attribute has to be able to point at
+function plugFactsNode(text) {
+  const el = document.createElement("span");
+  el.className = "sr-only";
+  el.id = "plug-row-facts-" + ++plugIdSeq;
+  el.textContent = text;
+  return el;
+}
+
+// Every control under one action carries the row's facts — the menu's items are
+// built before their menu is, so they hang off it and are reached from here. Each
+// of them acts on this one component, and the description says which.
+function plugDescribeTree(el, id) {
+  if (!el || typeof el.setAttribute !== "function") return;
+  el.setAttribute("aria-describedby", id);
+  for (const child of el.children || []) plugDescribeTree(child, id);
+}
+
 // ONE row, in the shape VS Code gives one extension (extensionsList.ts:70-90,
 // renderTemplate): a header line — the name, and whatever small state marks belong
 // beside it — then ONE line of description, then the row's controls on their own
@@ -108,10 +131,17 @@ function plugChip(text, cls) {
 // itself (`state.row`), which is how "this machine holds it but is not driving
 // it" is said without a second block of text (VS Code: `.disabled` on the row,
 // extensionsList.ts:185-191).
-function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra = null, state = null, title = "" } = {}) {
+function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra = null, state = null, title = "", role = "" } = {}) {
   const row = document.createElement("div");
   row.className = "plug-row" + (state && state.row ? " " + state.row : "");
+  // a component row is an ITEM of the list (`plugSection` wraps them in the list
+  // itself); a version row is not, so its caller passes nothing and it stays a
+  // plain box — a `listitem` outside a list is a lie about the shape of the page
+  if (role) row.setAttribute("role", role);
   if (title) row.title = title;
+  // a write in flight is a STATE of the row, and the stage line under the name is
+  // its sentence: `aria-busy` is how assistive tech hears "this one is moving"
+  if (state && state.cls === "busy") row.setAttribute("aria-busy", "true");
   const head = document.createElement("div");
   head.className = "plug-row-head";
   const nameEl = document.createElement("span");
@@ -148,6 +178,18 @@ function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra 
     const foot = document.createElement("div");
     foot.className = "plug-row-actions";
     for (const a of actions) foot.appendChild(a);
+    // `title=` is drawn on hover and on nothing else: on a keyboard or a touch
+    // screen a `title` is unreachable, so the facts a row no longer PRINTS (U-10)
+    // would be readable by pointer alone. The same sentence goes into an sr-only
+    // node on the row's own control line, and every control in that line — the
+    // menu's items included — points at it with `aria-describedby`: whichever one
+    // the user lands on, the facts arrive with it. Nothing gains a tab stop, and
+    // nothing gains a drawn word.
+    const facts = title ? plugFactsNode(title) : null;
+    if (facts) {
+      for (const a of actions) plugDescribeTree(a, facts.id);
+      foot.appendChild(facts);
+    }
     row.appendChild(foot);
   }
   if (extra) row.appendChild(extra);
@@ -158,6 +200,11 @@ function plugSection(title, meta, rows, empty) {
   const sec = document.createElement("div");
   sec.className = "plug-section";
   const head = document.createElement("h4");
+  // the heading is the MACHINE's name — DATA, never a field label — so it is the
+  // one heading in this modal that must not be set in caps (.modal-box h4 does
+  // that to every h4 it meets, and the same screen then read `SSH ubuntu@box` up
+  // here and `SSH UBUNTU@BOX` in the row beside it)
+  head.className = "plug-section-title";
   head.textContent = title;
   if (meta) {
     // the title is the MACHINE; the counts are what is behind it
@@ -168,7 +215,15 @@ function plugSection(title, meta, rows, empty) {
   }
   sec.appendChild(head);
   if (rows.length) {
-    for (const r of rows) sec.appendChild(r);
+    // the rows ARE a list, and saying so gives them a count and an item boundary
+    // ("list, 12 items") instead of twelve anonymous boxes. The list is the rows
+    // only: the caution and the source errors below are the SECTION's, not items
+    // of it.
+    const list = document.createElement("div");
+    list.className = "plug-items";
+    list.setAttribute("role", "list");
+    for (const r of rows) list.appendChild(r);
+    sec.appendChild(list);
   } else {
     const el = document.createElement("p");
     el.className = "plug-empty";
@@ -255,12 +310,18 @@ function plugFilterRow() {
   if (plugFilterChips) return plugFilterChips;
   const box = document.createElement("div");
   box.className = "plug-filter-chips";
+  // the chips are the five views of ONE list, so they are announced as a group —
+  // and each chip is a toggle, whose state is otherwise carried by `.active` alone
+  // (a class nobody using assistive tech can hear)
+  box.setAttribute("role", "group");
+  box.setAttribute("aria-label", "which components to show");
   plugFilterChips = [];
   for (const [id, label] of PLUG_FILTERS) {
     const btn = document.createElement("button");
     btn.className = "plug-filter-chip";
     btn.type = "button";
     btn.textContent = label;
+    btn.setAttribute("aria-pressed", String(id === plugState.filter));
     btn.title = `show only ${label.toLowerCase()} of what this machine holds and this client knows`;
     // the count sits beside the label, in the same voice as the title's counts:
     // "Updates 2" is a reason to click, "Updates" alone is not
@@ -280,6 +341,9 @@ function plugFilterRow() {
   input.value = plugState.query;
   input.placeholder = "filter by name";
   input.title = "filter by name";
+  // a placeholder is not a name: this box sits in a row of chips with no label of
+  // its own, so it says what it is out loud
+  input.setAttribute("aria-label", "filter the list by name");
   input.addEventListener("input", () => {
     plugState.query = input.value || "";
     renderPlugins();
@@ -292,7 +356,11 @@ function plugFilterRow() {
 function plugDrawFilter() {
   const items = plugModel();
   for (const [id, btn, count] of plugFilterRow()) {
-    btn.classList.toggle("active", id === plugState.filter);
+    const on = id === plugState.filter;
+    btn.classList.toggle("active", on);
+    // the filled mark is the view that is ON; `aria-pressed` says the same thing to
+    // a screen reader, which cannot see a background colour
+    btn.setAttribute("aria-pressed", String(on));
     const n = items.filter((item) => plugItemMatches(item, id)).length;
     // a zero is not a number worth reading on a chip: the empty message under it
     // already says why nothing is there
@@ -432,18 +500,27 @@ function plugItemMenuItems(item, lead) {
 function plugMenu(items) {
   const box = document.createElement("span");
   box.className = "plug-menu";
+  // the "…" names this box in `aria-controls`, so it needs an id of its own
+  box.id = "plug-menu-" + ++plugIdSeq;
   for (const item of items) box.appendChild(item);
   return box;
 }
 
 // The "…" itself: never a write, so it is live whenever the row is, and its title
 // says the two things its label cannot — which component, and on which machine.
+// The label is a GLYPH, which reads as "…" and nothing else, so the button carries
+// the name it means; and because what it opens is drawn once and shown by a class,
+// its expanded state is said out loud rather than only drawn.
 function plugMoreButton(name, menu) {
   const btn = document.createElement("button");
   btn.className = "plug-more";
   btn.type = "button";
   btn.textContent = "…";
   btn.title = `everything else ${name} can do on ${plugTargetName(plugState.target)}`;
+  btn.setAttribute("aria-label", `more actions for ${name} on ${plugTargetName(plugState.target)}`);
+  btn.setAttribute("aria-haspopup", "true");
+  btn.setAttribute("aria-controls", menu.id);
+  btn.setAttribute("aria-expanded", String(menu.classList.contains("open")));
   btn.addEventListener("click", (ev) => {
     // the document handler below closes every menu on any click, this one
     // included: the click on the "…" must not reach it (js/settings.js does the
@@ -457,6 +534,7 @@ function plugMoreButton(name, menu) {
     // to fit it), and a menu drawn past that edge is one the hand cannot reach.
     menu.classList.toggle("drop-up", open && !plugMenuFitsBelow(btn, menu));
     menu.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", String(open));
   });
   return btn;
 }
@@ -487,12 +565,25 @@ function plugCloseMenus() {
   for (const el of plugBodyEl.querySelectorAll(".plug-menu.open")) {
     el.classList.remove("open");
     el.classList.remove("drop-up");
+    // the class IS the state, so the state that is SAID out loud is cleared with
+    // it: a menu some other click closed must not still answer `aria-expanded`
+    const opener = el.previousElementSibling;
+    if (opener && opener.setAttribute) opener.setAttribute("aria-expanded", "false");
   }
 }
 document.addEventListener("click", () => plugCloseMenus());
+// Escape is the keyboard's "click anywhere else" — and it has to be the DOCUMENT's,
+// because the menu hangs off the control beside its opener, not inside the control:
+// Escape pressed while the focus is on the "…" and Escape pressed three items into
+// the menu it opened have to do the same thing.
+document.addEventListener("keydown", (ev) => {
+  if (ev && ev.key === "Escape") plugCloseMenus();
+});
 
 function plugItemRow(item) {
   return plugRow(item.name, {
+    // an item of the one list (plugSection puts the rows in the list itself)
+    role: "listitem",
     chips: plugItemChips(item),
     desc: plugItemDesc(item),
     actions: plugItemActions(item),
@@ -589,6 +680,19 @@ function plugBusyWord(busy) {
   return "being installed";
 }
 
+// What the control that is dead behind that write says it is doing, in one word.
+// The "…" it used to carry said "something is happening" to the eye and, to anyone
+// reading the page out loud, only an ellipsis: a button relabelled "…" is a button
+// with no name. Same four verbs, same rule as above — an install carries the
+// default verb, and the two directions of the switch are never spelled as each
+// other — and `fallback` is what a write of that kind is called from that control.
+function plugBusyLabel(busy, fallback) {
+  if (busy.verb === "remove") return "Removing…";
+  if (busy.verb === "disable") return "Stopping…";
+  if (busy.verb === "enable") return "Starting…";
+  return fallback;
+}
+
 // The switch: stop the machine DRIVING one component it holds, or start again.
 // It lives on the held row because that is the row whose fact it changes, and it
 // is offered with the least ceremony of the three writes — it deletes nothing and
@@ -601,7 +705,7 @@ function plugSwitchButton(held) {
   const btn = document.createElement("button");
   btn.className = "plug-switch" + (stopped ? " stopped" : "");
   btn.type = "button";
-  btn.textContent = busy ? "…" : stopped ? "Enable" : "Disable";
+  btn.textContent = busy ? plugBusyLabel(plugState.busy, stopped ? "Starting…" : "Stopping…") : stopped ? "Enable" : "Disable";
   if (!plugState.target || !plugState.target.base) {
     btn.disabled = true;
     btn.title = "no supervisor URL for the target machine yet";
@@ -633,7 +737,7 @@ function plugRemoveButton(held) {
   const btn = document.createElement("button");
   btn.className = "plug-remove";
   btn.type = "button";
-  btn.textContent = busy ? "…" : "Remove";
+  btn.textContent = busy ? plugBusyLabel(plugState.busy, "Removing…") : "Remove";
   if (!plugState.target || !plugState.target.base) {
     btn.disabled = true;
     btn.title = "no supervisor URL for the target machine yet";
@@ -659,7 +763,11 @@ function plugVersionsButton(held) {
   const btn = document.createElement("button");
   btn.className = "plug-versions" + (open ? " open" : "");
   btn.type = "button";
-  btn.textContent = reading ? "…" : open ? "Hide versions" : "Versions";
+  btn.textContent = reading ? "Reading…" : open ? "Hide versions" : "Versions";
+  // a disclosure, drawn once and shown by a class: what it opens is the version
+  // list under the row, and its own label flips with it — `aria-expanded` is the
+  // same fact for a reader who cannot see the list appear
+  btn.setAttribute("aria-expanded", String(open));
   if (!plugState.target || !plugState.target.base) {
     btn.disabled = true;
     btn.title = "no supervisor URL for the target machine yet";
@@ -738,7 +846,7 @@ function plugRemoveOneButton(held, record) {
   const btn = document.createElement("button");
   btn.className = "plug-remove plug-remove-one";
   btn.type = "button";
-  btn.textContent = busy ? "…" : "Remove";
+  btn.textContent = busy ? plugBusyLabel(plugState.busy, "Removing…") : "Remove";
   if (!plugState.target || !plugState.target.base) {
     btn.disabled = true;
     btn.title = "no supervisor URL for the target machine yet";
@@ -770,7 +878,7 @@ function plugInstallButton(entry) {
   const btn = document.createElement("button");
   btn.className = "plug-install";
   btn.type = "button";
-  btn.textContent = busy ? "…" : same ? "Reinstall" : newer ? "Update" : "Install";
+  btn.textContent = busy ? plugBusyLabel(plugState.busy, "Installing…") : same ? "Reinstall" : newer ? "Update" : "Install";
   if (!plugState.target) {
     btn.disabled = true;
     // the target is unresolvable (the read is still running, or it failed):

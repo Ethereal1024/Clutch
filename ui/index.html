@@ -52,19 +52,24 @@
     </div>
   </div>
 
-  <div id="settings-modal" class="modal hidden">
+  <!-- the settings box is a dialog: `aria-modal` says the page behind it is out of
+       reach while it is up, and its name is its own heading. The other boxes in this
+       file are the same shape and do not say so yet (a pass of their own). -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-box">
-      <h3>Settings</h3>
+      <h3 id="settings-title">Settings</h3>
       <!-- two surfaces in one modal: the model this client runs and the model's
            VOICE (which components the target machine holds / could be given).
            The tab strip is what keeps the plugin page out of the API form's
            way; ui/js/settings.js owns the switch, ui/js/components-panel.js
            fills the second pane. -->
       <div class="modal-tabs" role="tablist">
-        <button id="settings-tab-llm" class="modal-tab active" type="button" role="tab">Model</button>
-        <button id="settings-tab-plugins" class="modal-tab" type="button" role="tab">Plugins</button>
+        <button id="settings-tab-llm" class="modal-tab active" type="button" role="tab"
+          aria-selected="true" aria-controls="settings-pane-llm">Model</button>
+        <button id="settings-tab-plugins" class="modal-tab" type="button" role="tab"
+          aria-selected="false" aria-controls="settings-pane-plugins">Plugins</button>
       </div>
-      <div id="settings-pane-llm" class="modal-pane">
+      <div id="settings-pane-llm" class="modal-pane" role="tabpanel" aria-labelledby="settings-tab-llm">
       <label for="llm-profile-select">Saved profiles</label>
       <div class="fs-conn-row" style="margin-bottom: 16px">
         <div id="llm-profile-select" class="cselect" title="pick a saved profile to apply it"></div>
@@ -73,16 +78,21 @@
         <button id="llm-profile-del" title="delete the selected profile">Delete</button>
       </div>
       </div>
-      <div id="settings-pane-plugins" class="modal-pane hidden">
+      <div id="settings-pane-plugins" class="modal-pane hidden" role="tabpanel" aria-labelledby="settings-tab-plugins">
         <div class="plug-head">
           <div class="plug-target">
             <span class="plug-target-label">target machine</span>
             <span id="plug-target" class="plug-target-name">…</span>
           </div>
-          <button id="plug-reload" class="ghost" type="button" title="re-read the target machine and the market">↻</button>
+          <!-- the label is a glyph (↻), which reads as nothing: the button carries
+               the words its title spells out -->
+          <button id="plug-reload" class="ghost" type="button" aria-label="re-read the target machine and the market" title="re-read the target machine and the market">↻</button>
         </div>
         <p id="plug-base" class="plug-base"></p>
-        <p id="plug-note" class="plug-note"></p>
+        <!-- the page's one status line: reads in flight, and the verdict on a write
+             whose row is gone. It is announced as it changes (`role="status"`), the
+             way #notice is. -->
+        <p id="plug-note" class="plug-note" role="status" aria-live="polite"></p>
         <div id="plug-filter" class="plug-filter"></div>
         <div id="plug-body" class="plug-body scroll"></div>
       </div>
