@@ -416,6 +416,12 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 任何"从 Release 下载"的用法都必须有**本地目录 source** 的对照（`isRemote()` `:122` 为假时
 直接读文件），发布物只能用 `api.github.com` 的资产接口验证。
 
+已落到接缝上（本轮）：**镜像**在来源字符串变成 URL 的那一处（`components.js` 的 `sources()`）
+应用一次，`ui/net-fetch.js` 是唯一的门（`CLUTCH_SOURCE_MIRROR` → `settings.json` 的
+`source_mirror`），用户清单与调用方清单原样照用，摘要不动；读远程用 Electron 的 `net.fetch`
+（系统代理据此生效，`signal` 原样透传），宿主端点仍用全局 `fetch`（那是隧道两端的 127.0.0.1）。
+Android 上同一接缝只在取数时改写 URL，缓存身份与错误文案仍是原始 indexUrl。
+
 ## 五、风险
 
 | 风险 | 说明 | 缓解 |
