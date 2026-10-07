@@ -1,8 +1,9 @@
 # Clutch Android（M1–M3：引擎打通 + SSH 供给线 + CI 打包/前台服务/窄屏）
 
 WebView 渲染层（`ui/` 原样）+ nodejs-mobile 宿主（`ui/` 纯 Node 子集原样）+
-一个最小 Kotlin 壳。方案与特化点清单见 `docs/android/02-移植方案.md`
-（§3 架构、§6 N1–N7、§7 工程结构、§8 里程碑）。
+一个最小 Kotlin 壳。手机没有 pip/bash、没有 Chromium 网络栈，所以它与桌面端共用
+宿主 JS，另换三样东西：引擎（nodejs-mobile 的 `libnode.so`）、后端供给（CI 预构建的
+pylibs tar）、以及一层只负责起引擎与端 WebView 的 Kotlin 壳。
 
 ```
 android/host/                  宿主 JS（仓库源码，随包分发）
@@ -130,7 +131,7 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
 **待验**（需设备/真远端）：手机对全新 x86_64 与 aarch64 远端各一键连接成功，远端
 `~/.clutch-server/VERSION` == tar 哈希。
 
-## M1 验收对照（方案 §8）
+## M1 验收对照
 
 | 验收项 | 状态 |
 |---|---|
@@ -164,11 +165,11 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
    处于 foreground；下拉通知栏有静默常驻通知。
 6. N7（M3）：窄屏下顶栏两行不溢出、工作区面板在流区下方可滚动、弹窗不出屏。
 
-## 与方案 §7 的偏差（均已定案）
+## 与初版方案的偏差（均已定案）
 
 - `app/libs/nodejs-mobile.aar` → 改为按 ABI 的 `libnode.so` + 自有 JNI 壳
   （`cpp/native-lib.cpp`）。少一层 aar 打包，钉版与升级走同一个校验脚本；
-  风险表 §9 的兜底不变（桥以 loopback HTTP 为界，最坏换 sshj 只动一个模块）。
+  兜底不变（桥以 loopback HTTP 为界，最坏换 sshj 只动一个模块）。
 - 前台服务 `TunnelService`（N5 完整形态）原计划归 M3，已随 M3 落地（见上）。
 - npm 的 allowScripts 策略会跳过 `ssh2` 的 `install.js`（可选原生
   cpu-features）——Android 上本就要纯 JS 路径，这是期望行为，不是缺陷。

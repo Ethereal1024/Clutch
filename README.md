@@ -214,54 +214,26 @@ Electron 的 `net.fetch`，机器的系统代理设置因此生效；手机端�
 指向代码、`tools` 列出它发布的工具，它就会出现在工具表里。
 
 工具在界面里的样子也是声明的一部分：每个工具事件都带上它组件声明的 `ui` 块，前端里
-没有任何工具名。`ui` 的每个键只负责那一个部件：`chip`（行首那个工具名，默认打；
-summary 已经把这次调用说清楚的 read/grep 把它关掉）、`summary`（那行的一行标签，
-`{参数名}` / `{lines}` / `{name}` 由调用自己填，默认空 —— 行首的名字就是它）、
-`preview`（调用流式进行时那行实时显示什么：原始参数 JSON / 参数自带的文本 / 解包后
-的命令）、`header`（结果自成一块时那块的标题，空则退回 summary，再退回 `result`）、
-`form`（结果是一整块还是折叠成一行）、`body`（结果正文是文本 / 代码面板 / diff /
-不显示）、`highlight` / `chrome`（正文上的点缀：按 `path` 参数高亮、标题变成强调
-色块）、`group`（同一组的调用密集合并成一块，所以
-一串 read/grep 扫成一列单行，而 write 不会被打包进去）、`collapse`（折叠块怎么
-收），宿主再补上只有它才知道的 `mutates` / `undo`。协议的定义与默认值见
-`agent/tools/catalog.py` 顶部的说明（完整规范见
-[COMPONENTS.md](COMPONENTS.md)），消费方是 UI 渲染层（`ui/app.js` 与 `ui/js/*`，
-加载顺序见 `ui/index.html`；绘制这块表的是 `ui/js/tool-render.js`）。
+没有任何工具名——所以后装的组件不用改界面就能被渲染。每个键只管一个部件，比如 `chip`
+（行首的工具名，`summary` 已经把这次调用说清时关掉）、`preview`（流式那行显示什么）、
+`body`（结果正文是文本 / 代码面板 / diff / 不显示）、`group`（同组调用合并成一个密集块：
+一串 read/grep 扫成一列单行，write 不会被打包进去）；**完整表与默认值在
+[COMPONENTS.md](COMPONENTS.md) 第六节**，这里不复述。消费方是 UI 渲染层（`ui/app.js`
+与 `ui/js/*`，加载顺序见 `ui/index.html`；绘制这块表的是 `ui/js/tool-render.js`）。
 
 ## 测试
 
-无框架，逐个模块跑；断言共享 `tests/testsupport.py`。下面就是全部套件（每个文件头部写明
-它钉住的约定）：
+无框架，逐个模块跑：`uv run python -m tests.<name>`（断言共享 `tests/testsupport.py`）
+与 `node tests/<name>.test.js`（断言共享 `tests/harness.js`）。**清单就是目录本身**——
+`tests/*.py` 与 `tests/*test*.js`，每个文件头部都写明它钉住的约定，这里不再抄第二份
+（抄下来的那份只会落后于目录）。除下面两个例外，全部离线：不联网、不要密钥、不花额度。
 
 ```bash
-# 离线：不联网、不要密钥、不花 API 额度
-uv run python -m tests.selfcheck            # 核心逻辑自检
-uv run python -m tests.loop_test            # 循环路径（假模型驱动）
-uv run python -m tests.server_test          # HTTP + SSE 端到端
-uv run python -m tests.lazy_check           # 历史分页与惰性加载
-uv run python -m tests.supervisor_test      # 会话生命周期与跨进程锁
-uv run python -m tests.transport_test       # 传输层与远程工作区往返
-uv run python -m tests.remote_path_test     # 远端路径不得落到本机文件系统（macOS 回归）
-uv run python -m tests.project_lock_test    # 只读项目锁：第二个进程抢锁会被拒 / 被杀死后能释放
-uv run python -m tests.llm_client_test      # 两种线协议的流式错误与重试
-uv run python -m tests.llm_keepalive_test   # 内核 keepalive：选项被本机接受，直连与走代理的连接都真落到 socket 上
-uv run python -m tests.local_shell_test     # 本机 shell 决策（POSIX sh / Git Bash / cmd）
-uv run python -m tests.inst_test            # 工具语句：参数 -> 命令 -> 信封
-uv run python -m tests.rendezvous_test      # 模块 daemon/CLI 寻址与权限围栏（需 checkout）
-uv run python -m tests.tools_inst_test      # 每个工具的命令契约（--live 走真实模块）
-uv run python -m tests.catalog_test         # 组件声明：UI 协议 + 第三方注册（R4）
-uv run python -m tests.hostconfig_test      # 宿主自己的文档（host.json）：access/gates/ui/backends 表
-uv run python -m tests.components_api_test  # 组件安装层：客户端上传 + 宿主落地
-uv run python -m tests.ui_fonts_check       # 字体/图标跨平台一致（含 mermaid 标签字体）
-uv run python -m eval.harness               # 三个评测场景
+uv run python -m eval.harness   # 三个评测场景；要真 LLM，离线必然红
 
 # 需要一台真远端（见文件头：CLUTCH_E2E_HOST / _PORT / _USER / _PASS）
 CLUTCH_E2E_HOST=10.x.x.x CLUTCH_E2E_USER=me CLUTCH_E2E_PASS=… node tests/remote-bootstrap-e2e.js
 ```
-
-界面侧（事件流渲染 / 组件声明的 `ui` 协议 / SSH 隧道 / LLM 反代）同样无框架，
-`node tests/<name>.test.js`，断言共享 `tests/harness.js`；清单就是 `tests/*test*.js`
-（`remote-bootstrap-e2e.js` 需要真远端，其余离线）。
 
 模块自己的套件在模块目录里跑：`cd clutch-skills && python3 -m pytest`（memory /
 websearch / workspace 同理）。

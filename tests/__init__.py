@@ -3,6 +3,6 @@
   Python   `uv run python -m tests.<name>`   assertions via tests/testsupport.py
   JS       `node tests/<name>.test.js`       assertions via tests/harness.js
 
-The canonical list of suites lives in README.md's 测试 section — deliberately not
-repeated here, so it cannot drift from what actually runs.
+The list of suites is this directory itself (`tests/*.py`, `tests/*test*.js`); it is
+deliberately not repeated in README.md, so a second copy cannot drift from what runs.
 """

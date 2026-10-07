@@ -109,7 +109,10 @@ const getViewName = (viewTitle: string, server) =>
 一个入口（搜索框）、一族过滤器（视图）、一行一个对象、一行一个主按钮 + 一个菜单、
 一份详情在别处。我们的四块并列，恰好每一对都在"两个"上出错。
 
-## 二、我们今天的形状
+## 二、改造前的形状（0.1.32 之前）
+
+四块并列已在 §七 U0 合成一张清单。本节保留原样，因为下面那张代价表就是 U-1–U-3 的依据；
+里面的行号是**当时的**形状，`plugHeldSection` / `plugMarketSection` 今天已不存在。
 
 `ui/index.html:76-87` 定了容器，`ui/js/components-panel.js` 填它：
 
@@ -159,7 +162,7 @@ plug-body
 1. **一张清单，一个组件一行**（U-1 由"可以"升级为"唯一正确"）。
 2. **机器身份只住页头**（U-2）：行里每一行都属于页头点名的同一台机器，行内不需要
    "哪台机器"这一列，也不需要默认挂远端角标。
-3. 现有测试"定位到某一行"的方式（`tests/components-panel.test.js:97-106`）只认
+3. 现有测试"定位到某一行"的方式（`tests/components-panel.test.js`）只认
    `plug-row` / `plug-name`，与机器无关——U0 合并后语义反而更直白。
 
 ### VS Code 对照：结论一样，理由不同（一个必须说清的差别）
@@ -193,7 +196,7 @@ VS Code 唯一会把同一扩展放到两个标题下的地方，是**多服务�
 
 ### 唯一要留的余地
 
-`runs_on: "other"` 是**预留**（`COMPONENTS.md:83`；`rendezvous.py:19-23`）：将来若出现
+`runs_on: "other"` 是**预留**（`COMPONENTS.md` 声明示例里 `"runs_on": "self"` 那行的注释；`rendezvous.py:19-23`）：将来若出现
 "服务另一台机器文件系统"或"被另一个宿主反向调用的客户端组件"，设计意图是**往表里加一条
 entry，而不是给工具加一个分支**——每台机器仍渲染自己的那张表，单机视角不变。真到
 "同一名字在目标机与客户端各有一份"的那天，答案仍旧是 VS Code 那一条：**一行 + 一枚角标**，
@@ -244,69 +247,22 @@ flowchart TD
   U5 --> U6["U6 打磨<br/>徽章 / 计数 / 折叠 / 空态（P2）"]
 ```
 
-### U0 一张清单（P0）
+每步做什么（一行一件；施工细节与偏离全在 §七）：
 
-* 新增 `plugModel()`：把 `plugState.held` 与 `plugState.market.entries` 按 name 合成
-  `[{name, interface, version, held, entry, state}]`；`state` 由
-  `held`/`entry`/`entry.published` 三者的关系推出（今天这段判断散在
-  `plugMarketLines()` `:130-151` 与 `plugHeldSection()` `:161-183` 两处，正好合并）。
-* `renderPlugins()`（`:714-744`）只画一个列表；`plugSection()`（`:110-125`）保留，
-  但退化成"视图标题 + 计数"，不再承担分区语义。
-* 语义上**没有任何信息丢失**：市场侧独有的 `interface/origin/version` 与所持侧独有的
-  `digest/disabled/path` 都进同一行的 chips。
-* 验收：`node tests/components-panel.test.js` 30 条里，"某控制在哪一行"的定位从
-  "市场行 / 所持行"变成"同一个组件的那一行"——**改的是定位方式，不是断言的事实**。
-
-### U1 命名修正（P0）
-
-* `plugHeldSection()` 的标题换成目标机名；列表顶部只留一行"这台机器：<名字> · <url>"。
-* 顺带修 `Market (n of m source(s))`：改成 `Market · m sources`（`n` 是"能装的条数"，
-  应该由 U0 的模型统计出来，而不是来源数）。
-
-### U2 主按钮随状态走（P0）
-
-* `plugInstallButton()`（`:364-393`）与 `plugSwitchButton()`（`:204-230`）合并成
-  `plugPrimaryButton(item)`：`未装 → Install`、`已装同版 → Reinstall`、
-  `已装且停用 → Enable`、`已装且在跑 → Disable`。
-* `plugRemoveButton()`（`:237-255`）与 `plugVersionsButton()`（`:262-288`）收进 `…` 菜单。
-* **I5 不变**：`Remove` 仍然先问、问题里仍然点名版本与机器、仍然说"nothing here keeps a copy"
-  （`:490-497`、`:528-536`）；`Disable` 仍然不问（`:607-631` 的注释仍然是它的依据）。
-  菜单化只改**入口位置**，不改确认文案——测试的 10/13/18/29 号用例继续盯这一条。
-
-### U3 过滤行（P1）
-
-* 新元素 `#plug-filter`（`ui/index.html:86` 之前），`plugState.filter = "all"` +
-  `plugState.query = ""`；`plugVisibleRows()` 在渲染期过滤，**不落盘、不发请求**
-  （零之四.3：页面不留第二份真相；过滤是"看"的一种，不是"存"的一种）。
-* `Updates` 的判定就是 U0 模型里 `已装 · 可更新` 那一条（今天已经在
-  `plugMarketLines()` 里算过：`own.split("+")[0] !== offered`）。
-
-### U4 菜单收敛（P1）
-
-* 一个不依赖框架的 `plugMenu(el, items)`：点击在主按钮右侧弹出一个绝对定位的列表，
-  失去焦点即关；项就是现有 handler（`plugInstall` / `plugRemove` / `plugSwitch` /
-  `plugVersionsToggle`），一个都不新写。
-* 手机（`ui/mobile.css:174-182`）上 `…` 菜单要能点：宽度、`title` 与触摸目标同步调。
-
-### U5 行内状态与整行灰（P1）
-
-* `plugState.busy` 命中某行时，行内画 `plugStageLine()`；`plugState.result` 落到对应行的
-  行内一行，`plug-note` 只剩"读失败 / 通道缺失 / 全局故障"。
-* 整行灰：`.plug-row.stopped`（U-7），`disabled` 的说明句从 `plug-line` 降进 `title=`
-  （`:174`），行内只留 `stopped` chip。
-
-### U6 打磨（P2）
-
-* 计数徽章（U-9）、次级信息折叠（U-10）、来源失败汇总（U-11）、空态与失败态的
-  两句分家（U-12）、远端角标（U-8）。
-* **已落地**：chip 计数（U-9 的前半）、空态与失败态分句（U-12）、`Versions` 展开区的
-  缩进样式。**决定不做**：Tab 徽章。**仍未做**：U-10 折叠、U-11 汇总、U-8 远端角标。
-  逐条见 §七。
+| 步 | 做什么 |
+| --- | --- |
+| U0 | `plugModel()` 按 name 把 `held` 与 `market.entries` 合成一条记录，`renderPlugins()` 只画一个列表；`plugSection()` 保留但退化成"视图标题 + 计数"。市场侧独有的 `interface/origin/version` 与所持侧独有的 `digest/disabled/path` 都进同一行的 chips，**没有任何信息丢失** |
+| U1 | 分区标题换成目标机名；列表顶部只留一行"这台机器：<名字> · <url>"；`Market (n of m source(s))` 改成由 U0 模型统计的条数 |
+| U2 | 主按钮随状态走（`Install` / `Reinstall` / `Enable` / `Disable`），`Remove` 与 `Versions` 收进 `…` 菜单；菜单化只改**入口位置**，不改确认文案（I5 不变） |
+| U3 | 新过滤行 `#plug-filter`（五个 chip + 名字框，默认 `All`）；在渲染期过滤，**不落盘、不发请求**（零之四.3：过滤是"看"的一种，不是"存"的一种）。`Updates` = 已装且市场版本不同 |
+| U4 | 不依赖框架的 `plugMenu()`：主按钮右侧的绝对定位列表，失去焦点即关；项就是现有 handler，一个都不新写；手机上补齐触摸目标 |
+| U5 | busy / result 落到**它那一行**，`plug-note` 只剩读失败 / 通道缺失 / 全局故障；停用整行灰（`.plug-row.stopped`） |
+| U6 | 打磨：chip 计数（U-9 前半）、空态与失败态分句（U-12）、`Versions` 展开区缩进；**决定不做** Tab 徽章；U-10 折叠、U-11 汇总、U-8 远端角标留到 §八 及以后 |
 
 ## 五、验收与护栏
 
 * **面板自己的测试**：`node tests/components-panel.test.js`（35 组，见 §九 9.5）是这次改造的
-  唯一硬约束。它的 mini-DOM 按 `plug-row` / `plug-name` 定位（`tests/components-panel.test.js:99-125`
+  唯一硬约束。它的 mini-DOM 按 `plug-row` / `plug-name` 定位（`tests/components-panel.test.js`
   的 `rowOf()` / `rowNamed()` / `stateOf()`），
   所以 U0 起手就要**保住 `.plug-row` 与 `.plug-name` 这两个类名**（行首是名字），
   其余类名可以随布局改。定位方式的变化集中在 `rowOf()` / `ownerName()` / `stateOf()` 三处
@@ -346,63 +302,46 @@ flowchart TD
 按 §四 的顺序实施，每一步都先跑绿现有测试再加新断言。通道（`ui/components-view.js`）与
 安装层（P4/P5/G4、supervisor 端点）**全程未动**：过滤 / 合并 / 菜单 / 状态行都是渲染期的事。
 
-### U0 一张清单
+* **U0 一张清单**：`plugModel()` 按 name 把 `plugState.market.entries` 与 `plugState.held` 合成一条记录，
+  `plugItemChips()` / `plugItemLines()` 从合并后的记录推 chips 与说明行；已删 `plugMarketLines()` /
+  `plugHeldSection()` / `plugMarketSection()`，`plugSection()` 退化成"视图标题 + 计数"。槽位顺序：
+  先市场顺序，再合并只有机器持有的组件。
+* **U1 命名修正**：列表标题 = 目标机名（`plugTargetName`），计数降进 `.plug-meta`（mono、小号、
+  不随标题大写）。
+* **U2 主按钮随状态走**：`plugPrimaryButton(item)`（`entry` → `Install`/`Reinstall`，否则 `held` →
+  `Enable`/`Disable`）+ `plugItemMenuItems(item)`（`entry && held` → 菜单里的 switch；`held` →
+  `Versions` + `Remove`）。
+* **U3 过滤行**：`ui/index.html` 在 `plug-note` 与 `plug-body` 之间加 `div#plug-filter.plug-filter`；
+  五个视图 `PLUG_FILTERS` = `all` / `installed` / `market` / `updates` / `stopped`；
+  `plugState.filter` / `plugState.query` 只活在内存（不落盘、不发请求）。`plugFilterRow()` **只建一次**
+  （重建会把输入框的 caret 抢走），`plugDrawFilter()` 只重画状态类与计数；`plugItemShown(item)` =
+  名字 query 命中 **且** `plugItemMatches(item, filter)`。
+* **U4 菜单收敛**：`plugMenu(items)` / `plugMoreButton(name, menu)` / `plugCloseMenus()`，范式照
+  `ui/js/settings.js` 的下拉（按钮 `stopPropagation` + document click 收起）。菜单项**常驻 DOM**，
+  只由 `.open` 决定可见——所以 `switches()` / `removes()` / `versionBtns()` 的计数断言全部照旧
+  （"一个只在该出现时才被建出来的控件，是页面没法被问到、也没法被 `title` 的控件"）。
+  手机（`ui/mobile.css`）：`…` 与菜单项补 7px/12px 的手指目标。
+* **U5 行内状态与整行灰**：`plugItemState(item)` → `{text, cls, row}`，`plugRow(...)` 在行头之后插
+  `div.plug-line.plug-state`；写操作的 stage 与宿主裁定画在该组件**自己的行**上，`plug-note` 只剩
+  读失败 / 孤儿写 / `reading…`。`plugOrphanLine()` 兜底：写操作的行不在屏幕上（被卸载掉、被过滤
+  隐藏）时把 stage / 裁定落回 note——"起了一次写却对它闭口的页面，是丢掉一次删除的页面"。
+  三个 result 工厂（`plugInstallResult` / `plugRemoveResult` / `plugSwitchResult`）都带 `name`。
+* **U6 打磨**：`plugItemMatches(item, filter)` 给"过滤"与"计数"共用，`plugDrawFilter()` 用
+  `plugModel()` 算**不受名字 query 影响**的计数（chip 的数字是那个视图里有多少，不是名字框此刻
+  拼出了多少），0 不画；`plugEmptyText(known, shown)` 把"没读完 / 读失败 / 过滤没命中 / 机器真的是空"
+  分成不同句子，`plug-meta` 补 `market unreadable`（与 `inventory unreadable` 对称）；`Versions`
+  展开区缩进成嵌套列表（`.plug-versions-box` 左侧一条 border），`.plug-versions.open` 亮起。
 
-* 新增 `plugModel()`（按 name 把 `plugState.market.entries` 与 `plugState.held` 合成一条记录），
-  `plugItemChips()` / `plugItemLines()` 从合并后的记录推出 chips 与说明行。
-* 已删 `plugMarketLines()` / `plugHeldSection()` / `plugMarketSection()`。`plugSection()` 退化成
-  "视图标题 + 计数"。
-* 槽位顺序：先市场顺序，再合并只有机器持有的组件。
+两处**偏离计划**——都不是失手，是改成了更对的：
 
-### U1 命名修正
+* **偏离计划一**：`Reinstall` **永远留主按钮**，不收进菜单。市场条目本身的用途就是"把它放上这台
+  机器"，已装同版时"再装一次"仍是它的主操作；进菜单会变成"要点开菜单才知道还能不能再装"。
+  比较按**种类**而不是节点身份（早先误写成对象身份比较，菜单里多出一个 switch，测试 17 当场抓到）。
+* **偏离计划二**：保留可见的说明句 `held on this machine, but not driven: its tools are not offered
+  here`，**不**降进 `title=`——这是"held ≠ driven"唯一的可见解释，也保住了测试 17 的事实断言。
+  整行灰因此是 `.plug-row.stopped`（不驱动）与 `.plug-row.busy`（写飞行中，stage 行保持全重）。
 
-* 列表标题 = 目标机名（`plugTargetName`），计数降进 `.plug-meta`（mono、小号、不随标题大写）。
-
-### U2 主按钮随状态走
-
-* `plugPrimaryButton(item)`：`item.entry` 存在 → `Install` / `Reinstall`；否则 `item.held` → `Enable` / `Disable`。
-* `plugItemMenuItems(item)`：`entry && held` → 菜单里的 switch；`held` → `Versions` + `Remove`。
-* **偏离计划一**：`Reinstall` **永远留主按钮**，不收进菜单。市场的条目本身的用途就是"把它放上这台机器"，
-  已装同版时"再装一次"仍是它的主操作；进菜单会变成"要点开菜单才知道还能不能再装"。
-* I5 不变：`Remove` 先问、问题里点名版本与机器、说 `nothing here keeps a copy`；`Disable` 不问。
-
-### U3 过滤行
-
-* `ui/index.html` 在 `plug-note` 与 `plug-body` 之间加 `div#plug-filter.plug-filter`；
-  `plugState.filter = "all"`、`plugState.query = ""`（不落盘、不发请求）。
-* `plugFilterRow()` **只建一次**（重建会把输入框的 caret 抢走），`plugDrawFilter()` 只重画状态类与计数。
-* `plugItemShown(item)` = 名字 query 命中 且 `plugItemMatches(item, plugState.filter)`。
-* 五个视图 `PLUG_FILTERS`：`all` / `installed` / `market` / `updates` / `stopped`。
-
-### U4 菜单收敛
-
-* `plugMenu(items)` / `plugMoreButton(name, menu)` / `plugCloseMenus()`，范式照 `ui/js/settings.js` 的下拉
-  （按钮 `stopPropagation` + document click 收起）。菜单项**常驻 DOM**，只由 `.open` 决定可见——
-  所以 `switches()` / `removes()` / `versionBtns()` 的计数断言全部照旧（"一个只在该出现时才被建出来的
-  控件，是页面没法被问到、也没法被 `title` 的控件"）。
-* 手机（`ui/mobile.css`）：`…` 与菜单项补 7px/12px 的手指目标。
-
-### U5 行内状态与整行灰
-
-* `plugItemState(item)` → `{text, cls, row}`；`plugRow(name, chips, lines, actions, extra, state)`
-  在行头之后插 `div.plug-line.plug-state`。
-* 写操作的 stage 与宿主裁定画在该组件**自己的行**上；`plug-note` 只剩读失败 / 孤儿写 / `reading…`。
-* `plugOrphanLine()` 兜底：当写操作的行不在屏幕上（被卸载掉、被过滤隐藏），把 stage / 裁定落回 note——
-  "起了一次写却对它闭口的页面，是丢掉一次删除的页面"。
-* 三个 result 工厂（`plugInstallResult` / `plugRemoveResult` / `plugSwitchResult`）都带 `name`，供行内定位。
-* **偏离计划二**：保留可见的说明句 `held on this machine, but not driven: its tools are not offered here`，
-  **不**降进 `title=`。理由：这是"held ≠ driven"唯一的可见解释；而且要保住测试 17 的事实断言。
-* 整行灰：`.plug-row.stopped`（不驱动）与 `.plug-row.busy`（写飞行中，stage 行保持全重）。
-
-### U6 打磨
-
-* **chip 计数（U-9 前半）**：`plugItemMatches(item, filter)` 抽出来给"过滤"与"计数"共用；
-  `plugDrawFilter()` 用 `plugModel()` 算**不受名字 query 影响**的计数（chip 的数字是那个视图里有多少，
-  不是名字框此刻拼出了多少）；0 不画（空清单下面那句已经解释了空）。
-* **空态分句（U-12）**：`plugEmptyText(known, shown)` 把"没读完 / 读失败 / 过滤没命中 / 机器真的是空"
-  分成不同句子；`plug-meta` 补 `market unreadable`（与 `inventory unreadable` 对称）。
-* **Versions 展开区**：`.plug-versions-box { margin: 6px 0 2px 10px; padding-left: 10px; border-left: 1px solid var(--border) }`
-  （嵌套列表，不与 held 行同级），`.plug-versions.open` 亮起（同一个控件的第二态）。
+**I5 不变**：`Remove` 先问、问句里点名版本与机器、说 `nothing here keeps a copy`；`Disable` 不问。
 
 ### U-9 的 Tab 徽章：决定不做
 
@@ -412,10 +351,10 @@ flowchart TD
 
 ### 测试与护栏
 
-* `tests/components-panel.test.js`：33 组 → **34 组**（第 34 组是 U6 的 chip 计数；第 33 组孤儿兜底是 U5 加的）。
-  定位方式改成正则与 `rowNamed()` / `stateOf()`；断言的事实一条没放松。
-* 收尾全绿：`components-panel` / `components-view` / `components` / `bridge-server` 四个 node 测试，
-  `.venv/bin/python -m tests.ui_fonts_check`、`scripts/sync-android-host.sh`、`node tests/android-assets.test.js`。
+* 面板套件随重构增组：定位方式改成正则与 `rowNamed()` / `stateOf()`，断言的事实一条没放松；
+  U5 加孤儿兜底、U6 加 chip 计数。收尾全绿：`components-panel` / `components-view` /
+  `components` / `bridge-server` 四个 node 测试、`.venv/bin/python -m tests.ui_fonts_check`、
+  `scripts/sync-android-host.sh` + `node tests/android-assets.test.js`。
 
 ### 仍未做
 
@@ -430,64 +369,63 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 ### 8.1 已安装的行不再有 Install（用户第 1 条）
 
 * 依据：`extensionsActions.ts:472-500` `InstallAction.computeAndUpdateEnablement()` 开头
-  `this.enabled = false; this.class = InstallAction.HIDE; this.hidden = true;`，且
-  `if (this.extension.state !== ExtensionState.Uninstalled) return;` —— 安装后 Install 是**不画**，
-  不是画灰；启用/禁用从来不在列表行里内联，而在 `ManageExtensionAction`（`:1338`，齿轮 + 下拉，
-  顺序 Enable(全局/工作区) → Disable → Update → Install Specific Version… → Uninstall）。
-  有更新时行的主操作是 `UpdateAction`（`:957`，label `Update` `:971`）。
-* 落地：`plugItemLead(item)`（`entry && !held` → install；`held && entry && 有更新` → update；`held` → switch）
-  决定行主按钮；`plugInstallButton` 标签改为 **Install / Update / Reinstall**（已装且 release 不同 = Update，
-  title 说清被替换的版本不会被留）；次级动作全进 `…` 菜单（`plugItemMenuItems(item, lead)`：
-  switch → install 家族 → versions → remove）。比较按**种类**而不是节点身份（早先误写成对象身份比较，
-  结果菜单里多出一个 switch，测试 17 当场抓到）。
-* **回退"偏离计划一"（§七 U2）**：`Reinstall` 不再永远占主位。理由：用户要的就是 VS Code 的行为——
-  已装的行主位是启用/禁用（有更新时 Update），"再装一次"是菜单里的次级动作。
+  `this.hidden = true`，且 `if (this.extension.state !== ExtensionState.Uninstalled) return;`——
+  安装后 Install 是**不画**，不是画灰；启用/禁用从来不在行里内联，而在 `ManageExtensionAction`
+  （`:1338`，齿轮 + 下拉：Enable(全局/工作区) → Disable → Update → Install Specific Version… →
+  Uninstall）；有更新时行的主操作是 `UpdateAction`（`:957`，label `Update` `:971`）。
+* 落地：`plugItemLead(item)`（`entry && !held` → install；`held && entry && 有更新` → update；否则
+  switch）决定行主按钮，标签 **Install / Update / Reinstall**（已装且 release 不同 = Update，title
+  说清被替换的版本不会被留）；次级动作按 `plugItemMenuItems(item, lead)` 全进 `…` 菜单。
+* **回退"偏离计划一"（§七 U2）**：`Reinstall` 不再永远占主位——用户要的就是 VS Code 的行为：已装的
+  行主位是启用/禁用（有更新时 Update），"再装一次"是菜单里的次级动作。
 
 ### 8.2 行只留"标题 + 一句话"（用户第 2 条）
 
-* 依据：`extensionsList.ts:70-90` `renderTemplate` = `.icon-container`(36px 图标) + `.details > .header`
-  (`span.name`) + `.description.ellipsis` + `.footer`；`media/extension.css`：`.header-container{height:20px}`、
-  `.name` 半粗 + nowrap + ellipsis、`.description{color:var(--vscode-descriptionForeground)}`、
-  `.ellipsis{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}`。行里没有版本号、没有 digest、没有路径。
-* 落地（即 **U-10 次级信息折叠**，§七"仍未做"里那条）：`plugItemChips()` 只留 `stopped`；行内版本 chip /
-  interface chip / origin chip / "not offered by this client" 全部撤销；`plugItemDesc(item)` 出一句话；
-  digest / 源路径 / offered 版本 / release / interface 全部搬进 `plugItemMeta(item)`，拼成行的 `title=`。
-  CSS 补 `.plug-row-desc`（单行 + ellipsis + muted）与 `.plug-row-head .plug-name`（nowrap + ellipsis）。
-* 数据前提（已核实）：发布清单 `clutch-component.json` 只有 `schema/name/interface/version/declaration/artifacts`，
-  **没有 description**（`ui/components.js:272` 的 `parseManifest` 只按 checkout 的 `declaration` 取 `ui.label`），
-  所以行里那句"简介"只能是**按状态推导**的一句，不能凭空造组件简介。
+* 依据：`extensionsList.ts:70-90` 的 `renderTemplate` = `.icon-container`(36px) + `.name` +
+  `.description.ellipsis` + `.footer`，样式在 `media/extension.css`（`.name` 半粗 nowrap ellipsis、
+  `.description` 用 `--vscode-descriptionForeground`、`.ellipsis` 三件套）。行里没有版本号、没有
+  digest、没有路径。
+* 落地（即 **U-10 次级信息折叠**，§七"仍未做"里那条）：`plugItemChips()` 只留 `stopped`，行内版本
+  chip / interface chip / origin chip / "not offered by this client" 全部撤销；`plugItemDesc(item)`
+  出一句话；digest / 源路径 / offered 版本 / release / interface 全部搬进 `plugItemMeta(item)`，
+  拼成行的 `title=`。CSS 补 `.plug-row-desc`（单行 + ellipsis + muted）与
+  `.plug-row-head .plug-name`（nowrap + ellipsis）。
+* 数据前提（已核实）：发布清单 `clutch-component.json` 只有
+  `schema/name/interface/version/declaration/artifacts`，**没有 description**（`ui/components.js`
+  的 `parseManifest()` 只按 checkout 的 `declaration` 取 `ui.label`），所以行里那句"简介"只能是
+  **按状态推导**的一句，不能凭空造组件简介。
 
 ### 8.3 面板不再顶满整屏（用户第 3 条）
 
 * 依据：VS Code 的列表是一个**有底的滚动区**（`extensionsList.ts:29` `EXTENSION_LIST_ELEMENT_HEIGHT = 72`，
   虚拟化列表），不是页面长度的柱。
 * 落地：`#settings-modal .modal-box` 改 `display:flex; flex-direction:column; max-height:min(78vh, 720px);
-  overflow:hidden`；`h3` / `.modal-tabs` / `.modal-actions` 与 `.plug-head` / `#plug-base` / `.plug-note` /
-  `#plug-filter` 全部 `flex:none`；`#settings-pane-plugins:not(.hidden){display:flex;flex-direction:column;
-  overflow:hidden}`（**必须 `:not(.hidden)`**：id 选择器会压过 `.modal-pane.hidden{display:none}`）；
-  `#plug-body{flex:1 1 auto;min-height:0;overflow-y:auto}`（原 `max-height:44vh` 撤掉）。
-  手机：`ui/mobile.css` 删掉 `.plug-body{max-height:none;overflow-y:visible}` 那条（它正是"顶满整屏"的来源），
+  overflow:hidden`；`h3` / `.modal-tabs` / `.modal-actions` / `.plug-head` / `#plug-base` / `.plug-note` /
+  `#plug-filter` 全部 `flex:none`；`#plug-body{flex:1 1 auto;min-height:0;overflow-y:auto}`（原
+  `max-height:44vh` 撤掉）。`#settings-pane-plugins` 那条**必须写成 `:not(.hidden)`**：id 选择器会压过
+  `.modal-pane.hidden{display:none}`。
+  手机：`ui/mobile.css` 删掉 `.plug-body{max-height:none;overflow-y:visible}`（它正是"顶满整屏"的来源），
   并把 `#settings-modal .modal-box` 从"整框滚动"那组选择器里摘出来（它整框不滚，滚的是里面的列表），
-  高度上限收到 `calc(100vh - 96px)`：手机上一整块贴边的框读起来像"第二页"，而这个面板是盖在正在读的
-  那页上的；上下各留一段遮罩，剩下的高度给列表。
+  高度上限收到 `calc(100vh - 96px)`——手机上一整块贴边的框读起来像"第二页"，而这个面板是盖在正在读的
+  那页上的：上下各留一段遮罩，剩下的高度给列表。
 
 ### 8.4 过滤 chip 高亮时白底白字（用户第 4 条）
 
-* 根因：`button:hover:not(:disabled)`（`ui/style.css:266`，具体度 (0,2,1)）与 `.plug-filter-chip:hover:not(:disabled)`
-  ((0,3,0)) **压过** `.plug-filter-chip.active` ((0,2,0))；安卓 WebView 里点一下 `:hover` 会滞留，于是激活
-  chip 的 `--text` 背景 + 被改回 `--text` 的文字 = 白底白字。
-* 修法：`.plug-filter-chip.active, .plug-filter-chip.active:hover:not(:disabled),
-  .plug-filter-chip.active:focus-visible` 同具体度且置于其后，把三种状态都写全。
-* 同类隐患一并修：`.plug-switch.stopped:hover:not(:disabled)`（hover 会丢 accent）、
+* 根因：`button:hover:not(:disabled)`（`ui/style.css:266`，具体度 (0,2,1)）与
+  `.plug-filter-chip:hover:not(:disabled)` ((0,3,0)) **压过** `.plug-filter-chip.active` ((0,2,0))；
+  安卓 WebView 里点一下 `:hover` 会滞留，于是激活 chip 的 `--text` 背景 + 被改回 `--text` 的文字 =
+  白底白字。
+* 修法：`.plug-filter-chip.active` 连同它的 `:hover:not(:disabled)` / `:focus-visible` 三种状态写在
+  同具体度且置于其后。同类隐患一并修：`.plug-switch.stopped:hover:not(:disabled)`（hover 会丢 accent）、
   `.modal-tab.active:hover:not(:disabled)`（hover 会把激活 tab 的 accent 下划线刷成灰）。
 
 ### 8.5 测试
 
 * `tests/components-panel.test.js` 的断言随重构更新（**不放松事实**）：第 17 组的"版本 chip"改成"名字旁的
   stopped chip"（版本已按 8.2 撤出行）；第 31 组改问行**主按钮是哪一个**（新 helper `p.primary()` 读
-  `.plug-row-actions` 的首个子节点），并补两个方向：held 落后 → 主按钮 `Update` 且 title 说清被替换的版本；
-  held + entry 无更新 → 主按钮是 switch、菜单里是 `Reinstall`。断言里都写了 VS Code 出处，便于日后有人
-  再"简化"前先看依据。
+  `.plug-row-actions` 的首个子节点），并补两个方向：held 落后 → 主按钮 `Update` 且 title 说清被替换的
+  版本；held + entry 无更新 → 主按钮是 switch、菜单里是 `Reinstall`。断言里都写了 VS Code 出处，便于
+  日后有人再"简化"前先看依据。
 
 ## 九、0.1.34：每一个事实都要能不带指针地读到
 
@@ -500,14 +438,13 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 ### 9.1 行的事实再写一遍（sr-only + `aria-describedby`）
 
 * `plugFactsNode(text)`（`ui/js/components-panel.js:89`）建一个 `class="sr-only"`、
-  `id="plug-row-facts-N"` 的节点；`plugIdSeq`（`:88`）保证每个"要被指向"的节点都有自己的 id。
-  它挂在行的控件行（`.plug-row-actions`）**最后一个子节点**上——所以没有任何控件因此换位置。
-* `plugDescribeTree(el, id)`（`:100`）从控件行开始递归写 `aria-describedby`。**菜单项也要写**：
-  菜单项在菜单打开之前就已经建好（§七 U4 的"常驻 DOM"），一个"后建"的描述等于没有。
-* 节点是**裁切**（`.sr-only`，`ui/style.css:1632`）而不是 `display: none`：无障碍树留得住它，
-  控件不多一个 tab stop，`title=` 原地不动。两处都留着，是因为它们服务两种人（悬停的人 / 读屏的人），
-  不是同一句话的两种画法；行的 `title=` 仍由 `plugItemMeta()` 拼（§八 8.2），sr-only 节点写的
-  **就是它**——一句话，两个出口，不会各自漂。
+  `id="plug-row-facts-N"` 的节点（`plugIdSeq` `:88` 保证每个"要被指向"的节点都有自己的 id），挂在行的
+  控件行 `.plug-row-actions` **最后一个子节点**上——所以没有任何控件因此换位置。`plugDescribeTree(el, id)`
+  （`:100`）从控件行开始递归写 `aria-describedby`；**菜单项也要写**：它在本轮之前就已经建好
+  （§七 U4 的"常驻 DOM"），一个"后建"的描述等于没有。
+* 节点是**裁切**（`.sr-only`，`ui/style.css:1632`）而不是 `display: none`：无障碍树留得住它，控件不多
+  一个 tab stop，`title=` 原地不动。两处服务两种人（悬停的 / 读屏的），不是同一句话的两种画法：sr-only
+  节点写的**就是** `plugItemMeta()` 拼的那句 `title=`（§八 8.2）——一句话，两个出口，不会各自漂。
 
 ### 9.2 class 单独扛着的状态改成 ARIA
 
@@ -535,25 +472,24 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 * 两种"退到后面去"的整行灰原来写的是 `opacity: .55` / `.62`。合成会把行里的分隔线、accent 标记
   和文字一起拖下去，文字只剩约 **2.5:1**——低于 4.5:1 的底线，而且规则线本身也是被"变淡"画的。
 * 现在是颜色：`--muted` 与新增的 `--dim: #83838B`（`ui/style.css:76`，注释里写着它替代 opacity 的理由）。
-  `--dim` 是**按行真正坐着的那层表面量的**：`.modal-box` 的 `--bg2 #161618` 上 4.81:1、
-  页面 `--bg #0F0F10` 上 5.09:1（先试的 `#7E7E86` 在 `--bg2` 上只有 4.49:1，差一点点不合格）。
-* `.plug-row.stopped:hover` 回满重：停用只是"这台机器不驱动它"，指针指着它时不该还读起来像次要信息。
-* 危险色统一走 `--danger`（`:131`，`var(--accent)` 的另一个名字）。
+  `--dim` 是**按行真正坐着的那层表面量的**：`.modal-box` 的 `--bg2 #161618` 上 4.81:1、页面
+  `--bg #0F0F10` 上 5.09:1（先试的 `#7E7E86` 只有 4.49:1，差一点点不合格）。
+* `.plug-row.stopped:hover` 回满重——停用只是"这台机器不驱动它"，指针指着它时不该还读起来像次要信息；
+  危险色统一走 `--danger`（`:131`，`var(--accent)` 的另一个名字）。
 
 ### 9.4 同一轮的收尾
 
 * **token 化**：插件块是整张表里唯一自带一套 4px 刻度、又在 `ui/mobile.css` 里把每个尺寸抄一遍的地方。
   现在写的是名字：`--s1..--s6`（`:115`）、`--ctl-h` / `--ctl-h-sm` / `--tap`（`:120-122`）、
   `--fs-xs..--fs-xl`（`:126`）、`--radius`（`:127`）、`--danger`（`:131`）；手机端只在
-  `ui/mobile.css:197` 的 `#settings-pane-plugins` 上改这几个值。注释同时写明：**旧规则仍带自己的 px**
-  （本轮之前的注释声称全表都遵守刻度，实际不是），新规则一律用 token。
+  `ui/mobile.css:197` 的 `#settings-pane-plugins` 上改这几个值。注释同时写明**旧规则仍带自己的 px**
+  （本轮之前的注释声称全表都遵守刻度，实际不是）。
 * **焦点环回归**：块里 4 处 `outline: none` 删掉，`:300` 的全局 `:focus-visible` 环重新照到这些控件。
 * **表头不再被大写**：`.modal-box h4`（`:1031`）给所有 h4 加 `text-transform: uppercase`，于是机器名
-  `SSH ubuntu@box` 在四行下面读成 `SSH UBUNTU@BOX`。`.plug-section-title`（`:1195`）显式
-  `text-transform: none`：这是**数据**，不是标题。
+  `SSH ubuntu@box` 读成 `SSH UBUNTU@BOX`——`.plug-section-title`（`:1195`）显式 `text-transform: none`：
+  这是**数据**，不是标题。
 * `#plug-reload` 的 `font-size` 改 `var(--fs-lg)`；`#plug-base` 加 `min-height: var(--fs-lg)`
   （与 `.plug-note` 同一守卫：读之前那里不许塌成一个 0 高度的洞）。
-* `scripts/sync-android-host.sh` 重跑，`node tests/android-assets.test.js` 绿：手机资产与桌面同字节。
 
 ### 9.5 测试
 
@@ -566,21 +502,21 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   能在行子树内解析；第 31 组补 `…` 的 `aria-expanded` false → true → false 与
   `aria-controls` / `aria-haspopup` / `aria-label`；第 32 组补 chip 的 `aria-pressed` 恰一个 true
   且随视图移动、chips 的 `group` + `aria-label`、filter input 的 `aria-label`。
-* 收尾全绿：`tests/*test*.js` 40 个、`.venv/bin/python -m tests.ui_fonts_check`。
+* 收尾全绿：`node tests/*test*.js` 全套，加 21 个离线 python 模块（`.venv/bin/python -m tests.<name>`）
+  与 `scripts/sync-android-host.sh` + `node tests/android-assets.test.js`（手机资产与桌面同字节）。
   （`eval.harness` 要真 LLM，离线必然红，不算进"离线套件"。）
 
 ### 9.6 发布
 
-* 宿主 0.1.34（轻量 tag `v0.1.34`）：`VERSION` + `ui/package.json` + `ui/package-lock.json`
-  三处 bump，`chore(release): 0.1.34`；CI（`.github/workflows/release.yml`，只在 `push tags: v*` 触发）
-  出 deb / dmg / win / apk 并挂到 release。
-* 组件 `clutch-skills` 0.1.1：`component.json` + `pyproject.toml` + `clutch_skills/__init__.py`
-  三处一起 bump（它自己的 release workflow 会核对 tag 与 `component.json` 同名，不一致就拒绝发布），
-  带的是组件自己的 `install` 写动作。宿主只持一个 URL（`ui/components.sources.json` 的
-  `releases/latest`），所以这次宿主一行都没为它改。
+* 宿主 0.1.34（轻量 tag `v0.1.34`）：`VERSION` + `ui/package.json` + `ui/package-lock.json` 三处 bump，
+  `chore(release): 0.1.34`；CI（`.github/workflows/release.yml`，只在 `push tags: v*` 触发）出
+  deb / dmg / win / apk 并挂到 release。
+* 组件 `clutch-skills` 0.1.1：`component.json` + `pyproject.toml` + `clutch_skills/__init__.py` 三处一起
+  bump（它自己的 release workflow 核对 tag 与 `component.json` 同名，不一致就拒绝发布）。宿主只持一个
+  URL（`ui/components.sources.json` 的 `releases/latest`），所以这次宿主一行都没为它改。
 
 ### 仍未做（§六 之外新记的）
 
-* 模态级 Escape 与焦点陷阱：`ui/js/settings.js:451` 的 Escape 只在 confirm 可见时响应，
+* 模态级 Escape 与焦点陷阱：`ui/js/settings.js` 的 Escape 只在 confirm 可见时响应，
   `ui/js/conn-lost.js:138` 自己吞掉 Escape；其余 7 个 modal 仍没有 `role="dialog"`。
   这一轮把设置弹窗与两个 pane 的语义补齐了，剩下的是"焦点该停在哪儿"这一整件事，另开一轮做。

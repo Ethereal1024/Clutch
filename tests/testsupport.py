@@ -1,6 +1,6 @@
 """Shared helpers for the standalone test runners: no test framework, each runner
 is a plain `python -m tests.X` module. What is shared here is only what more than
-one runner needs — the canonical list of suites lives in README.md, not here.
+one runner needs — the list of suites is the tests/ directory itself, not a file here.
 
 - check()            fails fast: prints and exits non-zero on the first broken
                      assertion (the default)

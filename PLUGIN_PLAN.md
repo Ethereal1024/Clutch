@@ -8,11 +8,11 @@
 
 | # | 不变量 | 现状依据 |
 | --- | --- | --- |
-| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（4 行）、`components.sources()` `ui/components.js:111` |
-| I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()` `ui/components.js:191` |
+| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（4 行）、`components.sources()`（`ui/components.js`） |
+| I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()`（`ui/components.js`） |
 | I3 | **声明说词、宿主释义**：能力词汇（access / gate / mode）归宿主 | `agent/tools/gates.py:1-20`（导入期 `_check_vocabulary` 断言） |
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
-| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"a removal DELETES bytes…neither act is a rollback"（`ui/js/components-panel.js:640-641`），卸载确认说"This cannot be undone from here"（`:487`），市场常驻警告说"neither is a rollback"（`:693`）。P3c 补上第三条写入后，同一条界线依然清楚：**停用开关是协议里唯一不要求确认的写入**——它一个字节都不删，**按钮标签本身就是撤销路径**（§一、§零之四.2）。P3d 的逐版卸载同样先问、同一句"This cannot be undone from here"，且问题点名那一版（`plugRemoveVersion` `:526`） |
+| I5 | **不可撤销的动作不得在界面上伪装成可撤销** | P3b 之前靠"缺席"成立（没有卸载端点就不画卸载按钮）；P3b 给了按钮，从此靠**文案**成立：安装确认说"a removal DELETES bytes…neither act is a rollback"（`plugInstall()`），卸载确认说"This cannot be undone from here"（`plugRemove()` 与逐版的 `plugRemoveVersion()`），市场常驻警告说"neither is a rollback"——三处都在 `ui/js/components-panel.js`。P3c 补上第三条写入后，同一条界线依然清楚：**停用开关是协议里唯一不要求确认的写入**——它一个字节都不删，**按钮标签本身就是撤销路径**（§一、§零之四.2）。P3d 的逐版卸载同样先问、同一句"This cannot be undone from here"，且问题点名那一版 |
 
 ## 零之二、进度（随施工更新）
 
@@ -24,91 +24,41 @@
 | P3a 反向动词（宿主侧） | **已完成** | `90140ea` | `versions()` / `remove()` + `GET …/versions`、`DELETE …/<name>`；先停后删、非我启动的 daemon 拒绝 |
 | P3b 反向动词（页面） | **已完成** | `11f6ce4` | 每行卸载按钮 + 二次确认 + 宿主裁定回显（`removed`/`absent`/拒绝原文）+ 装完/卸完重读清单；I5 改由文案承担 |
 | P3c 停用/启用 | **已完成** | `9f53b9c`（宿主）+ `1df203d`（页面） | 登记表 `<components 根>/registry.json` 承载组件级 `disabled` 位；`POST /api/components/<name>/disable`、`…/enable`；`GET /api/components` 多带 `disabled`；页面每行一个开关（**不确认**，标签即撤销），停用行仍列出、仍可卸载 |
+| P3d 版本明细 | **已完成** | `cdc1625` | 已装行上的一个"…"披露该机持有的每一版（版本、摘要、是否 `resolved`），逐版点名卸载 |
 | 零之四.4 目标机自取字节 | **已完成** | `0899dc8`（宿主）+ `abab8cb`（页面） | 安装请求两种形状：body 有字节 = `upload()` 兜底（客户端独有的字节），空 body + `artifact_url` = 目标机自取（默认）；同一道 `accept` 门按 `digest` 量**取到的**字节；客户端不再下载 release，只带走几百字节的声明 |
-| P4 工具集 | 未动工 | — | — |
-| P5 静态索引 | 未动工 | — | — |
+| P4 工具集 | 未动工 | — | `interface: "data"`，见 §三 |
+| P5 静态索引 | 未动工 | — | 可选，见 §三 |
 
-P2 的端到端实测（不是单测）：起一个**一次性** supervisor
-（`CLUTCH_COMPONENTS_DIR=/tmp/… --port 8899`，空目录），用真的 `createComponentsView`
-装 `clutch-workspace` → `status:"installed"`、版本 `0.1.0+31bc2b7c5f799e5b`、`GET
-/api/components` 从空变一条、字节落到磁盘；**再装一次** → `status:"current"`，阶段序列
-`artifact -> current`（没有 upload）。本机 8890 上的 supervisor 全程未动。
-
-P3a 的端到端实测同上（另一个临时根）：`GET /api/components/versions?name=handmade` 报出
-一条 `resolved:true`；`DELETE …?version=9.9.9` → 400 宿主原文；`DELETE …/handmade` →
-`{"status":"removed","removed":["1.0.0"]}` 且目录消失；再来一次 → `{"status":"absent"}`；
-`DELETE …/..%2F..%2Fetc` → 400 `bad component name`。8890 未动。
-
-P3b 的端到端实测（再一个临时根、另一个端口）：真 `checkoutComponents()` → `artifactFor()` →
-`upload()` 装上 `clutch-workspace`（`0.1.0+31bc2b7c5f799e5b`）→ `view.versions()` 读回同一条
-`resolved:true` → `view.remove()` 报 `removed:["0.1.0+31bc2b7c5f799e5b"]` 且目录**真的消失**
-→ 再 `remove()` → `absent`、清单空 → `view.versions("../../etc")` → `bad component name`。
-全程只压到一次性 supervisor（端口独立），8890 / 78979 未动。
-
-P3c 的端到端实测：`node tests/components.test.js` 第 9 节对着一个一次性 supervisor 跑
-`hostSetDisabled()`——`{"status":"disabled","name":…,"disabled":true}`、清单**仍然列出**它
-（`disabled:true`，版本与摘要一个字不动）、版本目录**还在磁盘上**、`versions()` 仍是那一条 →
-再 `enable` → `{"status":"enabled","disabled":false}`；问一个这台机器没有的名字 → `absent`
-（**答案**，不是错误）；`../../etc` → 400 宿主原文。宿主侧 `tests/rendezvous_test.py` 的
-`_disabled_probe()` 另钉住两件只有单测能钉的事：停用之后 `unavailable_reason()` 报出宿主
-自己的句子（`<name> is disabled on this host (its tools are off; the bytes stay)`），而且
-**dev 检出也顶不上来**（把 `clutch-workspace` 的工件目录删掉，`resolve()` 照样找得到仓库旁
-那份检出，但停用位在它之前说话，工具不出现）。页面侧 17–24 节覆盖开关的三种写法与三条纪律
-（见下）。
-
-零之四.4 的端到端实测：`node tests/components.test.js` 第 8 节对着一个真文件服务器发布一份
-release —— `artifactFor()` 交回的是 **URL + 钉死的摘要**（本机缓存里只有那份几百字节的声明，
-工件一个字节都没经过本机）→ 空 body + `artifact_url` 装上（宿主自取，版本
-`0.1.0+<hex16>`）→ 再装一次 `current`；**摘要说谎** → 400 `hashes to …, not the declared …`，
-而且是**取字节的那台机器**拒绝的（字节根本不经客户端）；`file://` → 400 `http(s)`；既无 body
-又无 URL → 400 `no artifact`；64 MiB 封顶与 404 各自报出自己的句子，且都不留 scratch。
-`tests/components_api_test.py` 7b 是宿主侧同一件事（`PYTHONPATH=. python3
-tests/components_api_test.py` 全绿）。
+每阶段的端到端实测就写在该阶段的「验收」里，跑法是第四节那几条命令，这里不复述。
 
 ## 零之三、本轮新发现（P1/P2/P3 施工中得到；P3c 的两条是 7、8）
 
-1. **组件端点长在 supervisor 上，不在 session API 上**（最关键的一条）：
-   `GET /api/components`（`agent/supervisor.py:302`）与 `POST /api/components/install`
-   （`:410`）属于 supervisor 进程（本机 `127.0.0.1:8890`，远端 = 隧道的
-   `tunnelStatus().url`）。**窗口的 session base 是另一个端口、另一个进程，对组件一无所知**。
-   照 session base 去写这个页面会"看起来正确"——每个机器都显示"没有装任何组件"。所以：
-   * 页面写入的 base 一律取 supervisor（`ui/components-view.js:46 target()`）；
-   * "装到哪台机器"由**窗口的会话种类**决定（`ui/main.js:58` 把
-     `hostCore.backendKind(wc.id)` 传进去）：会话在隧道对端 → 装对端；其余（包括隧道在线
-     但窗口回退到本地会话的情形）→ 装本机；没有窗口也没有隧道 → 本机。
+1. **组件端点长在 supervisor 上，不在 session API 上**（最关键的一条）：`GET /api/components`
+   与 `POST /api/components/install` 属于 supervisor 进程（本机 `127.0.0.1:8890`，远端 =
+   隧道的 `tunnelStatus().url`），而**窗口的 session base 是另一个端口、另一个进程，对组件
+   一无所知**。照 session base 去写这个页面会"看起来正确"——每台机器都显示"没有装任何组件"。
+   所以页面写入的 base 一律取 supervisor（`ui/components-view.js` 的 `target()`），而"装到哪台
+   机器"由**窗口的会话种类**（`hostCore.backendKind`）决定：会话在隧道对端 → 装对端；其余
+   （包括隧道在线但窗口回退到本地会话的情形）→ 装本机；没有窗口也没有隧道 → 本机。
 2. **supervisor 会空闲退出**（**已补上唤醒**，`31d5ec6`，落点是第八节 G1）：本机那个是
-   `--idle-timeout 25` 起的（见其命令行），空闲即退出，由 app 按需重启。于是"本机安装"在
-   supervisor 没在跑时会直接失败——页面能报出宿主的话，**但一开始没有任何东西会为这次安装把它
-   叫起来**（`ui/server-bootstrap.js` 全文没有 components）。补法就是"写入自己把那台机器叫起来"：
-   * `ui/server-bootstrap.js` 导出 `ensureSupervisor`（本来就是幂等、探测在前的那一个，
-     `startLocalSession` 用的也是它），桌面 shell 把它当 `ensureSupervisor` 注入
-     `ui/components-view.js`（`ui/main.js:63`）。
-   * 唤醒点在 `install()` 里、**第一次需要目标机自己回答之前**（`ui/components-view.js:188`）：
-     本机 supervisor 没在跑就起它，起不来则是一句页面画得出来的话（`this machine's supervisor is
-     not running and could not be started (the app log says why)`），而不是"没回应"这条死路。
-     进度多一个 `wake` 段（页面画成 `${where} is starting its supervisor…`，首次启动要解包，
-     这一步确实慢）。
-   * 三条界线：**读不叫机器**（`list()` 照旧诚实地说"没回应"，页面画得出来）；**在自己就会拒的请求上
-     不叫机器**（名字不认识、这台机器没有这个平台的字节——绝不为了一个注定被拒的请求去起一台机器）；
-     **只叫本机**（隧道对端自己起自己的，见 G1 里 VS Code 的同一逻辑）。手机端根本不传这个 dep（N4，
-     它没有本机 supervisor），行为与从前逐字相同。
-3. **Android 当初只做了表面齐平**（**已修掉**，`f9238b4`，落点是第八节 G2）：`ui/bridge-shim.js` 暴露了
-   `clutchComponents`（手机端与桌面端 API 同名），但 `android/host/android-host.js` 没有任何
-   handler，所以手机上调用会以 `no such bridge method: clutchComponents.list` 结束，标签页把
-   它当一条错误画出来。补法就是"在 Android 宿主里实现同一组调用"，形状与桌面端逐字对齐：
-   * `android-host.js` 建**同一个** `ui/components-view.js`（共享实现，不是副本），
-     `supervisorBase: () => null` 保持 N4（手机上无本机 supervisor），`windowKind` 取
-     `hostCore.backendKind`，于是"装到哪台机器"与桌面端同一条规则：会话在隧道对端 → 装对端；
-     没有会话 → `this build has no supervisor URL for the local machine`，页面画得出来。
-   * 六个动词一个不少，`install` 的进度走 `components:progress`（shim 订阅的那条 SSE）。
-   * 一条**看不见的**前提：`scripts/sync-android-host.sh` 的 `UI_NODE` 手写清单必须包含
-     `components-view.js`（它 require 的 `components.js` 本来就在里面）。漏掉不会报"少个功能"，
-     而是宿主 require 不到、桥还没 bind 就死——所以有了 `tests/android-assets.test.js`。
-4. **本机已装版本还是旧形状**：实测 8890 上四条记录是 `59b12509b19c6759`、
-   `c66bb70851a8e165`…，而当前检出算出来的 `clutch-workspace` 是
-   `0.1.0+31bc2b7c5f799e5b`。两个事实：旧记录确实停留在裸摘要年代（`install()` 会清掉同组件
-   其它版本，所以下次安装自然换名，不需要迁移脚本）；且模块检出在这之后**变过**
-   （`82e974a` 那次 release 修复），所以现在点一次安装是**真的会写入新字节**，不是空跑。
+   `--idle-timeout 25` 起的，空闲即退出，由 app 按需重启——于是"本机安装"在 supervisor 没在跑
+   时会直接失败，而当初**没有任何东西会为这次安装把它叫起来**（`ui/server-bootstrap.js` 全文
+   没有 components）。补法是"写入自己把那台机器叫起来"：导出本来就幂等、探测在前的
+   `ensureSupervisor`，桌面 shell 注入 `ui/components-view.js`，唤醒点放在 `install()` 里、
+   **第一次需要目标机自己回答之前**，进度多一个 `wake` 段；起不来则交出一句页面画得出来的话，
+   而不是"没回应"这条死路。三条界线：**读不叫机器**（`list()` 照旧诚实地说"没回应"）、
+   **在自己就会拒的请求上不叫机器**（绝不为了一个注定被拒的请求去起一台机器）、**只叫本机**。
+   手机端不传这个 dep（N4），行为与从前逐字相同。
+3. **Android 当初只做了表面齐平**（**已修掉**，`f9238b4`，落点是第八节 G2）：`ui/bridge-shim.js`
+   暴露了 `clutchComponents`（两端 API 同名），但 `android/host/android-host.js` 没有任何
+   handler，于是手机上每次调用都结束于 `no such bridge method: clutchComponents.list`。补法是
+   建**同一个** `ui/components-view.js`（共享实现，不是副本）：`supervisorBase: () => null`
+   保持 N4，`windowKind` 取 `hostCore.backendKind`——"装到哪台机器"因此与桌面端同一条规则。
+   一条**看不见的**前提：`scripts/sync-android-host.sh` 的 `UI_NODE` 手写清单必须包含它，
+   漏掉不会报"少个功能"，而是宿主 require 不到、桥还没 bind 就死（所以有了
+   `tests/android-assets.test.js`）。
+4. **本机已装版本还是旧形状**：实测的旧记录仍停在裸摘要年代。`install()` 落地时会清掉同组件
+   其它版本，所以下一次安装自然换成带版本的目录名，**不需要迁移脚本**（P0 的迁移结论）。
 5. **"谁在跑"只能靠散目录里的记录去数**：daemon 的记录名是**工作区根路径的哈希**
    （`rendezvous._record_path`），从名字复原不出工作区，所以"这个组件现在有没有进程在跑"
    只有一条路可问——列该组件自己的记录目录（`_record_dir()`，本轮从 `_record_path()` 里
@@ -127,16 +77,14 @@ tests/components_api_test.py` 全绿）。
    `workbench/services/extensionManagement/common/extensionManagement.ts:645-646`），因为它的
    客户端自己握着已装清单；Clutch **没有客户端侧清单**（零之四.3），照抄会让第二个客户端看到
    假的"在驱动"。落点之外还有**顺序**：拦截必须在解析**之后**、交付**之前**
-   （`rendezvous.unavailable_reason()`，`agent/tools/rendezvous.py:255-267`），否则开发机上
+   （`rendezvous.unavailable_reason()`，`agent/tools/rendezvous.py`），否则开发机上
    "停用了"却因为仓库旁的检出在场而照样把工具递给模型——最坏组合是"页面说停了，工具还在"。
    `reindex()` 是唯一的例外：重建**忘掉 `disabled`**（磁盘上没有这个形状），重建后要重新停。
 8. **一个只有活体才看得见的一次性 Bug（`9f53b9c` 修掉）**：supervisor 的两条路由把**反的
    极性**传给了 `components.set_disabled`，于是 `/disable` 实际上在"重新驱动"。它藏得住是因为
-   参数名原来叫 `state`——两个方向读起来都对——而单测只钉了组件层（`set_disabled` 本身没错），
-   一直到把两条路由都对着真 supervisor 各跑一次才暴露。现在参数一律叫 `disabled`（**表里存的
-   那个位**），每条路由传自己那个词的**含义**：`/disable` → True、`/enable` → False
-   （`agent/supervisor.py:364-429`）。教训与零之三.6 同类：**名字和动词是两条独立的信息，
-   极性错位的时候两边都读得通**。
+   参数名原来叫 `state`——两个方向读起来都对——而单测只钉了组件层（`set_disabled` 本身没错）。
+   现在参数一律叫 `disabled`（**表里存的那个位**），每条路由传自己那个词的**含义**。教训与
+   零之三.6 同类：**名字和动词是两条独立的信息，极性错位的时候两边都读得通**。
 
 ## 零之四、已冻结的五个决定（本轮拍板，施工据此）
 
@@ -147,18 +95,17 @@ tests/components_api_test.py` 全绿）。
    谁为准。停用不是删除：字节不动、行还在、仍可卸载，而且**不要求确认**（I5 只约束撤不回来
    的动作，它的标签本身就是撤销路径）。
 3. **手机端不镜像远端的表**：页面**没有任何远端清单缓存**，每问一次就发一次请求
-   （`hostInventory()` `ui/components.js:472` / `hostVersions()` `:481`）。清单是机器的判断
+   （`hostInventory()` / `hostVersions()`，同在 `ui/components.js`）。清单是机器的判断
    （哪一版会赢、哪一版被停），客户端存一份就成了"第二份真相"，而且会把"读不到"画成"没有"。
 4. **字节默认由目标机自己取，手机端的 `upload()` 只是兜底**（**已实现**，宿主 `0899dc8` /
-   页面 `abab8cb`）：安装请求**两种形状**，一条端点一个 header——body 有字节（`upload()`
-   `ui/components.js:563`，**只有这台客户端独有的字节**才这样送：检出、预编译产物），或 body
-   为空而 manifest 带 `artifact_url`（`fetchInstall()` `:576`，**默认**），目标机自己去取
-   （`components.receive()` `agent/tools/components.py:750` → `download()` `:710`）。只走
-   http(s)（`file:` 与本地路径一律拒绝——那是这台机器自己的盘）、30 秒读超时、64 MiB 封顶、
-   流进 scratch 再过同一道门：`accept()` `:770` 量的是**取到的字节 vs 请求声明的 `digest`**，
-   所以 URL 不比 body 更松。客户端这边 `artifactFor()` 不再下载 release
-   （`publishedArtifact()` `ui/components.js:335`，交出去的是位置 + 钉死的摘要），只有几百字节
-   的 `declaration` 还从客户端过一趟（宿主要读组件形状）。
+   页面 `abab8cb`）：安装请求**两种形状**，一条端点一个 header——body 有字节（`upload()`，
+   **只有这台客户端独有的字节**才这样送：检出、预编译产物），或 body 为空而 manifest 带
+   `artifact_url`（`fetchInstall()`，**默认**），目标机自己去取（`components.receive()` →
+   `download()`）。只走 http(s)（`file:` 与本地路径一律拒绝——那是这台机器自己的盘）、30 秒读
+   超时、64 MiB 封顶、流进 scratch 再过同一道门：门量的是**取到的字节 vs 请求声明的
+   `digest`**，所以 URL 不比 body 更松。客户端这边 `artifactFor()` 不再下载 release
+   （`publishedArtifact()`，交出去的是位置 + 钉死的摘要），只有几百字节的 `declaration` 还从
+   客户端过一趟（宿主要读组件形状）。
 5. **注册表位置 / G1 / G2 / G4 一律"按照 VS Code 的逻辑来"**：结论落在第八节各行——G1 = 由
    目标机自己的二进制按需起服务（VS Code 的 `cli/src/tunnels/code_server.rs:322-350`）、
    G2 = 目标端注册同一个通道（`src/vs/server/node/serverServices.ts:403-409`）、G4 = 版本一致性
@@ -177,14 +124,15 @@ tests/components_api_test.py` 全绿）。
 **非目标**：账号体系、付费、下载统计、评分评论；中心化发布 API（与 I1 冲突）；组件间依赖
 求解（第一版只做"缺谁就说缺谁"）；插件沙箱隔离（插件仍以宿主权限运行，独立议题）。
 
-## 二、当初要修掉的四个断点（每行附今天的现状）
+## 二、当初要修掉的四个断点
 
-| # | 断点 | 证据 | 目标形态 |
-| --- | --- | --- | --- |
-| 1 | 渲染层无通道 | `ui/preload.js:25`（`clutchComponents` 全无）；`ui/main.js:173-190`（`components:*` 的 handler 全无） | 新增 `clutchComponents` IPC —— **已交付**（P1 起，P3b/P3c 各加动词，今天是六个 + 一个 `onProgress`） |
-| 2 | 只有读 + 一个无反动词的写 | `agent/supervisor.py:302,410`（清单 + 装上）；`agent/` 内 `uninstall` 零命中 | 卸载 / 停用 / 启用 / 版本列表 —— **已交付**（`90140ea`、`9f53b9c`）；**prune 拍板不做**（理由见 P3 末），页面"版本明细"已交付（P3d `cdc1625`） |
-| 3 | 安装版本是裸摘要前缀 | `ui/components.js:386-387`（`version: digest.slice(0,16)`） | `<声明版本>+<摘要16>`（宿主 `_VERSION_RE` 已认这个形状，`agent/tools/components.py:124`） |
-| 4 | 纯声明包递不进去 | 当初安装路由对空 body 直接 400（该拒绝已随零之四.4 移走，空 body 有了自己的含义）；`INTERFACES = ("daemon","cli")` `agent/tools/components.py:145` | 空 body 现在**是合法请求**（零之四.4：它意味着"字节在 `artifact_url` 那里"）；`interface: "data"`（**并入 P4**，理由见下） |
+1. **渲染层无通道** → 已交付：`clutchComponents` 在 preload 与 bridge-shim 里同名同参（今天
+   六个动词 + 一个 `onProgress`）。
+2. **只有读、没有反动词** → 已交付：卸载（`90140ea` + `11f6ce4`）、停用/启用（`9f53b9c` +
+   `1df203d`）、版本明细（`cdc1625`）；**`prune` 拍板不做**。
+3. **安装版本是裸摘要前缀** → 已交付 `<声明版本>+<摘要16>`（P0）。
+4. **纯声明包递不进去** → 空 body 如今**是合法请求**（零之四.4：它意味着"字节在
+   `artifact_url` 那里"）；`interface: "data"` **并入 P4**。
 
 ## 三、阶段
 
@@ -202,169 +150,110 @@ flowchart LR
 
 ### P0 版本语义：一次安装的版本必须可读（**已完成**，`42e6ee6`）
 
-问题：客户端把 `version` 写成 `digest.slice(0, 16)`（`ui/components.js:386-387`），于是宿主
-清单里只有 `5f900739e6a35f43` 这样的十六进制——**能列出组件，说不出它是哪个发行版**，升级
-与退回也就无从问起。
-
-改法：安装版本 = 组件**自报版本** + 内容摘要，即 `0.1.0+<digest16>`。这不是新协议：宿主
-正则早就认这个形状（`agent/tools/components.py:124`："…content digest (`0.2.0+<hex>`),
-which is how the client's install gate works"），`COMPONENTS.md` 第 80 行同样写着"安装版可
-携带内容摘要"。
-
-- 落点：`ui/components.js` 的 `installVersion()`，两个分支（检出工件、发布工件）都用它。
-- **没有版本可说的 spec**（裸 `{name, interface}`，测试里就是这个形态）仍只发摘要前缀：
-  身份就是它拥有的全部，编一个版本反而是无法兑现的声明。
-- 迁移：宿主 `install()` 落地时会清掉同组件其它版本（`COMPONENTS.md` 第 310 行"原子落地"），
-  所以旧机器下一次安装会自然换成带版本的目录名，**不需要**任何额外迁移步骤。
-- 验收：`node tests/components.test.js` 全绿，并新增"落地目录名 = 自报版本 + 摘要16"、
-  "宿主清单把该版本回报给客户端"两条断言；`tests/components_api_test.py` 补一条宿主侧
-  用例（复合版本是合法路径名）。
+安装版本 = 组件**自报版本** + 内容摘要，即 `0.1.0+<digest16>`（`ui/components.js` 的
+`installVersion()`，两个分支都用它）。宿主正则早就认这个形状，所以这不是新协议，只是把客户端
+原来写的裸摘要前缀补全。**没有版本可说的 spec**（裸 `{name, interface}`，测试里就是这个形态）
+仍只发摘要前缀：身份就是它拥有的全部，编一个版本反而是无法兑现的声明。旧机器**不需要迁移
+脚本**——`install()` 落地时清掉同组件其它版本，下一次安装自然换成带版本的目录名。
+验收：`tests/components.test.js` + `tests/components_api_test.py`。
 
 ### P1 只读可见（通道 + 标签页）（**已完成**，`2c473f6`）
 
-- `ui/preload.js` 新增 `clutchComponents { list, market, install, onProgress }`；`ui/main.js`
-  加 `components:*` handler，内部复用 `ui/components.js` 已有导出（`componentSpecs` :352、
-  `hostInventory` :450）、新增的 `ui/components-view.js` 承载目标机/市场缓存/安装裁定。
-- `ui/js/settings.js`（408 行、**无标签结构**）加标签；`ui/style.css` / `ui/mobile.css`
-  **没有 tab 样式**，需新增；overlay 套件（`customSelect` / `notice` / `askConfirm` /
-  `closeModal`）直接复用。渲染层是 **19 个经典脚本**，`ui/index.html` 的顺序就是契约
-  （`tests/ui-load-order-test.js` 守）。
-- 页面必须显示**来源错误**（`manifests()` `:168` 的 `errors` 是 data，不是异常）：否则用户
-  看到空市场却不知道是网络问题。
-- 本阶段**不画安装按钮**（I5）。
-- 验收：开发态显示 4 个检出组件 + 4 条来源失败原因（`componentSpecs()` :352 "a
-  contributor's edit beats a release"，本机不会真空）；连隧道后显示对端的 4 条已装记录。
-  实测：19 个脚本装序通过；本机 8890 返回 4 条已装记录；4 条远端来源在本机全部失败（见第
-  四节的网络约束），页面逐条画出原因而不是空市场。
-- 一处修正（`0b7229e`）：读失败时 `held` 不能留成"空数组"——那会被画成"没有装任何组件"，
-  与"读不到"混为一谈。失败一律 `held = null`。
+`clutchComponents { list, market, install, onProgress }` 落进 `ui/preload.js` 与 `ui/main.js`
+的 `components:*` handler；新增的 `ui/components-view.js` 从这里开始承载"目标机是谁 / 市场缓存
+/ 安装裁定"三件事。设置弹窗加了第二个标签（`ui/style.css` 此前没有 tab 样式；渲染层是 19 个
+经典脚本，装序是契约，`tests/ui-load-order-test.js` 守）。两条纪律：页面必须画出**来源错误**
+（`errors` 是 data 不是异常，否则用户在空市场前不知道是网络问题）；读失败时 `held` 一律
+`null` 而不是空数组——"读不到"与"没装"绝不能混为一谈（`0b7229e`）。本阶段**不画安装按钮**（I5）。
 
 ### P2 单向下发（安装）（**已完成**，`8d11845`）
 
-- 目标机语义**不复用** `#conn-select`：那个选择器描述的是"这个窗口连到哪台机器的会话"，而
-  组件要送到**supervisor**（见零之三.1）。现在由窗口的会话种类推导（`backendKind`），页面
-  只显示结果。
-- 新增 `components:install`（当时走 `upload()`，今 `ui/components.js:563`；零之四.4 之后它是
-  兜底，默认形状是目标机自取）与 `components:progress`；`askConfirm`
-  二次确认，文案明说"**这个页面不能撤销它**"（I5）；市场行自带一行常驻警告，不只藏在弹窗里。
-- 幂等来自宿主：`components.accept()` 的 `current()` 门 → `"current"`，重连不重传；客户端
-  还先查一次清单，同版本同摘要**连上传都不发生**。
-- 被拒时页面显示宿主给的 `error` **原文**，不转述。
-- 本机手动安装入口已给（按钮在），**但缺口还在**：supervisor 没在跑时没有任何东西为这次
-  安装把它叫起来（零之三.2、第八节 G1）。
-- 验收（单测）：`node tests/components-panel.test.js` 覆盖目标机规则、死按钮、确认
-  文案、拒绝、`installed`/`current`/宿主原文、重读清单；实测见零之二。
+目标机**不复用** `#conn-select`：那个选择器说的是"这个窗口连到哪台机器的会话"，而组件要送到
+**supervisor**（零之三.1）；现在由窗口的会话种类推导（`backendKind`），页面只显示结果。新增
+`components:install` 与 `components:progress`，`askConfirm` 明说"**这个页面不能撤销它**"（I5），
+市场行自带一行常驻警告，不只藏在弹窗里。幂等来自宿主：`accept()` 的 `current()` 门答
+`"current"`，重连不重传；客户端还先查一次清单，同版本同摘要**连上传都不发生**。被拒时页面显示
+宿主 `error` 的**原文**，不转述。
 
-### P3 反向动词（**三头已通**：宿主 `90140ea` + `9f53b9c`、页面 `11f6ce4` + `1df203d`）
+### P3 反向动词（宿主 `90140ea` + `9f53b9c`、页面 `11f6ce4` + `1df203d`，三段全通）
 
-**拆成 P3a（宿主侧的反动词，`90140ea`）、P3b（页面上的反动词，`11f6ce4`）与 P3c（停用/启用，
-两头一起，`9f53b9c` + `1df203d`），三段都已完成。**
+**P3a（宿主侧）**：
 
-P3a 交付：
-
-- `GET /api/components/versions?name=` → `{name, versions:[{name,version,interface,digest,path,
-  resolved}]}`，**新→旧**排序（就是 `resolve()` 的选择依据），`resolved:true` 标出宿主真会启
-  动的那一个；名字不合法 → 400（而不是空清单——空清单读起来像"没装"）。
+- `GET /api/components/versions?name=` → 每版一条 `{version, interface, digest, path,
+  resolved}`，**新→旧**排序（就是 `resolve()` 的选择依据），`resolved:true` 标出宿主真会启动
+  的那一个；名字不合法 → 400（而不是空清单——空清单读起来像"没装"）。
 - `DELETE /api/components/<name>[?version=]` → `{status:"removed", removed:[…]}` /
-  `{status:"absent"}`；拒绝（名字不合法、`?version=` 没装、有非我启动的 daemon 在跑）→ 400
-  带宿主原文。
-- `components.versions()` / `components.remove()`；`_check_name()` / `_check_version()` 从
-  `install()` 的内联判断提出来（名字就是路径片段，越权门与拼写规则是同一条规则）。
-- **"先停后删"落地**：`remove()` 收一个调用方的 `stop` 回调（`rendezvous.stop_for_removal`），
-  **只在确实有东西可删时调用**，返回拒绝句子就抛 `ValueError`；本进程启动的 daemon 先停
-  （属主规则与 `release`/`_stop` 一致），**别人启动的**（`proc is None` 的收养句柄、或只在
-  磁盘上有活记录）一律拒绝，并把 pid 写进句子——"磁盘上读到的 pid 不是开枪许可"。
-- `rendezvous.live_daemons()` + `_record_dir()`（见零之三.5/6 的两条发现）。
+  `{status:"absent"}`；名字不合法、`?version=` 没装、有非我启动的 daemon 在跑 → 400 带宿主原文。
+- **"先停后删"**：`remove()` 收一个调用方的 `stop` 回调（`rendezvous.stop_for_removal`），
+  **只在确实有东西可删时**才调用——否则一次注定被拒的删除会先把 daemon 杀掉再报错（零之三.6）。
+  本进程启动的 daemon 先停（属主规则与 `release` 一致），**别人启动的**一律拒绝并把 pid 写进
+  句子——"磁盘上读到的 pid 不是开枪许可"。
 
-P3b 交付（`11f6ce4`）：
+**P3b（页面）**：
 
-- 通道只加两个动词：`ui/components.js` 的 `hostVersions(base,name)`（`GET …/versions`）与
-  `hostRemove(base,name,version)`（`DELETE …/<name>[?version=]`）；两者共用新的
-  `hostJSON(url,{method,timeoutMs})`——宿主的 `{"error":…}` 直接变成抛出的句子（"谁在跑它"
-  这类拒绝，页面**必须能原文引用**，一个裸状态码会让它自己猜）。
-- `ui/components-view.js` 的 `versions(name,win)` / `remove(name,{version},win)`：先解目标机，
-  解不出来是**答案**不是异常；失败装在结果里（`{ok:false,error}`），所以"这台机器一版都没有"
-  和"这台机器问不到"绝不会画成同一幅空图。`remove()` 原样带出宿主的三种形状。
-- 页面：每条已装行一个 Remove 控件（`ui/js/components-panel.js:168`），**没有 supervisor URL
-  时它是死的**（哪台机器会掉字节是最不能猜的事），**任何写入在飞时它也是死的**——`busy` 现在
-  带 `verb`，两个方向共用"一次只准一个写入"。
-- 删除前先问（`:275`）：问题点名版本与机器，说清"连同这台机器持有的其它版本一起删"，并说最难
-  的那句——**这里撤不回来，本页不留副本，要拿回来只能再装一次**。
-- 裁定回显（`:262`）：`removed <name> <versions> from <where>` / `<name> was not installed on
-  <where> — there was nothing to remove`（`absent` 是答案不是错误）/ 拒绝原文。
-- **I5 从"靠缺席"改成"靠文案"**（见不变量表 I5 行）：按钮既然有了，就不能再靠不画它成立。
-
-验收（单测 + 实测）：`node tests/components-panel.test.js` 新增 9–15 节（每行控件与 title、
-先问再删且拒绝就什么都不删、成功回显点名删掉的版本、`absent` 画成答案、拒绝原文连 pid 一起
-引用且控件复位、两个方向共用"一次一个写入"、目标机没有 supervisor URL 时控件是死的并给出
-原因）；`tests/components-view.test.js` 7–8 节（版本读取、宿主顺序与 `resolved`、失败报成原因
-而不是"没有版本"、三种卸载裁定、带了版本号就问那一版）；`tests/components.test.js` 9 节对着
-真 supervisor 跑 `hostVersions()`/`hostRemove()`（改盘之后再读清单为空、第二次删是 `absent`、
-坏名字 400）。实测见零之二末段。
-
-**当时留下的两件**：`prune`（P3d 拍板**不做**，理由见 P3d 末）与页面上的"版本明细"视图（P3d 已交付，`cdc1625`）。
+- 通道只加两个动词：`hostVersions(base,name)` 与 `hostRemove(base,name,version)`，两者共用新的
+  `hostJSON(url,{method,timeoutMs})`——宿主的 `{"error":…}` 直接变成抛出的句子（"谁在跑它"这类
+  拒答，页面**必须能原文引用**，裸状态码只会让它自己猜）。
+- `ui/components-view.js` 的 `versions()` / `remove()` 先解目标机，解不出来是**答案**不是异常；
+  失败装在结果里（`{ok:false,error}`），所以"这台机器一版都没有"与"这台机器问不到"绝不会画成
+  同一幅空图。
+- 页面：每条已装行一个 Remove 控件，**没有 supervisor URL 时它是死的**（哪台机器会掉字节是最
+  不能猜的事），**任何写入在飞时它也是死的**——`busy` 带上 `verb`，两个方向共用"一次只准一个
+  写入"。删除前先问，问题点名版本与机器，并说最难的那句：**这里撤不回来，本页不留副本，要拿
+  回来只能再装一次**。裁定原样回显宿主的三种形状（`removed <name> <versions> from <where>` /
+  `<name> was not installed on <where> — there was nothing to remove` / 拒绝原文）。
+  **I5 从此靠文案成立**，不再靠缺席。
 
 ### P3c 第三条写入：留着，但不驱动（**已完成**，宿主 `9f53b9c` / 页面 `1df203d`）
 
-**这一段的语义先拍板、再写代码**（零之四.1/2/3）：`disabled` 是**每台机器各自**的事实，住在
-**持有组件那台机器的登记表**里，客户端不留副本。所以它不是"加一个端点"，而是一条新的写入
+**这一段先拍板语义、再写代码**（零之四.1/2/3）：`disabled` 是**每台机器各自**的事实，住在
+**持有组件那台机器的登记表**里，客户端不留副本——所以它不是"加一个端点"，而是一条新的写入
 路径，落点、顺序、界面三处都得跟着定。
 
-宿主（`9f53b9c`）：
-
-- **落点是登记表**：`<components 根>/registry.json` 每条记录多一个组件级 `disabled`
-  （`agent/tools/components.py:97`），与安装事实同一张表、同一个写者（`_TABLE_LOCK`），
-  于是"这台机器驱动什么"只有一个答案者。它**不落进组件目录**：登记表是"有什么"的唯一名册
-  ——表里有就是有，一个没有表项的目录不是组件（`reindex()` 是唯一的重建入口）。
-- **两条路由**：`POST /api/components/<name>/disable` / `…/enable`（`agent/supervisor.py:412-415`）
-  → `{"status":"disabled"|"enabled","name":…,"disabled":bool}`；这台机器根本没有它 →
+- **落点是登记表**：`<components 根>/registry.json` 每条记录多一个组件级 `disabled`，与安装
+  事实同一张表、同一个写者（`_TABLE_LOCK`），于是"这台机器驱动什么"只有一个答案者。它**不落
+  进组件目录**：登记表是"有什么"的唯一名册——表里有就是有，一个没有表项的目录不是组件
+  （`reindex()` 是唯一的重建入口）。
+- **两条路由**：`POST /api/components/<name>/disable` / `…/enable` →
+  `{"status":"disabled"|"enabled","name":…,"disabled":bool}`；这台机器根本没有它 →
   `{"status":"absent"}`（**答案**，不是错误：要求已经成立）；名字不合法/穿越 → 400 宿主原文；
   只发一个开关而不点名（`/api/components/disable`）→ 404（不是"叫空名字的组件"）。
 - **`disabled` 只抑制工具**：字节一个不动、清单照列（多带 `disabled:true`）、`versions()` 照报、
-  `DELETE` 照能删、重复停用/启用幂等。拦截点故意在**解析之后、交付之前**
+  `DELETE` 照能删、重复切换幂等。拦截点故意在**解析之后、交付之前**
   （`rendezvous.unavailable_reason()`），于是 **dev 检出也递不上替身**（零之三.7）。装新版本时
   这个位**跟着组件过去**，换版本不会偷偷把机器重新驱动起来。
 - **`reindex()` 忘掉这个位**（磁盘上没有这个形状）：重建的语义是"重新相信磁盘"，所以重建之后
   要重新停一次——这是这台机器上唯一会"自己恢复驱动"的路径，写在文档里而不是藏起来。
+- 页面出去的**是状态、不是动词**：`hostSetDisabled(base,name,disabled)` 按位选 `/disable` 与
+  `/enable`，preload 与 bridge-shim 同名同参（`tests/bridge-shim.test.js` 钉住这条平价）。
+  持有但停用的行，在版本号之后多一个 `stopped` 标记 + 一句 "held on this machine, but not
+  driven"，动作变成**开关 + 卸载**；开关**不弹确认**——它一个字节都不删、**标签本身就是撤销
+  路径**（I5）；三种死法都要说得出原因（没有目标机的 supervisor URL、这个 shell 没有这个动词、
+  另一个写入正在飞）。
+- 一个只在活体里露头的 Bug 随这条一起修掉（零之三.8）：supervisor 两条路由曾把**反的极性**
+  传给 `components.set_disabled`，`/disable` 实际在"重新驱动"；参数名改叫 `disabled` 之后消失。
 
-页面（`1df203d`）：
+### P3d 版本明细：每一版都点名（**已完成**，`cdc1625`）
 
-- 客户端出去的**是状态、不是动词**：`ui/components.js` 的 `hostSetDisabled(base,name,disabled)`
-  （`:507`）按位选 `/disable` 与 `/enable`；`ui/main.js:186` 的 `components:set-disabled`、
-  `ui/preload.js:31` 与 `ui/bridge-shim.js:116` 同名同参（`tests/bridge-shim.test.js` 自动钉住这
-  条平价）。`ui/components-view.js:264` 的 `setDisabled()` 先解目标机，失败装在结果里。
-- 页面：持有但停用的行，在版本号之后多一个 `stopped` 标记 + 一句 "held on this machine, but not
-  driven"，动作变成**开关 + 卸载**（`ui/js/components-panel.js:146-224`）。开关**不弹确认**——
-  它一个字节都不删、**标签本身就是撤销路径**（I5）；三种死法都要说得出原因（没有目标机的
-  supervisor URL、这个 shell 没有这个动词、另一个写入正在飞，`plugBusyWord` `:178`）。
-- 一个只在活体里露头的 Bug 随这条一起修掉（零之三.8）：supervisor 路由曾把**反的极性**传给
-  `components.set_disabled`，`/disable` 实际在"重新驱动"；参数名改叫 `disabled` 之后消失。
+已装行上的一个"…"披露目标机持有的每一版（版本、摘要、是否 `resolved` 都在里面），每一版自带
+一个点名卸载；它的三条死法与别的写入同源（没有目标机 URL、没有那个动词、另一个写入在飞）。
 
-验收（单测 + 实测）：`node tests/components-panel.test.js` 17–24 节（开关出现在持有它的那一行、
-title 说的是机器与"字节不动"、停用行有标记与那句话且**仍可卸载**、开关**不问**、线上走的是
-状态、`absent` 画成答案、拒绝引原文、一次只准一个写入、没有目标机 URL / 没有那个动词时不画活
-控件）；`tests/components-view.test.js` 9 节（状态出去、宿主的位回来、缺 `disabled` 时的兜底、
-`absent`、拒绝原文、目标机解不出来则**从不发请求**）；`tests/components.test.js` 9 节对着真
-supervisor 跑 `hostSetDisabled()`（清单仍在、目录仍在、版本仍是那一条）；宿主侧
-`tests/rendezvous_test.py` 的 `_disabled_probe()`（句子、清单、检出顶不上来、启用后回到原样）与
-`tests/components_api_test.py`（两条路由、`absent`、坏名字 400、裸开关 404）。实测见零之二末段。
-
-**还没做的（下一批）**：`prune`、页面上的"版本明细"视图。（零之四.4 的"目标机自取字节"已经
-落地：宿主 `0899dc8` / 页面 `abab8cb`，见 §零之四.4。）
+**`prune` 拍板不做**：`install()` 落地时已经清掉同组件其它版本（`_prune(name, keep=target)`），
+再给一个"手动清理旧版"的接口只是把同一件事说两遍——想回到某一版就再装一次（§一）。
 
 ### P4 工具集（`interface: "data"`）
 
-- **不是一行常量**：`catalog.py:553` 在声明层就拒绝未知 interface（`interface not in
+- **不是一行常量**：`catalog.py` 在声明层就拒绝未知 interface（`interface not in
   (DAEMON, CLI)` → 拒绝），`rendezvous.render_launch()` 只为 daemon/cli 产出 argv，
-  `facts.py:100` 规定只有 cli 组件能发布宿主事实。所以 `data` 需要一条"无进程"通路：
+  `facts.py` 规定只有 cli 组件能发布宿主事实。所以 `data` 需要一条"无进程"通路：
   声明可读即可驱，不解析 launch、不启动进程。
 - 契约形状（草案）：`{schema:1, name, interface:"data", version, tools:[…声明…], mode:"<名>",
   prompt:"PROMPT.md"}`。
-- **动态模式集**：`catalog.MODES` 是常量元组（`agent/tools/catalog.py:212`），要变成"内建 +
-  组件声明"；`registry.py:263` 的过滤、`config.py:97` 的 `mode`、`agent/api/run.py:29-31`
+- **动态模式集**：`catalog.MODES` 是常量元组（`agent/tools/catalog.py`），要变成"内建 +
+  组件声明"；`registry.py` 的过滤、`agent/config.py` 的 `mode`、`agent/api/run.py:29-31`
   的模式白名单随之放宽。
 - **提示词**：`agent/core/context.py` 现在追加固定文件 `agent/prompts/mode_*.md`；工具集自带
-  片段。可复用 `agent/tools/prompt.py:53` 的占位符机制（`$config.<field>` / `$backends` /
+  片段。可复用 `agent/tools/prompt.py` 的占位符机制（`$config.<field>` / `$backends` /
   宿主事实，整行 `$skills` 展开成块）。
 - **降级**：工具集引用了未安装组件提供的工具时，该工具不出现（`registry` 既有逐条过滤），
   并说明"缺谁"——先例是 `prompt.components_unavailable()` `:102`。
@@ -374,9 +263,9 @@ supervisor 跑 `hostSetDisabled()`（清单仍在、目录仍在、版本仍是�
 
 - **索引**：market 仓库里的静态 `index.json`（搜索/分类/精选），页面读它做展示，**权威仍是
   各模块的 manifest**；零服务器。
-- **私有源**：`downloadPinned()` `:290` 与 `readManifest()` `:154` 的 `fetch(url, {signal})`
+- **私有源**：`downloadPinned()` 与 `readManifest()`（`ui/components.js`）的 `fetch(url, {signal})`
   **不带任何 header**，要支持 token 必须改；来源项从字符串扩成对象时保持 `readSourceList()`
-  `:95` 的 `schema: 1` 兼容。零之四.4 之后**字节是目标机去取**（`download()`
+  的 `schema: 1` 兼容。零之四.4 之后**字节是目标机去取**（`download()`
   `agent/tools/components.py:710`，同样不带任何 header），所以 token 不光要给客户端，还得递到
   每一台要装的机器上——私有源至今是"没做"，不是"快有了"。
 - **撤销**：签名过的静态撤销列表（可选）。
@@ -397,12 +286,11 @@ PYTHONPATH=. python3 tests/rendezvous_test.py      # 寻址 + 停用位（`_disa
 PYTHONPATH=. python3 tests/tools_inst_test.py
 ```
 
-三条写入各由谁钉住（P3c 之后）：宿主侧是 `tests/components_api_test.py`（`/disable` 与
-`/enable` 两条路由、`absent`、坏名字 400、**裸开关 404**）与 `tests/rendezvous_test.py` 的
-`_disabled_probe()`（宿主自己的句子、清单仍列出它、**检出顶不上来**、启用后回到原样）；页面侧是
-`components-panel` 17–24 节、`components-view` 9 节、`components.test.js` 9 节（对着真
-supervisor）。一条纪律值得写在这里：**每条写入都要有"被拒之后什么都没变"的断言**（P3a 的
-零之三.6、P3c 的幂等），因为这三条路径动的都是别人的机器。
+三条写入各由谁钉住：宿主侧是 `tests/components_api_test.py`（安装/解析/门 + 两条开关路由 +
+裸开关 404）与 `tests/rendezvous_test.py` 的 `_disabled_probe()`（宿主自己的句子、清单仍列出它、
+**检出顶不上来**、启用后回到原样）；页面侧是 `components-panel`、`components-view` 与
+`components.test.js`（对着真 supervisor）。一条纪律写在所有写入上：**每条写入都要有"被拒之后
+什么都没变"的断言**（P3a 的零之三.6、P3c 的幂等）——这三条路径动的都是别人的机器。
 
 手动活体检查（会真的写字节，务必指到一次性 supervisor 上）：
 
@@ -413,14 +301,9 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 ```
 
 本机网络约束（硬条件）：`github.com` 的 HTTPS 不通（curl 28），`api.github.com` 可达。所以
-任何"从 Release 下载"的用法都必须有**本地目录 source** 的对照（`isRemote()` `:122` 为假时
-直接读文件），发布物只能用 `api.github.com` 的资产接口验证。
-
-已落到接缝上（本轮）：**镜像**在来源字符串变成 URL 的那一处（`components.js` 的 `sources()`）
-应用一次，`ui/net-fetch.js` 是唯一的门（`CLUTCH_SOURCE_MIRROR` → `settings.json` 的
-`source_mirror`），用户清单与调用方清单原样照用，摘要不动；读远程用 Electron 的 `net.fetch`
-（系统代理据此生效，`signal` 原样透传），宿主端点仍用全局 `fetch`（那是隧道两端的 127.0.0.1）。
-Android 上同一接缝只在取数时改写 URL，缓存身份与错误文案仍是原始 indexUrl。
+任何"从 Release 下载"的用法都必须有**本地目录 source** 的对照（`isRemote()` 为假时直接读
+文件），发布物只能用 `api.github.com` 的资产接口验证。镜像（`ui/net-fetch.js` 那一个门）绕开
+的正是这条约束，它的契约写在 `COMPONENTS.md` 第八节，不在本文件。
 
 ## 五、风险
 
@@ -429,15 +312,15 @@ Android 上同一接缝只在取数时改写 URL，缓存身份与错误文案�
 | 不可撤销的远端写入 | 装到别人的机器上，删是删掉字节、没有副本 | P3 已补反动词（`90140ea` + `11f6ce4`）：二次确认把"这不是回滚"说在明处（I5）；宿主只删**自己启动**的进程，其它一律拒绝并报 pid。**P3c 把风险分了两档**：三条写入里只有停用是撤得回来的，它因此是唯一不问的（I5 不是"全部都要问"，而是"不许把不可逆的说成可逆"） |
 | 版本语义断层 | 新旧两种"版本"形状并存 | P0 先统一；宿主落地自带清理，无需迁移脚本 |
 | 越权 | 工具集想让宿主执行它定义的行为 | 守 I3：只能引用宿主词汇，导入期断言会大声报错 |
-| 动态模式爆炸半径 | P4 改的是"模型看得到哪些工具" | 模式仍由宿主裁定（`registry.py:263` 的过滤保留），`chat` 语义不因插件变松 |
+| 动态模式爆炸半径 | P4 改的是"模型看得到哪些工具" | 模式仍由宿主裁定（`registry.py` 的过滤保留），`chat` 语义不因插件变松 |
 | 生态空转 | 有页面没插件 | 先跑通 4 个自家模块 + 一个工具集样本，再谈索引 |
 
 ## 六、为什么不需要自建服务器
 
-- 分发：sha256 钉死（`pinnedAsset()` `ui/components.js:316`）⇒ 托管方不可信也安全——而且钉子
+- 分发：sha256 钉死（`pinnedAsset()` `ui/components.js`）⇒ 托管方不可信也安全——而且钉子
   是在**取字节的那台机器**上兑现的（`accept()` `agent/tools/components.py:770` 量它取到的
-  字节）；asset 相对 source（`assetLocation()` `:129`）⇒ 换托管零成本。
-- 发现：来源列表是数据文件（`readSourceList()` `:95`），第 5 个模块 = 多一行 URL，宿主零代码改动。
+  字节）；asset 相对 source（`assetLocation()` `ui/components.js`）⇒ 换托管零成本。
+- 发现：来源列表是数据文件（`readSourceList()` `ui/components.js`），第 5 个模块 = 多一行 URL，宿主零代码改动。
 - 安装：`POST /api/components/install` 长在**目标机**的 supervisor 上，没有账号、配额、
   每机器注册表。
 - 只有"账号 / 付费 / 统计 / 集中发布"才逼出服务器，而每一项都与 I1 / I2 冲突，需单独决策。
@@ -445,34 +328,30 @@ Android 上同一接缝只在取数时改写 URL，缓存身份与错误文案�
 ## 七、待拍板
 
 1. ~~**P1 是否单独交付**~~ → **已决**：P1 单独一个只读提交（画不出安装按钮就不涉及 I5），
-   P2 同批紧跟（`8d11845`）。只读页面单独上线对用户价值低，但拆开让"什么时候开始能写"
-   在历史里一目了然。
+   P2 同批紧跟（`8d11845`）。
 2. **旧记录**：是否强制重装以统一版本形状（`install()` 会清掉旧版本目录，所以代价只是一次
    上传），或让两种形状长期并存。
 3. **索引仓库（P5）**：模块数 ≤4 时先不建。
 4. ~~**`DELETE` 不带版本号是什么意思**~~ → **已决（P3a）**：整个组件一起拿掉（"卸载这个
    组件"就是这个意思），返回 `removed:[…]` 说明删掉了哪几版；本来就没装 → `absent`，**不是
    错误**（要求已经成立）。`?version=` 指向没装的版本 → 拒绝。
-5. ~~**停用（`disable`）怎么表示、表示成什么**~~ → **已决（P3c）**：**都不选**。两个候选方案
-   （组件目录下的标记文件 / 改版本目录名）都被否掉——状态既不落进组件目录，也不在客户端，而是
-   进**持有组件那台机器的登记表**（`registry.json` 的组件级 `disabled`）。语义同时定了：清单
-   **仍列出**它（多带 `disabled:true`，否则"没装"和"不驱动"分不开）、`resolve()` 照旧解析出
-   那一版（字节能读）、工具**不出现**、重复切换幂等、**dev 检出也压得住**（拦截点放在
-   `unavailable_reason()`）。完整理由见 §零之四，落点与验收见 P3c。
-6. ~~**"目标机自取字节"什么时候做**~~ → **已决并已做**（§零之四.4）：宿主 `0899dc8`、页面
-   `abab8cb`。安装端点认两种形状（body 有字节 / 空 body + `artifact_url`），页面按"字节在哪"
-   选一条（`file.path ? upload : fetchInstall`，`ui/components.js:625`）。来源清单**不必两边都
-   读到**：URL 是客户端从清单里解出来的（`assetLocation` `ui/components.js:129`），跟着 manifest
-   递给目标机——目标机只认 URL，不认清单。已知边界：来源清单点名**磁盘上的**清单时，解出来的
-   工件位置也是本地路径，而宿主只取 http(s)（`download()` 拒绝 `file:`），这种来源今天装不上
-   （清单本身照读；`upload()` 兜底覆盖的是检出与预编译产物，不是镜像目录）。
+5. ~~**停用（`disable`）怎么表示、表示成什么**~~ → **已决（P3c）**：**都不选**。状态既不
+   落进组件目录，也不在客户端，而是进**持有组件那台机器的登记表**（`registry.json` 的组件级
+   `disabled`）。语义与理由见 §零之四.2 与 P3c。
+6. ~~**"目标机自取字节"什么时候做**~~ → **已决并已做**（§零之四.4）。安装端点认两种形状
+   （body 有字节 / 空 body + `artifact_url`），页面按"字节在哪"选一条（`file.path ? upload :
+   fetchInstall`）。来源清单**不必两边都读到**：URL 是客户端从清单里解出来的
+   （`assetLocation`），跟着 manifest 递给目标机——目标机只认 URL，不认清单。已知边界：来源
+   清单点名**磁盘上的**清单时，解出来的工件位置也是本地路径，而宿主只取 http(s)（`download()`
+   拒绝 `file:`），这种来源今天装不上（清单本身照读；`upload()` 兜底覆盖的是检出与预编译
+   产物，不是镜像目录）。
 
 ## 八、待办（本轮明确留着的缺口）
 
 | # | 缺口 | 影响 | 想修的话落在哪 |
 | --- | --- | --- | --- |
-| G1 | ~~本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步~~ → **已交付**：`ensureSupervisor` 注入 `ui/components-view.js:188`，本机安装先唤醒、再问；`wake` 是一段进度 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | 落地：`31d5ec6`（`ui/server-bootstrap.js` 导出、`ui/main.js:63` 注入、`ui/components-view.js:188` 唤醒、`ui/js/components-panel.js:407` 的 `wake` 文案）；守：`tests/components-view.test.js` 第 11 节、`tests/server-bootstrap.test.js` 收尾 |
-| G2 | ~~Android 宿主没有 `clutchComponents` handler~~ → **已交付**：`android/host/android-host.js:76-165` 建同一个 `ui/components-view.js`，六个动词 + `components:progress` | 手机上插件标签页每条读取都是一行错误 | 落地：`f9238b4`（`android/host/android-host.js`、`scripts/sync-android-host.sh` 的 `UI_NODE` 补 `components-view.js`）；守：`tests/bridge-server.test.js` 第 9 节、`tests/android-assets.test.js` |
+| G1 | ~~本机 supervisor 没在跑时，安装没有"先把它叫起来"这一步~~ → **已交付**：`ensureSupervisor` 注入 `ui/components-view.js`，本机安装先唤醒、再问；`wake` 是一段进度 | 本机第一次安装会以"supervisor 没回应"失败，用户得先让 app 启动它 | 落地：`31d5ec6`（`ui/server-bootstrap.js` 导出、`ui/main.js` 注入、`ui/components-view.js` 唤醒、`ui/js/components-panel.js` 的 `wake` 文案）；守：`tests/components-view.test.js` 第 11 节、`tests/server-bootstrap.test.js` 收尾 |
+| G2 | ~~Android 宿主没有 `clutchComponents` handler~~ → **已交付**：`android/host/android-host.js` 建同一个 `ui/components-view.js`，六个动词 + `components:progress` | 手机上插件标签页每条读取都是一行错误 | 落地：`f9238b4`（`android/host/android-host.js`、`scripts/sync-android-host.sh` 的 `UI_NODE` 补 `components-view.js`）；守：`tests/bridge-server.test.js` 第 9 节、`tests/android-assets.test.js` |
 | G3 | 宿主缺反动词（当初是卸载/停用/回滚三件） | 装上是单向的，页面只能靠文案诚实（I5） | **卸载已两头补齐**：宿主 `90140ea`、页面 `11f6ce4`；**停用/启用已补齐**：宿主 `9f53b9c`、页面 `1df203d`。**回滚不是功能**（§一）：回到旧版就是再装一次，页面不画它 |
 | G4 | `clutch-workspace/pyproject.toml` 0.2.0 与其 `component.json` 0.1.0 不一致 | 界面显示 0.1.0，包元数据说 0.2.0 | 模块仓库自身（结论见下） |
 | G5 | 纯声明包（`interface:"data"`）目前 400 | 工具集还递不进去 | P4 |
@@ -480,33 +359,22 @@ Android 上同一接缝只在取数时改写 URL，缓存身份与错误文案�
 G1 / G2 / G4 的答案是同一条：**按照 VS Code 的逻辑来**（零之四.5）。
 
 - **G1 — 让目标机自己的二进制按需把服务起起来**。VS Code 这边，远端 server 由 `code` CLI 的
-  tunnel 在需要时启动（`cli/src/tunnels/code_server.rs:322-350`：`bash -c "<server start
-  script> --install-extension=…"`——装扩展本身就是启动参数的一部分），所以"动手之前先保证那台
-  机器的服务在跑"是**那台机器的二进制的责任**，不是页面的。Clutch 的对应物是
-  `ui/server-bootstrap.js` 的 `ensureSupervisor`：一次安装应当能**唤醒空闲退出的 supervisor**
-  （本机那个是 `--idle-timeout 25` 起的，零之三.2）。
-  **已交付**（`31d5ec6`，形状见零之三.2）：桌面 shell 把 `ensureSupervisor` 注入
-  `ui/components-view.js`，`install()` 在**第一次需要目标机自己回答之前**唤醒它，起不来就交出
-  一句页面能画的话；读不唤醒、在自己就会拒的请求上不唤醒、只唤醒本机（隧道对端自己起自己的）。
-  手机端不传这个 dep——它没有本机 supervisor（N4），所以逐字不变。
+  tunnel 在需要时启动（`cli/src/tunnels/code_server.rs:322-350`：装扩展本身就是启动参数的一部分），
+  所以"动手之前先保证那台机器的服务在跑"是**那台机器的二进制的责任**，不是页面的。Clutch 的
+  对应物是 `ui/server-bootstrap.js` 的 `ensureSupervisor`：桌面 shell 把它注入
+  `ui/components-view.js`，`install()` 在**第一次需要目标机自己回答之前**唤醒它。三条界线：
+  **读不唤醒**、**在自己就会拒的请求上不唤醒**、**只唤醒本机**（隧道对端自己起自己的）。手机端
+  不传这个 dep——它没有本机 supervisor（N4），行为与从前逐字相同。
 - **G2 — 目标端注册同一个通道**。VS Code 的 server 端把同一组扩展管理命令注册进 RPC 通道
   （`src/vs/server/node/serverServices.ts:403-409`），客户端因此不需要为"远端"再写一套协议。
-  Clutch 的桌面端已经是这个形状（`clutchComponents` 在 preload 与 bridge-shim 里同名同参，
-  `tests/bridge-shim.test.js` 守）；缺的是 **Android 宿主**——`android/host/android-host.js` 与
-  `android/host/bridge-server.js` 里**一个 `clutchComponents` 命名空间都没有**，于是手机上每条
-  读取都结束于 `no such bridge method: clutchComponents.list`（零之三.3）。补法照 VS Code：
-  同一组名字、同一组参数，落在那台机器的宿主里。
-  **已交付**（`f9238b4`，形状见零之三.3）：`android-host.js` 实例化的是**同一个**
-  `ui/components-view.js`（桌面的那一个，不是副本），六个动词与桌面端逐字对齐，唯一差别是
-  bridge 路由不带窗口 id（这台机器只有一个窗口，N5），`install` 的进度写进
-  `components:progress` 那条 SSE。`supervisorBase: () => null` 保留 N4：手机没有本机
-  supervisor，"没有会话"于是说成 `this build has no supervisor URL for the local machine`——
-  一句页面能画的话，而不是一个缺方法（`tests/bridge-server.test.js` 第 9 节把这两种句子分开钉住，
-  并真的用隧道 base 去读一台假 supervisor 的清单/版本/开关/卸载，以及"字节不过手机"的
-  `artifact_url` 安装）。另加 `tests/android-assets.test.js`：`UI_NODE` 是手写清单，名字漏了不会
-  少个功能而是**宿主 require 不到、桥还没 bind 就死**（这正是一次真实事故的回声），所以
-  `useUI()` 的每个名字与它们的传递 `require` 都被这一条钉住。
-- **G4 — 版本一致性是模块仓库自己的事**。`clutch-workspace/pyproject.toml`（0.2.0）与
-  `component.json`（0.1.0）不一致，界面因此显示 0.1.0。宿主不该猜哪个对——猜错就是把一个发行
-  版本号写进安装事实。做法与 VS Code 对扩展 `package.json` 的态度一致：**声明就是版本**，
-  改在模块仓库，宿主照读（I1）。
+  Clutch 的桌面端已经是这个形状（`clutchComponents` 在 preload 与 bridge-shim 里同名同参）；缺的
+  **Android 宿主**已补上：`android-host.js` 实例化的是**同一个** `ui/components-view.js`（不是
+  副本），六个动词与桌面端逐字对齐，唯一差别是 bridge 路由不带窗口 id（这台机器只有一个窗口，
+  N5）；`supervisorBase: () => null` 保留 N4，"没有会话"于是说成 `this build has no supervisor
+  URL for the local machine`——一句页面能画的话，而不是一个缺方法。另加
+  `tests/android-assets.test.js`：`UI_NODE` 是手写清单，漏一个名字不是"少个功能"而是**宿主
+  require 不到、桥还没 bind 就死**（一次真实事故的回声），所以 `useUI()` 的每个名字与它们的
+  传递 `require` 都被这一条钉住。
+- **G4 — 版本一致性是模块仓库自己的事**。宿主不该猜哪个版本号对——猜错就是把一个发行版本号写进
+  安装事实。做法与 VS Code 对扩展 `package.json` 的态度一致：**声明就是版本**，改在模块仓库，
+  宿主照读（I1）。
