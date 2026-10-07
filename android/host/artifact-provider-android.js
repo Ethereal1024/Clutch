@@ -27,6 +27,27 @@ const path = require("path");
 const http = require("http");
 const https = require("https");
 
+// The shared ui/ modules this file uses: on the phone the copy synced beside it
+// wins (the nodejs-project layout, see scripts/sync-android-host.sh), and the repo
+// layout wins for the tests + a dev run straight from the checkout.
+function useUI(name) {
+  const local = path.join(__dirname, "ui", name);
+  return require(fs.existsSync(local) ? local : path.join(__dirname, "..", "..", "ui", name));
+}
+
+// The same mirror the component sources are read under (ui/net-fetch.js): one
+// setting moves every remote this app reads from, so a network where github.com is
+// only reachable through a proxy or an accelerator does not need a per-supply-line
+// answer. It rewrites the URL this DEVICE fetches and nothing else: the release's
+// own URL stays the identity, because the index cache is keyed by it and the stamp
+// names a tag — an index published for THIS APK's tag has to keep matching the copy
+// already on disk, mirror or not.
+const { mirrorPrefix, mirrored } = useUI("net-fetch.js");
+
+function fetchUrl(url) {
+  return mirrored(url, mirrorPrefix());
+}
+
 function defaultIndexUrl() {
   if (process.env.CLUTCH_PYLIBS_INDEX_URL) return process.env.CLUTCH_PYLIBS_INDEX_URL;
   try {
@@ -135,7 +156,7 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
   // surfaces — an unreachable release must never be dressed up as a catalogue.
   async function loadIndex(held) {
     try {
-      const index = await fetchIndex(indexUrl);
+      const index = await fetchIndex(fetchUrl(indexUrl));
       writeCachedIndex(indexUrl, index);
       return index;
     } catch (e) {
@@ -221,7 +242,7 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
         return { path: out, version: sha256(fs.readFileSync(out)).slice(0, 16) };
       }
       // the tar is ~30 MB: give the body transfer its own, longer stall window
-      const buf = await fetch(indexUrl.replace(/[^/]*$/, "") + entry.file, 0, TAR_TIMEOUT_MS);
+      const buf = await fetch(fetchUrl(indexUrl.replace(/[^/]*$/, "") + entry.file), 0, TAR_TIMEOUT_MS);
       const got = sha256(buf);
       if (got !== entry.sha256) {
         throw new Error(`pylibs artifact ${entry.file} failed sha256: expected ${entry.sha256}, got ${got}`);

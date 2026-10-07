@@ -101,6 +101,13 @@ Release 索引下载。四处改动：
    `ensurePyLibsTar(target)` 才给字节，只在真安装时调用（`ui/tunnel-bootstrap.js`
    的 `install:fetch` 阶段）。两者缺一，`setArtifactProvider` 直接拒绝。索引条目还会
    自校验 `version === sha256[0:16]`：条目自相矛盾时在下载任何字节之前就被拒。
+   **镜像同样作用于这条供给线**：索引与 tar 的取数 URL 都过一遍与组件来源同一处的接缝
+   （`ui/net-fetch.js` 的 `mirrorPrefix()`/`mirrored()`，前缀取 `CLUTCH_SOURCE_MIRROR`
+   env 或 `~/.clutch/settings.json` 的 `source_mirror`），于是 `github.com` 不可达时索引
+   与 tar 一起改从 `<镜像>/<原始绝对 URL>` 取。**改的只是取数的那一跳**：索引缓存仍以
+   原始 indexUrl 为键、缓存里存的 `url` 字段与错误文案也仍是原始 URL——盖章 tag 必须继续
+   和磁盘上那份对上，镜像今天有明天没有都不该让缓存失效，也不该让别的 release 的索引被
+   认领。手机上的 node 18 没有 Chromium 那层栈，代理仍不通（只有直连或镜像）。
 3. **CI**：`.github/workflows/release.yml` 增 `pylibs-matrix`（py3.10–3.13 ×
    x86_64/aarch64 × glibc/musl = 16 格，`pip download --platform` 纯下载，无需
    submodules/QEMU）+ `pylibs-index`（聚合校验：文件名哈希==内容哈希，生成

@@ -62,6 +62,43 @@ function serveArtifacts(tars) {
   });
 }
 
+// A stand-in accelerator: everything lives under /m/<the absolute url it asked
+// for>, routed by basename (a real one maps the URL; this one only has to record
+// what was asked for). Nothing outside /m/ is served, so a read that skipped the
+// mirror would show up as a 404 here rather than as a success.
+function serveMirror(indexJson, tars) {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.url);
+    const name = decodeURIComponent(req.url.split("?")[0]);
+    if (!name.startsWith("/m/")) {
+      res.writeHead(404);
+      return res.end("not here");
+    }
+    const base = name.split("/").pop();
+    if (base === "pylibs-index.json") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(indexJson));
+    }
+    const buf = tars.get(base);
+    if (!buf) {
+      res.writeHead(404);
+      return res.end("no such artifact");
+    }
+    res.writeHead(200, { "Content-Type": "application/gzip" });
+    res.end(buf);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        base: `http://127.0.0.1:${server.address().port}/m`,
+        seen,
+        close: () => new Promise((r) => server.close(r)),
+      });
+    });
+  });
+}
+
 async function main() {
   // 0. the unstamped dev fallback must name THIS repo. A placeholder host 404s,
   // and the provider then reports "that release carries no pylibs-matrix assets
@@ -276,6 +313,64 @@ async function main() {
     /req\.setTimeout\(timeoutMs/.test(PROVIDER_SRC),
     "a stalled artifact fetch is bounded by a socket timeout"
   );
+
+  // 10. one mirror setting moves every read this device makes, and the ORIGIN is
+  // never contacted. The origin here is the local release host from above, so a
+  // mirror that failed to apply is visible as a hit on it (a network timeout on
+  // github.com would only say "this machine is offline"). The mirror is a second
+  // server that answers under /m/ alone.
+  const mirrorTar = Buffer.from([0x1f, 0x8b, 0x07, 0x42]);
+  const mirrorHash16 = sha256(mirrorTar).slice(0, 16);
+  const mirrorFile = `agent-pylibs-linux-riscv64-glibc-py3.12-${mirrorHash16}.tar.gz`;
+  const mirror = await serveMirror(
+    { "linux-riscv64-glibc-py3.12": { file: mirrorFile, sha256: sha256(mirrorTar), version: mirrorHash16 } },
+    new Map([[mirrorFile, mirrorTar]])
+  );
+  const originBefore = srv.fetches.length;
+  process.env.CLUTCH_SOURCE_MIRROR = mirror.base;
+  try {
+    const viaMirror = createAndroidArtifactProvider({ indexUrl: srv.url });
+    const reached = await viaMirror.ensurePyLibsTar({
+      os: "linux",
+      arch: "riscv64",
+      libc: "glibc",
+      pyver: "3.12",
+    });
+    assert.strictEqual(reached.version, mirrorHash16, "the mirrored release supplies the gate value");
+    assert(fs.readFileSync(reached.path).equals(mirrorTar), "…and its bytes, sha256-verified as always");
+    assert.strictEqual(
+      srv.fetches.length,
+      originBefore,
+      "the origin was never contacted: every read this device made went through the mirror"
+    );
+    assert(
+      mirror.seen.length >= 2 && mirror.seen.every((u) => u.startsWith("/m/")),
+      "both the catalogue and the tar were read under the prefix"
+    );
+    assert(
+      mirror.seen.some((u) => u.startsWith(`/m/${srv.url}`)) ||
+        mirror.seen.some((u) => u.startsWith("/m/http://127.0.0.1:")),
+      "the prefix carries the source's own absolute URL, path preserved (so siblings still resolve)"
+    );
+
+    // 10a. the mirror moves the READ, not the identity. The catalogue is cached
+    // for, and stamped with, the URL the APK was built from — the tag is what has
+    // to keep matching the copy on disk, so a mirror present today and gone
+    // tomorrow must neither orphan the cache nor let another release's honour it.
+    delete process.env.CLUTCH_SOURCE_MIRROR;
+    const offlineOriginal = createAndroidArtifactProvider({
+      indexUrl: srv.url,
+      fetchIndex: () => Promise.reject(new Error("offline")),
+    });
+    assert.strictEqual(
+      await offlineOriginal.resolvePyLibsVersion({ os: "linux", arch: "riscv64", libc: "glibc", pyver: "3.12" }),
+      mirrorHash16,
+      "with the mirror off, the catalogue the mirrored run cached for the ORIGINAL url still answers"
+    );
+  } finally {
+    delete process.env.CLUTCH_SOURCE_MIRROR;
+    await mirror.close();
+  }
 
   await srv.close();
   fs.rmSync(HOME, { recursive: true, force: true });
