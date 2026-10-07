@@ -484,7 +484,8 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   `--fs-xs..--fs-xl`（`:126`）、`--radius`（`:127`）、`--danger`（`:131`）；手机端只在
   `ui/mobile.css:197` 的 `#settings-pane-plugins` 上改这几个值。注释同时写明**旧规则仍带自己的 px**
   （本轮之前的注释声称全表都遵守刻度，实际不是）。
-* **焦点环回归**：块里 4 处 `outline: none` 删掉，`:300` 的全局 `:focus-visible` 环重新照到这些控件。
+* **焦点环回归**：块里 4 处 `outline: none` 删掉，全局 `:focus-visible` 环重新照到这些控件。
+  （**0.1.37 有意回退，见 §十一**：文本框要的是一条线，环让同一个框上出现两条同色线。）
 * **表头不再被大写**：`.modal-box h4`（`:1031`）给所有 h4 加 `text-transform: uppercase`，于是机器名
   `SSH ubuntu@box` 读成 `SSH UBUNTU@BOX`——`.plug-section-title`（`:1195`）显式 `text-transform: none`：
   这是**数据**，不是标题。
@@ -597,3 +598,22 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 * 唯一缺的验证是**在浏览器里量**：本机没有 chrome/chromium，也没有 Xvfb 与 `DISPLAY`，
   所以两列与高度动画是 10.3 那套 stub 级"真代码 + 样式表事实"钉住的
   （`scripts/ui-render-bench/` 那条 headless 路径要的是同一套 chrome，因此也跑不了）。
+
+## 十一、0.1.37：文本框的焦点回到一条线（用户意见一条）
+
+* **看到的现象**：点进输入框，框自己的 1px 边框变成 accent，而全局 `:focus-visible` 环在边框外 2px
+  处又画一条 2px 的 accent 线——同色、中间还留着一段空隙，读起来就是"双线框"。来处是 §9.4 那条
+  "焦点环回归"：0.1.34 把块里 4 处 `outline: none` 删了，环就照到了这四个控件上（`#task-input`、
+  `.modal-box input`、`#plug-filter .plug-filter-name`、`.fs-conn-row select`）。
+* **为什么不能"只给键盘留环"**：`:focus-visible` 何时匹配由浏览器定，而"可以打字的框"在浏览器看来
+  **无论怎么聚焦都值得标记**（MDN 的 `:focus-visible` 条目就拿它当例子），鼠标点进去照样匹配。CSS
+  里没有"鼠标点不给、键盘给"这个表达，所以单线只有一条做法：不画环。
+* **本轮的取舍**：回到一条线。环的名单里不再有文本框（现在只留 `button:focus-visible` 与
+  `select:focus-visible`），三处 `:focus` 规则各自 `outline: none; border-color: var(--accent)`
+  ——`#task-input`、`.modal-box input`、`.fs-conn-row select`；插件页的 filter 框吃 `.modal-box
+  input:focus` 这一条，不再自带规则。代价写在这里不含糊：**这些框在键盘下也不再有任何框外提示**，
+  只剩下边框变色；要"键盘有环"就是 0.1.34 的形状，与单线不可兼得（第三条路是让环贴住边框合成一条
+  3px 的线）。用户看过这三条路后选了完全回到旧观感。
+* **测试**：`tests/settings-tabs-test.js` 第 8 组补 4 条样式表断言——环的名单里没有文本框、composer 与
+  modal 的字段各自 `outline: none` + 边框 accent、host row 的 select 跟随。42 个 node 测试 + 21 个
+  python 模块全绿（新的 4 条在旧样式表上会红，即它们钉的是本轮改变的那件事）。

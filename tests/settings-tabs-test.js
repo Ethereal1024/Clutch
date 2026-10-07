@@ -327,6 +327,28 @@ function makePage(opts) {
     "and the plugin pane opens hidden with its tab saying so (aria-selected=false), the state the first switch moves away from"
   );
   check(!/id="settings-pane-llm"[^>]*hidden/.test(html), "while the model pane is the one showing");
+
+  // the focus look of a box you type in is ONE line: the border goes accent and no
+  // ring is drawn around it, because the ring cannot be handed to the keyboard alone
+  // (a browser marks a text field however it was focused, so a ring here is a second
+  // accent line 2px outside the first on every click). These four say the look is
+  // still that one, in the sheet and in the markup that reads it.
+  check(
+    !/#task-input:focus-visible|\.modal-box input:focus-visible/.test(css),
+    "the ring's list does not name a text box: a field marks focus with its lit border, not with a second accent line 2px outside it"
+  );
+  check(
+    /outline: none/.test(decls(css, "#task-input:focus")) && /border-color: var\(--accent\)/.test(decls(css, "#task-input:focus")),
+    "the composer turns the outline off and lights its own border instead, so the pointer and the keyboard get the same single line"
+  );
+  check(
+    /outline: none/.test(decls(css, ".modal-box input:focus")),
+    "and every field in a modal says the same — the plugin tab's filter box is one of those boxes, not a case of its own"
+  );
+  check(
+    /outline: none/.test(decls(css, ".fs-conn-row select:focus")),
+    "the picker's host row keeps up with them, which is why the picker's other selects are the only ones the ring still reaches"
+  );
 }
 
 summary("settings-tabs: the settings modal's tabs and the box that follows them");

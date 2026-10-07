@@ -297,7 +297,11 @@ button {
 button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
 button:active:not(:disabled) { transform: translateY(1px); }
 button:disabled { opacity: 0.4; cursor: default; }
-button:focus-visible, #task-input:focus-visible, .modal-box input:focus-visible, select:focus-visible {
+/* a control whose own box cannot say "focus" wears this ring. Every text box is
+   deliberately absent from the list: a field says it with a lit border — one line,
+   and it could not be split by input modality anyway. The look and the reason live
+   at `#task-input:focus` below, and the modal's fields repeat it. */
+button:focus-visible, select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -454,14 +458,15 @@ main { display: flex; flex: 1; min-height: 0; }
   resize: none; /* height is owned by the auto-grow JS, not the user */
   transition: height .18s ease;
 }
-/* The focus ring is :focus-visible's, never :focus's. Every rule below used to
-   say `outline: none` next to its own border colour, which cancelled the global
-   ring for KEYBOARD focus too (`:focus` and `:focus-visible` carry the same
-   weight, and the local rule came later) — so a keyboard user got one 1px border
-   going red and the ring in this sheet was dead code. The border colour stays on
-   `:focus`: the box may light up under the pointer, the RING is what says the
-   keys are here. */
-#task-input:focus { border-color: var(--accent); }
+/* A text box says "focus" with ONE line: its own border goes accent, and the ring
+   in this sheet is not worn here (that list is up at the top of the button block).
+   Nor could the ring be split by modality: a browser treats "a box you may type in"
+   as always worth marking, so `:focus-visible` matches a field however it was
+   focused — the ring would be a second accent line 2px outside the lit border on
+   every click of every field, not only under the keyboard. `outline: none` is what
+   keeps the UA's own ring out of the way; the modal's fields and the picker's host
+   row are the same look, two rules below. */
+#task-input:focus { outline: none; border-color: var(--accent); }
 .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 /* the row is space-between: give the path the slack and ellipsize it — a long
    cwd must never stretch the actions row (on the phone it painted past the
@@ -1025,7 +1030,9 @@ mjx-container[display="true"] {
   font-size: 14px;
   margin-bottom: 14px;
 }
-.modal-box input:focus { border-color: var(--accent); }
+/* the same one-line focus as `#task-input:focus`, for every field in a modal — the
+   plugin tab's filter box is one of these boxes, not a case of its own */
+.modal-box input:focus { outline: none; border-color: var(--accent); }
 .modal-box p { margin: 10px 0 0; line-height: 1.5; }
 .modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
 .modal-box h4 { margin: 20px 0 12px; font-size: 13px; font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); }
@@ -1189,9 +1196,9 @@ mjx-container[display="true"] {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
 }
-/* the box's focus look is `.modal-box input:focus` a few hundred lines up: the
-   border lights up, and the RING stays :focus-visible's (this rule used to say
-   `outline: none` at a weight that outranked the global ring) */
+/* the box's focus look is `.modal-box input:focus` up in the modal block: the lit
+   border and no ring, like every other field in that box. It is a field in the box,
+   not a case of its own — this spot used to carry a rule of its own for it. */
 .plug-section { margin-bottom: var(--s4); }
 /* the section head is the MACHINE's name — DATA, not a field label — so it is the
    one heading on this page that must not be set in caps. `.modal-box h4` uppercases
@@ -1431,7 +1438,10 @@ mjx-container[display="true"] {
   font-family: var(--font-mono);
   font-size: 13px;
 }
-.fs-conn-row select:focus { border-color: var(--accent); }
+/* the picker's host row wears the same one-line focus as the text boxes above
+   (this rule outranks the ring's `select:focus-visible`, which the other selects
+   in the sheet — `.modal-box > select` — still use) */
+.fs-conn-row select:focus { outline: none; border-color: var(--accent); }
 .fs-conn-row select:disabled { opacity: 0.4; cursor: default; }
 .fs-conn-row button {
   white-space: nowrap;
