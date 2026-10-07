@@ -72,6 +72,29 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   以及可选的用户清单 `~/.clutch/components.sources.json`（**用户清单先读，先命名一个
   组件的那个说了算**，用户因此能覆盖某个模块、或在宿主不认识的地方挂上自己的发行版）。
   这就是加第五个模块的全部代价：多一条 URL，宿主代码一行不用改。
+- **自带清单可以整体走镜像**：自带清单里是四条 `github.com` URL，而"某些网络下
+  `github.com` 根本不可达"是实测（能通的往往只有 `api.github.com`）。所以在一个来源
+  **变成 URL 的那一处**（`ui/components.js` 的 `sources()`）应用一次前缀：
+  `<镜像>/<原始绝对 URL>`，路径原样保留——因为清单里其余地址都是它的**兄弟**（见上文
+  "声明是位置而不是内容"），于是**声明**与**目标机自取工件**的那条 URL 一起跟着走。
+  前缀取 `CLUTCH_SOURCE_MIRROR` 环境变量，其次取 `~/.clutch/settings.json` 的
+  `source_mirror`（桌面 GUI 继承不到环境变量，控件留待后续轮，手上先能手改）：
+
+  ```jsonc
+  // ~/.clutch/settings.json
+  { "source_mirror": "https://ghfast.top" }   // 或 CLUTCH_SOURCE_MIRROR=https://ghfast.top
+  ```
+
+  非 http(s) 的前缀**丢弃**而不是照用（照用会把 http 来源改写成不是 URL 的东西，
+  报出来却是"网络失败"）。用户自己写的清单与调用方显式传入的清单**原样照用**：写的人
+  已经写清了要从哪读，一个局域网索引不该被送去公网加速器。镜像只搬字节、不为字节背书：
+  摘要仍按 release 自己的 pin 校验，镜像换了字节就是那一条被拒。
+- **代理用的是运行时的栈**：桌面端读远程清单/工件走 Electron 的 `net.fetch`（Chromium
+  默认 session 的栈，机器的系统代理配置据此生效），而不是 node 的全局 `fetch`——后者
+  不认 `HTTPS_PROXY` 之类的名字，于是"读一个源"会一直挂到自己的超时，界面上只看到源
+  "什么都没答"。这个选择只在 `ui/net-fetch.js` 一处，超时的 `AbortSignal` 原样透传；
+  宿主端点（`hostJSON`/`postInstall`）**不**经过它——那是 SSH 隧道两端的 127.0.0.1，
+  走代理等于绕回本机。手机上的 node 18 没有这层栈，只有直连或镜像（`android/README.md`）。
 
 ## 二、组件级字段
 

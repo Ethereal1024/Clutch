@@ -69,6 +69,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { resolveBash, platformTag, isPackagedApp, fileHash, treeHash } = require("./server-bundle");
+// Which fetch a remote read uses, and the mirror the shipped source list is read
+// under — both are "the network this app runs on", see ui/net-fetch.js.
+const { netFetch, mirrorPrefix, mirrored } = require("./net-fetch");
 
 const REPO = path.join(__dirname, "..");
 const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
@@ -108,11 +111,20 @@ function readSourceList(file) {
 // that ships, so a user can override a module this build knows by naming their
 // own, and the shipped list is the fallback. A caller that names its own list
 // (a packager pointing a build at a mirror, a test) gets exactly that list.
+//
+// The SHIPPED list is the one a mirror rewrites (ui/net-fetch.js): it is the one
+// that points at github.com, and the one a packaged app cannot be asked to edit.
+// The user's own list and a caller's are read literally — a list that was written
+// by hand already says where it means to read from.
 function sources(explicit = null) {
   if (Array.isArray(explicit)) return explicit.filter((s) => typeof s === "string" && s);
   const out = [];
   for (const file of [USER_SOURCES_FILE, SOURCES_FILE]) {
-    for (const s of readSourceList(file)) if (!out.includes(s)) out.push(s);
+    const mirror = file === SOURCES_FILE ? mirrorPrefix() : "";
+    for (const s of readSourceList(file)) {
+      const u = mirrored(s, mirror);
+      if (!out.includes(u)) out.push(u);
+    }
   }
   return out;
 }
@@ -158,7 +170,7 @@ async function readManifest(source) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
   try {
-    const r = await fetch(source, { signal: ctl.signal });
+    const r = await netFetch()(source, { signal: ctl.signal });
     if (!r.ok) throw new Error(`the source answered ${r.status}`);
     return parseManifest(await r.json(), source);
   } finally {
@@ -293,7 +305,7 @@ async function downloadPinned(url, sha256, dest, timeoutMs = REQUEST_TIMEOUT_MS)
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   const tmp = `${dest}.${process.pid}.tmp`;
   try {
-    const r = await fetch(url, { signal: ctl.signal });
+    const r = await netFetch()(url, { signal: ctl.signal });
     if (!r.ok) throw new Error(`the artifact answered ${r.status}`);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
