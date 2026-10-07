@@ -586,3 +586,14 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 * 收尾全绿：42 个 node 测试 + 21 个离线 python 模块（`.venv/bin/python -m tests.<name>`），以及
   `scripts/sync-android-host.sh` 后的 `node tests/android-assets.test.js`（手机资产与桌面同字节；
   `android/app/src/main/assets/` 是生成物，不入库）。
+
+### 10.4 发布
+
+* 宿主 0.1.36：`VERSION` + `ui/package.json` + `ui/package-lock.json` 三处 bump，
+  `chore(release): 0.1.36`，tag `v0.1.36`；CI（`.github/workflows/release.yml`，只在 `push tags: v*`
+  触发）出 deb / dmg / win / apk 并挂到 release。
+* 本轮**没有**组件版本变化：`clutch-skills` 仍是 0.1.1，宿主对来源只持
+  `ui/components.sources.json` 里的 `releases/latest`，所以为它一行都没改。
+* 唯一缺的验证是**在浏览器里量**：本机没有 chrome/chromium，也没有 Xvfb 与 `DISPLAY`，
+  所以两列与高度动画是 10.3 那套 stub 级"真代码 + 样式表事实"钉住的
+  （`scripts/ui-render-bench/` 那条 headless 路径要的是同一套 chrome，因此也跑不了）。
