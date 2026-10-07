@@ -520,3 +520,69 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 * 模态级 Escape 与焦点陷阱：`ui/js/settings.js` 的 Escape 只在 confirm 可见时响应，
   `ui/js/conn-lost.js:138` 自己吞掉 Escape；其余 7 个 modal 仍没有 `role="dialog"`。
   这一轮把设置弹窗与两个 pane 的语义补齐了，剩下的是"焦点该停在哪儿"这一整件事，另开一轮做。
+
+## 十、0.1.36：行里两列，切页时高度跟着走（用户意见两条）
+
+用户装出 0.1.35 后看的是两件事：**行内文字与按钮上下堆叠**——"文字右侧有较大空白，按钮左侧也有
+较大空白"，要的是 VS Code 那种左右分布；**Model 与 Plugins 两个标签切换太生硬**，要的是文件浏览
+界面那种"窗口高度的变化平滑动画"。两条都只动插件面板与设置弹窗的外形，安装层、契约与 §零之四的
+冻结决定一条都不碰。
+
+### 10.1 一行 = 两列（用户第 1 条）
+
+* 症状的算法：行是块级流，`plug-row-head`（名字 + 状态标记）与控件行各自独占一行，于是**两行各比
+  对方宽的那一条短**——短的那条右侧（文字）与另一条的左侧（按钮）各留一片空白，正是用户指出的两处。
+* 依据仍是同一处行模板（`extensionsList.ts:70-159`）：名字与一句话是一列，行内动作区是同一水平线上
+  的另一列，两列之间没有"谁占一行"这回事。
+* 落地（`ui/js/components-panel.js` 的 `plugRow()`）：新增 `div.plug-row-main` 把 head / 状态行 /
+  一句话 / 进度行包成**一列字**；控件行 `.plug-row-actions` 与版本盒仍是行的直接子节点，**顺序不变**
+  （字在前、控件在后、版本盒最后），所以"`.plug-row-actions` 首子节点 = 主按钮"这条既有断言、
+  `aria-describedby` 的书写顺序与 sr-only 节点的位置都不动。
+* 落地（`ui/style.css`）：`.plug-row` 改成 `display:flex; flex-wrap:wrap; align-items:center;
+  gap: var(--s2) var(--s3)`；`.plug-row-main{flex:1 1 0%;min-width:0}`——**按"剩下的宽度"分，不按
+  句子长度分**：给字那一列 `flex-basis: auto`，长一点的句子照样把控件挤到下一行，那正是被替换掉的
+  形状；`.plug-row-actions{flex:none;margin-left:auto}`——控件不参与收缩（会动的目标不是目标），
+  并被钉在行的右缘，无论字那一列多长；版本盒 `flex:1 1 100%` 明确独占一行（它是行的第三个 flex
+  子节点，不写这一条就要和上面两列抢宽度）。
+* 手机：`ui/mobile.css` 里 `.plug-row-actions{flex:1 1 100%}` **恢复上下堆叠**——四个控件加起来约
+  290px，而手机上内宽只有 288px，横排只会换行成两层半；手机上还原成改动前的形状，不算回归。
+
+### 10.2 切页时弹窗的高度（用户第 2 条）
+
+* 两个 pane 长短不同，而 `#settings-modal .modal-box` 只有"正在显示的那个 pane"那么高（§八 8.3 定下
+  的形状），所以一次标签点击会**整框换高度**；换在一帧里发生，读起来像"来了第二个框"，而不是"我站的
+  这个框重新长开"。
+* 修法**不是** CSS transition，理由写在 `ui/js/settings.js` 的注释里，这里记一遍：
+  1. 那个高度不属于任何单独元素——它是"当前 pane + 框自己的 chrome"，没有可过渡的属性宿主；
+  2. **它在切换之后还在动**：插件 pane 由一个回答两次的读填（先机器、后市场），列表是切换**之后**
+     才到的。transition 只能瞄准点击那一瞬间量到的高度，走完再看就跳一下；
+  3. `height: auto` 与长度之间不可插值，而"中途第二次点击"要能改目标——rAF 每帧重设目标即可，一个
+     跑着的 transition 只能被取消，表现为一顿。
+* 落地：`SETTINGS_HEIGHT_MS = 300`（与文件浏览界面 `#fs-body` 的 `max-height .3s ease` 同长——同一类
+  跳跃用同一种走法；注释与测试都钉住这个等式）；`settingsBoxWants()` 临时清空内联高度再读回自然高度
+  （同一 task 内不绘制，框不会真的被画成那个高度）；`settingsHeightStop()` / `settingsHeightEase()`
+  （`1-(1-p)³`，ease-out）/ `settingsHeightStep()`。`showSettingsTab()` 的顺序是刻意的：先读**此刻**的
+  高度（可能正处在上一段动画中途，于是第二次点击从当前位置续上，而不是先弹回某个 pane 自己的高度）
+  → 停上一段 → 锁住这个高度 → 切 pane 与类名 → **下一帧**才开始走（插件 pane 的 reading 态是同一
+  task 里另一个监听画的，要去的那个高度得是它量出来的）→ 到位即把内联高度交还样式表，此后任何重排
+  （列表补齐、拖窗口）都是一帧的事。
+* 两条早退：`reducedMotion()`（样式表的 reduce 块只关 CSS 过渡与动画，管不到 rAF，必须显式判）与
+  "量到的高度为 0"（弹窗还没打开就是 `display:none`，而 `openSettings()` 正是从这里切第一次 tab）。
+
+### 10.3 测试
+
+* 新增 `tests/settings-tabs-test.js`（node 套件 41 → 42）：把 `SETTINGS_TABS` 到 `showSettingsTab()`
+  的**真代码**从页面自己声明的脚本清单里切出来，在 stub document 与假帧时钟上跑，问的都是"截图看不
+  出"的事实：切换瞬间锁住旧高度、动画**下一帧**才起步、pane 在飞行中变长时框跟着长且从不回退、
+  到达后高度交还样式表、第二次点击从当前高度续接、点同一枚 tab 不产生运动、未打开的弹窗与
+  reduce-motion 都只切 pane 而不走高度。样式表侧在同一次跑里钉住四条：`.modal-box` 没有任何
+  `transition`（CSS 不与这个逐帧高度抢）、框本身不滚（滚的是 pane，而框才是被量的那个）、
+  `SETTINGS_HEIGHT_MS` 恰等于 `#fs-body` 的过渡时长、`ui/index.html` 的 tab / tabpanel 开屏时就已经
+  彼此一致（切页只搬一个类 + 写 `aria-selected`，起点不一致等于开屏就说谎）。
+* `tests/components-panel.test.js` 第 35 组随行结构更新（新 helper `mainOf()`；`nameOf()` 不再假设
+  名字是行的首子节点——版本盒是本行最后一个子节点，遍历顺序保证先拿到本行的名字），并补了**样式表
+  侧**的四条：行是一条 wrap 的 flex 线、字那一列按剩余宽度分且可截断、控件那一列不缩且贴右、手机上
+  重新堆叠。
+* 收尾全绿：42 个 node 测试 + 21 个离线 python 模块（`.venv/bin/python -m tests.<name>`），以及
+  `scripts/sync-android-host.sh` 后的 `node tests/android-assets.test.js`（手机资产与桌面同字节；
+  `android/app/src/main/assets/` 是生成物，不入库）。

@@ -128,9 +128,27 @@ function rowOf(el) {
   return cur;
 }
 
+// a row is TWO columns now (ui/js/components-panel.js): the words in
+// `.plug-row-main` and the controls in `.plug-row-actions` beside them. So the
+// name is no longer the row's first child — it leads the words column instead.
+// Walking finds the row's OWN name first: the versions box (the row's last child)
+// is the only place a nested row can appear.
+function nameOf(row) {
+  return walk(row).find((n) => /(^| )plug-name( |$)/.test(n.className)) || null;
+}
+// the row's name LINE: the name and the marks that belong beside it
+function headOf(row) {
+  return walk(row).find((n) => /(^| )plug-row-head( |$)/.test(n.className)) || null;
+}
+// the words column itself
+function mainOf(row) {
+  return row.children.find((c) => /(^| )plug-row-main( |$)/.test(c.className)) || null;
+}
+
 function ownerName(el) {
   const row = rowOf(el);
-  return row ? textOf(row.children[0].children[0]).trim() : "";
+  const name = row && nameOf(row);
+  return name ? textOf(name).trim() : "";
 }
 
 // the row that NAMES this component (a version row names a version, not a
@@ -138,16 +156,18 @@ function ownerName(el) {
 // right now — a write in flight, or the host's verdict on the last one.
 function rowNamed(body, name) {
   return (
-    walk(body).find(
-      (n) => /(^| )plug-row( |$)/.test(n.className) && textOf(n.children[0].children[0]).trim() === name
-    ) || null
+    walk(body).find((n) => {
+      if (!/(^| )plug-row( |$)/.test(n.className)) return false;
+      const nm = nameOf(n);
+      return Boolean(nm) && textOf(nm).trim() === name;
+    }) || null
   );
 }
 
 function stateOf(body, name) {
   const row = rowNamed(body, name);
   if (!row) return null;
-  return row.children.find((c) => /(^| )plug-state( |$)/.test(c.className)) || null;
+  return walk(row).find((c) => /(^| )plug-state( |$)/.test(c.className)) || null;
 }
 
 const IDS = ["plug-body", "plug-target", "plug-base", "plug-note", "plug-reload", "plug-filter", "settings-tab-plugins"];
@@ -606,7 +626,7 @@ const CODE = mod ? mod.code : "";
     check(/drive clutch-workspace on Local \(this machine\) again/.test(held.switches()[0].title), "and its title names the machine it drives again");
     check(/its bytes stay where they are/.test(held.switches()[0].title), "still saying the bytes are what does not move");
     check(
-      /^clutch-workspace stopped$/.test(textOf(rowNamed(held.body(), "clutch-workspace").children[0])),
+      /^clutch-workspace stopped$/.test(textOf(headOf(rowNamed(held.body(), "clutch-workspace")))),
       "the row carries a 'stopped' chip beside the name"
     );
     check(
@@ -1162,19 +1182,20 @@ const CODE = mod ? mod.code : "";
   //     Everything a row used to spell out — the held version, its digest, the
   //     source path, the offered version, the release under it — is on the row's
   //     `title=` (U-10) and in the Versions disclosure, which is what VS Code does
-  //     with the same material: the list is name + description + controls
-  //     (extensionsList.ts:70-90; media/extension.css `.description`), and the
-  //     rest is the extension's own page.
+  //     with the same material: the list is name + description in one column and
+  //     the controls in the column beside them (extensionsList.ts:70-90, whose
+  //     ActionBar sits beside `.details`; media/extension.css `.description`), and
+  //     the rest is the extension's own page.
   {
     const p = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" }] });
     await p.open();
     const row = rowNamed(p.body(), "clutch-workspace");
-    check(row.children[0].children[0].textContent === "clutch-workspace", "the row leads with the component's name");
+    check(nameOf(row).textContent === "clutch-workspace", "the row leads with the component's name");
     const descs = walk(row).filter((n) => /(^| )plug-row-desc( |$)/.test(n.className));
     check(descs.length === 1 && descs[0].textContent === "installed — nothing newer is offered here", "then ONE sentence about this row's state");
     check(!/5f900739|digest|\/home\/|checkout|release/.test(drawnText(row)), "and nothing else: no version, digest, path or origin is drawn in the row");
     check(
-      textOf(row.children[0]).length + descs[0].textContent.length < 80,
+      textOf(headOf(row)).length + descs[0].textContent.length < 80,
       "the row's own words (name and sentence) stay inside one short line"
     );
     check(
@@ -1184,12 +1205,48 @@ const CODE = mod ? mod.code : "";
         /clutch-workspace/.test(row.title),
       "the facts it no longer draws are on its title, one hover away"
     );
+    const main = mainOf(row);
     const foot = row.children[row.children.length - 1];
     check(
       /(^| )plug-row-actions( |$)/.test(foot.className) && /plug-switch/.test(foot.children[0].className),
-      "and its controls are their own line under the sentence (VS Code's `.footer`)"
+      "and its controls are the column beside the words (VS Code's ActionBar)"
     );
-    check(row.children.indexOf(descs[0]) < row.children.indexOf(foot), "which comes after the sentence, not beside the name");
+    check(
+      Boolean(main) && walk(main).includes(descs[0]) && main.children.indexOf(headOf(row)) === 0,
+      "the words — name line and sentence — are the row's ONE column"
+    );
+    check(
+      row.children.indexOf(main) < row.children.indexOf(foot),
+      "and the controls come after them, in the direction the page reads"
+    );
+    // ...and the split is a claim about the SHEET as much as about this DOM: two
+    // children side by side in a block container are still two stacked blocks, so
+    // the row is only two columns because of what ui/style.css says about them. The
+    // words column is the one that yields, the controls are the column that never
+    // does (a target that shrinks is a target that moves).
+    const css = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
+    const decls = (sel) => {
+      const m = css.match(new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}"));
+      return m ? m[1].replace(/\s+/g, " ").trim() : "";
+    };
+    const rowRule = decls(".plug-row");
+    check(
+      /display: flex/.test(rowRule) && /flex-wrap: wrap/.test(rowRule) && /align-items: center/.test(rowRule),
+      "the row is one wrapping flex line with its two columns centred against each other, not two stacked blocks"
+    );
+    check(
+      /flex: 1 1 0%/.test(decls(".plug-row-main")) && /min-width: 0/.test(decls(".plug-row-main")),
+      "the words take the room that is LEFT rather than the width they ask for, and yield it by truncating"
+    );
+    check(
+      /flex: none/.test(decls(".plug-row-actions")) && /margin-left: auto/.test(decls(".plug-row-actions")),
+      "while the controls keep their size and are pinned to the row's right edge, whatever the sentence did"
+    );
+    const mobile = fs.readFileSync(path.join(__dirname, "..", "ui", "mobile.css"), "utf8");
+    check(
+      /\.plug-row-actions\s*\{[^}]*flex: 1 1 100%/.test(mobile),
+      "and on a phone that column takes a line of its own again — four controls do not fit beside a name in 288px"
+    );
 
     // ...and the facts the row no longer DRAWS are still reachable without a
     // pointer: a `title=` needs a mouse resting on the row, so the same sentence

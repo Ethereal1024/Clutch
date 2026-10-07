@@ -1071,6 +1071,11 @@ mjx-container[display="true"] {
 #settings-modal .modal-tabs,
 #settings-modal .modal-actions { flex: none; }
 #settings-modal .modal-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* the box's height is the pane's height plus this box's chrome, and its two panes
+   are different lengths — so switching tabs resizes the box. ui/js/settings.js
+   drives that height from there, one frame at a time, and the reason it cannot be
+   a rule here is that the height keeps moving after the tab lands: the plugin pane
+   is filled by a read that answers twice (the machine, then the market). */
 
 /* settings modal: the tab strip over its two panes. The strip is the modal's own
    chrome, so it takes no field spacing and its active rule sits ON the line. */
@@ -1205,13 +1210,33 @@ mjx-container[display="true"] {
   text-transform: none;
   color: var(--muted);
 }
-/* one row: a name line — the component's name and the state marks that belong
-   beside it — ONE sentence under it, and the row's controls on their own line
-   under both. That is VS Code's row (`extensionsList.ts:70-90` renderTemplate:
-   `.header-container` with the name, `.description`, then `.footer`; and
-   media/extension.css gives `.header-container` a fixed height of 20px with the
-   name nowrap + ellipsis), minus the 36px icon. */
-.plug-row { padding: var(--s2) 0; border-top: 1px solid var(--border); }
+/* one row: the WORDS down the left — a name line (the component's name and the
+   state marks that belong beside it) with ONE sentence under it — and the row's
+   controls in a column of their own on the right. That is VS Code's row
+   (`extensionsList.ts:70-159` renderTemplate: `.header-container` with the name
+   inside `.details`; `media/extension.css` gives `.header-container` a fixed
+   height of 20px with the name nowrap + ellipsis, and makes the row itself
+   `display: flex` with `.details` as the column that takes `flex: 1`), minus the
+   36px icon. VS Code's ActionBar ends up on the right as well, but on the row's
+   LAST line: it is built inside `.details > .footer` (`extensionsList.ts:89-91`)
+   and pushed to that line's end by the publisher taking the room before it
+   (`media/extension.css`: `.footer` is `justify-content: flex-end`). We draw no
+   publisher, so the controls are the column of their own, centred on the words.
+   The row wraps for the one thing that belongs UNDER both: the version box
+   below. */
+.plug-row {
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+}
+/* the words: EVERYTHING the row says is in here, so the column as a whole is what
+   yields width — `flex-basis: 0`, not the sentence's own length, or one long
+   sentence would push the controls onto a line under it (which is the shape this
+   replaced). `min-width: 0` is what lets the name inside it truncate at all. */
+.plug-row-main { flex: 1 1 0%; min-width: 0; }
 .plug-row-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: nowrap; overflow: hidden; }
 /* the name takes the room the state marks leave and gives up its tail first: it is
    the one thing on the row that must never be the part that gives way */
@@ -1233,11 +1258,20 @@ mjx-container[display="true"] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* the controls: the row's OWN line, right-aligned, the way VS Code's ActionBar
-   sits in the list item's `.footer` — beside the name they would fight it for
-   width, which on a phone is a fight the name loses */
+/* the controls: the row's SECOND column, on the right of the words — which is the
+   half of VS Code's row that matters here (its ActionBar is the union of the
+   actions the item offers and it takes the right end as well; it is built inside
+   `.details > .footer`, `extensionsList.ts:89-91`, because VS Code has a publisher
+   line to share that line with — we draw none, so the controls are a column of
+   their own, centred on the words). `flex: none` is the
+   point of the split — a target is never the part of a row that gives way, so the
+   sentence beside it truncates instead (and the height floor below keeps every
+   button in it the same size). `margin-left: auto` pins the column to the row's
+   right edge whatever the words did. On a phone this column takes a line of its
+   own again (ui/mobile.css). */
 .plug-row-actions {
-  margin-top: var(--s2);
+  flex: none;
+  margin-left: auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1321,8 +1355,10 @@ mjx-container[display="true"] {
 /* the version list under one held row: it belongs to the row ABOVE it, so it is
    set in from that row behind a hairline down its left — a nested list, never a
    second row of the same rank. Without this the versions it names read as
-   components of their own. */
-.plug-versions-box { margin: var(--s2) 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
+   components of their own. It is the row's third flex child and takes a line of
+   its own whatever the two columns above it measure (`flex-basis: 100%`); the
+   row's own row-gap is what spaces it from them. */
+.plug-versions-box { flex: 1 1 100%; margin: 0 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
 .plug-caution { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* the name is the row's loudest mark, and it has to read that way against the
    sentence under it and the two grey lines below both: VS Code's `.name` is the

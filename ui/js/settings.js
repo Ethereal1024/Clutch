@@ -332,15 +332,102 @@ function closeSettings() {
 // are no arrow keys — with two of them, Tab reaches the other one, which is what a
 // reader expects anyway.
 const SETTINGS_TABS = ["llm", "plugins"];
+
+// ---- the box follows its pane ----
+// The two panes are different lengths and the box is only as tall as the one that
+// is showing, so a tab click resizes the whole modal. With nothing between the two
+// heights that lands in ONE frame, and a box jumping from 300px to 720px reads as
+// a second box arriving rather than as the one you were standing in refilling —
+// the file picker smooths the same jump for the same reason (`#fs-body`'s
+// max-height transition, which is where the 300ms comes from too).
+//
+// What a CSS transition cannot do here is what this has to follow. The height
+// belongs to no element of its own — it is whichever pane is showing plus the
+// box's own chrome — and it keeps moving after the tab lands: the plugin pane is
+// filled by a read that answers twice (the machine, then the market), so its list
+// arrives AFTER the switch. A transition aimed at a height measured at the switch
+// would travel to the wrong number and then jump; this one is aimed, once per
+// frame, at whatever the box wants on that frame.
+const SETTINGS_HEIGHT_MS = 300;
+let settingsHeightAnim = null; // { box, raf, from, t0 } while the box is travelling
+
+// the box's own height, with nothing holding it: the inline height is cleared for
+// the length of one forced layout — no paint happens inside a single task, so the
+// box is never DRAWN at its natural height unless that is where it belongs — and
+// the number read back is the pane's own
+function settingsBoxWants(box) {
+  box.style.height = "";
+  return box.getBoundingClientRect().height;
+}
+
+function settingsHeightStop() {
+  if (!settingsHeightAnim) return;
+  const anim = settingsHeightAnim;
+  settingsHeightAnim = null;
+  cancelAnimationFrame(anim.raf);
+  anim.box.style.height = "";
+}
+
+// ease-out: leaves in one direction and arrives without a stop — the shape the
+// sheet's `ease` gives `#fs-body`
+function settingsHeightEase(p) {
+  return 1 - Math.pow(1 - p, 3);
+}
+
+function settingsHeightStep(anim, now) {
+  if (settingsHeightAnim !== anim) return; // a later switch took the box over
+  const first = !anim.t0;
+  if (first) anim.t0 = now;
+  const want = settingsBoxWants(anim.box);
+  const p = Math.min(1, (now - anim.t0) / SETTINGS_HEIGHT_MS);
+  // the travel is over, or there is nothing left to hold: the height goes back to
+  // the sheet, so every later resize — a list filling in, a window drag — moves
+  // the box in one frame again, as it always did. `first` is the same-tab click
+  // (or two panes that happen to be one height): nothing moved, so nothing is held
+  if (!want || p >= 1 || (first && Math.abs(want - anim.from) < 1)) {
+    settingsHeightAnim = null;
+    anim.box.style.height = "";
+    return;
+  }
+  anim.box.style.height = anim.from + (want - anim.from) * settingsHeightEase(p) + "px";
+  anim.raf = requestAnimationFrame((t) => settingsHeightStep(anim, t));
+}
+
 function showSettingsTab(name) {
   const tab = SETTINGS_TABS.includes(name) ? name : "llm";
-  for (const t of SETTINGS_TABS) {
-    const btn = $("#settings-tab-" + t);
-    const on = t === tab;
-    btn.classList.toggle("active", on);
-    btn.setAttribute("aria-selected", String(on));
-    $("#settings-pane-" + t).classList.toggle("hidden", !on);
+  const swap = () => {
+    for (const t of SETTINGS_TABS) {
+      const btn = $("#settings-tab-" + t);
+      const on = t === tab;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-selected", String(on));
+      $("#settings-pane-" + t).classList.toggle("hidden", !on);
+    }
+  };
+  const box = $("#settings-modal .modal-box");
+  const measurable = box && typeof box.getBoundingClientRect === "function";
+  // the height it has RIGHT NOW: read before the previous travel is stopped, so a
+  // second click continues from wherever that one had reached instead of snapping
+  // back to a pane's own height first
+  const from = measurable ? box.getBoundingClientRect().height : 0;
+  settingsHeightStop();
+  // nothing to watch: no height to read (the modal is still `display: none`, which
+  // is where openSettings calls this from, and what a DOM with no layout reports),
+  // or a reader who asked for less motion — the sheet's `prefers-reduced-motion`
+  // block stops transitions and animations, and this is neither
+  if (!from || reducedMotion()) {
+    swap();
+    return;
   }
+  box.style.height = from + "px"; // hold it while the panes change under it
+  swap();
+  const anim = { box, from, raf: 0, t0: 0 };
+  settingsHeightAnim = anim;
+  // the first step is the NEXT frame on purpose: this tab has a second listener
+  // (ui/js/components-panel.js, loaded after this file) and it draws the plugin
+  // pane's reading state in this same task — the height to travel to is the one
+  // that state asks for, not the empty pane's
+  anim.raf = requestAnimationFrame((t) => settingsHeightStep(anim, t));
 }
 for (const t of SETTINGS_TABS) {
   $("#settings-tab-" + t).addEventListener("click", () => showSettingsTab(t));

@@ -207,6 +207,10 @@
      token above, the room around the label from here — all three directions plus
      the "…" that holds the rest of them, and every item in the menu it opens */
   .plug-install, .plug-remove, .plug-switch, .plug-versions, .plug-more { padding: 7px 12px; }
+  /* ...and the row's two columns are two LINES here: four finger-sized targets are
+     the width of the pane, so a name squeezed beside them is the name that loses
+     (the pointer's split is ui/style.css) */
+  .plug-row-actions { flex: 1 1 100%; }
   .plug-menu > button { padding: 7px 12px; font-size: var(--fs-md); }
   /* the name box takes the width the phone gives it rather than pushing the chips
      off the row; it is a field, so the taller --ctl-h-sm above already sizes it */

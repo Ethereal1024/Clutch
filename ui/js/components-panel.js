@@ -103,11 +103,25 @@ function plugDescribeTree(el, id) {
   for (const child of el.children || []) plugDescribeTree(child, id);
 }
 
-// ONE row, in the shape VS Code gives one extension (extensionsList.ts:70-90,
-// renderTemplate): a header line — the name, and whatever small state marks belong
-// beside it — then ONE line of description, then the row's controls on their own
-// line under both, then the thing that belongs UNDER the row (a version list), or
-// nothing.
+// ONE row, in the shape VS Code gives one extension (extensionsList.ts:70-159,
+// renderTemplate): the WORDS down the left — a header line (the name, and whatever
+// small state marks belong beside it), then ONE line of description — and the
+// row's controls on the right of them. VS Code's row is the same two columns
+// (`media/extension.css`: the item is `display: flex`, `.details` the column that
+// takes `flex: 1`), and its ActionBar takes the right end too — but of the row's
+// LAST line, because it is built inside `.details > .footer`
+// (`extensionsList.ts:89-91`) and pushed there by the publisher that shares that
+// line with it. We draw no publisher line, so here the controls are the column
+// itself, centred on the words. Then, under both, the thing that belongs UNDER the
+// row (a version list), or nothing.
+//
+// The two columns are `.plug-row-main` and `.plug-row-actions` (ui/style.css says
+// the rest): stacked, a row of four controls is as wide as the pane and its one
+// sentence is cut to whatever the name above it does not need — the left half of
+// the controls' line and the right half of the sentence's are both empty, which is
+// the shape a phone forces and a pointer never has to accept. On a phone they
+// stack again (ui/mobile.css): there, four finger-sized targets ARE the width of
+// the pane, and squeezing the name beside them is the fight the name loses.
 //
 // What is deliberately NOT here is the pile of facts a row used to carry: the
 // digest, the source path, the "release under it", the offered-versus-held
@@ -142,6 +156,10 @@ function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra 
   // a write in flight is a STATE of the row, and the stage line under the name is
   // its sentence: `aria-busy` is how assistive tech hears "this one is moving"
   if (state && state.cls === "busy") row.setAttribute("aria-busy", "true");
+  // the words' column: the head, the state line and the sentence are one block, so
+  // the column as a whole is what yields width to the controls
+  const main = document.createElement("div");
+  main.className = "plug-row-main";
   const head = document.createElement("div");
   head.className = "plug-row-head";
   const nameEl = document.createElement("span");
@@ -149,31 +167,35 @@ function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra 
   nameEl.textContent = name;
   head.appendChild(nameEl);
   for (const [text, cls] of chips) head.appendChild(plugChip(text, cls));
-  row.appendChild(head);
+  main.appendChild(head);
   if (state && state.text) {
     const el = document.createElement("div");
     el.className = "plug-line plug-state" + (state.cls ? " " + state.cls : "");
     el.textContent = state.text;
-    row.appendChild(el);
+    main.appendChild(el);
   }
   if (desc) {
     const el = document.createElement("div");
     el.className = "plug-row-desc";
     el.textContent = desc;
-    row.appendChild(el);
+    main.appendChild(el);
   }
   for (const line of lines) {
     if (!line) continue;
     const el = document.createElement("div");
     el.className = "plug-line";
     el.textContent = line;
-    row.appendChild(el);
+    main.appendChild(el);
   }
-  // the controls get their OWN line, right-aligned under the sentence — VS Code's
-  // row is exactly this (`.details` = `.header-container` -> `.description` ->
-  // `.footer`, media/extension.css, and the footer is the ActionBar). Beside the
-  // name they would fight it for width on a phone, and the name is the one thing
-  // on the row that must never be the part that gives way.
+  row.appendChild(main);
+  // the controls get the row's OTHER column, on the right of the words — VS Code's
+  // ActionBar is the union of the actions an item offers and it takes the right end
+  // of a row as well, only of the row's LAST line (it shares that line with the
+  // publisher: `extensionsList.ts:89-91`, `media/extension.css`). Under the words
+  // they would cost a whole line per row, and the sentence beside them would be cut
+  // to the width of the name above it; beside THEM the words keep the room and give
+  // up their tail first (the name truncates, ui/style.css). On a phone they stack
+  // again (ui/mobile.css).
   if (actions.length) {
     const foot = document.createElement("div");
     foot.className = "plug-row-actions";
