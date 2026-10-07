@@ -44,5 +44,8 @@ docs/
 /probe.log
 /scripts/stream_probe.py
 
+# render-bench output (run.py docstring tells you to redirect it here)
+/bench.log
+
 # local build outputs (scripts/build-android-apk.sh writes the apk here)
 *.apk
