@@ -89,11 +89,13 @@ global.lastTextContent = "";
 global.thinkingEl = null;
 global.thinkingContent = "";
 global.textRenderRaf = 0;
+global.thinkingRenderRaf = 0;
 global.compactionEl = null;
 global.retryNoteEl = null;
 global.cancelAnimationFrame = () => {};
 global.setOlderPill = (n) => pill.push(n);
 global.flushTextRender = () => {};
+global.flushThinkingRender = () => {}; // addEvent finalizes the reasoning block too
 global.applyStreamEvent = () => false;
 global.renderEvent = (ev) => ({ ev, matches: () => false });
 global.highlightCode = () => {};

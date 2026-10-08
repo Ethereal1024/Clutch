@@ -685,3 +685,61 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   本轮**没有**组件版本变化（`clutch-skills` 仍是 0.1.1）。
 * 仍然缺浏览器级验证（本机无 chrome/chromium、无 Xvfb、`DISPLAY` 为空），插件页那部分是 §10.4 的
   stub 级"真代码 + 样式表事实"。真机上的判断交给用户：够不着时那条 hint 是否出现、写完镜像是否就好。
+
+## 十三、0.1.39：思考的字符不再被它自己的每一次写入挤住（用户报障一条）
+
+* **看到的现象**：「ui 有时会在模型思考时发生卡顿，thinking 后字符不再增长，思考内容无法展开，然后
+  过一阵后直接爆发出一堆消息的 ui 更新」。
+* **定性**：这是渲染器主线程被饱和，不是网络也不是宿主。三条症状是同一个队列的三个面——计数不动是
+  排队的写入还没轮到；点不开是点击排在同一队后面；末尾一起冒出来是队终于排空。**纯文本那条流早就
+  不是这个形状了**（`TEXT_RENDER_MIN_MS` 的节流 + 一帧一次合并渲染，注释里写着"每个 token 一次整块
+  重解析是 O(n²)""饿死的渲染器就是整窗冻结"），而**思考那条流没跟上**。
+
+### 13.1 每一次 delta 都在逼一次 layout
+
+* 旧的 reasoning 分支每来一个 delta 就做四件事：三次 `querySelector` 找到 label/`<pre>`/fold、写
+  label 文本、把整段 `thinkingContent` 塞回 `<pre>`（展开时）、`autoScroll()`。每一次写都要重新布局：
+  label 自己的宽度、transcript 的 `scrollHeight`（这篇还在整轮里不断变长）。一条按 token 走的推理流
+  是这扇窗里最密的东西——想一分钟就是几千个 delta，也就是几千次强制布局。
+* 修法与文本路径同形：`ui/js/stream-text.js` 里给出 `THINKING_RENDER_MIN_MS = 120` 与
+  `scheduleThinkingRender()` / `renderThinkingBlock()` / `flushThinkingRender()`，与
+  `textRenderRaf` 那一组一一对应；`ui/js/stream-events.js` 的 delta 分支只剩"累加 + 排一帧"，
+  **自己一个 DOM 都不碰**。计数仍然每帧都刷新，只是这一帧替一整帧的 delta 付一次账。
+
+### 13.2 展开的块只追加，不重写
+
+* 展开着的 `<pre>` 每帧整段重写，正是文本块当初被修掉的同一个 O(n²)。现在块上记一个
+  `_drawn` 游标（`buildThinkingBlock` 建块时就按已有文本设好，点击展开时重新对齐），每一趟只
+  `appendChild` 上次之后新到的那一段；这一帧没有新内容就一个节点都不加（否则每帧会多出一个空文本
+  节点）。
+
+### 13.3 结束这条流的那一帧
+
+* `addEvent` 里紧挨着 `flushTextRender()` 的那一行，对非 `reasoning_delta` 的事件补一次
+  `flushThinkingRender()`：这是这条流的结尾，计数必须**在这一帧定格**——`step_start` 会把
+  `thinkingEl` 直接丢掉，随后的 agent 文本块要来接尾巴，计数留到下一帧就再也没机会写。
+* 被丢弃的半截输出（`discardLivePartial`）与清空面板（`clearStream`）都要连排着的那一帧一起撤
+  （`thinkingRenderRaf`），与 `textRenderRaf` 的处理一致。
+* **有意不动**：`tool_call_delta` 的 `previewText()` 每 delta 写一次 `st.body.textContent`，是同一类
+  隐患，但参数流比 token 流稀得多。本轮只修报障的这一条，不顺手改那条。
+
+### 13.4 测试
+
+* `tests/stream-render-test.js` 新增两节，仍是"抽出真代码 + stub 驱动"的写法：一节把
+  `renderThinkingBlock` 那一组（`region("let thinkingRenderRaf = 0;", "flushThinkingRender")`）连同
+  建块的 `buildThinkingBlock` 一起 eval 出来，断言**一帧里 12 个 delta 一次 DOM 都不写**、flush 后
+  恰好一次渲染 + 一次 tail 固定、label 落在总长上、展开的块是 1 次追加 0 次重写、空转的那帧不追加
+  空节点、replay 与 live 两条建块路径都带着 `_drawn` 游标、点击展开把游标重新对齐；另一节是源码级
+  护栏：`reasoning_delta` 分支必须调用 `scheduleThinkingRender()` 且**不含** `querySelector` /
+  `textContent` / `autoScroll`（先剥注释再匹配，那段注释正说着自己警告的写法），以及
+  `flushThinkingRender()` 的两处接线。
+* 两节都做过变异验证：把 delta 分支改回逐次直写、把追加改回整段重写、删掉 `_drawn`，各自都会让对应
+  断言变红。
+* 全量：42 个 node 测试 + 21 个 python 模块，`SWEEP EXIT: 0`。
+
+### 13.5 发布
+
+* 宿主 0.1.39：`VERSION` + `ui/package.json` + `ui/package-lock.json` 三处 bump，tag `v0.1.39`。
+  本轮没有组件版本变化（`clutch-skills` 仍是 0.1.1）。
+* 仍然缺浏览器级验证（§10.4 的环境限制）：真机上的判断交给用户——思考时计数是否一直在走、思考块
+  是否随点随开、结尾是否还会一次性涌出。

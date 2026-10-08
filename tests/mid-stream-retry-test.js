@@ -27,6 +27,7 @@ global.pageSink = null;
 global.eventsEl = { appendChild: (c) => { appended.push(c); } };
 global.document = { createElement: (tag) => fakeNode(tag) };
 global.textRenderRaf = 0;
+global.thinkingRenderRaf = 0;
 global.lastTextEl = null;
 global.lastTextContent = "";
 global.thinkingEl = null;
@@ -58,6 +59,7 @@ const thinkNode = fakeNode("div");
 const rowA = fakeNode("div");
 const rowB = fakeNode("div");
 global.textRenderRaf = 7;
+global.thinkingRenderRaf = 8;
 global.lastTextEl = textNode;
 global.lastTextContent = "half an ans";
 global.thinkingEl = thinkNode;
@@ -73,6 +75,7 @@ check(global.thinkingEl === null && global.thinkingContent === "", "the reasonin
 check(rowA.removed && rowB.removed, "half-streamed tool-call rows go as well");
 check(Object.keys(global.streamRows).length === 0, "no streamed tool row is left behind");
 check(cancelledRaf.indexOf(7) >= 0 && global.textRenderRaf === 0, "a queued text render is cancelled");
+check(cancelledRaf.indexOf(8) >= 0 && global.thinkingRenderRaf === 0, "…and the queued reasoning render with it");
 
 // ---- 2) the retry notice still renders after a discard ----
 setRetryNote({ attempt: 1, max_retries: 3, message: "Connection interrupted. - retrying (1/3)" });
@@ -113,6 +116,7 @@ const think2 = fakeNode("div");
 const rowC = fakeNode("div");
 const chip2 = fakeNode("div");
 global.textRenderRaf = 3;
+global.thinkingRenderRaf = 4;
 global.lastTextEl = text2;
 global.lastTextContent = "half a thought";
 global.thinkingEl = think2;
@@ -131,6 +135,7 @@ check(think2.removed && global.thinkingEl === null && global.thinkingContent ===
 check(rowC.removed && Object.keys(global.streamRows).length === 0, "…and any half-streamed tool row");
 check(chip2.removed && global.retryNoteEl === null, "…and the stale retry chip");
 check(cancelledRaf.indexOf(3) >= 0 && global.textRenderRaf === 0, "…cancelling the render it had queued");
+check(cancelledRaf.indexOf(4) >= 0 && global.thinkingRenderRaf === 0, "…and the reasoning render beside it");
 check(global.toolGroupEl === null, "…and closing the tool group it was drawing into");
 
 // wiring: the reconnect reaches that teardown, and no longer just nulls the refs

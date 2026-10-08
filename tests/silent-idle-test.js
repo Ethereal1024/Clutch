@@ -154,11 +154,13 @@ global.lastTextContent = "";
 global.thinkingEl = null;
 global.thinkingContent = "";
 global.textRenderRaf = 0;
+global.thinkingRenderRaf = 0;
 global.compactionEl = null;
 global.retryNoteEl = null;
 global.cancelAnimationFrame = () => {};
 global.setOlderPill = () => {};
 global.flushTextRender = () => {};
+global.flushThinkingRender = () => {}; // addEvent finalizes the reasoning block too
 global.highlightCode = () => {};
 global.typesetMath = () => {};
 global.catchUp = false;

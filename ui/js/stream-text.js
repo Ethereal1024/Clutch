@@ -68,6 +68,72 @@ function flushTextRender() {
   }
 }
 
+// The reasoning block gets the same treatment as the text block above, for the
+// same reason and one of its own.
+//
+// A reasoning stream is the densest this window ever sees — a delta per token,
+// and a model that thinks for a minute sends thousands of them. The old shape
+// wrote the label ("thinking… N chars"), the block's own copy, and a pin to the
+// tail ON EVERY DELTA, and each of those writes forces a layout: the label's own
+// width, then autoScroll's `scrollHeight` read over a transcript that grows for
+// the whole turn. Thousands of forced layouts is a saturated main thread, and a
+// saturated renderer is exactly the freeze that was reported — the counter stops
+// moving, clicking the fold does nothing (the click is queued behind the layout
+// queue), and every queued change lands in one burst when the deltas finally go
+// quiet. One render per frame (throttled, like the text block) keeps the counter
+// live without making the frame pay for every token.
+//
+// The open fold is the second reason: rewriting a 50k-char <pre> per frame is
+// the same O(n²) the text block was fixed for, so an open block APPENDS what
+// arrived since the last render instead (_drawn); expanding the fold re-syncs
+// that mark, because the <pre> it rewrites whole is fully drawn again.
+let thinkingRenderRaf = 0;
+let thinkingRenderLast = 0;
+const THINKING_RENDER_MIN_MS = 120;
+function renderThinkingBlock(force = false) {
+  thinkingRenderRaf = 0;
+  if (!thinkingEl) return;
+  const now = performance.now();
+  if (!force && now - thinkingRenderLast < THINKING_RENDER_MIN_MS) {
+    // too soon since the last render: one more frame, which then carries every
+    // delta that arrived in between
+    thinkingRenderRaf = requestAnimationFrame(() => renderThinkingBlock(false));
+    return;
+  }
+  thinkingRenderLast = now;
+  const label = thinkingEl.querySelector(".thinking-label");
+  if (label) label.textContent = "thinking… " + thinkingContent.length + " chars";
+  const full = thinkingEl.querySelector(".thinking-full");
+  if (!full) return;
+  full._content = thinkingContent; // the block's own copy; survives step_start resets
+  const fold = thinkingEl.querySelector(".fold");
+  if (fold && !fold.classList.contains("hidden")) {
+    // open: the text a reader is watching grows by what was not drawn yet
+    const drawn = full._drawn;
+    if (typeof drawn === "number" && drawn > 0 && drawn <= thinkingContent.length) {
+      // only the part past the mark is new; an empty slice (nothing arrived since
+      // the last frame) must not append an empty text node per frame either
+      const add = thinkingContent.slice(drawn);
+      if (add) full.appendChild(document.createTextNode(add));
+    } else {
+      full.textContent = thinkingContent;
+    }
+    full._drawn = thinkingContent.length;
+  }
+  autoScroll();
+}
+function scheduleThinkingRender() {
+  if (thinkingRenderRaf) return;
+  thinkingRenderRaf = requestAnimationFrame(() => renderThinkingBlock(false));
+}
+// A non-reasoning event ends the block's stream: render it once, complete, before
+// the next block takes the tail (the same flush the text block gets).
+function flushThinkingRender() {
+  if (!thinkingRenderRaf) return;
+  cancelAnimationFrame(thinkingRenderRaf);
+  renderThinkingBlock(true);
+}
+
 // height animation via WAAPI with overflow hidden (no scrollbar shift)
 const FOLD_EASE = "cubic-bezier(.23, 1, .32, 1)";
 
@@ -207,11 +273,15 @@ function buildThinkingBlock(initialLabel, initialContent) {
   full.className = "thinking-full";
   full.textContent = initialContent;
   full._content = initialContent; // per-block copy; survives step_start resets
+  full._drawn = initialContent.length; // what the <pre> already shows (see above)
   const fold = wrapFold(full);
   el.appendChild(fold);
   // click toggles between the compact row and the full reasoning text
   row.onclick = () => {
-    const wasHidden = toggleFold(fold, () => { full.textContent = full._content; });
+    const wasHidden = toggleFold(fold, () => {
+      full.textContent = full._content;
+      full._drawn = full._content.length; // re-synced: the next render appends
+    });
     toggle.textContent = wasHidden ? "▾" : "▸";
   };
   return { el, full, fold };

@@ -19,6 +19,7 @@ function clearStream() {
   thinkingEl = null;
   thinkingContent = "";
   if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
+  if (thinkingRenderRaf) { cancelAnimationFrame(thinkingRenderRaf); thinkingRenderRaf = 0; }
   compactionEl = null;
   retryNoteEl = null;
   oldestOffset = null; // fresh project: no loaded events yet

@@ -61,6 +61,7 @@ function clearStreamPreviews() {
 // (stream deltas are never stored), so nothing is lost by dropping it here.
 function discardLivePartial() {
   if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
+  if (thinkingRenderRaf) { cancelAnimationFrame(thinkingRenderRaf); thinkingRenderRaf = 0; }
   if (lastTextEl) { lastTextEl.remove(); lastTextEl = null; }
   lastTextContent = "";
   if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
@@ -199,6 +200,10 @@ function addEvent(ev) {
   }
   // finalize the coalesced text block before any non-text event
   if (ev && ev.type !== "text_delta") flushTextRender();
+  // the same for the reasoning block: a non-reasoning event is the end of that
+  // stream, so the char counter has to land on its final value in this frame —
+  // before the next block takes the tail (step_start drops the block outright).
+  if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
   // events that break a tool group; results follow their own tool_calls
   if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
     toolGroupEl = null;
@@ -376,14 +381,12 @@ function applyStreamEvent(ev) {
       thinkingEl = block.el;
       (pageSink || eventsEl).appendChild(thinkingEl);
     }
-    thinkingEl.querySelector(".thinking-label").textContent =
-      "thinking… " + thinkingContent.length + " chars";
-    // keep the block's own copy in sync; update it live if the full text is open
-    const full = thinkingEl.querySelector(".thinking-full");
-    full._content = thinkingContent;
-    const fold = thinkingEl.querySelector(".fold");
-    if (fold && !fold.classList.contains("hidden")) full.textContent = full._content;
-    autoScroll();
+    // NOTHING is written to the DOM here: a delta per token means the label's
+    // width, the block's own copy and autoScroll's `scrollHeight` read would each
+    // pay a forced layout thousands of times over a long think — the freeze this
+    // shape was reported as. The coalesced render (stream-text.js) does one pass
+    // per frame, and flushThinkingRender() fixes the counter on the last one.
+    scheduleThinkingRender();
     return true;
   }
 
