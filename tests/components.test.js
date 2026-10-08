@@ -36,6 +36,10 @@ const path = require("path");
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-components-home-"));
 if (process.platform !== "win32") process.env.HOME = HOME; // components.js reads it at load
+// The manifest budget is the suite's, not the release's: a case that wants to see
+// the timeout branch must not spend 30 s learning that it works. Set before
+// ui/components is required, because that is where the number is read.
+process.env.CLUTCH_MANIFEST_TIMEOUT_MS = "1000";
 
 const { check, summary } = require("./harness");
 const components = require("../ui/components");
@@ -79,6 +83,36 @@ function serve(dir) {
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve({ server, base: `http://127.0.0.1:${server.address().port}` }));
+  });
+}
+
+// A source that does not answer the way a healthy one does, twice over: the first
+// `dieFirst` requests have their socket killed before any response (what a machine
+// on a bad network reads as "fetch failed"), and `silent` never answers at all
+// (what a blocked host looks like: the connection opens and nothing comes back).
+// It counts its asks, because the number of asks IS the fact under test.
+function serveBadly(file, { dieFirst = 0, silent = false } = {}) {
+  const name = path.basename(file);
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits++;
+    if (silent) return; // no response, no close: the caller's budget is what ends it
+    if (hits <= dieFirst) {
+      res.socket.destroy();
+      return;
+    }
+    if (decodeURIComponent(req.url.replace(/^\/+/, "").split("?")[0]) !== name) {
+      res.writeHead(404);
+      res.end("not here");
+      return;
+    }
+    res.writeHead(200, { "Content-Length": String(fs.statSync(file).size) });
+    res.end(fs.readFileSync(file));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, base: `http://127.0.0.1:${server.address().port}`, hits: () => hits })
+    );
   });
 }
 
@@ -353,7 +387,101 @@ async function main() {
     pubServer.server.close();
   }
 
-  // 9. the reverse verbs, against the same real machine: which versions it holds
+  // 9. one source read, on a network that is not good: what is asked AGAIN, and
+  //    what is not. A release is served from a host reached through a redirect,
+  //    and that connection dies on its own now and then — the report this group
+  //    comes from was four sources, three bare "fetch failed" and one timeout,
+  //    with the page keeping all four for five minutes. So: a connection that
+  //    died is asked again (three asks at most, half a second apart), an ANSWER
+  //    is never asked again (a status nobody can change; this client's own spent
+  //    budget), and what a page reads is a sentence about which of the two
+  //    happened, not the fetch implementation's word for one of them.
+  {
+    const dir = tmp("clutch-components-bad-source-");
+    const file = path.join(dir, "clutch-component.json");
+    fs.copyFileSync(manifestPath, file);
+
+    // dies twice, answers the third ask
+    const flaky = await serveBadly(file, { dieFirst: 2 });
+    try {
+      const manifest = await components.readManifest(`${flaky.base}/clutch-component.json`);
+      check(
+        manifest.name === "clutch-memory" && flaky.hits() === 3,
+        `a connection that died twice is asked a third time, and the manifest is read (${flaky.hits()} asks)`
+      );
+    } finally {
+      flaky.server.close();
+    }
+
+    // dies every time: three asks, then a reason a page can read
+    const dead = await serveBadly(file, { dieFirst: 99 });
+    try {
+      let reason = "";
+      try {
+        await components.readManifest(`${dead.base}/clutch-component.json`);
+      } catch (e) {
+        reason = (e && e.message) || "";
+      }
+      check(
+        /^the source could not be reached \(.+\)$/.test(reason) && /asked 3 times/.test(reason),
+        `a source whose connection keeps dying is reported in words a user can act on (${reason})`
+      );
+      check(!/fetch failed/.test(reason), "and not in the words of the fetch implementation, which name neither the layer nor whether the source ever spoke");
+      check(dead.hits() === components.MANIFEST_ATTEMPTS, `and it is asked ${components.MANIFEST_ATTEMPTS} times, not forever`);
+      const report = await components.componentSpecs({ sources: [`${dead.base}/clutch-component.json`] });
+      check(
+        report.errors.length === 1 && report.errors[0].reason === `${dead.base}/clutch-component.json: ${reason}`,
+        "the pass reports that reason with the source it belongs to"
+      );
+      check(report.errors[0].unreachable === true, "and the one bit a page needs to offer a way out: this failure is about reaching the machine");
+    } finally {
+      dead.server.close();
+    }
+
+    // an answer is an answer: the status is reported as it is, and asked once
+    const missing = await serveBadly(file);
+    try {
+      let reason = "";
+      try {
+        await components.readManifest(`${missing.base}/nope.json`);
+      } catch (e) {
+        reason = (e && e.message) || "";
+      }
+      check(/^the source answered 404$/.test(reason) && missing.hits() === 1, "a 404 is an ANSWER: reported as the status it is, and not asked again");
+      const report = await components.componentSpecs({ sources: [`${missing.base}/nope.json`] });
+      check(
+        report.errors.length === 1 && report.errors[0].unreachable === false,
+        "and it is not the failure a mirror answers: the trouble is what the source has, not how this machine reached it"
+      );
+    } finally {
+      missing.server.close();
+    }
+
+    // the budget: a source that opens a connection and never speaks is a timeout,
+    // said as one, and NOT asked again — three budgets would be a minute and a
+    // half of "reading…" for a source that is simply not coming back
+    const mute = await serveBadly(file, { silent: true });
+    try {
+      let reason = "";
+      try {
+        await components.readManifest(`${mute.base}/clutch-component.json`);
+      } catch (e) {
+        reason = (e && e.message) || "";
+      }
+      check(/^the source did not answer within 1 s$/.test(reason), `a source that never speaks is a timeout, in seconds (${reason})`);
+      check(mute.hits() === 1, "and a budget already spent is not spent again: it is asked once");
+      const report = await components.componentSpecs({ sources: [`${mute.base}/clutch-component.json`] });
+      check(
+        report.errors.length === 1 && report.errors[0].unreachable === true,
+        "a source that never answers is one this machine cannot reach, so a mirror is the way out of it too"
+      );
+    } finally {
+      if (mute.server.closeAllConnections) mute.server.closeAllConnections();
+      mute.server.close();
+    }
+  }
+
+  // 10. the reverse verbs, against the same real machine: which versions it holds
   //    for ONE component (newest first, and the one it would run), stopping or
   //    starting the driving of it, and letting that component go. The verdicts
   //    that matter are all here — "removed" with the versions that went, "absent"
@@ -410,7 +538,7 @@ async function main() {
     check((await components.hostVersions(base, "clutch-memory")).length === 0, "and the host names no version of it any more");
   }
 
-  // 10. cleanup: this run's supervisor goes away (its root is a temp dir)
+  // 11. cleanup: this run's supervisor goes away (its root is a temp dir)
   try {
     await fetch(`${base}/api/shutdown`, { method: "POST" });
   } catch (e) {

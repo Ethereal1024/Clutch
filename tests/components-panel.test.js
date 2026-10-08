@@ -190,7 +190,7 @@ const COMPONENTS = [
 ];
 
 // a fresh page: the real panel file, a fresh mini-DOM, a fake channel
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, store = {}, session = {} } = {}) {
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {} } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -222,7 +222,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       if (listError) throw new Error(listError);
       return { target, held, error: heldError };
     },
-    market: async () => { world.marketCalls++; return { entries, errors: [], sources: 4 }; },
+    market: async () => { world.marketCalls++; return { entries, errors, unreachable, sources: 4 }; },
     install: async (name) => {
       world.installCalls.push(name);
       if (world.control) return world.control.promise;
@@ -1271,6 +1271,70 @@ const CODE = mod ? mod.code : "";
     const srow = rowNamed(stopped.body(), "clutch-workspace");
     check(drawnText(srow).includes("held on this machine, but not driven"), "a stopped row's sentence says it is still held");
     check(stopped.switches()[0].textContent === "Enable", "and its control offers the way back, not the way out");
+  }
+
+  // 36. a source that could not be REACHED is a question about this machine's
+  // network, and the page answers it: the reason is drawn as before, and one
+  // quieter line under it names the one thing the user can change. A source that
+  // ANSWERED no (404) is a different fact and must not draw that line — sending a
+  // user to rewrite settings.json over a missing release would be a wild goose.
+  {
+    const LOST = "https://github.com/Ethereal1024/clutch-memory/releases/latest/download/clutch-component.json: the source could not be reached (other side closed, asked 3 times)";
+    const NO_SUCH = "https://github.com/Ethereal1024/clutch-skills/releases/latest/download/clutch-component.json: the source answered 404";
+    const dead = page({ errors: [LOST], unreachable: true });
+    await dead.open();
+    const body = dead.body();
+    const errs = () => walk(body).filter((n) => /(^| )plug-source-error( |$)/.test(n.className));
+    const hints = () => walk(body).filter((n) => /(^| )plug-source-hint( |$)/.test(n.className));
+    check(errs().length === 1 && errs()[0].textContent === LOST, "a source that failed is drawn as its reason, in full");
+    check(hints().length === 1, "and a source that could not be reached adds exactly one line saying what to do about it");
+    check(
+      /source_mirror/.test(hints()[0].textContent) && /settings\.json/.test(hints()[0].textContent),
+      "which names the setting and the file it goes in, because there is no other way to change where the bytes come from"
+    );
+    check(
+      /github\.com/.test(hints()[0].textContent) && /pin/.test(hints()[0].textContent),
+      "and says WHY the mirror is safe: the source is this build's own github one, and the digests are still the release's"
+    );
+    check(dead.buttons().length === 2 && dead.buttons().every((b) => !b.disabled), "the line is a sentence, not a second control: the offers the sources that DID answer are untouched");
+    const lines = walk(body).filter((n) => /(^| )plug-source-(error|hint)( |$)/.test(n.className));
+    check(
+      lines.length === 2 && /plug-source-error/.test(lines[0].className) && /plug-source-hint/.test(lines[1].className),
+      "and it comes after the reason it answers — the way out last, not before the complaint"
+    );
+
+    // two failures, one of them a network one: still one hint, under both reasons
+    const mixed = page({ errors: [NO_SUCH, LOST], unreachable: true });
+    await mixed.open();
+    check(
+      walk(mixed.body()).filter((n) => /(^| )plug-source-error( |$)/.test(n.className)).length === 2 &&
+        walk(mixed.body()).filter((n) => /(^| )plug-source-hint( |$)/.test(n.className)).length === 1,
+      "one line per failed source, and one way out for all of them"
+    );
+
+    // an answer that was simply "no": the reason only
+    const answered = page({ errors: [NO_SUCH], unreachable: false });
+    await answered.open();
+    check(walk(answered.body()).filter((n) => /(^| )plug-source-hint( |$)/.test(n.className)).length === 0, "a source that answered is not a machine that cannot reach github, so no hint is drawn");
+    check(walk(answered.body()).some((n) => n.textContent === NO_SUCH), "its reason is still on the page");
+
+    // ...and the quiet line is a claim about the SHEET too: the same kind of
+    // paragraph as the failure above it, in a quieter voice
+    const sheet = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
+    const decls = (sel) => {
+      const m = sheet.match(new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}"));
+      return m ? m[1].replace(/\s+/g, " ").trim() : "";
+    };
+    const hintRule = decls(".plug-source-hint");
+    check(hintRule !== "", "ui/style.css gives the hint a rule of its own (an unstyled paragraph inherits the page's body size)");
+    check(
+      /color: var\(--muted\)/.test(hintRule) && /font-size: var\(--fs-xs\)/.test(hintRule),
+      "small and muted: a way out is not a second complaint"
+    );
+    check(
+      /color: var\(--danger\)/.test(decls(".plug-source-error")) && /font-size: var\(--fs-sm\)/.test(decls(".plug-source-error")),
+      "while the reason above it stays the failure's own colour and size — the two are not the same fact"
+    );
   }
 
   summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");

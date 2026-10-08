@@ -79,7 +79,9 @@ const TAR_SCRIPT = path.join(REPO, "scripts", "build-component-tar.sh");
 const MANIFEST_HEADER = "X-Clutch-Component"; // agent/tools/components.py's contract: base64 of UTF-8 JSON
 const ARTIFACT_URL_FIELD = "artifact_url"; // where the bytes are, when the host fetches them for itself
 const REQUEST_TIMEOUT_MS = 120_000; // a onefile over a slow link
-const MANIFEST_TIMEOUT_MS = 30_000; // a few KB of JSON, from a release
+const MANIFEST_TIMEOUT_MS = Number(process.env.CLUTCH_MANIFEST_TIMEOUT_MS || 30_000); // a few KB of JSON, from a release
+const MANIFEST_ATTEMPTS = 3; // one ask, then two more: a reset is a moment, not a verdict
+const MANIFEST_RETRY_MS = 500; // the wait before the second ask; the third waits twice that
 const BUDGET_MS = 300_000; // the whole pass; beyond it the rest is deferred
 
 // The source lists: what this build knows, and what this user added. Both are
@@ -163,18 +165,95 @@ function parseManifest(data, source) {
   };
 }
 
+// The wait between two asks of the same source. Short on purpose: the reset that
+// killed the first ask is a moment in the network, and a user watching a page that
+// says "reading…" should not be made to wait out a backoff worthy of a service.
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Every failure of a read, in the words the plugin page shows. What a library
+// says about a connection is not one of them: node's fetch reports a reset, a
+// DNS failure and a refused socket as the same bare "fetch failed", which tells
+// a user neither which layer failed nor whether the source even spoke (Electron
+// is no better — `net::ERR_CONNECTION_RESET`). So the reason names the kind of
+// failure, keeps the technical detail in parentheses, and says how many times it
+// was asked. Which kind it was is decided where the read happens (readOnce), not
+// guessed from a message here.
+//
+// MANIFEST_TIMEOUT_MS is also the test suite's knob (CLUTCH_MANIFEST_TIMEOUT_MS,
+// like CLUTCH_TUNNEL_STOP_GRACE_MS): a 30 s budget is 30 s of suite for every case
+// that wants to see this branch, and the words below are asserted with it.
+function readFailure(e, attempts) {
+  const kind = e && e.clutchKind;
+  if (kind === "timeout") return `the source did not answer within ${MANIFEST_TIMEOUT_MS / 1000} s`;
+  if (kind === "unreachable") {
+    // A system code (ENOTFOUND, ECONNRESET) is the diagnosis. undici's own
+    // UND_ERR_* codes are its internal names for the same conditions, and its
+    // message beside them ("other side closed") says more than the code does.
+    const cause = e.cause || {};
+    const detail = cause.code && !/^UND_ERR_/.test(cause.code) ? cause.code : cause.message || e.message || "";
+    const asked = attempts > 1 ? `, asked ${attempts} times` : "";
+    return `the source could not be reached (${detail}${asked})`;
+  }
+  return (e && e.message) || String(e);
+}
+
+// One ask of one source, and the three verdicts it can come back with. Two of
+// them are ANSWERS — a status that is not ok, and bytes this client cannot read
+// as a manifest — and an answer is not asked for twice. The third is the
+// connection itself: the request produced no response at all, so the source never
+// spoke. That one is tagged, and it is the only one tag readManifest retries.
+async function readOnce(source) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
+  const answer = (e) => {
+    const err = e instanceof Error ? e : new Error(String(e));
+    err.clutchKind = "answer";
+    return err;
+  };
+  try {
+    const r = await netFetch()(source, { signal: ctl.signal });
+    if (!r.ok) throw answer(new Error(`the source answered ${r.status}`));
+    try {
+      return parseManifest(await r.json(), source);
+    } catch (e) {
+      throw answer(e);
+    }
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    if (!err.clutchKind) {
+      // the read never became a response: this machine's own budget ran out, or
+      // the connection did not come up. (A redirect chain counts as the latter:
+      // every hop is a connection of its own.)
+      err.clutchKind = ctl.signal.aborted || err.name === "AbortError" ? "timeout" : "unreachable";
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// One source's manifest, and the retry that makes a flaky network a smaller fact
+// than it used to be. A source is read from a release host on the other side of
+// a redirect, and a connection that dies there dies once: asking again a moment
+// later is what a user would do by hand. What is NOT asked again is an answer —
+// a status, a schema this client cannot read — because the second ask gets the
+// same one; and a source that spent its whole 30 s budget is not given two more
+// of them (the page would sit on "reading…" for a minute and a half).
 async function readManifest(source) {
   if (!isRemote(source)) {
     return parseManifest(JSON.parse(fs.readFileSync(source, "utf8")), source);
   }
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
-  try {
-    const r = await netFetch()(source, { signal: ctl.signal });
-    if (!r.ok) throw new Error(`the source answered ${r.status}`);
-    return parseManifest(await r.json(), source);
-  } finally {
-    clearTimeout(t);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await readOnce(source);
+    } catch (e) {
+      if (!e || e.clutchKind !== "unreachable" || attempt >= MANIFEST_ATTEMPTS) {
+        throw new Error(readFailure(e, attempt), { cause: e });
+      }
+      await sleep(MANIFEST_RETRY_MS * 2 ** (attempt - 1));
+    }
   }
 }
 
@@ -189,7 +268,17 @@ async function manifests(explicit = null) {
       if (out.components.some((c) => c.name === manifest.name)) continue; // the earlier source is the word
       out.components.push(manifest);
     } catch (e) {
-      out.errors.push({ name: "", reason: `${source}: ${(e && e.message) || e}` });
+      // the reason is what a page draws; `unreachable` is the one bit beside it
+      // that says what a page can OFFER — a source that could not be reached (or
+      // did not answer at all) is a question about the network this machine is on,
+      // and the mirror prefix is the answer to it, while an answer that said no
+      // ("the source answered 404") is not.
+      const kind = (e && e.cause && e.cause.clutchKind) || (e && e.clutchKind) || "";
+      out.errors.push({
+        name: "",
+        reason: `${source}: ${(e && e.message) || e}`,
+        unreachable: kind === "unreachable" || kind === "timeout",
+      });
     }
   }
   return out;
@@ -665,6 +754,8 @@ module.exports = {
   fetchInstall,
   CACHE,
   REQUEST_TIMEOUT_MS,
+  MANIFEST_ATTEMPTS,
+  MANIFEST_TIMEOUT_MS,
   SOURCES_FILE,
   USER_SOURCES_FILE,
 };

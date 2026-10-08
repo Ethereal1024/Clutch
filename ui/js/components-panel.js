@@ -687,6 +687,20 @@ function plugList() {
     el.textContent = reason;
     sec.appendChild(el);
   }
+  // ...and when the failure is the network rather than an answer (the view says
+  // which: `unreachable`), one more line says what can be done about it. This is
+  // the one place the page mentions the mirror, because it is the one place it is
+  // the answer: a source this build ships is read from github.com, and a machine
+  // that cannot reach it is not going to be talked out of it by a reload.
+  if (plugState.market && plugState.market.unreachable) {
+    const hint = document.createElement("p");
+    hint.className = "plug-source-hint";
+    hint.textContent =
+      "a source this build ships is read from github.com. If this machine cannot reach it, " +
+      'write "source_mirror": "https://<prefix>" into ~/.clutch/settings.json and look again — ' +
+      "a mirror only moves the bytes: every digest is still checked against the release's own pin";
+    sec.appendChild(hint);
+  }
   return sec;
 }
 

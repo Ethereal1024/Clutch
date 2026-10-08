@@ -617,3 +617,71 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 * **测试**：`tests/settings-tabs-test.js` 第 8 组补 4 条样式表断言——环的名单里没有文本框、composer 与
   modal 的字段各自 `outline: none` + 边框 accent、host row 的 select 跟随。42 个 node 测试 + 21 个
   python 模块全绿（新的 4 条在旧样式表上会红，即它们钉的是本轮改变的那件事）。
+
+## 十二、0.1.38：来源拉不到时，先说人话，再给一条出路（用户报障一条）
+
+* **看到的现象**：插件页四条出厂 source 全红——三条 `fetch failed`、一条
+  `This operation was aborted`。同一条网络下 curl 与 node 的全局 fetch 拉这四条
+  `releases/latest/download/clutch-component.json` 全部 200，所以这不是"来源挂了"。
+* **定性（先弄清是谁在说话）**：`fetch failed` 是 undici（node 全局 fetch）的措辞，底层原因挂在
+  `cause.code` 上（`ECONNRESET`、`UND_ERR_SOCKET` 配 message `other side closed`）；
+  `This operation was aborted` 是它的 `AbortError`。Electron 的 `net.fetch` 不会这么说：那边的网络
+  错误是 `net::ERR_…` 的 `Error`，abort 是 `DOMException('The operation was aborted.')`。所以失败
+  发生在**纯 node 那条路**上（手机 host 里嵌的 node 18，或某个进程里 `netFetch()` 落回了 null 分支），
+  不是 Electron 的 `session.fetch`。`android/README.md` 早就写着"手机上的 node 18 没有 Electron 那层
+  栈，只有直连或镜像""某些网络下 github.com 根本不可达"，与这条报障一致。
+* **因此本轮不追"为什么断"**：本机复现不出来（四次请求 4.9s / 1.2s / 2s / 0.6s 全通，镜像前缀为空，
+  环境里没有任何 proxy），只做三件事——读得有韧性、失败能自愈、报错说人话。
+
+### 12.1 重试只针对连接层，且不拉长等待
+
+* `ui/components.js`：一次 source 读有三种结局。非 2xx、读不懂的 JSON，是**回答**
+  （`clutchKind: "answer"`）；30 s 预算耗尽是自己放弃（`"timeout"`）；**请求根本没换来响应**才是
+  "够不着"（`"unreachable"`）。分类在 `readOnce()` 里做，措辞在 `readFailure()` 里生成，两件事不混。
+* 只有 `"unreachable"` 重试：一个 source 最多问 `MANIFEST_ATTEMPTS = 3` 次，退避从
+  `MANIFEST_RETRY_MS = 500ms` 起、每次翻倍。**回答不重问**（第二次拿到的还是同一个回答）；
+  **超时不重问**（一个 source 就是 90 s，页面会长时间停在 "reading…"）。
+* 报错说人话：`the source could not be reached (ECONNRESET, asked 3 times)`——哪一层、技术细节、
+  问了几次都在里面。undici 自己的 `UND_ERR_*` 是它内部的名字，遇到它改用旁边的 message。超时则是
+  `the source did not answer within 30 s`。`MANIFEST_TIMEOUT_MS` 同时也是测试的旋钮
+  （`CLUTCH_MANIFEST_TIMEOUT_MS`，仿 `CLUTCH_TUNNEL_STOP_GRACE_MS`），否则每个要看这条分支的用例
+  都得真等 30 s。
+* **有意不动**：`downloadPinned`（declaration 与 artifact 的字节）保持原样。本轮修的是"列表拉不到"，
+  字节那条路已经有 pinned 摘要与超时，动它就把这次修补变成一次重构。
+
+### 12.2 失败的市场读不再缓存五分钟
+
+* `ui/components-view.js`：好读仍缓存 `MARKET_TTL_MS`（5 分钟），**丢了 source 的那次读**只算新鲜
+  `MARKET_ERROR_TTL_MS = 30s`。旧的形状是"一瞬间网络不好"被记住五分钟——每次重开页面都画出同样的
+  错误，而且不再去问，用户看到的就是"这页坏了"。现在再打开一次就是再问一次；答上来的那些 source 仍然
+  留在列表里（半个市场也是市场）。
+
+### 12.3 页面给出的那条出路：镜像（仍然是 opt-in）
+
+* 视图把 `unreachable` 这个位交给页面，`ui/js/components-panel.js` 就在错误行下面多画一条
+  `.plug-source-hint`（`ui/style.css`：字号 `--fs-xs`、颜色 `--muted`，出路不该和故障一样响）。
+  文案是：出厂 source 读的是 github.com，够不着就在 `~/.clutch/settings.json` 里写
+  `"source_mirror": "https://<prefix>"` 再看一次；并写明"镜像只搬字节——每个 digest 仍按 release
+  自己的 pin 校验"。
+* **不默认镜像、不自动回退**：manifest 是信任根，默认一个第三方镜像等于默认任意代码执行。这一位只在
+  "够不着"时出现；一条 404 是回答，不是网络问题，把它当成镜像问题会让人白改设置文件。
+
+### 12.4 测试
+
+* `tests/components.test.js` 新增一组（`serveBadly()` 起一个按次数作乱、或只连接不说话的本机 server）：
+  死两次、第三次成功（恰好 3 问）；一直死（措辞 `the source could not be reached (…)` 带
+  `asked 3 times`，**不含** `fetch failed`，问的次数等于 `MANIFEST_ATTEMPTS`）；404 只问 1 次；
+  静默 server 撞上压到 1000 ms 的预算（`the source did not answer within 1 s`）。
+* `tests/components-view.test.js`：`unreachable` 这个位、失败的读在 `MARKET_ERROR_TTL_MS` 之后重读、
+  而同一时刻的好读不重读。
+* `tests/components-panel.test.js` 第 36 组：够不着时恰好一条 `.plug-source-hint`（且在理由之后）、
+  文案里有 `source_mirror` 与 `settings.json`、404 时一条都不画；外加样式表事实（hint 是 `--fs-xs`
+  配 `--muted`，它上面那条理由仍是 `--danger` 配 `--fs-sm`）。
+* 全量：42 个 node 测试 + 21 个 python 模块，`SWEEP EXIT: 0`。
+
+### 12.5 发布
+
+* 宿主 0.1.38：`VERSION` + `ui/package.json` + `ui/package-lock.json` 三处 bump，tag `v0.1.38`。
+  本轮**没有**组件版本变化（`clutch-skills` 仍是 0.1.1）。
+* 仍然缺浏览器级验证（本机无 chrome/chromium、无 Xvfb、`DISPLAY` 为空），插件页那部分是 §10.4 的
+  stub 级"真代码 + 样式表事实"。真机上的判断交给用户：够不着时那条 hint 是否出现、写完镜像是否就好。

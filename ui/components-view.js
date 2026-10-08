@@ -28,6 +28,14 @@ const defaultLib = require("./components");
 // up without a restart, long enough that the tab is instant to re-open.
 const MARKET_TTL_MS = 5 * 60_000;
 
+// A read that LOST a source is the exception to that: keeping a failure for five
+// minutes is how a moment of bad network becomes "this page is broken" — every
+// re-open draws the same four errors without asking again. So a read that failed
+// a source is fresh only for a moment; the next look is the next ask. (Entries
+// from the sources that did answer are kept in the meantime — half a market is
+// still a market.)
+const MARKET_ERROR_TTL_MS = 30_000;
+
 function createComponentsView(deps) {
   const {
     supervisorBase,
@@ -105,7 +113,12 @@ function createComponentsView(deps) {
     const known = await lib.componentSpecs(); // errors are data, never a throw
     const value = {
       entries: known.specs.map(entry),
+      // the reasons as drawn, and the one bit a page can act on
+      // (`ui/js/components-panel.js`): at least one source that could not be
+      // reached is a question about this machine's network, and a mirror prefix
+      // is the answer to it. An answer that said no is not that question.
       errors: known.errors.map((e) => e.reason),
+      unreachable: known.errors.some((e) => e.unreachable),
       sources: lib.sources().length,
     };
     market = { at: now(), value, specs: known.specs };
@@ -113,17 +126,26 @@ function createComponentsView(deps) {
     return market;
   }
 
+  // Is the last read still this page's picture of the market? A read that failed
+  // some source is worth asking again almost immediately (MARKET_ERROR_TTL_MS) —
+  // that is the retry, and the page gets it by looking again rather than by
+  // holding a timer of its own.
+  function stillFresh() {
+    if (!market) return false;
+    return now() - market.at < (market.value.errors.length ? MARKET_ERROR_TTL_MS : MARKET_TTL_MS);
+  }
+
   // The market, from the last read when it is still fresh. `force` is the page's
   // refresh: a user asking again is asking because something changed.
   async function marketList({ force = false } = {}) {
-    if (!force && market && now() - market.at < MARKET_TTL_MS) return market.value;
+    if (!force && stillFresh()) return market.value;
     try {
       const fresh = await readMarket();
       return fresh.value;
     } catch (e) {
       // componentSpecs reports as data; this only catches something broken
       // underneath it, and still answers with a shape the page can draw
-      const value = { entries: [], errors: [(e && e.message) || String(e)], sources: 0 };
+      const value = { entries: [], errors: [(e && e.message) || String(e)], unreachable: false, sources: 0 };
       market = { at: now(), value, specs: [] };
       return value;
     }
@@ -147,7 +169,7 @@ function createComponentsView(deps) {
     if (problem) return { ok: false, name, error: problem };
     let specs;
     try {
-      const fresh = market && now() - market.at < MARKET_TTL_MS ? market : await readMarket();
+      const fresh = stillFresh() ? market : await readMarket();
       specs = fresh.specs;
     } catch (e) {
       return { ok: false, name, error: (e && e.message) || String(e) };
@@ -322,4 +344,4 @@ function createComponentsView(deps) {
   };
 }
 
-module.exports = { createComponentsView, MARKET_TTL_MS };
+module.exports = { createComponentsView, MARKET_TTL_MS, MARKET_ERROR_TTL_MS };

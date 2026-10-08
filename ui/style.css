@@ -1419,6 +1419,9 @@ mjx-container[display="true"] {
 .plug-row.stopped:hover .plug-row-desc { color: var(--text); }
 .plug-empty { margin: 0; font-size: var(--fs-sm); color: var(--muted); }
 .plug-source-error { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--danger); overflow-wrap: anywhere; }
+/* the line that answers "what now": quieter than the failure above it — it is a
+   way out, not a second complaint */
+.plug-source-hint { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 
 .fs-conn { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
 /* when the picker body is collapsed (SSH connect/failure), the conn bar is the

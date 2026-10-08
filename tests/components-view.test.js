@@ -9,7 +9,7 @@
 // Run: node tests/components-view.test.js
 const { check, summary } = require("./harness.js");
 const components = require("../ui/components");
-const { createComponentsView, MARKET_TTL_MS } = require("../ui/components-view");
+const { createComponentsView, MARKET_TTL_MS, MARKET_ERROR_TTL_MS } = require("../ui/components-view");
 
 const DIGEST = "a".repeat(64);
 const VERSION = "0.1.0+" + DIGEST.slice(0, 16);
@@ -204,6 +204,56 @@ async function main() {
     await clocked.market();
     await clocked.market();
     check(lib.calls.specReads === 4, "a market read older than its TTL is refreshed");
+    check(m.unreachable === false, "a source that ANSWERED no is not a source that could not be reached");
+
+    // a read that LOST a source is the exception to that five minutes: holding
+    // "fetch failed" for five minutes is how a moment of bad network turns into
+    // "this page is broken", so it is asked again almost at once — and the page
+    // is told which case it has (the mirror hint in ui/js/components-panel.js
+    // hangs off exactly this bit)
+    const failed = fakeLib({
+      specs: [CHECKOUT],
+      errors: [
+        {
+          name: "",
+          reason:
+            "https://example.invalid/x.json: the source could not be reached (other side closed, asked 3 times)",
+          unreachable: true,
+        },
+      ],
+    });
+    let lost = 0;
+    const retried = createComponentsView({
+      supervisorBase: () => "http://127.0.0.1:8890",
+      tunnelStatus: () => ({}),
+      lib: failed,
+      now: () => lost,
+    });
+    const short = await retried.market();
+    check(
+      short.unreachable === true && short.errors.length === 1 && short.entries.length === 1,
+      "a source that could not be reached is marked as such, and the sources that did answer are still a market"
+    );
+    lost = MARKET_ERROR_TTL_MS + 1;
+    await retried.market();
+    check(
+      failed.calls.specReads === 2 && lost < MARKET_TTL_MS,
+      "an unreachable source is asked again after " + MARKET_ERROR_TTL_MS + "ms, far inside the healthy " + MARKET_TTL_MS + "ms"
+    );
+    // the same instant, healthy market: nothing to retry, so no ask
+    const healthy = fakeLib({ specs: [CHECKOUT] });
+    let fine = 0;
+    const kept = createComponentsView({
+      supervisorBase: () => "http://127.0.0.1:8890",
+      tunnelStatus: () => ({}),
+      lib: healthy,
+      now: () => fine,
+    });
+    await kept.market();
+    fine = MARKET_ERROR_TTL_MS + 1;
+    const again = await kept.market();
+    check(healthy.calls.specReads === 1, "a market with no lost source is not re-read at the failure TTL");
+    check(again.unreachable === false && again.errors.length === 0, "and it draws no reason and asks for no hint");
   }
 
   // ---- 4. one install ----
