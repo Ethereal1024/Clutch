@@ -116,6 +116,16 @@ class Workspace(ABC):
         self._allowed_escapes: set[Path] = set()
         # per-file undo stack: previous contents recorded before every overwrite
         self._snapshots: dict[str, list[str]] = {}
+        # The TURN JOURNAL: every file a component's write replaced (or created),
+        # keyed by the log offset of the user task that was running when it
+        # changed (begin_turn). It answers the UI's "roll back to this task":
+        # undoing a task means undoing every recorded mutation at or after that
+        # task's offset, newest first, and DELETING the files that did not exist
+        # before — a creation is not something the per-file undo stack above can
+        # express, which is why the journal is its own record.
+        self._journal: list[tuple[int, str, bool, str]] = []  # (anchor, path, existed, content)
+        self._journal_anchor: int | None = None
+        self._journal_lock = threading.Lock()
 
     def allow(self, paths) -> None:
         """Record user-approved external paths for the current tool call."""
@@ -143,6 +153,68 @@ class Workspace(ABC):
         content = stack.pop()
         self.write(str(path), content)
         return content
+
+    # ---- the turn journal (the UI's whole-task rollback) ---------------------
+
+    def begin_turn(self, anchor: int) -> None:
+        """Open a rollback checkpoint at the log offset of the user task about to
+        run: mutations recorded from here on belong to that task AND every task
+        after it, which is exactly the set "roll back to this task" undoes."""
+        with self._journal_lock:
+            self._journal_anchor = int(anchor)
+
+    def record_mutation(self, path: Path | str, existed: bool, previous: str = "") -> None:
+        """Journal one file mutation — the HOST's own record, kept beside the
+        component's write rather than asked of it (the workspace is what knows a
+        task boundary). ``existed`` False means the write CREATED the path, so a
+        rollback removes it instead of restoring content. Nothing is recorded
+        when no checkpoint is open (a tool call outside a run has no task to be
+        rolled back with, and inventing one would offer the UI an undo that
+        restores state no task ever produced)."""
+        with self._journal_lock:
+            if self._journal_anchor is None:
+                return
+            self._journal.append((self._journal_anchor, str(path), bool(existed), previous))
+
+    def rollback_anchors(self) -> list[int]:
+        """The log offsets a rollback checkpoint actually exists for, ascending.
+        The UI asks this to know whether a task row can offer "roll back to
+        here" at all (a task that changed nothing has no record)."""
+        with self._journal_lock:
+            return sorted({anchor for anchor, _path, _existed, _content in self._journal})
+
+    def rollback_from(self, anchor: int) -> dict[str, list[str]] | None:
+        """Undo every journaled mutation at or after ``anchor`` and report what
+        changed; None when nothing was recorded for that task or any later one.
+
+        The entries are applied NEWEST FIRST, which is what makes the same path
+        written twice come out right: the later write is undone to its
+        intermediate content, then the earlier one to what preceded it — and a
+        file created and then rewritten ends up deleted, exactly where the task
+        found the workspace. A path that cannot be put back (permissions, a file
+        removed by a shell command) is reported by omission rather than aborting
+        the rest of the rollback. The journal entries that were undone are
+        dropped: their effect is gone, and a second rollback to the same task
+        must not restore pre-task content over work done since.
+        """
+        with self._journal_lock:
+            picked = [entry for entry in self._journal if entry[0] >= anchor]
+            if not picked:
+                return None
+            self._journal = [entry for entry in self._journal if entry[0] < anchor]
+        restored: list[str] = []
+        deleted: list[str] = []
+        for _anchor, path, existed, content in reversed(picked):
+            try:
+                if existed:
+                    self.write(path, content)
+                    restored.append(path)
+                else:
+                    self.delete(path)
+                    deleted.append(path)
+            except (OSError, ValueError):
+                continue  # not put back; left out of the report instead of guessed
+        return {"restored": restored, "deleted": deleted}
 
     def protect(self, path: Path) -> None:
         """Mark a file as invisible/unusable to the agent (e.g. the .clc project file)."""
@@ -323,6 +395,12 @@ class Workspace(ABC):
         round the raw bytes losslessly (remote: the transport's binary mode keeps bytes
         exact without a remote base64)."""
 
+    @abstractmethod
+    def delete(self, path: str) -> None:
+        """Remove a file (the rollback of a CREATION: the journal is the only
+        thing that knows a path did not exist before the task). Raises OSError
+        when it cannot be removed."""
+
 
 class LocalWorkspace(Workspace):
     def __init__(self, root: str | None = None, transport: Transport | None = None) -> None:
@@ -390,6 +468,11 @@ class LocalWorkspace(Workspace):
         with open(p, "r+b") as f:
             f.seek(offset)
             f.write(data)
+
+    def delete(self, path: str) -> None:
+        # missing_ok: same tolerance as the remote `rm -f` — the rollback that
+        # un-creates a file must survive the user having removed it by hand
+        self.resolve(path).unlink(missing_ok=True)
 
 
 # Minimal sshd drops a single exec over ~8KB: writes are chunked below it;
@@ -626,3 +709,13 @@ class RemoteWorkspace(Workspace):
         r = self._transport.run(cmd, _REMOTE_IO_TIMEOUT)
         if r.code != 0:
             raise OSError(f"cannot write_at {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")
+
+    def delete(self, path: str) -> None:
+        """Remove a file: `rm -f` (a POSIX sh command, like every other op here)
+        so a path that is already gone is NOT an error — the rollback that
+        un-creates a file must survive the user having deleted it by hand. A
+        real failure (permissions, a directory) reports the exit code."""
+        p = self.resolve(path)
+        r = self._transport.run(f"rm -f {shq(str(p))}", _REMOTE_IO_TIMEOUT)
+        if r.code != 0:
+            raise OSError(f"cannot delete {p} (exit {r.code}): {(r.stderr or r.stdout)[:_ERR_SNIPPET]}")

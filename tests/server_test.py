@@ -1610,6 +1610,29 @@ def _workspace_tree(base_url, clc) -> None:
     check(clc.name not in names, ".clc file hidden from workspace tree")
 
 
+def _rollback_endpoint(base_url, state) -> None:
+    """5c. whole-task rollback: routing + guards on an idle, journal-less project.
+
+    The journal itself (which mutations it holds, what a rollback puts back) is
+    exercised in selfcheck against a real workspace; what is checked HERE is the
+    endpoint contract the UI's long-press depends on before any run has happened:
+    an honest empty checkpoint list, and a refusal — never a silent success — for
+    an offset that is not a non-negative integer or that has nothing recorded.
+    """
+    st, body = http_get(f"{base_url}/api/workspace/checkpoints")
+    data = json.loads(body)
+    check(
+        st == 200 and data.get("anchors") == [],
+        "checkpoints answers an empty journal before any run",
+    )
+    for bad in (None, -1, True, "12"):
+        st, _ = http_post(f"{base_url}/api/workspace/rollback", {} if bad is None else {"offset": bad})
+        check(st == 400, f"rollback rejects a bad offset ({bad!r})")
+    st, _ = http_post(f"{base_url}/api/workspace/rollback", {"offset": 1})
+    check(st == 404, "rollback with nothing recorded for that task is refused")
+    check(not state.busy, "the rollback guards above ran on an idle session")
+
+
 def _undo_endpoint(base_url, clc) -> None:
     # 5b. undo endpoint: routing + guards (restore logic in selfcheck)
     st, body = http_post(f"{base_url}/api/workspace/revert", {"path": "hello.txt"})
@@ -1620,6 +1643,66 @@ def _undo_endpoint(base_url, clc) -> None:
     check(st == 400, "revert refuses the protected .clc")
     st, body = http_post(f"{base_url}/api/workspace/revert", {})
     check(st == 400, "revert requires a path")
+
+
+def _rollback_after_real_run(base_url, clc) -> None:
+    """5d. whole-task rollback on a REAL run's own journal.
+
+    This is the only place the two halves of the feature meet on the wire: the
+    anchor the UI puts on a user row comes from the replay frame's ``offset``
+    (agent/api/events.py), and the journal's anchor comes from the log offset
+    Agent.run opened the checkpoint with — claim them equal here or "roll back
+    to this message" addresses a different point of the log than the row does.
+
+    Conditional on the journal being non-empty: only TOOL-declared writes are
+    journaled, and a model free to run `echo ... > hello.txt` through a shell
+    journals nothing, which is not a failure of the rollback (the deterministic
+    anchor chain is covered by tests/loop_test.py). The guards before the run
+    (_rollback_endpoint) proved the journal was empty, so every anchor here is
+    one this run recorded.
+    """
+    st, body = http_get(f"{base_url}/api/workspace/checkpoints")
+    data = json.loads(body)
+    anchors = data.get("anchors")
+    check(st == 200 and isinstance(anchors, list), "checkpoints lists the journal after a run")
+    check(
+        all(isinstance(a, int) and not isinstance(a, bool) and a >= 0 for a in anchors or []),
+        f"every anchor is a log offset (got {anchors})",
+    )
+    if not anchors:
+        print("  (the run journaled no tool-declared write - the rollback-to-a-run check is skipped)")
+        return
+
+    user_offsets = {
+        f["offset"]
+        for f in _records(_sse_collect(f"{base_url}/api/events"))
+        if isinstance(f.get("event"), dict) and f["event"].get("type") == "user_message"
+    }
+    anchored = user_offsets & set(anchors)
+    check(
+        bool(anchored),
+        f"the journal's anchor is the wire offset of the run's user message (anchors {anchors}, wire {user_offsets})",
+    )
+    if not anchored:
+        return  # nothing to aim a rollback at; the checks below would only guess
+    anchor = min(anchored)
+
+    clc_before = clc.read_text()
+    st, body = http_post(f"{base_url}/api/workspace/rollback", {"offset": anchor})
+    report = json.loads(body)
+    check(st == 200, f"rollback to the run's own anchor is accepted ({body[:120]})")
+    check(
+        any(Path(p).name == "hello.txt" for p in (report.get("deleted") or [])),
+        f"the rollback reports deleting the file the run created ({body[:160]})",
+    )
+    tree = json.loads(http_get(f"{base_url}/api/workspace/tree")[1])
+    check(
+        "hello.txt" not in [n["name"] for n in tree.get("tree", [])],
+        "the file the run created is gone from the workspace tree",
+    )
+    check(clc.read_text() == clc_before, "the .clc transcript is untouched: a rollback undoes files, never history")
+    st, _ = http_post(f"{base_url}/api/workspace/rollback", {"offset": anchor})
+    check(st == 404, "the same run cannot be rolled back twice")
 
 
 def _clc_persisted_conversation(base_url, clc) -> None:
@@ -1668,6 +1751,7 @@ def _run_server_test() -> int:
         _reopen_project(base_url, clc)
         _file_browser(base_url, proj_dir)
         _symlink_marking(base_url, proj_dir, clc)
+        _rollback_endpoint(base_url, state)
         lclc, comp_off = _lazy_open_and_history(base_url, sdir)
         appended = _clc_read_and_append(base_url, lclc)
         _clc_patch_memory_index(base_url, lclc, state, appended)
@@ -1692,6 +1776,7 @@ def _run_server_test() -> int:
         _collect_run_events(base_url)
         _workspace_tree(base_url, clc)
         _undo_endpoint(base_url, clc)
+        _rollback_after_real_run(base_url, clc)
         _clc_persisted_conversation(base_url, clc)
         _stop_is_safe_on_idle(base_url, srv)
 

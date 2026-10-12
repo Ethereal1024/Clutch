@@ -905,6 +905,54 @@ def main() -> None:
         check((sb.root / "edit.txt").read_text() == "alpha\nBETA\ngamma\n", "restore wrote the previous content back")
         check(sb.restore(sb.resolve("edit.txt")) == "alpha\nbeta\ngamma\n", "second restore pops the next snapshot")
         check(sb.restore(sb.resolve("edit.txt")) is None, "restore with no snapshot returns None")
+
+        # 4b. the turn journal: roll back every file change made from one task on
+        # (the UI's long-press / right-click on a sent message). The undo stack
+        # above is per-file and one step deep; the journal is per TASK, keyed by
+        # the log offset of the user message that started it, and it is the only
+        # record that can undo a CREATION (by deleting the file).
+        bare = LocalWorkspace(tmp)
+        bare.record_mutation(bare.resolve("nowhere.txt"), True, "x")
+        check(
+            bare.rollback_anchors() == [],
+            "a mutation outside a run is not journaled (no task to roll it back with)",
+        )
+
+        sb.begin_turn(100)
+        reg.execute(sb, config, "write_file", {"path": "made.txt", "content": "created by task A\n"})
+        reg.execute(sb, config, "write_file", {"path": "keep.txt", "content": "one\n"})
+        sb.begin_turn(200)
+        reg.execute(sb, config, "write_file", {"path": "keep.txt", "content": "two\n"})
+        check(sb.rollback_anchors() == [100, 200], "each task that changed a file gets one journal anchor")
+        report = sb.rollback_from(200)
+        check(
+            report == {"restored": [str(sb.resolve("keep.txt"))], "deleted": []},
+            f"a rollback to the later task restores only its own write (got {report})",
+        )
+        check(
+            (sb.root / "keep.txt").read_text() == "one\n",
+            "the later write is undone to what the earlier task left",
+        )
+        check(sb.rollback_anchors() == [100], "the undone anchor leaves the journal")
+        report = sb.rollback_from(100)
+        check(
+            report is not None
+            and report["restored"] == []
+            and sorted(Path(p).name for p in report["deleted"]) == ["keep.txt", "made.txt"],
+            "a rollback to the first task deletes every file it created, newest first",
+        )
+        check(
+            not (sb.root / "made.txt").exists() and not (sb.root / "keep.txt").exists(),
+            "the files the tasks created are gone: the workspace is what it was before them",
+        )
+        check(
+            sb.rollback_from(100) is None and sb.rollback_from(300) is None,
+            "a rolled-back or never-recorded anchor reports nothing to undo",
+        )
+        check(sb.rollback_anchors() == [], "the journal is empty once every task is undone")
+        sb.begin_turn(400)
+        r = reg.execute(sb, config, "edit_file", {"path": "absent.txt", "old_string": "a", "new_string": "b"})
+        check(r.error and sb.rollback_anchors() == [], "a failed write records nothing to undo")
         # read_file on a directory lists its entries
         r = reg.execute(sb, config, "read_file", {"path": "."})
         check("edit.txt" in r.content and not r.error, "read_file on a directory lists entries")

@@ -1242,6 +1242,60 @@ def _window_overflow_compacts() -> None:
         check("earlier answer" in str(fake17.seen[1]), "the summarizer saw the window that overflowed")
 
 
+def _rollback_anchor_is_the_wire_offset(config) -> None:
+    # 18. the anchor the UI is offered for "roll back to this message" is the
+    #     SAME number the wire carries: run() opens the workspace checkpoint at
+    #     the user record's own log_offset, so the live SSE frame, the replay's
+    #     (offset, event) pairs and the journal all address one point of the log.
+    #     The rollback then undoes exactly that task's writes — the file it
+    #     created is deleted, the one it overwrote is put back — and leaves the
+    #     transcript alone (a rollback is about files, never about history).
+    with tempfile.TemporaryDirectory() as tmp:
+        sb = LocalWorkspace(tmp)
+        (sb.root / "kept.txt").write_text("before\n")
+        fake = FakeLLM(
+            responses=[
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "new.txt", "content": "made\\n"}', cid="c1")]),
+                _resp(tool_calls=[_tool_call("write_file", '{"path": "kept.txt", "content": "after\\n"}', cid="c2")]),
+                _resp(content="done"),
+            ],
+            fallback=_resp(content="done"),
+        )
+        log = LazyEventLog.in_memory()
+        agent = _agent(fake, config, sb, log)
+        check(agent.run("make the changes") == "done", "a two-write task finishes")
+
+        records = log.items()
+        opened = next(e for _off, e in records if isinstance(e, UserMessageEvent))
+        anchor = getattr(opened, "log_offset", None)
+        check(isinstance(anchor, int), "the user record carries the wire offset the UI is shown")
+        check(
+            any(off == anchor and ev is opened for off, ev in records),
+            "the anchor IS the offset the replay reports for that same record",
+        )
+        check(
+            sb.rollback_anchors() == [anchor],
+            f"the task's checkpoint is open at that same offset (got {sb.rollback_anchors()})",
+        )
+
+        report = sb.rollback_from(anchor)
+        check(
+            report is not None and sorted(Path(p).name for p in report["deleted"]) == ["new.txt"],
+            f"the rollback deletes the file the task created (got {report})",
+        )
+        check(
+            report is not None and sorted(Path(p).name for p in report["restored"]) == ["kept.txt"],
+            f"the rollback restores the file the task overwrote (got {report})",
+        )
+        check(not (sb.root / "new.txt").exists(), "the created file is gone from the workspace")
+        check((sb.root / "kept.txt").read_text() == "before\n", "the overwritten file is what preceded the task")
+        check(sb.rollback_anchors() == [], "the undone task leaves no anchor behind")
+        check(
+            [off for off, _ev in log.items()] == [off for off, _ev in records],
+            "the transcript is untouched: a rollback undoes files, never the log",
+        )
+
+
 def main() -> int:
     config = Config()
 
@@ -1283,6 +1337,7 @@ def main() -> int:
     _classify_command()
     _stop_during_a_tool_call()
     _window_overflow_compacts()
+    _rollback_anchor_is_the_wire_offset(config)
 
     print("\nall passed")
     return 0

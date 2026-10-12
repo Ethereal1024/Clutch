@@ -97,7 +97,10 @@ global.setOlderPill = (n) => pill.push(n);
 global.flushTextRender = () => {};
 global.flushThinkingRender = () => {}; // addEvent finalizes the reasoning block too
 global.applyStreamEvent = () => false;
-global.renderEvent = (ev) => ({ ev, matches: () => false });
+// a rendered row carries the record's own byte offset (js/stream-events.js
+// addEvent stamps dataset.offset): the roll-back gesture reads it off the row,
+// and this runner renders the real rows
+global.renderEvent = (ev) => ({ ev, dataset: {}, matches: () => false });
 global.highlightCode = () => {};
 global.typesetMath = () => {};
 // the catch-up bracket (js/stream-view.js): the runner drives the real pair AND
@@ -115,6 +118,11 @@ global.runSettled = false;
 // runner cares about offsets, not prompts — what the mark does for a new run is
 // tests/perm-run-scope-test.js
 global.forgetAnsweredPerm = () => {};
+// the journal anchors a cleared pane drops (js/task-rollback.js, which loads
+// after this module): they belong to the project that just left, so clearStream
+// forgets them with the transcript. What a stale set would cost is that
+// module's subject — here the pane is.
+global.resetRollbackAnchors = () => {};
 
 for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
   (0, eval)(fnBody(name));

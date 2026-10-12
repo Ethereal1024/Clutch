@@ -25,6 +25,7 @@ function clearStream() {
   oldestOffset = null; // fresh project: no loaded events yet
   streamHighOffset = null; // and no replayed record to dedupe a reconnect against
   runSettled = false; // a fresh pane holds no run's ending (js/stream-events.js)
+  resetRollbackAnchors(); // and no journal anchors: they belong to the project that left
   setOlderPill(0);
 }
 
@@ -221,6 +222,7 @@ async function openProject(path, readOnly = false) {
     // now holds this project's tail, so the stream resumes exactly there
     reconnectSSE();
     refreshTree();
+    refreshRollbackAnchors(); // the rows just replayed can be rolled back; ask the journal
   } catch (e) {
     prog.classList.add("hidden");
     stream.classList.remove("loading");
@@ -257,6 +259,7 @@ async function createProject(dir, name) {
     hideWelcome();
     reconnectSSE(); // new empty project: the watermark resets with the stream
     refreshTree();
+    refreshRollbackAnchors(); // a fresh project has an empty journal; keep the set honest
   } catch (e) {
     notice("Failed to create project: " + e.message);
   }

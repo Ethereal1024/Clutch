@@ -132,7 +132,9 @@ function announceRunLost() {
 function addEvent(ev) {
   // lazy wire shape: {offset, event} carries each durable event's byte offset
   // so the UI can page the earlier records
+  let wireOffset = null; // the record's own offset, kept for the row it renders
   if (ev && typeof ev === "object" && ev.event && typeof ev.offset === "number") {
+    wireOffset = ev.offset;
     // Replay HEALS, it does not re-render. A reconnecting stream replays the log
     // from its window start, so every event this window already painted arrives
     // again (the transcript visibly doubled after a reconnect). Offsets are the
@@ -212,6 +214,10 @@ function addEvent(ev) {
 
   const el = renderEvent(ev);
   if (el) {
+    // the record's own byte offset rides on the row: it is what the roll-back
+    // gesture on a task row addresses (js/task-rollback.js), and the server's
+    // journal is keyed by exactly this number
+    if (wireOffset !== null && !pageSink) el.dataset.offset = String(wireOffset);
     (pageSink || eventsEl).appendChild(el);
     // user tasks render markdown too; replay hits this path as well.
     // NOTE: className is "event user" (two tokens) — classList.contains("event.user")
@@ -315,6 +321,13 @@ function applyStreamEvent(ev) {
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree
+    // the task is over: fold its middle away, leaving the opening task and this
+    // closing record (js/auto-fold.js). The head of the fold re-opens it.
+    autoFoldTurn();
+    // ...and this task's file changes are in the rollback journal now, so re-read
+    // the anchors: without this a long-press on the message would be answered
+    // from the set fetched when the project opened (js/task-rollback.js)
+    if (!pageSink) refreshRollbackAnchors();
     return true;
   }
   if (ev.type === "tool_call" && ev.tool_call_id) {

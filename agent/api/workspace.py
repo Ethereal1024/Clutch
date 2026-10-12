@@ -62,6 +62,64 @@ class WorkspaceMixin:
             return self._json({"error": "no snapshot to restore"}, status=404)
         self._json({"status": "ok", "path": str(p)})
 
+    def _workspace_checkpoints(self) -> None:
+        """Which tasks a whole-task rollback can be offered for.
+
+        The list is the workspace journal's anchors — the log offsets under
+        which file mutations were recorded, one per task that changed something
+        (Workspace.begin_turn / record_mutation). The UI asks for it when a
+        window opens and when a task ends, because the journal lives in THIS
+        process: a journal of past tasks is not something the transcript can be
+        read back for, and the anchor is the offset the UI already has on each
+        rendered user message.
+
+        A task that changed nothing is absent on purpose — "roll back to here"
+        would restore exactly the state the workspace is already in.
+        """
+        ws = self._state.workspace
+        self._json({"anchors": ws.rollback_anchors() if ws is not None else []})
+
+    def _workspace_rollback(self) -> None:
+        """Roll the workspace back to a sent task: undo every file mutation
+        recorded at or after that task's log offset, newest first.
+
+        This is the long-press / right-click action on a user message: it
+        deletes the files the later tasks created and restores the content they
+        overwrote, so the working tree is what it was before that message was
+        sent. The .clc is deliberately NOT truncated — the transcript keeps the
+        record of what ran, and undo/redo of CONVERSATION is not this endpoint's
+        job. Refused while a run is live (409): the run is writing those files
+        right now, and rolling back beneath it would have the journal record the
+        restored content as another mutation, blurring where the task started.
+        """
+        body = self._read_body()
+        if body is None:
+            return self._json({"error": "bad json body"}, status=400)
+        offset = body.get("offset")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            return self._json({"error": "offset (a non-negative integer) is required"}, status=400)
+        ws = self._state.workspace
+        if ws is None:
+            return self._json({"error": "no workspace open"}, status=400)
+        if self._state.busy:
+            return self._json({"error": "a run is active; stop it before rolling back"}, status=409)
+        project = self._state.project
+        if project is not None and project.read_only:
+            return self._json(
+                {"error": "project opened read-only; close the other window first"}, status=409
+            )
+        report = ws.rollback_from(offset)
+        if report is None:
+            return self._json({"error": "no recorded changes for that task"}, status=404)
+        self._json(
+            {
+                "status": "ok",
+                "restored": report["restored"],
+                "deleted": report["deleted"],
+                "count": len(report["restored"]) + len(report["deleted"]),
+            }
+        )
+
     # ---- .clc content service ----
     # Byte-level access to the ACTIVE project's .clc for decoupled tool modules
     # (clutch-memory and friends run as one-shot scripts; they must not import

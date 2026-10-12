@@ -40,6 +40,10 @@ function renderEvent(ev) {
   switch (ev.type) {
     case "user_message": {
       wrap.className = "event user";
+      // what the user actually typed, verbatim, kept on the row: the rendered
+      // DOM is markdown and cannot be turned back into the message, and the
+      // roll-back gesture has to put the message back in the box (js/task-rollback.js)
+      wrap._taskText = String(ev.content == null ? "" : ev.content);
       wrap.innerHTML = '<div class="hdr">task</div>';
       body.className = "body";
       // hard-wrapped markdown (breaks: true): WYSIWYG line breaks
@@ -147,6 +151,9 @@ async function run() {
   if (!currentProject) return;
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
+  // ...and it joins the box's sent-message history: ArrowUp walks it back
+  // (js/task-input.js), which is how the user re-reads or re-asks what they sent
+  recordSentTask(task);
   // sending a message returns to the live tail unconditionally
   followTail = true;
   autoScroll(true);

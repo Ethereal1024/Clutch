@@ -79,7 +79,16 @@ class Agent:
         # durable project-memory store, if any
         self.memories = memories
 
-    def _emit(self, event: Event) -> None:
+    def _emit(self, event: Event) -> Event:
+        """Append one event and hand it back.
+
+        Returning it is how a caller reads what only the log's append knows:
+        the log stamps a durable event with its own ``log_offset`` (see
+        core/lazy.py), and run() needs that of the user task it just emitted to
+        open the turn's rollback checkpoint at the SAME offset the UI is shown
+        in the SSE frame — the two must be the same number or the UI's "roll
+        back to this message" would address a different point of the log.
+        """
         self.log.append(event)
         if self.sink:
             # isolate the sink: a failing subscriber must not kill the agent
@@ -87,6 +96,7 @@ class Agent:
                 self.sink(event)
             except Exception:  # noqa: BLE001 -- subscriber failure is non-fatal
                 print(f"[clutch] sink error: {event.type}", file=sys.stderr)
+        return event
 
     def _finish(self, status: str, summary: str) -> str:
         self._emit(FinalEvent(status=status, summary=summary))
@@ -178,7 +188,15 @@ class Agent:
 
     def run(self, task: str) -> str:
         self._emit(StateUpdateEvent(value="running"))
-        self._emit(UserMessageEvent(content=task))
+        # The task's own log offset opens the workspace's rollback checkpoint:
+        # every file write from here until the next task is journaled under it,
+        # which is what makes "roll back to this message" undoable (registry
+        # records the writes through Workspace.record_mutation). The offset is
+        # the one the log stamped on the record just appended — the same number
+        # the SSE frame carries — and the fallback keeps a bare 0 for a log
+        # duck-typed by a caller that stamps nothing.
+        opened = self._emit(UserMessageEvent(content=task))
+        self.workspace.begin_turn(int(getattr(opened, "log_offset", 0) or 0))
         # what the components themselves say about their own tools, read once per
         # run: the surface is fixed for the run (the tools came from the same
         # declarations), so every turn's system prompt carries the same fragments

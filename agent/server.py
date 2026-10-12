@@ -7,6 +7,8 @@ Endpoints (all JSON except SSE/NDJSON):
   POST /api/stop           cancel the running agent
   GET  /api/events         SSE: replay active project history, then live events
   GET  /api/workspace/tree   file tree under the project's working directory
+  GET  /api/workspace/checkpoints  log offsets a whole-task rollback can undo
+  POST /api/workspace/rollback {offset} undo every file change from that task on
   GET  /api/fs/list           server-side directory browser (one level)
   GET  /api/clc?lo&hi         byte range of the active .clc -> {size, b64}
   POST /api/clc/append {line} append one line -> {offset, size}

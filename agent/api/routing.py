@@ -46,6 +46,8 @@ class RoutingMixin:
             self._history()
         elif path == "/api/workspace/tree":
             self._workspace_tree()
+        elif path == "/api/workspace/checkpoints":
+            self._workspace_checkpoints()
         elif path == "/api/fs/list":
             self._fs_list()
         elif path == "/api/clc":
@@ -73,6 +75,8 @@ class RoutingMixin:
             self._permission_respond()
         elif parsed.path == "/api/workspace/revert":
             self._workspace_revert()
+        elif parsed.path == "/api/workspace/rollback":
+            self._workspace_rollback()
         elif parsed.path == "/api/backend":
             self._backend()
         elif parsed.path == "/api/clc/append":

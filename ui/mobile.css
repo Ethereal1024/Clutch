@@ -216,6 +216,21 @@
      off the row; it is a field, so the taller --ctl-h-sm above already sizes it */
   #plug-filter .plug-filter-name { flex: 1 1 100%; min-width: 0; }
 
+  /* ---- a sent message is a long-press target (js/task-rollback.js) ----
+     Pressing and holding a task row rolls the workspace back to just before it,
+     so the press must be OURS: the platform's own long-press (the text-selection
+     handles and the callout/action-mode toolbar) starts at about the same moment
+     and would draw a second, unrelated menu over the same finger. Nothing is
+     lost to it — the gesture it enables puts the message back in the input box,
+     where it can be selected and copied like anything else, and the transcript
+     keeps every word of it. Desktop keeps plain selection: right-click is the
+     gesture there, and no touch callout exists to fight. */
+  .event.user {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   /* in-page notice: lift it above the ↓ button (bottom 16px + 34px tall), so a
      failure line and the scroll-to-bottom control are never on top of each other */
   .notice { bottom: 60px; }

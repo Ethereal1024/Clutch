@@ -267,6 +267,31 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
     return tools
 
 
+def _file_before(workspace: Workspace, args: dict[str, Any], arg: str) -> tuple[Any, bool, str] | None:
+    """(resolved path, existed, previous content) of the file a component's write
+    is about to replace or create.
+
+    One resolution, two records that need different halves of it: the per-file
+    undo stack (``snapshot``) only wants a file whose content is actually lost,
+    while the turn journal (``Workspace.record_mutation``) also has to know
+    whether the write CREATED the path — a creation is undone by deleting, which
+    the undo stack cannot express. ``existed`` False with an empty previous
+    content carries that case. None means the path could not be resolved at all
+    (an escape, a symlink loop, an unreadable directory entry): there is nothing
+    the host could remember, so nothing is recorded.
+    """
+    try:
+        p = workspace.resolve(str(args.get(arg, "")))
+    except (OSError, ValueError):
+        return None
+    try:
+        return (p, True, workspace.read(str(p)))
+    except FileNotFoundError:
+        return (p, False, "")
+    except OSError:
+        return None
+
+
 def _previous_content(workspace: Workspace, args: dict[str, Any], arg: str) -> tuple[Any, str] | None:
     """(resolved path, content) of the file a component's write is about to
     replace — the host's own undo bookkeeping for the statement path.
@@ -418,10 +443,15 @@ class ToolRegistry:
         # the component performs the write; the host keeps the undo record, but
         # only once the statement has actually overwritten something — a refused
         # or failed edit must not leave a snapshot the UI could "restore"
-        remembered = _previous_content(workspace, args, tool.snapshot_arg) if tool.snapshot else None
+        remembered = _file_before(workspace, args, tool.snapshot_arg) if tool.snapshot else None
         result = self._exec_statement(workspace, config, tool, args, cancel)
         if remembered is not None and not result.error:
-            workspace.snapshot(remembered[0], remembered[1])
+            path, existed, previous = remembered
+            # the undo stack keeps its old rule (only content that was actually
+            # lost is restorable); the journal keeps the fuller record
+            if existed and previous:
+                workspace.snapshot(path, previous)
+            workspace.record_mutation(path, existed, previous)
         return result
 
     def _exec_statement(

@@ -858,6 +858,28 @@ mjx-container[display="true"] {
   animation: fadeIn .26s ease-out;
 }
 
+/* a finished task's middle, folded away (js/auto-fold.js). The head is a plain
+   button in the stream's content column — the same 22px left padding as .event,
+   so the label lines up exactly under the rows the fold hides, and nothing
+   re-indents when the task ends. */
+.turn-fold { margin: 0 0 12px; }
+.turn-fold-head {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; margin: 0; padding: 4px 0 4px 22px;
+  border: none; background: none;
+  color: var(--muted);
+  font: inherit; font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  text-align: left; cursor: pointer;
+}
+.turn-fold-head:hover { color: var(--text); }
+.turn-fold-head:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.turn-fold-caret { font-size: 10px; line-height: 1; }
+/* The rows are MOVED into the fold, and a move re-inserts them: without this
+   every row of a long task would replay its arrival animation inside a box
+   that is collapsing at the same moment. */
+.turn-fold .fold-inner > * { animation: none; }
+
 /* a row form's folded body: collapsed label, expand on click */
 .result-detail {
   background: var(--code-bg); padding: 8px 10px; border-radius: 0;
@@ -1664,7 +1686,8 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   label.hidden-toggle:active { color: var(--accent); }
   label.hidden-toggle:active input[type="checkbox"] { border-color: var(--accent); }
   .thinking-row:active,
-  .result-row:active { color: var(--accent); }
+  .result-row:active,
+  .turn-fold-head:active { color: var(--accent); }
   /* a link is already accent text: the wash hugs the text box (inline), which
      is as "inside the element" as an inline element can get */
   .event .body a:active { background: rgba(239, 68, 68, 0.14); }

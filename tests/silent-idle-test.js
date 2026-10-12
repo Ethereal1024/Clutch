@@ -85,6 +85,9 @@ function fakeEl(tag) {
     textContent: "",
     innerHTML: "",
     children: [],
+    // a rendered row carries the record's own byte offset (js/stream-events.js
+    // addEvent stamps dataset.offset, which the roll-back gesture reads off it)
+    dataset: {},
     appendChild(child) {
       this.children.push(child);
       return child;
@@ -178,6 +181,14 @@ global.forgetAnsweredPerm = () => {};
 global.clearStreamPreviews = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};
+// the run's `final` branch hands off to two modules that load AFTER
+// js/stream-events.js on the page, so neither exists in this runner: the turn's
+// fold (js/auto-fold.js) and the anchors the finished task just entered
+// (js/task-rollback.js). This file is about what the window says when a run is
+// lost; both have their own runners.
+global.autoFoldTurn = () => {};
+global.refreshRollbackAnchors = () => {};
+global.resetRollbackAnchors = () => {};
 
 for (const name of [
   "switchBackend", "dropStaleBackend", "escapeHtml", "renderMarkdown",

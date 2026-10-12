@@ -138,6 +138,13 @@ global.clearStreamPreviews = () => {};
 global.clearRetryNote = () => {};
 global.refreshTree = () => {};
 global.announceRunLost = () => {};
+// the two things the real `final` branch hands off to, both defined by the
+// modules that load AFTER js/stream-events.js on the page and therefore absent
+// here: the turn's fold (js/auto-fold.js) and the rollback anchors the finished
+// task just entered (js/task-rollback.js). This runner is about permission
+// scope — neither side effect is its subject, and each has its own runner.
+global.autoFoldTurn = () => {};
+global.refreshRollbackAnchors = () => {};
 
 // ---- the real renderer, in ONE evaluation ----
 //

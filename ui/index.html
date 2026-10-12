@@ -431,6 +431,13 @@
   <script src="js/sse-stream.js"></script>
   <script src="js/project.js"></script>
   <script src="js/fs-browser.js"></script>
+  <!-- the task surface itself: the box's own conveniences (undo / sent-message
+       history), the fold a finished task collapses into, and the roll-back
+       gesture on a sent task row. They shape the pane the files above build, so
+       they load last and touch nothing that runs before them. -->
+  <script src="js/task-input.js"></script>
+  <script src="js/auto-fold.js"></script>
+  <script src="js/task-rollback.js"></script>
   <script src="js/boot.js"></script>
 </body>
 </html>
