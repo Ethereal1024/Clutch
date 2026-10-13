@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..base import LAGGED
 from ..core.lazy import LazyEventLog
-from ..core.project_lock import ProjectLock
+from ..core.project_lock import ProjectLock, ProjectOpenConflict
 from ..events import Event, PermissionRequestEvent, StateUpdateEvent, event_to_json
 from ..project import Project, open_project_lazy
 
@@ -89,7 +89,19 @@ class EventsMixin:
     def _project_for_sse(self, project_q: str | None) -> Project | None:
         """Resolve the project an SSE subscriber asked to watch: the global
         active one when no project is given (or it matches), otherwise open the
-        requested .clc fresh. Failures degrade to None (skip replay)."""
+        requested .clc fresh. Failures degrade to None (skip replay).
+
+        A session that has NO project yet ADOPTS the one its subscriber names
+        (_adopt_for_sse): the subscription is the window's own statement of which
+        .clc it has open, and it is the only thing a reconnecting window still
+        says about it. The window's project lives in the renderer, while the
+        process serving it can have been replaced under it (a tunnel end, the
+        host's self-heal, a re-claim -- ui/host-core.js claimWindowBackend) and a
+        fresh session starts with no project AND no workspace. Without the
+        adoption every project-scoped view answers that session with "nothing
+        open" -- the reported blank workspace panel after a reconnect, which only
+        recovered once the window happened to send a task, the one other place a
+        window names its project (/api/run)."""
         try:
             if project_q:
                 global_proj = self._state.project
@@ -98,13 +110,37 @@ class EventsMixin:
                 full = self._project_path(project_q)
                 if full.suffix == ".clc" and (self._state.backend_mode == "ssh" or full.is_file()):
                     ws = self._state.build_workspace(str(full.parent))
+                    if global_proj is None:
+                        return self._adopt_for_sse(full, ws)
                     # SSE only replays/watchs: open read-only so a subscriber
-                    # never takes the write lock (or fights the real writer)
+                    # never takes the write lock (or fights the real writer). The
+                    # session already has a project, and a subscriber on another
+                    # window's file must not replace it (tests/server_test.py
+                    # _multi_window_isolation).
                     return open_project_lazy(full, workspace=ws, read_only=True)
                 return None
             return self._state.project
         except (OSError, ValueError):
             return None
+
+    def _adopt_for_sse(self, full: Path, ws) -> Project:
+        """Make the .clc this stream names the session's project, so every
+        project-scoped endpoint (the tree, the checkpoints, the .clc service)
+        answers with the window's project instead of "nothing open".
+
+        The write open is preferred, because that IS the state the window was in
+        before its session was replaced: the UI's own open takes the write lock
+        and the lock's whole purpose is that a window with a project open is that
+        project's one writer. A .clc another window already holds is adopted
+        read-only instead -- the same fallback the UI offers -- since read-only
+        still brings the workspace the tree and the transcript need, and the first
+        task this window sends re-asks for the claim (/api/run)."""
+        try:
+            project = open_project_lazy(full, workspace=ws)
+        except ProjectOpenConflict:
+            project = open_project_lazy(full, workspace=ws, read_only=True)
+        self._state.set_project(project, workspace=ws)
+        return project
 
     def _sse(self, project_q: str | None = None, replay: bool = True,
              since: int | None = None) -> None:

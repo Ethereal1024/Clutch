@@ -123,6 +123,13 @@ global.forgetAnsweredPerm = () => {};
 // forgets them with the transcript. What a stale set would cost is that
 // module's subject — here the pane is.
 global.resetRollbackAnchors = () => {};
+// the workspace-panel read the `replayed` frame makes (js/workspace-panel.js):
+// the session has resolved the project this stream names by then, and only then
+// is a tree read unable to race it (asserted below and in sse-liveness-test.js)
+let treeRefreshes = 0;
+global.refreshTree = () => {
+  treeRefreshes++;
+};
 
 for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
   (0, eval)(fnBody(name));
@@ -227,8 +234,16 @@ addEvent({ type: "replayed", count: 2 });
 check(global.catchUp === false, "the 'replayed' frame closes the catch-up");
 check(pins.length === pinsBefore + 1 && pins[pins.length - 1] === 1000,
   "and the view moves exactly once, at the end, onto the tail");
+// the same frame is the first moment the workspace tree may be read: the host
+// resolves the project this stream named BEFORE it serves that block
+// (agent/api/events.py _project_for_sse), and a session that was replaced under
+// this window adopts it there. A read from onopen beats that open and is
+// answered "nothing open" — the blank panel after a reconnect (sse-liveness-test.js)
+check(treeRefreshes === 1, "and it re-reads the workspace tree, now that the session's project is settled");
 addEvent({ type: "replayed", count: 0 });
 check(pins.length === pinsBefore + 1, "a close with nothing open moves nothing");
+check(treeRefreshes === 2,
+  "an empty catch-up re-reads the tree too: that is the ordinary idle reconnect");
 
 // ---- 8. an offset the log cannot continue from restarts the pane ----
 // (the .clc was replaced under this window: appending the served window would

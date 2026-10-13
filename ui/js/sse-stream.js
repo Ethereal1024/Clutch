@@ -229,8 +229,15 @@ function connectSSE() {
     // over a run that is no longer thinking — and the turn's own durable record
     // then draws a second copy of the text under the stale first half.
     dropOrphanLive();
-    // the backend (re)connected, possibly after a self-heal restart: resync the tree
-    refreshTree();
+    // The tree is read where the SESSION has answered, never here. This frame is
+    // the response HEADERS arriving, and the host resolves the project this
+    // stream names (agent/api/events.py _project_for_sse) after them, so a read
+    // from here can race that open and be answered "nothing open" — the reported
+    // blank workspace panel after a reconnect. The end of the block the server
+    // brackets around that answer (js/stream-events.js `replayed`) is the first
+    // moment the read cannot race it. With no project named there is nothing to
+    // race: the tree is read here, as it always was.
+    if (!currentProject) refreshTree();
   };
   es.onerror = () => {
     // the browser reconnects on its own, but a base that is GONE retries

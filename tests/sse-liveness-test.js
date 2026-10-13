@@ -113,7 +113,13 @@ global.switchBackendResolved = async () => {
   return true;
 };
 global.addEvent = () => {};
-global.refreshTree = () => {};
+// The workspace tree this window reads: on open it is read only when no project
+// is named — a named project is resolved by the session AFTER the headers this
+// frame reports, so the read belongs to the `replayed` frame (section 8 below).
+let treeRefreshes = 0;
+global.refreshTree = () => {
+  treeRefreshes++;
+};
 // The reconnect's teardown of the blocks the dead stream drew lives in
 // stream-events.js (dropOrphanLive) and is driven for real by
 // mid-stream-retry-test.js; this runner loads sse-stream.js alone, so it only
@@ -225,6 +231,28 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
   check(notices.length === before && probes === 1,
     "a delivered Stop stays quiet: the stream carries the aborted final");
   check(global.busy === true, "a delivered Stop leaves the stream in charge of the status");
+
+  // ---- 8) the workspace tree is read where the SESSION has answered ----
+  // A session replaced under this window (a tunnel end, the host's self-heal, a
+  // re-claim — ui/host-core.js claimWindowBackend) starts with no project: it
+  // ADOPTS the one this stream names, and it does so AFTER the response headers
+  // that fire onopen. A tree read from onopen can therefore race that open and
+  // be answered "nothing open" — the reported blank workspace panel after a
+  // reconnect, which only recovered when the user sent a task. So a window that
+  // names a project reads the tree when the block the server brackets around
+  // that answer closes instead (js/stream-events.js `replayed`, driven for real
+  // by replay-dedupe-test.js).
+  const opened = treeRefreshes;
+  connectSSE();
+  instances[instances.length - 1].fireOpen();
+  check(treeRefreshes === opened,
+    "onopen does not read the tree for a named project: it would race the session's own open");
+  // no project named: the tree cannot race anything, and it is still read here
+  global.currentProject = "";
+  connectSSE();
+  instances[instances.length - 1].fireOpen();
+  check(treeRefreshes === opened + 1,
+    "a window with no project still resyncs the tree on open, as it always did");
 
   summary("sse-liveness");
 })();

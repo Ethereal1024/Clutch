@@ -367,6 +367,45 @@ def _symlink_marking(base_url, proj_dir, clc) -> None:
         _check_symlink_marking(base_url, proj_dir, clc)
 
 
+def _sse_adopts_the_window_project(base_url, clc, proj_dir, state) -> None:
+    """3d-bis. A session that has no project ADOPTS the one its stream names.
+
+    The window's open project lives in the RENDERER; the process serving it can
+    be replaced under it (a tunnel end, the host's self-heal, a re-claim --
+    ui/host-core.js claimWindowBackend), and a fresh session starts with no
+    project and therefore no workspace. Every project-scoped view then answers
+    "nothing open" -- the reported blank workspace panel after a reconnect,
+    which only recovered when the user sent a task, the one other place a window
+    names its project (/api/run). The SSE subscription is that same statement,
+    and it arrives on its own: the stream that names a project makes it the
+    session's (agent/api/events.py _adopt_for_sse).
+
+    The replacement is staged with /api/backend, the one endpoint that drops the
+    session's whole project context while the .clc stays on disk, unheld — the
+    state a reconnecting window finds itself in.
+    """
+    (proj_dir / "adopt.txt").write_text("x", encoding="utf-8")  # something to find in the tree
+    st, _ = http_post(f"{base_url}/api/backend", {"mode": "local"})
+    check(st == 200, "the session's project context is dropped (a replaced session)")
+    check(state.project is None and state.workspace is None, "and it starts with nothing open")
+    st, body = http_get(f"{base_url}/api/workspace/tree")
+    check(st == 200 and json.loads(body) == {"tree": [], "root": None},
+          "every project-scoped view answers 'nothing open' (the blank panel)")
+
+    # the reconnecting window names its project: the stream adopts it
+    frames = _sse_collect(f"{base_url}/api/events?project={quote(str(clc))}")
+    check(state.project is not None and str(state.project.path) == str(clc.resolve()),
+          "the stream's ?project= becomes the session's project")
+    check(any(f.get("type") == "replayed" for f in frames),
+          "and the block that stream is owed is served (a project-less session serves none)")
+    st, body = http_get(f"{base_url}/api/workspace/tree")
+    data = json.loads(body)
+    check(data.get("root") == str(proj_dir.resolve()), "the tree is rooted at the window's workdir")
+    check("adopt.txt" in [n["name"] for n in data.get("tree", [])],
+          "the workspace panel repaints WITHOUT the user sending a message")
+    check(not state.project.read_only, "adopted for write: this window is the file's one writer again")
+
+
 def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     # 3e. lazy .clc: open reports older bytes; history pages by byte range
     from agent.events import AssistantMessageEvent, CompactionEvent, UserMessageEvent, _line_bytes, event_to_json
@@ -1049,6 +1088,10 @@ def _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster) -> Path
     while broadcaster.count() < 2 and time.time() < deadline:
         time.sleep(0.05)
     check(broadcaster.count() >= 2, "both SSE subscribers connected")
+    check(
+        str(state.project.path) == str(clc.resolve()),
+        "a subscriber on ANOTHER window's project never becomes the session's active one",
+    )
 
     # a run on project A must reach only A's subscriber
     state.run_project = str(clc)
@@ -1751,6 +1794,7 @@ def _run_server_test() -> int:
         _reopen_project(base_url, clc)
         _file_browser(base_url, proj_dir)
         _symlink_marking(base_url, proj_dir, clc)
+        _sse_adopts_the_window_project(base_url, clc, proj_dir, state)
         _rollback_endpoint(base_url, state)
         lclc, comp_off = _lazy_open_and_history(base_url, sdir)
         appended = _clc_read_and_append(base_url, lclc)

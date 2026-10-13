@@ -174,6 +174,14 @@ function addEvent(ev) {
   // the catch-up is over: the view follows again, with a single move
   if (ev && ev.type === "replayed") {
     endCatchUp();
+    // The block that just closed is also the first moment this window may read
+    // the workspace tree: the session resolved the project this stream named
+    // BEFORE it served that block (agent/api/events.py _project_for_sse), and a
+    // session that was replaced under us (a tunnel end, a self-heal, a re-claim)
+    // adopts it there. Reading earlier — from onopen — can race that open and
+    // blank the panel (js/sse-stream.js). This is what repaints it after a
+    // reconnect without the user having to send a message.
+    refreshTree();
     // The block that just closed is the log's whole answer to the question the
     // status frame asked (sse-stream.js sseRunLostPending): a final inside it
     // ended the run and said so — the departing session writes one when it is
