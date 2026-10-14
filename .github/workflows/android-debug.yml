@@ -27,6 +27,11 @@ jobs:
       # no submodules (same reasoning as release.yml android-apk)
       - uses: actions/checkout@v4
 
+      # same guard as release.yml's android-apk: the committed launcher icon must
+      # be the generator's own output (tests/android_icon_check.py), stdlib only
+      - name: Verify the launcher icon
+        run: python3 -m tests.android_icon_check
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

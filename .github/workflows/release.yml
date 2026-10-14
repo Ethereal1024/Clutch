@@ -361,6 +361,14 @@ jobs:
       # phone at RUNTIME through the stamped index, never at build time
       - uses: actions/checkout@v4
 
+      # The launcher icon, before the 5-minute SDK install: the 0.1.44 APK went
+      # out with `icon=''` — no android:icon and no mipmap at all — and nothing
+      # else in the pipeline notices (the build, the install and every other job
+      # are green either way). tests/android_icon_check.py docstring. Stdlib only,
+      # on purpose: this job installs no Python packages.
+      - name: Verify the launcher icon
+        run: python3 -m tests.android_icon_check
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

@@ -12,6 +12,8 @@ android/host/                  宿主 JS（仓库源码，随包分发）
   bridge-server.js             loopback HTTP 桥：POST /api/<ns>/<m> + GET /events (SSE)
   artifact-provider-android.js N3：CI 预构建 pylibs tar 下载器（M2 已接线，经 server-bundle 的 artifact provider seam 注册）
 app/src/main/
+  AndroidManifest.xml          壳的声明：activity/service/权限 + 启动器图标
+  res/                         启动器图标与字符串（图标由 scripts/make-icon.py 生成，勿手改）
   java/io/clutch/mobile/       Kotlin 壳（仅壳：引擎启动 + WebView + 返回键/外链）
   cpp/native-lib.cpp           唯一 C++：setenv(HOME/TMPDIR) → node::Start（pthread）
   jniLibs/<abi>/libnode.so     nodejs-mobile v18.20.4（脚本下载，不入库）
@@ -196,6 +198,62 @@ WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按�
 开一个客户端（隧道把会话端口转发到 127.0.0.1 上），或以后真做一个"共享/旁观同一会话"的
 功能——都不是当前产品提供的流程；真到那时，`trust_armed` 才会需要改成按客户端持有。
 
+## 启动器图标（报告："移动端目前还没有图标"）
+
+**报告**：APK 装到手机上，桌面/应用抽屉里是系统默认的 Android 小人，不是那枚红 ▣。
+
+**根因**：`AndroidManifest.xml` 的 `<application>` 从头到尾没有 `android:icon`，`res/` 下也
+只有通知小图标 `drawable/ic_stat_clutch.xml`、`values/strings.xml` 和网络配置——没有任何
+`mipmap/`。平台于是画它自己的占位图。**没有任何东西会因此报错**：构建、`apksigner` 指纹
+校验、安装、CI 全绿，`aapt2 dump badging` 只把这件事印成一行
+`application: label='Clutch' icon=''`（0.1.44 实测）。
+
+**修法**：图标从桌面端同一枚品牌标记生成，来源只有一个——`scripts/make-icon.py`（纯标准
+库）现在同时喂 `ui/build/icon.{png,svg,ico}` 与 `app/src/main/res/`，两边不可能漂移。标记
+本身没变：红 `#EF4444`（`RED`）的 ▣ 画在 `#0F0F10`（`BG`）的方块上，视口 512，几何常量
+`RING_OUTER=168`/`RING_INNER=104`/`CENTER_HALF=72`。`render()` 这次改成形状/透明度感知
+（`inside_tile()` 是个圆角矩形 SDF，`radius<=0` 就是不透明整块），桌面三件套在这个重构后
+仍逐字节不变（`git diff --stat -- ui/build/` 为空）。
+
+1. **API 26+：自适应图标**（`res/mipmap-anydpi-v26/ic_launcher.xml`）。108dp 画布，前景
+   `res/drawable/ic_launcher_foreground.xml` 是 512 视口里的一条 `<group>`：缩放
+   `adaptive_scale()` = `72/108 = 2/3`，平移 `512*(1-2/3)/2 = 256/3 ≈ 85.333333`——把标记
+   按"遮罩保留的 72dp"而不是"108dp 画布"来摆，正是它落进遮罩里的原因。标记 47.25dp 宽
+   = 72dp 可见框的 65.6%，也就是 Android 内容 keyline 那个 66dp 圆里的内接方块。背景是
+   `res/values/colors.xml` 的 `@color/ic_launcher_background` = `BG`（启动器把它画在前景
+   后面，再套自己的遮罩）。路径由 `mark_path_data()` 生成：外框顺时针、挖孔逆时针、内核
+   再顺时针——nonzero 填充下这才算"一个洞"，而不是三块叠上去的色。
+2. **API 24–25：位图**（`res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`，
+   48/72/96/144/192，即 `LAUNCHER_DENSITIES`）。这两个版本没有自适应图标，形状得自己画：
+   圆角方块（圆角半径 `TILE_CORNER=0.22` 边长），方块之外透明。缩像素时 RGB 只对真正被
+   覆盖的样本取平均（预乘），所以圆角弧上不会晕出一圈黑边。
+3. **不加 `roundIcon`，也不出 `mipmap-*-round`**：API 26+ 的启动器会给自适应图标套它
+   自己的遮罩，一套圆图只服务 API 25，纯粹是多一份要同步的东西。检查里断言
+   `android:roundIcon` 必须缺席。
+
+**验证**：`tests/android_icon_check.py`（`python3 -m tests.android_icon_check`）。**纯标准
+库**，不 import `tests.testsupport`——两个 Android CI job 都不装 Python 包。它管：manifest
+的声明（`android:icon == @mipmap/ic_launcher`、无 `roundIcon`）；`res/**/*.xml` 每个都良构
+且 `@color`/`@drawable`/`@mipmap` 引用都能解析；自适应图标确实是 `<adaptive-icon>`、背景是
+`BG`、前景是 108dp 的 `<vector>`、`<group>` 的缩放/平移等于生成器算出的那两个数、唯一那条
+`<path>` 等于 `mark_path_data()` 且填 `RED`；五张位图是正确尺寸的 8 位 RGBA（圆角透明、
+中心 `RED`、边上 `BG`、过半不透明、且没有比 `BG` 更暗的像素——晕边闸）；最后把桌面三件套 +
+5 张位图 + 3 个 XML 与"当场重渲染"的结果逐字节比对。
+
+先本地后 CI：本机构建的 APK 过 `aapt2 dump badging`，那一行从 `icon=''` 变成
+`icon='res/mipmap-anydpi-v26/ic_launcher.xml'`，五张位图登记为
+`application-icon-160/240/320/480/640`；`res/` 整目录过 `aapt2 compile`。两个 workflow
+（`release.yml` 的 `android-apk`、`android-debug.yml`）都在 checkout 之后跑这条检查。
+
+**回归**：六种改法全被拒——manifest 丢掉 `android:icon`；`colors.xml` 被手工改成
+`#FF000000`；位图翻一个字节；删掉 `mipmap-hdpi`；XML 注释里出现 `--`（这个真撞上过一次：
+第一版 `colors.xml` 的注释里写了 `--bg`，`aapt2 compile` 报
+`values/colors.xml:0: error: xml parser error: not well-formed (invalid token)`）；加回
+`android:roundIcon`。
+
+**待验（真机）**：装到手机上，抽屉里出现红方图标；圆形与方形两种遮罩下标记本体都不被裁
+（65.6% 这条留白就是为它准备的）。
+
 ## M2：pylibs 供给线（代码+CI+测试完成，真远端验收待设备环节）
 
 完整 SSH 路径的最后一块拼图：手机上**没有** pip/bash，pylibs tar 改为 CI 预构建、
@@ -281,6 +339,10 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
    应自己重连（`adb logcat -s clutch | grep ladder`）；首启弹一次电池优化豁免对话框
    （拒绝后不再弹）；`adb shell dumpsys power | grep clutch:tunnel` 只在有隧道意图时
    有这把锁，断开后消失。
+8. 启动器图标：抽屉/桌面出现红 ▣（不是系统默认小人）；系统若允许选图标形状，圆形
+   与方形两种遮罩下标记本体都不被裁——`aapt2 dump badging` 的
+   `application: … icon='res/mipmap-anydpi-v26/ic_launcher.xml'` 是后台判据，肉眼
+   这一条才是判据（见「启动器图标」一节）。
 
 ## 与初版方案的偏差（均已定案）
 

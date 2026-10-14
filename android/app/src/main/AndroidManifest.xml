@@ -32,7 +32,18 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- The launcher icon. Two shapes for two platform eras, both generated from
+         the desktop's ▣ by scripts/make-icon.py so phone and desktop cannot
+         drift: mipmap-anydpi-v26/ic_launcher.xml is the adaptive icon API 26+
+         composites and masks itself, and the mipmap-<density>/ic_launcher.png
+         rasters are the pre-26 fallback, which no launcher masks — so those
+         bring their own rounded tile.
+
+         No android:roundIcon: on API 26+ the launcher already masks the adaptive
+         icon into whatever shape the device draws, and a second raster set, only
+         reachable on API 25, would be one more thing to keep in sync. -->
     <application
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
