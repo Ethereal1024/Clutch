@@ -65,6 +65,27 @@ class EventsMixin:
             return self._json({"error": "request not found or already resolved"}, status=404)
         self._json({"status": "ok"})
 
+    def _permission_trust(self) -> None:
+        """Arm/disarm the far-side trust countdown: {armed: bool}.
+
+        The page owns the toggle (ui/js/permissions.js, localStorage
+        clutch_trust_all) and mirrors it here on every change and on every
+        (re)connect — a session can be replaced under a window (self-heal,
+        re-claim), and a fresh one starts disarmed. What the flag MEANS lives in
+        PermissionGate.trust: while it reads true an ask answers itself with
+        allow after TRUST_COUNTDOWN_S. It is here rather than only on the page
+        because the page is not always running — a backgrounded phone freezes
+        the WebView and its timers, which is exactly the countdown that used to
+        pause and leave the run blocked waiting for an answer the user had
+        already armed.
+        """
+        body = self._read_body()
+        if body is None:
+            return self._json({"error": "bad json body"}, status=400)
+        armed = bool(body.get("armed"))
+        self._state.trust_armed = armed
+        self._json({"status": "ok", "armed": armed})
+
     def _backend(self) -> None:
         """Switch between the local and the SSH-degradation backend. The renderer
         posts {mode:"ssh", bridge, workspace} when bootstrap fails on a host that

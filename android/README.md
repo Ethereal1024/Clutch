@@ -83,6 +83,119 @@ Kotlin 与 Gradle 本机无 SDK 编译不了，正确性靠 CI 首跑验证（�
 **待验**（CI/真机）：release tag 流水线首跑出 APK；真机上前台服务在回桌面/
 锁屏后保活、通知出现、重进 App 自动重连。
 
+## M4：熄屏后的重连（引擎侧补线 + 唤醒锁 + 电池白名单）
+
+**报告**："自动重连要等我把 App 切回前台才发生"——熄屏时也一样。
+
+**根因**：重连的**策略**活在渲染层（`ui/js/conn-lost.js`：`connLostArm` 对
+`document.hidden` 直接不布防，隐藏页的定时器本来也已经停了），重连的**能力**活在
+引擎（前台服务保活的那半个进程）。隧道一断，唯一会拨号的那半边正被系统冻结。
+
+**修法（JS 侧）**：把同一套拨号阶梯搬进引擎，做成两端共享模块
+`ui/tunnel-ladder.js`（**不加任何新桥动词**）：
+
+- 布防只认"用户自己发起且**成功**的 connect"；`disconnect` 与"没有窗口了"的
+  `releaseSession` 撤防——没有开机自动拨号（保住 `backend-lifecycle.js` 的
+  "nothing here dials it behind their back"）。
+- 阶梯就是页面自己的退避表（`CONN_LOST_BACKOFF_MS`：1s 逐级加倍到 128s 封顶，一次
+  一个尝试，永不放弃）；断线通知（`tunnel.onTunnelEnd`）到达后先释放已死的转发、
+  再布防、最后才广播 `tunnel:ended`。
+- 凭据用引擎**已经持有**的那份（`ssh_secrets`），**永不弹窗**：密码主机凭据没了就
+  撤防、交回页面的对话框（否则等于把认证失败按退避表循环打，会被 fail2ban 拉黑）；
+  用密钥/agent 连上的主机（那次 connect 本来就不需要凭据）照原样重拨。
+- 重连成功回调宿主自己的 `ensureWindowBackend`（心跳优先的重认领），远端会话跨跳存活。
+- 跳已经活着 ⇒ 撤防，绝不重置一条正在工作的隧道。
+- **两条阶梯会撞车，败者不许拆胜者**：页面可见时页面自己也拨号（`conn-lost.js`），首拨
+  与引擎阶梯同在 ~1s 落地。后到的那次 `connect` 按 `connectTunnel` 既有规则重置先到的
+  那条（`state.sshClient` 在握手前就已装上，所以在飞的那次看起来和死掉的一样），先到者
+  于是失败——它的失败路径只允许"仍然持有这条线"的那次拨号执行拆线（客户端身份判定，
+  与 `tunnelGone` 同一条规则），否则败者会把刚刚赢下、正在握手的隧道一起拆掉、白丢
+  一级退避。（`ui/tunnel-connect.js` 的 catch。）
+
+**修法（Kotlin 侧）**：前台服务只保**进程**，不保**处理器**。熄屏后 CPU 挂起，引擎里
+那个本该拨号的 `setTimeout` 要等手机因别的事醒来才会跑——这正是用户看到的症状。
+
+1. 引擎把"用户此刻想不想要隧道"写成 `$HOME/tunnel.state`（`up`/`down`），由阶梯**自己
+   的状态变化**驱动（`onState`：阶梯内部的两次主动放弃不经过任何调用点，所以观察者
+   必须挂在阶梯上而不是调用点上）。启动时先删掉上一世进程留下的标记。
+2. `TunnelService` 每 2s 读这个标记：`up` 时持 `PARTIAL_WAKE_LOCK` + `WifiLock`
+   （Q+ 用 `WIFI_MODE_FULL_LOW_LATENCY`，之前用 `WIFI_MODE_FULL_HIGH_PERF`），
+   `down` 时立即释放，`onDestroy` 一律释放。
+3. `MainActivity.onResume` 在"标记为 up 且尚未豁免"时**每安装一次**问一次电池优化
+   豁免——Doze 里平台会挂起网络并**忽略唤醒锁**，豁免才是让上面两把锁在口袋里真正
+   有意义的那一步；后台启动 Activity 从 API 29 起被禁，所以这个问题只能由 Activity
+   问。新增权限：`WAKE_LOCK`、`ACCESS_WIFI_STATE`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
+
+**验证**：`tests/tunnel-ladder-test.js` 新增"观察者"一节（布防/撤防各通知一次、重挂
+同一主机不重复通知、凭据消失与"跳已活"两次内部放弃也要通知、观察者抛异常不破坏阶梯）
+以及两端 wiring 的源码断言（含标记文件写法与开机清理）；`tests/tunnel-concurrent-dial-test.js`
+用假 ssh2 钉住上面那条"败者不拆胜者"的规则（含两组对照：单拨失败仍然自己收尾、
+旧行为下该套件会红）；全 JS 套件 + 离线 `./gradlew --offline :app:assembleDebug` 编译
+通过，`scripts/sync-android-host.sh` 重新同步后 APK 的 `assets/nodejs-project/ui/` 里确实
+带上了 `tunnel-ladder.js`（此前 assets 是旧拷贝，装的 APK 不含这半条命）。
+
+**待验（真机）**：连接成功后锁屏 5–10 分钟，让远端 sshd/网络断掉，手机不碰屏幕，隧道应
+在 ≤128s 内自己回来（`adb logcat -s clutch` 看 `[ladder] attempt`）；
+`adb shell dumpsys power | grep clutch:tunnel` 应只在有隧道意图时看到这把锁。
+未豁免电池优化时长 Doze 下仍要等到下次唤醒——**这一条来自设计而非实测**（本 checkout
+无网络，developer.android.com 不可达，Doze/唤醒锁语义未能核对）。
+
+## M4b：信任倒计时也会被冻住（permission 的同类问题）
+
+**报告**："permission 也存在相同的问题，它在后台是会被冻结的，这导致自动通过的倒计时
+会暂停"——开 Trust 后把 App 切到后台，Allow 按钮上那个 10 秒的自动通过不再倒数，
+run 停在提示上。
+
+**根因**：与 M4 是同一个平台行为（N5 的 `TunnelService` 一节：targetSdk 34 冻结后台
+WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按下去"）此前只活在渲染层
+（`ui/js/permissions.js` 的 `setTimeout` 链），页面一冻秒数就停在原处；而
+`PermissionGate.require` 按设计**没有超时**——一个冻结但连接还在的页面仍算 attached
+（`ui/js/sse-stream.js` 的 `sseSuspend` 就是这条先例），于是 run 永远在等一个屏幕上
+早已到点的答复，会话因此不被回收、`.clc` 的写锁也不释放。
+
+**修法**：倒计时的**权威**搬到远端闸门（`agent/core/permission.py`）。`PermissionGate`
+新增 `trust` 探针与 `TRUST_COUNTDOWN_S`：等待循环每次轮询都重读探针——开着就从进入
+等待（或布防）那一刻起算，到点执行 `resolve(request_id, True)`，也就是**与 Allow 按钮
+同一条判决**（因此它同样放行 escape，不像 `auto_allow`/非交互模式那样在 escape 上失败
+闭合，并把路径记进工作区）；探针读到关闭就清空 deadline，于是**中途布防从布防起算、
+中途撤防立即取消**，和点按钮一模一样。页面只剩**显示**用的倒计时：`trustDeadline` 改成
+墙钟、`trustTick` 每次重算 `Date.now()`，解冻时 `trustResumeTick`（`visibilitychange`/
+`pageshow`/`focus`）立即补算——过期的提示随手关掉，而不是重放它最后几秒。布防状态由
+`POST /api/permission/trust` 镜像到 `RunState.trust_armed`（`agent/api/events.py`
+`_permission_trust`），闸门以 `trust=lambda: self.state.trust_armed` 读到它；每次 SSE
+`onopen` 重推一次，因为被替换/重认领的会话默认是撤防的。
+
+**验证**：`tests/trust_countdown_test.py`（远端权威：布防即自行放行且确实等了倒计时、
+撤防照常等用户、中途撤防取消、中途布防从布防起算、信任放行 escape 并把路径记进工作区、
+没有探针时仍是原来的死等、两侧 10s 常量对齐、端点真的点亮**正在跑的那个** run 的闸门，
+坏 body 是 400 而不是静默布防）+ `tests/trust-countdown-test.js`（页面侧：墙钟分母、
+隐藏页不误答、解冻立即补答、布防/撤防各推一次、重连重推、`/api/permission/trust` 路径）。
+全 JS 套件与 Python 套件（`trust_countdown_test`/`gate_detach_test`/`ask_replay_test`/
+`server_test`/`selfcheck`）全绿。
+
+**作用域**：布防是**这个窗口的会话**上的模式，不是单次 run 的开关——开着时本窗口发起的
+每个 run 的提示都会自动通过（含它之后换开的别的项目），撤防立即恢复成等用户。**没有第二个
+窗口能共享这个会话**，所以不存在"别的窗口的提示被顺手放行"这件事：
+
+- `ui/host-core.js` 按 `webContents.id` 各自 claim 一个 session（`windowBackends`；
+  `releaseAllBackends` 的注释：*"the machine may still serve other windows — their sessions
+  keep running on it"*），`claimWindowBackend` 对没有 claim 的窗口一律 `session/start`；
+- `agent/supervisor.py` 的回收契约逐字是"与窗口"（`_stale`：*"The heartbeat contract is
+  with the WINDOW"*，每个会话 `spawn(uuid4()[:12], beat_required=True)`），会话按**它的**
+  窗口的心跳被回收；
+- `ui/js/sse-stream.js` 开头就是 *"One EventSource per window"*；
+- 同一个 `.clc` 还有写锁挡着：`agent/project/__init__.py` `_acquire_lock` 撞锁即
+  `ProjectOpenConflict`，`ui/js/project.js` 只给"只读打开"这一条出路（*"Read-only mode
+  cannot run tasks"*），而只读项目起不了 run（`agent/api/run.py`）——第二个窗口连提示都
+  生不出来。
+
+服务端的 `broadcaster.count(project)` 之所以按**流**计数而不是"恰好一个窗口"，是因为窗口
+自己的重连/boot 会短暂并存两条流（未带 `?project=` 的 unfiltered 流），而服务端本来就不知道
+有几方在看它（`agent/api/events.py` 的 `_sse` 不设订阅上限，那里的 "another window" 指的是
+"另一条客户端流"）。唯一能让一个会话被两个客户端共享的路径，是绕过 host 直接拿会话 URL 再
+开一个客户端（隧道把会话端口转发到 127.0.0.1 上），或以后真做一个"共享/旁观同一会话"的
+功能——都不是当前产品提供的流程；真到那时，`trust_armed` 才会需要改成按客户端持有。
+
 ## M2：pylibs 供给线（代码+CI+测试完成，真远端验收待设备环节）
 
 完整 SSH 路径的最后一块拼图：手机上**没有** pip/bash，pylibs tar 改为 CI 预构建、
@@ -164,6 +277,10 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
    `adb shell dumpsys activity services io.clutch.mobile` 见 `TunnelService`
    处于 foreground；下拉通知栏有静默常驻通知。
 6. N7（M3）：窄屏下顶栏两行不溢出、工作区面板在流区下方可滚动、弹窗不出屏。
+7. M4：连上远端后熄屏 5–10 分钟，远端 `kill` 掉 sshd（或断网），**不碰手机**，隧道
+   应自己重连（`adb logcat -s clutch | grep ladder`）；首启弹一次电池优化豁免对话框
+   （拒绝后不再弹）；`adb shell dumpsys power | grep clutch:tunnel` 只在有隧道意图时
+   有这把锁，断开后消失。
 
 ## 与初版方案的偏差（均已定案）
 

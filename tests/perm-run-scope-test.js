@@ -76,6 +76,10 @@ const el = (sel) => {
 global.$ = (sel) => el(sel);
 global.els = { trust: fakeEl("button"), task: fakeEl("textarea") };
 global.document = { createElement: (tag) => fakeEl(tag), addEventListener: () => {} };
+// ...and the trust block also subscribes on `window` (the platform's resume
+// hooks). On the page window IS the global object; here it is a stub, because
+// this runner evaluates the whole of js/permissions.js.
+global.window = { addEventListener: () => {} };
 
 const store = new Map();
 global.localStorage = {
@@ -95,6 +99,9 @@ global.apiFetch = async (url, opts) => {
   posts.push({ url, body: opts && opts.body });
   return {};
 };
+// js/permissions.js mirrors the trust flag over apiFetch, but only when a
+// session exists (app.js's API_BASE); with none, the startup paint is a no-op
+global.API_BASE = null;
 
 // ---- the streaming state addEvent and applyStreamEvent read ----
 let loading = false;

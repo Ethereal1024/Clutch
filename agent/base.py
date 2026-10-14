@@ -130,6 +130,11 @@ class RunState:
         self.workspace: Workspace | None = None
         self.api_key: str | None = None
         self.gate: PermissionGate | None = None
+        # trust mode (agent/core/permission.py TRUST_COUNTDOWN_S): the window's
+        # armed flag, mirrored here by POST /api/permission/trust so the
+        # countdown can run on THIS side. The page's own clock is a frozen
+        # WebView's problem; this one keeps ticking (see PermissionGate.trust).
+        self.trust_armed: bool = False
         # project of the active run; SSE subscribers filter live events by it
         self.run_project: str | None = None
         # when set, tools/.clc/fs run through the exec bridge
@@ -312,6 +317,10 @@ class BaseServer(ABC):
             # gate denies instead of holding the run — and with it the project's
             # write lock — forever
             is_attached=lambda: self.broadcaster.count(str(project.path)) > 0,
+            # trust mode: the countdown belongs on this side (a backgrounded
+            # phone freezes the renderer and its timers with it), and the flag is
+            # read live so arming/disarming mid-prompt behaves like the button
+            trust=lambda: self.state.trust_armed,
         )
         return Agent(
             llm=llm,

@@ -209,6 +209,17 @@ DETACH_GRACE_S = 30.0
 # place, one that never saw it finally can.
 REANNOUNCE_S = 15.0
 
+# Trust mode: the seconds an armed prompt waits before answering ITSELF with
+# allow (see PermissionGate.trust). The countdown is kept HERE, in the gate, and
+# mirrored by the renderer only for the label on the Allow button
+# (ui/js/permissions.js TRUST_COUNTDOWN_S) — a number that must stay in step
+# with this one. The renderer's own timer is display, not authority: a page in
+# the background is FROZEN (Android freezes the WebView and its timers with it,
+# ui/js/sse-stream.js sseSuspend), so a countdown that lived only there paused
+# with the page and left the run blocked on a prompt that had already had its
+# answer coming. The gate's poll loop keeps ticking whatever the page does.
+TRUST_COUNTDOWN_S = 10.0
+
 # Request ids are unique for the LIFE OF THE PROCESS, not just inside one gate.
 #
 # A gate is built per run (agent/base.py start_task), and its own counter started
@@ -247,12 +258,13 @@ class PermissionGate:
     UI responds via `resolve(request_id, allow)` — it waits as long as the user
     needs (no timeout, so the model never sees a spurious "permission request
     timed out"). The only ways out of the wait: the user allows/denies, the
-    server's Stop resolves every pending ask as denied, or the UI is GONE — the
-    prompt could not be handed to anyone (`on_ask` returned False) or the UI it
-    was published to left — and stayed gone for the whole grace, in which case
-    the action is denied rather than left hanging. "Nobody is watching right
-    now" is never a verdict on its own: it is the same fact an EventSource
-    reconnect produces for a second, so it only starts the clock
+    server's Stop resolves every pending ask as denied, TRUST MODE answers an
+    armed ask with allow after its countdown (`trust`, TRUST_COUNTDOWN_S), or
+    the UI is GONE — the prompt could not be handed to anyone (`on_ask` returned
+    False) or the UI it was published to left — and stayed gone for the whole
+    grace, in which case the action is denied rather than left hanging. "Nobody
+    is watching right now" is never a verdict on its own: it is the same fact an
+    EventSource reconnect produces for a second, so it only starts the clock
     (see DETACH_GRACE_S).
     """
 
@@ -265,6 +277,8 @@ class PermissionGate:
         detach_grace_s: float = DETACH_GRACE_S,
         attach_poll_s: float = ATTACH_POLL_S,
         reannounce_s: float = REANNOUNCE_S,
+        trust: Callable[[], bool] | None = None,
+        trust_s: float = TRUST_COUNTDOWN_S,
     ) -> None:
         self.evaluator = evaluator
         # (request_id, tool, args_repr, reason) -> None to block, False when no
@@ -277,6 +291,13 @@ class PermissionGate:
         self.detach_grace_s = detach_grace_s
         self.attach_poll_s = attach_poll_s
         self.reannounce_s = reannounce_s
+        # trust mode: while this reads True an ask answers ITSELF with allow
+        # after `trust_s` (ui/js/permissions.js auto-allows an armed prompt) —
+        # asked at every poll, so arming mid-prompt starts the clock and
+        # disarming cancels it, exactly like the button on the page. None = the
+        # mode does not exist on this host (the plain blocking wait).
+        self.trust = trust
+        self.trust_s = trust_s
         self._pending: dict[str, _Ask] = {}
         self._decisions: dict[str, bool] = {}
         self._lock = threading.Lock()
@@ -344,7 +365,9 @@ class PermissionGate:
             unattached_since: float | None = time.monotonic()
         else:
             unattached_since = None
-        if not self._await_decision(ev, _remind if self.on_ask else None, unattached_since):
+        if not self._await_decision(
+            ev, _remind if self.on_ask else None, unattached_since, request_id
+        ):
             # the UI this prompt was published to is gone and never came back:
             # nobody is left who CAN confirm, so answer exactly like on_ask's
             # "no UI attached" instead of wedging the run — an unanswered ask
@@ -365,7 +388,7 @@ class PermissionGate:
         workspace.allow(escapes)
 
     def _await_decision(self, ev: threading.Event, remind: Callable[[], None] | None = None,
-                        gone_since: float | None = None) -> bool:
+                        gone_since: float | None = None, request_id: str = "") -> bool:
         """Wait for the user's answer; False when the audience is gone for good.
 
         No timeout while a UI is attached: the prompt stays up until the user
@@ -385,10 +408,35 @@ class PermissionGate:
         must not block forever on a prompt its window never saw. A reminder that
         cannot be delivered is not this loop's verdict — the attachment check
         above owns that.
+
+        This poll loop is also where TRUST MODE counts down (see `trust`): an
+        armed ask answers itself with allow after `trust_s`, on this thread,
+        which is the one that keeps running when the page does not — Android
+        freezes the WebView and its timers, so a countdown owned by the page
+        paused in the background and the run waited on an answer that had
+        already been given on screen. The verdict is `resolve(request_id, True)`,
+        the same one the Allow button (or the page's own clock) sends.
         """
         announced = time.monotonic()
+        # an ask published to an armed window starts counting at once; the flag
+        # is re-read every poll below, so arming mid-prompt starts the clock and
+        # disarming cancels it, exactly like the button on the page
+        trust_deadline = (
+            time.monotonic() + self.trust_s
+            if self.trust is not None and request_id and self.trust()
+            else None
+        )
         while not ev.wait(self.attach_poll_s):
             now = time.monotonic()
+            if self.trust is not None and request_id:
+                if self.trust():
+                    if trust_deadline is None:
+                        trust_deadline = now + self.trust_s
+                    elif now >= trust_deadline:
+                        self.resolve(request_id, True)
+                        return True
+                else:
+                    trust_deadline = None  # disarming cancels the clock
             if remind is not None and now - announced >= self.reannounce_s:
                 announced = now
                 try:

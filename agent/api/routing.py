@@ -73,6 +73,8 @@ class RoutingMixin:
             self._settings_post()
         elif parsed.path == "/api/permission/respond":
             self._permission_respond()
+        elif parsed.path == "/api/permission/trust":
+            self._permission_trust()
         elif parsed.path == "/api/workspace/revert":
             self._workspace_revert()
         elif parsed.path == "/api/workspace/rollback":

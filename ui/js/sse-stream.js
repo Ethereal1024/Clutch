@@ -221,6 +221,12 @@ function connectSSE() {
     // the window would sit on a port nobody serves. An open stream has the
     // host's own status frame behind it, so a run still in flight stays running.
     resolveConnectionLost();
+    // The session that just answered may be a REPLACEMENT (host self-heal, a
+    // re-claim after a tunnel end) and a fresh one starts with trust disarmed —
+    // the countdown it runs for an armed prompt (agent/api/events.py
+    // _permission_trust) would then never fire. The push is idempotent, so the
+    // cheap thing is to say it again on every connect.
+    if (typeof pushTrustArmed === "function") pushTrustArmed();
     // A session really answered, and everything the PREVIOUS stream drew is now
     // un-updatable — the deltas it missed are gone for good. Restart the
     // streaming state AND take the nodes with it (js/stream-events.js

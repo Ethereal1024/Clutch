@@ -108,16 +108,37 @@ function permKey(e) {
 document.addEventListener("keydown", permKey);
 
 // ---- trust mode: permission prompts auto-allow after a short countdown ----
-// UI-side only: the armed flag lives in localStorage, the countdown lives here.
-// Expiry takes the same respondPerm(true) path as clicking Allow, so the backend
-// sees an ordinary allow; deny / any close / disarm cancels the clock. The clock
-// is a plain setTimeout chain (1 tick per second) so a closed prompt is seen on
-// the next tick at worst.
-const TRUST_COUNTDOWN_S = 10;
+// The COUNTDOWN THAT DECIDES lives on the far side, in the gate that owns the
+// ask (agent/core/permission.py TRUST_COUNTDOWN_S, armed here by
+// POST /api/permission/trust): a page in the background is FROZEN — Android
+// stops the WebView and every timer in it — so a countdown kept only here
+// paused with the page and left the run blocked on a prompt whose answer was
+// already armed. What lives here is the label on the button (a WALL-CLOCK
+// deadline, so a page that comes back paints the truth instead of the seconds
+// it was frozen for) and the arming of that far-side clock. Expiry takes the
+// same respondPerm(true) path as clicking Allow, so a visible page still
+// answers its own prompt first; the far side's expiry is the backstop for a
+// page that is not running, and a copy of the ask arriving after either verdict
+// is swallowed by the answered marks above.
+const TRUST_COUNTDOWN_S = 10; // keep in step with agent/core/permission.py
 let trustTimer = null;
+let trustDeadline = 0; // wall-clock ms at which an armed prompt allows
 
 function trustArmed() {
   return localStorage.getItem("clutch_trust_all") === "1";
+}
+
+// Mirror the armed flag to the backend, which is what actually counts down.
+// Best effort by design: a push that cannot land (no backend yet, a session
+// being replaced) costs nothing, because the page's own clock still answers a
+// visible prompt and the next (re)connect pushes again (js/sse-stream.js).
+async function pushTrustArmed() {
+  if (!API_BASE) return; // no session to arm: the connect below pushes it
+  try {
+    await apiFetch("/api/permission/trust", { method: "POST", body: { armed: trustArmed() } });
+  } catch (e) {
+    console.warn("[trust] could not mirror the armed flag to the backend", e);
+  }
 }
 
 function paintTrustBtn() {
@@ -131,26 +152,48 @@ function setTrustArmed(on) {
     ? `trust mode ON — prompts auto-allow after ${TRUST_COUNTDOWN_S}s unless denied. Click to disable.`
     : `trust mode OFF — every prompt waits. Click to auto-allow after ${TRUST_COUNTDOWN_S}s.`;
   paintTrustBtn();
+  pushTrustArmed(); // arm the far-side clock too: it is the one that keeps ticking
   if (!on) stopTrustCountdown();
   else if (pendingPerm) startTrustCountdown(); // arming mid-prompt starts the clock now
+}
+
+// one countdown tick: paint what is left of the WALL-CLOCK deadline and either
+// schedule the next or answer. Reading the clock each time (instead of counting
+// ticks down) is what makes a thawed page honest: a timer that came due while
+// the page was frozen fires late with a deadline already behind it, so the
+// prompt it belongs to closes at once instead of reliving its last seconds.
+function trustTick() {
+  trustTimer = null;
+  if (!pendingPerm) return; // prompt closed under a pending tick
+  const left = Math.ceil((trustDeadline - Date.now()) / 1000);
+  if (left <= 0) {
+    respondPerm(true); // same path as clicking Allow (which also closes + resets)
+    return;
+  }
+  $("#perm-allow").textContent = `Allow (${left}s)`;
+  trustTimer = setTimeout(trustTick, 1000);
+}
+
+// a page that comes back owns a prompt nothing was counting down while it was
+// away: re-tick now rather than wait for the overdue timer, so a prompt whose
+// deadline already passed (the far side has long since answered it) closes on
+// the spot. The platform's own resume signals, exactly as the SSE stream
+// listens for them (js/sse-stream.js).
+function trustResumeTick() {
+  if (typeof document !== "undefined" && document.hidden) return; // still away
+  if (!pendingPerm || !trustArmed()) return;
+  if (trustTimer) {
+    clearTimeout(trustTimer);
+    trustTimer = null;
+  }
+  trustTick();
 }
 
 function startTrustCountdown() {
   stopTrustCountdown();
   if (!trustArmed() || !pendingPerm) return;
-  let left = TRUST_COUNTDOWN_S;
-  const allowBtn = $("#perm-allow");
-  const tick = () => {
-    if (!pendingPerm) return; // prompt closed under a pending tick
-    if (left <= 0) {
-      respondPerm(true); // same path as clicking Allow (which also closes + resets)
-      return;
-    }
-    allowBtn.textContent = `Allow (${left}s)`;
-    left -= 1;
-    trustTimer = setTimeout(tick, 1000);
-  };
-  tick();
+  trustDeadline = Date.now() + TRUST_COUNTDOWN_S * 1000;
+  trustTick();
 }
 
 function stopTrustCountdown() {
@@ -158,8 +201,15 @@ function stopTrustCountdown() {
     clearTimeout(trustTimer);
     trustTimer = null;
   }
+  trustDeadline = 0;
   $("#perm-allow").textContent = "Allow";
 }
+
+// every way the platform announces that this page stops and starts running
+// again: a hidden tab, the WebView frozen outright, a bfcache-style suspend
+document.addEventListener("visibilitychange", trustResumeTick);
+window.addEventListener("pageshow", trustResumeTick);
+window.addEventListener("focus", trustResumeTick);
 
 els.trust.addEventListener("click", () => setTrustArmed(!trustArmed()));
 setTrustArmed(trustArmed()); // paint the stored state on startup
