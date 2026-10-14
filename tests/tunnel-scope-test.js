@@ -64,11 +64,13 @@ check(/const affected = await hostCore\.releaseTunnelBackends\(\);/.test(HOST) &
 
 // ---- 2. leaving an outage is a WINDOW act; the machine-wide release is the picker ----
 const releaseAt = MAIN.indexOf('ipcMain.handle("session:release"');
-const releaseHandler = releaseAt < 0 ? "" : MAIN.slice(releaseAt, releaseAt + 700);
+const releaseHandler = releaseAt < 0 ? "" : MAIN.slice(releaseAt, releaseAt + 1000);
 check(/hostCore\.releaseWindowBackend\(e\.sender\.id\)/.test(releaseHandler),
   "one window's exit releases THAT window's claim — the shell names it from e.sender, so a renderer cannot release another window's session");
-check(/if \(!hostCore\.anyTunnelWindow\(\)\) await tunnel\.stopTunnel\(\)/.test(releaseHandler),
+check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,400}await tunnel\.stopTunnel\(\)/.test(releaseHandler),
   "and the shared hop is stopped only when no window is left on it: one window's Cancel is not another window's shutdown");
+check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,200}ladder\.noteUserLeft\(\)/.test(releaseHandler),
+  "…and that exit disarms the standing reconnect intent too (ui/tunnel-ladder.js): nothing may redial a host the user is done with");
 check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,400}releaseAllBackends\(\)/.test(MAIN),
   "releasing EVERY window's claim stays where it belongs: the picker's own Disconnect, which is the user leaving the machine");
 check(/releaseSession: async \(\) => \{\s*\n\s*await hostCore\.releaseWindowBackend\(window\.id\);/.test(HOST) &&

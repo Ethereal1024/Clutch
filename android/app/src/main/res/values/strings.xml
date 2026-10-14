@@ -3,4 +3,11 @@
     <string name="app_name">Clutch</string>
     <!-- N5: the foreground service's mandatory notification -->
     <string name="tunnel_notification_text">Tunnel and engine running</string>
+    <!-- M4: the one-time Doze exemption offer (MainActivity.onResume). Chinese, like
+         the engine-error page beside it: it asks the user to change a phone setting,
+         so it has to be readable, not decorative. -->
+    <string name="battery_title">让隧道在后台保持连接</string>
+    <string name="battery_message">手机长时间静止时，Android 会暂停网络并忽略唤醒锁——断开的 SSH 隧道要等到你再打开 App 才会重连。把 Clutch 加入电池优化白名单即可避免这一点，其它行为不变。</string>
+    <string name="battery_action">去设置</string>
+    <string name="battery_later">以后再说</string>
 </resources>

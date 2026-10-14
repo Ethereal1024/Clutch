@@ -6,7 +6,8 @@ const tunnel = require("./ssh-tunnel");
 const { SUPERVISOR_PORT, ensureSupervisor, startLocalSession } = require("./server-bootstrap");
 const { createHostCore } = require("./host-core");
 const { createComponentsView } = require("./components-view");
-const { writeSettingsMirror, ensureSettingsMirror, readSettings } = require("./settings-mirror");
+const { writeSettingsMirror, ensureSettingsMirror, readSettings, getSshSecret } = require("./settings-mirror");
+const { createTunnelLadder } = require("./tunnel-ladder");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -46,6 +47,32 @@ const hostCore = createHostCore({
   restartRemoteServer: () => tunnel.restartRemoteServer(),
   openSessionForward: (port) => tunnel.openSessionForward(port),
   startLocalSession,
+  log: tunnelLog,
+});
+
+// The reconnect ladder, on the side the platform does not freeze
+// (ui/tunnel-ladder.js — the phone's report, which the desktop shares one layer
+// down: a minimized/backgrounded window is throttled by Chromium exactly like a
+// phone in another app, so the renderer's own redial ladder is parked while
+// nobody is looking, and the main process keeps its timers). Exactly as on the
+// phone, nothing here dials a host nobody was on: a connect the user WON arms it.
+let lostWindowIds = new Set(); // the windows the last hop owned (webContents ids)
+
+const ladder = createTunnelLadder({
+  connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress),
+  status: () => tunnel.tunnelStatus(),
+  // the same cache connectTunnel itself reads: a background attempt never asks
+  secretFor: (host, user, port) => getSshSecret(host, user, port),
+  // the hop is back: put each window the outage took back on the session it
+  // still holds on the far side (host-core's heartbeat-first re-bind), so a
+  // window nobody is looking at is working again when somebody does
+  onUp: async () => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || !lostWindowIds.has(w.webContents.id)) continue;
+      const url = await hostCore.ensureWindowBackend(w.webContents, true);
+      tunnelLog(`[tunnel] hop back; window ${w.webContents.id} re-claimed ${url || "(parked)"}`);
+    }
+  },
   log: tunnelLog,
 });
 
@@ -202,14 +229,18 @@ if (!app.requestSingleInstanceLock()) {
     );
 
     ipcMain.handle("tunnel:connect", async (e, cfg) =>
-      tunnel.connectTunnel(cfg, (stage) => e.sender.send("tunnel:progress", stage))
+      // every connect goes through the ladder: the user's own dial owns the wire,
+      // and a connect that WINS is the standing intent it may redial on the next
+      // hop loss (ui/tunnel-ladder.js)
+      ladder.userConnect(cfg, (stage) => e.sender.send("tunnel:progress", stage))
     );
 
     ipcMain.handle("tunnel:status", async () => tunnel.tunnelStatus());
     ipcMain.handle("tunnel:disconnect", async () => {
       // THE MACHINE-WIDE act: the picker's own Disconnect, i.e. the user leaving
       // this machine. Every window's claim goes, because every window was on the
-      // tunnel the user just dropped.
+      // tunnel the user just dropped — and the standing intent goes with them.
+      ladder.noteUserLeft();
       await hostCore.releaseAllBackends();
       await tunnel.stopTunnel();
       return { ok: true };
@@ -222,7 +253,12 @@ if (!app.requestSingleInstanceLock()) {
     // tear the other windows' claims down with it.
     ipcMain.handle("session:release", async (e) => {
       await hostCore.releaseWindowBackend(e.sender.id);
-      if (!hostCore.anyTunnelWindow()) await tunnel.stopTunnel();
+      if (!hostCore.anyTunnelWindow()) {
+        // the outage's Cancel: this was the last window on the hop and the user
+        // is done with it, so nothing may redial this host behind them
+        ladder.noteUserLeft();
+        await tunnel.stopTunnel();
+      }
       return { ok: true };
     });
 
@@ -238,6 +274,13 @@ if (!app.requestSingleInstanceLock()) {
       // drop them first, so a re-claim that races this notification opens a
       // FRESH forward instead of handing the window a port nobody serves
       const affected = await hostCore.releaseTunnelBackends();
+      // remember whose session the hop was carrying, for the ladder's re-claim
+      lostWindowIds = new Set(affected);
+      // and the ENGINE acts on it: a window that is minimized/backgrounded is
+      // throttled by the platform, so its own renderer-side redial ladder is
+      // parked (ui/js/conn-lost.js connLostArm) — this notification alone used to
+      // leave the hop dead until somebody looked at the window
+      ladder.hopLost();
       const lost = new Set(affected);
       for (const w of BrowserWindow.getAllWindows()) {
         if (!w.isDestroyed()) w.webContents.send("tunnel:ended", { lost: lost.has(w.webContents.id) });
@@ -248,6 +291,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on("window-all-closed", async () => {
+    // the app is going away: the standing intent goes with it
+    ladder.stop();
     // stop sessions + ask the supervisors to exit while the tunnel is still up
     await hostCore.stopAllBackends();
     tunnel.stopTunnel();

@@ -2,10 +2,15 @@ package io.clutch.mobile
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.KeyEvent
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -127,6 +132,75 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * M4: the screen-off half of the "it only reconnects once I open the app"
+     * report. A foreground service keeps the PROCESS alive, not the PROCESSOR:
+     * with the device idle Android suspends network access and ignores wake locks
+     * (TunnelService holds one either way), so the engine can keep its ladder
+     * armed and still not dial. The battery-optimization exemption is what lifts
+     * that — and asking for it is an ACTIVITY's job: background activity starts
+     * are blocked from API 29, so the service could not show it even if it knew
+     * to. Asked once per install, and only when the engine's own marker says a
+     * tunnel is actually wanted, so a user who never connected is never nagged
+     * about battery settings.
+     */
+    override fun onResume() {
+        super.onResume()
+        offerBatteryExemption()
+    }
+
+    private fun offerBatteryExemption() {
+        if (isFinishing || batteryExemptionAsked()) return
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        // "does this user want a tunnel" is the engine's answer — the same one-word
+        // file the service polls — never this screen's guess from "the app is open"
+        val wanted = try {
+            val marker = File(filesDir, TUNNEL_STATE_MARKER)
+            marker.isFile && marker.readText().trim() == "up"
+        } catch (e: Exception) {
+            false
+        }
+        if (!wanted) return
+        markBatteryExemptionAsked() // once: "not now" is an answer too
+        AlertDialog.Builder(this)
+            .setTitle(R.string.battery_title)
+            .setMessage(R.string.battery_message)
+            .setPositiveButton(R.string.battery_action) { _, _ -> requestBatteryExemption() }
+            .setNegativeButton(R.string.battery_later, null)
+            .show()
+    }
+
+    private fun requestBatteryExemption() {
+        // the direct request is the ONE screen that grants the exemption, and it
+        // needs REQUEST_IGNORE_BATTERY_OPTIMIZATIONS in the manifest (declared:
+        // a side-loaded build with no store policy to weigh). A device that will
+        // not answer it falls back to the settings list, where the user does the
+        // same thing by hand — a dead end is the one outcome to avoid.
+        val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:$packageName"))
+        val opened = try {
+            startActivity(direct)
+            true
+        } catch (e: Exception) {
+            false
+        }
+        if (opened) return
+        try {
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        } catch (e: Exception) {
+            /* no such settings screen: nothing left to offer */
+        }
+    }
+
+    private fun batteryExemptionAsked(): Boolean =
+        getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_BATTERY_ASKED, false)
+
+    private fun markBatteryExemptionAsked() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean(PREF_BATTERY_ASKED, true).apply()
+    }
+
     private fun showEngineError() {
         webView.loadData(
             "<meta charset='utf-8'><body style='font-family:sans-serif;padding:2em'>" +
@@ -159,5 +233,12 @@ class MainActivity : Activity() {
         const val POLL_INTERVAL_MS = 150L
         const val BRIDGE_TIMEOUT_MS = 30_000L
         const val REQ_NOTIFICATIONS = 1
+        // the engine's wake marker: android-host.js writes it, TunnelService polls
+        // it, and this screen only reads it — to decide whether a battery prompt is
+        // about anything the user is actually doing (filesDir == the engine's HOME)
+        const val TUNNEL_STATE_MARKER = "tunnel.state"
+        // install-scoped, so "once per install" survives a cold start
+        const val PREFS = "clutch"
+        const val PREF_BATTERY_ASKED = "battery_exemption_asked"
     }
 }

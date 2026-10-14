@@ -26,8 +26,14 @@ function useUI(name) {
 
 // shared with the desktop shell — these are THE implementations, not copies
 const { createHostCore } = useUI("host-core.js");
-const { writeSettingsMirror, ensureSettingsMirror, readSettings } = useUI("settings-mirror.js");
+const {
+  writeSettingsMirror,
+  ensureSettingsMirror,
+  readSettings,
+  getSshSecret,
+} = useUI("settings-mirror.js");
 const { createComponentsView } = useUI("components-view.js");
+const { createTunnelLadder } = useUI("tunnel-ladder.js");
 
 // No base placeholder exists. The desktop's 127.0.0.1:8890 is the supervisor's
 // LIFECYCLE port (it answers /api/session/*, never a window API), and this host
@@ -89,6 +95,56 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     send: (channel, payload) => bus.broadcast(channel, payload),
   };
 
+  // The reconnect ladder, on the side that survives the freeze (ui/tunnel-ladder.js
+  // explains the split it closes). On the phone it matters most: the renderer is
+  // the part Android suspends while the app is in the background, and the engine
+  // — this process, held by TunnelService's foreground service — is the part that
+  // keeps running. The secret comes from the same cache connectTunnel itself
+  // reads (ssh_secrets), so an attempt here never has to ask for anything.
+  // The wake-lock marker (M4). TunnelService — the foreground service that holds
+  // this engine — polls $HOME/tunnel.state and keeps the CPU awake only while it
+  // says the user wants a tunnel. It has to be a file: NodeEngine exposes no
+  // handle the Kotlin side could call into, and a marker under HOME is the idiom
+  // this app already uses for bridge.port. `armed` is the whole answer: a connect
+  // that succeeded set it, Disconnect and the outage's Cancel cleared it, and the
+  // ladder's own stand-downs (nothing left to dial with, the hop came back on its
+  // own) cleared it too — so a phone that can no longer redial does not hold the
+  // processor awake for a tunnel it is not going to get.
+  const wakeMarker = path.join(os.homedir(), "tunnel.state");
+  function writeWakeMarker(state) {
+    const want = state && state.armed ? "up" : "down";
+    let current = null;
+    try {
+      current = fs.readFileSync(wakeMarker, "utf8");
+    } catch (e) {
+      /* absent on the first write */
+    }
+    if (current === want) return; // nothing changed: no write at all
+    try {
+      fs.writeFileSync(wakeMarker, want);
+    } catch (e) {
+      log(`[wake] could not write ${wakeMarker}: ${(e && e.message) || e}`);
+    }
+  }
+
+  const ladder = createTunnelLadder({
+    connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress),
+    status: () => tunnel.tunnelStatus(),
+    secretFor: (host, user, port) => getSshSecret(host, user, port),
+    // every change of the standing intent goes to the marker above — including
+    // the disarmings that happen inside the ladder and reach no call site here
+    onState: writeWakeMarker,
+    // the hop is back: re-bind THIS window's claim through host-core's own
+    // verdict (heartbeat first, then the forward to the SAME remote session),
+    // which is also how the session's window contract is re-armed on the far
+    // side while the phone is still in the background
+    onUp: async () => {
+      const url = await hostCore.ensureWindowBackend(window, true);
+      log(`[ladder] claim re-bound: ${url || "parked (the far session is not provably there yet)"}`);
+    },
+    log,
+  });
+
   // the bridge surface: ui/main.js's ipcMain handlers, one for one
   const handlers = {
     clutchApi: {
@@ -108,7 +164,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       // window is left on it (ui/main.js `session:release`, one for one).
       releaseSession: async () => {
         await hostCore.releaseWindowBackend(window.id);
-        if (!hostCore.anyTunnelWindow()) await tunnel.stopTunnel();
+        if (!hostCore.anyTunnelWindow()) {
+          // the outage's Cancel: this window was the last one on the hop and the
+          // user is done with it, so nothing may redial this host behind them
+          ladder.noteUserLeft();
+          await tunnel.stopTunnel();
+        }
         return { ok: true };
       },
     },
@@ -130,10 +191,15 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       },
     },
     clutchTunnel: {
-      connect: (cfg) => tunnel.connectTunnel(cfg, (stage) => bus.broadcast("tunnel:progress", stage)),
+      // every connect goes through the ladder: the user's own act owns the wire
+      // (nothing dials behind it) and a connect that WINS is the standing intent
+      // the ladder may redial on the next hop loss (ui/tunnel-ladder.js)
+      connect: (cfg) =>
+        ladder.userConnect(cfg, (stage) => bus.broadcast("tunnel:progress", stage)),
       status: async () => tunnel.tunnelStatus(),
       disconnect: async () => {
         // stop window backends first, while the tunnel/bridge is still alive
+        ladder.noteUserLeft(); // the user leaving: the standing intent goes with them
         await hostCore.releaseAllBackends();
         await tunnel.stopTunnel();
         return { ok: true };
@@ -171,6 +237,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
   // window (N5), so it is "was that window's claim one of the hop's?".
   tunnel.onTunnelEnd(async () => {
     const affected = await hostCore.releaseTunnelBackends();
+    // the page hears about it (whenever it is running again) and the ENGINE acts
+    // on it: while the app is in the background the renderer is frozen — its
+    // redial ladder is parked on purpose (ui/js/conn-lost.js connLostArm) — so
+    // this notification alone used to leave the hop dead until the user came
+    // back and looked at it
+    ladder.hopLost();
     bus.broadcast("tunnel:ended", { lost: affected.includes(window.id) });
   });
 
@@ -182,6 +254,14 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     // below). A failed boot must leave NO marker at all.
     try {
       fs.unlinkSync(path.join(os.homedir(), "bridge.port"));
+    } catch (e) {
+      /* absent on first boot */
+    }
+    // the same for the wake marker the foreground service polls: a "up" left by
+    // a previous process life would hold this device's CPU awake for a standing
+    // intent that does not exist in THIS life (nothing dials before the user does)
+    try {
+      fs.unlinkSync(path.join(os.homedir(), "tunnel.state"));
     } catch (e) {
       /* absent on first boot */
     }

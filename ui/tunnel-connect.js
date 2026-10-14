@@ -77,6 +77,9 @@ async function connectTunnel({ host, user, port, password }, progress) {
   tunnelLog(
     `[connect] attempt host=${host} user=${user} port=${port || 22} secret=${secret ? "yes" : "no"}${cached ? " (cached)" : ""}`
   );
+  // The client THIS attempt installed, held outside the try so the failure path
+  // can tell whether it is still the dial that owns the wire (see the catch).
+  let dialling = null;
   try {
     const localPort = await freePort();
     state.llmProxyPort = await startLlmProxy();
@@ -120,6 +123,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     if (progress) progress("auth");
     await new Promise((resolve, reject) => {
       client = new Client();
+      dialling = client;
       state.sshClient = client;
       client.on("ready", resolve);
       client.on("error", reject);
@@ -234,7 +238,19 @@ async function connectTunnel({ host, user, port, password }, progress) {
     // a cached secret that no longer authenticates is worse than none: drop it
     // so this path prompts again (and a typed one can take its place)
     if (cached && /authentication/i.test(friendly)) forgetSshSecret(host, user, port);
-    stopTunnel();
+    // Only a dial that still owns the wire may tear the shared state down. A
+    // SECOND dial started on top of this one (the page's own redial landing next
+    // to the engine ladder's attempt, a second window, the picker's retry)
+    // resets this client in its "existing tunnel is dead or still starting"
+    // branch; this attempt then fails BECAUSE of that reset, and an unguarded
+    // teardown here would close the very tunnel that just won the race — the
+    // loser killing the winner. Same identity rule as tunnelGone's, and for the
+    // same reason: a stale attempt must not clobber a newer client.
+    if (dialling === null || state.sshClient === dialling) {
+      stopTunnel();
+    } else {
+      tunnelLog("[error] a newer dial owns the tunnel now; leaving it alone");
+    }
     return { ok: false, error: friendly };
   }
 }
