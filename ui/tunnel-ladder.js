@@ -53,7 +53,7 @@ function createTunnelLadder({
   status, // () => ({ active, url }) — the shell's tunnelStatus
   secretFor = () => "", // (host, user, port) => the credential already held, "" when none
   onUp = () => {}, // the hop is back: the shell re-claims its windows
-  onState = () => {}, // the standing intent changed (armed ⇄ disarmed): who else cares
+  onState = () => {}, // the standing intent changed (armed <-> disarmed): who else cares
   log = () => {},
   delays = DEFAULT_DELAYS_MS,
   setTimer = setTimeout,
