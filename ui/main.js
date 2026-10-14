@@ -13,9 +13,6 @@ function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
 }
 
-// remote sessions: LLM via the tunnel's reverse forward (matches LLM_PROXY_REMOTE_PORT)
-const REMOTE_LLM_BASE = "http://127.0.0.1:8892/v1";
-
 // The remote host carries no LLM settings of its own (the settings mirror is
 // local), so the model must ride along with the session claim; without it the
 // remote server dies at LLM init with "missing LLM argument: model".
@@ -38,9 +35,15 @@ const remoteLlmKnobs = () => {
 // Android host; this shell only feeds it its desktop inputs. Electron
 // webContents already satisfies host-core's window-handle contract
 // ({id, isDestroyed(), send}).
+//
+// remote sessions get their LLM through the tunnel's reverse forward, and NOT on
+// a frozen port: 8892 is what the far side is asked for first, but when a
+// listener the far host will not release holds it, the reverse forward lands on
+// a port the far side picks instead (ui/tunnel-connect.js) — so the base is read
+// here, at claim time, from the state that remembers where it landed.
 const hostCore = createHostCore({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
-  remoteLlmBase: () => REMOTE_LLM_BASE,
+  remoteLlmBase: () => tunnel.remoteLlmBase(),
   remoteLlmModel,
   remoteLlmKnobs,
   tunnelStatus: () => tunnel.tunnelStatus(),

@@ -52,6 +52,10 @@ function fakeTunnel() {
       state.stopped += 1;
     },
     onTunnelEnd: (cb) => state.endCbs.push(cb),
+    // the reverse-forward port the real tunnel remembers (8892 unless a held
+    // listener pushed the bind elsewhere) — what a remote session's base is
+    // built from, so the fake has to carry it like the real face does
+    remoteLlmBase: () => "http://127.0.0.1:8892/v1",
     tunnelLog: (...a) => state.logs.push(a.join(" ")),
   };
 }

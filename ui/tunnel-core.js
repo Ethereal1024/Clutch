@@ -21,6 +21,10 @@ const state = {
   sshClient: null,
   localSrv: null,
   llmProxyPort: null,
+  // The far-side port this process's model path lives on — null until the
+  // reverse forward is installed, and kept for the life of the process after
+  // that (see remoteLlmPort). A fresh module graph starts it at null again.
+  llmProxyRemotePort: null,
   execBridgePort: null,
   sftpHandle: null,
   sftpUnavailable: false, // the current host has no SFTP subsystem: use exec uploads
@@ -41,6 +45,32 @@ const LLM_PROXY_REMOTE_PORT = 8892;
 const CONNECT_TIMEOUT_MS = 15000;
 const HEAL_INTERVAL_MS = 15000;
 
+// Where the far side's model requests arrive. 8892 is the contract — it is what
+// a remote session's --base-url is built from, so it is always tried first — but
+// the port belongs to the FAR host, and a listener an earlier hop left behind
+// (a hop whose client is gone but whose sshd session has not noticed yet) holds
+// it, refuses our bind and never lets go. That is not a reason to lose a whole
+// connection, so the reverse forward falls back to a port the far side picks for
+// itself (installReverseForward) and this process remembers it: every later hop
+// re-binds THAT port, and every session this process starts is told to use it,
+// so the far side's model path stays where its --base-url points.
+//
+// The limit of that: a session is told its base ONCE, at spawn (agent/supervisor.py
+// --base-url, no re-point API), so a session already running under the old port
+// talks into nothing until the far side reaps it (supervise.py STALE_S). That is
+// the cost of moving the model path, and it is paid only when the port really
+// cannot be had — never as a preference.
+function remoteLlmPort() {
+  return state.llmProxyRemotePort || LLM_PROXY_REMOTE_PORT;
+}
+
+// The LLM base a remote session is spawned with. It must be read at SPAWN time
+// (host-core calls it per session), because the port is only known once the
+// reverse forward has been installed.
+function remoteLlmBase() {
+  return `http://127.0.0.1:${remoteLlmPort()}/v1`;
+}
+
 function tunnelLog(...args) {
   try {
     const dir = path.dirname(LOG_FILE);
@@ -57,6 +87,8 @@ module.exports = {
   LLM_PROXY_REMOTE_PORT,
   CONNECT_TIMEOUT_MS,
   HEAL_INTERVAL_MS,
+  remoteLlmPort,
+  remoteLlmBase,
   state,
   tunnelLog,
 };

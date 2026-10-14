@@ -375,6 +375,7 @@ python3 -m http.server 8000        # 供出；aarch64 远端同法换 arch 再�
    ssh <远端> ls ~/.clutch-server                 # agent/ site-packages/ STRATEGY=pylibs
    ```
    VERSION 应 == 所装 tar 的 sha256 前 16 位（索引里 `version` 字段的值）。
-5. **完整对话**：设置里配 LLM key（请求走 remote:8892 反向转发回手机上的
-   llm-proxy），发一轮消息确认 SSE 流式与权限确认弹窗正常。
+5. **完整对话**：设置里配 LLM key（请求走远端 `127.0.0.1:8892` 反向转发回手机上的
+   llm-proxy；该端口被占用时由远端自选一个端口，见 `ui/tunnel-connect.js`），
+   发一轮消息确认 SSE 流式与权限确认弹窗正常。
 6. **M2 达标线**：x86_64 与 aarch64 各一台全新远端一键连接成功，且 VERSION==tar 哈希。

@@ -41,9 +41,11 @@ const { createTunnelLadder } = useUI("tunnel-ladder.js");
 // only ever point a window at a dead port that fails every request with
 // "Failed to fetch". A host with nothing to offer returns null and the window
 // stays on "not running" until the tunnel produces a real forwarded session.
-// remote sessions: LLM via the tunnel's reverse forward (matches
-// LLM_PROXY_REMOTE_PORT in ui/ssh-tunnel.js)
-const REMOTE_LLM_BASE = "http://127.0.0.1:8892/v1";
+// remote sessions: LLM via the tunnel's reverse forward. The port is NOT frozen
+// here: 8892 is what the far side is asked for first, but when a listener the far
+// host will not release holds it, the reverse forward lands on a port the far
+// side picks instead (ui/tunnel-connect.js) — so the base comes from the tunnel
+// (tunnel-core's remoteLlmBase) and is read at claim time, after that landing.
 
 function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
   tunnel = tunnel || useUI("ssh-tunnel.js");
@@ -56,7 +58,7 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
 
   const hostCore = createHostCore({
     supervisorBase: () => null, // N4: no local supervisor on Android
-    remoteLlmBase: () => REMOTE_LLM_BASE,
+    remoteLlmBase: () => tunnel.remoteLlmBase(),
     // same reason as ui/main.js: the remote session cannot read this device's settings
     remoteLlmModel: () => readSettings().model || "",
     remoteLlmKnobs: () => {

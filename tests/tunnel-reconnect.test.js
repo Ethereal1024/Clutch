@@ -418,7 +418,7 @@ async function main() {
   // moment a newer connect owns the session, and reports failure instead of
   // pretending the model path is up.
   {
-    const { state } = require("../ui/tunnel-core");
+    const { state, remoteLlmBase, LLM_PROXY_REMOTE_PORT } = require("../ui/tunnel-core");
     const { installReverseForward } = require("../ui/tunnel-connect");
     state.sshClient = null;
 
@@ -442,12 +442,48 @@ async function main() {
     const abandoned = await installReverseForward(replaced, { tries: 3, retryMs: 5, maxWaitMs: 10 });
     check(abandoned === false && late === 0, "a replaced session's forward is never installed at all");
 
-    // a host that never frees the port is a FAILURE, never a quiet connect
+    // A port that never frees up is not automatically a dead model path, though:
+    // the far side may hold 8892 with a listener this window cannot kill (an
+    // sshd whose peer vanished holds it for hours — the stock keepalive is off)
+    // while still being perfectly willing to forward on another port. So the
+    // ladder ends by asking IT to pick one (port 0), and the process remembers
+    // the answer: every later hop re-binds that port, and every session this
+    // process spawns is told to use it.
+    const asked = [];
     let refused = 0;
-    const held = { forwardIn(_host, _port, cb) { refused++; cb(new Error("bind: Address already in use")); } };
+    const held = {
+      forwardIn(_host, port, cb) {
+        asked.push(port);
+        if (port === 0) return cb(null, 46123); // the far side picks
+        refused++;
+        cb(new Error("bind: Address already in use"));
+      },
+    };
     state.sshClient = held;
-    const never = await installReverseForward(held, { tries: 3, retryMs: 5, maxWaitMs: 10 });
-    check(never === false && refused === 3, "a port that never frees up fails the connect loudly, after its tries");
+    const elsewhere = await installReverseForward(held, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    check(elsewhere === true && refused === 3, `a held port does not sink the connection (${refused} retries, then the far side's own port)`);
+    check(
+      asked.length === 4 && asked[3] === 0 && asked.slice(0, 3).every((p) => p === 8892),
+      `the preferred port is tried FIRST and the far side is asked to choose only after it is exhausted (${asked.join(",")})`
+    );
+    check(state.llmProxyRemotePort === 46123, "the port the far side chose is remembered for every later hop");
+    check(
+      remoteLlmBase() === "http://127.0.0.1:46123/v1",
+      "…and the sessions this process spawns are pointed at the port that actually landed"
+    );
+
+    // but a host that refuses the preferred port AND a port of its own choosing
+    // is a FAILURE, never a quiet connect: three tries, then the one ask
+    state.llmProxyRemotePort = null;
+    let refusedBoth = 0;
+    const closed = { forwardIn(_host, _port, cb) { refusedBoth++; cb(new Error("bind: refused")); } };
+    state.sshClient = closed;
+    const never = await installReverseForward(closed, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    check(
+      never === false && refusedBoth === 4,
+      `a host that forwards to nobody fails the connect loudly: 3 tries on ${LLM_PROXY_REMOTE_PORT}, then one ask for its own (${refusedBoth} calls)`
+    );
+    check(state.llmProxyRemotePort === null, "and nothing is remembered from a bind that never landed");
     state.sshClient = null;
   }
 

@@ -6,7 +6,9 @@
 //
 // deps:
 //   supervisorBase()      => "http://127.0.0.1:8890" | null  (null = no local mode, N4)
-//   remoteLlmBase()       => "http://127.0.0.1:8892/v1"     (reverse-forward LLM proxy)
+//   remoteLlmBase()       => "http://127.0.0.1:8892/v1"     (reverse-forward LLM proxy;
+//                            the port is the one the reverse forward landed on —
+//                            8892 unless the far side had to choose another)
 //   remoteLlmModel()      => "deepseek-v4-flash" | ""       (model for the remote session)
 //   remoteLlmKnobs()      => { reasoning_effort, api_protocol }  (same trip as the model)
 //   tunnelStatus()        => { active, url }                (SSH tunnel state)

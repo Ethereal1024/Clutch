@@ -12,7 +12,7 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
-const { state, tunnelLog, REMOTE_API_PORT, LLM_PROXY_REMOTE_PORT, CONNECT_TIMEOUT_MS } = require("./tunnel-core");
+const { state, tunnelLog, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, remoteLlmPort } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeSupervisorShape } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
 const { PROBE_CMD, parseProbe, installServer, installComponents } = require("./tunnel-bootstrap");
@@ -167,7 +167,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
       // down): refuse the forward instead of calling net.connect(null), which
       // throws synchronously inside this handler — an uncaught throw in the main
       // process takes the whole window down
-      if (info.destPort !== LLM_PROXY_REMOTE_PORT || !state.llmProxyPort) {
+      if (info.destPort !== remoteLlmPort() || !state.llmProxyPort) {
         reject();
         return;
       }
@@ -269,39 +269,119 @@ async function connectTunnel({ host, user, port, password }, progress) {
 // 240s budget) however long the network has been back, and only a Stop — which
 // breaks the read — gets it moving again. So: retry the bind until it really is
 // bound, and let the gate below fail the connect loudly if it never is.
+//
+// The second release of the same report is why retrying is not the whole story.
+// It read as "stuck on Starting tunnel…", and the listener holding 8892 need not
+// be a dying one: sshd's keepalive is off in the stock config, so a session
+// whose network vanished without a FIN (a phone that lost its radio, a laptop
+// that slept) is held — and holds 8892 with it — for hours, and a listener left
+// by a hop this window no longer owns is not ours to kill. A bind that never
+// lands is not proof the far side cannot forward: it is proof it cannot forward
+// on THAT port. So the ladder ends by asking the far side to pick a port for
+// itself (port 0 — RFC 4254 has sshd bind what it can and report the number),
+// and this process remembers the answer for every later hop (see remoteLlmPort).
 const REVERSE_FORWARD_TRIES = 6;
 const REVERSE_FORWARD_RETRY_MS = 500; // first step of the ladder
 const REVERSE_FORWARD_MAX_WAIT_MS = 2000; // a port freeing up, not a network: cap it here
 
-function installReverseForward(client, opts = {}) {
+// One bind attempt. port === 0 is the wire's own way of saying "you pick": sshd
+// binds whatever it has and ssh2 hands the chosen number back as the callback's
+// second argument.
+function bindReverseForward(client, port) {
+  const failed = (e) => ({ ok: false, error: (e && e.message) || String(e) });
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (!settled) {
+        settled = true;
+        resolve(v);
+      }
+    };
+    try {
+      client.forwardIn("127.0.0.1", port, (err, assigned) => {
+        // forwardIn throws — it does not call back — on a socket that is already
+        // gone, and that throw would escape past this promise into the connect
+        if (err) return done(failed(err));
+        done({ ok: true, port: Number(assigned) || port });
+      });
+    } catch (e) {
+      done(failed(e));
+    }
+  });
+}
+
+// The ladder: the SAME port, asked for again, because "address already in use"
+// is usually an sshd releasing a dead hop's listener and it is gone a moment
+// later. abandoned is not failure — it means a newer connect owns the session
+// now, so this forward belongs to a dead connect and must not be installed.
+async function bindReverseForwardWithLadder(client, port, opts = {}) {
   const tries = opts.tries || REVERSE_FORWARD_TRIES;
   const first = opts.retryMs || REVERSE_FORWARD_RETRY_MS;
   const cap = opts.maxWaitMs || REVERSE_FORWARD_MAX_WAIT_MS;
-  return new Promise((resolve) => {
-    let attempt = 0;
-    const tryOnce = () => {
-      // a newer connect owns the session now: this forward belongs to a dead one
-      if (!client || state.sshClient !== client) return resolve(false);
-      attempt++;
-      client.forwardIn("127.0.0.1", LLM_PROXY_REMOTE_PORT, (err) => {
-        if (!err) {
-          tunnelLog(
-            `[phase] reverse forward listening 127.0.0.1:${LLM_PROXY_REMOTE_PORT} -> client proxy :${state.llmProxyPort}` +
-              (attempt > 1 ? ` (try ${attempt})` : "")
-          );
-          return resolve(true);
-        }
-        if (state.sshClient !== client) return resolve(false); // tunnel died under us
-        const wait = Math.min(first * Math.pow(2, attempt - 1), cap);
-        tunnelLog(
-          `[phase] reverse forward failed (try ${attempt}/${tries}, retry in ${wait}ms): ${err.message}`
-        );
-        if (attempt >= tries) return resolve(false);
-        setTimeout(tryOnce, wait);
-      });
-    };
-    tryOnce();
-  });
+  let last = "no attempt was made";
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    // a newer connect owns the session now: this forward belongs to a dead one
+    if (!client || state.sshClient !== client) return { ok: false, abandoned: true };
+    const got = await bindReverseForward(client, port);
+    if (got.ok) return { ok: true, port: got.port, attempt };
+    if (state.sshClient !== client) return { ok: false, abandoned: true }; // tunnel died under us
+    last = got.error;
+    if (attempt >= tries) break;
+    const wait = Math.min(first * Math.pow(2, attempt - 1), cap);
+    tunnelLog(`[phase] reverse forward failed (try ${attempt}/${tries}, retry in ${wait}ms): ${last}`);
+    await new Promise((r) => setTimeout(r, wait));
+  }
+  return { ok: false, error: last };
+}
+
+// true only when the far side really has a listener that forwards back here.
+async function installReverseForward(client, opts = {}) {
+  const preferred = remoteLlmPort();
+  const first = await bindReverseForwardWithLadder(client, preferred, opts);
+  if (first.ok) {
+    state.llmProxyRemotePort = first.port;
+    tunnelLog(
+      `[phase] reverse forward listening 127.0.0.1:${first.port} -> client proxy :${state.llmProxyPort}` +
+        (first.attempt > 1 ? ` (try ${first.attempt})` : "")
+    );
+    return true;
+  }
+  if (first.abandoned) return false;
+  // 8892 is the contract with the far side's --base-url, not a right: a listener
+  // we cannot reach and cannot kill costs us a different port, not the connect.
+  tunnelLog(
+    `[phase] reverse forward on ${preferred} refused (${first.error}); asking the far side for a port of its own`
+  );
+  const second = await bindReverseForwardWithLadder(client, 0, { ...opts, tries: 1 });
+  if (second.ok) {
+    state.llmProxyRemotePort = second.port;
+    tunnelLog(
+      `[phase] reverse forward listening 127.0.0.1:${second.port} (chosen by the far side: ${preferred} is held) ` +
+        `-> client proxy :${state.llmProxyPort}`
+    );
+    return true;
+  }
+  if (!second.abandoned) {
+    tunnelLog(
+      `[phase] reverse forward failed: the far side would not forward to us at all (${second.error})`
+    );
+  }
+  return false;
+}
+
+// Failing a gate is not a reason to close a wire a NEWER dial may already own:
+// an attempt that lost the race fails BECAUSE of the reset the winner performed,
+// so an unguarded teardown here closes the very tunnel that just won. Same
+// identity rule as connectTunnel's catch and tunnelGone's, and for the same
+// reason — a stale attempt must not clobber a newer client.
+function failConnect(client, why, error) {
+  tunnelLog(why);
+  if (state.sshClient === client) {
+    stopTunnel();
+  } else {
+    tunnelLog("[error] a newer dial owns the tunnel now; leaving it alone");
+  }
+  return { ok: false, error };
 }
 
 // Set up the bidirectional forwards and gate on the health check through the tunnel.
@@ -334,31 +414,30 @@ async function establishForwardAndHealth(localPort, client) {
   // model at all (see installReverseForward)
   const reverse = await installReverseForward(client);
   if (!reverse) {
-    tunnelLog(`[health] FAIL: the far side could not be given a listener on ${LLM_PROXY_REMOTE_PORT} (the model path is dead)`);
-    stopTunnel();
-    return {
-      ok: false,
-      error:
-        `the remote host would not let us listen on 127.0.0.1:${LLM_PROXY_REMOTE_PORT}, so its model requests ` +
-        "have nowhere to go (an old session's listener is usually holding the port) — wait a moment and reconnect.",
-    };
+    const port = remoteLlmPort();
+    return failConnect(
+      client,
+      `[health] FAIL: the far side could not be given a listener (tried 127.0.0.1:${port}, then a port of its own)`,
+      `the remote host would not let us listen on 127.0.0.1:${port} or on a port of its own choosing, so its model ` +
+        "requests have nowhere to go — check that the host allows TCP forwarding (AllowTcpForwarding) and reconnect."
+    );
   }
   const up = await waitForServer("http://127.0.0.1:" + localPort + "/api/health", CONNECT_TIMEOUT_MS);
   if (!up) {
-    tunnelLog("[health] FAIL: backend not reachable on the remote host");
-    stopTunnel();
-    return { ok: false, error: "backend not reachable on the remote host" };
+    return failConnect(
+      client,
+      "[health] FAIL: backend not reachable on the remote host",
+      "backend not reachable on the remote host"
+    );
   }
   const shape = await probeSupervisorShape("http://127.0.0.1:" + localPort);
   if (shape !== "up") {
-    tunnelLog("[health] FAIL: remote 8890 is not a Clutch supervisor (legacy shared server?)");
-    stopTunnel();
-    return {
-      ok: false,
-      error:
-        "remote 8890 runs a non-supervisor server (a legacy shared clutch-server?). " +
-        "Restart it (pkill -f agent-server) and reconnect, or close the old app.",
-    };
+    return failConnect(
+      client,
+      "[health] FAIL: remote 8890 is not a Clutch supervisor (legacy shared server?)",
+      "remote 8890 runs a non-supervisor server (a legacy shared clutch-server?). " +
+        "Restart it (pkill -f agent-server) and reconnect, or close the old app."
+    );
   }
   tunnelLog(`[connect] OK url=http://127.0.0.1:${localPort}`);
   state.currentUrl = "http://127.0.0.1:" + localPort;

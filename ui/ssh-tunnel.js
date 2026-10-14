@@ -10,7 +10,7 @@
 // contract — ui/main.js, ui/exec-bridge.js (a lazy require, which is what keeps
 // its cycle with this file from closing) and android/host/android-host.js.
 
-const { tunnelLog } = require("./tunnel-core");
+const { tunnelLog, remoteLlmBase } = require("./tunnel-core");
 const { remoteExec, uploadFileViaExec } = require("./tunnel-remote");
 const { chooseStrategy } = require("./tunnel-bootstrap");
 const { connectTunnel } = require("./tunnel-connect");
@@ -27,6 +27,7 @@ module.exports = {
   stopTunnel,
   remoteExec,
   tunnelLog,
+  remoteLlmBase,
   onTunnelEnd,
   tunnelStatus,
   uploadFileViaExec,

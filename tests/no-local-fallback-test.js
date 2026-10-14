@@ -150,6 +150,7 @@ function fakeTunnel(status) {
     },
     stopTunnel: async () => {},
     onTunnelEnd: () => {},
+    remoteLlmBase: () => "http://127.0.0.1:8892/v1",
     tunnelLog: () => {},
   };
 }
