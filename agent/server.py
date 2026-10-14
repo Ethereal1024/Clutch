@@ -18,7 +18,10 @@ Endpoints (all JSON except SSE/NDJSON):
 A session can also be RELEASED from outside (the last window's exit,
 /api/shutdown, a reap that raced a run's start). A SIGTERM with a run in flight
 is therefore answered with one durable final before this process goes — the
-ending the run could not write for itself. See install_release_handler.
+ending the run could not write for itself. See install_release_handler. The same
+signal is raised at ourselves when a run has no window left to serve and the
+host, by design, would leave it unbounded — see unattended_lock_watchdog and
+UNATTENDED_RUN_GRACE_S.
 
 CORS is wide open (Access-Control-Allow-Origin: *) so the decoupled UI can live
 on another origin/host. The API key travels in request bodies, not cookies, so a
@@ -41,6 +44,7 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 
 from .api.base import HandlerBase
 from .api.events import EventsMixin
@@ -162,12 +166,41 @@ def peer_gone(conn) -> bool:
 UNATTENDED_GRACE_S = 30.0
 UNATTENDED_POLL_S = 2.0
 
+# How long a RUN IN FLIGHT may keep a session alive with no window watching it.
+#
+# The write claim stands for as long as a run lasts (see the watchdog: a run is
+# a writer that is still there, and handing the lock back under it is exactly
+# the two writers the lock exists to prevent). That argument holds only while
+# some window can still be watching the run — and an orphan has none. Its window
+# died UNCLEANLY (the app was killed, the client crashed, the tunnel was torn
+# down mid-run) and so never sent POST /api/session/stop, the one thing that
+# sets the record's ``detached`` flag. Without it the supervisor cannot tell that
+# orphan apart from a backgrounded phone whose socket is still open and whose
+# run it must protect, so it defers to the child's own evidence (in_flight) and
+# leaves the session unbounded on purpose (agent/supervisor.py _stale).
+# Observed live: a session held ui-upgrade.clc for four hours after its window
+# vanished, with no window on earth able to see or stop the run.
+#
+# THIS side can tell: the broadcaster's live subscriber count is the same
+# evidence the idle path already uses, and a window that is coming back
+# re-subscribes long before this. 600 s is two STALE_S windows — the host's own
+# horizon for a session whose window said it would not be back
+# (agent/procmgr/supervise.py) — and well past a client's whole tunnel-redial
+# ladder, so a clean and an unclean departure end the same way, within the same
+# hour. The cost is a contract change: a window that stays away longer than this
+# loses its run, exactly as if its session had been released and reaped. A
+# writer nobody can see or stop must not hold the .clc for the host's lifetime;
+# this is the bound that makes that true without touching the supervisor.
+UNATTENDED_RUN_GRACE_S = 600.0
+
 
 def unattended_lock_watchdog(
     state: RunState,
     broadcaster: Broadcaster,
+    release: Callable[[RunState], None],
     grace_s: float = UNATTENDED_GRACE_S,
     poll_s: float = UNATTENDED_POLL_S,
+    run_grace_s: float = UNATTENDED_RUN_GRACE_S,
 ) -> threading.Thread:
     """Hand back the active project's write lock once its audience is gone.
 
@@ -179,9 +212,22 @@ def unattended_lock_watchdog(
 
     A run in flight is NOT an absent window: it is a writer that is still there
     (the supervisor keeps a session with a run for the same reason), and it
-    appends to this .clc, so the claim stands for as long as it lasts. It does
-    not stop the clock: when the run ends with still nobody watching, the lock
-    goes on the next tick instead of waiting out the supervisor's stale window.
+    appends to this .clc, so its claim stands for as long as it lasts. It does
+    not stop the clock, though: when the run ends with still nobody watching,
+    the lock goes on the next tick instead of waiting out the supervisor's stale
+    window. An orphaned run is the exception the clock is for — a run nobody can
+    see or stop, whose window died without saying so, which the host leaves
+    unbounded by design (agent/supervisor.py _stale). Past `run_grace_s` of
+    silence with a run still in flight the SESSION is ended through `release`,
+    the one action that can free the claim: it cannot be handed back under a
+    live writer without inviting the two-writer race the lock exists to prevent
+    (see UNATTENDED_RUN_GRACE_S, and release_orphaned_session below for what
+    that action is).
+
+    `release` is a parameter rather than a constant so that a test can start
+    this watchdog — a daemon thread that outlives the section that started it —
+    without ever delivering a real release signal to the process running the
+    tests.
     """
     def _loop() -> None:
         watched: Path | None = None
@@ -194,8 +240,6 @@ def unattended_lock_watchdog(
                 continue
             if project.path != watched:
                 watched, unattended_since = project.path, None
-            if state.busy:
-                continue
             if broadcaster.count(str(project.path)) > 0:
                 unattended_since = None
                 continue
@@ -203,7 +247,26 @@ def unattended_lock_watchdog(
             if unattended_since is None:
                 unattended_since = now
                 continue
-            if now - unattended_since >= grace_s:
+            silent_s = now - unattended_since
+            if state.busy:
+                # a writer that writes for nobody: past the run grace this is an
+                # orphan, and only ending the session can give the lock back
+                if silent_s >= run_grace_s:
+                    try:
+                        print(
+                            f"[clutch-server] no window watching {project.path.name}: "
+                            "ending this session (the run in flight has no audience)",
+                            flush=True,
+                        )
+                    except (OSError, ValueError):
+                        # a stdout nobody reads (a closed pipe) must not stop the
+                        # release: the whole point of this branch is that it
+                        # happens, and the .clc records it either way
+                        pass
+                    release(state)
+                    return
+                continue
+            if silent_s >= grace_s:
                 if state.release_write_claim():
                     print(
                         f"[clutch-server] no window watching {project.path.name}: "
@@ -215,6 +278,44 @@ def unattended_lock_watchdog(
     thread = threading.Thread(target=_loop, name="clutch-unattended-lock", daemon=True)
     thread.start()
     return thread
+
+
+def release_orphaned_session(state: RunState) -> None:
+    """End this session the way the host's release ladder would.
+
+    A run in flight holds the project's write lock by design, so the lock only
+    comes back when the SESSION ends (UNATTENDED_RUN_GRACE_S says when and why).
+    The host has exactly one way to end a session: SIGTERM to its process group,
+    which this process answers with record_release + exit (the ladder is
+    agent/procmgr/kill.py's signal_soft; the answering side is
+    install_release_handler). Raise that same signal at ourselves and let the
+    installed handler do the work — one release path whether the host found the
+    orphan or the session noticed its own, and the same durable ending for
+    whoever reads the .clc later ("the host released this session while the run
+    was in flight"). Nothing has to stop the run thread: it is a daemon
+    (agent/api/run.py), so it dies with the main thread's exit, and the kernel
+    drops the flock with the process.
+
+    The host's soft step is a GROUP signal (agent/procmgr/kill.py signal_soft),
+    so this one is too — otherwise a run's tool children outlive the session as
+    orphans nobody reaps (in the live incident: sixteen parallel downloads and a
+    dozen sleep-pollers). Only when this process IS the group leader, which is
+    how the supervisor spawns every session (agent/procmgr/supervise.py
+    start_new_session on POSIX): a server started by hand from a shell shares
+    that shell's group and may only signal itself.
+
+    Windows gets the hard-kill flavour, as it does from the ladder: there is no
+    deliverable SIGTERM to answer there (install_release_handler installs no
+    handler on nt), so the .clc tail simply stops — the case
+    ui/js/sse-stream.js's stale-run rule exists for.
+    """
+    try:
+        if os.name == "posix" and os.getpgid(0) == os.getpid():
+            os.killpg(os.getpid(), signal.SIGTERM)
+            return
+    except OSError:  # no group to speak of: fall through to ourselves
+        pass
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _settings_path() -> Path:
@@ -297,14 +398,25 @@ def build(
 # the file afterwards.
 RELEASED_SUMMARY = "the host released this session while the run was in flight"
 
+# The release ending belongs to the PROCESS, and is written at most once. Two
+# sources can signal the same session within a moment of each other: the host's
+# reap ladder, and this session's own orphan watchdog
+# (agent/server.py UNATTENDED_RUN_GRACE_S). A SIGTERM handler runs once per
+# delivery, so a second signal would append a second final to a .clc whose tail
+# is supposed to hold exactly one ending — the transcript would then end twice,
+# with the same words, and the window could not tell a double release from a
+# run that ended and then, somehow, ended again.
+_release_guard = threading.Lock()
+_release_recorded = False
+
 
 def record_release(state: RunState) -> None:
     """Write the ending a run in flight could not write for itself.
 
     A session is released from OUTSIDE (the last window's exit, /api/shutdown,
-    a reap that raced the run's start), so no code of the run's own gets to run
-    again: if there was a run in flight, the durable record of how it ended has
-    to be written here, on the way out.
+    a reap that raced the run's start, a run with no window left to serve), so
+    no code of the run's own gets to run again: if there was a run in flight,
+    the durable record of how it ended has to be written here, on the way out.
 
     Deliberately not the cancel path. /api/stop means the user asked, and the
     loop answers that itself with a cancelled-flavoured final; a release is
@@ -317,14 +429,19 @@ def record_release(state: RunState) -> None:
     ``state.project`` IS the running project, and ``busy`` only ever goes
     True -> False.
     """
-    project = state.project
-    if project is None or not state.busy:
-        return
-    try:
-        project.log.append(FinalEvent(status="error", summary=RELEASED_SUMMARY))
-        print(f"[clutch-server] {RELEASED_SUMMARY}", flush=True)
-    except Exception as e:  # noqa: BLE001 - already going down: never mask why
-        print(f"[clutch-server] cannot record the release: {e}", file=sys.stderr)
+    global _release_recorded
+    with _release_guard:
+        if _release_recorded:
+            return
+        project = state.project
+        if project is None or not state.busy:
+            return
+        _release_recorded = True
+        try:
+            project.log.append(FinalEvent(status="error", summary=RELEASED_SUMMARY))
+            print(f"[clutch-server] {RELEASED_SUMMARY}", flush=True)
+        except Exception as e:  # noqa: BLE001 - already going down: never mask why
+            print(f"[clutch-server] cannot record the release: {e}", file=sys.stderr)
 
 
 def install_release_handler(state: RunState) -> None:
@@ -426,8 +543,12 @@ def main() -> int:
     install_release_handler(state)
     # a window that went away must not keep its project's write lock (see the
     # watchdog's own comment: waiting out the supervisor's stale window instead
-    # leaves the .clc locked for minutes after its window is gone)
-    unattended_lock_watchdog(state, broadcaster)
+    # leaves the .clc locked for minutes after its window is gone). A run in
+    # flight is the same leak with a harsher escape clause: the supervisor
+    # leaves such a session alive on purpose (it cannot tell an orphan from a
+    # backgrounded phone), so the session ends ITSELF once the run has had no
+    # audience for UNATTENDED_RUN_GRACE_S, through the host's own release path.
+    unattended_lock_watchdog(state, broadcaster, release_orphaned_session)
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.

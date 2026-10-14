@@ -1424,11 +1424,15 @@ def _unattended_lock_watchdog() -> None:
 
         # -- the watchdog: a watching window keeps it, silence hands it back
         state.set_project(open_project_lazy(project.path, workspace=ws), workspace=ws)
-        unattended_lock_watchdog(state, broadcaster, grace_s=0.3, poll_s=0.05)
+        releases: list[RunState] = []
+        unattended_lock_watchdog(
+            state, broadcaster, releases.append, grace_s=0.3, poll_s=0.05, run_grace_s=0.3
+        )
         q = broadcaster.subscribe(key)  # a subscriber that publishes nothing is an audience
         try:
             time.sleep(1.0)  # several grace windows' worth of ticks
             check(not state.project.read_only and claimed(), "a watching window keeps the write lock")
+            check(not releases, "and a watched session is never released")
         finally:
             broadcaster.unsubscribe(q)
         deadline = time.time() + 10
@@ -1436,6 +1440,55 @@ def _unattended_lock_watchdog() -> None:
             time.sleep(0.05)
         check(state.project.read_only, "nobody watching: the watchdog hands the lock back")
         check(not claimed(), "and the .clc is free again for any other window")
+
+        # -- an orphaned RUN: the session goes, the claim cannot
+        # The incident's shape: the window died without POST /api/session/stop,
+        # so the supervisor never set the record's ``detached`` flag and both of
+        # its guards deferred to the run in flight — ui-upgrade.clc stayed
+        # claimed for four hours, with no window on earth able to see or stop
+        # the run. The claim CANNOT be handed back under a live writer (that is
+        # the two-writer race the lock exists to prevent), so the session ends
+        # instead — through the host's own release path.
+        run_state = RunState()
+        run_bc = Broadcaster()
+        run_state.set_project(create_project(root / "orphan", "orphan", workspace=ws), workspace=ws)
+        run_key = str(run_state.project.path)
+
+        def run_claimed() -> bool:
+            h = ProjectLock._acquire_local(run_key)
+            if h is None:
+                return True
+            ProjectLock.release(h)
+            return False
+
+        run_state.busy = True  # a run in flight, and nobody left to watch it
+        released: list[RunState] = []
+        unattended_lock_watchdog(
+            run_state, run_bc, released.append, grace_s=0.3, poll_s=0.05, run_grace_s=0.3
+        )
+        deadline = time.time() + 10
+        while time.time() < deadline and not released:
+            time.sleep(0.05)
+        check(released == [run_state], "an unattended run releases its session")
+        check(run_claimed(), "the claim is NOT handed back under the live writer")
+        check(not run_state.project.read_only, "the session ends; the claim is the run's until then")
+        time.sleep(0.3)
+        check(released == [run_state], "and the release is asked for exactly once (the watchdog stops)")
+
+        # -- a run WITH a window is untouched: the run grace never starts
+        w_state = RunState()
+        w_bc = Broadcaster()
+        w_state.set_project(create_project(root / "watched-run", "watched-run", workspace=ws), workspace=ws)
+        w_state.busy = True
+        kept: list[RunState] = []
+        unattended_lock_watchdog(w_state, w_bc, kept.append, grace_s=0.3, poll_s=0.05, run_grace_s=0.3)
+        wq = w_bc.subscribe(str(w_state.project.path))
+        try:
+            time.sleep(1.0)  # several run-grace windows' worth of ticks
+            check(not kept, "a run whose window is watching is left alone")
+            check(not w_state.project.read_only and w_state.busy, "with its claim and its run intact")
+        finally:
+            w_bc.unsubscribe(wq)
 
 
 def _session_release_is_recorded() -> None:
@@ -1574,6 +1627,26 @@ def _session_release_is_recorded() -> None:
             finally:
                 if proc2.poll() is None:
                     _kill_tree(proc2)
+
+        # -- the ending is written ONCE, whatever brings the session down
+        # Two sources can signal the same process within a moment of each other:
+        # the host's reap ladder, and the session's own orphan watchdog
+        # (UNATTENDED_RUN_GRACE_S). A signal handler runs once per delivery, so a
+        # second SIGTERM would append a second final to a .clc whose tail holds
+        # exactly one ending.
+        with tempfile.TemporaryDirectory() as gdir:
+            from agent.project import create_project
+            from agent.tools.workspace import LocalWorkspace
+
+            gws = LocalWorkspace(gdir)
+            gproject = create_project(Path(gdir) / "once", "once", workspace=gws)
+            gstate = server_mod.RunState()
+            gstate.set_project(gproject, workspace=gws)
+            gstate.busy = True
+            server_mod.record_release(gstate)
+            server_mod.record_release(gstate)  # the second delivery
+            finals = [ev for ev in events_in(Path(gproject.path)) if ev["type"] == "final"]
+            check(len(finals) == 1, f"a double release writes one ending, not two (got {len(finals)})")
     finally:
         hang.close()
 
