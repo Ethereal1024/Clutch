@@ -4,8 +4,13 @@
    rule, it only shrinks/re-flows what cannot fit a 360-430 CSS-px column.
    Conservative on purpose: every selector here restates one style.css owns;
    we only touch layout (width/padding/order/display) and the control/type SCALE
-   itself (the --ctl-*/--fs-* names the plugin tab's rules are written against),
-   never a colour.
+   itself (the --ctl-* / --fs-* names the plugin tab's rules are written against
+   — those two spaces are load-bearing: a slash written tight against the star
+   would END this comment on the line above, and the prose after it plus the
+   @media block below would then be parsed as one qualified rule with a nonsense
+   selector, which a browser drops whole. That is what v0.1.34 through v0.1.42
+   did, and it took this file's every phone rule with it —
+   tests/ui_css_check.py is the gate that now says so), never a colour.
 
    M3.5 reports covered here:
    #1 the conn modal grew a horizontal scrollbar (long SSH label + picker)

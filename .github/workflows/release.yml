@@ -68,6 +68,14 @@ jobs:
       - name: Verify UI fonts
         run: .venv/bin/python -m tests.ui_fonts_check
 
+      # stylesheet wiring guard: ui/mobile.css is linked ONLY under
+      # media="(max-width: 640px)", so a comment that ended early in it killed
+      # every phone rule (and nothing else) for nine releases, with no desktop
+      # symptom to notice (tests/ui_css_check.py docstring). Offline, no browser,
+      # no deps — the scan is stdlib.
+      - name: Verify UI stylesheets
+        run: .venv/bin/python -m tests.ui_css_check
+
       - name: Build deb
         working-directory: ui
         run: npm run dist
@@ -218,6 +226,11 @@ jobs:
       - name: Verify UI fonts
         shell: bash
         run: .venv/Scripts/python -m tests.ui_fonts_check
+
+      # stylesheet wiring guard: the deb job runs it (tests/ui_css_check.py)
+      - name: Verify UI stylesheets
+        shell: bash
+        run: .venv/Scripts/python -m tests.ui_css_check
 
       - name: Build unsigned NSIS installer
         working-directory: ui
