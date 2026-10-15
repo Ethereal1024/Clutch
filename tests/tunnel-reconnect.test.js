@@ -20,9 +20,23 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const Module = require("module");
+const { EventEmitter } = require("events");
 const { check, summary } = require("./harness");
+
+// tunnelLog appends synchronously to $HOME/.clutch/tunnel.log; a few checks below
+// read it back, because "where did it stop?" is the report these come from.
+const TUNNEL_LOG = path.join(os.homedir(), ".clutch", "tunnel.log");
+
+function tunnelLogText() {
+  try {
+    return fs.readFileSync(TUNNEL_LOG, "utf-8");
+  } catch {
+    return "";
+  }
+}
 
 process.env.CLUTCH_TUNNEL_STOP_GRACE_MS = process.env.CLUTCH_TUNNEL_STOP_GRACE_MS || "250";
 
@@ -484,6 +498,54 @@ async function main() {
       `a host that forwards to nobody fails the connect loudly: 3 tries on ${LLM_PROXY_REMOTE_PORT}, then one ask for its own (${refusedBoth} calls)`
     );
     check(state.llmProxyRemotePort === null, "and nothing is remembered from a bind that never landed");
+
+    // ...and a far side that says NOTHING is not a far side that says no: ssh2
+    // calls the forwardIn callback from the REPLY handler and from nowhere else,
+    // so an attempt with no reply in flight was a promise nothing could settle.
+    // That is the report 0.1.46 closed on — "still stuck on Starting tunnel…" —
+    // because progress("forward") prints that label right before the bind and no
+    // other await in the phase is unbounded. Its own clock ends it now.
+    const silent = new EventEmitter();
+    silent.forwardIn = () => {}; // the far side never answers, and never dies
+    state.sshClient = silent;
+    let t0 = Date.now();
+    const unbound = await installReverseForward(silent, { tries: 1, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 40 });
+    let elapsed = Date.now() - t0;
+    check(
+      unbound === false && elapsed >= 60 && elapsed < 1500,
+      `an unanswered bind gives up on its own clock instead of parking the connect (${elapsed}ms for the two 40ms asks)`
+    );
+    check(
+      /did not answer the reverse-forward request within 40ms/.test(tunnelLogText()),
+      "…and the tunnel log names the timeout that ended it (where did it stop, without a debugger)"
+    );
+    check(
+      silent.listenerCount("close") === 0 && silent.listenerCount("error") === 0,
+      "…leaving no listeners behind on the client it gave up on"
+    );
+
+    // ...and an attempt ends AT ONCE when the client itself reports the wire is
+    // gone: the keepalive that notices a hop which died without a FIN tears the
+    // client down, and a promise already in flight has to hear about it.
+    const dying = new EventEmitter();
+    dying.forwardIn = () => {};
+    state.sshClient = dying;
+    t0 = Date.now();
+    const pending = installReverseForward(dying, { tries: 1, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 5000 });
+    setTimeout(() => {
+      state.sshClient = null;
+      dying.emit("close");
+    }, 60);
+    const dead = await pending;
+    elapsed = Date.now() - t0;
+    check(
+      dead === false && elapsed < 1000,
+      `a client that dies mid-bind settles the attempt at once, not with the 5000ms clock (${elapsed}ms)`
+    );
+    check(
+      dying.listenerCount("close") === 0 && dying.listenerCount("error") === 0,
+      "…and that path leaves no listeners on the dead client either"
+    );
     state.sshClient = null;
   }
 

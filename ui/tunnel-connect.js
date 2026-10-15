@@ -280,23 +280,62 @@ async function connectTunnel({ host, user, port, password }, progress) {
 // on THAT port. So the ladder ends by asking the far side to pick a port for
 // itself (port 0 — RFC 4254 has sshd bind what it can and report the number),
 // and this process remembers the answer for every later hop (see remoteLlmPort).
+//
+// The THIRD release of that report — 0.1.46, "still stuck on Starting tunnel…" —
+// is the one the ladder above could not reach, because the ladder is not where it
+// parks. ssh2 answers forwardIn only when the FAR side replies to the global
+// request (SSH_MSG_GLOBAL_REQUEST: node_modules/ssh2/lib/client.js invokes the
+// callback from the reply handler, and from nowhere else), so an attempt whose
+// answer never arrives leaves this await pending for as long as the client object
+// lives. The keepalive does eventually notice a wire that died without a FIN and
+// tears the CLIENT down (15s × 3), but nothing rejects a promise that is already
+// in flight: the phase stayed on "Starting tunnel…" — the label progress("forward")
+// prints right before this — for good. Every other await in the phase is bounded
+// (CONNECT_TIMEOUT_MS on the health probe, 3s on the supervisor probe, the exec
+// budget in tunnel-remote), so the bind gets a clock of its own, and it also
+// settles the moment the client says it is gone.
 const REVERSE_FORWARD_TRIES = 6;
 const REVERSE_FORWARD_RETRY_MS = 500; // first step of the ladder
 const REVERSE_FORWARD_MAX_WAIT_MS = 2000; // a port freeing up, not a network: cap it here
+// How long ONE attempt may stay unanswered before it counts as "no reply is
+// coming". sshd answers as soon as it has tried the bind, so this is not a speed
+// limit on a slow link: it is the difference between "the far side said no" and
+// "nobody is going to say anything".
+const REVERSE_FORWARD_BIND_TIMEOUT_MS = 4000;
 
 // One bind attempt. port === 0 is the wire's own way of saying "you pick": sshd
 // binds whatever it has and ssh2 hands the chosen number back as the callback's
 // second argument.
-function bindReverseForward(client, port) {
+function bindReverseForward(client, port, timeoutMs = REVERSE_FORWARD_BIND_TIMEOUT_MS) {
   const failed = (e) => ({ ok: false, error: (e && e.message) || String(e) });
   return new Promise((resolve) => {
     let settled = false;
+    let timer = null;
+    // Two ways out that ssh2 does not give us (see the comment above): the
+    // client's own death notice, and a clock. Both are removed on settle, so a
+    // long ladder leaves no listeners behind and a late reply is a no-op.
+    const gone = () =>
+      done(failed("the connection closed before the far side answered the reverse-forward request"));
     const done = (v) => {
-      if (!settled) {
-        settled = true;
-        resolve(v);
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (typeof client.removeListener === "function") {
+        client.removeListener("close", gone);
+        client.removeListener("error", gone);
       }
+      resolve(v);
     };
+    if (typeof client.once === "function") {
+      client.once("close", gone);
+      client.once("error", gone);
+    }
+    if (timeoutMs > 0) {
+      timer = setTimeout(
+        () => done(failed(`the far side did not answer the reverse-forward request within ${timeoutMs}ms`)),
+        timeoutMs
+      );
+    }
     try {
       client.forwardIn("127.0.0.1", port, (err, assigned) => {
         // forwardIn throws — it does not call back — on a socket that is already
@@ -318,11 +357,12 @@ async function bindReverseForwardWithLadder(client, port, opts = {}) {
   const tries = opts.tries || REVERSE_FORWARD_TRIES;
   const first = opts.retryMs || REVERSE_FORWARD_RETRY_MS;
   const cap = opts.maxWaitMs || REVERSE_FORWARD_MAX_WAIT_MS;
+  const bindTimeoutMs = opts.bindTimeoutMs || REVERSE_FORWARD_BIND_TIMEOUT_MS;
   let last = "no attempt was made";
   for (let attempt = 1; attempt <= tries; attempt++) {
     // a newer connect owns the session now: this forward belongs to a dead one
     if (!client || state.sshClient !== client) return { ok: false, abandoned: true };
-    const got = await bindReverseForward(client, port);
+    const got = await bindReverseForward(client, port, bindTimeoutMs);
     if (got.ok) return { ok: true, port: got.port, attempt };
     if (state.sshClient !== client) return { ok: false, abandoned: true }; // tunnel died under us
     last = got.error;

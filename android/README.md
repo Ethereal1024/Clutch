@@ -198,6 +198,39 @@ WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按�
 开一个客户端（隧道把会话端口转发到 127.0.0.1 上），或以后真做一个"共享/旁观同一会话"的
 功能——都不是当前产品提供的流程；真到那时，`trust_armed` 才会需要改成按客户端持有。
 
+## 隧道连上后卡在 "Starting tunnel…"（报告：0.1.46 连远端永远转，不落地也不报错）
+
+**报告**：连远端时进度停在 "Starting tunnel…"，界面不报错也不超时——既没有失败提示，
+也永远等不到连上那一刻。
+
+**根因**：不是 0.1.46 引入的（`git log v0.1.45..v0.1.46 -- ui/tunnel-connect.js` 为空），
+是这个阶段里**唯一一处没有时钟的等待**。反向端口转发走 `ssh2` 的
+`client.forwardIn(bindAddr, bindPort, cb)`（`ui/node_modules/ssh2/lib/client.js:1333`）：
+它的回调只在**对端的 global request 答复**到达时才被调用——ssh2 自己不设超时，而断线时
+的清理（keepalive 大约 45s）会把 `state` 清掉，却**不会 reject 那个还在飞的 promise**。
+"对端不回话"于是既没有回调也没有拒绝：`forward` 阶段（`ui/tunnel-connect.js:231` 的
+`progress("forward")`，标签就是 UI 上那句 "Starting tunnel…"）永远停在那儿。这一阶段里
+其它每个 await 都是有界的（健康探测 `CONNECT_TIMEOUT_MS = 15000`、supervisor 探测 3s、
+ exec 预算 60s），所以一个没有边界的等待足以让整条连接死在那里。
+
+**修法**：`bindReverseForward(client, port, timeoutMs)` 把一次 bind 变成"两个 ssh2 不给
+的出口，先到者胜"——`REVERSE_FORWARD_BIND_TIMEOUT_MS = 4000` 的钟，以及 client 自己的
+讣告（`once("close"|"error")`）。两者都只活到 settle 那一刻（`settled` 闸 + 移除监听器），
+所以 6 次阶梯重试不漏监听器、迟到的回调只是个 no-op；`forwardIn` 在已经死掉的 socket 上
+会**抛**而不是回调，这一抛也收进同一个 settle 里。文案分两句，"对端说不"与"没人会说话"
+不是一件事：`the connection closed before the far side answered the reverse-forward
+request` / `the far side did not answer the reverse-forward request within 4000ms`。4s 不是
+慢链路的限速——sshd 一旦试过 bind 就会回话，所以这个钟量的正是"答复本来就不会来了"。
+
+**验证**：`tests/tunnel-reconnect.test.js` 在既有的"没落地的 bind 什么都不留"之后加了两问：
+一个**永远不回答**的假 client（`bindTimeoutMs: 40`）必须在有界时间内放弃（实测 81ms；日志
+里出现 `did not answer the reverse-forward request within 40ms`；零残留监听器）；一个
+**已经 close** 的 client 必须立刻 settle（实测 61ms，而钟是 5000ms）。
+
+**回归证明**：把这两个出口临时删掉，`timeout 25 node tests/tunnel-reconnect.test.js` 正好
+停在 `and nothing is remembered from a bind that never landed` 之后再也不动——就是把报告里
+那个"一直转"复现了一遍。
+
 ## 启动器图标（报告："移动端目前还没有图标"）
 
 **报告**：APK 装到手机上，桌面/应用抽屉里是系统默认的 Android 小人，不是那枚红 ▣。
