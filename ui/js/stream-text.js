@@ -134,8 +134,14 @@ function flushThinkingRender() {
   renderThinkingBlock(true);
 }
 
-// height animation via WAAPI with overflow hidden (no scrollbar shift)
-const FOLD_EASE = "cubic-bezier(.23, 1, .32, 1)";
+// height animation via WAAPI with overflow hidden (no scrollbar shift). The two
+// curves are the sheet's own pair, used the way the sheet uses them: a fold that
+// ARRIVES decelerates into place on --arrival, one that LEAVES accelerates out
+// on --departure. Nothing in either language can see the other, so
+// tests/ui_css_check.py pins all three numbers to ui/style.css's tokens.
+const FOLD_OPEN_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
+const FOLD_CLOSE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
+const FOLD_MS = 200; // --move
 
 // one fold/diff animation per element; cancel any in-flight one
 function cancelFoldAnim(el) {
@@ -158,9 +164,11 @@ function animateFold(el, from, to, onDone) {
     settle();
     return;
   }
+  // the direction of travel picks the curve: the same arrival/leave pair the grid
+  // fold below uses, so a diff opening and a diff closing are one gesture each
   const anim = el.animate(
     [{ height: from + "px" }, { height: to + "px" }],
-    { duration: 200, easing: FOLD_EASE, fill: "forwards" }
+    { duration: FOLD_MS, easing: to >= from ? FOLD_OPEN_EASE : FOLD_CLOSE_EASE, fill: "forwards" }
   );
   el._foldAnim = anim;
   anim.onfinish = settle;
@@ -213,44 +221,81 @@ function followTailDuring(anim) {
   anim.addEventListener("cancel", stop, { once: true });
 }
 
-function foldExpand(fold) {
+// How far the row has travelled right now. getComputedTiming().progress comes
+// with the curve already applied, so it IS the fraction of the height on screen
+// (not how far the clock got); the fold's own record of the direction turns that
+// into "fr". With nothing in flight, the settled class is the whole answer.
+function foldFraction(fold) {
+  const anim = fold._foldAnim;
+  // only a move this function started carries the two fractions; the diff body's
+  // own height animation shares the same slot on its own element
+  if (!anim || typeof fold._foldFrom !== "number") {
+    return fold.classList.contains("hidden") ? 0 : 1;
+  }
+  const timing = anim.effect && anim.effect.getComputedTiming ? anim.effect.getComputedTiming() : null;
+  const progress = timing && typeof timing.progress === "number" ? timing.progress : 1;
+  return fold._foldFrom + (fold._foldTo - fold._foldFrom) * progress;
+}
+
+// Where the fold is GOING. Mid-flight that is not what its class list says — the
+// list holds neither `hidden` nor `open` while a fold moves — so a second click
+// there used to re-run the move the reader had just asked to reverse.
+function foldOpen(fold) {
+  return fold._foldAnim ? !!fold._foldTarget : !fold.classList.contains("hidden");
+}
+
+// The one mover behind both directions. The destination is a CLASS and it is
+// applied BEFORE the animation starts: a cancel — reduced motion, a teardown, the
+// next click — then lands on the destination instead of snapping back to the
+// state the fold started from. The move itself begins at the fraction that is on
+// screen, so an interrupted fold carries on from its current frame rather than
+// jumping to 0fr/1fr and replaying the whole distance.
+function foldAnim(fold, open, onDone) {
+  const from = foldFraction(fold);
+  const to = open ? 1 : 0;
   cancelFoldAnim(fold);
-  fold.classList.remove("hidden");
-  if (reducedMotion()) { fold.classList.add("open"); autoScroll(); return; }
+  fold.classList.remove("hidden"); // a rendered box is what can be animated
+  if (open) fold.classList.add("open");
+  else fold.classList.remove("open");
+  if (reducedMotion()) {
+    if (!open) fold.classList.add("hidden");
+    if (open) autoScroll();
+    if (onDone) onDone();
+    return;
+  }
   const anim = fold.animate(
-    [{ gridTemplateRows: "0fr" }, { gridTemplateRows: "1fr" }],
-    { duration: 200, easing: FOLD_EASE }
+    [{ gridTemplateRows: from + "fr" }, { gridTemplateRows: to + "fr" }],
+    { duration: FOLD_MS, easing: open ? FOLD_OPEN_EASE : FOLD_CLOSE_EASE }
   );
   fold._foldAnim = anim;
-  anim.onfinish = () => { fold._foldAnim = null; fold.classList.add("open"); };
-  followTailDuring(anim);
+  fold._foldFrom = from;
+  fold._foldTo = to;
+  fold._foldTarget = open;
+  anim.onfinish = () => {
+    fold._foldAnim = null;
+    if (!open) fold.classList.add("hidden");
+    if (onDone) onDone();
+  };
+  if (open) followTailDuring(anim); // only an expansion pushes the tail down
+}
+
+function foldExpand(fold) {
+  foldAnim(fold, true);
 }
 
 function foldCollapse(fold, onDone) {
-  cancelFoldAnim(fold);
-  fold.classList.remove("open");
-  if (reducedMotion()) { fold.classList.add("hidden"); if (onDone) onDone(); return; }
-  const anim = fold.animate(
-    [{ gridTemplateRows: "1fr" }, { gridTemplateRows: "0fr" }],
-    { duration: 200, easing: FOLD_EASE }
-  );
-  fold._foldAnim = anim;
-  anim.onfinish = () => {
-    fold._foldAnim = null;
-    fold.classList.add("hidden");
-    if (onDone) onDone();
-  };
+  foldAnim(fold, false, onDone);
 }
 
 function toggleFold(fold, onExpand) {
-  const wasHidden = fold.classList.contains("hidden");
-  if (wasHidden) {
+  const open = foldOpen(fold);
+  if (open) {
+    foldCollapse(fold);
+  } else {
     if (onExpand) onExpand(); // fill content before the wrapper sizes itself
     foldExpand(fold);
-  } else {
-    foldCollapse(fold);
   }
-  return wasHidden;
+  return !open; // true: it is open, or on its way there
 }
 
 // collapsible thinking row; shared by the stored-replay and live streaming paths

@@ -66,7 +66,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---- load the real code ----
 (0, eval)(region("let textRenderRaf = 0;", "flushTextRender"));
 (0, eval)(region("let thinkingRenderRaf = 0;", "flushThinkingRender"));
-(0, eval)(region("const FOLD_EASE", "buildThinkingBlock"));
+(0, eval)(region("const FOLD_OPEN_EASE", "buildThinkingBlock"));
 (0, eval)(region("const hlCache = new Map();", "highlightCode"));
 (0, eval)(fnBody("noBackend"));
 (0, eval)(fnBody("apiFetch"));

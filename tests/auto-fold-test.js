@@ -173,10 +173,12 @@ check(collapseCalls === 1, "a live turn animates its close (foldCollapse called 
 check(user.dataset.turnFolded === "1", "the turn is marked folded on its own task row");
 
 head.onclick();
-check(toggleCalls === 1 && head.children[0].textContent === "▾" && head.attrs["aria-expanded"] === "true",
-      "clicking the head re-opens the process and the caret says so");
+check(toggleCalls === 1 && head.attrs["aria-expanded"] === "true" && head.children[0].textContent === "▸",
+      "clicking the head re-opens the process, and the caret says so by turning: one glyph, " +
+      "the state on the head's aria-expanded");
 head.onclick();
-check(head.children[0].textContent === "▸" && head.attrs["aria-expanded"] === "false", "and clicking again closes it");
+check(head.attrs["aria-expanded"] === "false" && head.children[0].textContent === "▸",
+      "and clicking again closes it, with the same glyph going back");
 
 // ---- 2) a second `final` for the same turn must not fold the fold ----
 const before = p.children.slice();
@@ -272,7 +274,15 @@ check(/appendCompletion\(ev\.status, ev\.summary\);[\s\S]{0,400}autoFoldTurn\(\)
 check(/\.turn-fold-head\s*{[^}]*padding:[^}]*22px/.test(css),
       "the fold's head sits in the stream's content column (.event's own 22px)");
 check(/\.turn-fold-head\s*{[^}]*cursor:\s*pointer/.test(css), "the head reads as clickable");
-check(/\.turn-fold \.fold-inner > \* \{\s*animation: none/.test(css),
-      "the rows moved into the fold do not replay their arrival animation");
+check(/\.turn-fold-head\s*\{\s*animation:\s*fadeIn var\(--move\)\s*;/.test(css),
+      "the head — inserted in the frame the middle collapses — fades in like the divider " +
+      "beside it, on --move and with no curve, rather than painting");
+check(/\.turn-fold \.fold:not\(\.open\) \.fold-inner > \* \{\s*animation: none/.test(css),
+      "the rows moved into the fold do not replay their arrival animation in a fold that is " +
+      "not open — and only there: opening it is when they arrive");
+check(/\[aria-expanded="true"\] \.turn-fold-caret\s*\{[^}]*transform:\s*rotate\(90deg\)/.test(css),
+      "the caret is turned by the head's own aria-expanded, not by a second glyph");
+check(/\.turn-fold-caret\s*\{[^}]*transition:\s*transform var\(--move\)/.test(css),
+      "the caret's turn runs at the fold's own --move, not on the CSS default");
 
 summary("auto-fold");

@@ -42,11 +42,15 @@ of comments/strings/braces, the exact part of the grammar this bug lives in):
      rule with no declaration anywhere, which is not an error a browser reports:
      the declaration is dropped and the colour simply inherits, i.e. a rule that
      looks deliberate and means nothing
-  9. the js side of the motion is the css side's tokens: FOLD_EASE in
-     js/stream-text.js is --arrival and its fold duration is --move, and
-     settings.js's MODAL_CLOSE_MS is --move in milliseconds. The fold is animated
-     in js and the tokens live in css, so nothing in either language can see the
-     other: without a pin, editing one half is a silent change to the rhythm
+  9. the js side of the motion is the css side's tokens: FOLD_OPEN_EASE in
+     js/stream-text.js is --arrival and FOLD_CLOSE_EASE is --departure (a fold
+     that opens arrives, one that closes leaves — so both names have to be the
+     pair one easing picks between, not two constants one of which moves
+     nothing), the duration every fold runs is the FOLD_MS constant and that
+     constant is --move, and settings.js's MODAL_CLOSE_MS is --move in
+     milliseconds. The folds are animated in js and the tokens live in css, so
+     nothing in either language can see the other: without a pin, editing one
+     half is a silent change to the rhythm
 
 Run: uv run python3 -m tests.ui_css_check
 """
@@ -335,23 +339,53 @@ def js_ms(js: str, name: str) -> int | None:
 def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> list[str]:
     """Every place the js side has drifted from the sheet's own motion tokens.
 
-    The fold is animated in js (WAAPI, so a height can be interpolated without a
-    layout property being transitioned) while its curve and duration are the
-    sheet's --arrival and --move: nothing in either language can see the other, so
-    the pairing is only real while a check holds it. settings.js's MODAL_CLOSE_MS
-    is --move in milliseconds — the timer that lands `.hidden` when the closing
-    slide is over — and drifts the same way, one frame at a time.
+    The folds are animated in js (WAAPI, so a height can be interpolated without a
+    layout property being transitioned) while their curves and their duration are
+    the sheet's --arrival, --departure and --move: nothing in either language can
+    see the other, so the pairing is only real while a check holds it — and the
+    pair is used by DIRECTION (a fold that opens arrives, one that closes leaves),
+    which is why both curves are pinned by name and not just one.
+    settings.js's MODAL_CLOSE_MS is --move in milliseconds — the timer that lands
+    `.hidden` when the closing slide is over — and drifts the same way, one frame
+    at a time.
     """
     out: list[str] = []
-    arrival = declared.get("--arrival")
     move_ms = ms_of(declared.get("--move", ""))
 
-    curve = re.search(r'const\s+FOLD_EASE\s*=\s*"([^"]*)"\s*;', fold_js)
-    written = curve.group(1) if curve else "(no FOLD_EASE)"
-    if not arrival or _compact(written) != _compact(arrival):
+    for name, token in (("FOLD_OPEN_EASE", "--arrival"), ("FOLD_CLOSE_EASE", "--departure")):
+        token_value = declared.get(token)
+        curve = re.search(rf'const\s+{name}\s*=\s*"([^"]*)"\s*;', fold_js)
+        written = curve.group(1) if curve else f"(no {name})"
+        if not token_value or _compact(written) != _compact(token_value):
+            out.append(
+                f"ui/js/stream-text.js: {name} = {written!r} is not "
+                f"ui/style.css's {token} = {token_value!r}"
+            )
+
+    # the duration is a constant now (the same one at every call site), so the pin
+    # is on the constant's value AND on one animation actually running for it: a
+    # renamed or unused constant is the same drift with nothing left to read.
+    fold_ms = js_ms(fold_js, "FOLD_MS")
+    if move_ms is None or fold_ms != move_ms:
         out.append(
-            f"ui/js/stream-text.js: FOLD_EASE = {written!r} is not "
-            f"ui/style.css's --arrival = {arrival!r}"
+            f"ui/js/stream-text.js: FOLD_MS = {fold_ms} is not --move "
+            f"({declared.get('--move')!r}), which every fold here runs for"
+        )
+    if not re.search(r"duration:\s*FOLD_MS\s*,", fold_js):
+        out.append(
+            "ui/js/stream-text.js: no animation runs for FOLD_MS — the fold's "
+            "duration is not the sheet's --move at all"
+        )
+
+    # ...and both curves have to be the pair some easing actually PICKS BETWEEN.
+    # The decision is a direction (a fold that opens arrives, one that closes
+    # leaves), so one curve wired into both directions is the drift the two names
+    # exist to make visible — and every value above would still match the sheet.
+    if not re.search(r"easing:\s*[^\n]*FOLD_OPEN_EASE[^\n]*FOLD_CLOSE_EASE", fold_js):
+        out.append(
+            "ui/js/stream-text.js: no easing picks between FOLD_OPEN_EASE and "
+            "FOLD_CLOSE_EASE — both curves are in the file and neither one moves "
+            "anything"
         )
 
     for match in JS_DURATION.finditer(fold_js):
@@ -443,7 +477,8 @@ def check_motion() -> None:
     )
     print("the js side of the motion:")
     check(not drifts,
-          "the js folds and the modal's close timer are the sheet's --arrival and --move"
+          "the js folds and the modal's close timer are the sheet's --arrival, "
+          "--departure and --move"
           + (f" — {drifts[0]}" if drifts else ""))
 
 
@@ -485,20 +520,31 @@ def check_regression() -> None:
 # The token scan and the motion pin, exercised on shapes they must and must not
 # report: `var(--fg)` is the real defect this check was written after (a name used
 # and never declared, so the colour silently inherited), the fallback form beside
-# it is legal and must stay quiet, and the js beside it is a fold whose curve and
-# duration have both been edited away from the sheet's tokens — the drift no
-# reader of either file can see, which is the whole reason to pin it.
+# it is legal and must stay quiet, and the js beside it is a fold whose two curves
+# have been SWAPPED and whose duration has been edited away from the sheet's
+# tokens — the drift no reader of either file can see, which is the whole reason to
+# pin it.
 REGRESSION_TOKENS = """\
-:root { --arrival: cubic-bezier(.23, 1, .32, 1); --move: .2s; }
+:root { --arrival: cubic-bezier(.23, 1, .32, 1); --departure: cubic-bezier(.4, 0, 1, 1); --move: .2s; }
 /* notes name tokens: var(--not-a-use) and cssValue("--also-not") */
 .a { color: var(--fg); }
 .b { color: var(--accent, #EF4444); }
 """
 REGRESSION_FOLD_JS = """\
-const FOLD_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure, not --arrival
-const anim = el.animate([], { duration: 150, easing: FOLD_EASE });
+const FOLD_OPEN_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure, where --arrival belongs
+const FOLD_CLOSE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // and the pair swapped
+const FOLD_MS = 150; // --size, not --move
+const anim = el.animate([], { duration: FOLD_MS, easing: open ? FOLD_OPEN_EASE : FOLD_CLOSE_EASE });
 """
 REGRESSION_MODAL_JS = "const MODAL_CLOSE_MS = 180;\n"
+# the same fold with both curves correct, the duration correct, and one curve
+# wired into both directions: nothing but the direction pin can see this one.
+REGRESSION_FOLD_ONE_CURVE_JS = """\
+const FOLD_OPEN_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
+const FOLD_CLOSE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
+const FOLD_MS = 200; // --move
+const anim = el.animate([], { duration: FOLD_MS, easing: FOLD_OPEN_EASE });
+"""
 
 
 def check_regression_tokens() -> None:
@@ -516,13 +562,20 @@ def check_regression_tokens() -> None:
 
 
 def check_regression_motion() -> None:
-    drift = motion_drifts(declared_tokens(code_only(REGRESSION_TOKENS)), REGRESSION_FOLD_JS, REGRESSION_MODAL_JS)
-    check(len(drift) == 3,
-          f"the motion pin reports a curve that is another token, a duration that is not --move, "
-          f"and a close timer that is not --move either ({len(drift)} reported)")
+    declared = declared_tokens(code_only(REGRESSION_TOKENS))
+    drift = motion_drifts(declared, REGRESSION_FOLD_JS, REGRESSION_MODAL_JS)
+    check(len(drift) == 4,
+          f"the motion pin reports the two curves a fold arrives/leaves on being swapped, a "
+          f"duration that is not --move, and a close timer that is not --move either "
+          f"({len(drift)} reported)")
     files = [d.split(":")[0] for d in drift]
-    check(files == ["ui/js/stream-text.js"] * 2 + ["ui/js/settings.js"],
+    check(files == ["ui/js/stream-text.js"] * 3 + ["ui/js/settings.js"],
           f"each drift names the file it is in ({files})")
+    one = motion_drifts(declared, REGRESSION_FOLD_ONE_CURVE_JS,
+                        f"const MODAL_CLOSE_MS = {ms_of(declared['--move'])};\n")
+    check(len(one) == 1 and "picks between FOLD_OPEN_EASE and FOLD_CLOSE_EASE" in one[0],
+          f"the same fold with one curve wired into both directions is reported as that and "
+          f"nothing else ({len(one)} reported)")
 
 
 def main() -> int:

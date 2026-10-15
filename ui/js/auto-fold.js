@@ -78,6 +78,12 @@ function autoFoldTurn() {
   head.setAttribute("aria-expanded", "false");
   const caret = document.createElement("span");
   caret.className = "turn-fold-caret";
+  // one glyph for both states: the quarter turn that makes it point down is
+  // `transform: rotate(90deg)` under `[aria-expanded="true"]` (ui/style.css), so
+  // the caret keeps its advance width and the label never shifts under the
+  // reader's finger — a glyph SWAP cannot be transitioned, and this one moves
+  // with the fold it opens. The state it is drawn from is the attribute below,
+  // which is also what a screen reader reads.
   caret.textContent = "▸";
   const label = document.createElement("span");
   label.textContent = `process · ${mid.length} ${mid.length === 1 ? "step" : "steps"}`;
@@ -105,9 +111,11 @@ function autoFoldTurn() {
   for (const el of mid) frag.appendChild(el); // moves each row out of the pane
   inner.appendChild(frag);
   head.onclick = () => {
-    const wasHidden = toggleFold(fold);
-    caret.textContent = wasHidden ? "▾" : "▸";
-    head.setAttribute("aria-expanded", wasHidden ? "true" : "false");
+    // toggleFold answers with where the fold is GOING, not with the class list it
+    // is passing through: mid-flight a second click reverses the move instead of
+    // re-running it, and the caret/attribute follow the answer either way.
+    const open = toggleFold(fold);
+    head.setAttribute("aria-expanded", open ? "true" : "false");
   };
 
   // Collapse it. Live runs animate the close (the reader watched those rows
