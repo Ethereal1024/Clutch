@@ -262,6 +262,10 @@ port 0"，第 7 节新增源码断言：connect 里不再有 `await installRever
 临时换回 `await installReverseForward(client)`（失败即 connect 失败），第 4 步那台"永远不回答"
 的远端就不再 `ok:true`，而是 `ok:false`、connect 在 4002ms 上失败——判决重新挂回"对端回不回话"，
 这正是要拆掉的那条依赖（改动已还原，`grep -rn "TEMP REGRESSION PROBE" ui/` 无残留）。
+真线上还有一次 A/B（真 sshd 跑在 127.0.0.1:2222，本地 8892 被占，于是走完整个"拒绝"阶梯）：
+不装门时 connect **255ms** 落地，而模型通路 7459ms 才到 `listening`；把
+`await installReverseForward(client)` 和它的 `failConnect` 装回同一份文件，同一根线上的 connect
+变成 **7747ms**——同一个 7.5 秒的阶梯，一次是背景里的重试，一次是在屏幕上。
 
 ## 启动器图标（报告："移动端目前还没有图标"）
 

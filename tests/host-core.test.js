@@ -497,6 +497,82 @@ async function main() {
     assert.strictEqual(core.backendCount(), 1, "the parked claim still names the far session");
   }
 
+  // 20. the far side's model path is awaited HERE (the claim), not inside the
+  //     connect (ui/tunnel-connect.js startModelPath): the connect can no longer
+  //     be parked by a far side that never answers a global request — the report
+  //     this dependency exists for — and this await is the one place a session's
+  //     --base-url is checked against a listener that is actually there. The
+  //     request is ACCEPTED by the reverse forward and answered by nobody, so a
+  //     session handed a base too early parks in the agent's own read budget.
+  {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    let asked = 0;
+    const ts = { active: true, url: "http://127.0.0.1:8891" };
+    const { core, sessions, state } = makeCore({
+      tunnel: ts,
+      over: {
+        awaitModelPath: () => {
+          asked++;
+          return gate;
+        },
+      },
+    });
+    const claim = core.ensureWindowBackend(fakeWin(20));
+    await tick();
+    await tick();
+    assert.strictEqual(sessions.calls.started.length, 0, "no session is spawned while the model path is still being installed");
+    release("listening");
+    assert.ok(await claim, "the claim lands once the path answers");
+    assert.strictEqual(asked, 1, "the claim asked the far side's model path once");
+    assert.strictEqual(sessions.calls.started.length, 1, "and only then is the session spawned");
+    assert.strictEqual(
+      sessions.calls.started[0].baseUrl,
+      "http://127.0.0.1:8892/v1",
+      "still pointed at the reverse forward, whose listener the await just confirmed",
+    );
+    assert.deepStrictEqual(
+      state.logs.filter((l) => /model path/.test(l)),
+      [],
+      "a path that IS up needs no caveat in the log",
+    );
+  }
+
+  // 21. a path that is not up: the session is started anyway, and the log says
+  //     which path it was started over — a run whose model does not answer beats
+  //     no run, but it must not be a silent guess
+  {
+    const { core, sessions, state } = makeCore({
+      tunnel: { active: true, url: "http://127.0.0.1:8891" },
+      over: { awaitModelPath: async () => "unavailable" },
+    });
+    assert.ok(await core.ensureWindowBackend(fakeWin(21)), "a far side with no model path still gets its session");
+    assert.strictEqual(sessions.calls.started.length, 1, "the session is spawned regardless of the path");
+    assert.ok(
+      state.logs.includes("[backend] the far side's model path is unavailable; starting the session anyway"),
+      "the log names the path the session was started over (" + JSON.stringify(state.logs) + ")",
+    );
+  }
+
+  // 22. a model-path dep that throws is "unknown", never a failed claim: the
+  //     tunnel not answering about a port is not a reason to refuse a run
+  {
+    const { core, sessions, state } = makeCore({
+      tunnel: { active: true, url: "http://127.0.0.1:8891" },
+      over: {
+        awaitModelPath: async () => {
+          throw new Error("no wire");
+        },
+      },
+    });
+    assert.ok(await core.ensureWindowBackend(fakeWin(22)), "a model-path error does not cost the session");
+    assert.strictEqual(sessions.calls.started.length, 1, "and the session child is the ordinary one");
+    assert.ok(
+      state.logs.includes("[backend] the far side's model path is unknown (no wire); starting the session anyway"),
+      "the error is reported as unknown, not swallowed (" + JSON.stringify(state.logs) + ")",
+    );
+  }
+
   console.log("host-core: all checks passed");
 }
 
