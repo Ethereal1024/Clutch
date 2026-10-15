@@ -481,7 +481,10 @@ function dismissOnOverlayPress(overlayEl, onClose) {
   });
 }
 
-const MODAL_CLOSE_MS = 180;
+// --move in ui/style.css, in milliseconds. `.modal.closing` runs for exactly this
+// long, and the constant has to move with it: a shorter timer lands .hidden
+// mid-slide, a longer one paints a frame of a modal that is already gone.
+const MODAL_CLOSE_MS = 200;
 
 // animated close: fade the overlay, then land display:none when done
 function closeModal(overlayEl, onDone) {

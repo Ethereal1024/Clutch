@@ -30,8 +30,10 @@
 // The same run checks the stylesheet facts the design leans on: the box's height is
 // NOT transitioned anywhere (nothing in CSS fights the tween), the box does not
 // scroll (the pane is the scroll region, and it is the box that is measured), the
-// 300ms comes from the file picker's own transition, and ui/index.html opens with
-// the strip and the panes agreeing about which one is showing.
+// 300ms comes from the file picker's own transition (the sheet's --size token, and
+// the constant that drives this tween is checked against that token), and
+// ui/index.html opens with the strip and the panes agreeing about which one is
+// showing.
 //
 // Run: node tests/settings-tabs-test.js
 
@@ -302,14 +304,20 @@ function makePage(opts) {
     "the pane fills what is left of the box, so the box's height is the pane's height plus the box's own chrome"
   );
 
-  // the 300ms is the file picker's, on purpose: the two jumps are the same kind of
-  // jump, so they are the same length (the comment in settings.js says so, and this
-  // is what keeps it from rotting)
+  // the --size is the file picker's, on purpose: the two jumps are the same kind
+  // of jump, so they are the same length (the comment in settings.js says so, and
+  // this is what keeps it from rotting). The sheet spells that length as a token,
+  // so the number is read out of the sheet the way the token is: a hardcoded 0.3s
+  // here would pin a copy of the value instead of the value.
   const fsBody = decls(css, "#fs-body");
-  const m = fsBody.match(/transition:\s*max-height\s+([\d.]+)s/);
-  check(Boolean(m), "#fs-body still transitions its max-height — the motion this one is copied from");
+  const travel = fsBody.match(/transition:\s*([^;]+);/);
   check(
-    Math.round(parseFloat(m && m[1]) * 1000) === vm.runInContext("SETTINGS_HEIGHT_MS", makePage().ctx),
+    Boolean(travel) && /max-height\s+var\(--size\)/.test(travel[1]),
+    "#fs-body still transitions its max-height — the motion this one is copied from"
+  );
+  const size = css.match(/--size:\s*([\d.]+)s\s*;/);
+  check(
+    Boolean(size) && Math.round(parseFloat(size[1]) * 1000) === vm.runInContext("SETTINGS_HEIGHT_MS", makePage().ctx),
     "and the settings box travels for exactly as long as the file picker's body does"
   );
   check(

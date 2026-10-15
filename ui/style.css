@@ -113,6 +113,22 @@
      than the smallest step, and rules older than the scale still carry their own
      pixels (a stray 6px or 10px is the scale bypassed, not a decision). */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  /* the two off-scale values that ARE decisions, so the next reader does not have
+     to guess which stray is which:
+     --row-gutter is the app's text inset inside a box — a panel of code, a thinking
+     block, a result detail, a field, the picker's rows, the popup's options. Its
+     vertical half is always a step (8px for a panel, 6px for a list row, 4px for a
+     table cell) while the horizontal half is 10px in every one of them: one optical
+     value used as a vocabulary, not thirty typos. It is not 12px because a row whose
+     text starts that far in reads as inset from nothing, and it is not 8px because
+     that glues the first glyph to the box's edge.
+     --select-gutter is the room a themed <select> keeps on its right for the arrow
+     it paints there (background-position right 8px + the arrow's own 8px + air).
+     A control pads optically around its own chrome — 7px against Archivo's 13px,
+     pinned by `.run-actions button`'s height comment below — so neither of these is
+     a step, and both are spelled once, here. */
+  --row-gutter: 10px;
+  --select-gutter: 26px;
   /* the control scale: ONE height per class of control, so a pane cannot grow a
      fifth one (the plugin tab alone used 32/26/20/18px). --tap is the floor
      WCAG 2.2 SC 2.5.8 puts under a target; mobile.css raises these same names
@@ -125,6 +141,17 @@
      line stop reading as a pair. */
   --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 16px;
   --radius: 0; /* swiss dark: sharp corners are the house style, said once */
+  /* the text a FILLED control paints — the accent bar, the primary's near-white.
+     The same value as --bg, named for what it is FOR: a control that inverts asks
+     for --ink rather than for the page background, so the two can part ways if the
+     base ever moves without every filled control following it by accident. */
+  --ink: #0F0F10;
+  /* the scrollbar pill, spelled once because two places draw it: the
+     ::-webkit-scrollbar-thumb rules and the @supports fallback under them. Two
+     graphite steps, deliberately quieter than --border — the bar is furniture, not
+     a line between two panes — and never the accent except while a drag is on. */
+  --scroll-thumb: #2b2b31;
+  --scroll-thumb-hover: #3f3f47;
   /* the accent under its other name. A removal, a refusal and a stopped
      component are the ONE red this palette owns, so calling it --danger where
      that is what it means keeps a future palette change to a single line. */
@@ -165,17 +192,17 @@ html { -webkit-tap-highlight-color: transparent; }
 ::-webkit-scrollbar-track,
 ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #2b2b31;
+  background: var(--scroll-thumb);
   border-radius: 999px;
 }
-::-webkit-scrollbar-thumb:hover { background: #3f3f47; }
+::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 ::-webkit-scrollbar-thumb:active { background: var(--accent); }
 @supports not selector(::-webkit-scrollbar) {
-  * { scrollbar-width: thin; scrollbar-color: #2b2b31 transparent; }
+  * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
 }
 
 /* text selection: red fill + near-black text, the theme's single accent */
-::selection { background: var(--accent); color: #0F0F10; }
+::selection { background: var(--accent); color: var(--ink); }
 
 html, body {
   height: 100%;
@@ -258,7 +285,7 @@ body { display: flex; flex-direction: column; }
    the title via the topbar's align-items:center + matching line-height */
 .badge {
   display: inline-block;
-  padding: 3px 10px;
+  padding: 3px var(--row-gutter);
   border-radius: 0;
   font-size: 12px;
   line-height: 1;
@@ -267,17 +294,46 @@ body { display: flex; flex-direction: column; }
   letter-spacing: 0.08em;
 }
 .badge.idle { color: var(--muted); }
-.badge.running { color: #0F0F10; background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
-.badge.waiting { color: #0F0F10; background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
+.badge.running { color: var(--ink); background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
+.badge.waiting { color: var(--ink); background: var(--accent); border-color: var(--accent); animation: pulse 1.2s infinite; }
 .badge.finished { color: var(--text); border-color: var(--accent); }
-.badge.error { color: #e05555; border-color: #e05555; }
+/* the failure badge is the SAME red as every other failure here, not a second one.
+   It used to carry #e05555 — a hand-lightened accent that measured 5.11:1 against
+   --bg where --accent measures 5.09:1, i.e. the tint bought no contrast at all and
+   only split "the error red" into two values that had to be kept in step by hand
+   (`.plug-line.plug-state.error` beside it always used the token). */
+.badge.error { color: var(--danger); border-color: var(--danger); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 @keyframes fadeSlideUp {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-:root { --arrival: cubic-bezier(.23, 1, .32, 1); }
+/* motion: two curves and three durations, and everything that moves in this sheet
+   is written against one of them (the arrival animations on a row and a modal box,
+   the popovers, the hover fades, the picker body folding away).
+   --arrival decelerates INTO place — the curve that says "this is where the thing
+   lives"; --departure accelerates OUT of it, because something on its way out that
+   still lingers at the near end of its path reads as a lag rather than as a leave.
+   The three durations are the whole vocabulary: --quick is feedback on something
+   already under the pointer (a hover, a press, a 4px popover slide — at 150ms the
+   change has landed before a tap is over), --move is something that arrives or
+   leaves (a modal, a menu, a row), --size is a surface changing its own height,
+   which is the one transition long enough to need the extra 100ms.
+   A transition that lists only a duration sits on the CSS default `ease`, and
+   deliberately so: a colour or an opacity change has nothing travelling through
+   it, so it wants the gentle default rather than an arrival curve. The JS-driven
+   folds in js/stream-text.js use this same pair (tests/ui_css_check.py pins it),
+   because an expansion the reader watches is the same arrival at the same speed —
+   and the same check holds js/settings.js's MODAL_CLOSE_MS at --move in
+   milliseconds, which is what lands `.hidden` once a modal's own slide is over. */
+:root {
+  --arrival: cubic-bezier(.23, 1, .32, 1);
+  --departure: cubic-bezier(.4, 0, 1, 1);
+  --quick: .15s;
+  --move: .2s;
+  --size: .3s;
+}
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
@@ -292,7 +348,7 @@ button {
   font-family: var(--font-display);
   font-size: 13px;
   letter-spacing: 0.02em;
-  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+  transition: background-color var(--quick), border-color var(--quick), color var(--quick);
 }
 button:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
 button:active:not(:disabled) { transform: translateY(1px); }
@@ -305,14 +361,32 @@ button:focus-visible, select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-button.primary { background: var(--text); border-color: var(--text); color: #0F0F10; font-weight: 600; }
-button.primary:hover:not(:disabled) { background: #d8d8db; border-color: #d8d8db; color: #0F0F10; }
+button.primary { background: var(--text); border-color: var(--text); color: var(--ink); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: #d8d8db; border-color: #d8d8db; color: var(--ink); }
 button.primary.stop-mode { color: var(--accent); border-color: var(--accent); }
 button.primary.stop-mode:hover:not(:disabled) { background: #fbe6e6; border-color: var(--accent); color: var(--accent); }
 /* ghost: a subdued, borderless-looking action (dismissals like Cancel) that
    reads as secondary next to the solid management buttons */
 button.ghost { background: transparent; color: var(--muted); }
 button.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+
+/* Rows that are their own control: a file-tree row, a picker row, an option in a
+   popup, a tool/thinking row, a component row's own name. Their state is a COLOUR
+   and it arrives the way the buttons beside them arrive — a rule that only sets a
+   :hover colour flips in one frame, which reads as a repaint next to a button's
+   fade, i.e. the same gesture at two speeds in the same pane. This is where the
+   row family is put on the sheet's --quick; the `:active` press hints for the same
+   rows are switched off again under (hover: none) at the end of this file, because
+   a press must land on frame one.
+   `.tool-args-btn` is a <button> and deliberately NOT in this list: the base
+   `button` rule above already transitions its background, border and colour, and a
+   class selector here would WIN over that type selector and replace the three with
+   the two below — the fade it needs, minus the border it fades everywhere else. */
+.tree-node, .fs-row, .cselect-opt, .thinking-row, .result-row,
+.tool-row.folded .tool-label,
+.plug-row .plug-name, .plug-row .plug-row-desc {
+  transition: background-color var(--quick), color var(--quick);
+}
 
 /* the run row is ONE control cluster, not three independent buttons: run/stop,
    mode and trust all read as switches over the next run, so they share a single
@@ -353,10 +427,10 @@ select {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 0;
-  padding: 5px 26px 5px 8px;
+  padding: 5px var(--select-gutter) 5px var(--s2);
   font-family: var(--font-display);
   cursor: pointer;
-  transition: border-color .15s ease, background-color .15s ease;
+  transition: border-color var(--quick), background-color var(--quick);
 }
 select:hover { border-color: var(--accent); }
 select option { background-color: var(--bg2); color: var(--text); }
@@ -379,7 +453,7 @@ select option { background-color: var(--bg2); color: var(--text); }
   font-family: var(--font-mono);
   font-size: 13px;
   cursor: pointer;
-  transition: border-color .15s ease, background-color .15s ease;
+  transition: border-color var(--quick), background-color var(--quick);
 }
 .cselect-btn:hover, .cselect.open .cselect-btn { border-color: var(--accent); }
 .cselect-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
@@ -392,7 +466,7 @@ select option { background-color: var(--bg2); color: var(--text); }
   width: 8px;
   height: 6px;
   background: url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjYiIHZpZXdCb3g9IjAgMCA4IDYiPjxwYXRoIGQ9Ik0xIDEuNWwzIDMgMy0zIiBzdHJva2U9IiM4YjhiOTIiIHN0cm9rZS13aWR0aD0iMS41IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=') no-repeat center / contain;
-  transition: transform .15s ease;
+  transition: transform var(--quick);
 }
 .cselect.open .cselect-arrow { transform: rotate(180deg); }
 /* The popup is about its CONTENT, not about the box it hangs from. The picker's own
@@ -418,32 +492,35 @@ select option { background-color: var(--bg2); color: var(--text); }
   overflow-x: hidden;
   display: none;
 }
-.cselect.open .cselect-pop { display: block; animation: cselect-in .15s ease-out; }
+.cselect.open .cselect-pop { display: block; animation: cselect-in var(--quick) var(--arrival); }
 @keyframes cselect-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .cselect-opt {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 6px var(--row-gutter);
   cursor: pointer;
   color: var(--text);
   font-size: 13px;
   font-family: var(--font-mono);
 }
 .cselect-opt-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cselect-opt:hover, .cselect-opt.active { background: var(--accent); color: #0F0F10; }
+.cselect-opt:hover, .cselect-opt.active { background: var(--accent); color: var(--ink); }
 .cselect.disabled .cselect-btn { opacity: 0.4; cursor: default; }
 .cselect.disabled .cselect-btn:hover { border-color: var(--border); }
 .fs-conn-row .cselect { flex: 1; }
-.modal-box > .cselect .cselect-btn { font-family: var(--font-display); font-size: 14px; padding: 8px 10px; }
-.modal-box > .cselect { margin-bottom: 14px; }
+.modal-box > .cselect .cselect-btn { font-family: var(--font-display); font-size: 14px; padding: 8px var(--row-gutter); }
+.modal-box > .cselect { margin-bottom: var(--s4); }
 .modal-box > .cselect .cselect-opt { font-family: var(--font-display); }
 
 main { display: flex; flex: 1; min-height: 0; }
 
 #left { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
-#taskbar { padding: 14px 16px 16px; border-bottom: 1px solid var(--border); }
+/* the input bar's own padding is the --s4 step on all four sides: the textarea
+   inside it carries the same step, so the bar's box reads as one frame around the
+   field rather than as four different gaps (the bottom used to be the only 16). */
+#taskbar { padding: var(--s4); border-bottom: 1px solid var(--border); }
 #task-input {
   width: 100%;
   background: var(--bg2);
@@ -456,7 +533,7 @@ main { display: flex; flex: 1; min-height: 0; }
   line-height: 1.5;
   overflow-y: auto;
   resize: none; /* height is owned by the auto-grow JS, not the user */
-  transition: height .18s ease;
+  transition: height var(--move);
 }
 /* A text box says "focus" with ONE line: its own border goes accent, and the ring
    in this sheet is not worn here (that list is up at the top of the button block).
@@ -507,16 +584,27 @@ main { display: flex; flex: 1; min-height: 0; }
 .older-pill {
   display: block;
   margin: 0 auto 12px auto;
-  padding: 5px 14px;
+  /* the pill is a MARK floating over the stream (rounded, bordered), not a block
+     of layout, so it pads optically at the scale's smallest steps — and takes the
+     small type step: 12.5px was a half-step this sheet's type scale does not have
+     (--fs-xs..--fs-xl), and it was the last one in the file: the other two rules
+     carrying it were the compaction and retry asides, the same small muted voice. */
+  padding: var(--s1) var(--s3);
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg2);
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   cursor: pointer;
-  transition: border-color .15s ease, color .15s ease;
+  transition: border-color var(--quick), color var(--quick);
 }
-.older-pill:hover { border-color: var(--accent); color: var(--fg); }
+/* hover: the accent edge, and the row's own voice. `color: var(--fg)` used to sit
+   here — a name defined NOWHERE in this sheet or in mobile.css, so the declaration
+   was invalid at computed-value time and the colour was simply INHERITED, which
+   happened to equal --text under #stream. Same defect class as the .readonly-badge
+   note further down; spelled out, the hover survives the pill being placed anywhere
+   else (and the token check in tests/ui_css_check.py is what found it). */
+.older-pill:hover { border-color: var(--accent); color: var(--text); }
 .older-pill.hidden { display: none; }
 
 /* event stream: a numbered execution track threaded by a connector rail.
@@ -599,7 +687,7 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .event.compaction::before { display: none; }
 .event.compaction .hdr::before { content: none; }
-.event.compaction .body { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+.event.compaction .body { margin: 2px 0 0; font-size: var(--fs-sm); color: var(--muted); }
 
 /* transient "reconnecting…" chip (llm_retry): a stream attempt failed before
    its first token and the client is retrying with backoff. Same live-block
@@ -617,7 +705,7 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .event.llm-note::before { display: none; }
 .event.llm-note .hdr::before { content: none; }
-.event.llm-note .body { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); white-space: normal; }
+.event.llm-note .body { margin: 2px 0 0; font-size: var(--fs-sm); color: var(--muted); white-space: normal; }
 
 /* rendered markdown inside event bodies */
 .event .body h1, .event .body h2, .event .body h3, .event .body h4 {
@@ -634,7 +722,7 @@ main { display: flex; flex: 1; min-height: 0; }
   font-family: var(--font-mono); font-size: 13px;
 }
 .event .body pre {
-  background: var(--code-bg); padding: 8px 10px; border-radius: 0;
+  background: var(--code-bg); padding: 8px var(--row-gutter); border-radius: 0;
   border: 1px solid var(--border); overflow-x: auto; margin: 10px 0; line-height: 1.45;
 }
 .event .body pre code { background: none; padding: 0; }
@@ -654,7 +742,7 @@ main { display: flex; flex: 1; min-height: 0; }
   border-color: var(--border);
   text-align: center;
   overflow-x: auto;
-  padding: 12px 10px;
+  padding: 12px var(--row-gutter);
 }
 .event .body pre.mermaid-rendered svg { max-width: 100%; height: auto; }
 /* device report #6: a wide diagram inside a phone column is unreadable at
@@ -682,7 +770,7 @@ main { display: flex; flex: 1; min-height: 0; }
   z-index: 2; display: flex; gap: 6px; padding: 6px;
   background: rgba(24, 24, 28, 0.92); border: 1px solid var(--border);
 }
-.dv-bar button { min-width: 42px; padding: 6px 10px; font-size: 13px; }
+.dv-bar button { min-width: 42px; padding: 6px var(--row-gutter); font-size: 13px; }
 .dv-close { position: absolute; top: 12px; right: 12px; z-index: 2; padding: 6px 12px; font-size: 15px; }
 .dv-hint {
   position: absolute; top: 16px; left: 16px; z-index: 2;
@@ -713,7 +801,7 @@ mjx-container[display="true"] {
 }
 .event .body pre .mermaid-error {
   margin-top: 8px;
-  padding: 6px 10px;
+  padding: 6px var(--row-gutter);
   border-top: 1px solid rgba(239, 68, 68, 0.25);
   color: var(--accent, #EF4444);
   font-size: 12px;
@@ -746,7 +834,7 @@ mjx-container[display="true"] {
   display: block; max-width: 100%; overflow-x: auto;
 }
 .event .body th, .event .body td {
-  border: 1px solid var(--border); padding: 4px 10px; font-size: 13px;
+  border: 1px solid var(--border); padding: var(--s1) var(--row-gutter); font-size: 13px;
 }
 .event .body th { background: var(--bg); }
 
@@ -802,14 +890,14 @@ mjx-container[display="true"] {
   color: var(--accent); cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
   opacity: 1; transform: none;
-  transition: opacity .15s ease, transform .15s ease, visibility 0s linear 0s;
+  transition: opacity var(--quick), transform var(--quick), visibility 0s linear 0s;
 }
 .jump-bottom:hover { border-color: var(--accent); }
 .jump-bottom.hidden {
   display: flex !important;      /* beat global .hidden's display:none */
   opacity: 0; transform: translateY(6px) scale(.85);
   visibility: hidden; pointer-events: none;
-  transition: opacity .15s ease, transform .15s ease, visibility 0s linear .15s;
+  transition: opacity var(--quick), transform var(--quick), visibility 0s linear var(--quick);
 }
 .event.tool_result::before { background: var(--accent); }
 .event.tool_result .hdr { color: var(--accent); font-weight: 600; }
@@ -829,7 +917,7 @@ mjx-container[display="true"] {
 .thinking-row:hover { color: var(--text); }
 .thinking-label { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .thinking-full {
-  background: var(--code-bg); padding: 8px 10px; border-radius: 0;
+  background: var(--code-bg); padding: 8px var(--row-gutter); border-radius: 0;
   border: 1px solid var(--border);
   margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; color: var(--muted); white-space: pre-wrap;
@@ -839,23 +927,31 @@ mjx-container[display="true"] {
 /* run completion: full-width dashed divider with centered uppercase label */
 .completion {
   display: flex; align-items: center; gap: 12px;
-  margin: 24px 0 32px;
+  margin: var(--s6) 0 var(--s6);
   color: var(--accent);
   font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.35em;
-  animation: fadeIn .26s ease-out;
+  animation: fadeIn var(--move);
 }
 .completion::before, .completion::after {
   content: ""; flex: 1; height: 1px;
   background: var(--accent);
   opacity: 0.55;
 }
-/* abort/error termination reason, shown under the completion divider */
+/* abort/error termination reason, shown under the completion divider.
+   The negative top margin closes the divider's --s6 back down to the --s2 a note
+   belongs at from the line it explains: the two values are one decision (`8 - 24`
+   = the -16px here), which is why they are both steps now instead of the -24/32
+   pair of naked pixels this used to carry — a 32px gap that had to be cancelled
+   by a magic -24 elsewhere to stop reading as a hole. Its left inset is the
+   STREAM's content column, the same 22px `.event` and `.turn-fold-head` are set in
+   from: the note is a row of this transcript, and the 16px it used to take was a
+   second, nearly-equal indent that lined it up with nothing. */
 .completion-note {
-  margin: -24px 0 28px; padding-left: 16px;
+  margin: calc(var(--s2) - var(--s6)) 0 var(--s6); padding-left: 22px;
   color: var(--muted); font-family: var(--font-mono);
   font-size: 12px; line-height: 1.5;
-  animation: fadeIn .26s ease-out;
+  animation: fadeIn var(--move);
 }
 
 /* a finished task's middle, folded away (js/auto-fold.js). The head is a plain
@@ -882,7 +978,7 @@ mjx-container[display="true"] {
 
 /* a row form's folded body: collapsed label, expand on click */
 .result-detail {
-  background: var(--code-bg); padding: 8px 10px; border-radius: 0;
+  background: var(--code-bg); padding: 8px var(--row-gutter); border-radius: 0;
   border: 1px solid var(--border);
   overflow-x: auto; margin: 6px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; flex-basis: 100%;
@@ -921,7 +1017,7 @@ mjx-container[display="true"] {
    "output" steps — a red-filled header chip */
 .event.tool_result.accent .hdr {
   display: inline-block;
-  background: var(--accent); color: #0F0F10; font-weight: 600;
+  background: var(--accent); color: var(--ink); font-weight: 600;
   padding: 1px 8px; border-radius: 0;
 }
 .event.tool_result.accent::before { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px rgba(239, 68, 68, 0.5); }
@@ -931,7 +1027,7 @@ mjx-container[display="true"] {
   background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: 0;
-  padding: 8px 10px;
+  padding: 8px var(--row-gutter);
   max-height: 320px;
   overflow-y: auto;
 }
@@ -947,7 +1043,7 @@ mjx-container[display="true"] {
                                     default fixed font = SimSun on zh-CN Windows */
   font-size: 13px; color: var(--muted);
   background: var(--code-bg); border: 1px solid var(--border);
-  padding: 8px 10px; border-radius: 0;
+  padding: 8px var(--row-gutter); border-radius: 0;
   margin: 8px 0 0;
   white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 240px; overflow-y: auto;
@@ -965,7 +1061,7 @@ mjx-container[display="true"] {
   background: var(--bg2);
 }
 .panel-head {
-  padding: 9px 12px; border-bottom: 1px solid var(--border);
+  padding: var(--s2) var(--s3); border-bottom: 1px solid var(--border);
   border-left: 4px solid var(--accent);
   font-family: var(--font-display); font-weight: 600;
   font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
@@ -997,13 +1093,15 @@ mjx-container[display="true"] {
   align-items: center;
   justify-content: center;
   z-index: 100;
-  animation: fadeIn .2s ease-out;
+  animation: fadeIn var(--move);
 }
 .modal.hidden { display: none; }
 /* closing: fade the overlay out and slide the box down, then .hidden lands (the
-   JS defers the display:none until this animation finishes) */
-.modal.closing { animation: fadeOut .18s ease-in forwards; }
-.modal.closing .modal-box { animation: fadeSlideDown .18s ease-in forwards; }
+   JS defers the display:none until this animation finishes — MODAL_CLOSE_MS in
+   ui/js/settings.js is --move in milliseconds, and the two have to move together:
+   a shorter timer cuts the box off mid-slide, a longer one leaves a dead frame) */
+.modal.closing { animation: fadeOut var(--move) var(--departure) forwards; }
+.modal.closing .modal-box { animation: fadeSlideDown var(--move) var(--departure) forwards; }
 @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
 @keyframes fadeSlideDown {
   from { opacity: 1; transform: translateY(0); }
@@ -1028,13 +1126,15 @@ mjx-container[display="true"] {
   border: 1px solid var(--border);
   border-radius: 0;
   color: var(--text);
-  padding: 8px 10px;
+  padding: 8px var(--row-gutter);
   font-family: var(--font-mono);
   font-size: 14px;
 }
 /* field spacing: only DIRECT form fields in a modal get it — the picker's
-   toolbar/path input is a descendant and must stay a tight flex row */
-.modal-box > input { margin-bottom: 14px; }
+   toolbar/path input is a descendant and must stay a tight flex row. One value for
+   all three field kinds (an input, a select, the custom dropdown): they are the
+   same rung of the same column, and 14px was a step no scale in this sheet has. */
+.modal-box > input { margin-bottom: var(--s4); }
 /* profile-name uniqueness feedback in the LLM profile editor */
 .modal-box .llm-profile-error { margin: 2px 0 12px; color: var(--accent); font-size: 12px; }
 .modal-box input.profile-name-error,
@@ -1047,10 +1147,10 @@ mjx-container[display="true"] {
   border: 1px solid var(--border);
   border-radius: 0;
   color: var(--text);
-  padding: 8px 26px 8px 10px;
+  padding: var(--s2) var(--select-gutter) var(--s2) var(--row-gutter);
   font-family: var(--font-display);
   font-size: 14px;
-  margin-bottom: 14px;
+  margin-bottom: var(--s4);
 }
 /* the same one-line focus as `#task-input:focus`, for every field in a modal — the
    plugin tab's filter box is one of these boxes, not a case of its own */
@@ -1069,7 +1169,7 @@ mjx-container[display="true"] {
   position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
   z-index: 95;
   max-width: min(560px, calc(100vw - 24px));
-  padding: 9px 14px;
+  padding: var(--s2) var(--s4);
   background: var(--bg2); color: var(--text);
   border: 1px solid var(--border); border-left: 4px solid var(--muted);
   border-radius: 0;
@@ -1110,8 +1210,8 @@ mjx-container[display="true"] {
    chrome, so it takes no field spacing and its active rule sits ON the line. */
 .modal-tabs {
   display: flex;
-  gap: 14px;
-  margin: 0 0 16px;
+  gap: var(--s3);
+  margin: 0 0 var(--s4);
   border-bottom: 1px solid var(--border);
 }
 .modal-tab {
@@ -1395,7 +1495,7 @@ mjx-container[display="true"] {
      a panel that simply appears reads as a glitch next to one that slides in.
      Opening UPWARD plays the same motion mirrored: `fadeSlideUp` is the same
      keyframe with the offset on the other side of zero. */
-  animation: cselect-in .15s ease-out;
+  animation: cselect-in var(--quick) var(--arrival);
 }
 .plug-menu > button { text-align: left; white-space: nowrap; }
 /* the version list under one held row: it belongs to the row ABOVE it, so it is
@@ -1462,7 +1562,7 @@ mjx-container[display="true"] {
    way out, not a second complaint */
 .plug-source-hint { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 
-.fs-conn { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.fs-conn { margin-bottom: var(--s3); padding-bottom: var(--s3); border-bottom: 1px solid var(--border); }
 /* when the picker body is collapsed (SSH connect/failure), the conn bar is the
    last thing in the modal — drop its divider and bottom spacing so no stray line
    or gap sits under it */
@@ -1474,7 +1574,7 @@ mjx-container[display="true"] {
   border: 1px solid var(--border);
   border-radius: 0;
   color: var(--text);
-  padding: 7px 26px 7px 8px; /* match the buttons' 7px vertical padding */
+  padding: 7px var(--select-gutter) 7px var(--s2); /* match the buttons' 7px vertical padding */
   height: 32px;              /* fixed height: equal to the buttons, so the
                                 flex row centers every box on the same line */
   font-family: var(--font-mono);
@@ -1512,22 +1612,30 @@ mjx-container[display="true"] {
 #conn-status { margin: 8px 0 0; }
 .conn-progress { margin-top: 8px; }
 .conn-progress-track { height: 3px; background: var(--border); overflow: hidden; border-radius: 2px; }
-.conn-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width .18s linear; }
+.conn-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width var(--quick) linear; }
 .conn-progress-fill.indeterminate { width: 35%; animation: conn-slide 1.1s ease-in-out infinite; }
-@keyframes conn-slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+/* The sliding bar is moved with `transform`, not with `margin-left` (it used to be
+   -35%→100% of the TRACK, a layout property re-running the row's layout on every
+   frame of a loop that never stops). Percentages on transform resolve against the
+   element's OWN box, which is 35% of the track here — so the same travel is
+   -100%→285.714% (= 100/35): identical pixels, moved on the compositor. */
+@keyframes conn-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(285.714%); } }
 /* SSH failure options: Retry + Cancel pinned to the bottom-right of the picker.
    The collapsed (failure) box becomes a flex column with a taller min-height. */
-#conn-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: auto; padding-top: 18px; }
+#conn-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: auto; padding-top: var(--s5); }
 #fs-modal .modal-box:has(#fs-body.collapsed) { display: flex; flex-direction: column; min-height: 210px; }
 /* the file-browsing body collapses smoothly during SSH connect (height + fade).
    max-height clamps it deterministically; 480px safely covers the bounded body. */
 #fs-body {
   overflow: hidden;
   max-height: 480px;
-  transition: max-height .3s ease, opacity .25s ease;
+  /* the height and the fade are the same length on purpose: the body is either
+     here or gone, and a fade that finishes after the height has collapsed leaves
+     the last third of it fading over whatever moved up into its place. */
+  transition: max-height var(--size), opacity var(--size);
 }
 #fs-body.collapsed { max-height: 0; opacity: 0; }
-.fs-toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.fs-toolbar { display: flex; gap: var(--s2); margin-bottom: var(--s3); }
 .fs-toolbar input { flex: 1; }
 label.hidden-toggle {
   font-family: var(--font-mono); font-size: 11px; color: var(--muted);
@@ -1548,7 +1656,7 @@ label.hidden-toggle input[type="checkbox"] {
   border-radius: 0;
   cursor: pointer;
   position: relative;
-  transition: background-color .15s ease, border-color .15s ease;
+  transition: background-color var(--quick), border-color var(--quick);
 }
 label.hidden-toggle input[type="checkbox"]:checked {
   background: var(--accent);
@@ -1558,7 +1666,7 @@ label.hidden-toggle input[type="checkbox"]:checked::after {
   content: "✓";
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  color: #0F0F10; font-size: 11px; font-weight: 700; line-height: 1;
+  color: var(--ink); font-size: 11px; font-weight: 700; line-height: 1;
 }
 label.hidden-toggle input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--accent);
@@ -1575,7 +1683,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   font-size: 13px;
   overflow-y: auto;
 }
-.fs-row { padding: 6px 10px; cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; user-select: none; }
+.fs-row { padding: 6px var(--row-gutter); cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; user-select: none; }
 .fs-row:hover { background: var(--bg2); }
 .fs-row.dir::before { content: "▸"; color: var(--muted); }
 .fs-row.file::before { content: ""; width: 8px; }
@@ -1584,7 +1692,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .fs-row.error-row { color: var(--accent); cursor: default; }
 .fs-row.action { color: var(--accent); cursor: pointer; }
 .fs-row.action:hover { background: var(--bg2); }
-#fs-new { margin-top: 14px; }
+#fs-new { margin-top: var(--s4); }
 
 /* project label */
 .project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }
@@ -1627,7 +1735,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .welcome-actions button {
   padding: 10px 22px; font-size: 15px; border-radius: 0;
 }
-.welcome-actions button.primary { background: var(--text); border-color: var(--text); color: #0F0F10; font-weight: 600; }
+.welcome-actions button.primary { background: var(--text); border-color: var(--text); color: var(--ink); font-weight: 600; }
 
 /* unified diff view: additions keep green, removals red — the single red/green pair */
 .diff-view {
@@ -1636,7 +1744,7 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   margin: 8px 0 0; font-family: var(--font-mono); font-size: 13px;
   max-height: 320px; overflow-y: auto; line-height: 1.45;
 }
-.diff-view div { padding: 0 10px; white-space: pre-wrap; word-break: break-all; }
+.diff-view div { padding: 0 var(--row-gutter); white-space: pre-wrap; word-break: break-all; }
 .diff-view .diff-add { background: rgba(111, 191, 143, 0.12); color: #8fd4ab; }
 .diff-view .diff-del { background: rgba(239, 68, 68, 0.10); color: #ef8a8a; }
 .diff-view .diff-meta { color: var(--muted); background: rgba(138, 151, 168, 0.07); }
@@ -1681,19 +1789,32 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
     transition: none;
   }
   button.primary:active:not(:disabled) {
-    background: #d8d8db; border-color: #d8d8db; color: #0F0F10;
+    background: #d8d8db; border-color: #d8d8db; color: var(--ink);
   }
   button.primary.stop-mode:active:not(:disabled) {
     background: #fbe6e6; border-color: var(--accent); color: var(--accent);
   }
-  /* rows fill their own box — never wider than the row itself */
+  /* rows that are their own control fill their own box — never wider than the row
+     itself — and their wash is a press hint like the buttons' above, so it is
+     switched off here too and comes back through the base rule's --quick. The
+     label-only rows are the same hint in the row's text colour. Exactly the rows
+     the base rule above puts on --quick, and no more: a <button> among them is
+     already silenced by `button:active:not(:disabled)`, which outranks any class. */
+  .tree-node:active,
+  .fs-row:active,
+  .cselect-opt:active,
+  .thinking-row:active,
+  .result-row:active,
+  .tool-row.folded:active .tool-label {
+    transition: none;
+  }
   .fs-row:active,
   .fs-row.action:active,
   .tree-node:active {
     background: rgba(255, 255, 255, 0.07);
   }
   /* the popup option fills with the accent, like its own .active/:hover state */
-  .cselect-opt:active { background: var(--accent); color: #0F0F10; }
+  .cselect-opt:active { background: var(--accent); color: var(--ink); }
   /* rows that ARE their label have no box to fill, so the label is the press —
      and it goes to the accent, not to the --text their :hover already reaches
      (a tap fires :hover in Blink too, so a press state that equals hover would

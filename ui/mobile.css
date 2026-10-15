@@ -75,7 +75,9 @@
     position: fixed; inset: 0; z-index: 55;
     background: rgba(0, 0, 0, 0.5);
     opacity: 0; pointer-events: none;
-    transition: opacity 0.18s ease;
+    /* the same --move as the drawer's own slide below: the dim is the drawer's
+       shadow, so a shorter one would finish while the panel was still travelling */
+    transition: opacity var(--move);
   }
   .shell-backdrop.open { opacity: 1; pointer-events: auto; }
   /* the project section only exists in the phone panel (report #2) */
@@ -125,7 +127,7 @@
     max-height: none;
     border-top: none;
     transform: translateX(101%);
-    transition: transform 0.2s ease;
+    transition: transform var(--move);
   }
   #right.drawer-open { transform: none; }
   #tree { min-height: 0; }

@@ -37,6 +37,16 @@ of comments/strings/braces, the exact part of the grammar this bug lives in):
      that forgets scripts/sync-android-host.sh is a fix the phone never gets)
   7. the detector itself is exercised on the v0.1.34 shape, in miniature — so a
      future edit that blinds the scan fails HERE instead of passing quietly
+  8. every name the two sheets read is one either sheet declares, and so is every
+     name js reads out of the cascade with cssValue() — `var(--fg)` sat in a hover
+     rule with no declaration anywhere, which is not an error a browser reports:
+     the declaration is dropped and the colour simply inherits, i.e. a rule that
+     looks deliberate and means nothing
+  9. the js side of the motion is the css side's tokens: FOLD_EASE in
+     js/stream-text.js is --arrival and its fold duration is --move, and
+     settings.js's MODAL_CLOSE_MS is --move in milliseconds. The fold is animated
+     in js and the tokens live in css, so nothing in either language can see the
+     other: without a pin, editing one half is a silent change to the rhythm
 
 Run: uv run python3 -m tests.ui_css_check
 """
@@ -58,6 +68,17 @@ DESKTOP = UI / "style.css"
 PHONE = UI / "mobile.css"
 
 PHONE_QUERY = "(max-width: 640px)"
+
+# one `--name: value`, and the two ways a name is read: a `var(--name)` (the char
+# that follows says whether a fallback makes a missing declaration legal) and a
+# `cssValue("--name")` read in js. A duration in js is always a WAAPI option.
+DECLARATION = re.compile(r"(--[A-Za-z0-9_-]+)\s*:\s*([^;{}]*)")
+VAR_USE = re.compile(r"var\(\s*(--[A-Za-z0-9_-]+)\s*([,)])")
+JS_TOKEN_READ = re.compile(r'cssValue\(\s*"(--[A-Za-z0-9_-]+)"\s*\)')
+JS_DURATION = re.compile(r"duration:\s*(\d+)\s*[,}]")
+
+FOLD_JS = UI / "js" / "stream-text.js"
+MODAL_JS = UI / "js" / "settings.js"
 
 check, failures = collecting_check()
 
@@ -232,6 +253,129 @@ def at_rules(ats: list[tuple[str, str, int]], keyword: str, prelude: str = "") -
     return [a for a in ats if a[0] == keyword and a[1] == prelude]
 
 
+def code_only(text: str, *, js: bool = False) -> str:
+    """`text` with every comment's words replaced by the newlines that were in them.
+
+    Both scans below look for names, and the sheets name their own tokens and
+    curves constantly in prose (the motion note spells --arrival twice): reading a
+    comment as code invents declarations that do not exist. Dropping the comments
+    would shift every line number a failure reports, so the newlines are kept.
+    """
+    def blank(match: re.Match[str]) -> str:
+        return "\n" * match.group(0).count("\n")
+
+    without_blocks = re.sub(r"/\*.*?\*/", blank, text, flags=re.S)
+    if not js:
+        return without_blocks
+    return re.sub(r"//[^\n]*", "", without_blocks)
+
+
+def declared_tokens(*codes: str) -> dict[str, str]:
+    """Every custom property the given sheets declare, name -> value as written.
+
+    The value of a name declared twice is the last one written, which is what the
+    cascade would do for rules of equal specificity; the checks only read names
+    here and --arrival/--move are declared once, in :root.
+    """
+    out: dict[str, str] = {}
+    for code in codes:
+        for match in DECLARATION.finditer(code):
+            out[match.group(1)] = match.group(2).strip()
+    return out
+
+
+def undeclared_sheet_reads(label: str, code: str, declared: dict[str, str]) -> list[str]:
+    """`var(--x)` uses in one sheet whose name no sheet declares.
+
+    A `var()` WITH a fallback is exempt and stays exempt: `var(--accent, #EF4444)`
+    is the statement "this may be missing, and here is what that means", so it is
+    the one form that needs no declaration to be correct.
+    """
+    out: list[str] = []
+    for match in VAR_USE.finditer(code):
+        if match.group(2) == ",":
+            continue
+        if match.group(1) not in declared:
+            out.append(
+                f"{label}:{_line_of(code, match.start())}: var({match.group(1)}) — "
+                f"neither sheet declares {match.group(1)}, so the declaration is dropped "
+                f"and the value is inherited"
+            )
+    return out
+
+
+def undeclared_js_reads(label: str, code: str, declared: dict[str, str]) -> list[str]:
+    """The same for a token js reads out of the cascade with `cssValue("--x")`."""
+    out: list[str] = []
+    for match in JS_TOKEN_READ.finditer(code):
+        if match.group(1) not in declared:
+            out.append(
+                f"{label}:{_line_of(code, match.start())}: cssValue(\"{match.group(1)}\") — "
+                f"neither sheet declares {match.group(1)}, so the read is always empty"
+            )
+    return out
+
+
+def ms_of(value: str) -> int | None:
+    """A CSS time as milliseconds (None when the value is not one)."""
+    match = re.fullmatch(r"(?:(\d*\.?\d+)s|(\d+)ms)", value.strip())
+    if not match:
+        return None
+    if match.group(1):
+        return int(float(match.group(1)) * 1000 + 0.5)
+    return int(match.group(2))
+
+
+def js_ms(js: str, name: str) -> int | None:
+    """The integer a `const NAME = 200;` in js holds (None when it is not there)."""
+    match = re.search(rf"const\s+{re.escape(name)}\s*=\s*(\d+)\s*;", js)
+    return int(match.group(1)) if match else None
+
+
+def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> list[str]:
+    """Every place the js side has drifted from the sheet's own motion tokens.
+
+    The fold is animated in js (WAAPI, so a height can be interpolated without a
+    layout property being transitioned) while its curve and duration are the
+    sheet's --arrival and --move: nothing in either language can see the other, so
+    the pairing is only real while a check holds it. settings.js's MODAL_CLOSE_MS
+    is --move in milliseconds — the timer that lands `.hidden` when the closing
+    slide is over — and drifts the same way, one frame at a time.
+    """
+    out: list[str] = []
+    arrival = declared.get("--arrival")
+    move_ms = ms_of(declared.get("--move", ""))
+
+    curve = re.search(r'const\s+FOLD_EASE\s*=\s*"([^"]*)"\s*;', fold_js)
+    written = curve.group(1) if curve else "(no FOLD_EASE)"
+    if not arrival or _compact(written) != _compact(arrival):
+        out.append(
+            f"ui/js/stream-text.js: FOLD_EASE = {written!r} is not "
+            f"ui/style.css's --arrival = {arrival!r}"
+        )
+
+    for match in JS_DURATION.finditer(fold_js):
+        if move_ms is None or int(match.group(1)) != move_ms:
+            out.append(
+                f"ui/js/stream-text.js:{_line_of(fold_js, match.start())}: the fold runs "
+                f"{match.group(1)}ms while --move is {declared.get('--move')!r}"
+            )
+
+    close_ms = js_ms(settings_js, "MODAL_CLOSE_MS")
+    if move_ms is None or close_ms != move_ms:
+        out.append(
+            f"ui/js/settings.js: MODAL_CLOSE_MS = {close_ms} is not --move "
+            f"({declared.get('--move')!r}), which `.modal.closing` runs for"
+        )
+    return out
+
+
+def _compact(value: str) -> str:
+    """A curve with its whitespace gone: the js spelling and the css one are the
+    same curve, and the sheet writes the gaps a reader needs."""
+    return re.sub(r"\s+", "", value)
+
+
 def stylesheet_links(html: str) -> dict[str, str | None]:
     """href -> media attribute (None when the link is unconditional)."""
     out: dict[str, str | None] = {}
@@ -270,6 +414,39 @@ def check_sheet(path: Path, name: str, *, phone: bool) -> None:
         check(bool(hover) and hover[0][2] >= 5, f"{name} keeps @media (hover: none) with its touch rules")
 
 
+def check_tokens() -> None:
+    """Every name either sheet reads is a name one of them declares, and so is every
+    name js reads out of the cascade."""
+    codes = {name: code_only((UI / name).read_text(encoding="utf-8")) for name in ("style.css", "mobile.css")}
+    declared = declared_tokens(*codes.values())
+    print(f"the tokens the sheets are written against ({len(declared)} declared):")
+    for name, code in codes.items():
+        missing = undeclared_sheet_reads(f"ui/{name}", code, declared)
+        check(not missing, f"ui/{name} reads only tokens the sheets declare"
+              + (f" — {missing[0]}" if missing else ""))
+    readers = sorted((UI / "js").glob("*.js"))
+    print(f"and the ones js reads out of the cascade ({len(readers)} modules scanned):")
+    for path in readers:
+        code = code_only(path.read_text(encoding="utf-8"), js=True)
+        missing = undeclared_js_reads(f"ui/js/{path.name}", code, declared)
+        check(not missing, f"ui/js/{path.name} reads only tokens the sheets declare"
+              + (f" — {missing[0]}" if missing else ""))
+
+
+def check_motion() -> None:
+    """The js side of the motion is the css side's tokens, in the units each needs."""
+    declared = declared_tokens(code_only(DESKTOP.read_text(encoding="utf-8")))
+    drifts = motion_drifts(
+        declared,
+        code_only(FOLD_JS.read_text(encoding="utf-8"), js=True),
+        code_only(MODAL_JS.read_text(encoding="utf-8"), js=True),
+    )
+    print("the js side of the motion:")
+    check(not drifts,
+          "the js folds and the modal's close timer are the sheet's --arrival and --move"
+          + (f" — {drifts[0]}" if drifts else ""))
+
+
 def check_android_copy(name: str) -> None:
     src = UI / name
     dst = ANDROID_UI / name
@@ -305,6 +482,49 @@ def check_regression() -> None:
     check(rules == 1, f"the swallowed @media reads as one qualified rule holding them ({rules} top-level style rule)")
 
 
+# The token scan and the motion pin, exercised on shapes they must and must not
+# report: `var(--fg)` is the real defect this check was written after (a name used
+# and never declared, so the colour silently inherited), the fallback form beside
+# it is legal and must stay quiet, and the js beside it is a fold whose curve and
+# duration have both been edited away from the sheet's tokens — the drift no
+# reader of either file can see, which is the whole reason to pin it.
+REGRESSION_TOKENS = """\
+:root { --arrival: cubic-bezier(.23, 1, .32, 1); --move: .2s; }
+/* notes name tokens: var(--not-a-use) and cssValue("--also-not") */
+.a { color: var(--fg); }
+.b { color: var(--accent, #EF4444); }
+"""
+REGRESSION_FOLD_JS = """\
+const FOLD_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure, not --arrival
+const anim = el.animate([], { duration: 150, easing: FOLD_EASE });
+"""
+REGRESSION_MODAL_JS = "const MODAL_CLOSE_MS = 180;\n"
+
+
+def check_regression_tokens() -> None:
+    code = code_only(REGRESSION_TOKENS)
+    declared = declared_tokens(code)
+    missing = undeclared_sheet_reads("mini.css", code, declared)
+    check([m.split("var(")[1].split(")")[0] for m in missing] == ["--fg"],
+          f"the token scan reports exactly the undeclared read, not the commented ones and not the "
+          f"fallback one ({len(missing)} reported)")
+    check(not undeclared_js_reads("mini.css", code, declared),
+          "the js read scan skips a cssValue() that is only named in a comment")
+    reported = undeclared_js_reads("mini.js", 'const v = cssValue("--fg");', declared)
+    check(len(reported) == 1 and "--fg" in reported[0],
+          f"the js read scan reports a read that IS code ({len(reported)} reported)")
+
+
+def check_regression_motion() -> None:
+    drift = motion_drifts(declared_tokens(code_only(REGRESSION_TOKENS)), REGRESSION_FOLD_JS, REGRESSION_MODAL_JS)
+    check(len(drift) == 3,
+          f"the motion pin reports a curve that is another token, a duration that is not --move, "
+          f"and a close timer that is not --move either ({len(drift)} reported)")
+    files = [d.split(":")[0] for d in drift]
+    check(files == ["ui/js/stream-text.js"] * 2 + ["ui/js/settings.js"],
+          f"each drift names the file it is in ({files})")
+
+
 def main() -> int:
     print("ui stylesheets:")
     check_sheet(DESKTOP, "ui/style.css", phone=False)
@@ -318,8 +538,12 @@ def main() -> int:
     print("what the phone is shipped:")
     check_android_copy("style.css")
     check_android_copy("mobile.css")
+    check_tokens()
+    check_motion()
     print("the scan itself:")
     check_regression()
+    check_regression_tokens()
+    check_regression_motion()
 
     if failures:
         print(f"\nui_css_check: {len(failures)} FAILED")
