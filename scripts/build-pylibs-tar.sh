@@ -57,6 +57,20 @@ fi
 # pin the client venv's exact versions from uv.lock
 OPENAI_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('openai'))")"
 HTTPX2_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('httpx2'))")"
+# ...and the pair that has no business drifting with the build date: pydantic
+# refuses to import beside a pydantic_core it was not built against
+# ("SystemError: The installed pydantic-core version ... is incompatible"),
+# and pinning only openai/httpx2 leaves that pair to whatever the index
+# resolves on the day of the build — one pair per release, i.e. a remote that
+# reinstalls the whole stack for nothing on a version bump (the tree damage of
+# the older, merge-style install is in docs/android/README §"no backend").
+# Pinned from the same venv as the two above, so the tar's pair is the pair
+# this client itself runs. Availability is not a guess: pydantic_core publishes
+# wheels for every leg of the release matrix (manylinux2014 / musllinux_1_1 ×
+# x86_64 / aarch64 × cp310–cp313).
+PYDANTIC_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('pydantic'))")"
+PYDANTIC_CORE_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('pydantic_core'))")"
+PINS=("openai==$OPENAI_VER" "httpx2==$HTTPX2_VER" "pydantic==$PYDANTIC_VER" "pydantic_core==$PYDANTIC_CORE_VER")
 
 TMP="$(mktemp -d)"
 # || true: a raced file lock (AV scanner) must not flip the script's exit code
@@ -67,12 +81,12 @@ mkdir -p "$TMP/pkg"
 # a different Python than the one whose pinned versions we are mirroring
 "$PY" -m pip download --only-binary=:all: \
   --platform "$TAG" --python-version "$PYVER" --implementation cp --abi "$ABI" \
-  -d "$TMP/wheels" "openai==$OPENAI_VER" "httpx2==$HTTPX2_VER"
+  -d "$TMP/wheels" "${PINS[@]}"
 
 "$PY" -m pip install --target "$TMP/pkg/site-packages" \
   --no-index --find-links "$TMP/wheels" --only-binary=:all: --no-compile \
   --platform "$TAG" --python-version "$PYVER" --implementation cp --abi "$ABI" \
-  "openai==$OPENAI_VER" "httpx2==$HTTPX2_VER"
+  "${PINS[@]}"
 
 cp -r "$ROOT/agent" "$TMP/pkg/agent"
 # Ship sources only: a .pyc embeds the compiling interpreter's view of source

@@ -146,6 +146,33 @@ async function main() {
   "tar embeds agent/ (incl. supervisor entry) + site-packages"
 );
 
+    // ④: the pinned wheel set. Pinning only openai/httpx2 left the pydantic
+    // pair to whatever the index resolved on build day — one pair per release,
+    // and pydantic refuses to import beside a pydantic_core it was not built
+    // against ("SystemError: The installed pydantic-core version ... is
+    // incompatible"), which is the drift that re-broke the tree. Both are
+    // pinned from THIS venv, so the tar must carry exactly the venv's version
+    // of each, and exactly one generation of each.
+    const distInfos = listing.split("\n").filter((l) => /\.dist-info\/?$/.test(l));
+    const gens = (name) =>
+      distInfos.filter((l) => new RegExp(`site-packages/${name}-[^/]+\\.dist-info`).test(l));
+    const venvVer = (name) =>
+      spawnSync(VENV_PY, ["-c", `import importlib.metadata as m;print(m.version('${name}'))`], {
+        encoding: "utf8",
+      }).stdout.trim();
+    check(gens("openai").length === 1 && gens("httpx2").length === 1, "tar carries one openai + httpx2 generation");
+    check(
+      gens("pydantic").length === 1 && gens("pydantic_core").length === 1,
+      "tar pins exactly one pydantic + pydantic_core generation (④: no index-day drift)"
+    );
+    check(
+      gens("pydantic")[0] === `site-packages/pydantic-${venvVer("pydantic")}.dist-info/` &&
+        gens("pydantic_core")[0] === `site-packages/pydantic_core-${venvVer("pydantic_core")}.dist-info/` &&
+        gens("openai")[0] === `site-packages/openai-${venvVer("openai")}.dist-info/` &&
+        gens("httpx2")[0] === `site-packages/httpx2-${venvVer("httpx2")}.dist-info/`,
+      "every pin equals the client venv's own version (the pair this client runs)"
+    );
+
     // ---- 2. CI-named tar through the Android provider over a fake index ----
     // exactly the pylibs-index job's assertion: the name's hash equals the
     // content hash, so the index can be generated from filenames alone

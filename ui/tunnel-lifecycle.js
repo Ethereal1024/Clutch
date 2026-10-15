@@ -27,6 +27,40 @@ const { stopExecBridge } = require("./exec-bridge");
 // to a port nobody serves: the SSE stream ends silently (the window shows a
 // run that is not there) and Stop posts the cancel into nothing while the
 // remote session keeps running -- unreachable, and unable to be stopped.
+// Hand the far side's listener back on the way out. An sshd does release a
+// session's tcpip-forward bindings when the session ends — but only once it
+// learns that it did, and a hop that died without a FIN (a phone that lost its
+// radio, a process killed mid-flight, a NAT that forgot the flow) leaves the
+// listener bound until something else notices. On a stock sshd that something is
+// the TCP keepalive, two hours later, and the field's next hop found its own
+// 8892 held by that ghost: every bind refused, the ladder spent, and the model
+// path pushed to a port of the far side's choosing (tunnel-core's remoteLlmPort).
+//
+// The cancel is a global request the client may send at any time, it costs one
+// packet on a wire that is still up, and it must go BEFORE end(): a teardown
+// that only closes the socket leaves the far side to infer the rest. It is
+// best-effort by construction — ssh2 throws when the socket is already gone
+// ("Not connected"), and the far side's sshd is the authority on its own ports
+// either way — so nothing here is awaited or reported as a failure of the
+// teardown.
+//
+// Only the listener THIS hop was granted is cancelled: a teardown deliberately
+// keeps the remembered port (tunnel-core's remoteLlmPort), and cancelling a port
+// this client was never given would be a request about someone else's listener.
+function releaseModelPath(client) {
+  if (!client || state.modelPathClient !== client) return;
+  if (state.modelPath !== "listening" || !state.llmProxyRemotePort) return;
+  const port = state.llmProxyRemotePort;
+  tunnelLog(`[disconnect] releasing the far side's reverse forward on 127.0.0.1:${port}`);
+  try {
+    client.unforwardIn("127.0.0.1", port, (err) => {
+      if (err) tunnelLog("[disconnect] reverse forward release refused: " + ((err && err.message) || err));
+    });
+  } catch (e) {
+    tunnelLog("[disconnect] reverse forward release skipped: " + ((e && e.message) || e));
+  }
+}
+
 async function stopTunnel(notify = false) {
   tunnelLog("[disconnect] stopTunnel");
   stopHealing();
@@ -40,6 +74,9 @@ async function stopTunnel(notify = false) {
     clearTimeout(state.modelPathRepairTimer);
     state.modelPathRepairTimer = null;
   }
+  // before the modelPath facts are cleared: the release asks whether THIS hop
+  // was granted a listener, and that answer lives in exactly those facts
+  releaseModelPath(state.sshClient);
   state.modelPath = null;
   state.modelPathClient = null;
   state.modelPathInstall = null; // an install in flight settles into a no-op (finishModelPath's guard)

@@ -65,6 +65,7 @@ const remote = {
   serving: false,
   version: null, // the VERSION file, i.e. the install gate
   stubborn: false, // a process pkill cannot remove (another user's server)
+  installFails: false, // the unpack-and-swap chain returns nonzero on the far side
   stopped: 0,
   started: 0,
   commands: [],
@@ -72,11 +73,12 @@ const remote = {
   // channel (one per heal round): the count is what says how many rounds the
   // healer actually spent, instead of a race with the clock
   selfAsks: 0,
-  reset({ bound = false, serving = false, version = null, stubborn = false } = {}) {
+  reset({ bound = false, serving = false, version = null, stubborn = false, installFails = false } = {}) {
     this.bound = bound;
     this.serving = serving;
     this.version = version;
     this.stubborn = stubborn;
+    this.installFails = installFails;
     this.stopped = 0;
     this.started = 0;
     this.commands = [];
@@ -110,6 +112,15 @@ function fakeRemoteExec(cmd) {
   if (/^echo .* > .*VERSION/.test(cmd)) {
     remote.version = cmd.split("echo ")[1].split(" ")[0];
     return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+  }
+  // the unpack-and-swap chain `pylibsInstallCmd` builds (it is the only command
+  // that names the staging tree): what the far side answers there
+  if (/pylibs\.stage/.test(cmd)) {
+    return Promise.resolve(
+      remote.installFails
+        ? { code: 1, stdout: "", stderr: "tarfile.ReadError: not a gzip file\n" }
+        : { code: 0, stdout: "", stderr: "" }
+    );
   }
   return Promise.resolve({ code: 0, stdout: "", stderr: "" });
 }
@@ -170,8 +181,11 @@ const PROBE = {
 // box is asked about lives in the probe (the port check is only asked when the
 // probe carries a python3), and the install gate reads the VERSION file the
 // remote is currently holding — so it has to be derived, not fixed.
-function probeFor() {
-  return { ...PROBE, installedVersion: remote.version || "" };
+// `extra` is how a case says what the far side's TREE answered (the probe's
+// `__TREE__` section); a case that says nothing about it is a remote whose tree
+// answer never arrived, which the gate must not read as a broken tree.
+function probeFor(extra) {
+  return { ...PROBE, installedVersion: remote.version || "", ...(extra || {}) };
 }
 
 async function main() {
@@ -278,6 +292,77 @@ async function main() {
   check(/8890/.test(stuck.error || ""), "…and names the port it is stuck on");
   check(remote.started === 0, "…and does not start a supervisor that would bind-fail");
   check(remote.commands.some((c) => c.startsWith("pkill -9")), "…after escalating to SIGKILL");
+
+  // ---- 5b. the VERSION file is a claim; the tree is the evidence ----
+  //
+  // The field's "no backend": a site-packages that had been installed OVER (a
+  // merge of three releases) held pydantic 2.13.5 beside pydantic_core 2.50.1
+  // and raised SystemError at import — under a VERSION file that matched the
+  // release being connected to exactly. So the gate said "already installed" on
+  // every reconnect, the install was skipped, and the far side's server died at
+  // import with nothing on this side to show for it. The gate now asks the tree
+  // as well, and a marker over a tree that cannot import is an install.
+  uploads = 0;
+  tarFetches = 0;
+  remote.reset({ bound: true, serving: true, version: VERSION });
+  const noAnswer = await installServer(probeFor(), { force: "pylibs", progress: () => {} });
+  check(
+    noAnswer.installed === true && uploads === 0 && tarFetches === 0,
+    "a probe that never carried the tree's answer is not read as a broken tree (nothing is installed on a hunch)"
+  );
+  for (const [tree, what] of [
+    ["", "an answer that came back empty"],
+    ["NOPY", "a remote with no python3 to ask with"],
+    ["OK", "a tree that imports its wheels and has one generation of each"],
+  ]) {
+    uploads = 0;
+    tarFetches = 0;
+    remote.reset({ bound: true, serving: true, version: VERSION });
+    const clean = await installServer(probeFor({ pylibsTree: tree }), { force: "pylibs", progress: () => {} });
+    check(
+      clean.installed === true && uploads === 0 && tarFetches === 0 && remote.stopped === 0,
+      `a matching VERSION over ${what} is not an install (${tree || "no answer"})`
+    );
+  }
+  for (const tree of ["DUP:pydantic_core", "IMPORT:SystemError", "NONE"]) {
+    uploads = 0;
+    tarFetches = 0;
+    remote.reset({ bound: true, serving: true, version: VERSION });
+    const logAt = tunnelLogText().length;
+    const over = await installServer(probeFor({ pylibsTree: tree }), { force: "pylibs", progress: () => {} });
+    check(
+      over.installed === true && uploads === 1 && tarFetches === 1 && remote.stopped >= 1,
+      `the same matching VERSION over a tree that answered ${tree} IS an install`
+    );
+    check(
+      tunnelLogText()
+        .slice(logAt)
+        .includes(`the VERSION file matches but its tree does not (${tree})`),
+      `…and the log says why, where the next reader of the field's log will look (${tree})`
+    );
+  }
+  // ---- 5c. an install that does not land does not get a VERSION file ----
+  //
+  // The unpack-and-swap is one shell chain, and the exit status is the only
+  // thing that says whether the trees changed. Writing the marker anyway is what
+  // made the field's remote look installed while it was not — so the failure
+  // stops the install before the marker, and reports itself.
+  {
+    uploads = 0;
+    remote.reset({ bound: true, serving: true, version: "bbbbbbbbbbbbbbbb", installFails: true });
+    const failed = await installServer(probeFor({ pylibsTree: "OK" }), { force: "pylibs", progress: () => {} });
+    check(failed.ok === false, "a pylibs install that fails on the far side fails the connect");
+    check(
+      /could not unpack the wheels/.test(failed.error || "") && /not a gzip file/.test(failed.error || ""),
+      "…naming what went wrong on the far side: " + (failed.error || "")
+    );
+    check(remote.version === "bbbbbbbbbbbbbbbb", "…and the VERSION marker is NOT written over a tree that did not land");
+    check(remote.started === 0, "…and no supervisor is started on top of it");
+  }
+  check(
+    /if \(landed\.code !== 0\)/.test(BOOTSTRAP_SRC),
+    "the marker write is guarded by the install's own exit status (asserted on the source: the fake remote cannot show the order)"
+  );
 
   // ---- 6. a stale forward over a still-serving far side is rebound, never killed ----
   //
@@ -571,6 +656,119 @@ async function main() {
       "…and that path leaves no listeners on the dead client either"
     );
     state.sshClient = null;
+  }
+
+  // ---- 6d. the listener the far side granted us is handed back before the wire goes ----
+  //
+  // An sshd releases a session's tcpip-forward bindings when it learns the
+  // session ended — and a hop that died without a FIN (a phone that lost its
+  // radio, a process killed mid-flight) teaches it nothing until the TCP
+  // keepalive does, two hours later on a stock sshd. That ghost listener is what
+  // the next hop's own 8892-in-use came from. So the teardown cancels the one
+  // listener THIS hop was granted, as a global request on a wire that is still
+  // up, before end() lets the far side infer the rest.
+  {
+    const { state } = require("../ui/tunnel-core");
+    const { stopTunnel } = require("../ui/tunnel-lifecycle");
+    const order = [];
+    const granted = {
+      end() {
+        order.push("end");
+      },
+      unforwardIn(host, port, cb) {
+        order.push(`unforward:${host}:${port}`);
+        if (cb) cb();
+      },
+    };
+    state.sshClient = granted;
+    state.modelPathClient = granted;
+    state.modelPath = "listening";
+    state.llmProxyRemotePort = 8892;
+    state.modelPathRepairTimer = null;
+    state.currentUrl = "http://127.0.0.1:1";
+    state.localSrv = null;
+    state.sessionForwards = new Set();
+    const logAt = tunnelLogText().length;
+    await stopTunnel();
+    check(
+      order.length === 2 && order[0] === "unforward:127.0.0.1:8892" && order[1] === "end",
+      "a teardown cancels the far side's reverse forward BEFORE it ends the wire (" + order.join(" then ") + ")"
+    );
+    check(
+      tunnelLogText().includes("[disconnect] releasing the far side's reverse forward on 127.0.0.1:8892"),
+      "…and says which listener it handed back (the port is the fact the next hop needs)"
+    );
+    check(
+      state.llmProxyRemotePort === 8892,
+      "…while the PORT stays remembered: the far side keeps it, the cancel was about this hop's binding"
+    );
+
+    // a model path that never landed is not a listener to hand back — and a
+    // listener belonging to a NEWER hop is not this hop's to cancel either:
+    // cancelling a port this client was never given is a request about somebody
+    // else's listener, and the next hop would spend its ladder on it.
+    for (const [what, setup] of [
+      ["a model path that never landed", { modelPath: "unavailable", sameClient: true }],
+      ["a listener belonging to a newer hop", { modelPath: "listening", sameClient: false }],
+    ]) {
+      order.length = 0;
+      const me = {
+        end() {
+          order.push("end");
+        },
+        unforwardIn() {
+          order.push("unforward");
+        },
+      };
+      const other = { end() {} };
+      state.sshClient = me;
+      state.modelPathClient = setup.sameClient ? me : other;
+      state.modelPath = setup.modelPath;
+      state.llmProxyRemotePort = 8892;
+      state.currentUrl = "http://127.0.0.1:1";
+      state.localSrv = null;
+      state.sessionForwards = new Set();
+      await stopTunnel();
+      check(order.join(",") === "end", `nothing is cancelled for ${what}`);
+    }
+
+    // the wire may already be gone: ssh2 throws "Not connected" from its own
+    // guard, and the teardown must not turn that into a failed disconnect
+    order.length = 0;
+    const dead = {
+      end() {
+        order.push("end");
+      },
+      unforwardIn() {
+        throw new Error("Not connected");
+      },
+    };
+    state.sshClient = dead;
+    state.modelPathClient = dead;
+    state.modelPath = "listening";
+    state.llmProxyRemotePort = 8892;
+    state.currentUrl = "http://127.0.0.1:1";
+    state.localSrv = null;
+    state.sessionForwards = new Set();
+    let threw = null;
+    try {
+      await stopTunnel();
+    } catch (e) {
+      threw = e;
+    }
+    check(
+      !threw && order.join(",") === "end",
+      "a client whose wire is already gone still tears down (the release is best-effort: " +
+        ((threw && threw.message) || "no error") +
+        ")"
+    );
+    check(
+      /reverse forward release skipped/.test(tunnelLogText()),
+      "…and what the release could not do is logged, not thrown at the disconnect"
+    );
+    state.modelPath = null;
+    state.modelPathClient = null;
+    state.llmProxyRemotePort = null;
   }
 
   // ---- 7. the paths a fake remote cannot reach, asserted on the source ----

@@ -267,6 +267,124 @@ port 0"，第 7 节新增源码断言：connect 里不再有 `await installRever
 `await installReverseForward(client)` 和它的 `failConnect` 装回同一份文件，同一根线上的 connect
 变成 **7747ms**——同一个 7.5 秒的阶梯，一次是背景里的重试，一次是在屏幕上。
 
+## 远端 pylibs 树被"合并安装"写坏：手机端报 "no backend"（报告："移动端连不上，报错 no backend"；"清后台好几次也连不上"）
+
+**报告**：手机（Android）连 `124.220.181.209` 反复失败，界面停在 "Not connected — no backend"；
+手机上清后台、重连多次无效。同一台远端上，桌面端 0.1.37 连它是卡在 "Starting tunnel…"（上一节）。
+
+**根因（三层，都在远端）**：
+
+1. **pylibs 安装是"覆盖"，不是"替换"**。`ui/tunnel-bootstrap.js:303-311` 的 pylibs 分支把 tar 上传后直接
+   `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${dir}')"` —— 解压到**正在使用的**
+   `site-packages` 上，不删旧树、不落 `.new` 再原子换名（对照同一文件 `:280-302` 的 bundle 分支：
+   `.new` + `chmod +x` + `mv -f`，以及 `:267-270` 那句"the NAS refuses to truncate an executing binary in
+   place: stop first"）。**tar 里没有的文件不会被删**：每装一次，上一代留下的 dist-info、旧 `.so`、旧子包
+   全部留在原地。
+   现场证据（`ls ~/.clutch-server/site-packages`）：pydantic `2.13.5 / 2.14.0 / 2.14.1` 与
+   pydantic_core `2.46.5 / 2.50.0 / 2.50.1` **三代元数据同时在**（20 个 dist-info），
+   而 `pydantic_core/` 下只有一个扩展模块文件名 `_pydantic_core.cpython-310-x86_64-linux-gnu.so`
+   —— 三代里只有一个能占住它，其余全是残骸。
+2. **"合并"会致命，是因为 tar 里 pydantic 的版本没有锁**。`scripts/build-pylibs-tar.sh` 只用
+   `pip download openai==<客户端 venv 的版本> httpx2==<客户端 venv 的版本>`，传递依赖（pydantic 系）
+   由**构建那天**的索引决定，所以不同发布带的 tar 装着不同的 pydantic 对。各 tag 的
+   `pylibs-index.json` 里 `linux-x86_64-glibc-py3.10` 的工件版本就是这个漂移的指纹：
+   v0.1.33 `5ecaf238f273085b`、v0.1.35-37 `11c0310476572913`、v0.1.38-39 `b68fe68323d96a63`、
+   v0.1.40 `b3d9088ef19deb63`、v0.1.41 `e9c082e617d8b647`、v0.1.42-45 `edebdaf6c1133c52`、
+   v0.1.46-48 `02af0e74dfd222d7`。两代 tar 叠在同一棵树上，叠出的就可能是一对**互不兼容**的
+   pydantic / pydantic_core。现场 `PYTHONPATH=site-packages python3 -c "import pydantic"` 直接：
+   `SystemError: The installed pydantic-core version (2.50.1) is incompatible with the current pydantic version, which requires 2.46.5.`
+   （该机 `VERSION` 里的 `5ecaf238f273085b` 正是 v0.1.33 那代的工件哈希，即最后一次**完整**安装是
+   0.1.33 一代的 tar；三代元数据说明此后还有别的 tar 解压过，只是没走到写 `VERSION` 那一步。）
+3. **会话因此起不来，客户端只能看到 "no backend"**。会话子进程是 `python3 -m agent.server`，
+   `agent/server.py:43` → `openai` → `pydantic` 导入即崩（`/tmp/clutch-server.log` 有完整栈）；
+   监督进程的 `/api/session/start` 于是回 `500 {"error":"session start failed"}`。手机端
+   `startLocalSession: null` + `supervisorBase: () => null`（`android/host/android-host.js`，N4：手机上
+   不跑本地后端），claim 失败就是"窗口没有后端" → "Not connected — no backend"。**远端本身的 sshd、
+   隧道、反向转发都是好的**：本次修好后现场实测 `/api/session/start` → **200**
+   `{"session_id":"15dc3eb4681b","port":41137}`，该会话 `/api/health` → `{"ok":true,"in_flight":false}`。
+
+**为什么重连修不好它：安装门槛是"标记相等"**。`ui/tunnel-bootstrap.js:240` 的
+`installed = probe.installedVersion === version` 比的是 `~/.clutch-server/VERSION` 里的**工件内容哈希**，
+而"树是坏的"并不改变这个哈希——坏树永远算"已安装"，重连既不重装也不检查。用户"清后台好几次也没用"
+就是这一条：客户端侧能做的都做了，服务端那棵树没有任何人去看，也没有任何一条路径会去看。
+
+**现场始末（0.1.48 那次会话留下的痕迹，供下一次修复时对照）**：`~/Clutch/ui-upgrade.clc` 的最后一轮
+（10-15 10:12–10:26 UTC）里，卡在同一句 SystemError 上的会话先被读出"2.50.1 的 `.so` + 2.13.5 的
+`pydantic/`"，随后 10:26:37 的最后一条命令**故意**把 2.50.1 的 `.so` 覆盖回 `site-packages`
+（把 2.46.5 的备份到 `/tmp`），做"远端坏掉时客户端怎么报"的实验；会话在 10:26:38 就断了，
+于是实验现场一直留在机器上。也就是说：**最后的坏对是那次实验留下的，而它复现的混合物本身来自第 1、2 条**。
+
+**顺带记录：8892 被占时，0.1.43 及更早的客户端是硬失败**。现场 `127.0.0.1:8892` 被手机那条 ssh
+会话自己的反向转发占着（`sshd: ubuntu@notty`，16 分钟没人用），同一时刻桌面 0.1.37 的四次重连每次都在
+6 次 `Unable to bind to 127.0.0.1:8892`（`REQUEST_FAILURE`）后判死，并写下
+`[health] FAIL: the far side could not be given a listener on 8892 (the model path is dead)`
+（`~/.clutch/tunnel.log`）。0.1.44 的 `e6340ea` 已经会向对端要一个自选端口（port 0）——本次实测
+`forwardIn('127.0.0.1', 8892)` 被授予、`forwardIn('127.0.0.1', 0)` 被授予 `32909`（两者随后都
+`unforwardIn` 释放）——但**装着的那个 0.1.37 没有这条回退**，所以它在"8892 被占"这个形状上仍然必失败。
+
+**修法（已实施，0.1.49；前三条是缺陷本身，第四条是让第 1、2 条不再复发的锁）**：
+
+1. **pylibs 安装改成"替换"语义**（`ui/tunnel-bootstrap.js` 的 `pylibsInstallCmd(dir)`）。tar 先解到**同一文件
+   系统**上的 `${dir}/pylibs.stage`，然后 `test -d ${stage}/site-packages -a -d ${stage}/agent` ——
+   **两棵树都到场才动手**，只带了一棵的 tar 一颗都不装。换名沿用"旧的先让位"：`site-packages`、`agent`
+   逐个 `rm -rf X.old && (mv X X.old 2>/dev/null || true) && mv ${stage}/X X && rm -rf X.old`；两个 `mv`
+   之间断掉，留下的是可恢复的 `X.old`，不是一个空洞。最后 `rm -f` 掉上传的 tar。整条链的尾巴是
+   `` ; rc=$?; rm -rf ${stage}; test $rc -eq 0 ``：失败时也清掉半解压的 stage（手机上那是几十 MB，本来要
+   躺到下一次尝试自己的 `rm -rf`），同时**保留非零退出码**。`installServer` 就读这个退出码：非零即
+   `{ok:false, error:"the remote could not unpack the wheels (exit N…). Nothing was replaced — the far
+   side's tree is the one it had."}` 直接返回——**不写 `VERSION`/`STRATEGY`、不起 supervisor**。写 `VERSION`
+   的那行只在真的换完之后才走到，所以"这个标记说装好了"第一次成为事实，而不只是意图。
+2. **门槛补一条"树能自证"的检查**（同文件的 `TREE_PROBE_CMD`，插在 `PROBE_CMD` 的 `__ART__` 与 `__NET__`
+   之间；`parseProbe` 收成 `probe.pylibsTree`）。探针是一次 `PYTHONPATH=site-packages python3 -c`，只回答一个
+   词：`NONE`（`VERSION` 描述的树不在）、`DUP:<name,…>`（同名 dist-info 有多代——第 1 条的现场形状）、
+   `IMPORT:SystemError|ImportError|Other`（轮子都在、一起 import 就崩）、`OK`、`NOPY`（没有 python3 可问）。
+   判决函数 `pylibsTreeSound(verdict)`：只有 `OK` 算健全；`""`/`NOPY`/`UNKNOWN` **不是对树不利的判断**
+   （没有 python3 的远端本来就被拒绝装 pylibs，所以这个默认不会放过任何健康树），其余一律重装。门槛因此是
+   `installed = (probe.installedVersion === version) && (strategy !== "pylibs" || pylibsTreeSound(probe.pylibsTree))`
+   ——"坏树永远已安装"到此为止；命中时 `[bootstrap]` 日志自带
+   `; the VERSION file matches but its tree does not (<verdict>) — installing over it`。
+   探针程序里唯一的 `__` 就是分隔符本身，所以 `except` 按**名字**分别捕获，不反射 `type(exc).__name__`
+   （那会把分隔符打进程序；测试断言程序与输出都不含 `__`）。
+3. **反向转发在 teardown 时显式归还**（`ui/tunnel-lifecycle.js` 的 `releaseModelPath(client)`，在 `stopTunnel`
+   里、清 `modelPath` 那几项**之前**调用）。守卫是"这条 hop 确实拿到过 listener"：
+   `state.modelPathClient === client && state.modelPath === "listening" && state.llmProxyRemotePort`，然后
+   `client.unforwardIn("127.0.0.1", port)`。**只归还自己被授予的那个编号**（`tunnel-core` 的 `remoteLlmPort()`
+   故意跨 hop 记住端口，所以 teardown 不清 `llmProxyRemotePort`；去 cancel 一个自己从没被授予的端口，是在对
+   别人的 listener 发话）。尽力而为：不 await、不影响 teardown 的结论；socket 已经不在了时 ssh2 抛
+   `Not connected` → 日志 `[disconnect] reverse forward release skipped`。
+4. **wheel 集按客户端 venv 钉死**（`scripts/build-pylibs-tar.sh` 的 `PINS`）。除既有的 `openai`/`httpx2`，
+   新增从同一个 venv 读出的 `pydantic`/`pydantic_core`：`pip download` 与 `pip install --no-index` 两边都吃
+   `"${PINS[@]}"`。这样 tar 的内容是**锁的函数**，而不是"哪天构建"的函数——每代 tar 各自自洽，于是第 1 条那类
+   "两代叠出互不兼容的一对"在源头不再产生。可用性不是猜的：`pydantic_core` 在发布矩阵的每一条腿
+   （`manylinux2014`/`musllinux_1_1` × `x86_64`/`aarch64` × `cp310`–`cp313`）都有 wheel，`pydantic` 则是
+   pure-python wheel。
+
+**验证与回归（全绿）**：
+
+- `tests/pylibs-install-merge-test.js`（新增）：真 bash + 真 tar + 真 python3。钉住"命令不含
+  `extractall('<dir>')`、解包目标必须是 `pylibs.stage`、`test -d … -a -d …` 夹在两个 `mv` 之间、`rm -f` 在最后、
+  尾部确有 `rc=$?; rm -rf …pylibs.stage; test $rc -eq 0`"；连续装 A→B 之后 `pkg_a-1.1.0.dist-info` /
+  `pkg_core-1.0.0.dist-info` 各只剩一代，A 独有文件（`pkg_a/only_in_a.py`、`agent/old_only.py`）消失，agent 树
+  被整体替换，不留 `.old`/stage；缺 `agent/` 的 tar 与坏 tar 都**非零退出**、live 树 sha256 **逐字节不变**、
+  stage 被清掉。同文件用真 `TREE_PROBE_CMD`（HOME 指向 scratch）产出 `NONE`/`OK`/`DUP:pydantic_core`/
+  `IMPORT:SystemError`，PATH 置空 → `NOPY`，并断言 `PROBE_CMD` 内含它、与其余段落解析互不干扰。
+- `tests/tunnel-reconnect.test.js` 新增三节：5b（`pylibsTree` 缺失/`""`/`NOPY`/`OK` → 不装；`DUP:`/
+  `IMPORT:SystemError`/`NONE` → 装，且日志含 `the VERSION file matches but its tree does not (<verdict>)`）、
+  5c（上传成功但解包失败 → `ok:false`、`VERSION` 未变、supervisor 未起）、6d（假 client 记顺序：`unforward:`
+  在 `end` **之前**、端口仍被记住；`modelPath` 不属于本条 hop 时**不** cancel；`unforwardIn` 抛
+  `Not connected` 时 teardown 仍走完）。
+- `tests/tunnel-quiet-forward-test.js`（真协议；`tests/fake-sshd.js` 现记录 `cancel-tcpip-forward:<port>`）：
+  被授予 8892 的那条 teardown 时**恰发一条** `cancel-tcpip-forward:8892`；对端自选端口的那条 cancel 的**是
+  它自己的**编号、**没有**碰 8892；安静退出的那条**一条都不发**。
+- `node tests/android-pylibs-path-test.js`（两次真构建）：新增断言 tar 里 `openai`/`httpx2`/`pydantic`/
+  `pydantic_core` 各只有一代，且版本分别等于客户端 venv 自己的版本；两次构建 sha256 仍然相同（`VERSION` 门槛与
+  `~/.clutch/bundles` 缓存的前提不变）。
+
+**仍未做（不在本次范围）**：真机端到端（桌面与手机两端都要人工操作）；对端 sshd 的 `ClientAliveInterval 60` /
+`ClientAliveCountMax 3`（系统级改动，待确认）——没有它，对端 sshd 默认 `ClientAliveInterval 0`，半死会话仍能占到
+TCP keepalive（默认 2 小时）；以及"替别人收回 8892"在协议上做不到：一条连接只能 cancel 自己被授予的 forward，
+所以第 3 条归还的只是**自己**那一条。
+
 ## 启动器图标（报告："移动端目前还没有图标"）
 
 **报告**：APK 装到手机上，桌面/应用抽屉里是系统默认的 Android 小人，不是那枚红 ▣。
@@ -499,6 +617,22 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     `the far side's model path is unavailable; starting the session anyway`（见上一节报告）。
     对端确实**拒绝**（`Address already in use`）时才是另一条路：阶梯重试 6 次、再请对端自选
     端口。
+11. 坏掉的 pylibs 树不再"假装修好了"（报告"移动端连不上，报错 no backend"）：在一台
+    `~/.clutch-server/VERSION` 与本次发布**相同**、但树里叠了两代 `pydantic*-dist-info`（或
+    `PYTHONPATH=~/.clutch-server/site-packages python3 -c "import pydantic, pydantic_core"`
+    直接 SystemError）的远端上点连接，必须**看到一次重装并连上**，而不是停在
+    "Not connected — no backend"：`~/.clutch/tunnel.log` 里先有
+    `[bootstrap] … the VERSION file matches but its tree does not (DUP:pydantic_core) — installing
+    over it`，随后重装完成；连上后远端 `ls ~/.clutch-server/site-packages | grep dist-info` 里
+    `pydantic*` 各只剩一代，`~/.clutch-server/{VERSION,STRATEGY}` 已更新。反向的一半同样可验：
+    tar 传坏（上传成功、解包失败）时界面报的是 `the remote could not unpack the wheels (exit N…).
+    Nothing was replaced …`，且**远端 `VERSION` 没变**（`ssh` 上机复核）——这是"失败不再留下半棵树
+    的证据"，也是下一次连接会重试的前提。
+12. teardown 归还反向转发：断开后停一两秒，在远端 `ss -ltnp | grep 127.0.0.1` 里，那条会话（以及
+    它自己那条 `sshd: ubuntu@notty`）留下的监听不该还在；客户端 `~/.clutch/tunnel.log` 的断开处有
+    `[disconnect] releasing the far side's reverse forward on 127.0.0.1:<port>`。手机端走的常是
+    "请对端自选端口"那条路（8892 被别人占着），那就该看到 `<port>` 是自选的那个、而不是 8892
+    ——**只归还自己被授予的编号**是这条的判据（见上一节）。
 
 ## 与初版方案的偏差（均已定案）
 

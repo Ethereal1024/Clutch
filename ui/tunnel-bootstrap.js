@@ -20,6 +20,53 @@ const components = require("./components");
 // The env override keeps the test suite from spending the grace twice per case.
 const STOP_GRACE_MS = Number(process.env.CLUTCH_TUNNEL_STOP_GRACE_MS || 5000);
 
+// Does the far side's tree still vouch for itself? A file WE wrote cannot: the
+// field's broken remote held a VERSION that matched ours exactly (so every
+// reconnect skipped the install — the gate is "the marker equals our hash") over
+// a site-packages that was a MERGE of three releases, and the far side's server
+// died on `import pydantic` before it could bind. So the tree is asked the two
+// questions a marker cannot answer, both far cheaper than the transfer they
+// avoid:
+//
+//   * is any project carrying more than one dist-info? An install that unpacks
+//     ON TOP of a live tree leaves the previous generation's metadata (and the
+//     modules the new release does not ship) behind forever; two generations on
+//     one tree is what a merge is, and it is visible from the names alone.
+//   * does the import the far side's server does FIRST still work? `agent/llm`
+//     imports openai, which imports pydantic, which checks pydantic_core's
+//     version — that pair is the one the field broke on, and it is also the
+//     cheap one to import (openai pulls the whole client stack).
+//
+// One token, and neither the program nor anything it prints contains `__`: the
+// probe's sections are delimited by it. NONE = the VERSION file describes a tree
+// that is not there; NOPY = no python3 to ask with (not a verdict about the
+// tree). The import is caught by NAME rather than reflected off the exception
+// (type(exc).__name__ is the one dunder that would put the delimiter in the
+// program), and the names are the field's: SystemError is the mismatch pydantic
+// raises when pydantic_core is not the version it was built against.
+const TREE_PROBE_CMD = `echo "__TREE__"; PYTHONPATH="$HOME/.clutch-server/site-packages" python3 -c '
+import os, sys
+sp = os.environ["PYTHONPATH"]
+if not os.path.isdir(sp):
+    print("NONE")
+    raise SystemExit(0)
+names = [d[:-10].rsplit("-", 1)[0] for d in os.listdir(sp) if d.endswith(".dist-info")]
+dups = sorted(set(n for n in names if names.count(n) > 1))
+if dups:
+    print("DUP:" + ",".join(dups[:4]))
+    raise SystemExit(0)
+try:
+    import pydantic, pydantic_core
+except SystemError:
+    print("IMPORT:SystemError")
+except ImportError:
+    print("IMPORT:ImportError")
+except Exception:
+    print("IMPORT:Other")
+else:
+    print("OK")
+' 2>/dev/null || echo NOPY`;
+
 const PROBE_CMD = [
   'echo "__OS__"; uname -s',
   'echo "__ARCH__"; uname -m',
@@ -30,6 +77,7 @@ const PROBE_CMD = [
   'echo "__VER__"; (cat "$HOME/.clutch-server/VERSION" 2>/dev/null) || echo NONE',
   'echo "__STRATEGY__"; (cat "$HOME/.clutch-server/STRATEGY" 2>/dev/null) || echo NONE',
   'echo "__ART__"; (test -x "$HOME/.clutch-server/agent-server" -a -x "$HOME/.clutch-server/agent-supervisor" && echo bundle || true); (test -x "$HOME/.clutch-server/venv/bin/python" && echo pip || true); (test -d "$HOME/.clutch-server/site-packages" && echo pylibs || true)',
+  TREE_PROBE_CMD,
   'echo "__NET__"; (python3 -c "import urllib.request;urllib.request.urlopen(\'https://pypi.org\',timeout=3);print(\'OK\')" 2>/dev/null) || echo NO',
   'echo "__TMP__"; (test -w /tmp && echo YES) || echo NO',
 ].join("; ");
@@ -50,6 +98,10 @@ function parseProbe(out) {
     installedVersion: section("__VER__"),
     installedStrategy: section("__STRATEGY__"),
     artifacts: arts,
+    // the far side's tree vouching for itself (see TREE_PROBE_CMD): "OK",
+    // "NONE", "DUP:…", "IMPORT:…", "NOPY", or "" for a probe that answered
+    // nothing at all
+    pylibsTree: section("__TREE__"),
     internet: section("__NET__") === "OK",
     tmpWritable: section("__TMP__") === "YES",
   };
@@ -189,6 +241,68 @@ function chooseStrategy(probe, localTag = platformTag()) {
   return null;
 }
 
+// What the tree said about itself (TREE_PROBE_CMD), read as "may I hand this
+// remote our code with no install?". Only the answers that mean "this tree
+// cannot serve" make it unsound:
+//
+//   NONE      the VERSION file describes a tree that is not there
+//   DUP:…     two releases merged on one tree (the field's shape)
+//   IMPORT:…  the wheels are present and cannot be imported together
+//
+// "NOPY" (no python3 to ask with) and an exec that came back without the section
+// are NOT verdicts about the tree, and an install forced on one of them would be
+// a guess: a pylibs install is refused outright on a remote without python3, so
+// nothing healthy is ever skipped by this default.
+function pylibsTreeSound(verdict) {
+  const v = String(verdict || "").trim();
+  if (!v || v === "NOPY" || v === "UNKNOWN") return true;
+  return v === "OK";
+}
+
+// How the pylibs tar lands on the far side: by REPLACE, never by merge.
+//
+// The tar carries two top-level trees — `site-packages` (the wheels) and `agent`
+// (the far side's own code) — and unpacking it OVER the live ones is not an
+// install. tarfile only adds and overwrites: every file the new release does not
+// ship (a dropped module, the previous generation's `pydantic_core-2.50.1.dist-info`,
+// an older extension module under the same name) stays behind forever, and two
+// releases merged on one tree is a tree no import survives. That is the field's
+// "no backend": pydantic 2.13.5 beside pydantic_core 2.50.1 raising SystemError
+// at import, under a VERSION file that matched the release being connected to.
+//
+// So: unpack into a staging directory ON THE SAME FILESYSTEM, check that BOTH
+// trees really arrived, and only then swap them in — `mv` inside one directory
+// is a rename, the old tree is deleted only after the new one is in place, and
+// every failure before the first `mv` leaves the live tree exactly as it was
+// (the staging directory is the only thing thrown away). The far side's server
+// is already stopped by the caller (see the note above), so nothing is reading
+// either tree while it is swapped.
+function pylibsInstallCmd(dir) {
+  const stage = `${dir}/pylibs.stage`;
+  // the OLD tree is renamed aside first and removed last: a swap that dies
+  // between the two renames leaves `site-packages.old` recoverable, not a hole
+  const swap = (name) =>
+    `rm -rf ${dir}/${name}.old && (mv ${dir}/${name} ${dir}/${name}.old 2>/dev/null || true) && ` +
+    `mv ${stage}/${name} ${dir}/${name} && rm -rf ${dir}/${name}.old`;
+  const chain = [
+    `rm -rf ${stage}`,
+    `mkdir -p ${stage}`,
+    `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${stage}')"`,
+    // both trees before either swap: a tar that carries no `agent` (or no
+    // site-packages) installs NOTHING rather than half of itself
+    `test -d ${stage}/site-packages -a -d ${stage}/agent`,
+    swap("site-packages"),
+    swap("agent"),
+    `rm -f ${dir}/pylibs.tar.gz`,
+  ].join(" && ");
+  // …and the staging tree is thrown away whatever happened. On success the swap
+  // already removed it; on a failure it holds a half-unpacked copy of the wheels
+  // (tens of megabytes, on a phone) until the next attempt's own `rm -rf` — so
+  // the failure path clears it too, and the exit status is preserved: a failed
+  // install is a nonzero exit, which installServer now asks about by name.
+  return `${chain} ; rc=$?; rm -rf ${stage}; test $rc -eq 0`;
+}
+
 // force is for tests; auto-decides when omitted. progress(stage) drives the UI progress bar.
 async function installServer(probe, { force, progress } = {}) {
   const localTag = platformTag();
@@ -237,8 +351,21 @@ async function installServer(probe, { force, progress } = {}) {
       return { ok: false, error: "cannot obtain wheels for target: " + e.message };
     }
   }
-  const installed = probe.installedVersion === version;
-  tunnelLog(`[bootstrap] strategy=${strategy} version=${version.slice(0, 12)}… installed=${installed}`);
+  // The gate has two halves, and the second one is the field's fix: VERSION is a
+  // marker this client wrote (so it can only report the last install that got
+  // as far as writing it), and the tree is the truth the marker stands for. A
+  // remote whose marker matches but whose tree does not is an install, not a
+  // no-op — see TREE_PROBE_CMD for what the tree is asked and why it is
+  // believed over the file.
+  const versionMatches = probe.installedVersion === version;
+  const treeSound = strategy !== "pylibs" || pylibsTreeSound(probe.pylibsTree);
+  const installed = versionMatches && treeSound;
+  tunnelLog(
+    `[bootstrap] strategy=${strategy} version=${version.slice(0, 12)}… installed=${installed}` +
+      (versionMatches && !treeSound
+        ? `; the VERSION file matches but its tree does not (${probe.pylibsTree}) — installing over it`
+        : "")
+  );
 
   const home = probe.home || "~";
   const dir = `${home}/.clutch-server`;
@@ -305,9 +432,25 @@ async function installServer(probe, { force, progress } = {}) {
       tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
       if (progress) progress("install:upload");
       await uploadFile(artifact, `${dir}/pylibs.tar.gz`);
-      await remoteExec(
-        `python3 -c "import tarfile;tarfile.open('${dir}/pylibs.tar.gz').extractall('${dir}')" && rm -f ${dir}/pylibs.tar.gz`
-      );
+      // the unpack-and-swap is a chain of shell steps that can fail as a whole
+      // (a truncated upload, a tar that carries only one of the two trees): its
+      // exit status is the only thing that says whether the trees actually
+      // changed, and a VERSION file written over a tree that did not land is
+      // exactly the lie this release is about. The install is reported, not
+      // assumed — the marker is only reached on the path that succeeded.
+      const landed = await remoteExec(pylibsInstallCmd(dir));
+      if (landed.code !== 0) {
+        const diag = (landed.stderr || landed.stdout || "").trim().slice(0, 400);
+        tunnelLog(`[bootstrap] the pylibs install failed (exit ${landed.code}):\n` + diag);
+        return {
+          ok: false,
+          error:
+            "the remote could not unpack the wheels (exit " +
+            landed.code +
+            (diag ? ": " + diag : "") +
+            "). Nothing was replaced — the far side's tree is the one it had.",
+        };
+      }
     }
     await remoteExec(`echo ${version} > ${dir}/VERSION && echo ${strategy} > ${dir}/STRATEGY`);
     tunnelLog("[bootstrap] installed");
@@ -416,7 +559,10 @@ function installComponents(base) {
 
 module.exports = {
   PROBE_CMD,
+  TREE_PROBE_CMD,
   parseProbe,
+  pylibsTreeSound,
+  pylibsInstallCmd,
   startCommand,
   stopServerCmd,
   stopServer,
