@@ -12,6 +12,12 @@
 //   remoteLlmModel()      => "deepseek-v4-flash" | ""       (model for the remote session)
 //   remoteLlmKnobs()      => { reasoning_effort, api_protocol }  (same trip as the model)
 //   tunnelStatus()        => { active, url }                (SSH tunnel state)
+//   awaitModelPath()      => Promise<"listening"|"installing"|"unavailable"|"none">
+//                            (joins the far side's in-flight reverse-forward
+//                            install; "listening" is the only answer that means
+//                            a session's --base-url points at something that
+//                            answers. The connect no longer waits for it, so
+//                            this claim does — see ui/tunnel-connect.js)
 //   restartRemoteServer() => Promise<bool>                  (reboot an idle-exited remote supervisor)
 //   openSessionForward(port) => Promise<{ localPort, close() }>
 //   startLocalSession(onFail) => Promise<{mode, sessionId, url, stop}> | null
@@ -34,6 +40,9 @@ function createHostCore(deps) {
     tunnelStatus,
     restartRemoteServer,
     openSessionForward,
+    // no tunnel at all (a host with no tunnel dep, a hermetic test): "none" says
+    // "nothing to wait for", which is also what a fake-dep suite means by it
+    awaitModelPath = async () => "none",
     startLocalSession,
     log = () => {},
     sessions = defaultSessions,
@@ -41,6 +50,17 @@ function createHostCore(deps) {
 
   // per-window backend state: windowId -> {kind, sessionId, url, stop()}
   const windowBackends = new Map();
+
+  // Where the far side's model path is, as a value this machine can log and act
+  // on. Never throws: a claim must not fail because the tunnel could not answer
+  // about a port, and "unknown" is the honest word for that.
+  async function modelPathState() {
+    try {
+      return (await awaitModelPath()) || "unknown";
+    } catch (e) {
+      return "unknown (" + ((e && e.message) || e) + ")";
+    }
+  }
 
   async function releaseWindowBackend(winId) {
     const wb = windowBackends.get(winId);
@@ -216,6 +236,20 @@ function createHostCore(deps) {
         }
       }
       await releaseWindowBackend(wc.id); // drop any local session first
+      // The far side's model path is installed beside the connect, not inside it
+      // (ui/tunnel-connect.js startModelPath): a far side that is silent about
+      // global requests must not be able to hold "Starting tunnel…" open. What it
+      // must not do either is get a session whose --base-url points at a port
+      // nobody serves — the request is ACCEPTED by the reverse forward and
+      // answered by nobody, and the agent's read then parks in its own budget
+      // ("only Stop moved it"). So the wait happens HERE: once, at the one moment
+      // the answer is actually needed, and bounded by the installer's own clocks.
+      // A path that is not up is not a reason to refuse the session — a run whose
+      // model does not answer beats no run — but the log says which it is.
+      const path = await modelPathState();
+      if (path !== "listening") {
+        log(`[backend] the far side's model path is ${path}; starting the session anyway`);
+      }
       let res = await sessions.supervisorSessionStart(
         ts.url,
         remoteLlmBase(),

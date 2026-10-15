@@ -66,6 +66,10 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       return { reasoning_effort: s.reasoning_effort || "", api_protocol: s.api_protocol || "" };
     },
     tunnelStatus: () => tunnel.tunnelStatus(),
+    // the far side's model path is installed beside the connect, not inside it:
+    // the claim waits for it here (host-core), so a session is never spawned with
+    // its --base-url pointed at a port nobody serves (ui/tunnel-connect.js)
+    awaitModelPath: () => tunnel.awaitModelPath(),
     restartRemoteServer: () => tunnel.restartRemoteServer(),
     openSessionForward: (port) => tunnel.openSessionForward(port),
     startLocalSession: null, // N4: no local mode; the renderer shows "not running"

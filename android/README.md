@@ -198,38 +198,70 @@ WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按�
 开一个客户端（隧道把会话端口转发到 127.0.0.1 上），或以后真做一个"共享/旁观同一会话"的
 功能——都不是当前产品提供的流程；真到那时，`trust_armed` 才会需要改成按客户端持有。
 
-## 隧道连上后卡在 "Starting tunnel…"（报告：0.1.46 连远端永远转，不落地也不报错）
+## 隧道连上后卡在 "Starting tunnel…"（报告：0.1.47 连远端永远转，不落地也不报错）
 
 **报告**：连远端时进度停在 "Starting tunnel…"，界面不报错也不超时——既没有失败提示，
-也永远等不到连上那一刻。
+也永远等不到连上那一刻。0.1.47 已经给这一步加了 4 秒的钟（上一版这一节写的就是那个钟），
+报告照旧，所以**钟不是答案**。
 
-**根因**：不是 0.1.46 引入的（`git log v0.1.45..v0.1.46 -- ui/tunnel-connect.js` 为空），
-是这个阶段里**唯一一处没有时钟的等待**。反向端口转发走 `ssh2` 的
-`client.forwardIn(bindAddr, bindPort, cb)`（`ui/node_modules/ssh2/lib/client.js:1333`）：
-它的回调只在**对端的 global request 答复**到达时才被调用——ssh2 自己不设超时，而断线时
-的清理（keepalive 大约 45s）会把 `state` 清掉，却**不会 reject 那个还在飞的 promise**。
-"对端不回话"于是既没有回调也没有拒绝：`forward` 阶段（`ui/tunnel-connect.js:231` 的
-`progress("forward")`，标签就是 UI 上那句 "Starting tunnel…"）永远停在那儿。这一阶段里
-其它每个 await 都是有界的（健康探测 `CONNECT_TIMEOUT_MS = 15000`、supervisor 探测 3s、
- exec 预算 60s），所以一个没有边界的等待足以让整条连接死在那里。
+**根因（一个"承重"的结构变化，不是时序）**：把注释剥掉只比这一个文件，
+`git diff v0.1.33 HEAD -- ui/tunnel-connect.js` 里唯一承重的一处是 `b04b124`（v0.1.35）：
+反向端口转发（`-R`）从"在同一个位置发出、发出即忘"变成"**被 await，而且它失败就等于这次
+connect 失败**"。v0.1.33 里这条 `-R` 也在同一位置发出（本地转发之后、健康检查之前），但
+结果没人等——它既拖不慢 connect，也压不垮 connect。v0.1.35 之后，**对端对一句 global
+request 的态度成了这条连接的判决条件之一**。
 
-**修法**：`bindReverseForward(client, port, timeoutMs)` 把一次 bind 变成"两个 ssh2 不给
-的出口，先到者胜"——`REVERSE_FORWARD_BIND_TIMEOUT_MS = 4000` 的钟，以及 client 自己的
-讣告（`once("close"|"error")`）。两者都只活到 settle 那一刻（`settled` 闸 + 移除监听器），
-所以 6 次阶梯重试不漏监听器、迟到的回调只是个 no-op；`forwardIn` 在已经死掉的 socket 上
-会**抛**而不是回调，这一抛也收进同一个 settle 里。文案分两句，"对端说不"与"没人会说话"
-不是一件事：`the connection closed before the far side answered the reverse-forward
-request` / `the far side did not answer the reverse-forward request within 4000ms`。4s 不是
-慢链路的限速——sshd 一旦试过 bind 就会回话，所以这个钟量的正是"答复本来就不会来了"。
+**为什么表现是"永远转"**：`ssh2` 的 `client.forwardIn()` 只在**对端答复
+`SSH_MSG_GLOBAL_REQUEST`** 时才回调（`ui/node_modules/ssh2/lib/client.js:1333`，回调由
+reply handler 触发，别处不触发）。中间盒、非 OpenSSH 的 sshd、被卡住的 request 通道都足以
+让答复永远不来；keepalive（15s×3）最后会把 client 拆掉，却**不会 reject 一个已经在飞的
+promise**。而失败是有出口的：`ui/js/conn-flow.js` 的 `handleSshConnect` 把失败词写进同一个
+状态/why 元素（`setFsConnectError`），**失败的连接会显示错误**。所以"停在 Starting tunnel…
+且没有错误、也没有超时"只有一种解释：那个 await 从未 settle（`ui/tunnel-connect.js` 的
+`progress("forward")` 打的正是这句标签）。同一阶段里其它每个 await 都是有界的（健康探测
+`CONNECT_TIMEOUT_MS = 15000`、supervisor 探测 3s、exec 预算），于是结构很干净——连接
+的判决依赖于远端"回不回话"，而远端可以合法地永远不回。
 
-**验证**：`tests/tunnel-reconnect.test.js` 在既有的"没落地的 bind 什么都不留"之后加了两问：
-一个**永远不回答**的假 client（`bindTimeoutMs: 40`）必须在有界时间内放弃（实测 81ms；日志
-里出现 `did not answer the reverse-forward request within 40ms`；零残留监听器）；一个
-**已经 close** 的 client 必须立刻 settle（实测 61ms，而钟是 5000ms）。
+**修法（拆掉依赖，不是又一个超时）**：模型通路不再参与 connect 的判决。
 
-**回归证明**：把这两个出口临时删掉，`timeout 25 node tests/tunnel-reconnect.test.js` 正好
-停在 `and nothing is remembered from a bind that never landed` 之后再也不动——就是把报告里
-那个"一直转"复现了一遍。
+1. **沉默 ≠ 说"不"**。`bindReverseForward` 的失败结果带上 `silent`：4 秒的钟到点、或 client
+   自己死掉，都记 `silent: true`（"答复本来就不会来了"）；对端的拒绝（`Address already in
+   use`）不带这个标记。阶梯在 `silent` 上**立刻停**——同一个问题问同一个不会说话的对端，
+   只是再花一个钟；`installReverseForward` 也不再跟着问 port 0（那还是同一个问题，只是换个
+   数字）。一次沉默的全部代价从"6 次 + port 0"变成一个 4 秒的钟。
+2. **反向转发装在 connect 旁边，不装在它前面**。新增 `startModelPath(client)` /
+   `awaitModelPath()` 与 `state.modelPath`（`null` / `"installing"` / `"listening"` /
+   `"unavailable"`）：`establishForwardAndHealth` 用 `startModelPath(client)` 取代了原来那句
+   `await installReverseForward(client)` 和它后面的 `failConnect`。这一层的门回到 v0.1.33 的
+   那几道——本地转发、`waitForServer`（15s）、`probeSupervisorShape`（3s）。装不上就按
+   15s→60s 退避重试（unref，且只对它自己那一代 client 有效；换 hop 时 `stopTunnel` 连钟一起
+   清掉），所有提问者 join**同一个** in-flight promise，不产生第二个钟。
+3. **真正需要"通路已就绪"的那一刻是会话被 spawn 的时候**。`ui/host-core.js` 在
+   `supervisorSessionStart` 之前 `await deps.awaitModelPath()`（新依赖，默认 no-op，所以
+   假依赖的测试不受影响），不是 `listening` 就照常起会话、但在日志里写明。这样
+   `remoteLlmBase()`（远端会话的 `--base-url`）**永远不会指着一个没人服务的端口**——这正是
+   那条测试一直钉的性质——而 connect 再也不被对端的一句话吊住。
+
+**验证**：`tests/tunnel-reverse-port-test.js` 新增第 4 步，用同一根假线路搭一台**永远不回答**
+反向转发请求的远端（`FakeClient.silent`）：connect 必须照常 `ok:true`（实测 **3ms**）、只问一次
+`8892`、`tunnelStatus().modelPath` **不是** `listening`（实测 `installing`），而
+`awaitModelPath()` 在 4 秒的钟上落成 `"unavailable"`（实测 4000ms）且不记住任何端口。
+`tests/tunnel-reconnect.test.js` 6c 里那个"永远不回答"的用例改成钉"**只问一次**、不再问
+port 0"，第 7 节新增源码断言：connect 里不再有 `await installReverseForward(client)`、host-core
+的 claim 在 `supervisorSessionStart` 之前 `await modelPathState()`、repair 钟有 `unref` 且随
+`stopTunnel` 归零。（该 runner 现在也把 `HOME` 指到 scratch 目录，不再往开发者真的
+`~/.clutch/tunnel.log` 里写测试噪声——那份日志是现场证据。）
+
+**回归证明**（探针 + 一次临时改动量出来的，两条都记实测）：同一个探针
+`/tmp/park-probe.js`（`NODE_PATH=/tmp/stub/node_modules` 里的 ssh2 桩，对端永不回调）对着
+**v0.1.46 的 `ui/tunnel-connect.js`**（`TUNNEL_MODULE=/tmp/old46-tunnel-connect.js`）跑到 8 秒，
+`installReverseForward` **还在飞**——`after 8006ms -> STILL PENDING`，`forwards` 里只有一次
+`8892`。那份文件里**根本没有钟**：`forwardIn` 不回调就没人推进阶梯，第一次尝试永远挂着，
+这就是报告里那个"一直转"。同一个探针对着**现在这个文件**跑，4008ms 落成 `settled: false`，
+而且只问了 `[8892]` 一次（不再跟着问 port 0）。那道门本身也量过：把 `startModelPath(client)`
+临时换回 `await installReverseForward(client)`（失败即 connect 失败），第 4 步那台"永远不回答"
+的远端就不再 `ok:true`，而是 `ok:false`、connect 在 4002ms 上失败——判决重新挂回"对端回不回话"，
+这正是要拆掉的那条依赖（改动已还原，`grep -rn "TEMP REGRESSION PROBE" ui/` 无残留）。
 
 ## 启动器图标（报告："移动端目前还没有图标"）
 
@@ -454,10 +486,15 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
    清空后再保存并连一次，同一行变回 `no source mirror set: … (github.com) directly`。
    在**不能**直连 github.com 的网络里，组件市场与远端 pylibs 安装都应能走通（见
    「源镜像在手机上够不着」一节）。
-10. 隧道不落地（报告"0.1.46 卡在 Starting tunnel…"）：连一台 sshd 拒绝反向转发的远端
-    （或对端防火墙丢掉 global request），进度条必须**在 4 秒一级、总共几十秒内**给出失败，
-    而不是永远停在 "Starting tunnel…"；`~/.clutch/tunnel.log` 里应出现
-    `did not answer the reverse-forward request within 4000ms`（见上一节报告）。
+10. 隧道不落地（报告"0.1.47 卡在 Starting tunnel…"）：连一台**对反向转发请求不回话**的远端
+    （中间盒 / 非 OpenSSH sshd / 卡住的 request 通道），进度条必须**照常走到连上**——模型的
+    通路不是 connect 的判决条件；`~/.clutch/tunnel.log` 里此时应出现
+    `reverse forward unanswered (…did not answer the reverse-forward request within 4000ms…);
+    not asking for a port of its own`，随后是 `model path unavailable …; asking again in
+    15000ms`，并且 `tunnel:status` 的 `modelPath` 不是 `listening`；起会话时同一份日志里有
+    `the far side's model path is unavailable; starting the session anyway`（见上一节报告）。
+    对端确实**拒绝**（`Address already in use`）时才是另一条路：阶梯重试 6 次、再请对端自选
+    端口。
 
 ## 与初版方案的偏差（均已定案）
 

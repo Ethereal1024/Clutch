@@ -13,7 +13,7 @@
 const { tunnelLog, remoteLlmBase } = require("./tunnel-core");
 const { remoteExec, uploadFileViaExec } = require("./tunnel-remote");
 const { chooseStrategy } = require("./tunnel-bootstrap");
-const { connectTunnel } = require("./tunnel-connect");
+const { connectTunnel, startModelPath, awaitModelPath } = require("./tunnel-connect");
 const {
   stopTunnel,
   onTunnelEnd,
@@ -28,6 +28,10 @@ module.exports = {
   remoteExec,
   tunnelLog,
   remoteLlmBase,
+  // the far side's model path, installed beside the connect and awaited by the
+  // session claim (host-core) rather than by the connect itself
+  awaitModelPath,
+  startModelPath,
   onTunnelEnd,
   tunnelStatus,
   uploadFileViaExec,

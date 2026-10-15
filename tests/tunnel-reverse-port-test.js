@@ -90,9 +90,12 @@ class FakeClient extends EventEmitter {
     });
   }
   // the far sshd: it holds 8892 (the listener this window cannot reach), and
-  // when asked for a port of its own choosing it binds one and reports it
+  // when asked for a port of its own choosing it binds one and reports it.
+  // With FakeClient.silent set it is the far side of the 0.1.47 report: it takes
+  // the request and says NOTHING — no error, no port, no disconnection.
   forwardIn(_host, port, cb) {
     this.forwards.push(port);
+    if (FakeClient.silent) return;
     if (port === 0 || !FakeClient.holds.has(port)) {
       return process.nextTick(() => cb(null, port === 0 ? GRANTED : port));
     }
@@ -120,12 +123,14 @@ ssh2Mod.loaded = true;
 ssh2Mod.exports = { Client: FakeClient };
 require.cache[ssh2Path] = ssh2Mod;
 
-const { connectTunnel, stopTunnel } = require("../ui/ssh-tunnel");
+const { connectTunnel, stopTunnel, awaitModelPath, tunnelStatus } = require("../ui/ssh-tunnel");
 const { state, remoteLlmBase, remoteLlmPort, LLM_PROXY_REMOTE_PORT } = require("../ui/tunnel-core");
 
 // the ports the fake far side holds: 8892, and only until the far side releases
 // it (step 3 re-dials after that, which is the ordinary reconnect case)
 FakeClient.holds = new Set([LLM_PROXY_REMOTE_PORT]);
+// step 4's far side: it never answers a reverse-forward request at all
+FakeClient.silent = false;
 
 // ---- the far host's supervisor: what the gate's health check reaches --------
 // It answers like a Clutch supervisor (the shape probe wants a "status" field).
@@ -160,6 +165,12 @@ async function armInbound(client, destPort) {
   const first = await connectTunnel({ host: "far.example", user: "alice", port: 22 });
   const client = FakeClient.last;
   check(first && first.ok === true, "a far side that will not release 8892 still connects");
+  // The connect no longer waits for the model path (0.1.47: a far side that never
+  // answers must not be able to hold "Starting tunnel…" open), so the port the far
+  // side chose is only known once the install has landed — which is the moment
+  // host-core's claim asks for it, before it tells a session where the model is.
+  const path = await awaitModelPath();
+  check(path === "listening", `the far side's model path lands after the connect has said yes (${path})`);
   check(
     client.forwards.length > 1 &&
       client.forwards.slice(0, -1).every((p) => p === LLM_PROXY_REMOTE_PORT) &&
@@ -213,6 +224,42 @@ async function armInbound(client, destPort) {
   );
   check(state.llmProxyRemotePort === GRANTED && remoteLlmBase() === `http://127.0.0.1:${GRANTED}/v1`,
     "…and a session spawned after that hop is pointed at the same place");
+
+  // 4. the report this fix is about (0.1.47: "still stuck on Starting tunnel…",
+  //    deterministic on a good network). This far side takes the reverse-forward
+  //    request and never answers it: no refusal, no port, no disconnection. ssh2
+  //    calls forwardIn's callback from the reply handler and from NOWHERE else, so
+  //    an in-flight attempt with no reply in it was a promise nothing could
+  //    settle — the connect parked on it for as long as the ssh client lived.
+  //    A hop is not a model path: the connect is its own verdict (the local
+  //    forward, a live supervisor behind it, that supervisor's shape), and the
+  //    model path is reported honestly — not listening — instead of assumed.
+  await stopTunnel();
+  state.llmProxyRemotePort = null; // ask the contract port: the ask count then has one plain meaning
+  FakeClient.last = null;
+  FakeClient.holds = new Set();
+  FakeClient.silent = true;
+  const quietAt = Date.now();
+  const quiet = await connectTunnel({ host: "far.example", user: "alice", port: 22 });
+  const quietMs = Date.now() - quietAt;
+  const quietClient = FakeClient.last;
+  check(quiet && quiet.ok === true, "a far side that never answers the reverse-forward request still connects");
+  check(quietMs < 10000, `…on the hop's own gates, not on the far side's silence (${quietMs}ms)`);
+  check(
+    quietClient.forwards.length === 1 && quietClient.forwards[0] === LLM_PROXY_REMOTE_PORT,
+    `…asking the promised port exactly once (${quietClient.forwards.join(",")})`
+  );
+  check(
+    tunnelStatus().modelPath === "installing" || tunnelStatus().modelPath === "unavailable",
+    `…and the model path is not called listening just because the hop came up (${tunnelStatus().modelPath})`
+  );
+  const quietPath = await awaitModelPath();
+  check(
+    quietPath === "unavailable",
+    `the silent ask ends on its own clock and is reported as such (${quietPath}, ${Date.now() - quietAt}ms)`
+  );
+  check(state.llmProxyRemotePort === null, "nothing is remembered from a bind the far side never answered");
+  FakeClient.silent = false;
 
   await stopTunnel();
   peer.close();

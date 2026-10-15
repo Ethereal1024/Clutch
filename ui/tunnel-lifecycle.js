@@ -30,6 +30,20 @@ const { stopExecBridge } = require("./exec-bridge");
 async function stopTunnel(notify = false) {
   tunnelLog("[disconnect] stopTunnel");
   stopHealing();
+  // The far side's model path lives and dies with the hop that carried it: the
+  // reverse forward is a global request on THIS client, and the port it landed on
+  // is meaningless once the client is gone. A repair still waiting on the clock
+  // must not fire into the next hop either — that hop installs its own path
+  // (tunnel-connect's startModelPath), and this timer would be a second ask about
+  // a dead wire.
+  if (state.modelPathRepairTimer) {
+    clearTimeout(state.modelPathRepairTimer);
+    state.modelPathRepairTimer = null;
+  }
+  state.modelPath = null;
+  state.modelPathClient = null;
+  state.modelPathInstall = null; // an install in flight settles into a no-op (finishModelPath's guard)
+  state.modelPathRepairDelay = null;
   if (state.localSrv) {
     state.localSrv.close();
     state.localSrv = null;
@@ -80,6 +94,12 @@ function tunnelStatus() {
   return {
     active: Boolean(state.sshClient),
     url: state.currentUrl,
+    // Where the far side's model path got to: "listening" is the only value that
+    // means a session may be pointed at remoteLlmBase(); "unavailable" says the
+    // far side would not (or would not answer) forward, and a session started
+    // anyway will not reach a model. The hop itself is up in every case (see
+    // tunnel-connect: it is not part of the connect's verdict).
+    modelPath: state.modelPath,
     // exec bridge URL for the local agent's SshTransport; null with no live tunnel
     execBridge: state.sshClient && state.execBridgePort ? "http://127.0.0.1:" + state.execBridgePort : null,
   };

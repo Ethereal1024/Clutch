@@ -47,6 +47,10 @@ const hostCore = createHostCore({
   remoteLlmModel,
   remoteLlmKnobs,
   tunnelStatus: () => tunnel.tunnelStatus(),
+  // the far side's model path is installed beside the connect, not inside it: the
+  // claim waits for it here, so a session is never spawned with its --base-url
+  // pointed at a port nobody serves (ui/tunnel-connect.js startModelPath)
+  awaitModelPath: () => tunnel.awaitModelPath(),
   restartRemoteServer: () => tunnel.restartRemoteServer(),
   openSessionForward: (port) => tunnel.openSessionForward(port),
   startLocalSession,

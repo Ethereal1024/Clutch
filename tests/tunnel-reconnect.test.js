@@ -27,7 +27,15 @@ const { EventEmitter } = require("events");
 const { check, summary } = require("./harness");
 
 // tunnelLog appends synchronously to $HOME/.clutch/tunnel.log; a few checks below
-// read it back, because "where did it stop?" is the report these come from.
+// read it back, because "where did it stop?" is the report these come from. HOME
+// is redirected to a scratch dir FIRST, the way tests/tunnel-reverse-port-test.js
+// does: a runner that reads the log must not also scribble on the developer's own
+// ~/.clutch/tunnel.log (it used to, and the real log became unreadable as field
+// evidence for exactly that reason).
+const SCRATCH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-reconnect-"));
+process.env.HOME = SCRATCH_HOME;
+if (process.platform === "win32") process.env.USERPROFILE = SCRATCH_HOME;
+
 const TUNNEL_LOG = path.join(os.homedir(), ".clutch", "tunnel.log");
 
 function tunnelLogText() {
@@ -45,6 +53,7 @@ const BOOTSTRAP = path.join(UI_DIR, "tunnel-bootstrap.js");
 const BOOTSTRAP_SRC = fs.readFileSync(BOOTSTRAP, "utf8");
 const CONNECT_SRC = fs.readFileSync(path.join(UI_DIR, "tunnel-connect.js"), "utf8");
 const LIFECYCLE_SRC = fs.readFileSync(path.join(UI_DIR, "tunnel-lifecycle.js"), "utf8");
+const HOST_CORE_SRC = fs.readFileSync(path.join(UI_DIR, "host-core.js"), "utf8");
 
 // ---- the fake far side ----
 //
@@ -504,20 +513,35 @@ async function main() {
     // so an attempt with no reply in flight was a promise nothing could settle.
     // That is the report 0.1.46 closed on — "still stuck on Starting tunnel…" —
     // because progress("forward") prints that label right before the bind and no
-    // other await in the phase is unbounded. Its own clock ends it now.
+    // other await in the phase is unbounded. Its own clock ends it now, and
+    // 0.1.47 went further: silence is not a verdict about the port (asking the
+    // same far side for a port of its own is the same question), and it is not a
+    // verdict about the connect either (the model path is not what the connect
+    // is — see section 7). So one unanswered ask is the whole cost.
     const silent = new EventEmitter();
-    silent.forwardIn = () => {}; // the far side never answers, and never dies
+    let silentAsks = 0;
+    silent.forwardIn = () => {
+      silentAsks++; // the far side never answers, and never dies
+    };
     state.sshClient = silent;
     let t0 = Date.now();
-    const unbound = await installReverseForward(silent, { tries: 1, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 40 });
+    const unbound = await installReverseForward(silent, { tries: 3, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 40 });
     let elapsed = Date.now() - t0;
     check(
-      unbound === false && elapsed >= 60 && elapsed < 1500,
-      `an unanswered bind gives up on its own clock instead of parking the connect (${elapsed}ms for the two 40ms asks)`
+      unbound === false && elapsed >= 30 && elapsed < 1500,
+      `an unanswered bind gives up on its own clock instead of parking the connect (${elapsed}ms)`
+    );
+    check(
+      silentAsks === 1,
+      `…and a SILENT far side is asked exactly once: another ask is another clock about a question nothing answers (${silentAsks})`
     );
     check(
       /did not answer the reverse-forward request within 40ms/.test(tunnelLogText()),
       "…and the tunnel log names the timeout that ended it (where did it stop, without a debugger)"
+    );
+    check(
+      /not asking for a port of its own/.test(tunnelLogText()),
+      "…and it does not follow silence with the port-0 ask, which the far side would be silent about too"
     );
     check(
       silent.listenerCount("close") === 0 && silent.listenerCount("error") === 0,
@@ -550,14 +574,39 @@ async function main() {
   }
 
   // ---- 7. the paths a fake remote cannot reach, asserted on the source ----
+  //
+  // report #4 (0.1.47: "still stuck on Starting tunnel…", deterministic, on a good
+  // network). The clock added in 0.1.47 bounded the wait but left the SHAPE the
+  // report was about: the hop's verdict still depended on the far side answering a
+  // global request. What the connect builds is a hop — a local forward to a live
+  // supervisor — and the far side's model path is installed beside it, with the
+  // property that actually matters ("never point a session at a port nobody
+  // serves") waiting where it can be waited for: the claim, just before the
+  // session's --base-url is built.
   check(
-    /const reverse = await installReverseForward\(client\)/.test(CONNECT_SRC) &&
-      /establishForwardAndHealth\(localPort, client\)/.test(CONNECT_SRC),
-    "the reverse forward is installed AND awaited before the connect is called good"
+    /^\s*startModelPath\(client\);/m.test(CONNECT_SRC) &&
+      !/await installReverseForward\(client\)/.test(CONNECT_SRC),
+    "the far side's model path is started beside the connect, never awaited by it"
   );
   check(
-    /if \(!reverse\)/.test(CONNECT_SRC) && /could not be given a listener/.test(CONNECT_SRC),
-    "a far side that never gets its listener is a failed connect, not a silent one"
+    /establishForwardAndHealth\(localPort, client\)/.test(CONNECT_SRC) &&
+      !/could not be given a listener/.test(CONNECT_SRC),
+    "a far side that never gets its listener can no longer hold the connect open, let alone fail it"
+  );
+  const claimSrc = HOST_CORE_SRC.split("await releaseWindowBackend(wc.id); // drop any local session first")[1] || "";
+  check(
+    claimSrc.indexOf("await modelPathState()") > -1 &&
+      claimSrc.indexOf("await modelPathState()") < claimSrc.indexOf("supervisorSessionStart("),
+    "the claim waits for the model path before a session is told where the model is"
+  );
+  check(
+    /if \(state\.modelPathInstall\) return state\.modelPathInstall;/.test(CONNECT_SRC) &&
+      /state\.sshClient !== client\) return Promise\.resolve\(state\.modelPath/.test(CONNECT_SRC),
+    "one install in flight, joined by every asker: a repair and a claim ask the far side once, not once each"
+  );
+  check(
+    /state\.modelPathRepairTimer\.unref/.test(CONNECT_SRC) && /state\.modelPath = null;/.test(LIFECYCLE_SRC),
+    "a pending repair never keeps a host alive, and it dies with the hop it belongs to"
   );
   check(
     /stream\.on\("error", kill\)/.test(CONNECT_SRC) && /proxy\.on\("error", kill\)/.test(CONNECT_SRC),

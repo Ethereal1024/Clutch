@@ -25,6 +25,19 @@ const state = {
   // reverse forward is installed, and kept for the life of the process after
   // that (see remoteLlmPort). A fresh module graph starts it at null again.
   llmProxyRemotePort: null,
+  // Where the far side's model path is: null with no hop, "installing" while the
+  // reverse forward is being asked for, "listening" once it really is installed,
+  // "unavailable" when the far side would not forward (or never answered). It is
+  // tracked separately from the hop because the hop no longer waits for it
+  // (tunnel-connect's startModelPath): the connect is the thing a user stares at,
+  // and a far side that never answers a global request must not be able to hold
+  // it open. The one place that DOES wait is the session claim (host-core), which
+  // reads this to avoid pointing a session's --base-url at a port nobody serves.
+  modelPath: null,
+  modelPathClient: null, // the client this modelPath/modelPathInstall belongs to
+  modelPathInstall: null, // the one in-flight install every asker joins
+  modelPathRepairTimer: null,
+  modelPathRepairDelay: null, // grows from MODEL_PATH_REPAIR_MS to its cap
   execBridgePort: null,
   sftpHandle: null,
   sftpUnavailable: false, // the current host has no SFTP subsystem: use exec uploads
