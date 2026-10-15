@@ -62,10 +62,29 @@ ADAPTIVE_VISIBLE_DP = 72
 # square reads as a screenshot.
 TILE_CORNER = 0.22
 
+# How much SMALLER the red mark is drawn on Android than on the desktop (report:
+# "the four corners of the red mark sit right on the rounded edge"). The mark is
+# the part a mask threatens, and it is the corners that reach furthest: at the
+# desktop's share of the canvas a ▣'s circumscribed circle is 33.4dp in radius —
+# past Android's 66dp content keyline (33dp) and only 2.6dp inside the 36dp a
+# full-bleed circular mask keeps. Shrinking the mark about the tile's center (the
+# TILE stays full-bleed) to 84% of that share puts 55.1% of the visible 72dp box
+# on screen: a 28.1dp circumscribed circle, ~7.9dp of daylight from the mask edge
+# and comfortably inside the keyline, round launcher or square. The same inset is
+# applied to the API 24-25 rasters so the icon does not change size between two
+# Android versions; the DESKTOP keeps the full-size mark (electron-builder masks
+# nothing, and ui/build/* is byte-identical to before this constant existed).
+ANDROID_MARK_SCALE = 0.84
 
-def color_at(x: float, y: float) -> tuple[int, int, int]:
-    """Color of one sample point (all opaque — the tile is full-bleed)."""
-    dx, dy = abs(x - 256), abs(y - 256)
+
+def color_at(x: float, y: float, mark_scale: float = 1.0) -> tuple[int, int, int]:
+    """Color of one sample point (all opaque — the tile is full-bleed).
+
+    mark_scale < 1 shrinks the MARK about the tile's center and leaves the tile
+    exactly where it was: the sample is answered by asking the full-size glyph
+    where this point would be at 1/mark_scale from the center, so the red body
+    moves inward while the tile stays full-bleed."""
+    dx, dy = abs(x - 256) / mark_scale, abs(y - 256) / mark_scale
     in_outer = dx <= RING_OUTER and dy <= RING_OUTER
     in_ring_hole = dx <= RING_INNER and dy <= RING_INNER
     if in_outer and not in_ring_hole:
@@ -90,14 +109,15 @@ def inside_tile(x: float, y: float, radius: float) -> bool:
     return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) <= radius
 
 
-def render(size: int, corner: float = 0.0) -> list[bytes]:
+def render(size: int, corner: float = 0.0, mark_scale: float = 1.0) -> list[bytes]:
     """Supersampled RGBA scanlines at `size`x`size`.
 
     corner > 0 rounds the tile by that fraction of the side and leaves everything
     outside it TRANSPARENT: an Android raster icon is never masked, so it has to
     bring its own shape. RGB is averaged over the covered samples only — averaging
     in the transparent ones would drag the edge pixels toward black and leave a
-    dark halo along the corners."""
+    dark halo along the corners. mark_scale shrinks the mark alone
+    (ANDROID_MARK_SCALE; the desktop renders at 1.0)."""
     step = W / size
     radius = corner * W
     shaped = corner > 0
@@ -112,7 +132,7 @@ def render(size: int, corner: float = 0.0) -> list[bytes]:
                     y = (py + (sy + 0.5) / SS) * step
                     if shaped and not inside_tile(x, y, radius):
                         continue
-                    cr, cg, cb = color_at(x, y)
+                    cr, cg, cb = color_at(x, y, mark_scale)
                     r += cr
                     g += cg
                     b += cb
@@ -215,14 +235,25 @@ def mark_path_data() -> str:
 
 
 def adaptive_scale() -> float:
-    """How much of the adaptive canvas the mark takes: the desktop's share.
+    """How much of the adaptive canvas the DESKTOP's share of the mark takes.
 
     The mark spans 2*RING_OUTER of W on the desktop, so on the 108dp canvas it
-    must span ADAPTIVE_VISIBLE_DP/ADAPTIVE_DP of it — 72/108, exactly 2/3. That
-    makes the mark 47.25dp wide inside the 72dp every mask keeps: the square
-    inscribed in Android's 66dp content keyline circle, so a ▣ sits in a circular
-    mask the way it sits in its own tile."""
+    must span ADAPTIVE_VISIBLE_DP/ADAPTIVE_DP of it — 72/108, exactly 2/3. That is
+    the share that makes a ▣ sit in a mask the way it sits in its own tile, and it
+    is what the API 24-25 rasters draw; the adaptive foreground insets it further
+    (adaptive_mark_scale)."""
     return ADAPTIVE_VISIBLE_DP / ADAPTIVE_DP
+
+
+def adaptive_mark_scale() -> float:
+    """The scale the adaptive foreground's <group> applies to the mark.
+
+    adaptive_scale() is the desktop's share of the canvas; ANDROID_MARK_SCALE is
+    the inset the mask asks for. That product is 0.56, so the mark (2*RING_OUTER
+    of the 512 viewport) spans 0.56 * 336/512 * 108 = 39.7dp of the canvas —
+    55.1% of the 72dp every mask keeps, and its corners land 7.9dp inside the
+    mask's own 36dp circle instead of 2.6dp away from it."""
+    return adaptive_scale() * ANDROID_MARK_SCALE
 
 
 def write_adaptive_foreground(path: Path) -> None:
@@ -230,15 +261,17 @@ def write_adaptive_foreground(path: Path) -> None:
 
     A group's pivot defaults to 0, so its matrix is translate ∘ scale and the
     translate is what recenters the scaled mark on the canvas."""
-    scale = adaptive_scale()
+    scale = adaptive_mark_scale()
     offset = W * (1 - scale) / 2
     path.write_text(
         f'<?xml version="1.0" encoding="utf-8"?>\n'
         f'<!-- Generated by scripts/make-icon.py; do not edit by hand. The same ▣\n'
         f'     as the desktop icon (ui/build/icon.svg: frame 88..424 of 512, ring\n'
-        f'     64 wide, core 144 square), drawn at {scale:.6g} of the 108dp canvas\n'
-        f'     so it fills the 72dp every mask keeps visible the way it fills the\n'
-        f'     desktop tile. Only the mark lives here: a launcher on API 26+ draws\n'
+        f'     64 wide, core 144 square), drawn at {scale:.6g} of the 108dp canvas:\n'
+        f'     the desktop\'s share of it ({adaptive_scale():.6g}) inset by\n'
+        f'     ANDROID_MARK_SCALE = {ANDROID_MARK_SCALE:g}, so the mark fills 55% of\n'
+        f'     the 72dp every mask keeps and its corners stay clear of a rounded\n'
+        f'     mask\'s edge. Only the mark lives here: a launcher on API 26+ draws\n'
         f'     the tile color behind it and applies its own mask on top. -->\n'
         f'<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
         f'    android:width="{ADAPTIVE_DP}dp"\n'
@@ -316,7 +349,7 @@ def write_android(root: Path) -> list[tuple[Path, str]]:
     for bucket, px in LAUNCHER_DENSITIES.items():
         (res / f"mipmap-{bucket}").mkdir(parents=True, exist_ok=True)
         out = res / f"mipmap-{bucket}" / "ic_launcher.png"
-        write_png(out, render(px, corner=TILE_CORNER))
+        write_png(out, render(px, corner=TILE_CORNER, mark_scale=ANDROID_MARK_SCALE))
         written.append((out, f"{px}px, the API 24-25 fallback"))
     return written
 

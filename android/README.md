@@ -217,16 +217,20 @@ WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按�
 
 1. **API 26+：自适应图标**（`res/mipmap-anydpi-v26/ic_launcher.xml`）。108dp 画布，前景
    `res/drawable/ic_launcher_foreground.xml` 是 512 视口里的一条 `<group>`：缩放
-   `adaptive_scale()` = `72/108 = 2/3`，平移 `512*(1-2/3)/2 = 256/3 ≈ 85.333333`——把标记
-   按"遮罩保留的 72dp"而不是"108dp 画布"来摆，正是它落进遮罩里的原因。标记 47.25dp 宽
-   = 72dp 可见框的 65.6%，也就是 Android 内容 keyline 那个 66dp 圆里的内接方块。背景是
-   `res/values/colors.xml` 的 `@color/ic_launcher_background` = `BG`（启动器把它画在前景
+   `adaptive_mark_scale()` = `72/108 × ANDROID_MARK_SCALE(0.84)` = **0.56**，平移
+   `512*(1-0.56)/2 = 112.64`——先把标记按"遮罩保留的 72dp"而不是"108dp 画布"来摆
+   （`adaptive_scale()`），再按报告的遮罩留白收进去（`ANDROID_MARK_SCALE`）。标记现在宽
+   39.7dp = 72dp 可见框的 **55.1%**（收进去之前是 65.6%），外接圆半径 28.1dp（原 33.4dp），
+   离遮罩自己的 36dp 圆**还有 7.9dp 空隙**（原 2.6dp，也就是报告的"红块四角顶着圆角边"）。
+   背景是 `res/values/colors.xml` 的 `@color/ic_launcher_background` = `BG`（启动器把它画在前景
    后面，再套自己的遮罩）。路径由 `mark_path_data()` 生成：外框顺时针、挖孔逆时针、内核
-   再顺时针——nonzero 填充下这才算"一个洞"，而不是三块叠上去的色。
+   再顺时针——nonzero 填充下这才算"一个洞"，而不是三块叠上去的色。桌面三件套仍按
+   `mark_scale = 1.0` 渲染，几何不变。
 2. **API 24–25：位图**（`res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`，
    48/72/96/144/192，即 `LAUNCHER_DENSITIES`）。这两个版本没有自适应图标，形状得自己画：
    圆角方块（圆角半径 `TILE_CORNER=0.22` 边长），方块之外透明。缩像素时 RGB 只对真正被
-   覆盖的样本取平均（预乘），所以圆角弧上不会晕出一圈黑边。
+   覆盖的样本取平均（预乘），所以圆角弧上不会晕出一圈黑边。这里**不缩标记**（缩它没有
+   意义：不遮罩就没有边缘可顶），只缩自适应前景那一份。
 3. **不加 `roundIcon`，也不出 `mipmap-*-round`**：API 26+ 的启动器会给自适应图标套它
    自己的遮罩，一套圆图只服务 API 25，纯粹是多一份要同步的东西。检查里断言
    `android:roundIcon` 必须缺席。
@@ -236,9 +240,13 @@ WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按�
 的声明（`android:icon == @mipmap/ic_launcher`、无 `roundIcon`）；`res/**/*.xml` 每个都良构
 且 `@color`/`@drawable`/`@mipmap` 引用都能解析；自适应图标确实是 `<adaptive-icon>`、背景是
 `BG`、前景是 108dp 的 `<vector>`、`<group>` 的缩放/平移等于生成器算出的那两个数、唯一那条
-`<path>` 等于 `mark_path_data()` 且填 `RED`；五张位图是正确尺寸的 8 位 RGBA（圆角透明、
-中心 `RED`、边上 `BG`、过半不透明、且没有比 `BG` 更暗的像素——晕边闸）；最后把桌面三件套 +
-5 张位图 + 3 个 XML 与"当场重渲染"的结果逐字节比对。
+`<path>` 等于 `mark_path_data()` 且填 `RED`；**标记的留白**：它用 `gen.adaptive_mark_scale()`
+现场重算，断言外接圆 ≤ 33dp keyline 且离 36dp 遮罩 ≥ 6dp（失败信息直接写"was 33.4dp"/
+"was 2.6dp"，也就是报告的旧几何）；五张位图是正确尺寸的 8 位 RGBA（圆角透明、中心 `RED`、
+边上 `BG`、过半不透明、且没有比 `BG` 更暗的像素——晕边闸），并且**红带宽度**等于
+`2*RING_OUTER*ANDROID_MARK_SCALE/512*边长`（±2px），既有 `red_extent()` 逐行量；最后把
+桌面三件套 + 5 张位图 + 3 个 XML 与"当场重渲染"的结果逐字节比对，并单独断言**桌面**图标
+仍是满幅 336px 的红（缩标记只发生在 Android 那一份）。
 
 先本地后 CI：本机构建的 APK 过 `aapt2 dump badging`，那一行从 `icon=''` 变成
 `icon='res/mipmap-anydpi-v26/ic_launcher.xml'`，五张位图登记为
