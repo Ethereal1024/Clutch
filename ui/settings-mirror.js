@@ -34,6 +34,13 @@ function writeSettingsMirror(data) {
   // empty string clears the knob (provider default), undefined keeps it
   if (data && data.reasoning_effort !== undefined) upd.reasoning_effort = data.reasoning_effort;
   if (data && data.api_protocol !== undefined) upd.api_protocol = data.api_protocol;
+  // the source mirror (ui/net-fetch.js reads it per fetch, and the Android host's
+  // artifact downloads read the same key): same rule as the knobs above — an
+  // empty string clears it, undefined keeps whatever is there. It is written
+  // through this path on purpose: on the phone this file is the ONLY place
+  // mirrorPrefix() can read a mirror from, so a UI save is the only way to set
+  // one there at all (report: downloads still needed a VPN).
+  if (data && data.source_mirror !== undefined) upd.source_mirror = String(data.source_mirror || "").trim();
   const flat = Object.assign({}, cur, upd);
   if (secrets) flat.ssh_secrets = secrets;
   fs.mkdirSync(path.dirname(p), { recursive: true });

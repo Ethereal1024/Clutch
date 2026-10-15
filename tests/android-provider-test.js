@@ -322,9 +322,20 @@ async function main() {
   const mirrorTar = Buffer.from([0x1f, 0x8b, 0x07, 0x42]);
   const mirrorHash16 = sha256(mirrorTar).slice(0, 16);
   const mirrorFile = `agent-pylibs-linux-riscv64-glibc-py3.12-${mirrorHash16}.tar.gz`;
+  // a second artifact, for the run that has to prove the SETTINGS FILE is a door
+  // too (10b): a cached tar would prove nothing, so this one is fresh
+  const fileTar = Buffer.from([0x1f, 0x8b, 0x07, 0x43]);
+  const fileHash16 = sha256(fileTar).slice(0, 16);
+  const fileArtifact = `agent-pylibs-linux-riscv64-musl-py3.13-${fileHash16}.tar.gz`;
   const mirror = await serveMirror(
-    { "linux-riscv64-glibc-py3.12": { file: mirrorFile, sha256: sha256(mirrorTar), version: mirrorHash16 } },
-    new Map([[mirrorFile, mirrorTar]])
+    {
+      "linux-riscv64-glibc-py3.12": { file: mirrorFile, sha256: sha256(mirrorTar), version: mirrorHash16 },
+      "linux-riscv64-musl-py3.13": { file: fileArtifact, sha256: sha256(fileTar), version: fileHash16 },
+    },
+    new Map([
+      [mirrorFile, mirrorTar],
+      [fileArtifact, fileTar],
+    ])
   );
   const originBefore = srv.fetches.length;
   process.env.CLUTCH_SOURCE_MIRROR = mirror.base;
@@ -352,6 +363,43 @@ async function main() {
         mirror.seen.some((u) => u.startsWith("/m/http://127.0.0.1:")),
       "the prefix carries the source's own absolute URL, path preserved (so siblings still resolve)"
     );
+
+    // 10b. on a PHONE the mirror comes from the SETTINGS FILE, never the
+    // environment: HOME is the app's own filesDir (N2 sets it before Node boots),
+    // so a GUI launch inherits no CLUTCH_SOURCE_MIRROR and there is no shell to
+    // export one in — which is what the report describes ("downloads and uploads
+    // still need a VPN: the domestic mirror never took effect"). The same server,
+    // the same assertion: with the env unset, a source_mirror in
+    // ~/.clutch/settings.json must move every read this device makes. This is the
+    // path the plugin page's mirror field writes (ui/js/components-panel.js ->
+    // clutchSettings.save -> settings-mirror.js).
+    delete process.env.CLUTCH_SOURCE_MIRROR;
+    const settingsPath = path.join(HOME, ".clutch", "settings.json");
+    fs.writeFileSync(
+      settingsPath,
+      // a trailing slash on purpose: "<mirror>" and "<mirror>/" are one mirror
+      JSON.stringify({ base_url: "https://api.example", source_mirror: mirror.base + "/" })
+    );
+    const originBeforeFile = srv.fetches.length;
+    const viaFile = createAndroidArtifactProvider({ indexUrl: srv.url });
+    const byFile = await viaFile.ensurePyLibsTar({
+      os: "linux",
+      arch: "riscv64",
+      libc: "musl",
+      pyver: "3.13",
+    });
+    assert.strictEqual(byFile.version, fileHash16, "a mirror in the settings file supplies the gate value");
+    assert(fs.readFileSync(byFile.path).equals(fileTar), "…and its bytes, sha256-verified as always");
+    assert.strictEqual(
+      srv.fetches.length,
+      originBeforeFile,
+      "with no environment variable set at all, the origin was still never contacted"
+    );
+    // and an empty value is the OFF switch, the same one the field saves when it
+    // is cleared: the next read goes back to the source's own URL
+    fs.writeFileSync(settingsPath, JSON.stringify({ source_mirror: "" }));
+    const { mirrorPrefix: mirrorNow } = require("../ui/net-fetch");
+    assert.strictEqual(mirrorNow(), "", "an empty source_mirror is no mirror, not a broken prefix");
 
     // 10a. the mirror moves the READ, not the identity. The catalogue is cached
     // for, and stamped with, the URL the APK was built from — the tag is what has

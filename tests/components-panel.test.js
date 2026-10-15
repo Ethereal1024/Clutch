@@ -170,7 +170,20 @@ function stateOf(body, name) {
   return walk(row).find((c) => /(^| )plug-state( |$)/.test(c.className)) || null;
 }
 
-const IDS = ["plug-body", "plug-target", "plug-base", "plug-note", "plug-reload", "plug-filter", "settings-tab-plugins"];
+const IDS = [
+  "plug-body",
+  "plug-target",
+  "plug-base",
+  "plug-note",
+  "plug-reload",
+  "plug-filter",
+  "settings-tab-plugins",
+  // the source-mirror row the pane draws above the list (report: "downloads and
+  // uploads still needed a VPN" — the field is the only door to the knob)
+  "mirror-input",
+  "mirror-save",
+  "mirror-note",
+];
 
 const tick = () => new Promise((r) => setImmediate(r));
 async function settle(n = 5) { for (let i = 0; i < n; i++) await tick(); }
@@ -215,6 +228,11 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     },
     confirms: [],
     answer: true,
+    // the host channel the mirror row writes through (clutchSettings.save): the
+    // window's copy of the knob is only kept when this answers ok
+    settingsSaves: [],
+    settingsReply: { ok: true },
+    settingsControl: null,
   };
   const api = {
     list: async () => {
@@ -253,7 +271,15 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     clearTimeout,
     Promise,
     document: dom.document,
-    localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem() {}, removeItem() {} },
+    localStorage: {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => {
+        store[k] = String(v);
+      },
+      removeItem: (k) => {
+        delete store[k];
+      },
+    },
     // the session URL names THIS window's session, so every reader of it uses
     // sessionStorage (js/backend-lifecycle.js): the panel's ✓ is about the window
     // the panel is drawn in, not about the machine the profile remembers (⑤)
@@ -265,11 +291,22 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
   ctx.window = ctx;
   ctx.globalThis = ctx;
   ctx.window.clutchComponents = api;
+  // the mirror row's channel, one for one with ui/preload.js + ui/bridge-shim.js:
+  // a save is asked of the HOST (it holds ~/.clutch/settings.json), so this is the
+  // only way a value becomes the mirror the sources are read under
+  ctx.window.clutchSettings = {
+    save: async (data) => {
+      world.settingsSaves.push(data);
+      if (world.settingsControl) return world.settingsControl.promise;
+      return world.settingsReply;
+    },
+  };
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx, { filename: "ui/js/components-panel.js" });
   return {
     ctx,
     world,
+    store,
     byId: dom.byId,
     el: (id) => dom.byId.get("#" + id),
     body: () => dom.byId.get("#plug-body"),
@@ -1293,6 +1330,10 @@ const CODE = mod ? mod.code : "";
       "which names the setting and the file it goes in, because there is no other way to change where the bytes come from"
     );
     check(
+      /box above/.test(hints()[0].textContent),
+      "and points at the field drawn above the list, which is the door on a machine whose HOME nobody can write to"
+    );
+    check(
       /github\.com/.test(hints()[0].textContent) && /pin/.test(hints()[0].textContent),
       "and says WHY the mirror is safe: the source is this build's own github one, and the digests are still the release's"
     );
@@ -1335,6 +1376,103 @@ const CODE = mod ? mod.code : "";
       /color: var\(--danger\)/.test(decls(".plug-source-error")) && /font-size: var\(--fs-sm\)/.test(decls(".plug-source-error")),
       "while the reason above it stays the failure's own colour and size — the two are not the same fact"
     );
+  }
+
+  // 37. the source mirror is a field, not a hand-written file (report: "downloads
+  //     and uploads to the server still need a VPN — the domestic mirror never took
+  //     effect"). Two machines have to agree on it: the host process is the one that
+  //     OBEYS the prefix (ui/net-fetch.js, and on the phone the host's own artifact
+  //     downloads), and this window is the one that can only remember what it was
+  //     told. So the save writes the host's file FIRST and this window's copy
+  //     second, a value that is not a URL is refused before either is touched, and
+  //     the list is read again because where the bytes come from just moved.
+  {
+    const note = (p) => p.el("mirror-note");
+    const box = (p) => p.el("mirror-input");
+    const bad = (p) => /(^| )error( |$)/.test(note(p).className);
+
+    // what the field says when nothing was saved in this session: the copy this
+    // window kept, and — with none — that the sources are read from github.com
+    const fresh = page();
+    check(box(fresh).value === "", "a window that never set a mirror leaves the field empty");
+    check(/no mirror/.test(note(fresh).textContent) && !bad(fresh), "and says so in the plain words of the thing it decides: sources are read from github.com");
+    const seeded = page({ store: { clutch_source_mirror: "https://mirror.example" } });
+    check(box(seeded).value === "https://mirror.example", "a window that did set one comes back with the field filled from its own copy of it");
+    check(/read under https:\/\/mirror\.example/.test(note(seeded).textContent), "and the note names the prefix the sources are read under");
+
+    // a value that is not http(s) never reaches the file: obeying it would rewrite
+    // every source into something that is not a URL, and the page would then blame
+    // the network for a typo in this box
+    const typo = page();
+    box(typo).value = "mirror.example/clutch";
+    typo.el("mirror-save").click();
+    await settle();
+    check(typo.world.settingsSaves.length === 0, "a value that is not a URL is not written to the host at all");
+    check(!("clutch_source_mirror" in typo.store), "nor kept as this window's own copy of it");
+    check(bad(typo) && /not http\(s\)/.test(note(typo).textContent) && /nothing was written/.test(note(typo).textContent), "and the verdict says what is wrong with it before anything happens");
+
+    // the save itself: the host's file, then this window's copy, then a fresh read
+    // of the market — a source that could not be reached a second ago may answer now
+    const saved = page();
+    const marketsBefore = saved.world.marketCalls;
+    const listsBefore = saved.world.listCalls;
+    box(saved).value = "https://mirror.example/";
+    saved.el("mirror-save").click();
+    await settle();
+    check(
+      saved.world.settingsSaves.length === 1 && saved.world.settingsSaves[0].source_mirror === "https://mirror.example",
+      "the host is asked for exactly the one key (ui/settings-mirror.js merges it, so the LLM knobs beside it survive) and a trailing slash is the same mirror"
+    );
+    check(saved.store.clutch_source_mirror === "https://mirror.example", "and the window remembers the prefix it saved, not the text that was typed");
+    check(saved.world.marketCalls === marketsBefore + 1 && saved.world.listCalls === listsBefore + 1, "the sources are read again under it, because the mirror moves where the bytes come from");
+    check(!bad(saved) && /read under https:\/\/mirror\.example/.test(note(saved).textContent), "and the line then says what the sources follow");
+    check(/pin/.test(note(saved).textContent), "and repeats what a mirror cannot change: the digest is still the release's own");
+
+    // clearing it is a save too (an empty value is the answer "github.com again")
+    const cleared = page({ store: { clutch_source_mirror: "https://mirror.example" } });
+    box(cleared).value = "";
+    cleared.el("mirror-save").click();
+    await settle();
+    check(cleared.world.settingsSaves.length === 1 && cleared.world.settingsSaves[0].source_mirror === "", "an empty field clears the knob rather than leaving the old prefix in the file");
+    check(cleared.store.clutch_source_mirror === "", "and this window's copy with it");
+    check(/github\.com again/.test(note(cleared).textContent), "the line says the sources are back to github.com");
+
+    // a write the host refused is not remembered as if it had landed: a filled
+    // field would claim a mirror this window is not reading under
+    const refused = page();
+    refused.world.settingsReply = { ok: false, error: "read-only file system" };
+    box(refused).value = "https://mirror.example";
+    refused.el("mirror-save").click();
+    await settle();
+    check(bad(refused) && /read-only file system/.test(note(refused).textContent), "a refusal is drawn with the host's own reason");
+    check(!("clutch_source_mirror" in refused.store), "and nothing is kept for a mirror that is not in force");
+    const thrown = page();
+    thrown.ctx.window.clutchSettings = { save: async () => { throw new Error("main process is gone"); } };
+    box(thrown).value = "https://mirror.example";
+    thrown.el("mirror-save").click();
+    await settle();
+    check(bad(thrown) && /main process is gone/.test(note(thrown).textContent), "a channel that threw is a refusal too, not a mirror that landed");
+
+    // a shell without the channel draws no lie: the value is refused, loudly
+    const shell = page();
+    shell.ctx.window.clutchSettings = undefined;
+    box(shell).value = "https://mirror.example";
+    shell.el("mirror-save").click();
+    await settle();
+    check(bad(shell) && /cannot write the setting/.test(note(shell).textContent), "a shell without the channel says it cannot write the setting rather than pretending it did");
+    check(!("clutch_source_mirror" in shell.store), "and keeps no copy of a mirror only this window could not apply");
+
+    // the sheet: the row is the field's own rule, and it must not scroll away from
+    // the list that explains why it is wanted
+    const sheet = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
+    const rules = (sel) => [...sheet.matchAll(new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\{([^}]*)\\}", "g"))].map((m) => m[1].replace(/\s+/g, " ").trim());
+    check(rules(".plug-mirror").some((r) => /display: flex/.test(r)), "ui/style.css draws the mirror row as its own block above the list");
+    check(rules(".plug-mirror").some((r) => /flex: none/.test(r)), "pinned like the head and the note: a field scrolled out of reach is not the door the hint points at");
+    check(rules(".plug-mirror input").some((r) => /flex: 1/.test(r) && /width: auto/.test(r)), "and the input gives its full width to the Save button beside it");
+    const dangerRules = [...sheet.matchAll(/([^{}]*)\{([^}]*)\}/g)].filter(
+      (m) => /\.plug-mirror-note\.error\b/.test(m[1]) && /var\(--danger\)/.test(m[2])
+    );
+    check(dangerRules.length === 1, "while a refused value takes the failure colour, not the muted one the note is written in");
   }
 
   summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");

@@ -43,9 +43,29 @@ function useUI(name) {
 // names a tag — an index published for THIS APK's tag has to keep matching the copy
 // already on disk, mirror or not.
 const { mirrorPrefix, mirrored } = useUI("net-fetch.js");
+// The mirror decision is written to the tunnel log (report: "downloads and uploads
+// to the server still need a VPN — the domestic mirror never took effect"). "the
+// mirror was not set" and "the mirror was set and this is what it fetched" are two
+// different reports, and on a phone the log is the only place the difference is
+// visible: the settings file it comes from is the app's own filesDir.
+const { tunnelLog } = useUI("tunnel-core.js");
+
+// What the LAST fetchUrl reported, so the decision is stated once per prefix
+// rather than once per chunk of a 30 MB tar (~500 of them): the question this
+// answers — "did the mirror take effect?" — is answered by the first line.
+let loggedPrefix = null;
 
 function fetchUrl(url) {
-  return mirrored(url, mirrorPrefix());
+  const prefix = mirrorPrefix();
+  if (loggedPrefix !== prefix) {
+    loggedPrefix = prefix;
+    tunnelLog(
+      prefix
+        ? `[artifact] source mirror ${prefix} — fetching ${mirrored(url, prefix)}`
+        : `[artifact] no source mirror set: fetching ${url} (github.com) directly`
+    );
+  }
+  return mirrored(url, prefix);
 }
 
 function defaultIndexUrl() {
@@ -242,7 +262,16 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
         return { path: out, version: sha256(fs.readFileSync(out)).slice(0, 16) };
       }
       // the tar is ~30 MB: give the body transfer its own, longer stall window
-      const buf = await fetch(fetchUrl(indexUrl.replace(/[^/]*$/, "") + entry.file), 0, TAR_TIMEOUT_MS);
+      const tarUrl = fetchUrl(indexUrl.replace(/[^/]*$/, "") + entry.file);
+      let buf;
+      try {
+        buf = await fetch(tarUrl, 0, TAR_TIMEOUT_MS);
+      } catch (e) {
+        // the URL this DEVICE tried, mirror and all: "it needed a VPN" is answered
+        // by reading which host was actually asked (see fetchUrl)
+        tunnelLog(`[artifact] tar fetch failed: ${tarUrl} :: ${(e && e.message) || e}`);
+        throw e;
+      }
       const got = sha256(buf);
       if (got !== entry.sha256) {
         throw new Error(`pylibs artifact ${entry.file} failed sha256: expected ${entry.sha256}, got ${got}`);

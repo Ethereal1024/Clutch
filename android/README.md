@@ -290,10 +290,71 @@ request` / `the far side did not answer the reverse-forward request within 4000m
 `#FF000000`；位图翻一个字节；删掉 `mipmap-hdpi`；XML 注释里出现 `--`（这个真撞上过一次：
 第一版 `colors.xml` 的注释里写了 `--bg`，`aapt2 compile` 报
 `values/colors.xml:0: error: xml parser error: not well-formed (invalid token)`）；加回
-`android:roundIcon`。
+`android:roundIcon`。**留白这条也单测过**：在进程内把 `gen.ANDROID_MARK_SCALE` 改成 1.0
+（旧几何）后重跑，keyline/空隙/红带宽度三处检查当场变红。
 
-**待验（真机）**：装到手机上，抽屉里出现红方图标；圆形与方形两种遮罩下标记本体都不被裁
-（65.6% 这条留白就是为它准备的）。
+**待验（真机）**：装到手机上，抽屉里出现红方图标；圆形与方形两种遮罩下标记本体都不被裁，
+四角与圆角遮罩边之间看得见那圈留白（55.1% 这条留白就是为它准备的）。
+
+## 源镜像在手机上够不着（报告："下载/上传服务器还得走 VPN——国内镜像没生效"）
+
+**报告**：APK 里"国内镜像"这个开关看不出有任何作用：组件市场下载、给远端装 pylibs 仍然要
+翻出去。
+
+**根因**：镜像**在手机上根本没有入口**。它读的是 `CLUTCH_SOURCE_MIRROR` env 或
+`~/.clutch/settings.json` 的 `source_mirror`（`ui/net-fetch.js` 的 `mirrorPrefix()`）——
+而手机上的 HOME 是 App 自己的 filesDir（N2 在 Node 起来之前设好）：没有 shell 可 export，
+也没有文件管理器能写进去。`writeSettingsMirror()` 之前更是**没有** `source_mirror` 这一支，
+UI 里也没有这个字段。也就是说"写进 ~/.clutch/settings.json"这句话在手机上是一句谁也做不到
+的事。按文档 §12.3 的定案（**不默认镜像、不自动回退**）不能塞一个第三方加速器进去，
+能做的是**把开关修成真的能用**。手机侧唯一的 github 取数就是 pylibs 的索引与 tar
+（`android/host/artifact-provider-android.js`），所以这条线上"没生效"最刺眼。
+
+**修法**：三处，一个开关。
+
+1. **入口**：插件页顶端一个 `Source mirror` 字段（`ui/index.html` 的 `.plug-mirror`，放在
+   `#settings-pane-plugins` 里、在"目标机器"那一大块**上面**——它是**客户端**设置：决定
+   这台机器到哪里去读字节，与远端装了什么无关）。它明确是"**保存**"这个动作
+   （`#mirror-save`，不是敲一个键就落盘），并有一条 `role="status"` 的判词行：非 http(s)
+   的值当场被拒（`"…" is not http(s): a mirror is the prefix a source URL is read under,
+   so it has to be a URL too — nothing was written`），成功则印出当前取值并重申"每个
+   digest 仍然对 release 自己的 pin 校验"。保存顺序是**先宿主、后本窗口**（`localStorage`
+   的 `clutch_source_mirror` 只负责让下次打开时字段是满的）：宿主写失败、抛错、或根本没有
+   这个通道时，本窗口绝不留下一个"并不生效的镜像"；保存成功后清掉上一轮 verdict 并
+   `plugRead({ force: true })` 重读市场——字节从哪来刚变了，刚才失败的源可能就活了。
+   尾斜杠归一化（`https://m/` 与 `https://m` 是同一个镜像）在字段侧完成。
+2. **落盘**：`ui/settings-mirror.js` 的 `writeSettingsMirror()` 补上 `source_mirror` 这一支，
+   规则与旁边几个旋钮一字不差——有值就写、`""` 清空、`undefined` 保留，并且与文件里既有的
+   键**合并**（`ssh_secrets` 和别的未知键都活着）。这是手机上唯一的落点，也是
+   `mirrorPrefix()` 唯一能读到镜像的地方。
+3. **看得见**：`android/host/artifact-provider-android.js` 的 `fetchUrl()` 每次前缀变化就往
+   隧道日志写一行（`[artifact] source mirror <prefix> — fetching <mirrored url>` /
+   `[artifact] no source mirror set: fetching <url> (github.com) directly`，一次前缀只写一行，
+   不给 30MB 的 tar 的每一块都写一行）——手机上唯一能亲眼看到的判据就是这行日志；tar 取数
+   失败也把**实际请求的 URL** 写进去（`[artifact] tar fetch failed: <url> :: <原因>`），
+   "它到底在问哪个域名"一句话就有答案。插件列表里原来那句"请手写
+   `~/.clutch/settings.json`"也改成指向上面这个框。
+
+**验证**：`tests/components-panel.test.js` 第 37 节（真页面 + 迷你 DOM）：字段从本窗口那
+份副本回填、没有就是"no mirror"、非 http(s) 的值**一个字节都没写**且判词是红的、正常保存
+按"宿主 → 本窗口 → 重读市场"的顺序发生（`settingsSaves` 恰好一次、`source_mirror` 是归一化
+后的前缀、`marketCalls` 与 `listCalls` 各 +1）、空值 = 回到 github.com、宿主拒绝/通道抛错/
+通道缺席三种失败都不在本窗口留副本，最后还钉住样式表：`.plug-mirror` 是 `flex: none`
+（会滚走的字段不是判词行指向的那个门）、输入框把宽度让给 Save、`.plug-mirror-note.error`
+才是失败色。
+`tests/settings-mirror.test.js` 第 6 节：`{source_mirror}` 这种"只带一个键"的保存写在
+`~/.clutch/settings.json` 里、与 `ssh_secrets`/`custom` 合并、不再提它时保留、`""` 清空。
+`tests/android-provider-test.js` 第 10b 节：**env 完全不设**，只把 `source_mirror` 写进沙箱
+的 settings 文件，索引与 tar 仍然整条走镜像（origin 一次都没被访问）——这正是报告描述
+的那条路径；`source_mirror: ""` 则是关掉它的那把开关。`tests/net-fetch.test.js` 既有几问
+继续钉住 env 优先、非 http(s) 被丢弃、`{profiles, active}` 折叠。
+**回归证明**：把 `writeSettingsMirror` 里 `source_mirror` 那一支删掉重跑，
+`tests/settings-mirror.test.js` 第 6 节当场变红（`actual: undefined`）。
+
+**待验（真机）**：手机上填一个镜像并保存 → `adb logcat -s clutch | grep '\[artifact\]'`
+出现 `source mirror https://… — fetching https://…/https://github.com/…`；清空后再连一次，
+同一行变成 `no source mirror set: fetching … (github.com) directly`。此时在**不能**直连
+github.com 的网络里，组件市场与远端 pylibs 安装都应能走通。
 
 ## M2：pylibs 供给线（代码+CI+测试完成，真远端验收待设备环节）
 
@@ -316,7 +377,8 @@ Release 索引下载。四处改动：
    自校验 `version === sha256[0:16]`：条目自相矛盾时在下载任何字节之前就被拒。
    **镜像同样作用于这条供给线**：索引与 tar 的取数 URL 都过一遍与组件来源同一处的接缝
    （`ui/net-fetch.js` 的 `mirrorPrefix()`/`mirrored()`，前缀取 `CLUTCH_SOURCE_MIRROR`
-   env 或 `~/.clutch/settings.json` 的 `source_mirror`），于是 `github.com` 不可达时索引
+   env 或 `~/.clutch/settings.json` 的 `source_mirror`；手机上的入口是插件页顶端那个
+   `Source mirror` 字段，见「源镜像在手机上够不着」一节），于是 `github.com` 不可达时索引
    与 tar 一起改从 `<镜像>/<原始绝对 URL>` 取。**改的只是取数的那一跳**：索引缓存仍以
    原始 indexUrl 为键、缓存里存的 `url` 字段与错误文案也仍是原始 URL——盖章 tag 必须继续
    和磁盘上那份对上，镜像今天有明天没有都不该让缓存失效，也不该让别的 release 的索引被
@@ -361,9 +423,12 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
   单一 EventSource、`bridge.port` 就绪标记契约。
 - `tests/android-provider-test.js` — N3：下载→自算 sha256→落盘桌面同缓存、
   二次命中不重下、清单篡改→拒收且零残留、索引缺键→拒绝、`ensureBundle`
-  恒拒绝、`version` 与桌面 `fileHash().slice(0,16)` 逐字节相等。
+  恒拒绝、`version` 与桌面 `fileHash().slice(0,16)` 逐字节相等；第 10 节起
+  镜像整条作用于索引+tar、**只写在 settings 文件里（env 一概不设）也算数**。
 - 其余 16 个既有 JS 套件全绿（含 settings-mirror/bridge-shim/
-  server-bootstrap——M1 对 `ui/` 的三处共享层改动不破坏桌面）。
+  server-bootstrap——M1 对 `ui/` 的三处共享层改动不破坏桌面；`tunnel-reconnect`
+  的 bind 超时/对端死亡两问、`components-panel` 的镜像字段一节、
+  `settings-mirror` 第 6 节见各自报告一节）。
 
 ## 真机待验清单（下一台 Android 设备/CI device farm）
 
@@ -381,9 +446,18 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
    （拒绝后不再弹）；`adb shell dumpsys power | grep clutch:tunnel` 只在有隧道意图时
    有这把锁，断开后消失。
 8. 启动器图标：抽屉/桌面出现红 ▣（不是系统默认小人）；系统若允许选图标形状，圆形
-   与方形两种遮罩下标记本体都不被裁——`aapt2 dump badging` 的
-   `application: … icon='res/mipmap-anydpi-v26/ic_launcher.xml'` 是后台判据，肉眼
-   这一条才是判据（见「启动器图标」一节）。
+   与方形两种遮罩下标记本体都不被裁，红块四角与圆角遮罩边之间看得见那圈留白——
+   `aapt2 dump badging` 的 `application: … icon='res/mipmap-anydpi-v26/ic_launcher.xml'`
+   是后台判据，肉眼这一条才是判据（见「启动器图标」一节）。
+9. 源镜像（报告"国内镜像没生效"）：插件页顶端填一个镜像 → Save → 判词行印出当前前缀；
+   `adb logcat -s clutch | grep '\[artifact\]'` 见 `source mirror … — fetching …`；
+   清空后再保存并连一次，同一行变回 `no source mirror set: … (github.com) directly`。
+   在**不能**直连 github.com 的网络里，组件市场与远端 pylibs 安装都应能走通（见
+   「源镜像在手机上够不着」一节）。
+10. 隧道不落地（报告"0.1.46 卡在 Starting tunnel…"）：连一台 sshd 拒绝反向转发的远端
+    （或对端防火墙丢掉 global request），进度条必须**在 4 秒一级、总共几十秒内**给出失败，
+    而不是永远停在 "Starting tunnel…"；`~/.clutch/tunnel.log` 里应出现
+    `did not answer the reverse-forward request within 4000ms`（见上一节报告）。
 
 ## 与初版方案的偏差（均已定案）
 

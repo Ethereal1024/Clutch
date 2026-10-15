@@ -1135,6 +1135,22 @@ mjx-container[display="true"] {
 .modal-tab.active, .modal-tab.active:hover:not(:disabled) { color: var(--text); border-color: transparent; border-bottom-color: var(--accent); }
 .modal-pane.hidden { display: none; }
 
+/* the mirror row: a CLIENT setting — where the sources below are READ from — which
+   is why it is drawn above the machine they are for. It is `flex: none` like the
+   head and the note (see the group below): a field that has scrolled away is a
+   field you cannot reach at the moment the list under it explains why you want it.
+   The input keeps the modal's field look and gives up its `width: 100%` to the
+   flex row's Save button. */
+.plug-mirror {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--s3);
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+}
+.plug-mirror input { flex: 1; width: auto; min-width: 0; }
+.plug-mirror-note { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
+.plug-mirror-note.error { color: var(--danger); }
 /* plugin tab: the target machine, what it holds, and the market */
 .plug-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
 .plug-target { display: flex; flex-direction: column; min-width: 0; }
@@ -1170,6 +1186,7 @@ mjx-container[display="true"] {
   overflow: hidden;
 }
 .plug-head, #plug-base, .plug-note, #plug-filter { flex: none; }
+.plug-mirror { flex: none; }
 .plug-body { margin-top: var(--s3); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* the filter row: the views of the ONE list, plus a box to narrow it by name. It
    sits OUTSIDE the scrolling list on purpose — which view is on screen must stay

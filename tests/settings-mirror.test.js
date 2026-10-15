@@ -93,6 +93,30 @@ async function main() {
   assert.strictEqual(merged.api_key, "k2", "save writes the key");
   assert.strictEqual(merged.custom, "x", "save preserves unknown keys");
 
+  // 6. the source mirror rides through the SAME save (report: "downloads and
+  // uploads to the server still need a VPN"). On Android this file is the only
+  // place mirrorPrefix() can read a mirror from, so what the UI's field writes has
+  // to land here — merged next to whatever else the file holds, with the same
+  // explicit rules as the knobs above: a value sets it, "" clears it, and a save
+  // that does not mention it leaves it alone.
+  fs.writeFileSync(SETTINGS, JSON.stringify({ base_url: "https://a", custom: "x", ssh_secrets: { "u@h:22": "s" } }));
+  r = await save(null, { source_mirror: "  https://mirror.example/  " });
+  assert.deepStrictEqual(r, { ok: true }, "a mirror-only save is a save");
+  let withMirror = JSON.parse(fs.readFileSync(SETTINGS, "utf-8"));
+  assert.strictEqual(withMirror.source_mirror, "https://mirror.example/", "the mirror is written trimmed");
+  assert.strictEqual(withMirror.custom, "x", "and the keys the LLM knobs do not own survive it");
+  assert.strictEqual(withMirror.ssh_secrets["u@h:22"], "s", "the secret cache survives it too");
+  assert.strictEqual(withMirror.base_url, "https://a", "as does the endpoint beside it");
+
+  r = await save(null, { api_key: "k3" });
+  withMirror = JSON.parse(fs.readFileSync(SETTINGS, "utf-8"));
+  assert.strictEqual(withMirror.source_mirror, "https://mirror.example/", "a save that does not mention the mirror keeps it (undefined keeps, like the knobs)");
+  assert.strictEqual(withMirror.api_key, "k3", "while the key it does mention lands");
+
+  r = await save(null, { source_mirror: "" });
+  withMirror = JSON.parse(fs.readFileSync(SETTINGS, "utf-8"));
+  assert.strictEqual(withMirror.source_mirror, "", "an empty string clears the knob back to github.com");
+
   fs.rmSync(FAKE_HOME, { recursive: true, force: true });
   console.log("settings mirror: all passed");
   return 0;

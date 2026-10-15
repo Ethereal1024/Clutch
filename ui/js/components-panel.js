@@ -40,6 +40,9 @@ const plugTargetEl = $("#plug-target");
 const plugBaseEl = $("#plug-base");
 const plugNoteEl = $("#plug-note");
 const plugReloadBtn = $("#plug-reload");
+const plugMirrorInput = $("#mirror-input");
+const plugMirrorSaveBtn = $("#mirror-save");
+const plugMirrorNoteEl = $("#mirror-note");
 
 const plugState = {
   target: null, // {kind, base} — which machine this page is about
@@ -689,16 +692,19 @@ function plugList() {
   }
   // ...and when the failure is the network rather than an answer (the view says
   // which: `unreachable`), one more line says what can be done about it. This is
-  // the one place the page mentions the mirror, because it is the one place it is
+  // the one place the list mentions the mirror, because it is the one place it is
   // the answer: a source this build ships is read from github.com, and a machine
-  // that cannot reach it is not going to be talked out of it by a reload.
+  // that cannot reach it is not going to be talked out of it by a reload. The
+  // FIELD is drawn above, out of this list's reach — this line is the pointer to
+  // it, and the file it names is where the same key lands on a desktop.
   if (plugState.market && plugState.market.unreachable) {
     const hint = document.createElement("p");
     hint.className = "plug-source-hint";
     hint.textContent =
       "a source this build ships is read from github.com. If this machine cannot reach it, " +
-      'write "source_mirror": "https://<prefix>" into ~/.clutch/settings.json and look again — ' +
-      "a mirror only moves the bytes: every digest is still checked against the release's own pin";
+      "set a source mirror in the box above (it writes \"source_mirror\" into " +
+      "~/.clutch/settings.json) and look again — a mirror only moves the bytes: every " +
+      "digest is still checked against the release's own pin";
     sec.appendChild(hint);
   }
   return sec;
@@ -1315,6 +1321,103 @@ function plugRead({ force = false } = {}) {
       renderPlugins();
     });
 }
+
+// ---- the source mirror ------------------------------------------------------
+//
+// Where a source this build SHIPS is read from. ui/net-fetch.js applies the prefix
+// once, where a source becomes a URL, and the fetch that obeys it happens in the
+// HOST process — this file cannot reach it, and on the phone the host's own
+// artifact downloads read the same key — so this field is not the knob: it is the
+// one door to it. Saving writes ~/.clutch/settings.json through clutchSettings
+// (the same path the LLM knobs take), which is the only place mirrorPrefix() can
+// read a mirror from on Android, where HOME is the app's own filesDir and the
+// hand-written key the log line used to prescribe is not something a phone user
+// can produce. localStorage is this window's own copy, kept only so the field
+// comes back filled the next time the pane is opened — nothing reads it but this.
+//
+// The knob is a decision with a network consequence, so it is one deliberate act
+// (the Save button, never the keystroke) and the line under it is the verdict:
+// what the sources are read under now, or why the value was refused.
+function plugMirrorStored() {
+  try {
+    return localStorage.getItem("clutch_source_mirror") || "";
+  } catch (e) {
+    return ""; // a storage this window cannot read is a window with no mirror
+  }
+}
+
+function plugMirrorNote(text, bad) {
+  if (!plugMirrorNoteEl) return;
+  plugMirrorNoteEl.className = "plug-mirror-note" + (bad ? " error" : "");
+  plugMirrorNoteEl.textContent = text;
+}
+
+// What the line says when it is NOT the answer to a just-pressed Save: the mirror
+// in force, said as the sentence the sources follow ("read under X" / "read from
+// github.com") rather than as the value's own name for itself.
+function plugMirrorIdleNote() {
+  const cur = plugMirrorStored();
+  plugMirrorNote(
+    cur
+      ? `sources this build ships are read under ${cur}`
+      : "no mirror: sources this build ships are read from github.com",
+    false
+  );
+}
+
+// The save: one value, one write, one re-read. A value that is not http(s) is
+// refused before anything is written — a mirror is the PREFIX of an http(s) URL, so
+// anything else would rewrite every source into something that is not a URL and
+// the page would then report a network failure for what is a typo. The host writes
+// first and localStorage second: a copy that outlived a refused write would fill
+// the field with a mirror this window is not actually reading under.
+async function plugMirrorSave() {
+  const raw = plugMirrorInput ? plugMirrorInput.value.trim() : "";
+  if (raw && !/^https?:\/\//i.test(raw)) {
+    plugMirrorNote(
+      `"${raw}" is not http(s): a mirror is the prefix a source URL is read under, so it has to be a URL too — nothing was written`,
+      true
+    );
+    return;
+  }
+  const value = raw.replace(/\/+$/, ""); // "<mirror>" and "<mirror>/" are one mirror
+  const api = window.clutchSettings;
+  if (!api || !api.save) {
+    plugMirrorNote("this shell cannot write the setting", true);
+    return;
+  }
+  if (plugMirrorSaveBtn) plugMirrorSaveBtn.disabled = true;
+  let reply = null;
+  try {
+    reply = await api.save({ source_mirror: value });
+  } catch (e) {
+    reply = { ok: false, error: (e && e.message) || String(e) };
+  }
+  if (plugMirrorSaveBtn) plugMirrorSaveBtn.disabled = false;
+  if (reply && reply.ok === false) {
+    plugMirrorNote(`could not save the mirror: ${(reply && reply.error) || "the host refused it"}`, true);
+    return;
+  }
+  try {
+    localStorage.setItem("clutch_source_mirror", value);
+  } catch (e) {
+    /* a window that cannot remember it still reads under it for this session */
+  }
+  plugMirrorNote(
+    value
+      ? `sources this build ships are now read under ${value} — every digest is still checked against the release's own pin`
+      : "no mirror: sources this build ships are read from github.com again",
+    false
+  );
+  // the mirror moves where the BYTES come from, so the list has to be read again:
+  // a source that could not be reached a moment ago may answer now
+  plugState.result = null;
+  plugRead({ force: true });
+}
+
+if (plugMirrorInput) plugMirrorInput.value = plugMirrorStored();
+if (plugMirrorSaveBtn) plugMirrorSaveBtn.addEventListener("click", plugMirrorSave);
+plugMirrorIdleNote();
 
 plugReloadBtn.addEventListener("click", () => {
   plugState.result = null; // a reload is a request for facts, not a report to keep

@@ -79,6 +79,28 @@
       </div>
       </div>
       <div id="settings-pane-plugins" class="modal-pane hidden" role="tabpanel" aria-labelledby="settings-tab-plugins">
+        <!-- Where every source this build ships is read from (report: "downloads
+             and uploads to the server still need a VPN — the domestic mirror never
+             took effect"). The knob used to exist only as CLUTCH_SOURCE_MIRROR or a
+             hand-written ~/.clutch/settings.json key, and on Android HOME is the
+             app's own filesDir: neither is reachable on a phone. It is a CLIENT
+             setting (this window's network, ui/net-fetch.js reads it per fetch), so
+             it is drawn above the target machine rather than among its components —
+             and it is the only door to it there is. -->
+        <div class="plug-mirror">
+          <label for="mirror-input">Source mirror</label>
+          <div class="fs-conn-row">
+            <input id="mirror-input" type="text" autocomplete="off" spellcheck="false"
+              placeholder="https://accelerator.example/ — empty reads github.com directly" />
+            <!-- the field is saved, not typed-at-the-backend: it is a decision with
+                 a network consequence, so it is one deliberate act -->
+            <button id="mirror-save" class="ghost" type="button"
+              title="save the mirror and read the sources again">Save</button>
+          </div>
+          <!-- the verdict on that save (what it applies to, or why it was refused):
+               the same `role="status"` line the pane uses above the list -->
+          <p id="mirror-note" class="plug-mirror-note" role="status" aria-live="polite"></p>
+        </div>
         <div class="plug-head">
           <div class="plug-target">
             <span class="plug-target-label">target machine</span>
