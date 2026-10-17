@@ -30,7 +30,18 @@ global.typesetMath = () => { mathCalls++; };
 // every autoScroll is a scrollHeight read over the whole transcript: a forced
 // layout. Counted, because "per delta" vs "per frame" is exactly the bug.
 global.autoScroll = () => { autoScrollCalls++; };
-global.stream = { classList: { contains: () => false } };
+// the pane the fold engine talks to (js/stream-view.js's #stream): the two
+// listeners it registers at load, the rect its give-back reads, and the heads
+// paintStuck walks (none here — this runner is about the render throttle)
+global.stream = {
+  classList: { contains: () => false },
+  addEventListener: () => {},
+  querySelectorAll: () => [],
+  getBoundingClientRect: () => ({ top: 0 }),
+  clientTop: 0,
+  clientHeight: 600,
+  scrollTop: 0,
+};
 global.highlightCode = () => {}; // replaced by the real one below
 function makeBlock() {
   return { querySelector: () => ({ set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ""; } }) };
@@ -43,7 +54,7 @@ function makeBlock() {
 // so an "append, do not rewrite" fix is visible as appends/rewrites counts.
 function makeNode() {
   const cls = new Set();
-  const node = { innerHTML: "", _t: "", text: "", children: [], appends: 0, rewrites: 0 };
+  const node = { innerHTML: "", _t: "", text: "", children: [], appends: 0, rewrites: 0, style: {} };
   Object.defineProperty(node, "className", {
     get: () => [...cls].join(" "),
     set: (v) => { cls.clear(); String(v).split(/\s+/).filter(Boolean).forEach((c) => cls.add(c)); },
@@ -52,7 +63,17 @@ function makeNode() {
     get() { return this._t + this.children.map((c) => c.textContent || "").join(""); },
     set(v) { this.rewrites++; this._t = String(v); this.children = []; },
   });
-  node.classList = { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c) };
+  node.classList = {
+    add: (c) => cls.add(c),
+    remove: (c) => cls.delete(c),
+    contains: (c) => cls.has(c),
+    // foldAnim applies the destination class with toggle(c, open)
+    toggle: (c, force) => {
+      const on = force === undefined ? !cls.has(c) : !!force;
+      if (on) cls.add(c); else cls.delete(c);
+      return on;
+    },
+  };
   node.appendChild = function (n) {
     this.children.push(n);
     this.appends++;
@@ -64,9 +85,13 @@ function makeNode() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- load the real code ----
+// the fold engine subscribes to the window at load (a resize moves the pane's top
+// edge under the pinned heads). This runner drives it with reduced motion, so the
+// stub exists for the subscription itself.
+global.window = { matchMedia: () => ({ matches: true }), addEventListener: () => {} };
 (0, eval)(region("let textRenderRaf = 0;", "flushTextRender"));
 (0, eval)(region("let thinkingRenderRaf = 0;", "flushThinkingRender"));
-(0, eval)(region("const FOLD_OPEN_EASE", "buildThinkingBlock"));
+(0, eval)(region("const ARRIVE_EASE", "buildThinkingBlock"));
 (0, eval)(region("const hlCache = new Map();", "highlightCode"));
 (0, eval)(fnBody("noBackend"));
 (0, eval)(fnBody("apiFetch"));

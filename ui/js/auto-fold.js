@@ -10,6 +10,12 @@
 // in this pane already uses (js/stream-text.js wrapFold), so opening it is the
 // animation the reader knows.
 //
+// A turn only folds while it is in the pane. Two other ways its rows reach the
+// reader are covered here as well: a replayed project — the same `final` events,
+// replayed into the same pane — and a page of older records paged in above the
+// window, which can arrive carrying the front half of a turn whose divider this
+// window already had (foldClosedRegions at the bottom).
+//
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
 // sees every `const`/`let`/`function` the earlier files declared. It may rely
@@ -17,29 +23,21 @@
 
 "use strict";
 
-// Fold this turn's middle. Called once per finished task, live or replayed: a
-// replayed `final` folds the turn it closes exactly like a live one, which is
-// what makes a reopened project read the same way it did when it was running.
-function autoFoldTurn() {
-  // The history pager renders older records into an off-DOM sink to measure and
-  // prepend them in one pass (js/project.js loadOlder): folding THERE would build
-  // rows the pane is about to be handed already-shaped, and the "one turn" this
-  // function reasons about does not exist in a sink that holds a window of them.
-  if (pageSink) return;
-  if (!eventsEl) return;
-  const kids = Array.from(eventsEl.children);
-
-  // This turn, read off the transcript instead of guessed. appendCompletion put
-  // THIS run's divider in the pane just before this call (js/stream-events.js),
-  // so the turn is the region between the divider before that one and it. A
-  // region is what makes the opener unambiguous: a run emits user rows of its
-  // own (the max-tokens / empty-response notices are user_message events), and
-  // the turn's OWN task is the first user row in the region, never the newest —
-  // the newest is a notice, and anchoring on it would leave the turn unfolded.
-  let turnEnd = kids.length; // exclusive: this run's own divider
-  for (let i = kids.length - 1; i >= 0; i--) {
-    if (kids[i].matches(".completion")) { turnEnd = i; break; }
-  }
+// Fold this turn's middle, folding the one region of `root` that ends at
+// `turnEnd`: the index, in root's children, of the divider that closed the turn.
+// `root` is the pane for a live or replayed `final`, and the pane again for the
+// regions a paged-in history has just handed back — never the off-DOM sink the
+// pager renders into, whose rows are about to move.
+//
+// A region, read off the transcript instead of guessed. appendCompletion put THIS
+// run's divider in the pane just before this is called (js/stream-events.js), so
+// the turn is the region between the divider before that one and it. A region is
+// what makes the opener unambiguous: a run emits user rows of its own (the
+// max-tokens / empty-response notices are user_message events), and the turn's
+// OWN task is the first user row in the region, never the newest — the newest is a
+// notice, and anchoring on it would leave the turn unfolded.
+function foldRegion(root, turnEnd) {
+  const kids = Array.from(root.children);
   let turnStart = 0;
   for (let i = turnEnd - 1; i >= 0; i--) {
     if (kids[i].matches(".completion")) { turnStart = i + 1; break; }
@@ -48,7 +46,27 @@ function autoFoldTurn() {
   for (let i = turnStart; i < turnEnd; i++) {
     if (kids[i].matches(".event.user")) { start = i; break; }
   }
-  if (start < 0) return; // a window that opens mid-turn: the task row was paged away
+  // No task row in the region means one thing only: the pane starts INSIDE this
+  // turn. cpr_start is the newest compaction line (agent/core/lazy.py) and a
+  // compaction fires while a run is working, so a reopened project's first turn
+  // is the one that was running when the context filled — its task row is above
+  // the window and cannot be paged in backwards from here. Reading that as "no
+  // turn" left the top of every reopened project unfolded, next to a divider that
+  // said `completed` while the turn just below it (whose task row is inside the
+  // window) folded: two identical endings, one fold. That asymmetry is the report
+  // against ui-fix.clc (996–1051 folded, 878–995 did not, both `completed`).
+  //
+  // The region still has a head — the row the pane itself starts on — and the
+  // middle under it is as re-readable as any other turn's, so the fold hangs off
+  // that head. It stays in plain sight: it is the compaction notice that says why
+  // the window begins here, and it takes the place the task row takes in a turn
+  // that has one. Only the pane's FIRST region is read this way: a region in the
+  // middle of the transcript with no task row is a shape this file does not
+  // recognize, and guessing on one is what this early return is for.
+  if (start < 0) {
+    if (turnStart !== 0) return;
+    start = turnStart;
+  }
   const opener = kids[start];
   // folded already: a second `final` for the same turn (a reconnect replays one)
   // must not fold the fold, and must not re-collapse a fold the reader opened
@@ -83,8 +101,11 @@ function autoFoldTurn() {
   // the caret keeps its advance width and the label never shifts under the
   // reader's finger — a glyph SWAP cannot be transitioned, and this one moves
   // with the fold it opens. The state it is drawn from is the attribute below,
-  // which is also what a screen reader reads.
-  caret.textContent = "▸";
+  // which is also what a screen reader reads. The glyph itself is the icon face's
+  // FILLED triangle rather than the `▸` the other fold toggles in this pane use:
+  // that one is drawn 3x4px at 12px and this caret is the only control a whole
+  // block of the transcript hangs off (ui/style.css has the sizes).
+  caret.textContent = "▶";
   const label = document.createElement("span");
   label.textContent = `process · ${mid.length} ${mid.length === 1 ? "step" : "steps"}`;
   head.appendChild(caret);
@@ -98,18 +119,27 @@ function autoFoldTurn() {
   fold.className = "fold open";
   const inner = document.createElement("div");
   inner.className = "fold-inner";
+  // The rows sit one level deeper than the clip: `.fold-inner` clips, and
+  // `.fold-body` is what the close SLIDES (up by its own height, js/stream-text.js
+  // foldAnim) so the last row stays glued to the shrinking box's bottom edge instead
+  // of being sliced off at the crop line — the rows leave under the hanging head.
+  // It is the only thing that can move there: a transform on the box would carry the
+  // clip window with it and leave a gap where the rows were.
+  const body = document.createElement("div");
+  body.className = "fold-body";
+  inner.appendChild(body);
   fold.appendChild(inner);
   wrap.appendChild(head);
   wrap.appendChild(fold);
 
   // the wrapper takes the first folded row's place FIRST (insertBefore needs a
-  // reference node still in the pane), and the rows then move in behind it: the
+  // reference node still in `root`), and the rows then move in behind it: the
   // task row stays above the fold, the closing answer and the completion divider
   // stay below it
-  eventsEl.insertBefore(wrap, mid[0]);
+  root.insertBefore(wrap, mid[0]);
   const frag = document.createDocumentFragment();
   for (const el of mid) frag.appendChild(el); // moves each row out of the pane
-  inner.appendChild(frag);
+  body.appendChild(frag);
   head.onclick = () => {
     // toggleFold answers with where the fold is GOING, not with the class list it
     // is passing through: mid-flight a second click reverses the move instead of
@@ -122,10 +152,70 @@ function autoFoldTurn() {
   // arrive); a replayed turn gets the end state at once — a project open must not
   // run one animation per turn of its history — and foldCollapse itself lands the
   // end state immediately for a reduced-motion reader.
-  if (stream.classList.contains("loading")) {
+  if (foldsLandClosed()) {
     fold.classList.remove("open");
     fold.classList.add("hidden");
   } else {
     foldCollapse(fold);
   }
+  // The block is a row of the pane now, and where its head sits against the pane's
+  // top edge is a state nothing else has announced: with the block already scrolled
+  // past (a long turn folding under a reader who is inside it) the head pins on this
+  // frame, not on the next scroll event (js/stream-text.js paintStuck).
+  queueStuck();
 }
+
+// Fold this run's turn: the region that ends at the pane's newest divider. Called
+// once per finished task, live or replayed — a replayed `final` folds the turn it
+// closes exactly like a live one, which is what makes a reopened project read the
+// same way it did when it was running.
+function autoFoldTurn() {
+  // The history pager renders older records into an off-DOM sink to measure and
+  // prepend them in one pass (js/project.js loadOlder): folding THERE would build
+  // rows the pane is about to be handed already-shaped, and the "one turn" this
+  // function reasons about does not exist in a sink that holds a window of them.
+  // What the sink therefore could not fold is folded after the prepend, by
+  // foldClosedRegions below.
+  if (pageSink) return;
+  if (!eventsEl) return;
+  const kids = Array.from(eventsEl.children);
+  let turnEnd = kids.length; // exclusive: this run's own divider
+  for (let i = kids.length - 1; i >= 0; i--) {
+    if (kids[i].matches(".completion")) { turnEnd = i; break; }
+  }
+  foldRegion(eventsEl, turnEnd);
+}
+
+// Every region of `root` that is closed already, in one pass: the pane after the
+// history pager has prepended a page into it. That page can carry the end of a
+// turn this window opened in the middle of — cpr_start is the newest compaction
+// line (agent/core/lazy.py) and a compaction fires while a run is working, so the
+// window's first region is a turn whose task row is above the window, and its
+// `final` landed while the sink was the render target and folding was refused. The
+// dividers are the regions' ends — the one node the fold never moves — so they are
+// the handles. Each is looked up again by identity, because folding the region
+// before it moved its rows out of root and shifted every index under it.
+function foldClosedRegions(root) {
+  if (!root) return;
+  const ends = Array.from(root.children).filter((el) => el.matches(".completion"));
+  for (const divider of ends) {
+    const at = Array.from(root.children).indexOf(divider);
+    if (at >= 0) foldRegion(root, at);
+  }
+}
+
+// Does a fold land closed without animating? A live run animates (the reader
+// watched those rows arrive); a replayed project open lands every fold of its
+// history at once, and folding a page of prepended history is that same replay.
+// It must be instant there for a second reason: the pager measures the fold it
+// just made to re-anchor the view (js/project.js loadOlder), and an animation still
+// in flight would carry the rows out from under that measurement.
+function foldsLandClosed() {
+  return stream.classList.contains("loading") || paging;
+}
+
+// The pager cannot call foldClosedRegions: the page loads js/project.js before
+// this file, and a classic script may only name what the files above it declared
+// (tests/ui-load-order-test.js pins that). So loadOlder announces the prepend by
+// name and the folding happens here, where the pane's shape is known.
+if (eventsEl) eventsEl.addEventListener("clutch:page-prepended", () => foldClosedRegions(eventsEl));

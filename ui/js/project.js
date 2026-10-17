@@ -89,15 +89,29 @@ async function loadOlder() {
     const frag = document.createDocumentFragment();
     while (sink.firstChild) frag.appendChild(sink.firstChild);
     eventsEl.insertBefore(frag, eventsEl.firstElementChild);
+    // This page can carry the end of a turn this window opened in the middle of: a
+    // compaction fired mid-run, so the window's first region is a turn whose task
+    // row is older than the window (agent/core/lazy.py cpr_start). Its `final`
+    // arrived while the sink was the render target — where folding is refused,
+    // because the pane is about to be handed those rows (js/auto-fold.js) — so it
+    // is folded now, on the prepended pane and before anything paints. Announced by
+    // name, not called: js/auto-fold.js loads after this file and a classic script
+    // may only name what the files above it declared (tests/ui-load-order-test.js).
+    eventsEl.dispatchEvent(new CustomEvent("clutch:page-prepended"));
     if (typeof MathJax !== "undefined" && typeof MathJax.typesetPromise === "function") {
       for (const b of mathBlocks) {
         try { await MathJax.typesetPromise([b]); } catch (e) {}
         await new Promise((r) => setTimeout(r, 0)); // repaint between blocks
       }
     }
-    // prepending (and typesetting) shifted the content down: re-anchor the view
+    // prepending (and typesetting) shifted the content down: re-anchor the view on
+    // the row that was on top. That row can now be inside a fold the line above
+    // just closed, and a hidden row has no box — its rect reads zero, which would
+    // throw the scroll position — so anchor on the fold that holds it instead: the
+    // fold's head sits exactly where that row was.
     if (anchor && anchorTop !== null) {
-      stream.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+      const onTop = anchor.getClientRects().length ? anchor : anchor.closest(".turn-fold");
+      if (onTop) stream.scrollTop += onTop.getBoundingClientRect().top - anchorTop;
     }
     setOlderPill(data.older);
   } catch (e) {

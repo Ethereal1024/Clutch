@@ -58,6 +58,13 @@ function endCatchUp() {
 
 function autoScroll(force) {
   if (stream.classList.contains("loading")) return;
+  // A region fold that is handing the pane's scroll back (js/stream-text.js,
+  // giveBack) already has the pane where it wants it: re-pinning the tail under it
+  // would carry the head it is holding at the top edge off with the shrinking box.
+  // The engine loads after this file, so the typeof is only there for a
+  // ResizeObserver callback delivered between the two scripts — there is no fold to
+  // give anything back before it exists.
+  if (typeof foldHoldsScroll === "function" && foldHoldsScroll() && !force) return;
   if (catchUp && !force) return; // one scroll per catch-up, not one per record
   if (force) {
     // User-initiated jump (message send, ↓, Cmd/Ctrl+Down): tracked = instant pin,

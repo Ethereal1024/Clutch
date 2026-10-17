@@ -139,14 +139,108 @@ function flushThinkingRender() {
 // ARRIVES decelerates into place on --arrival, one that LEAVES accelerates out
 // on --departure. Nothing in either language can see the other, so
 // tests/ui_css_check.py pins all three numbers to ui/style.css's tokens.
-const FOLD_OPEN_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
-const FOLD_CLOSE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
-const FOLD_MS = 200; // --move
+const ARRIVE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
+const LEAVE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
+const FOLD_MS = 200; // --move: a fold the size of a row
+const FOLD_SIZE_MS = 420; // --size: the same move once it has a screenful to cover
+const FOLD_PX = 1000; // the screenful --size is written for
+
+// The fold's own content height in pixels: the inner's scrollHeight — the whole
+// content, because the inner clips its overflow but still reports its extent, and
+// it is readable even while the fold is closed (the measurement is the track the
+// move travels AND the distance its duration is paced by). A fold with nothing
+// measured (a test double, a box with no layout) is 0, so both callers stay on the
+// sheet's own numbers instead of a NaN.
+function foldContentPx(fold) {
+  const inner = fold.firstElementChild;
+  return inner && typeof inner.scrollHeight === "number" ? inner.scrollHeight : 0;
+}
+
+// How long THIS fold's move runs. The region fold swallows a turn of a hundred
+// rows (js/auto-fold.js) and a flat 200ms closed those at a speed the eye reads as
+// a jump — the same gesture, given the time the distance it covers deserves. The
+// two ends are the sheet's own: under half a screenful rides --move, a screenful
+// leaves on --size, and the move walks between them on the distance.
+function foldMoveMs(fold) {
+  const px = foldContentPx(fold);
+  return Math.max(FOLD_MS, Math.min(FOLD_SIZE_MS, Math.round(px * FOLD_SIZE_MS / FOLD_PX)));
+}
+
+// The timeline's own progress, read with the curve already applied: it IS the
+// fraction of the distance on screen, which is what the body's slide and the
+// pane's give-back have to travel on. With nothing in flight the move is over, so
+// the answer is 1 — that is how a landing call after a stop reads the destination
+// instead of 0.
+function foldProgress(el) {
+  const anim = el && el._foldAnim;
+  const timing = anim && anim.effect && anim.effect.getComputedTiming ? anim.effect.getComputedTiming() : null;
+  return timing && typeof timing.progress === "number" ? timing.progress : 1;
+}
+
+// The wrapper a close SLIDES: the region fold's rows inside the clipping inner
+// (`.fold-body`, js/auto-fold.js). A thinking or diff fold holds its content
+// directly, with no body, and takes the opacity leg of the move instead.
+function foldBody(fold) {
+  const inner = fold.firstElementChild;
+  const body = inner ? inner.firstElementChild : null;
+  return body && body.classList && body.classList.contains("fold-body") ? body : null;
+}
+
+// The head that HANGS over this fold — the `.turn-fold-head` it follows — or null
+// for every other fold, which has no band pinned at the pane's top and so no
+// scroll of its own to give back.
+function foldHead(fold) {
+  const head = fold.previousElementSibling;
+  return head && head.classList && head.classList.contains("turn-fold-head") ? head : null;
+}
+
+// How far the block's head sits above the pane's top edge: the distance the pane's
+// own scroll has to give back for a close to leave the head hanging at the top
+// instead of being carried off with the box it belongs to. Read from the BLOCK,
+// never from the head — a pinned head reports where sticky put it, not where it
+// belongs.
+function headLag(fold) {
+  const block = fold.parentElement;
+  if (!block) return 0;
+  const pane = stream.getBoundingClientRect();
+  return Math.max(0, pane.top + stream.clientTop - block.getBoundingClientRect().top);
+}
+
+/* ── the give-back: a close inside a pinned block moves the pane ───────────────
+   A close that starts with the block's head already pinned (the reader is inside
+   the rows it is about to swallow) shrinks a box whose top is ABOVE the pane's top
+   edge. With the pane's scroll standing still, the last frames of the shrink carry
+   the head up with the box it belongs to — exactly what the hanging head exists to
+   prevent. So the pane's scroll runs on the same clock and hands back headLag():
+   the scroll and the height share one curve (foldProgress is the timeline's own,
+   eased — a second easing here would let the head drift off the pane's edge
+   mid-move). The one extra call after the animation has been stopped is how the
+   move lands exactly on the lag instead of on the last frame it managed to draw.
+   While a give-back runs the pane belongs to it (foldHoldsScroll): js/stream-view.js
+   does not re-pin the tail under it, and the ResizeObserver that watches the
+   transcript's height does not either. */
+let foldScrollHold = 0;
+
+function foldHoldsScroll() { return foldScrollHold > 0; }
+
+function giveBack(fold) {
+  if (!fold._scrollLag) return;
+  stream.scrollTop = fold._scrollFrom - fold._scrollLag * foldProgress(fold);
+}
+
+function stopGiveBack(fold) {
+  if (fold._scrollRaf) cancelAnimationFrame(fold._scrollRaf);
+  fold._scrollRaf = 0;
+  if (fold._scrollHold) { foldScrollHold--; fold._scrollHold = false; }
+}
 
 // one fold/diff animation per element; cancel any in-flight one
 function cancelFoldAnim(el) {
   if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
   el._foldAnim = null;
+  if (el._bodyAnim) { try { el._bodyAnim.cancel(); } catch (e) {} }
+  el._bodyAnim = null;
+  stopGiveBack(el);
 }
 
 function animateFold(el, from, to, onDone) {
@@ -168,7 +262,7 @@ function animateFold(el, from, to, onDone) {
   // fold below uses, so a diff opening and a diff closing are one gesture each
   const anim = el.animate(
     [{ height: from + "px" }, { height: to + "px" }],
-    { duration: FOLD_MS, easing: to >= from ? FOLD_OPEN_EASE : FOLD_CLOSE_EASE, fill: "forwards" }
+    { duration: FOLD_MS, easing: to >= from ? ARRIVE_EASE : LEAVE_EASE, fill: "forwards" }
   );
   el._foldAnim = anim;
   anim.onfinish = settle;
@@ -221,20 +315,24 @@ function followTailDuring(anim) {
   anim.addEventListener("cancel", stop, { once: true });
 }
 
-// How far the row has travelled right now. getComputedTiming().progress comes
-// with the curve already applied, so it IS the fraction of the height on screen
-// (not how far the clock got); the fold's own record of the direction turns that
-// into "fr". With nothing in flight, the settled class is the whole answer.
+// How far the row has travelled right now. The timeline's progress comes with the
+// curve already applied, so it IS the fraction of the height on screen (not how far
+// the clock got); the fold's own record of the direction turns that into "fr". With
+// nothing in flight, the settled class is the whole answer.
 function foldFraction(fold) {
-  const anim = fold._foldAnim;
   // only a move this function started carries the two fractions; the diff body's
   // own height animation shares the same slot on its own element
-  if (!anim || typeof fold._foldFrom !== "number") {
+  if (!fold._foldAnim || typeof fold._foldFrom !== "number") {
     return fold.classList.contains("hidden") ? 0 : 1;
   }
-  const timing = anim.effect && anim.effect.getComputedTiming ? anim.effect.getComputedTiming() : null;
-  const progress = timing && typeof timing.progress === "number" ? timing.progress : 1;
-  return fold._foldFrom + (fold._foldTo - fold._foldFrom) * progress;
+  return fold._foldFrom + (fold._foldTo - fold._foldFrom) * foldProgress(fold);
+}
+
+// Where the body's slide is right now, in px from its resting place: read before a
+// move is cancelled so a reversal carries on from the frame on screen.
+function foldBodyY(fold) {
+  if (typeof fold._bodyFrom !== "number") return 0;
+  return fold._bodyFrom + (fold._bodyTo - fold._bodyFrom) * foldProgress(fold);
 }
 
 // Where the fold is GOING. Mid-flight that is not what its class list says — the
@@ -251,32 +349,109 @@ function foldOpen(fold) {
 // screen, so an interrupted fold carries on from its current frame rather than
 // jumping to 0fr/1fr and replaying the whole distance.
 function foldAnim(fold, open, onDone) {
+  // where the move is RIGHT NOW, read before the cancel throws it away
   const from = foldFraction(fold);
+  const fromY = foldBodyY(fold);
   const to = open ? 1 : 0;
   cancelFoldAnim(fold);
+  // measurable pass: the fold is opened for the length of this synchronous block
+  // only, and it is handed its start height INLINE before the destination class
+  // goes on, so the document never lays out in a half-built state — a `display:
+  // none` box has no height to measure, and a closed one shrinking the scrollport
+  // for the instant between the class write and the first animation frame used to
+  // clamp a pane scrolled deep into the block back to the top before the move had
+  // started. That inline row is cleared again the moment the move settles; the
+  // sheet's own 0fr/1fr (or `.hidden`) takes the box over.
   fold.classList.remove("hidden"); // a rendered box is what can be animated
-  if (open) fold.classList.add("open");
-  else fold.classList.remove("open");
+  fold.classList.add("open");
+  const size = foldContentPx(fold);
+  fold.style.gridTemplateRows = Math.round(size * from) + "px";
+  const body = foldBody(fold);
+  // A close that starts with the block's head already pinned hands the pane's
+  // scroll back; the lag is read HERE, with the box at its start height and the
+  // destination class not on yet, which is the geometry the move begins from.
+  const lag = open || !foldHead(fold) ? 0 : headLag(fold);
+  fold.classList.toggle("open", open); // the class carries the end state
   if (reducedMotion()) {
+    fold.style.gridTemplateRows = "";
     if (!open) fold.classList.add("hidden");
+    if (lag) stream.scrollTop -= lag; // one step, not a track of them
     if (open) autoScroll();
+    queueStuck();
     if (onDone) onDone();
     return;
   }
+  // The track is measured in PIXELS, not `fr`. The fraction would be resolved
+  // against a container whose own height is auto — and Blink resolves that
+  // fraction twice: the container lands on f×content while the track (and so the
+  // clipped inner) lands on f²×content. Mid-move the box is then f(1-f)×content
+  // taller than what it holds, which used to be invisible behind a transparent
+  // head and reads as a bug inside a framed card: the frame closes on an empty
+  // band. Pixels give the box and the clip one number by construction, and it is
+  // the same measurement foldMoveMs paces the move by.
+  //
+  // ONE curve for a region fold, both directions: its move is a height being taken
+  // away from, or given back to, a screenful of rows — always the box ARRIVING at
+  // its new size, and the decelerating half of --arrival is what keeps the last of
+  // it from snapping. (A fold with no body is the other case: it closes by fading
+  // its content out, which IS a leave, so that direction keeps --departure.)
+  const track = (f) => Math.round(size * f) + "px";
+  const ms = foldMoveMs(fold); // one measurement, two animations on one clock
+  const easing = open || body ? ARRIVE_EASE : LEAVE_EASE;
   const anim = fold.animate(
-    [{ gridTemplateRows: from + "fr" }, { gridTemplateRows: to + "fr" }],
-    { duration: FOLD_MS, easing: open ? FOLD_OPEN_EASE : FOLD_CLOSE_EASE }
+    [{ gridTemplateRows: track(from), opacity: 1 },
+     { gridTemplateRows: track(to), opacity: open || body ? 1 : 0 }],
+    { duration: ms, easing }
   );
   fold._foldAnim = anim;
   fold._foldFrom = from;
   fold._foldTo = to;
   fold._foldTarget = open;
+  // the scroll the close has to give back, and where it started from: kept on the
+  // fold rather than inside the track so the landing can be exact
+  fold._scrollFrom = stream.scrollTop;
+  fold._scrollLag = lag;
+  if (lag > 1) {
+    foldScrollHold++;
+    fold._scrollHold = true;
+    const trackScroll = () => {
+      giveBack(fold);
+      fold._scrollRaf = requestAnimationFrame(trackScroll);
+    };
+    fold._scrollRaf = requestAnimationFrame(trackScroll);
+  }
+  // The body's own track. A region fold's rows slide UP a full content height on a
+  // close, so the LAST row stays glued to the shrinking box's bottom edge instead
+  // of being sliced off at the crop line: the rows leave under the hanging head
+  // instead of being cropped by an edge nobody can see. On an open they settle back
+  // to 0 from wherever an interrupted move left them. A fold with no body (thinking,
+  // diff) cannot slide, so its content fades instead — a block that is merely
+  // cropped row by row reads as a jump, not as a leave. Never a transform on the
+  // BOX: that would carry its own clip window with it and leave a gap where the
+  // rows were.
+  if (body) {
+    fold._bodyFrom = fromY;
+    fold._bodyTo = open ? 0 : -size;
+    fold._bodyAnim = body.animate(
+      [{ transform: "translateY(" + fromY + "px)" },
+       { transform: "translateY(" + fold._bodyTo + "px)" }],
+      { duration: ms, easing }
+    );
+  }
   anim.onfinish = () => {
     fold._foldAnim = null;
+    giveBack(fold); // land it, don't stop a frame short
+    fold._scrollLag = 0;
+    stopGiveBack(fold); // …then hand the pane back
+    fold.style.gridTemplateRows = "";
+    fold._bodyAnim = null; // no fill: the body's own resting place takes over
+    fold._bodyFrom = fold._bodyTo = 0;
     if (!open) fold.classList.add("hidden");
     if (onDone) onDone();
+    queueStuck(); // the block moved, and with it its head's pin state
   };
   if (open) followTailDuring(anim); // only an expansion pushes the tail down
+  queueStuck();
 }
 
 function foldExpand(fold) {
@@ -297,6 +472,50 @@ function toggleFold(fold, onExpand) {
   }
   return !open; // true: it is open, or on its way there
 }
+
+/* ── the pinned head's own state ───────────────────────────────────────────────
+   `position: sticky` has no `:stuck`, and a hanging head's fill must not be there
+   while it sits in its natural place — a band over a block nobody has scrolled past
+   would read as the frame this sheet just deleted. So "stuck" is computed: the block
+   starts above the pane's top edge and still has height below it — the condition
+   UIKit uses to pin a section header, and it costs two rects per block per frame
+   (already laid out: scrolling does not invalidate layout). The ecosystem's other
+   answer is a 1px sentinel plus an IntersectionObserver (stickybits,
+   react-sticky-box); rects need no extra element and every one of them is read in
+   the scroll path the pane already runs. rAF-coalesced, because a scroll event can
+   arrive several times a frame and this must not. */
+let stuckRaf = 0;
+
+function paintStuck() {
+  stuckRaf = 0;
+  const heads = stream.querySelectorAll(".turn-fold-head");
+  if (!heads.length) return;
+  const pane = stream.getBoundingClientRect().top;
+  const state = [];
+  // read, then write: a class write between two reads is what makes a loop of rects
+  // force a style recalculation per block
+  for (const head of heads) {
+    const block = head.parentElement;
+    const fold = head.nextElementSibling;
+    state.push([head, !!(block && fold &&
+      block.getBoundingClientRect().top < pane - 0.5 &&
+      fold.getBoundingClientRect().bottom > pane + 1)]);
+  }
+  for (const [head, stuck] of state) head.classList.toggle("stuck", stuck);
+}
+
+function queueStuck() {
+  if (stuckRaf) return;
+  stuckRaf = requestAnimationFrame(paintStuck);
+}
+
+// The pane's own scroll is where this has to run, and it runs on its OWN listener:
+// js/stream-view.js's listener returns early on every programmatic scroll (it must —
+// the latch may only follow the reader's gestures), and the give-back above IS a
+// programmatic scroll that has to repaint the heads. A resize moves the pane's top
+// edge under the heads without any scroll at all, so it repaints too.
+stream.addEventListener("scroll", queueStuck, { passive: true });
+window.addEventListener("resize", queueStuck);
 
 // collapsible thinking row; shared by the stored-replay and live streaming paths
 function buildThinkingBlock(initialLabel, initialContent) {

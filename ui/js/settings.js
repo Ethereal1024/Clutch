@@ -339,7 +339,8 @@ const SETTINGS_TABS = ["llm", "plugins"];
 // heights that lands in ONE frame, and a box jumping from 300px to 720px reads as
 // a second box arriving rather than as the one you were standing in refilling —
 // the file picker smooths the same jump for the same reason (`#fs-body`'s
-// max-height transition, which is where the 300ms comes from too).
+// max-height transition, which is where the length comes from too: --size, in
+// milliseconds, the same token the region fold walks up to).
 //
 // What a CSS transition cannot do here is what this has to follow. The height
 // belongs to no element of its own — it is whichever pane is showing plus the
@@ -348,7 +349,7 @@ const SETTINGS_TABS = ["llm", "plugins"];
 // arrives AFTER the switch. A transition aimed at a height measured at the switch
 // would travel to the wrong number and then jump; this one is aimed, once per
 // frame, at whatever the box wants on that frame.
-const SETTINGS_HEIGHT_MS = 300;
+const SETTINGS_HEIGHT_MS = 420; // --size
 let settingsHeightAnim = null; // { box, raf, from, t0 } while the box is travelling
 
 // the box's own height, with nothing holding it: the inline height is cleared for

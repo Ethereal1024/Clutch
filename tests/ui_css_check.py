@@ -42,15 +42,16 @@ of comments/strings/braces, the exact part of the grammar this bug lives in):
      rule with no declaration anywhere, which is not an error a browser reports:
      the declaration is dropped and the colour simply inherits, i.e. a rule that
      looks deliberate and means nothing
-  9. the js side of the motion is the css side's tokens: FOLD_OPEN_EASE in
-     js/stream-text.js is --arrival and FOLD_CLOSE_EASE is --departure (a fold
-     that opens arrives, one that closes leaves — so both names have to be the
-     pair one easing picks between, not two constants one of which moves
-     nothing), the duration every fold runs is the FOLD_MS constant and that
-     constant is --move, and settings.js's MODAL_CLOSE_MS is --move in
-     milliseconds. The folds are animated in js and the tokens live in css, so
-     nothing in either language can see the other: without a pin, editing one
-     half is a silent change to the rhythm
+  9. the js side of the motion is the css side's tokens: ARRIVE_EASE in
+     js/stream-text.js is --arrival and LEAVE_EASE is --departure (a fold that
+     opens arrives, one that closes leaves — so both names have to be the pair
+     one easing picks between, not two constants one of which moves nothing),
+     the duration a row-sized fold runs is FOLD_MS and that constant is --move,
+     the region fold's far end is FOLD_SIZE_MS and that is --size, and
+     settings.js's MODAL_CLOSE_MS is --move in milliseconds. The folds are
+     animated in js and the tokens live in css, so nothing in either language
+     can see the other: without a pin, editing one half is a silent change to
+     the rhythm
 
 Run: uv run python3 -m tests.ui_css_check
 """
@@ -80,6 +81,22 @@ DECLARATION = re.compile(r"(--[A-Za-z0-9_-]+)\s*:\s*([^;{}]*)")
 VAR_USE = re.compile(r"var\(\s*(--[A-Za-z0-9_-]+)\s*([,)])")
 JS_TOKEN_READ = re.compile(r'cssValue\(\s*"(--[A-Za-z0-9_-]+)"\s*\)')
 JS_DURATION = re.compile(r"duration:\s*(\d+)\s*[,}]")
+
+# The region fold's duration is not a constant: ONE measurement paces the box and
+# the body inside it on the same clock, so the pin is that the measurement IS
+# foldMoveMs(fold) and that an animation runs for what it returned.
+RAMP_WIRED = re.compile(
+    r"const\s+ms\s*=\s*foldMoveMs\(\s*fold\s*\)\s*;[\s\S]{0,260}?duration:\s*ms\s*[,}]"
+)
+
+# A curve is a pair only while a DIRECTION picks between the two: the diff fold grows
+# into place and shrinks out of it, and a region fold (one with rows to slide) is a
+# box arriving at its new size in both directions. One curve wired into both
+# directions leaves every value above still matching the sheet.
+EASING_PICKS = (
+    re.compile(r"easing:\s*to\s*>=\s*from\s*\?\s*ARRIVE_EASE\s*:\s*LEAVE_EASE"),
+    re.compile(r"easing\s*=\s*open\s*\|\|\s*body\s*\?\s*ARRIVE_EASE\s*:\s*LEAVE_EASE"),
+)
 
 FOLD_JS = UI / "js" / "stream-text.js"
 MODAL_JS = UI / "js" / "settings.js"
@@ -348,11 +365,14 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
     settings.js's MODAL_CLOSE_MS is --move in milliseconds — the timer that lands
     `.hidden` when the closing slide is over — and drifts the same way, one frame
     at a time.
+    The region fold is the one move whose duration is not a constant: it walks
+    from --move up to --size with the distance it covers, so --size is pinned too,
+    along with the ramp call site that is the only place the far end is reached.
     """
     out: list[str] = []
     move_ms = ms_of(declared.get("--move", ""))
 
-    for name, token in (("FOLD_OPEN_EASE", "--arrival"), ("FOLD_CLOSE_EASE", "--departure")):
+    for name, token in (("ARRIVE_EASE", "--arrival"), ("LEAVE_EASE", "--departure")):
         token_value = declared.get(token)
         curve = re.search(rf'const\s+{name}\s*=\s*"([^"]*)"\s*;', fold_js)
         written = curve.group(1) if curve else f"(no {name})"
@@ -377,15 +397,36 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
             "duration is not the sheet's --move at all"
         )
 
+    # the region fold (a whole turn, js/auto-fold.js) is ONE move whose length
+    # depends on the distance it covers: a row-sized fold rides --move, a
+    # screenful leaves on --size, and the two ends are the same constant pair.
+    # --size is the sheet's own word for exactly this ("a surface changing its own
+    # height"), so the far end of the ramp is pinned here too: a drift back to the
+    # flat --move would put a hundred-row turn away at the speed of one row, which
+    # is the jump this ramp exists to remove.
+    size_ms = ms_of(declared.get("--size", ""))
+    fold_size_ms = js_ms(fold_js, "FOLD_SIZE_MS")
+    if size_ms is None or fold_size_ms != size_ms:
+        out.append(
+            f"ui/js/stream-text.js: FOLD_SIZE_MS = {fold_size_ms} is not --size "
+            f"({declared.get('--size')!r}), the far end of the region fold's ramp"
+        )
+    if not RAMP_WIRED.search(fold_js):
+        out.append(
+            "ui/js/stream-text.js: no animation runs for foldMoveMs(fold) — the "
+            "region fold's above---move duration is not wired to the distance ramp"
+        )
+
     # ...and both curves have to be the pair some easing actually PICKS BETWEEN.
     # The decision is a direction (a fold that opens arrives, one that closes
     # leaves), so one curve wired into both directions is the drift the two names
     # exist to make visible — and every value above would still match the sheet.
-    if not re.search(r"easing:\s*[^\n]*FOLD_OPEN_EASE[^\n]*FOLD_CLOSE_EASE", fold_js):
+    if not all(pick.search(fold_js) for pick in EASING_PICKS):
         out.append(
-            "ui/js/stream-text.js: no easing picks between FOLD_OPEN_EASE and "
-            "FOLD_CLOSE_EASE — both curves are in the file and neither one moves "
-            "anything"
+            "ui/js/stream-text.js: no easing picks between ARRIVE_EASE and LEAVE_EASE by "
+            "direction (a diff fold grows into place and shrinks out of it; a region fold "
+            "has a body, so it arrives in BOTH directions) — both curves are in the file "
+            "and neither one moves anything"
         )
 
     for match in JS_DURATION.finditer(fold_js):
@@ -478,7 +519,7 @@ def check_motion() -> None:
     print("the js side of the motion:")
     check(not drifts,
           "the js folds and the modal's close timer are the sheet's --arrival, "
-          "--departure and --move"
+          "--departure, --move and --size"
           + (f" — {drifts[0]}" if drifts else ""))
 
 
@@ -525,25 +566,31 @@ def check_regression() -> None:
 # tokens — the drift no reader of either file can see, which is the whole reason to
 # pin it.
 REGRESSION_TOKENS = """\
-:root { --arrival: cubic-bezier(.23, 1, .32, 1); --departure: cubic-bezier(.4, 0, 1, 1); --move: .2s; }
+:root { --arrival: cubic-bezier(.23, 1, .32, 1); --departure: cubic-bezier(.4, 0, 1, 1); --move: .2s; --size: .3s; }
 /* notes name tokens: var(--not-a-use) and cssValue("--also-not") */
 .a { color: var(--fg); }
 .b { color: var(--accent, #EF4444); }
 """
 REGRESSION_FOLD_JS = """\
-const FOLD_OPEN_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure, where --arrival belongs
-const FOLD_CLOSE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // and the pair swapped
+const ARRIVE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure, where --arrival belongs
+const LEAVE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // and the pair swapped
 const FOLD_MS = 150; // --size, not --move
-const anim = el.animate([], { duration: FOLD_MS, easing: open ? FOLD_OPEN_EASE : FOLD_CLOSE_EASE });
+const FOLD_SIZE_MS = 300; // --size
+const anim = el.animate([], { duration: FOLD_MS, easing: to >= from ? ARRIVE_EASE : LEAVE_EASE });
+const ms = foldMoveMs(fold);
+const sized = el.animate([], { duration: ms, easing: open || body ? LEAVE_EASE : ARRIVE_EASE });
 """
 REGRESSION_MODAL_JS = "const MODAL_CLOSE_MS = 180;\n"
-# the same fold with both curves correct, the duration correct, and one curve
+# the same fold with both curves correct, the durations correct, and one curve
 # wired into both directions: nothing but the direction pin can see this one.
 REGRESSION_FOLD_ONE_CURVE_JS = """\
-const FOLD_OPEN_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
-const FOLD_CLOSE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
+const ARRIVE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
+const LEAVE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
 const FOLD_MS = 200; // --move
-const anim = el.animate([], { duration: FOLD_MS, easing: FOLD_OPEN_EASE });
+const FOLD_SIZE_MS = 300; // --size
+const anim = el.animate([], { duration: FOLD_MS, easing: ARRIVE_EASE });
+const ms = foldMoveMs(fold);
+const sized = el.animate([], { duration: ms, easing: ARRIVE_EASE });
 """
 
 
@@ -564,18 +611,27 @@ def check_regression_tokens() -> None:
 def check_regression_motion() -> None:
     declared = declared_tokens(code_only(REGRESSION_TOKENS))
     drift = motion_drifts(declared, REGRESSION_FOLD_JS, REGRESSION_MODAL_JS)
-    check(len(drift) == 4,
+    check(len(drift) == 5,
           f"the motion pin reports the two curves a fold arrives/leaves on being swapped, a "
-          f"duration that is not --move, and a close timer that is not --move either "
+          f"duration that is not --move, a region fold that no longer takes the arrival curve "
+          f"in both directions, and a close timer that is not --move either "
           f"({len(drift)} reported)")
     files = [d.split(":")[0] for d in drift]
-    check(files == ["ui/js/stream-text.js"] * 3 + ["ui/js/settings.js"],
+    check(files == ["ui/js/stream-text.js"] * 4 + ["ui/js/settings.js"],
           f"each drift names the file it is in ({files})")
     one = motion_drifts(declared, REGRESSION_FOLD_ONE_CURVE_JS,
                         f"const MODAL_CLOSE_MS = {ms_of(declared['--move'])};\n")
-    check(len(one) == 1 and "picks between FOLD_OPEN_EASE and FOLD_CLOSE_EASE" in one[0],
+    check(len(one) == 1 and "picks between ARRIVE_EASE and LEAVE_EASE" in one[0],
           f"the same fold with one curve wired into both directions is reported as that and "
           f"nothing else ({len(one)} reported)")
+    # and the ramp is only wired while the ONE measurement is the duration the box and
+    # its body both run for: a fold paced by a literal is the drift the ramp exists to
+    # remove, and every value above would still match the sheet.
+    unramped = REGRESSION_FOLD_ONE_CURVE_JS.replace("duration: ms", "duration: FOLD_MS")
+    ramp = motion_drifts(declared, unramped, f"const MODAL_CLOSE_MS = {ms_of(declared['--move'])};\n")
+    check(any("foldMoveMs(fold)" in d for d in ramp),
+          f"a region fold paced by a constant instead of foldMoveMs(fold) is reported "
+          f"({len(ramp)} reported)")
 
 
 def main() -> int:

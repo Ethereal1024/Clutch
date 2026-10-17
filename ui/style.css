@@ -318,24 +318,30 @@ body { display: flex; flex-direction: column; }
    The three durations are the whole vocabulary: --quick is feedback on something
    already under the pointer (a hover, a press, a 4px popover slide — at 150ms the
    change has landed before a tap is over), --move is something that arrives or
-   leaves (a modal, a menu, a row), --size is a surface changing its own height,
-   which is the one transition long enough to need the extra 100ms.
+   leaves (a modal, a menu, a row), --size is a surface changing its own height —
+   a fold the reader opens or closes, the one move that has to be FOLLOWED (the
+   eye tracks the head down the transcript, or the rows up under it) rather than
+   merely noticed, and so the one long enough to need the extra 220ms.
    A transition that lists only a duration sits on the CSS default `ease`, and
    deliberately so: a colour or an opacity change has nothing travelling through
    it, so it wants the gentle default rather than an arrival curve. The JS-driven
    folds in js/stream-text.js use this same pair in the same directions — a fold
-   that opens arrives on --arrival, one that closes leaves on --departure, both
-   at --move — and tests/ui_css_check.py pins each curve and the duration back to
-   these declarations, because an expansion the reader watches is the same arrival
-   at the same speed. The same check holds js/settings.js's MODAL_CLOSE_MS at
-   --move in milliseconds, which is what lands `.hidden` once a modal's own slide
-   is over. */
+   that opens arrives on --arrival, one that closes leaves on --departure — and
+   tests/ui_css_check.py pins each curve and every duration back to these
+   declarations, because an expansion the reader watches is the same arrival at
+   the same speed. A fold of one row or one thinking block runs at --move; the
+   region fold (js/auto-fold.js) can swallow a hundred rows at once, and a
+   surface that is leaving from a screenful of height is exactly the change
+   --size's extra 220ms exists for, so its move walks from --move to --size with
+   the distance it has to cover (FOLD_PX in js/stream-text.js). The same check
+   holds js/settings.js's MODAL_CLOSE_MS at --move in milliseconds, which is what
+   lands `.hidden` once a modal's own slide is over. */
 :root {
   --arrival: cubic-bezier(.23, 1, .32, 1);
   --departure: cubic-bezier(.4, 0, 1, 1);
   --quick: .15s;
   --move: .2s;
-  --size: .3s;
+  --size: .42s;
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
@@ -957,55 +963,153 @@ mjx-container[display="true"] {
   animation: fadeIn var(--move);
 }
 
-/* a finished task's middle, folded away (js/auto-fold.js). The head is a plain
-   button in the stream's content column — the same 22px left padding as .event,
-   so the label lines up exactly under the rows the fold hides, and nothing
-   re-indents when the task ends. */
-.turn-fold { margin: 0 0 12px; }
+/* a finished task's middle, folded away (js/auto-fold.js). The block is a ROW of
+   the transcript, not a card in it: no border, no background, no frame. It borrows a
+   row's two structural columns — the caret stands on the gutter the `.event::before`
+   markers are threaded on, the label on the message column — because a row is what
+   it is. What used to say "a block OF the transcript, not a line of it" was a 1px
+   frame on --code-bg, and the frame also gave the collapse something to be seen BY
+   (its own bottom edge was the line travelling up). The head does that now, and
+   better: it HANGS at the pane's top while the rows it hides slide under it, so a
+   move that swallows a screenful of height stays legible with no box drawn round it.
+   `--head-bg` is the colour that hanging head fills with — the pane's own ground
+   out here, --code-bg in the framed variant at the end of this block. */
+.turn-fold {
+  margin: 0 0 var(--s4);
+  --head-bg: var(--bg);
+  /* deliberately NOT `position: relative` any more: the framed block needed a
+     positioned box to paint OVER #stream::before, the full-height rail threaded
+     through the event markers. Borderless, the rail is meant to run through the
+     block like it runs through every other row (the caret is on the markers' own
+     column), and the head paints above it on its own — sticky IS positioned. */
+}
+/* The head HANGS: it is the one part of a fold that does not scroll away with the
+   rows it hides. It is the lid of the block and it stays at the top of the pane until
+   the block it belongs to has been read to its end — the section header model
+   (`UITableView.sectionHeadersPinToVisibleBounds`, a RecyclerView sticky
+   `ItemDecoration`), which is what `position: sticky` inside the block gives for
+   free: the head pins while its own block is in view and is pushed out by that
+   block's end, no state and no per-frame position of its own.
+   `top` is -s4 (16px), NOT 0: sticky resolves against the pane's CONTENT box and
+   #stream carries 16px of padding, so at `top: 0` the head pins 16px below the
+   pane's top edge and a strip of the very rows it is covering keeps scrolling
+   through the band above it. At -s4 it pins flush with the edge.
+   The caret cell + gap is the 22px the rows under the bar are inset by, so the
+   label lands on the rows' own text column; the padding is vertical only, since
+   there is no frame edge left to hold a gutter against. */
 .turn-fold-head {
-  display: flex; align-items: center; gap: 6px;
-  width: 100%; margin: 0; padding: 4px 0 4px 22px;
-  border: none; background: none;
+  position: sticky; top: calc(-1 * var(--s4)); z-index: 3;
+  display: flex; align-items: center; gap: var(--s1);
+  width: 100%; margin: 0; padding: var(--s1) 0;
+  border: none; background: none; border-radius: 0;
   color: var(--muted);
   font: inherit; font-size: 12px; font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.08em;
   text-align: left; cursor: pointer;
 }
-.turn-fold-head:hover { color: var(--text); }
-.turn-fold-head:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-/* The head is the row that takes the folded block's place, and it is inserted in
-   the same frame the block above it collapses: with nothing to fade it in, the
-   label simply paints while the middle under it is still moving. It gets the
-   opacity-only arrival `.completion` and `.completion-note` get — a duration and
-   no curve, because a fade has nothing travelling through it and the default
-   `ease` is what a fade wants (the rule is written out at the token block above).
-   Not the rows' `fadeSlideUp`: that would put a transform animation on a `button`
-   for the first 200ms of its life, and the 1px press sink is a plain declaration
-   an animation wins over — the fold appears exactly when the reader reaches for
-   it. */
-.turn-fold-head { animation: fadeIn var(--move); }
-/* One glyph in both states, turned by the state: `▸` rotated a quarter turn IS
-   `▾`, so the caret keeps its advance width and the label does not shift in the
-   frame the reader clicks. A transform needs a box and a bare inline span has
-   none — this one is a flex item (the head is a flex row), so `inline-block` only
-   writes that down. The state it is drawn FROM is `aria-expanded`, the same one
-   assistive tech reads; the closed state is the leaving one (--departure) and the
-   open state arrives on --arrival, which is how the fold under it moves too. */
-.turn-fold-caret {
-  display: inline-block;
-  font-size: 10px; line-height: 1;
-  transition: transform var(--move) var(--departure);
+/* the rule the label runs on, to the right edge: the fold's own length, drawn */
+.turn-fold-head::after {
+  content: ""; flex: 1; height: 1px; min-width: var(--s4);
+  background: var(--border);
 }
+.turn-fold-head:hover { color: var(--text); }
+.turn-fold-head:hover::after { background: var(--dim); }
+/* the one ring in this sheet drawn INSIDE its control: the head is a full-width
+   band that other rows pass under, so a ring at the default offset would land on
+   the rows above and below it and the lit control would stop being the thing that
+   is lit. At -1px the ring's own edge sits on the band's edge, so focus reads as the
+   hanging head taking the accent — which is what was just tabbed to. */
+.turn-fold-head:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* ── a hanging head needs a page of its own ─────────────────────────────────────
+   Rows pass UNDER it, so it cannot be a bare label: without a fill the text it is
+   supposed to hang above collides with it, and with a hard fill the rows are sliced
+   at the head's bottom edge. So the fill is a ::before — it can reach below the head
+   and fade out (a mask, so it works on any --head-bg) while the head's own box stays
+   exactly the height it always was: pinning must never move the layout.
+   It is invisible at rest (`opacity: 0`): a band over a block nobody has scrolled
+   would just look like the frame we deleted. `.stuck` is computed in
+   js/stream-text.js (paintStuck) — sticky gives no `:stuck` pseudo-class, and the
+   ecosystem's other answer is a 1px sentinel plus an IntersectionObserver
+   (stickybits, react-sticky-box); comparing the block's rect against the pane's top
+   per frame costs two reads per block, in the scroll path the pane already runs.
+   z-index -1 keeps it behind the label inside the head's own stacking context (the
+   sticky head is positioned, so the fill cannot slip behind the rows). */
+.turn-fold-head::before {
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  inset: 0 0 calc(-1 * var(--s2));
+  background: var(--head-bg);
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  opacity: 0; transition: opacity var(--quick) linear;
+}
+.turn-fold-head.stuck::before { opacity: 1; }
+.turn-fold-head.stuck { color: var(--text); }
+/* No arrival animation on the head, deliberately. It is inserted in the frame the
+   middle under it starts to collapse and it is the LID the reader is meant to
+   watch that middle fold into: an opacity fade would hold the label at half
+   strength for the first hundred milliseconds of a 200-420ms move (the fold's own
+   speed, js/stream-text.js) and leave the block folding away into nothing in
+   particular — which is what this read as. So the control is simply THERE on the
+   frame the move starts, and the move is the whole gesture. The divider beside it
+   still fades in on --move: that one is news, this one is a lid. Not the rows'
+   `fadeSlideUp` either: a transform animation on a `button` would win over the
+   1px press sink for its duration, and the fold has to be pressable the moment
+   the reader reaches for it. */
+.turn-fold-head { animation: none; }
+/* One glyph in both states, turned by the state: `▶` rotated a quarter turn IS
+   `▼`, so the caret keeps its advance width and the label does not shift in the
+   frame the reader clicks. Which glyph, and how big, was the whole of the control
+   and got it wrong twice: this sheet's icons come from the bundled "Clutch Icons"
+   face, whose `▸` (U+25B8) is drawn 3x4px at 12px — a caret the size of a full stop,
+   and it read as one — while `▶` (U+25B6, the filled triangle, same unicode-range)
+   is 8x9px there, exactly the footprint of the `.event::before` markers it stood
+   beside, and a mark of the same size in the same column is a mark whatever it
+   depicts. So it is drawn at 16px (about 8.5x10.5 of ink, measured — the markers'
+   own footprint) in an 18px cell: the cell is what the content column is inset by
+   and what a transform needs (a bare inline span has no box to rotate; this one is
+   a grid of one cell, which also centres the glyph in it).
+   BARE, not boxed: with the frame gone, a 1px --border + --bg2 chip would be the
+   only framed thing left in a borderless block — a button drawn inside a row that
+   has stopped being a card. A mark on the pane's own ground is what the marker
+   column already holds, and the caret is one. The state it is drawn FROM is
+   `aria-expanded`, the same one assistive tech reads; the closed state is the
+   leaving one (--departure) and the open state arrives on --arrival. */
+.turn-fold-caret {
+  flex: none;
+  display: grid; place-items: center;
+  width: 18px; height: 18px;
+  font-size: 16px; line-height: 1;
+  transition: transform var(--move) var(--departure), color var(--quick);
+}
+.turn-fold-head:hover .turn-fold-caret { color: var(--text); }
 .turn-fold-head[aria-expanded="true"] .turn-fold-caret {
   transform: rotate(90deg);
-  transition: transform var(--move) var(--arrival);
+  transition: transform var(--move) var(--arrival), color var(--quick);
 }
 /* The rows are MOVED into the fold, and a move re-inserts them: inside a fold that
    is NOT open every row of a long task would replay its arrival animation while
    the box collapses around it. Scoped to the closed state on purpose — a fold
    that opens has its rows displayed again, and that is exactly when they should
-   arrive, one gesture at the fold's own --move. */
-.turn-fold .fold:not(.open) .fold-inner > * { animation: none; }
+   arrive, one gesture at the fold's own --move. The rows sit in the fold's body
+   (`.fold-body`, js/auto-fold.js): that element is what the close SLIDES, so it is
+   the body's children that are being displayed or not. */
+.turn-fold .fold:not(.open) .fold-body > * { animation: none; }
+/* The fold's own body — the rows' wrapper inside `.fold-inner` (js/auto-fold.js) —
+   is what the move SLIDES. `.fold-inner` is only the clipping box (a 0fr track with
+   overflow hidden); `.fold-body` is the element js/stream-text.js translates during
+   a close, by exactly the height the box is giving back, so the rows leave UP under
+   the hanging head instead of being cropped by an edge nobody can see. `min-height:
+   0` is the same contract `.fold-inner` carries: inside a 0fr track an item has to
+   be allowed to shrink below its content or the track cannot close at all. */
+.fold-body { min-height: 0; }
+/* No foot spacer inside the body, and no other air invented for the open fold's
+   last row: what is inside is a block of process rows laid out by the transcript's
+   own rhythm, and the row's own 12px margin under the last one is the inset the
+   closed head tucks up against (about 20px of air under the last row's ink). The
+   block's separation from the answer that follows it is the wrapper's --s4 margin,
+   the same gap any other pair of rows uses — nothing has to END the block any more,
+   because nothing is drawn round it: the head hanging at the pane's top is what says
+   where the process is, and the answer after it is simply the next row. */
 
 /* a row form's folded body: collapsed label, expand on click */
 .result-detail {
@@ -1857,6 +1961,9 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   .thinking-row:active,
   .result-row:active,
   .turn-fold-head:active { color: var(--accent); }
+  /* the chip is the one control in that group with a box to light, so the press
+     reaches it as well: its border takes the accent along with the label */
+  .turn-fold-head:active .turn-fold-caret { color: var(--accent); border-color: var(--accent); }
   /* a link is already accent text: the wash hugs the text box (inline), which
      is as "inside the element" as an inline element can get */
   .event .body a:active { background: rgba(239, 68, 68, 0.14); }
