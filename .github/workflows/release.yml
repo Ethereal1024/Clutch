@@ -22,8 +22,54 @@ permissions:
   contents: write
 
 jobs:
+  # ---- verify: the one gate every artifact job depends on ----
+  # Why it exists: 0.1.51 and 0.1.52 shipped an APK + pylibs tars and NO deb,
+  # because the phone chain (pylibs -> apk) had no dependency on the desktop
+  # job at all — the desktop build failed its font scan and nothing downstream
+  # noticed, so a release could go out with only the artifacts built from a
+  # tree that never passed the checks. A tag push must publish everything or
+  # nothing, so every job below lists this one in `needs:` and a failing check
+  # stops the run before any asset is attached.
+  #
+  # Stdlib only, on purpose: the three scans import no third-party package, so
+  # `python3 -m` works on the runner image without uv sync / npm ci — the gate
+  # costs seconds and cannot itself fail for a dependency reason.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # font wiring guard: a root-absolute @font-face url resolves to file:///… and
+      # fails silently, which is how every platform ended up in its own OS face
+      # (tests/ui_fonts_check.py docstring). Offline, no browser, no deps.
+      - name: Verify UI fonts
+        run: python3 -m tests.ui_fonts_check
+
+      # stylesheet wiring guard: ui/mobile.css is linked ONLY under
+      # media="(max-width: 640px)", so a comment that ended early in it killed
+      # every phone rule (and nothing else) for nine releases, with no desktop
+      # symptom to notice (tests/ui_css_check.py docstring). Offline, no browser,
+      # no deps — the scan is stdlib.
+      - name: Verify UI stylesheets
+        run: python3 -m tests.ui_css_check
+
+      # The launcher icon: the 0.1.44 APK went out with `icon=''` — no
+      # android:icon and no mipmap at all — and nothing else in the pipeline
+      # notices (the build, the install and every other job are green either
+      # way). tests/android_icon_check.py docstring.
+      - name: Verify the launcher icon
+        run: python3 -m tests.android_icon_check
+
+      # The gate's own wiring: every job that attaches an asset must reach this
+      # one, and the phone chain must also reach `deb` — the 0.1.51/0.1.52
+      # half-published releases (tests/release_graph_check.py docstring). A
+      # `needs:` removed by a future edit fails here, before the next tag.
+      - name: Verify the release graph
+        run: python3 -m tests.release_graph_check
+
   deb:
     runs-on: ubuntu-latest
+    needs: verify
     steps:
       # No submodules: the bundle is the HOST's own code and carries no module —
       # a release must not depend on one being checked out (or published).
@@ -62,19 +108,10 @@ jobs:
         working-directory: ui
         run: node verify-build-config.js
 
-      # font wiring guard: a root-absolute @font-face url resolves to file:///… and
-      # fails silently, which is how every platform ended up in its own OS face
-      # (tests/ui_fonts_check.py docstring). Offline, no browser, no deps.
-      - name: Verify UI fonts
-        run: .venv/bin/python -m tests.ui_fonts_check
-
-      # stylesheet wiring guard: ui/mobile.css is linked ONLY under
-      # media="(max-width: 640px)", so a comment that ended early in it killed
-      # every phone rule (and nothing else) for nine releases, with no desktop
-      # symptom to notice (tests/ui_css_check.py docstring). Offline, no browser,
-      # no deps — the scan is stdlib.
-      - name: Verify UI stylesheets
-        run: .venv/bin/python -m tests.ui_css_check
+      # The font/stylesheet/icon scans used to run here. They now run in the
+      # `verify` job this one needs, so that pylibs/apk (which must not publish
+      # a tree the checks reject) are gated by the same single pass instead of
+      # by a copy of it. Nothing was dropped: see `verify` above.
 
       - name: Build deb
         working-directory: ui
@@ -263,6 +300,14 @@ jobs:
   # a new VERSION on the remote (one reinstall), never a silent mismatch.
   pylibs-matrix:
     runs-on: ubuntu-latest
+    # needs: deb, not just for ordering — this is the other half of the
+    # 0.1.51/0.1.52 repair. The phone chain used to start in parallel with the
+    # desktop build, so a failed/half-built desktop release still published
+    # tars + an APK pointing at them: a release with a working phone installer
+    # and no desktop package. Waiting for `deb` (which waits for `verify`) means
+    # the release object exists and the tree passed the checks before a single
+    # tar is attached; if the deb build dies, no phone asset appears either.
+    needs: [verify, deb]
     strategy:
       fail-fast: false
       matrix:
@@ -361,14 +406,9 @@ jobs:
       # phone at RUNTIME through the stamped index, never at build time
       - uses: actions/checkout@v4
 
-      # The launcher icon, before the 5-minute SDK install: the 0.1.44 APK went
-      # out with `icon=''` — no android:icon and no mipmap at all — and nothing
-      # else in the pipeline notices (the build, the install and every other job
-      # are green either way). tests/android_icon_check.py docstring. Stdlib only,
-      # on purpose: this job installs no Python packages.
-      - name: Verify the launcher icon
-        run: python3 -m tests.android_icon_check
-
+      # The launcher icon check moved to the `verify` job (this job reaches it
+      # through pylibs-index -> pylibs-matrix -> verify), so a missing icon now
+      # blocks the run before any tar or APK is attached instead of after.
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
