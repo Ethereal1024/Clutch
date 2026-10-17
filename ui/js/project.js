@@ -61,7 +61,13 @@ async function loadOlder() {
   paging = true;
   try {
     const anchor = eventsEl.firstElementChild; // identity survives the prepend
-    const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=262144`, { timeout: 60000 });
+    // A page is a BYTE budget, and a byte budget splits turns: the median finished
+    // turn in a real project is ~278 KB (ui-fix.clc), so a 256 KiB page cut one
+    // nearly every time. Two things follow from that. `limit` is now ~2 turns'
+    // worth, and `align=turn` has the server walk the page's start back to the task
+    // row that opens the turn the budget cut (agent/core/lazy.py aligned_start) —
+    // a page then begins where a turn begins, and the pane is handed whole turns.
+    const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=1048576&align=turn`, { timeout: 60000 });
     const page = data.events || [];
     if (!page.length) { setOlderPill(0); return; }
     const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;

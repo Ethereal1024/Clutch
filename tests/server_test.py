@@ -416,6 +416,9 @@ def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     levents = [UserMessageEvent(content="task")]
     for i in range(1, 500):
         levents.append(AssistantMessageEvent(content=f"old work {i}"))
+    # a SECOND turn opens inside the pageable middle: `align=turn` has to have a
+    # task row to walk back to that is not offset 0 (/api/history)
+    levents.insert(300, UserMessageEvent(content="task two"))
     # compaction line offset = window start (persisted in header)
     comp_off = sum(_line_bytes(ev) for ev in levents[:450])
     levents.append(CompactionEvent(summary="old work summarized"))
@@ -458,6 +461,37 @@ def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000")
     h2 = json.loads(body)
     check(len(h2["events"]) < len(h["events"]), "history respects the byte-window clamp")
+    # align=turn: a page is whole turns, not a byte window that cuts one (the UI
+    # asks for 1 MiB; the median finished turn is ~278 KB, so an unaligned cut lands
+    # mid-turn about every time, and the pane then folds a region whose head it has
+    # never seen — ui/js/auto-fold.js absorbIntoRegion is what reconciles that later)
+    loffs = []
+    pos = 0
+    for ev in levents[:450]:
+        loffs.append(pos)
+        pos += _line_bytes(ev)
+    task2_off = loffs[300]
+    check(h2["events"][0]["event"]["type"] != "user_message",
+          "the unaligned page at this offset opens mid-turn (that is the shape being fixed)")
+    st, body = http_get(f"{base_url}/api/history?before={comp_off}&limit=1000&align=turn")
+    h4 = json.loads(body)
+    check(st == 200 and h4["events"][0]["offset"] == task2_off
+          and h4["events"][0]["event"]["content"] == "task two",
+          "align=turn opens the page on the task row the byte budget cut")
+    check(h4.get("older") == task2_off,
+          "and older is the widened start, so the next page resumes from the same task row")
+    check(len(h4["events"]) > len(h2["events"]),
+          "so the aligned page carries its whole turn, not the middle the window cut into")
+    # the page after that one begins EXACTLY on the task row: widening it again would
+    # hand the reader the turn before the one they asked for, page after page
+    st, body = http_get(
+        f"{base_url}/api/history?before={task2_off + 4096}&limit=4096&align=turn"
+    )
+    h5 = json.loads(body)
+    check(h5["events"][0]["offset"] == task2_off and h5.get("older") == task2_off
+          and len(h5["events"]) > 1,
+          "a page whose budget already starts on a task row is left there (not widened "
+          "into the turn before it)")
     st, body = http_get(f"{base_url}/api/history?before=1&limit=1000000")
     h3 = json.loads(body)
     check(h3.get("events") == [] and h3.get("older") == 0, "history before the task is empty")

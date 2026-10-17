@@ -242,3 +242,49 @@ class LazyEventLog:
         if lo >= hi:
             return []
         return _parse_with_offsets(self._read(self._base + lo, self._base + hi), lo)
+
+    # How far back a page may be widened to open on a turn boundary. A turn bigger
+    # than this is left split: one page must never become the whole history.
+    ALIGN_REACH = 4 * 1024 * 1024
+
+    def aligned_start(self, lo: int, reach: int = ALIGN_REACH) -> int:
+        """The offset a history page should START at so that its first record opens
+        a turn: ``lo`` walked back to the nearest preceding ``user_message``.
+
+        A page is a byte window (/api/history), and any byte window splits turns:
+        the window the UI asks for is ~2 finished turns, while the median finished
+        turn in a real project is ~278 KB (ui-fix.clc), so a cut lands in the middle
+        of a turn about every time. What a split turn costs is not bytes, it is the
+        renderer: the pane has to fold a region it never saw the head of, and when a
+        later page finally brings that turn's task row the fold has to be reconciled
+        (ui/js/auto-fold.js absorbIntoRegion). Starting a page on a task row makes
+        "a page of history" and "whole turns" the same unit.
+
+        Returns ``lo`` unchanged when the window already opens on a task row, and
+        when no task row is within ``reach`` bytes (a turn larger than the budget),
+        so the bound holds.
+        """
+        lo = min(max(0, lo), self._file_bytes - self._base)
+        # A window that already STARTS on a task row is aligned — and it usually
+        # does: `lo` is the oldest rendered record's offset (ui/js/stream-events.js),
+        # so every page after the first begins exactly on a record. Walking back from
+        # there would hand the reader the turn BEFORE the one they asked for, on every
+        # page, and the pages would grow turn by turn instead of holding their budget.
+        head = _parse_with_offsets(
+            self._read(self._base + lo, self._base + min(lo + 4096, self._file_bytes - self._base)),
+            lo,
+        )
+        if head and head[0][0] == lo and head[0][1].type == "user_message":
+            return lo
+        floor = max(0, lo - reach)
+        end = lo
+        step = 64 * 1024
+        while end > floor:
+            start = max(floor, end - step)
+            window = self._read(self._base + start, self._base + end)
+            for off, ev in reversed(_parse_with_offsets(window, start)):
+                if ev.type == "user_message":
+                    return off
+            end = start
+            step *= 2
+        return lo

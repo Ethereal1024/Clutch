@@ -14,7 +14,10 @@
 // reader are covered here as well: a replayed project — the same `final` events,
 // replayed into the same pane — and a page of older records paged in above the
 // window, which can arrive carrying the front half of a turn whose divider this
-// window already had (foldClosedRegions at the bottom).
+// window already had (foldClosedRegions at the bottom). That turn is often folded
+// ALREADY, under the row the window happened to start on, and a page that brings
+// its own task row completes it: the fold is then completed too, never folded
+// again (absorbIntoRegion).
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
@@ -22,6 +25,12 @@
 // on anything above it in ui/index.html and on nothing below it.
 
 "use strict";
+
+// what a fold's head says about what it hides: one row of the middle, one step —
+// recomputed when a page adds rows to a fold that is already on screen
+function foldLabel(n) {
+  return `process · ${n} ${n === 1 ? "step" : "steps"}`;
+}
 
 // Fold this turn's middle, folding the one region of `root` that ends at
 // `turnEnd`: the index, in root's children, of the divider that closed the turn.
@@ -41,6 +50,20 @@ function foldRegion(root, turnEnd) {
   let turnStart = 0;
   for (let i = turnEnd - 1; i >= 0; i--) {
     if (kids[i].matches(".completion")) { turnStart = i + 1; break; }
+  }
+  // What "this region is folded" is recorded on is the DIVIDER, not the head. The
+  // divider is the one node in the region a fold never moves, so its mark survives
+  // everything a fold does; a head does not — the pane's first region is folded
+  // under whatever row the window happened to start on (the compaction notice
+  // below), and a page of history that brings the turn's real task row moves that
+  // head up. Keyed on the head, the next pass missed the fold entirely and built a
+  // second one AROUND it: a fold inside a fold, its inner head buried in a
+  // `display: none` subtree, its step count counting the inner fold as one step
+  // (ui-fix.clc, the second press of "load earlier records").
+  const divider = kids[turnEnd] && kids[turnEnd].matches(".completion") ? kids[turnEnd] : null;
+  if (divider && divider.dataset.turnFolded === "1") {
+    absorbIntoRegion(root, turnStart); // the rows a page just brought still belong in it
+    return;
   }
   let start = -1;
   for (let i = turnStart; i < turnEnd; i++) {
@@ -107,7 +130,7 @@ function foldRegion(root, turnEnd) {
   // block of the transcript hangs off (ui/style.css has the sizes).
   caret.textContent = "▶";
   const label = document.createElement("span");
-  label.textContent = `process · ${mid.length} ${mid.length === 1 ? "step" : "steps"}`;
+  label.textContent = foldLabel(mid.length);
   head.appendChild(caret);
   head.appendChild(label);
 
@@ -140,6 +163,10 @@ function foldRegion(root, turnEnd) {
   const frag = document.createDocumentFragment();
   for (const el of mid) frag.appendChild(el); // moves each row out of the pane
   body.appendChild(frag);
+  // where the fold keeps the two things a later page needs to add to: the rows it
+  // holds (absorbIntoRegion prepends to them) and the count in its head
+  wrap._body = body;
+  wrap._label = label;
   head.onclick = () => {
     // toggleFold answers with where the fold is GOING, not with the class list it
     // is passing through: mid-flight a second click reverses the move instead of
@@ -158,11 +185,58 @@ function foldRegion(root, turnEnd) {
   } else {
     foldCollapse(fold);
   }
+  // The region is folded, and the mark goes on its divider (see the top of this
+  // function): a page that completes this turn is then a page that ADDS to the
+  // fold, not one that folds it again.
+  if (divider) divider.dataset.turnFolded = "1";
   // The block is a row of the pane now, and where its head sits against the pane's
   // top edge is a state nothing else has announced: with the block already scrolled
   // past (a long turn folding under a reader who is inside it) the head pins on this
   // frame, not on the next scroll event (js/stream-text.js paintStuck).
   queueStuck();
+}
+
+// A folded region can still gain rows — above itself, one page at a time. A page
+// prepends, so the head a fold hangs on can only ever gain PREDECESSORS; the fold
+// itself never needs to move down. What it does need is to take those rows in: they
+// are the same turn's middle, which is one region with one head, and a second fold
+// over the first is exactly the shape this function exists to prevent.
+//
+// The rows between the head and the fold go into the fold's body, at its top, in
+// file order; the fold is then re-seated directly under the head, which is how a
+// fold that hung on the compaction notice ends up hanging on the turn's own task row
+// once the page brings it (`divider.dataset.turnFolded` is what got us here, so the
+// divider's own row never moves and the caller's index is still good).
+function absorbIntoRegion(root, turnStart) {
+  const kids = Array.from(root.children);
+  const at = kids.findIndex((el, i) => i >= turnStart && el.matches(".turn-fold"));
+  if (at < 0) return; // no fold among this region's rows: nothing to add to
+  const wrap = kids[at];
+  // the head: the region's first user row — the same rule foldRegion applies, and
+  // the same one relaxation for the pane's own first region, where the row the
+  // window starts on takes the place a task row takes
+  let head = -1;
+  for (let i = turnStart; i < at; i++) {
+    if (kids[i].matches(".event.user")) { head = i; break; }
+  }
+  if (head < 0 && turnStart === 0) head = 0;
+  if (head < 0 || at - head < 2) return; // the fold is already flush under its head
+
+  const loose = kids.slice(head + 1, at);
+  root.insertBefore(wrap, kids[head + 1]); // up, under the head the page completed
+  // each row goes in at the BODY's top, so they go in from the back: prepending
+  // forward would hand the body the region's rows in reverse file order
+  for (let i = loose.length - 1; i >= 0; i--) {
+    const el = loose[i];
+    wrap._body.insertBefore(el, wrap._body.children[0] || null);
+  }
+  // the head row the fold hung on before is one of `loose` when the page replaced it
+  // (the compaction notice now sits in the middle it explains): the mark moves with
+  // the head, so a second pass over this region still finds it folded
+  for (const el of loose) delete el.dataset.turnFolded;
+  kids[head].dataset.turnFolded = "1";
+  if (wrap._label) wrap._label.textContent = foldLabel(wrap._body.children.length);
+  queueStuck(); // the head moved with the block: recompute whether it pins
 }
 
 // Fold this run's turn: the region that ends at the pane's newest divider. Called

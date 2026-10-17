@@ -21,6 +21,10 @@ Builds a synthetic .clc with a compaction, opens it lazily, and checks:
   8. a durable append STAMPS the record with the offset a replay/serve will use,
      and _write_sse puts it on the live frame ({offset, event}) while a transient
      delta stays bare — the renderer's reconnect watermark rests on this
+  9. a history page can open on a TURN boundary: aligned_start walks the window's
+     start back to the turn's task row (so a byte window, which always splits
+     turns, stops cutting a fold away from its head), keeps a window that already
+     starts on one, and leaves the offset alone past its reach budget
 
 Run: uv run python -m tests.lazy_check
 """
@@ -324,6 +328,62 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         bare = json.loads(sse.wfile.buf.decode().split("data: ", 1)[1].strip())
         check(bare.get("type") == "text_delta" and "offset" not in bare,
               "a delta stays a bare frame (nothing to dedupe, nothing replayed)")
+
+    # ---- 9. a history page opens on a TURN boundary (align=turn) -----------
+    # A page is a byte window (/api/history), and a byte window splits turns: the
+    # UI asks for 1 MiB while the median finished turn in a real project is ~278 KB
+    # (ui-fix.clc), so a cut lands inside a turn about every time. `align=turn` walks
+    # the window's START back to the turn's own task row (aligned_start), which makes
+    # "a page of history" and "whole turns" the same unit — the renderer then never
+    # folds a region whose head it has not seen, and never has to reconcile that fold
+    # when a later page brings the head (ui/js/auto-fold.js absorbIntoRegion).
+    with tempfile.TemporaryDirectory() as d:
+        p9 = Path(d) / "align.clc"
+        evs = [UserMessageEvent(content="task one")]
+        evs += [AssistantMessageEvent(content=f"turn one step {i} " + "x" * 120) for i in range(12)]
+        evs.append(UserMessageEvent(content="task two"))
+        evs += [AssistantMessageEvent(content=f"turn two step {i} " + "x" * 120) for i in range(12)]
+        offs: list[int] = []
+        body: list[str] = []
+        pos = 0
+        for ev in evs:
+            offs.append(pos)  # the record's offset in the event region (what history sends)
+            body.append(event_to_json(ev))
+            pos += _line_bytes(ev)
+        header = "\n".join(
+            ["# clutch project v1", "name: align-test", "model: fake-model", "---"]
+        ) + "\n"
+        p9.write_text(header + "\n".join(body) + "\n", encoding="utf-8", newline="\n")
+        alg = open_project_lazy(p9, workspace=None).log
+        task1, task2 = offs[0], offs[13]
+        check(task1 == 0 and task2 > 0,
+              "the alignment fixture's second task row sits at a byte offset of its own")
+        # each page after the first begins EXACTLY on a record (`lo` is the oldest
+        # rendered event's offset, ui/js/stream-events.js): re-walking it would hand
+        # the reader the turn BEFORE the one they asked for, on every page
+        check(alg.aligned_start(task2) == task2,
+              "a window that already starts on a task row stays where it is")
+        inside2 = offs[13 + 6]  # a row in the middle of turn two
+        check(alg.aligned_start(inside2) == task2,
+              "a window cut inside a turn opens on that turn's task row")
+        check(alg.aligned_start(offs[6]) == task1,
+              "and a window cut inside the FIRST turn opens on its task row")
+        check(alg.aligned_start(inside2 + 1) == task2,
+              "a window cut mid-record is walked back the same way (the partial line is "
+              "not a record, so it cannot pass for an aligned start)")
+        check(alg.aligned_start(inside2, reach=10) == inside2,
+              "a task row out of reach leaves the window where it was — a turn bigger "
+              "than the budget is split, never widened into the whole history")
+        # the page the UI would get: it opens on the task row and runs to the end
+        aligned = alg.read_page(alg.aligned_start(inside2), 10 ** 9)
+        check(aligned and aligned[0][0] == task2 and aligned[0][1].content == "task two",
+              "the aligned page's first record IS the turn's task row")
+        check([e.type for _, e in aligned].count("user_message") == 1,
+              "so a page starts inside exactly one turn (the one it opens on)")
+        plain = alg.read_page(inside2, 10 ** 9)
+        check(plain[0][1].type != "user_message" and len(aligned) > len(plain),
+              "the unaligned window at the same offset opens mid-turn, which is the "
+              "fold-without-a-head the alignment exists to prevent")
 
     print()
     if failures:

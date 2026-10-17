@@ -151,18 +151,27 @@ class ProjectMixin:
         count (honest even after a reconnect dropped pages the UI already
         rendered). The page never enters the resident log: history browsing is
         decoupled from the model context (which is only the window since the
-        newest compaction line)."""
+        newest compaction line).
+
+        ``align=turn`` widens the page BACK to the task row that opens the turn the
+        byte budget cut (log.aligned_start), so a page begins where a turn begins
+        and the renderer is never handed a turn's middle without its head. ``older``
+        is the widened start either way, so the next request pages from exactly
+        where this one began."""
         qs = parse_qs(urlparse(self.path).query)
         try:
             before = int(qs.get("before", ["0"])[0])
             limit = min(max(int(qs.get("limit", ["262144"])[0]), 4096), 4 * 1024 * 1024)
         except ValueError:
             return self._json({"error": "bad query"}, status=400)
+        align = qs.get("align", ["0"])[0] in ("1", "turn", "true")
         project = self._state.project
         log = project.log if project is not None else None
         if log is None:
             return self._json({"events": [], "older": 0})
         lo = max(0, before - limit)
+        if align:
+            lo = log.aligned_start(lo)
         pairs = log.read_page(lo, before)
         self._json(
             {

@@ -376,6 +376,70 @@ check(p.children.filter((c) => c.matches(".turn-fold")).length === 2 &&
       bodyOf(p.children[1]).children[0] === cutMid,
       "folding the pane again changes nothing: the rows are marked folded on their own head row");
 
+// ---- 7g) the page that COMPLETES a folded turn. The window opened inside this
+// turn, so it was folded under the row the window happened to start on — a
+// compaction notice — and the page brings the turn's own task row. The region is one
+// middle with one head: the fold takes those rows in and moves up under the task row,
+// it is never folded again. Keyed on the HEAD (which this page just replaced) the
+// next pass misses the fold and builds a second one AROUND it — the reported fold
+// inside a fold, its inner head unclickable inside the closed outer one, its count
+// counting a whole fold as one step. The divider, which no fold ever moves, is what
+// "this region is folded" is recorded on now.
+const noticeG = row("event compaction", "context compressed (the window starts here)");
+const oldMid = row("event tool_group", "bash …");
+const ansG = row("event text", "old answer");
+const divG = row("completion", "completed");
+p = pane([noticeG, oldMid, ansG, divG]);
+ctx.eventsEl = p;
+streamNode.classList.add("loading"); // a reopened project folds this region on replay
+ctx.autoFoldTurn();
+streamNode.classList.remove("loading");
+check(foldOf(p) !== undefined && divG.dataset.turnFolded === "1",
+      "the window's first region folds on open, and the region is marked on its divider");
+
+const taskG = row("event user", "the turn the window cut in half");
+const earlyG = row("event tool_result", "…read_file (the earlier half)");
+const moreG = row("event tool_group", "grep …");
+// the page, prepended in file order (each insert lands above the pane's first row)
+p.insertBefore(moreG, p.children[0]);
+p.insertBefore(earlyG, p.children[0]);
+p.insertBefore(taskG, p.children[0]);
+ctx.paging = true;
+ctx.foldClosedRegions(p);
+ctx.paging = false;
+const gFolds = p.children.filter((c) => c.matches(".turn-fold"));
+check(gFolds.length === 1 && p.children[0] === taskG && p.children[1] === gFolds[0],
+      "the page completes the folded turn instead of folding it again: one fold, hanging off " +
+      "the task row the page brought");
+check(bodyOf(gFolds[0]).children.length === 4 &&
+      bodyOf(gFolds[0]).children[0] === earlyG &&
+      bodyOf(gFolds[0]).children[1] === moreG &&
+      bodyOf(gFolds[0]).children[2] === noticeG &&
+      bodyOf(gFolds[0]).children[3] === oldMid,
+      "the rows above the fold are the same middle: they go in at its top, in file order, and " +
+      "the notice the fold used to hang on is one of them now");
+check(taskG.dataset.turnFolded === "1" && noticeG.dataset.turnFolded === undefined,
+      "the mark moves with the head, so a third pass still finds this region folded");
+check(gFolds[0].children[0].children[1].textContent === "process · 4 steps",
+      "and the head counts the middle it hides now (" +
+      JSON.stringify(gFolds[0].children[0].children[1].textContent) + ")");
+check(p.children[2] === ansG && p.children[3] === divG && divG.dataset.turnFolded === "1",
+      "the answer and the divider stay in plain sight, and the region stays folded");
+const before7g = p.children.slice();
+ctx.foldClosedRegions(p);
+check(p.children.length === before7g.length && p.children.every((c, i) => c === before7g[i]),
+      "announcing the same page twice changes nothing (its rows are inside the fold by now)");
+
+// ---- 7h) a page that brings no task row at all (a turn larger than the server's
+// alignment budget): the fold keeps its head and takes nothing in — and above all,
+// the rows above it are still not a second fold.
+const looseG = row("event tool_result", "…a middle of a middle");
+const pH = pane([looseG, taskG, gFolds[0], ansG, divG]);
+ctx.eventsEl = pH;
+ctx.foldClosedRegions(pH);
+check(pH.children.filter((c) => c.matches(".turn-fold")).length === 1 && pH.children[1] === taskG,
+      "rows that arrive above the head leave the fold where it is, and never fold it");
+
 // ---- 8) the wiring the page has to carry ----
 const uiDir = path.join(__dirname, "..", "ui");
 const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
