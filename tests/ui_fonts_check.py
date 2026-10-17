@@ -196,12 +196,71 @@ def in_cjk(cp: int) -> bool:
     return any(lo <= cp <= hi for lo, hi in CJK_RANGES)
 
 
+def strip_js_comments(js: str) -> str:
+    """Remove // and /* */ runs from JS, leaving string and template literals
+    alone.
+
+    A COMMENT IS NEVER DRAWN. The UI's prose uses typographic glyphs the icon
+    font has no business carrying — `─` rules between sections of a file, the
+    en dash of a measured range (996–1051), `▼` named as the glyph a rotated `▶`
+    becomes — and scanning them for coverage made the release build fail on a
+    sentence. Strings are still scanned: that is where a glyph that reaches the
+    screen lives (`caret.textContent = "▶"`)."""
+    out: list[str] = []
+    i, n = 0, len(js)
+    quote = ""
+    while i < n:
+        ch = js[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(js[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and js.startswith("//", i):
+            j = js.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if ch == "/" and js.startswith("/*", i):
+            j = js.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def strip_html_comments(html: str) -> str:
+    return re.sub(r"<!--[\s\S]*?-->", "", html)
+
+
+def rendered_text(path: Path) -> str:
+    """A UI source with its comments cut: what the coverage scan must read."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix == ".js":
+        return strip_js_comments(text)
+    if path.suffix == ".css":
+        return strip_comments(text)
+    if path.suffix == ".html":
+        return strip_html_comments(text)
+    return text
+
+
 def used_icon_codepoints() -> dict[int, set[str]]:
     """Every character in ui/ that no bundled face covers — the ones that must be
     in clutch-icons.woff2, mapped to the files that use them."""
     found: dict[int, set[str]] = {}
     for path in ui_source_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = rendered_text(path)
         for ch in sorted(set(text)):  # set(): dedupe before classifying
             cp = ord(ch)
             if cp < 0x80 or ch in LATIN_COVERED or (in_cjk(cp) and ch != "\uFF0B"):
@@ -391,6 +450,21 @@ def check_stack_coverage(css: str) -> None:
               "--font-mono resolves CJK from the bundled Noto before MS Gothic (JIS shapes)")
 
 
+def check_scan_reads_rendered_text() -> None:
+    """The coverage scan reads what reaches the screen, comments included in that
+    is wrong in both directions: it fails the release build on a sentence (a `─`
+    rule between sections, the en dash of a range) and it hides nothing — a glyph
+    nobody renders does not need a glyph in the font."""
+    js = '/* ─ section ─ */\n// 996–1051 folded\nconst caret = "▶";\n'
+    kept = strip_js_comments(js)
+    check("─" not in kept and "–" not in kept and "▶" in kept,
+          "the icon-font scan reads comments as prose, not as drawn symbols: a glyph "
+          "in a /* */ or // run is dropped, one in a string is still scanned")
+    check(strip_js_comments('const url = "http://x/y"; // ▼\n').strip()
+          == 'const url = "http://x/y";',
+          "and a // inside a string is part of the string, not the start of a comment")
+
+
 def main() -> int:
     raw = CSS.read_text(encoding="utf-8")
     css = strip_comments(raw)
@@ -406,6 +480,7 @@ def main() -> int:
     print("bundled icon font:")
     check_icon_font(css)
     check_icon_family_first(css)
+    check_scan_reads_rendered_text()
     print("diagram labels:")
     check_mermaid_font(ui_source())
 
