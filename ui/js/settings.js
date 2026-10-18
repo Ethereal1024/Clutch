@@ -313,6 +313,7 @@ async function openSettings() {
   modal.classList.remove("hidden", "closing");
   // url/key/model fields live in the profile editor; nothing to prefill here
   renderLlmProfiles(localStorage.getItem("clutch_llm_active") || "");
+  paintAbout(); // no read, no wait: the pane's three facts are already on this page
   // always open on the model tab: the plugin page is a place a user goes, not
   // the place they land (and its lists are re-read when they do)
   showSettingsTab("llm");
@@ -321,20 +322,73 @@ function closeSettings() {
   closeModal(modal);
 }
 
-// ---- the settings modal's two panes ----
-// A tab strip over one modal box: "Model" (the LLM profile form) and "Plugins"
-// (ui/js/components-panel.js). Purely visual — this only moves a class; the
-// plugin pane draws itself when it becomes visible.
+// ---- the About pane: what this build IS ----
+// A version page is only worth having if the number is the build's own, so it is
+// read from the stamp (ui/version.js) and never spelled out here. Three facts, and
+// the other two are the ones that make the first mean something: the same renderer
+// runs inside Electron and inside the phone's system WebView, so "0.1.54" alone
+// does not say what was on screen.
+function aboutVersion() {
+  const v = String(window.CLUTCH_VERSION == null ? "" : window.CLUTCH_VERSION).trim();
+  // no stamp: a checkout served plainly, or a page from before this file existed.
+  // Saying so beats an empty row that looks like a broken read.
+  return v || "dev build";
+}
+
+// The system, the shell and the engine, parsed off the user agent — the only
+// version facts a page in a WebView has for free. Electron names itself there, and
+// so does the Android WebView ("; Android 13; …) Version/4.0 Chrome/108…"); a
+// plain desktop browser is neither, and says so.
+function aboutPlatform() {
+  const ua = String((navigator && navigator.userAgent) || "");
+  const grab = (re) => {
+    const m = ua.match(re);
+    return m ? m[1] : "";
+  };
+  const electron = grab(/Electron\/([\d.]+)/);
+  const android = grab(/Android\s+([\d.]+)/);
+  const chrome = grab(/(?:Chrome|Chromium)\/(\d+)/);
+  const system = android ? "Android " + android
+    : /Windows/.test(ua) ? "Windows"
+    : /Mac OS X|Macintosh/.test(ua) ? "macOS"
+    : /Linux|X11/.test(ua) ? "Linux"
+    : "unknown system";
+  const shell = electron ? "Electron " + electron : android ? "Android WebView" : "browser";
+  return [system, shell, chrome ? "Chromium " + chrome : ""].filter(Boolean).join(" · ");
+}
+
+// The session this window holds (ui/app.js API_BASE): local, or a tunnel to the
+// machine on the far side. It is the one row that says whether a version report is
+// about this device or about the host it was talking to.
+function aboutBackend() {
+  return API_BASE || "not connected";
+}
+
+function paintAbout() {
+  const set = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+  set("about-version", aboutVersion());
+  set("about-platform", aboutPlatform());
+  set("about-backend", aboutBackend());
+}
+
+// ---- the settings modal's panes ----
+// A tab strip over one modal box: "Model" (the LLM profile form), "Plugins"
+// (ui/js/components-panel.js) and "About" (the three facts above). Purely visual —
+// this only moves a class; the plugin pane draws itself when it becomes visible,
+// and the About pane is painted on its own tab's click below.
 //
 // The strip is a real `role="tablist"` in index.html, and `aria-selected` is the
 // half of it a class cannot say: `.active` paints the tab, `aria-selected` is how
-// the pane that is showing is announced. Both tabs stay in the tab order and there
-// are no arrow keys — with two of them, Tab reaches the other one, which is what a
-// reader expects anyway.
-const SETTINGS_TABS = ["llm", "plugins"];
+// the pane that is showing is announced. No tab is removed from the tab order and
+// there are no arrow keys — with three of them, Tab reaches the others, which is
+// what a reader expects anyway.
+const SETTINGS_TABS = ["llm", "plugins", "about"];
 
 // ---- the box follows its pane ----
-// The two panes are different lengths and the box is only as tall as the one that
+// The panes are different lengths and the box is only as tall as the one that
 // is showing, so a tab click resizes the whole modal. With nothing between the two
 // heights that lands in ONE frame, and a box jumping from 300px to 720px reads as
 // a second box arriving rather than as the one you were standing in refilling —
@@ -433,6 +487,11 @@ function showSettingsTab(name) {
 for (const t of SETTINGS_TABS) {
   $("#settings-tab-" + t).addEventListener("click", () => showSettingsTab(t));
 }
+// The About pane is painted on the tap that shows it, not inside the switch above:
+// the switch is the modal's own mechanics (one class, one height), while these three
+// facts are cheap and one of them — the backend address — moves when a session
+// comes or goes under a modal that is already open.
+$("#settings-tab-about").addEventListener("click", paintAbout);
 // push the profile-editor form values to the backend
 async function pushSettings() {
   const key = keyInput.value.trim();

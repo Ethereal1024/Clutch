@@ -35,6 +35,10 @@ for f in $UI_NODE; do cp "ui/$f" "$NODEJS_PROJECT/ui/"; done
 rm -rf "$UI_ASSETS"
 mkdir -p "$UI_ASSETS"
 cp ui/index.html ui/app.js ui/style.css ui/mobile.css ui/bridge-shim.js "$UI_ASSETS/"
+# the build stamp the About pane reads (ui/version.js): rewritten below by
+# build-android-apk.sh with the version it hands gradle, and carried at its
+# source-tree value when this script runs on its own
+cp ui/version.js "$UI_ASSETS/"
 # the renderer's own modules (ui/js) + the vendored third-party libraries
 cp -r ui/js "$UI_ASSETS/js"
 cp -r ui/vendor "$UI_ASSETS/vendor"

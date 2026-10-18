@@ -1372,13 +1372,13 @@ mjx-container[display="true"] {
 #settings-modal .modal-tabs,
 #settings-modal .modal-actions { flex: none; }
 #settings-modal .modal-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-/* the box's height is the pane's height plus this box's chrome, and its two panes
-   are different lengths — so switching tabs resizes the box. ui/js/settings.js
+/* the box's height is the pane's height plus this box's chrome, and its panes are
+   different lengths — so switching tabs resizes the box. ui/js/settings.js
    drives that height from there, one frame at a time, and the reason it cannot be
    a rule here is that the height keeps moving after the tab lands: the plugin pane
    is filled by a read that answers twice (the machine, then the market). */
 
-/* settings modal: the tab strip over its two panes. The strip is the modal's own
+/* settings modal: the tab strip over its panes. The strip is the modal's own
    chrome, so it takes no field spacing and its active rule sits ON the line. */
 .modal-tabs {
   display: flex;
@@ -1406,6 +1406,38 @@ mjx-container[display="true"] {
    cannot be told from the one next to it */
 .modal-tab.active, .modal-tab.active:hover:not(:disabled) { color: var(--text); border-color: transparent; border-bottom-color: var(--accent); }
 .modal-pane.hidden { display: none; }
+
+/* the About pane: a short table of FACTS, not a form. Labels are the same eyebrow
+   as every field name in this box (.modal-box label, .modal-tab), and the values are
+   DATA — set in the mono face and never uppercased, because a version is a string to
+   be compared against another version, not prose. `max-content` on the label column
+   keeps the three values on one left edge whatever their labels measure, and the
+   value column may wrap (`minmax(0, …)`) so a long backend address cannot widen the
+   modal. */
+.about-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--s2) var(--s4);
+  margin: 0 0 var(--s4);
+  align-items: baseline;
+}
+.about-list dt {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.about-list dd { margin: 0; min-width: 0; }
+/* the number itself: the one thing on this pane a reader came for, so it is the
+   largest type in the box and the only line at full contrast */
+.about-version { font-family: var(--font-mono); font-size: var(--fs-lg); color: var(--text); }
+.about-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  overflow-wrap: anywhere; /* an address has no spaces to break at */
+}
+.about-note { margin: 0; font-size: var(--fs-sm); line-height: 1.5; max-width: 46ch; }
 
 /* the mirror row: a CLIENT setting — where the sources below are READ from — which
    is why it is drawn above the machine they are for. It is `flex: none` like the

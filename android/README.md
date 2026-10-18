@@ -25,8 +25,15 @@ app/src/main/
 # 本机（需 JDK 17 + Android SDK 34/NDK 26.3.11579264；libnode zip 已缓存秒过）
 scripts/build-android-apk.sh <pylibs-index-url> <版本> clutch-android.apk
 # 脚本内部 = 盖章(pylibs-index-url.txt) → fetch-android-libnode → sync →
-# ./gradlew --no-daemon :app:assembleDebug -PAPP_VERSION=<版本> → 拷出 APK
+# 版本戳(assets/ui/version.js ← <版本>) → ./gradlew --no-daemon :app:assembleDebug
+# -PAPP_VERSION=<版本> → 拷出 APK
 ```
+
+设置里的 **About** 页读的就是那份 `assets/ui/version.js`：构建脚本用**传给 gradle 的同一个
+`<版本>`** 重写它（所以手机上看到的号 = `dumpsys package` 里的 `versionName`，包括 tag 构建
+与 debug 构建 id）。源码树里该文件与 `VERSION`、`ui/package.json`/`package-lock.json`
+是同一个号，由 `tests/about-version-test.js` 钉住——页面没有别的途径知道自己的版本（WebView
+没有连到 Kotlin 壳的通道），所以这个戳是唯一的真相。
 
 产物是 **debug 签名 APK**，但签名密钥是**项目自己的**（`android/keystore/clutch.jks`，
 `android/app/build.gradle` 的 `signingConfigs.clutch` 同时用在 debug 与 release 上）：
@@ -693,6 +700,12 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     一页较大时先出现 `rendering earlier records…` 再插入；中途再点不产生第二个请求；到历史尽头
     pill 消失；失败时回到 `load earlier records (…)` 并在下面有一行 `Failed to load earlier
     records: …`（同一节）。
+17. 设置页的版本号（报告"设置里看不到软件版本"）：设置弹窗第三个标签 **About** 里的号码是人眼
+    能读的一行等宽大字，且**等于这个包自己的** `versionName`——
+    `adb shell dumpsys package io.clutch.mobile | grep versionName` 与屏上那一行逐字相同（不是
+    `dev build`，也不是源码树里可能更新的号）；下面两行分别是 `Android <N> · Android WebView ·
+    Chromium <M>` 与后端地址（未连接时是 `not connected`，连上后是那条会话的地址）。切换标签时
+    弹窗高度随之变化但仍是滑过去、不是跳过去；About 页可以反复进出，号码不会变成空行。
 
 ## 与初版方案的偏差（均已定案）
 
@@ -711,7 +724,7 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
 uv pip install pip                        # 一次性：uv venv 默认无 pip，构建 tar 需要
 for f in tests/*.test.js tests/*-test.js; do
   case "$f" in *e2e*) continue;; esac
-  node "$f" || echo "FAILED: $f"          # 54 个套件应全绿（*e2e* 需 CLUTCH_E2E_*，跳过）
+  node "$f" || echo "FAILED: $f"          # 56 个套件应全绿（*e2e* 需 CLUTCH_E2E_*，跳过）
 done
 uv run python -m tests.selfcheck          # python 侧
 

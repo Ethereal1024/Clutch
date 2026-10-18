@@ -51,10 +51,20 @@ printf '%s\n' "$INDEX_URL" > android/host/pylibs-index-url.txt
 bash scripts/fetch-android-libnode.sh
 bash scripts/sync-android-host.sh
 
-# 3. gradle: --no-daemon keeps CI memory flat and leaves no stray JVM behind
+# 3. the version stamp the About page reads (ui/version.js, in assets/ui — the
+#    copy sync-android-host.sh made from the source tree). The page cannot ask
+#    the shell for its versionName: the WebView has no channel to it, and adding
+#    one would buy nothing a stamped file does not already say. So rewrite the
+#    file the page already loads with EXACTLY the number gradle is about to be
+#    given, and an installed APK names the release it was built from — also when
+#    the tree said something else (a tag build, a debug build id).
+printf '// stamped by scripts/build-android-apk.sh: the versionName gradle was given\nwindow.CLUTCH_VERSION = "%s";\n' "$VERSION" \
+  > android/app/src/main/assets/ui/version.js
+
+# 4. gradle: --no-daemon keeps CI memory flat and leaves no stray JVM behind
 ( cd android && ./gradlew --no-daemon :app:assembleDebug -PAPP_VERSION="$VERSION" )
 
-# 4. ship the artifact out of the build tree
+# 5. ship the artifact out of the build tree
 BUILT=android/app/build/outputs/apk/debug/app-debug.apk
 [ -f "$BUILT" ] || { echo "build-android-apk: gradle produced no $BUILT" >&2; exit 1; }
 mkdir -p "$(dirname "$OUT")"
@@ -63,7 +73,7 @@ cp "$BUILT" "$OUT"
 echo "build-android-apk: wrote $OUT (versionName $VERSION, index $INDEX_URL)"
 sha256sum "$OUT"
 
-# 5. The signature is a CONTRACT, not an accident. Android installs an APK over
+# 6. The signature is a CONTRACT, not an accident. Android installs an APK over
 #    the previous one only when the certificate matches, and the failure appears
 #    on somebody's phone — never here. So read the certificate out of the
 #    finished file and compare it with the digest pinned in the repo: a build

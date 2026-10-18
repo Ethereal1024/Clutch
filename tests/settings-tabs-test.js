@@ -50,7 +50,7 @@ const html = fs.readFileSync(path.join(UI, "index.html"), "utf8");
 // lives on, to the switch that starts it. Sliced out of the page's own source
 // (harness.js reads the script list index.html declares), so a module this page
 // forgets to load fails here rather than passing against a copy.
-const REGION = slicer(uiSource()).region('const SETTINGS_TABS = ["llm", "plugins"]', "showSettingsTab");
+const REGION = slicer(uiSource()).region('const SETTINGS_TABS = ["llm", "plugins", "about"]', "showSettingsTab");
 
 // one rule's declarations, with its whitespace folded away
 function decls(sheet, selector) {
