@@ -510,6 +510,31 @@ UI 里也没有这个字段。也就是说"写进 ~/.clutch/settings.json"这句
 同一行变成 `no source mirror set: fetching … (github.com) directly`。此时在**不能**直连
 github.com 的网络里，组件市场与远端 pylibs 安装都应能走通。
 
+## 系统栏不是 App 的底色，两指还会放大整个界面（同一次真机反馈里的两条）
+
+**报告**：
+
+1. 状态栏和导航栏是浅色/发白的，和 App 的 `#0F0F10` 底色对不上——看着像"屏幕底下还有一层别的东西"，不是 App 的一部分。
+2. 界面上很容易误触两指，一放大整屏就糊住，而且**不会自己回去**：布局没有重排，顶栏和输入框被推到屏幕外。
+
+**根因**：两条都是壳的默认值，代码里一行都没写过。
+
+- 主题：manifest 指向平台的 `@android:style/Theme.Material.Light.NoActionBar`。Light Material 继承 `Theme.Light`，其 `windowBackground` 是 `@color/background_material_light`（`material_grey_50`，约 `#FAFAFA`），`statusBarColor` 是 `?attr/colorPrimaryDark`（浅色 Material 下就是灰），而 `navigationBarColor` 是 `@color/navigation_bar_default` = `#00808080`——**alpha 是 0x00，即完全透明**：那条近白的窗口底色从导航栏里透出来，正是用户看到的白。`res/values/` 此前**没有 themes.xml**，三个值一个都没被改过。
+- 缩放：`WebSettings.supportZoom` **默认 true**，`MainActivity` 只设了 `javaScriptEnabled` / `domStorageEnabled`，`ui/index.html` 的 viewport 也没写上上限。WebView 于是内建了双指与双击放大，放大的是**视觉视口**（不触发重排），所以表现是"糊上去且卡住"，而不是"响应式变大"。
+
+**修法**：一层管一条，四处在代码里。
+
+1. 新增 `app/src/main/res/values/themes.xml`：`Theme.Clutch`，父主题是**深色**的 `@android:style/Theme.Material.NoActionBar`（深色父主题的 `windowLightStatusBar` / `windowLightNavigationBar` 本来就是 false，栏上图标识天然是浅色，不必赌），`windowBackground` / `colorBackground` / `statusBarColor` / `navigationBarColor` / `navigationBarDividerColor` 全部指向同一个 `#FF0F0F10`（`clutch_bg`），`windowDrawsSystemBarBackgrounds` = true。**没有**建 `values-v27` / `values-v28`：配置目录里的 style 是**整袋替换**而不是合并，建了就得分身重写全部 item；两个新属性（API 27/28）在旧平台上不认识的属性 ID 会在 inflate 时被忽略。
+2. `AndroidManifest.xml` 的 `<application android:theme>` 换成 `@style/Theme.Clutch`。顺带的正效应：`offerBatteryExemption()` 那个 `AlertDialog` 继承 Activity 主题，现在是深底浅字，和 App 同一张皮（此前是浅灰底的系统对话框，看着像另一个应用）。
+3. `MainActivity`：`webView.setBackgroundColor(getColor(R.color.clutch_bg))`——`setContentView` 到页面首帧之间那块平台白底就没了；`showEngineError()` 的内联页补上 `background:#0F0F10;color:#F2F2F4`（此前是一张白底网页，看着像"崩到浏览器里了"）。
+4. 缩放：`webView.settings.apply { setSupportZoom(false); builtInZoomControls = false; displayZoomControls = false }`；`ui/mobile.css` 的 ≤640px 块给 `html, body` 加 `touch-action: pan-x pan-y`（第二道；**`manipulation` 不能用来干这个**，按规范它恰恰是"允许 pinch"的那个值）；`ui/index.html` 的 viewport 补 `maximum-scale=1.0, user-scalable=no`——这条只当意图记录：Chrome/WebView 出于无障碍会忽略它，真正的闸门是 `setSupportZoom(false)`。
+
+**为什么不会弄坏 App 自己的双指**：图表查看器不靠原生缩放。`ui/js/diagram-viewer.js` 用 pointer events 自己做 pinch（`pointerdown` 里 `setPointerCapture`，两个 pointer 时算 `dvZoom`，`dvApply()` 只改 `transform`），`.dv-stage` 本来就有 `touch-action: none`。`setSupportZoom` 只关视觉视口的原生缩放，pointer 事件一条不少。
+
+**回归**：`tests/ui_css_check`（含 `android/.../assets/ui` 的逐字节副本）、`tests/ui_fonts_check`、`tests/android_icon_check` 全绿。`clutch_bg` **没有**写进 `values/colors.xml`——那个文件由 `scripts/make-icon.py` 生成、被逐字节钉死，往里加一条图标闸门就会红。产物侧证据：`aapt2 dump resources` 里 `style/Theme.Clutch` 是 8 条 item、父主题 `0x0103022e`，清单的 `android:theme` 指到 `0x7f0a0005`；`dexdump -d classes3.dex` 里在 `const/4 v2, #int 0` 之后连着 `setSupportZoom` / `setBuiltInZoomControls` / `setDisplayZoomControls`，即三个都传 false。**覆盖不了的一条**：系统的无障碍"强制启用缩放"/放大手势是用户设置，App 无法覆盖，开着它时仍会放大。
+
+**待验（真机）**：状态栏、导航栏、App 底色三处同色，栏上图标识是浅色（不出现深图标压在近黑栏上）；旋转屏幕、弹出软键盘时系统栏区域不闪白；聊天区/顶栏两指乱蹭不再放大，双击也不放大；图表查看器里捏合、双击 1:1、拖动照旧。
+
 ## M2：pylibs 供给线（代码+CI+测试完成，真远端验收待设备环节）
 
 完整 SSH 路径的最后一块拼图：手机上**没有** pip/bash，pylibs tar 改为 CI 预构建、
@@ -633,6 +658,10 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     `[disconnect] releasing the far side's reverse forward on 127.0.0.1:<port>`。手机端走的常是
     "请对端自选端口"那条路（8892 被别人占着），那就该看到 `<port>` 是自选的那个、而不是 8892
     ——**只归还自己被授予的编号**是这条的判据（见上一节）。
+13. 系统栏同色（报告"状态栏/导航栏不是 App 的底色"）：状态栏、导航栏、App 底色三处同色，
+    栏上图标识是浅色；旋转屏幕与弹出软键盘时系统栏区域不闪白（见「系统栏不是 App 的底色」一节）。
+14. 缩放锁（报告"两指误触就放大"）：聊天区、顶栏两指蹭与双击都不放大，界面不会停在"糊住且
+    不回弹"的状态；图表查看器里捏合、双击 1:1、拖动**照旧**（同一节）。
 
 ## 与初版方案的偏差（均已定案）
 

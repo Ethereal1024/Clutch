@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The phone shell's one theme (device report: the status bar and the
+     navigation bar rendered in the framework's greys instead of the app's
+     own #0F0F10, with the near-white window showing through the nav bar).
+
+     Why it happened: the manifest pointed at the platform's
+     Theme.Material.Light.NoActionBar. A Light Material theme inherits
+     Theme.Light, whose windowBackground is @color/background_material_light
+     (material_grey_50, about #FAFAFA), and sets windowLightStatusBar so the
+     bar glyphs are dark. Its navigationBarColor is @color/navigation_bar_default
+     = #00808080, i.e. alpha 0x00 — a fully TRANSPARENT nav bar, so that
+     near-white window background was what the user actually saw there.
+
+     The parent below is the DARK Material theme on purpose, not just a
+     repaint: its windowLightStatusBar / windowLightNavigationBar flags are
+     already false, so the bar glyphs stay light on our near-black bar
+     without depending on the two items below, and its own surfaces are dark,
+     so nothing white can flash through during a resize or the first draw.
+
+     Every colour here is the same #0F0F10 as the render layer's background
+     variable and the launcher tile. The value lives HERE, not in colors.xml:
+     scripts/make-icon.py generates that file and tests/android_icon_check.py
+     pins it byte for byte, so adding to it would fail the icon gate.
+
+     One file, no values-v27 / values-v28 variant: a style in a config
+     specific folder REPLACES the base style bag rather than merging into it,
+     so a variant would have to restate every item above. The three newer
+     items (windowLightNavigationBar is API 27, navigationBarDividerColor is
+     API 28) are inert on the older platforms; framework attribute IDs a
+     device does not know are simply ignored at inflate time. -->
+<resources>
+    <color name="clutch_bg">#FF0F0F10</color>
+
+    <style name="Theme.Clutch" parent="@android:style/Theme.Material.NoActionBar">
+        <!-- every window surface painted before or behind the WebView -->
+        <item name="android:windowBackground">@color/clutch_bg</item>
+        <item name="android:colorBackground">@color/clutch_bg</item>
+        <!-- targetSdk 34 still lets an app paint its system bars directly;
+             at 35 they are forced edge to edge and this pair stops applying -->
+        <item name="android:statusBarColor">@color/clutch_bg</item>
+        <item name="android:navigationBarColor">@color/clutch_bg</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <!-- explicit even though the dark parent already implies both:
+             light glyphs on a #0F0F10 bar, never dark on dark -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <!-- a 3 button nav bar draws a hairline divider; at its default it is
+             a second, lighter line under a bar that is meant to be seamless -->
+        <item name="android:navigationBarDividerColor">@color/clutch_bg</item>
+    </style>
+</resources>

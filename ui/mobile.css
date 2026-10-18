@@ -39,6 +39,12 @@
   html, body {
     overflow: hidden;
     overscroll-behavior: none;
+    /* second line against a stray two finger gesture (the authoritative lock
+       is setSupportZoom(false) in MainActivity). pan-x pan-y keeps pans and
+       drops pinch; `manipulation` would be the wrong value here, since it is
+       the one that ALLOWS pinch zoom. Nothing on a phone page needs a native
+       pinch: the diagram viewer zooms with its own transforms. */
+    touch-action: pan-x pan-y;
   }
 
   /* report #3: a touch scrollbar is an overlay — keep it hairline */

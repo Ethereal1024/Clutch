@@ -63,11 +63,27 @@ class MainActivity : Activity() {
         // (idempotent — the service runs the same call)
         NodeEngine.ensureStarted(applicationContext)
 
+        // the theme paints the window clutch_bg, and the WebView paints itself
+        // the same colour: between setContentView and the page's first paint
+        // the surface would otherwise be the platform's white, a visible flash
+        // under a near-black UI
         webView = WebView(this)
+        webView.setBackgroundColor(getColor(R.color.clutch_bg))
         setContentView(webView)
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            // an app is not a web page (device report: a stray two finger
+            // touch zoomed the whole UI, and it stayed zoomed because the
+            // visual viewport magnifies the laid out page). supportZoom
+            // defaults to TRUE and covers the pinch and the double tap alike;
+            // it does not touch setTextZoom, so the font scale is unchanged.
+            // The app's own pinch is pure JavaScript (ui/js/diagram-viewer.js
+            // transforms .dv-stage from pointer events, and .dv-stage already
+            // declares touch-action: none), so it cannot be affected by this.
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
         }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
@@ -202,8 +218,12 @@ class MainActivity : Activity() {
     }
 
     private fun showEngineError() {
+        // the bare loadData page inherits the default white background, which
+        // under a #0F0F10 shell reads as "the app crashed into a web page"
         webView.loadData(
-            "<meta charset='utf-8'><body style='font-family:sans-serif;padding:2em'>" +
+            "<meta charset='utf-8'>" +
+                "<body style='font-family:sans-serif;padding:2em;" +
+                "background:#0F0F10;color:#F2F2F4'>" +
                 "<h3>Clutch 引擎未启动</h3>" +
                 "<p>诊断：<code>adb logcat -s clutch</code>；应用沙箱内 <code>filesDir/tunnel.log</code>。</p>",
             "text/html",

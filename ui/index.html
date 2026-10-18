@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- maximum-scale / user-scalable are belt and braces only: Chromium
+       honours them for the page's OWN zoom, but the authoritative lock is
+       WebSettings.setSupportZoom(false) in the Android shell (Chrome ignores
+       user-scalable=no for accessibility reasons, so never rely on this
+       line alone). The desktop shell is unaffected either way. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Clutch — coding agent</title>
   <link rel="stylesheet" href="style.css" />
   <!-- N7 (M3): phone-only re-flow. The media attribute keeps this a no-op on
