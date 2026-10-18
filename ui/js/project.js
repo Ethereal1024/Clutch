@@ -39,26 +39,72 @@ let oldestOffset = null; // byte offset of the oldest loaded (rendered) non-task
 // already painted (addEvent in js/stream-events.js). Reset with the pane.
 let streamHighOffset = null;
 let paging = false;   // one history fetch at a time
+// what the pill is waiting on: "" (offering the page), "fetch" (the request is
+// out) or "render" (the reply is here and the pane is taking it). A `history`
+// frame that lands mid-page reads this instead of overwriting the wait.
+let olderBusy = "";
 // when non-null, addEvent appends into this off-DOM sink instead of #events
 let pageSink = null;
+
+// The page's size as a person reads it: the pill offers it, and names it again
+// while it is being fetched.
+function olderSizeLabel(bytes) {
+  const kb = Math.max(1, Math.ceil(bytes / 1024));
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+}
+
+// The pill's one label, in all three states. It is painted from `olderBusy`, so a
+// reconnecting stream's `history` frame (js/stream-events.js setOlderPill) mid-page
+// rewrites the same sentence instead of taking the spinner's place.
+function paintOlderLabel() {
+  const label = document.getElementById("older-label");
+  if (!label) return;
+  const size = olderSizeLabel(olderRemaining);
+  if (olderBusy === "render") label.textContent = "rendering earlier records…";
+  else if (olderBusy === "fetch") label.textContent = `loading ${size}…`;
+  else label.textContent = `load earlier records (${size})`;
+}
 
 function setOlderPill(n) {
   olderRemaining = Math.max(0, n | 0);
   const pill = document.getElementById("older-pill");
   if (olderRemaining > 0) {
     pill.classList.remove("hidden");
-    const kb = Math.max(1, Math.ceil(olderRemaining / 1024));
-    const label = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
-    document.getElementById("older-label").textContent =
-      `load earlier records (${label})`;
+    paintOlderLabel();
   } else {
     pill.classList.add("hidden");
   }
 }
 
+// The tap has to be answered on the frame it lands. A page is ONE /api/history
+// request whose budget is a megabyte and a turn (below), the server assembles it
+// from disk, and the prepend that follows is one synchronous pass over the reply —
+// so the wait is spent inside the control that was just pressed: a ring, the number
+// being fetched, and `aria-busy` for assistive tech. Cleared in loadOlder's
+// `finally`, whatever the outcome.
+function setOlderBusy(stage) {
+  olderBusy = stage || "";
+  const pill = document.getElementById("older-pill");
+  if (!pill) return;
+  pill.classList.toggle("busy", !!olderBusy);
+  if (olderBusy) pill.setAttribute("aria-busy", "true");
+  else pill.removeAttribute("aria-busy");
+  paintOlderLabel();
+}
+
+// One PAINTED frame: the first rAF only promises the browser is about to paint.
+// Used to put the reply's own state on screen before the synchronous prepend takes
+// the main thread — otherwise the label would change and then freeze unseen.
+function nextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
 async function loadOlder() {
   if (paging || stream.classList.contains("loading") || !oldestOffset || olderRemaining <= 0) return;
   paging = true;
+  setOlderBusy("fetch"); // synchronous: this is the frame the tap lands on
   try {
     const anchor = eventsEl.firstElementChild; // identity survives the prepend
     // A page is a BYTE budget, and a byte budget splits turns: the median finished
@@ -70,6 +116,12 @@ async function loadOlder() {
     const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=1048576&align=turn`, { timeout: 60000 });
     const page = data.events || [];
     if (!page.length) { setOlderPill(0); return; }
+    // What follows is one synchronous pass (the sink render below, the prepend, the
+    // folds), so the reply's own stage is painted first. Nothing has moved yet:
+    // `pageSink` is not set and `oldestOffset` is not read again, so a live frame
+    // that lands in this yield renders into the pane exactly as it always would.
+    setOlderBusy("render");
+    await nextPaint();
     const anchorTop = anchor ? anchor.getBoundingClientRect().top : null;
     // render the page through the full replay pipeline into an off-DOM sink,
     // then prepend it in one pass; save/restore live-stream state
@@ -124,6 +176,7 @@ async function loadOlder() {
     notice("Failed to load earlier records: " + e.message);
   } finally {
     paging = false;
+    setOlderBusy(""); // the pill goes back to offering the page (or hides at 0)
   }
 }
 

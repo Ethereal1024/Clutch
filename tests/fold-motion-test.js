@@ -138,7 +138,7 @@ function flush() {
   rafStarted = 0;
   autoScrollCalls = 0;
 }
-const keyframes = (anim) => anim.frames.map((f) => f.gridTemplateRows).join(" -> ");
+const keyframes = (anim) => anim.frames.map((f) => f.height).join(" -> ");
 const fade = (anim) => anim.frames.map((f) => f.opacity).join(" -> ");
 const slideFrames = (anim) => anim.frames.map((f) => f.transform).join(" -> ");
 
@@ -204,11 +204,27 @@ check(fold.has("open") && !fold.has("hidden") &&
       + "can only land there (it cannot snap back to the state it started from)");
 check(keyframes(opening) === "0px -> " + SIZED + "px",
       "a fresh open runs the whole distance: " + keyframes(opening));
-check(opening.frames[1].gridTemplateRows === SIZED + "px" &&
-      opening.frames[0].gridTemplateRows === "0px",
-      "and the track it moves is the inner's own measured height, in PIXELS: a fractional `fr` "
-      + "is resolved against an auto-height container twice by Blink, so the track landed on "
+check(opening.frames[1].height === SIZED + "px" &&
+      opening.frames[0].height === "0px",
+      "and the box moves by its own HEIGHT in pixels, the inner's measured content: a fractional "
+      + "`fr` is resolved against an auto-height container twice by Blink, so the track landed on "
       + "f*f x content while the box landed on f x content and the frame closed on an empty band");
+// The property carrying the move is not interchangeable. `grid-template-rows` became
+// interpolable in Chromium 107 (mdn/browser-compat-data, css/properties/grid-template-rows
+// .json, the `animation` entry) and the phone renders this page in the SYSTEM WebView,
+// whose version ships with the device: on an older one the keyframes were not
+// animatable, the box sat at 0px for the whole duration and then appeared at full
+// height in one frame — the report ("the process block opens instantly on the phone").
+// So the frames carry `height`, and the fold's one track is held OPEN while the box
+// moves (its own `.fold` rule is 0fr closed, which would otherwise pinch the inner to
+// zero on a close and shrink the box around nothing).
+check(Object.keys(opening.frames[0]).every((k) => k === "height" || k === "opacity") &&
+      opening.frames.every((f) => f.gridTemplateRows === undefined),
+      "and grid tracks are nowhere in the keyframes: " + Object.keys(opening.frames[0]).join(", ")
+      + " is what every engine this pane runs in can interpolate");
+check(fold.style.height === "0px" && fold.style.gridTemplateRows === "1fr",
+      "with the track held open inline for the length of the move (" + fold.style.height + ", "
+      + fold.style.gridTemplateRows + "): the resting 0fr would clip the rows away mid-travel");
 check(opening.options.easing === ARRIVE && opening.options.duration === FOLD_MS,
       "and it arrives on ARRIVE_EASE (" + ARRIVE + ") at FOLD_MS (" + FOLD_MS + "ms)");
 check(fade(opening) === "1 -> 1",
@@ -259,6 +275,9 @@ check(rafStarted === 1 && autoScrollCalls === 0,
 closing.finish();
 check(fold.has("hidden") && !fold.has("open") && fold._foldAnim === null && done === 1,
       "a finished close lands the fold in its .hidden end state, and its callback runs once");
+check(fold.style.height === "" && fold.style.gridTemplateRows === "",
+      "and the inline height and the held-open track come off again, so the sheet's own 0fr/.hidden "
+      + "pair owns the box from then on (a stale 0px would pin it shut for good)");
 
 // ---- 3) a click DURING a move reverses it (the class list cannot answer this) ----
 fold = makeSizedFold(SIZED);
@@ -335,6 +354,9 @@ autoScrollCalls = 0;
 ctx.foldCollapse(fold, () => { done++; });
 check(fold._animations.length === 0 && fold.has("hidden") && !fold.has("open") && done === 1,
       "and a reduced-motion close lands `.hidden` and runs its callback");
+check(fold.style.height === "" && fold.style.gridTemplateRows === "",
+      "with the same clean inline state: a reduced-motion reader gets the destination, never a "
+      + "half-set box");
 check(autoScrollCalls === 0, "without scrolling a reader who is reading the history");
 reduced = false;
 

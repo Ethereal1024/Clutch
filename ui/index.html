@@ -328,6 +328,10 @@
             <span class="open-progress-label">0%</span>
           </div>
           <button id="older-pill" class="older-pill hidden" type="button" title="load earlier records from this conversation">
+            <!-- the wait, in the control that was just pressed: a page is one
+                 request (js/project.js loadOlder) and its reply is a megabyte of
+                 records, so the tap has to read as taken on the frame it lands -->
+            <span class="older-spinner" aria-hidden="true"></span>
             <span id="older-label"></span>
           </button>
           <div id="events" class="events"></div>

@@ -365,7 +365,22 @@ function foldAnim(fold, open, onDone) {
   fold.classList.remove("hidden"); // a rendered box is what can be animated
   fold.classList.add("open");
   const size = foldContentPx(fold);
-  fold.style.gridTemplateRows = Math.round(size * from) + "px";
+  // What the move travels on is the BOX's height in pixels, and its one grid track is
+  // held OPEN (`1fr`, inline) for the length of the travel. It used to be the track
+  // itself (`grid-template-rows` keyframes), which works only from Chromium 107 on —
+  // mdn/browser-compat-data, css/properties/grid-template-rows.json, the `animation`
+  // entry — and the phone renders this page in the SYSTEM WebView, whose version
+  // belongs to the device and not to this app. Short of that engine the property is
+  // not animatable: the box sat at its 0px start for the whole duration and then
+  // appeared at full height in a single frame, which is the report ("the process block
+  // opens instantly on the phone, with no transition"). `height` has been interpolable
+  // in every engine this pane runs in, and it is the same number: the same pixels,
+  // the same pacing (foldMoveMs measures the content), the same curves. The track has
+  // to stay 1fr while it moves or the `.fold` rule's own 0fr would pinch the inner to
+  // zero on a close and the box would shrink around nothing.
+  const at = (f) => Math.round(size * f) + "px";
+  fold.style.gridTemplateRows = "1fr";
+  fold.style.height = at(from);
   const body = foldBody(fold);
   // A close that starts with the block's head already pinned hands the pane's
   // scroll back; the lag is read HERE, with the box at its start height and the
@@ -373,6 +388,7 @@ function foldAnim(fold, open, onDone) {
   const lag = open || !foldHead(fold) ? 0 : headLag(fold);
   fold.classList.toggle("open", open); // the class carries the end state
   if (reducedMotion()) {
+    fold.style.height = "";
     fold.style.gridTemplateRows = "";
     if (!open) fold.classList.add("hidden");
     if (lag) stream.scrollTop -= lag; // one step, not a track of them
@@ -381,7 +397,7 @@ function foldAnim(fold, open, onDone) {
     if (onDone) onDone();
     return;
   }
-  // The track is measured in PIXELS, not `fr`. The fraction would be resolved
+  // The travel is measured in PIXELS, not `fr`. The fraction would be resolved
   // against a container whose own height is auto — and Blink resolves that
   // fraction twice: the container lands on f×content while the track (and so the
   // clipped inner) lands on f²×content. Mid-move the box is then f(1-f)×content
@@ -395,12 +411,11 @@ function foldAnim(fold, open, onDone) {
   // its new size, and the decelerating half of --arrival is what keeps the last of
   // it from snapping. (A fold with no body is the other case: it closes by fading
   // its content out, which IS a leave, so that direction keeps --departure.)
-  const track = (f) => Math.round(size * f) + "px";
   const ms = foldMoveMs(fold); // one measurement, two animations on one clock
   const easing = open || body ? ARRIVE_EASE : LEAVE_EASE;
   const anim = fold.animate(
-    [{ gridTemplateRows: track(from), opacity: 1 },
-     { gridTemplateRows: track(to), opacity: open || body ? 1 : 0 }],
+    [{ height: at(from), opacity: 1 },
+     { height: at(to), opacity: open || body ? 1 : 0 }],
     { duration: ms, easing }
   );
   fold._foldAnim = anim;
@@ -443,6 +458,7 @@ function foldAnim(fold, open, onDone) {
     giveBack(fold); // land it, don't stop a frame short
     fold._scrollLag = 0;
     stopGiveBack(fold); // …then hand the pane back
+    fold.style.height = ""; // the sheet's 0fr/1fr and .hidden take the box over again
     fold.style.gridTemplateRows = "";
     fold._bodyAnim = null; // no fill: the body's own resting place takes over
     fold._bodyFrom = fold._bodyTo = 0;

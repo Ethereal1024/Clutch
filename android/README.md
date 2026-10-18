@@ -535,6 +535,29 @@ github.com 的网络里，组件市场与远端 pylibs 安装都应能走通。
 
 **待验（真机）**：状态栏、导航栏、App 底色三处同色，栏上图标识是浅色（不出现深图标压在近黑栏上）；旋转屏幕、弹出软键盘时系统栏区域不闪白；聊天区/顶栏两指乱蹭不再放大，双击也不放大；图表查看器里捏合、双击 1:1、拖动照旧。
 
+## process 块在手机上是"蹦"出来的，"load earlier records"点下去像没反应（同一次真机反馈里的两条）
+
+**报告**：
+
+1. 一轮回答结束后那块 `process · N steps` 折叠区，在手机上是**瞬间展开/收起**的，一点过渡都没有（桌面上看着是滑开的）。
+2. 点 "load earlier records"，**点完当下像什么都没发生**：要等好一会儿才看到内容插进来，中间没有任何进度或加载提示。
+
+**根因**：两条都出在 `ui/` 里，一条是动画属性选错了引擎，一条是把"等待"放进了没有反馈的地方。
+
+- 折叠：`ui/js/stream-text.js` 的 `foldAnim()` 把 `grid-template-rows` 从 `Npx` 动画到 `Mpx`。**grid 轨道可插值是从 Chromium 107 才开始的**（`mdn/browser-compat-data` 的 `css/properties/grid-template-rows.json`，`animation.support.chrome.version_added = "107"`，`chrome_android` 镜像桌面）。桌面端 Electron/Chromium 够新，所以本机怎么试都是滑开的；而**手机上这个页面跑在系统 WebView 里**，WebView 的版本属于设备、不属于 App——短于 107 的引擎里这个属性**不是可动画属性**，Web Animations 不会报错，只是整段时长都停在起始值（`0px`）上，然后一帧落到全高。报告里的"瞬间展开"就是这个。
+- 翻页：一页是**一个** `/api/history` 请求，预算是一兆字节**且**整轮（服务端从磁盘读，并把起点回退到开这一轮的那条 task 行，`agent/core/lazy.py aligned_start`），回复之后那次 prepend 又是**一趟同步**跑完的。也就是说"从点到看见"中间没有任何可显示的状态，原来的 `paging = true` 只是不给第二次点，读者看不见它。
+
+**修法**：两条都改在"看得见的那个东西"上。
+
+1. 折叠的位移改成盒子的 `height`（px），那一格 grid 轨道在移动期间用内联 `1fr` **保持撑开**（`ui/style.css` 的 `.fold` / `.fold.open` 仍是 0fr/1fr 的**静止态**，夹住内容的仍是 `.fold-inner { overflow: hidden }`）。`height` 在所有这个页面会跑的引擎里都可插值，而且是同一个数：同一批像素、同一个节奏（`foldMoveMs()` 量的还是内容高度）、同一条曲线。轨道必须保持 `1fr`——留 0fr 会在收起时把内层夹成 0，盒子就是在**空转**里缩小。收尾（`onfinish`）和 `prefers-reduced-motion` 分支都把 `style.height` 与 `style.gridTemplateRows` 一起清掉，让样式表接管。
+2. 等待放进**刚被按下的那个控件**：`#older-pill` 里多了一个 `.older-spinner`（10px 环，`--border` 底 + `--accent` 缺口，静止时不占位、不跑钟），`.older-pill.busy` 把边框与文字换成 accent、`cursor: progress`，标签在三个状态间走同一句话（`paintOlderLabel()`，读数来自 `olderBusy`）：`load earlier records (3.0 MB)` → `loading 3.0 MB…` → `rendering earlier records…`。`aria-busy="true"` 给读屏。`setOlderBusy("fetch")` 是**同步**写在第一个 `await` 之前的，所以按下的那一帧就有环；回复到了之后先 `setOlderBusy("render")` 再 `await nextPaint()`（两次 rAF）——否则标签变完就立刻被那趟同步 prepend 冻住，等于没变。`finally` 里清空，失败也回到 offer。附带两点：`olderSizeLabel()` 一律向上取整到整 KB、大于等于 1 KB 才写成一位小数的 MB，**永不写 0**；重连流中途来的 `history` 帧（`js/stream-events.js` 的 `setOlderPill`）只会重写同一句话，不会把环顶掉。
+
+**为什么不是进度条**：这条等待里没有可量的进度——请求是一次性的，服务端一次把整页读出来，没有分片也没有逐条回调。画一条按时间猜的条会说谎；环是"正在进行、不知道还要多久"的诚实物，也和 App 里其它在等的地方（`.open-progress` 的条只用于**有**分片数量的启动阶段）分工一致。大页的那种几十毫秒的**渲染**停顿另有第二句话（`rendering earlier records…`），因为那一趟跑在主线程上，条也会一起停住，能动的只有已经画出去的字。
+
+**回归**：`node tests/older-pill-test.js`（新，18 条）拿**真的** `loadOlder` 对着 stub 的 pill/pane 和一个手动 resolve 的 promise 跑，钉的都是**顺序**：按下的那一帧就 busy（请求还没发出去）、第二次点不发第二个请求、中途 `history` 帧不夺走等待、回复后先出"rendering"再 prepend、prepend 只发生一次且插进去就是渲染出来的那一行、`older = 0` 时 pill 隐藏、失败回到 offer 且只报一行。`node tests/fold-motion-test.js` 同步改了：keyframes 只带 `height`/`opacity`（**没有** `gridTemplateRows`）、移动中 `fold.style.height === "0px"` 而 `gridTemplateRows === "1fr"`、`onfinish` 与 reduced-motion 两条路都清掉内联样式；像素节奏那条断言改成读 `height`。`tests/ui_css_check` 里 `foldMoveMs` → `duration: ms` 的形状与样式表 token 的钉子都还在。改动后跑了全量：`tests/*.js` 55 个套件（只有需要 `CLUTCH_E2E_*` 的 `remote-bootstrap-e2e.js` 按设计跳过）＋ `tests/*.py` 25 个全绿，`scripts/sync-android-host.sh` 重铺了 `assets/{ui,nodejs-project}`，逐字节副本检查跟着绿。
+
+**待验（真机）**：展开/收起 `process` 块有过渡（约 200–420ms，随内容高度走），中途反点点能从中途接上而不是重放；系统开了"移除动画"时直接落位。点 "load earlier records"：**同一帧**看到环与 `loading N…`；大页时先出现 `rendering earlier records…` 再插进来；一直点不会发出第二个请求；到历史尽头 pill 消失；网络失败时回到 offer 且下面有一行 `Failed to load earlier records: …`（这两种视觉在本机**没法**验：这台机器上 Electron 缺 `libatk-1.0.so.0`、没有 chromium 也没有 xvfb，只能靠上面的顺序测试与代码推理，真机是验收口）。
+
 ## M2：pylibs 供给线（代码+CI+测试完成，真远端验收待设备环节）
 
 完整 SSH 路径的最后一块拼图：手机上**没有** pip/bash，pylibs tar 改为 CI 预构建、
@@ -662,6 +685,14 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     栏上图标识是浅色；旋转屏幕与弹出软键盘时系统栏区域不闪白（见「系统栏不是 App 的底色」一节）。
 14. 缩放锁（报告"两指误触就放大"）：聊天区、顶栏两指蹭与双击都不放大，界面不会停在"糊住且
     不回弹"的状态；图表查看器里捏合、双击 1:1、拖动**照旧**（同一节）。
+15. 折叠有过渡（报告"process 在手机上是瞬间展开"）：展开/收起 `process · N steps` 是滑开而不是
+    "蹦"出来，时长随内容高度在 200–420ms 之间；移开手指后立刻反点，能从当前高度接上、不重放整段；
+    系统"移除动画"打开时直接落位（即**不再**是瞬间，而是"无动画但有终态"）。见「process 块在手机上
+    是"蹦"出来的」一节。
+16. 翻页有反馈（报告"load earlier records 点下去像没反应"）：点下**同一帧**看到环与 `loading N…`；
+    一页较大时先出现 `rendering earlier records…` 再插入；中途再点不产生第二个请求；到历史尽头
+    pill 消失；失败时回到 `load earlier records (…)` 并在下面有一行 `Failed to load earlier
+    records: …`（同一节）。
 
 ## 与初版方案的偏差（均已定案）
 
@@ -680,7 +711,7 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
 uv pip install pip                        # 一次性：uv venv 默认无 pip，构建 tar 需要
 for f in tests/*.test.js tests/*-test.js; do
   case "$f" in *e2e*) continue;; esac
-  node "$f" || echo "FAILED: $f"          # 20 个套件应全绿
+  node "$f" || echo "FAILED: $f"          # 54 个套件应全绿（*e2e* 需 CLUTCH_E2E_*，跳过）
 done
 uv run python -m tests.selfcheck          # python 侧
 
