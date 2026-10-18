@@ -326,7 +326,7 @@ function closeSettings() {
 // A version page is only worth having if the number is the build's own, so it is
 // read from the stamp (ui/version.js) and never spelled out here. Three facts, and
 // the other two are the ones that make the first mean something: the same renderer
-// runs inside Electron and inside the phone's system WebView, so "0.1.54" alone
+// runs inside Electron and inside the phone's system WebView, so the number alone
 // does not say what was on screen.
 function aboutVersion() {
   const v = String(window.CLUTCH_VERSION == null ? "" : window.CLUTCH_VERSION).trim();

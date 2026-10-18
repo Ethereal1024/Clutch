@@ -137,8 +137,10 @@ function decls(sheet, selector) {
 // ---- 3. the painting: the real functions, one scenario each ----
 const ABOUT = slicer(uiSource()).region("// ---- the About pane", "paintAbout");
 
+// (the app's own product token carries the release number; built from VERSION so
+// this file holds no version literal of its own to go stale)
 const ELECTRON_UA =
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Clutch/0.1.54 Chrome/108.0.5359.215 Electron/22.3.26 Safari/537.36";
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Clutch/" + VERSION + " Chrome/108.0.5359.215 Electron/22.3.26 Safari/537.36";
 const ANDROID_UA =
   "Mozilla/5.0 (Linux; Android 13; SM-S911B Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/108.0.5359.128 Mobile Safari/537.36";
 const DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -195,7 +197,7 @@ function makePane(opts) {
   );
   check(
     makePane({ ua: ANDROID_UA }).call("aboutPlatform") === "Android 13 · Android WebView · Chromium 108",
-    "the phone names the system it is running in and the engine that WebView is (the same renderer, a different host) — '0.1.54' alone would not say which"
+    "the phone names the system it is running in and the engine that WebView is (the same renderer, a different host) — the number alone would not say which"
   );
   check(
     makePane({ ua: DESKTOP_UA }).call("aboutPlatform") === "Linux · browser · Chromium 120",
