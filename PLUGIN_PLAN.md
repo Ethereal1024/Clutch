@@ -28,6 +28,20 @@
 | 零之四.4 目标机自取字节 | **已完成** | `0899dc8`（宿主）+ `abab8cb`（页面） | 安装请求两种形状：body 有字节 = `upload()` 兜底（客户端独有的字节），空 body + `artifact_url` = 目标机自取（默认）；同一道 `accept` 门按 `digest` 量**取到的**字节；客户端不再下载 release，只带走几百字节的声明 |
 | P4 工具集 | 未动工 | — | `interface: "data"`，见 §三 |
 | P5 静态索引 | 未动工 | — | 可选，见 §三 |
+| C1 别的机器上的进程 | **已完成** | `7cb224e` | `runs_on: "other"` 在这台机器上是**拒绝**而不是悄悄本地代跑：`rendezvous.unavailable_reason` 是唯一的门（已装说"no channel"、推来的说"unknown component"）；`tests/catalog_test.py` |
+| C2 客户端自己的组件域 | **已完成** | `75414ee` | `ui/plugin-host.js` + `ui/plugin-child.js`：根是 `~/.clutch/client`（`CLUTCH_CLIENT_COMPONENTS_DIR` 可重指），登记表 + 摘要门 + 版本 + 停用位；一次调用 fork 一个子进程（可杀、不阻塞主进程），ABI 是 `exports.call(tool, args)` |
+| C3 反向转发改成端口表 | **已完成** | `52c8950` | `tunnel-core` 的 `channels`：一行 = 首选端口 + 本地监听 + 记住远侧给的端口 + 认领 inbound；模型路径只是其中一行，不再有模型特例 |
+| C4 声明推送端点 | **已完成** | `90f8bab` | 目标侧半边：`agent/tools/channel.py`（端口/令牌/整集声明、内存、fail-closed）、`catalog.PLUGIN`、`registry.Tool.remote`、`POST/DELETE/GET /api/channel` |
+| C5 客户端自己的 `/call` 监听 | **已完成** | `219694e` | `ui/plugin-server.js`：`Authorization: Bearer` 门、并发上限、答案封顶、只认 `/call`；`tests/plugin-server.test.js` |
+| C6 声明推给会话 | **已完成** | `69d2279` | `ui/plugin-link.js`：认领时装（远侧端口 + 转发）、整集推、按 base 记、失败重试、非 loopback 拒绝、丢跳清端口与 base；`ui/main.js` 挂在 `api:base` / 梯子 `onUp` / `onTunnelEnd` / 退出；`tests/plugin-link.test.js` |
+| C7 插件页的第三种目标 | 未动工 | — | `ui/components-view.js#target()` 今天只认"某台机器的 supervisor"；客户端插件根目前由 `plugin-host.install()` 直接写 |
+| C8 一个真的客户端插件 | 未动工 | — | 计划是把 `clutch-websearch` 的 `search` 搬到 JS（`_assert_public_host` 与覆盖率 guard 随迁），作为这个域的第一个实测对象 |
+
+C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推声明（`scripts/sync-android-host.sh`
+的 `UI_NODE` 不动）。这不是省事，而是**手机目前没有"这台客户端的插件"这个概念**——根、入口、
+认领时的推送都还没有在那边长出来；把四个文件塞进资源子集只会得到一份没人调用的死代码，
+`tests/android-assets.test.js` 守的正是"发出去的东西都得被解析到"。哪天手机要装客户端插件，
+代价是那一组名字 + 一个 `announcePlugins` 的对应物，不是协议。
 
 每阶段的端到端实测就写在该阶段的「验收」里，跑法是第四节那几条命令，这里不复述。
 
@@ -110,6 +124,31 @@
    目标机自己的二进制按需起服务（VS Code 的 `cli/src/tunnels/code_server.rs:322-350`）、
    G2 = 目标端注册同一个通道（`src/vs/server/node/serverServices.ts:403-409`）、G4 = 版本一致性
    是模块仓库自己的事。
+
+## 零之五、客户端插件（`interface: "plugin"`）：四条冻结的界线
+
+前四个决定都关于**别人的机器上的目录**。这一段关于另一个域：有些主体根本不该过隧道——搜索、
+剪贴板、客户端自己机器上的东西。字节在这边、密钥在这边、出口在这边，只有一句"我声明了什么
+工具"需要过去。契约写在 `COMPONENTS.md` 第三节的 plugin，这里是四条不许退让的界线：
+
+1. **两个域、两个根、各一个写者**：目标机的域在 `~/.clutch/components`（写者 = 那台机器的
+   supervisor），客户端的域在 `~/.clutch/client`（写者 = **这个客户端**，`ui/plugin-host.js`）。
+   一个组件的字节只住在其中一边；声明里的 `runs_on` 说的就是它住哪边——`other` 的声明到了
+   目标机只剩一个**拒绝**（C1），绝不会在那里跑出一份副本。"两个实现"正是这次拆分要消掉的
+   东西。
+2. **通道是一句声明，不是一次部署**：客户端把 `{port, token, components}` 推给一个**正在运行
+   的会话进程**（`POST /api/channel`），会话照这张表把调用拨回客户端的 `/call`。表是内存、
+   整集、重启即空；没有"改一条"，因为两张表对不上时"以谁为准"没有答案。
+3. **只推给远端的会话**：本地会话里客户端和会话是同一台机器，客户端插件在那儿就是普通的
+   本地组件，这个通道只会重复组件页已有的东西（`ui/main.js#announcePlugins` 只对 tunnel 窗口
+   出手）。认领（`api:base`）是**唯一**的推送时刻——也是路径被安装的时刻：远端 loopback 端口
+   只为真的可能被调用的会话占用，不为"连上了"占用。
+4. **令牌是栅栏，不是沙箱**：`/call` 认 `Authorization: Bearer <token>`，令牌只在推给本机会话
+   的那一个请求里出现，所以推送只发往 loopback 的 http base（`ui/plugin-link.js#session()` 拒绝
+   一切别的地址）。它买的是"**只有我推过的那个会话能问我**"；fork 买的是"可杀 + 不阻塞主进程"。
+   **都不买隔离**：插件以应用权限跑在用户自己的机器上（"插件沙箱"在本文件仍是独立非目标），
+   所以这两个端口（客户端的 `/call`、远侧 sshd 分配的那个）**绝不是** supervisor 的 8890，也
+   绝不是模型代理那个带 key 的端口——一行反向转发的目的地只能是它自己的那一行。
 
 ## 一、目标与非目标
 
@@ -284,6 +323,10 @@ node tests/components.test.js                      # 客户端 + 宿主端到端
 PYTHONPATH=. python3 tests/components_api_test.py  # 宿主侧安装/解析/门/两条开关路由
 PYTHONPATH=. python3 tests/rendezvous_test.py      # 寻址 + 停用位（`_disabled_probe`）
 PYTHONPATH=. python3 tests/tools_inst_test.py
+node tests/plugin-host.test.js                    # 客户端自己的组件根：安装/摘要门/版本/停用
+node tests/plugin-server.test.js                  # 客户端的 /call 监听：令牌门/并发/答案封顶/只认 /call
+node tests/plugin-link.test.js                    # 认领才装 + 整集推送 + 丢跳清端口 + 非 loopback 拒绝
+PYTHONPATH=. python3 tests/channel_test.py        # 目标侧 /api/channel：整集/内存/fail-closed 的一句话
 ```
 
 三条写入各由谁钉住：宿主侧是 `tests/components_api_test.py`（安装/解析/门 + 两条开关路由 +

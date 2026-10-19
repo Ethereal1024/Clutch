@@ -60,6 +60,12 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 - **摘要即信任**：`sha256` 必须是 64 位十六进制；缺失或形状不对的条目**整条拒绝**，
   不猜、也不"尽力而为"。字节由**要运行它的那台机器**自己取回、自己量（第八节
   「字节怎么到」），先验字节再落地；量的是目标机，不是转手的客户端。
+- **`interface: "plugin"` 的发行版装到客户端，不是目标机**：同一份清单、同一道摘要门，
+  只是"要运行它的那台机器"变成了**用户正坐着的那台**——`~/.clutch/client/components`
+  （`ui/plugin-host.js`，`CLUTCH_CLIENT_COMPONENTS_DIR` 可重指；目录、tar/zip、单文件三种
+  工件形状与第八节同一套判断）。字节因此一次都不过隧道，过隧道的只有那句声明（第三节
+  plugin）。**页面还没有这条路**：插件页的 `target()` 至今只指"某台机器的 supervisor"，
+  客户端的插件根目前由 `plugin-host.install()` 直接写入（测试与将来的入口都走它）。
 - **平台查找先精确后兜底**：按客户端的平台标签（`linux-x86_64` / `darwin-arm64` /
   `windows-x86_64`）取键，取不到用 `any`。今天的四个模块都只发一个平台无关的
   **tar**（`clutch-skills` 的 tar 里是代码 + `skills/`——技能库随组件自己的发行版走，
@@ -138,8 +144,9 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 {
   "name": "clutch-hello",            // 必填，唯一身份：安装目录名、检出目录名、表键，一个字符串
   "version": "0.1.0",                // 必填；安装版可携带内容摘要（0.2.0+<hex>）
-  "interface": "cli",                // 必填："daemon" | "cli"（怎么被调用，见下节）
-  "runs_on": "self",                 // 进程跑在谁的机器上："self"（默认）| "other"（预留：本机尚无通道时其工具 fail-closed，绝不本地代跑）
+  "interface": "cli",                // 必填："daemon" | "cli" | "plugin"（怎么被调用，见下节）
+  "runs_on": "self",                 // 进程跑在谁的机器上："self"（默认）| "other"（进程在**调用它的那个客户端**：plugin 必填 other，没有通道时 fail-closed，绝不本地代跑）
+  "entry": "",                       // plugin 专用：入口模块（相对组件目录），一份只导出 call(tool, args) 的 CommonJS 文件
   "subject": "workspace-fs",         // 服务谁的资源（见下），决定语句能否为某工作区运行
   "launch": {                        // 宿主如何**启动**一个进程（工件的形状，不是接口）
     "argv": ["{py}", "{script}"],    // argv 词模板；{py} 解释器、{dir} 组件目录、{name} 组件名、{script} 入口文件
@@ -177,7 +184,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 它接受调用契约（daemon：`--workspace <根> --idle <秒>`，围栏时另有 `--protect <glob>`；
 cli：`--envelope` 信封输出）。argv 词逐一交给 Popen，**没有 shell**——引号属于语句层。
 
-## 三、两种接口
+## 三、三种接口
 
 **daemon**：每个工作区一个常驻进程，loopback HTTP。宿主按发现记录（`app_dir` 下
 `<prefix><digest>.json`，`discovery_env` 可重指）找到它，没有就按 `launch` 拉起。
@@ -208,6 +215,56 @@ daemon 退出时按 pid 匹配才删记录，所以被顶替的 daemon 删不掉
 ```
 "command": "--envelope save --title {title} --content {content}"
 ```
+
+**plugin**：前面两种都跑在**持有组件的那台机器**上，这一种跑在**调用它的那个客户端**
+上（`interface: "plugin"` + `runs_on: "other"`）。它解决的是前两种解决不了的那类主体：
+搜索、剪贴板、客户端自己机器上的东西——**字节在这边、密钥在这边、出口在这边**，只有一
+句"我声明了什么工具"需要过隧道。
+
+所以它没有 `launch`、没有 `command`、没有语句：工具集来自组件目录里那份
+`component.json` 的 `tools`，一次调用交回给客户端自己的运行时。声明里多一个 `entry`
+（相对组件目录，像 `launch.entry` 一样是路径、不是语句），指向那份 CommonJS 模块，它只
+导出一个 `call`：
+
+```js
+// entry 指向的文件；tool 来自 component.json 的 tools，args 是模型给的参数
+exports.call = async (tool, args) => {
+  // 回答：一段字符串，或 {content, error?}——形状与信封同源，只是语言不同
+  return { content: "…" };
+};
+```
+
+客户端怎么把它接上会话，是**声明 + 反向通道**，不是把字节送过去：
+
+```
+客户端  ──① POST /api/channel──▶  [会话里的 agent.server]
+        { port, token, components:[{name, version, interface:"plugin", runs_on:"other", tools}] }
+        ◀── ②（只是记忆：这张表活在这个会话进程里，重启即空）
+
+[会话里的 agent.server] ──③ POST http://127.0.0.1:<port>/call──▶  客户端的监听（带令牌）
+        { component, tool, args }   ◀── ④ { content, error? }
+```
+
+要点，每一条都对应一处 fail-closed：
+
+- **通道是"在这台机器上没有"的另一种说法**。`runs_on: "other"` 的声明若没有通道，
+  `rendezvous.unavailable_reason` 说的是"this host has no channel to that client"，**绝不**
+  本地代跑（`runs_on` 不是提示，是断言）。声明的字节因此永远不进这台机器——进不来，也
+  没有地方可跑。
+- **推送是整集**：一次 `POST` 就是这张表的全部，`DELETE` 是"我没有插件"（于是拒绝变成一
+  句关于状态的话，而不是一次拨到空处的等待）。没有"改一个"的动词，因为两张表对不上时
+  "以谁为准"没有答案。
+- **推送里没有字节**：`name` / `version` / `interface` / `runs_on` / `tools`，没有 `entry`、
+  `digest`、`launch`、`command`、`location`。字节在哪台机器上是那台机器的私事
+  （PLUGIN_PLAN.md 零之四.1 的同一条界线）。
+- **转发是先决条件**：端口是远侧 sshd 分配的一个 loopback 端口，一行反向转发把它送回客
+  户端的监听。转发没落地就不推——让会话去拨一个没人应答的端口，比"没有通道"更假。
+- **令牌是栅栏**：`/call` 要 `Authorization: Bearer <token>`，令牌只在推给本机会话的那
+  一个请求里出现，所以推送只发往 loopback 的 http base（`ui/plugin-link.js#session()` 拒
+  绝一切不是 `127.0.0.1` / `localhost` / `::1` 的地址）。它是"只有我推过的那个会话能问
+  我"，不是沙箱：插件以应用权限跑在自己机器上（见 PLUGIN_PLAN.md 零之五）。
+- **只推给远端的会话**：本地会话里客户端和会话是同一台机器，客户端插件在那儿就是普通
+  的本地组件，这个通道只会重复组件页已有的东西（`ui/main.js#announcePlugins`）。
 
 ## 四、工具级字段
 
@@ -482,6 +539,14 @@ PLUGIN_PLAN.md 零之四.3），位只能住在机器上；反过来说，住在
 （`{"disabled":false}` 即"重新驱动"，动词由位决定：`ui/components.js` 的 `hostSetDisabled`
 按位选 `/disable` 与 `/enable`），**不弹确认**——它删不掉任何东西，而**标签本身就是 undo**；
 `absent` 渲染成"这台机器没持有它，没有可开关的东西"，不渲染成错误。
+
+### 客户端插件不在这一节
+
+`/api/channel`（第三节的 plugin）**不**长在 supervisor 上，也**不**落盘：它属于一个正在
+运行的会话进程（`agent/server.py`），"谁持有"那个问题的答案是"持有它的那个客户端推给了
+谁"。理由是同一条界线反过来用——这一节的每条写入都关于一台机器的**目录**，而插件一个
+字节都不进这台机器的目录。所以推送在会话进程重启后自然消失（客户端会重推，`api:base`
+就是那个时刻），而 `PUT`/`PATCH` 这类"改一条"的动词在这里是 501：没有单条可改，只有整集。
 
 ## 九、开发工作流
 
