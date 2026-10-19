@@ -234,6 +234,15 @@ exports.call = async (tool, args) => {
 };
 ```
 
+一个真的例子：`clutch-websearch/plugin`（子模块里，`web_search`/`web_fetch` 的 JS 移植，
+只用 `http/https/dns/zlib`，组件目录没有 `node_modules`）。它的 `README.md` 逐条写下与
+Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、coverage 为 `null` 时给一句话而不
+是崩、内部的 `positions` 不过线）以及它读的每一个 `CLUTCH_*` 名字。守它的是三层：子模块的
+`tests/plugin-test.js`（解析器、围栏、覆盖率 guard，无网络）、父仓
+`tests/client-plugin-websearch.test.js`（装 → 推 → `/call` → 删，真 fork），以及
+`tests/channel_test.py` 把那**随包发出去的** `component.json` 钉在 `channel._plugin_of` 上
+——声明的形状因此不是测试里编的。
+
 客户端怎么把它接上会话，是**声明 + 反向通道**，不是把字节送过去：
 
 ```
