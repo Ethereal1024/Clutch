@@ -16,8 +16,11 @@ Three facts describe a component and they are independent (see
 catalog.Component): WHAT a statement is spoken to as (interface: a per-workspace
 daemon over loopback HTTP, or one process per call), WHERE its process runs
 relative to the host being asked (runs_on), and WHOSE resources it serves
-(subject). Today every component in the table runs on the host that asks
-(runs_on=SELF) — which makes the axis invisible, and that is the point: a
+(subject). Every component in the table today runs on the host that asks
+(runs_on=SELF), and the axis is ENFORCED rather than decorative: a declaration
+that says OTHER contributes no tools until this host has a channel to that
+other machine (`unavailable_reason` says so, as a sentence a client can show) —
+it must never quietly run here, which is the one thing the word forbids. So a
 component that serves ANOTHER machine's filesystem (an ssh workspace), or one
 that is called FROM another host (a client-side component behind a reverse
 channel), adds an ENTRY to the table, never a branch to a tool.
@@ -265,6 +268,17 @@ def unavailable_reason(module: str) -> str:
         return f"unknown component: {module}"
     if components.disabled(mod.name):
         return f"{mod.name} is disabled on this host (its tools are off; the bytes stay)"
+    if mod.runs_on == catalog.OTHER:
+        # Fail CLOSED, and before `resolve`: this component's process belongs to
+        # another machine (the client that called it), so its bytes are not here
+        # and "not installed on this host" would be a lie about the wrong thing.
+        # Until a channel to that machine exists, the honest answer is that this
+        # host cannot reach it — NOT running it locally, which is what the word
+        # exists to forbid.
+        return (
+            f"{mod.name} runs on the client that calls it (runs_on=other) and this host "
+            f"has no channel to that client"
+        )
     resolved = resolve(module)
     if resolved is None:
         return f"{mod.name} is not installed on this host"

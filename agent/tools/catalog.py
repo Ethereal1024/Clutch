@@ -129,7 +129,7 @@ CLI = "cli"  # one command line per call
 
 # Where a component's process runs, RELATIVE TO THE HOST BEING ASKED.
 SELF = "self"
-OTHER = "other"  # another host, through a channel of its own (none yet)
+OTHER = "other"  # another host, through a channel of its own (rendezvous: not drivable here yet)
 
 # Whose resources a component serves — which decides whether a statement may run
 # for a given workspace at all (registry.module_blocked_reason).
@@ -307,6 +307,18 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
         for f in component.requires
         if f not in FACILITIES
     ]
+    # The third axis, as a WORD: a `runs_on` the host does not know is a typo, and
+    # a typo here decides whether a component's process is expected on this
+    # machine. Unknown means withheld (fatal), never "assume self".
+    if component.runs_on not in (SELF, OTHER):
+        out.append(
+            Diagnostic(
+                component.name,
+                "",
+                f"unknown runs_on {component.runs_on!r} (host knows {_known((SELF, OTHER))}, and a component "
+                f"that runs elsewhere must say {OTHER!r})",
+            )
+        )
     for token in component.facts:
         if token not in FACT_TOKENS:
             out.append(

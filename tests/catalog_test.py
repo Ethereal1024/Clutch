@@ -1095,6 +1095,36 @@ def check_registration() -> None:
             result = reg.execute(ws, cfg, "say_hello", {"who": "世界"})
             check(not result.error and result.content == "echo:世界", "and the tool is executable end to end")
 
+        # runs_on is not decoration: a component whose process belongs to ANOTHER
+        # machine (the client that calls it) is not driven here at all. The one
+        # wrong answer — running it on this host because the word was ignored —
+        # would search the wrong network from the wrong machine and look like a
+        # success, so the refusal is a sentence, said before the install check.
+        elsewhere = _third_party("clutch-elsewhere", tool="say_elsewhere", directory=str(code))
+        elsewhere["runs_on"] = "other"
+        _write_registration(elsewhere)
+        check(
+            "no channel" in rendezvous.unavailable_reason("clutch-elsewhere"),
+            "runs_on=other says this host has no channel to that client, instead of running it locally",
+        )
+        check(
+            "say_elsewhere" not in [t.name for t in build_tools(Config())],
+            "and its tools never reach the model (fail closed, not fail silently-local)",
+        )
+
+        # the same axis as a WORD: a typo is withheld, never read as "self"
+        typo = _third_party("clutch-typo", tool="say_typo", directory=str(code))
+        typo["runs_on"] = "server"
+        _write_registration(typo)
+        check(
+            any(d.fatal and "unknown runs_on 'server'" in d.message for d in catalog.diagnostics() if d.tool == ""),
+            "an unknown runs_on is a fatal word (a typo must not decide which machine runs it)",
+        )
+        check(
+            "say_typo" not in [t.name for t in build_tools(Config())],
+            "and the component behind the typo contributes nothing",
+        )
+
 
 def check_installed_third_party() -> None:
     """An artifact the install layer lands registers itself too — the same path

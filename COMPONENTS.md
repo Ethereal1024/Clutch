@@ -139,7 +139,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   "name": "clutch-hello",            // 必填，唯一身份：安装目录名、检出目录名、表键，一个字符串
   "version": "0.1.0",                // 必填；安装版可携带内容摘要（0.2.0+<hex>）
   "interface": "cli",                // 必填："daemon" | "cli"（怎么被调用，见下节）
-  "runs_on": "self",                 // 进程跑在谁的机器上："self"（默认）| "other"（预留）
+  "runs_on": "self",                 // 进程跑在谁的机器上："self"（默认）| "other"（预留：本机尚无通道时其工具 fail-closed，绝不本地代跑）
   "subject": "workspace-fs",         // 服务谁的资源（见下），决定语句能否为某工作区运行
   "launch": {                        // 宿主如何**启动**一个进程（工件的形状，不是接口）
     "argv": ["{py}", "{script}"],    // argv 词模板；{py} 解释器、{dir} 组件目录、{name} 组件名、{script} 入口文件
