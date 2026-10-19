@@ -56,6 +56,8 @@ class RoutingMixin:
             self._settings_get()
         elif path == "/api/host":
             self._host_get()
+        elif path == "/api/channel":
+            self._channel_get()
         else:
             self._json({"error": "not found"}, status=404)
 
@@ -85,5 +87,14 @@ class RoutingMixin:
             self._clc_append()
         elif parsed.path == "/api/clc/patch":
             self._clc_patch()
+        elif parsed.path == "/api/channel":
+            self._channel_post()
+        else:
+            self._json({"error": "not found"}, status=404)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/channel":
+            self._channel_delete()
         else:
             self._json({"error": "not found"}, status=404)

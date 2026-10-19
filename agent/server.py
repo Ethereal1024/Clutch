@@ -13,6 +13,9 @@ Endpoints (all JSON except SSE/NDJSON):
   GET  /api/clc?lo&hi         byte range of the active .clc -> {size, b64}
   POST /api/clc/append {line} append one line -> {offset, size}
   POST /api/clc/patch {offset, b64}  in-place byte patch (never grows the file)
+  POST /api/channel {port, token, components}  the client's plugin declarations
+  GET  /api/channel        what this session holds (never the token)
+  DELETE /api/channel      forget them (the client went away)
   GET  /api/health         {ok, in_flight}  in_flight: a run is live right now
 
 A session can also be RELEASED from outside (the last window's exit,
@@ -47,6 +50,7 @@ from pathlib import Path
 from typing import Callable
 
 from .api.base import HandlerBase
+from .api.channel import ChannelMixin
 from .api.events import EventsMixin
 from .api.project import ProjectMixin
 from .api.routing import RoutingMixin
@@ -352,6 +356,7 @@ class Handler(
     RoutingMixin,
     RunMixin,
     SettingsMixin,
+    ChannelMixin,
     EventsMixin,
     WorkspaceMixin,
     ProjectMixin,

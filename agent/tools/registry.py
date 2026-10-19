@@ -45,7 +45,7 @@ from typing import Any
 from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
-from . import catalog, host, inst, rendezvous
+from . import catalog, channel, host, inst, rendezvous
 from .answers import (
     _drivable,
     _entries,
@@ -113,6 +113,15 @@ class Tool:
     because a declaration without a command never becomes a Tool unless the host
     declares it itself and brings the implementation (see build_tools).
 
+    `remote` is the third kind, and it is deliberately NOT `host`: a component the
+    CLIENT runs (interface `plugin`, tools/channel.py) has no implementation in
+    this process and no statement either — one HTTP call to the port the client's
+    reverse forward listens on, and the client's own answer is the envelope. It is
+    its own field rather than a `host` callable because the two answer different
+    questions downstream: `host is not None` means "the host's command changed the
+    tree", while a plugin call is a tool on another machine whose declaration
+    alone says whether it writes anything (`ui.mutates`).
+
     `access` is the policy the tool's DECLARATION put it under (catalog.Tool.access)
     — the one thing permission.evaluate and permission.escaped_paths read to decide
     what a call may touch. `access_arg` is the argument that policy judges, and
@@ -150,6 +159,7 @@ class Tool:
     inst: str | None = None  # the component's own part of the statement
     module: str | None = None  # which component serves the statement
     host: ToolImpl | None = None  # the host's own tool (no component behind it)
+    remote: bool = False  # the CLIENT implements it, over its channel (no statement here)
     cancelable: bool = False  # Stop reaches this call (a host tool that declares it)
     access: str = ""  # the policy its declaration put it under ("" = unguarded)
     access_arg: str = ""  # the argument that policy judges
@@ -175,7 +185,14 @@ class Tool:
 
 
 
-def _wire(spec: catalog.Tool, config: Config, *, owner: str, implementation: host.HostImpl | None = None) -> Tool:
+def _wire(
+    spec: catalog.Tool,
+    config: Config,
+    *,
+    owner: str,
+    implementation: host.HostImpl | None = None,
+    remote: bool = False,
+) -> Tool:
     """One declaration -> the tool the model sees and the host runs.
 
     The description and the schema alike are run through `_resolve`, so a
@@ -191,16 +208,22 @@ def _wire(spec: catalog.Tool, config: Config, *, owner: str, implementation: hos
     `owner` names who declared it — a component, or the host itself for the
     bootstrap exception (tools/host.py) — and `implementation` is what a
     declaration has only when the host made it: a component's statement IS its
-    implementation, so it brings none and is carried out by its statement."""
+    implementation, so it brings none and is carried out by its statement.
+    `remote` is the one other place an implementation can be: the CLIENT's, for a
+    `plugin` component (tools/channel.py) — no statement is wired and the call
+    itself goes over the channel (see _invoke)."""
     access = ACCESS.get(spec.access)
     access_arg = spec.access_arg or (access.arg if access else "")
     return Tool(
         name=spec.name,
         description=_resolve(spec.description, config),
         parameters=copy.deepcopy(_resolve(dict(spec.parameters), config)),
-        inst=spec.command if implementation is None else None,
+        # a remote tool has no statement even if one slipped through the
+        # diagnostics: the client's process is the implementation
+        inst=None if (remote or implementation is not None) else spec.command,
         module=owner if implementation is None else None,
         host=implementation,
+        remote=remote,
         cancelable=implementation is not None,
         access=spec.access,
         access_arg=access_arg,
@@ -263,7 +286,9 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
                 continue
             if not _gate_ok(spec.gate, config, memories):
                 continue
-            tools.append(_wire(spec, config, owner=component.name))
+            tools.append(
+                _wire(spec, config, owner=component.name, remote=component.interface == catalog.PLUGIN)
+            )
     return tools
 
 
@@ -423,14 +448,26 @@ class ToolRegistry:
         """One call: the host's policy, then the one implementation of it.
 
         There is no precedence to speak of any more — a tool's implementation is
-        exactly one of two things (the component's statement, or the host's own
-        command) and the wiring says which. A statement whose component is not
-        runnable for this call is answered with the reason, never with a stand-in.
+        exactly one of three things (the component's statement, the host's own
+        command, or the client's plugin behind its channel) and the wiring says
+        which. A statement whose component is not runnable for this call is
+        answered with the reason, never with a stand-in.
         """
         if tool.guard is not None:
             refused = tool.guard(workspace, config, args, tool.access_arg)
             if refused is not None:
                 return refused
+        if tool.remote:
+            # The implementation is the client's. There is no statement to render
+            # and no transport of ours: one call over the channel the client
+            # pushed, and its answer IS the envelope — including a failure the
+            # plugin itself reported (`error: true`), which the model must see as
+            # a failure and not as a search result that happened to say so.
+            try:
+                reply = channel.call(tool.module or "", tool.name, args, config.command_timeout)
+            except channel.ChannelError as e:
+                return Envelope(f"ERROR: {e}", error=True)
+            return Envelope(reply.content, error=reply.error)
         if tool.inst is None:
             if tool.host is None:  # unreachable: build_tools never wires one
                 return Envelope(f"ERROR: tool {tool.name} has no implementation", error=True)

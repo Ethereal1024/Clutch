@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import catalog, components, modules
+from . import catalog, channel, components, modules
 from .localshell import local_shell, shq
 from .transport import LocalTransport
 
@@ -272,9 +272,15 @@ def unavailable_reason(module: str) -> str:
         # Fail CLOSED, and before `resolve`: this component's process belongs to
         # another machine (the client that called it), so its bytes are not here
         # and "not installed on this host" would be a lie about the wrong thing.
-        # Until a channel to that machine exists, the honest answer is that this
-        # host cannot reach it — NOT running it locally, which is what the word
-        # exists to forbid.
+        # There is exactly ONE door through that refusal, and it is a live channel
+        # that holds this component's declaration (tools/channel.py): the client
+        # said what it runs and where to call it, so this host can drive it
+        # without ever launching it. Anything else — no push, an older push that
+        # did not name it, a `runs_on: other` declaration nobody implements — is
+        # "no channel", never a quiet local run, which is what the word exists to
+        # forbid.
+        if mod.interface == catalog.PLUGIN and channel.holds(mod.name):
+            return ""
         return (
             f"{mod.name} runs on the client that calls it (runs_on=other) and this host "
             f"has no channel to that client"

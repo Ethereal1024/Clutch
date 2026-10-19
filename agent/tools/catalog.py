@@ -126,10 +126,17 @@ from . import components, hostconfig, modules
 # How a component is spoken to.
 DAEMON = "daemon"  # a per-workspace HTTP service discovered through a record
 CLI = "cli"  # one command line per call
+# PLUGIN: no process here at all. The implementation is the CLIENT's, named by a
+# declaration the client pushes over its own channel (tools/channel.py), and this
+# host reaches it through that channel's port and token. It is the one interface
+# whose code this host never sees, which is why it also fixes `runs_on`: a plugin
+# that claimed to run here would be a declaration with no implementation behind
+# it, refused as such (component_diagnostics).
+PLUGIN = "plugin"
 
 # Where a component's process runs, RELATIVE TO THE HOST BEING ASKED.
 SELF = "self"
-OTHER = "other"  # another host, through a channel of its own (rendezvous: not drivable here yet)
+OTHER = "other"  # another host, through a channel of its own (rendezvous: only while a live channel holds it)
 
 # Whose resources a component serves — which decides whether a statement may run
 # for a given workspace at all (registry.module_blocked_reason).
@@ -300,7 +307,10 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
     token the host does not know (it would be a fact nothing ever spends), or a
     fact published by a component that is not a CLI — a daemon's statements are
     spoken to a service that belongs to one workspace, while a host fact belongs
-    to none (tools/facts.py).
+    to none (tools/facts.py). And the two words a `plugin` fixes: its process is
+    the client's (so `runs_on` must say `other`) and it has no launch or statement
+    here (so neither may be declared) — the same check for a declaration read from
+    disk and for one the client pushed over its channel (tools/channel.py).
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
@@ -319,6 +329,32 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                 f"that runs elsewhere must say {OTHER!r})",
             )
         )
+    # The one interface whose implementation this host does NOT have fixes the
+    # other two words as well, and a declaration that got them wrong is refused
+    # rather than half-read. A plugin's process is the client's (`runs_on: other`),
+    # and it has no launch and no statement HERE: either would be this host being
+    # asked to run a copy of what the client's own declaration says it runs, and
+    # two implementations of one tool is the failure the whole split exists to
+    # avoid.
+    if component.interface == PLUGIN:
+        if component.runs_on != OTHER:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    "",
+                    f"a {PLUGIN} component's implementation is the client's: say runs_on: {OTHER!r}, "
+                    f"not {component.runs_on!r}",
+                )
+            )
+        if component.launch.argv or component.launch.entry or component.launch.binary or component.launch.importable:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    "",
+                    f"a {PLUGIN} component declares no launch on this host: how its process starts is the "
+                    f"client's business",
+                )
+            )
     for token in component.facts:
         if token not in FACT_TOKENS:
             out.append(
@@ -356,6 +392,15 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     spec.name,
                     f"tool name {spec.name!r} is the host's own (the host always offers it), so a component "
                     f"cannot publish it — rename this tool",
+                )
+            )
+        if component.interface == PLUGIN and spec.command:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    spec.name,
+                    f"a {PLUGIN} tool carries no command: the client implements it, and a statement here "
+                    f"would be a second implementation of one tool",
                 )
             )
         out.extend(tool_diagnostics(component.name, spec))
@@ -562,7 +607,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
     """
     name = str(data.get("name", ""))
     interface = str(data.get("interface", DAEMON))
-    if not name or interface not in (DAEMON, CLI):
+    if not name or interface not in (DAEMON, CLI, PLUGIN):
         return None
     launch = data.get("launch") if isinstance(data.get("launch"), dict) else {}
     tools: list[Tool] = []
@@ -745,6 +790,11 @@ def source_signature() -> tuple:
     ]
     directory = catalog_dir()
     registrations = [(entry.name, _stamp(entry.path)) for entry in _scan(directory) if entry.name.endswith(".json")]
+    # A push over the client's channel is an ARRIVAL the disk will never show
+    # (tools/channel.py keeps it in memory), and it changes the table as surely as
+    # a manifest appearing does. Its generation is the shape of that source.
+    from . import channel  # late: channel imports this module at import time
+
     return (
         str(repo),
         tuple(checkouts),
@@ -754,6 +804,7 @@ def source_signature() -> tuple:
         tuple(registrations),
         os.environ.get(components.ROOT_ENV, ""),
         os.environ.get("CLUTCH_COMPONENTS_CATALOG", ""),
+        channel.generation(),
     )
 
 
@@ -824,6 +875,17 @@ def _build_table() -> dict[str, Component]:
             out[declared.name] = declared
             continue
         out[declared.name] = _refine(known, declared, data)
+    # The client's push is the LAST word, and it REPLACES rather than refines. The
+    # merge above is about one component declared by several sources ("named means
+    # override") — a checkout refined by what was installed from it. A pushed
+    # declaration is not another view of that artifact: it describes a process the
+    # CLIENT runs, and its fields are read from the client's own manifest, so
+    # carrying a disk declaration's `launch` or arguments into it would invent a
+    # component neither side declared.
+    from . import channel  # late: channel imports this module at import time
+
+    for name, component in channel.declarations().items():
+        out[name] = component
     return out
 
 
@@ -845,7 +907,12 @@ def table() -> dict[str, Component]:
     The result is MEMOIZED on the shape of the sources (source_signature): the
     table is the host's view of what is installed, and asking for it dozens of
     times in one turn must cost one scan, not dozens. Returned as a copy —
-    callers keep it, nobody owns it."""
+    callers keep it, nobody owns it.
+
+    One source is not a registration at all: the components the CLIENT says it
+    runs, pushed over its channel (tools/channel.py). They are folded in last and
+    replace by name rather than refine, and their arrival is part of the
+    signature, so a push is picked up exactly like a manifest that appeared."""
     global _TABLE
     signature = source_signature()
     if _TABLE is None or _TABLE[0] != signature:

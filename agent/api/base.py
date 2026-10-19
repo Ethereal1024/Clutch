@@ -85,7 +85,9 @@ class HandlerBase(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         # the UI runs on its own origin/host; every response must be readable there
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # DELETE is /api/channel's "nothing is declared": the verbs are the API's
+        # whole surface, so the preflight has to admit it
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self) -> None:  # noqa: N802
