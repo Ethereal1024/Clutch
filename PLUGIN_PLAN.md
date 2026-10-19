@@ -34,7 +34,7 @@
 | C4 声明推送端点 | **已完成** | `90f8bab` | 目标侧半边：`agent/tools/channel.py`（端口/令牌/整集声明、内存、fail-closed）、`catalog.PLUGIN`、`registry.Tool.remote`、`POST/DELETE/GET /api/channel` |
 | C5 客户端自己的 `/call` 监听 | **已完成** | `219694e` | `ui/plugin-server.js`：`Authorization: Bearer` 门、并发上限、答案封顶、只认 `/call`；`tests/plugin-server.test.js` |
 | C6 声明推给会话 | **已完成** | `69d2279` | `ui/plugin-link.js`：认领时装（远侧端口 + 转发）、整集推、按 base 记、失败重试、非 loopback 拒绝、丢跳清端口与 base；`ui/main.js` 挂在 `api:base` / 梯子 `onUp` / `onTunnelEnd` / 退出；`tests/plugin-link.test.js` |
-| C7 插件页的第三种目标 | 未动工 | — | `ui/components-view.js#target()` 今天只认"某台机器的 supervisor"；客户端插件根目前由 `plugin-host.install()` 直接写 |
+| C7 插件页的第三种目标 | 未动工（**明确留着**） | — | `ui/components-view.js#target()` 今天只认"某台机器的 supervisor"；客户端插件根目前由 `plugin-host.install()` 直接写。C8 之后这一条更好走也更该做：`ui/plugin-host.js` 已经有 `list`/`install`/`remove`/`resolve`/`setDisabled`，缺的只是 view 那一层的 dep 注入（第三个 dest，像 `supervisorBase` 那样）与面板上的第三个选项；在此之前，装一个客户端插件要么走认领时的自动装（C6），要么走 `plugin-host.install()` 的代码路径 |
 | C8 一个真的客户端插件 | **已完成** | `8522543` | `clutch-websearch/plugin/`（子模块 `9bbe191`）：`web_search`/`web_fetch` 的 JS 移植，只用 `http/https/dns/zlib`，没有 `node_modules`；`exports.call(tool, args)`，一次调用 fork 一个子进程；`_assert_public_host` 随迁成每一跳都查的围栏，覆盖率 guard 随迁成 WEAK/NOTE/LEGS 三行答案。与 Python 版的分叉（块级换行、无 curl_cffi、coverage 为 null 不再崩、不把 positions 传过线、坏数字回落默认）写在 `plugin/README.md`。测试：子模块 `tests/plugin-test.js`（14 项，无网络）、父仓 `tests/client-plugin-websearch.test.js`（装→推→`/call`→删，真 fork）、`tests/channel_test.py` 把真实 `component.json` 钉在 `channel._plugin_of` 上 |
 
 C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推声明（`scripts/sync-android-host.sh`
