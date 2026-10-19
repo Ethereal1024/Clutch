@@ -8,6 +8,9 @@ const { createHostCore } = require("./host-core");
 const { createComponentsView } = require("./components-view");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings, getSshSecret } = require("./settings-mirror");
 const { createTunnelLadder } = require("./tunnel-ladder");
+// the client's plugin path: the /call listener, the reverse row it answers on, and
+// the push that tells a session what this client runs (ui/plugin-link.js)
+const pluginLink = require("./plugin-link");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -57,6 +60,25 @@ const hostCore = createHostCore({
   log: tunnelLog,
 });
 
+// Tell the session a window is on what THIS client runs (ui/plugin-link.js).
+//
+// Only a session that runs on ANOTHER machine is told. A plugin runs where the
+// user is sitting — that is the whole point of that domain — and it only means
+// something when the session is somewhere else: in a local session the two are
+// the same machine, so a client plugin would be an ordinary local component and
+// this channel would only duplicate a surface the component tab already has.
+//
+// Never awaited: the base is the renderer's the moment it is answered, and a
+// declaration landing a heartbeat later is a plugin appearing in a session that
+// is already running — not a reason to make the window wait on a push. A failure
+// is a sentence in the tunnel log; the session reads "this host has no channel".
+function announcePlugins(winId, base) {
+  if (!base || hostCore.backendKind(winId) !== "tunnel") return;
+  pluginLink
+    .offer(base)
+    .catch((e) => tunnelLog(`[plugin] declaring to ${base} failed: ${(e && e.message) || e}`));
+}
+
 // The reconnect ladder, on the side the platform does not freeze
 // (ui/tunnel-ladder.js — the phone's report, which the desktop shares one layer
 // down: a minimized/backgrounded window is throttled by Chromium exactly like a
@@ -77,6 +99,8 @@ const ladder = createTunnelLadder({
     for (const w of BrowserWindow.getAllWindows()) {
       if (w.isDestroyed() || !lostWindowIds.has(w.webContents.id)) continue;
       const url = await hostCore.ensureWindowBackend(w.webContents, true);
+      // the same session claimed from a fresh hop: its channel moved with the hop
+      announcePlugins(w.webContents.id, url);
       tunnelLog(`[tunnel] hop back; window ${w.webContents.id} re-claimed ${url || "(parked)"}`);
     }
   },
@@ -180,7 +204,11 @@ if (!app.requestSingleInstanceLock()) {
         // null = this window has no session (no tunnel, and no local one
         // either): the renderer stays on "not running" and waits for
         // backend:base-changed. Never the supervisor's port as a stand-in.
-        return (await hostCore.ensureWindowBackend(e.sender)) || null;
+        const base = (await hostCore.ensureWindowBackend(e.sender)) || null;
+        // the claim is also the one moment this session may be told what this
+        // client runs — a push, never a gate (see announcePlugins)
+        announcePlugins(e.sender.id, base);
+        return base;
       } catch (err) {
         tunnelLog(`[backend] api:base failed: ${err && err.message}`);
         return null;
@@ -291,6 +319,8 @@ if (!app.requestSingleInstanceLock()) {
       // drop them first, so a re-claim that races this notification opens a
       // FRESH forward instead of handing the window a port nobody serves
       const affected = await hostCore.releaseTunnelBackends();
+      // the plugin port this hop carried died with it (plugin-link.js hopLost)
+      pluginLink.hopLost();
       // remember whose session the hop was carrying, for the ladder's re-claim
       lostWindowIds = new Set(affected);
       // and the ENGINE acts on it: a window that is minimized/backgrounded is
@@ -310,6 +340,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on("window-all-closed", async () => {
     // the app is going away: the standing intent goes with it
     ladder.stop();
+    // the sessions this client served are stopped on the next line, so these
+    // DELETEs are a courtesy the far side may never read — not awaited, or one
+    // quiet session would hold the quit for its own timeout (ui/plugin-link.js)
+    pluginLink.stop();
     // stop sessions + ask the supervisors to exit while the tunnel is still up
     await hostCore.stopAllBackends();
     tunnel.stopTunnel();

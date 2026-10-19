@@ -630,6 +630,13 @@ async function awaitModelPath() {
   return startModelPath(state.sshClient);
 }
 
+// Note there is no plugin path here. The client's plugin endpoint is installed at
+// CLAIM time, not at connect (ui/plugin-link.js: a window's api:base -> offer),
+// because a claim is the first moment a session could call one: asking the far
+// side for a loopback port on every hop would be a listener held on that machine
+// for a facility nobody had used. What this file owes that channel is the routing
+// rule, and it is already generic — a row in `channels`, not a model special case.
+
 // Failing a gate is not a reason to close a wire a NEWER dial may already own:
 // an attempt that lost the race fails BECAUSE of the reset the winner performed,
 // so an unguarded teardown here closes the very tunnel that just won. Same
@@ -681,6 +688,8 @@ async function establishForwardAndHealth(localPort, client) {
   // --base-url anywhere. The gates below describe the hop itself and stay as they
   // were: a local forward, a live supervisor behind it, that supervisor's shape.
   startModelPath(client);
+  // Nothing for the plugin path here: it is installed by the first claim of a
+  // session on this hop (ui/plugin-link.js offer, from main.js's api:base).
   const up = await waitForServer("http://127.0.0.1:" + localPort + "/api/health", CONNECT_TIMEOUT_MS);
   if (!up) {
     return failConnect(
