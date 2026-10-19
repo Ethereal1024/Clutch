@@ -65,6 +65,79 @@ const LLM_PROXY_REMOTE_PORT = 8892;
 const CONNECT_TIMEOUT_MS = 15000;
 const HEAL_INTERVAL_MS = 15000;
 
+// ---- the reverse channels ----
+//
+// Everything the far side may open a connection INTO this machine for is one row
+// here: the port it asks sshd to listen on, and the loopback listener on THIS
+// machine that answers it. The accept handler (tunnel-connect's "tcp
+// connection") routes by destPort through this table, so a second channel is a
+// row plus the module that starts its listener — the tunnel itself never learns
+// another special case, and a port nobody asked for is refused instead of
+// dialled blind.
+//
+// `remote` is where the far side actually listens: null until an install has
+// landed (tunnel-connect's installReverseForward writes it), and `preferred` —
+// the contract port — while it is still in flight. That fallback is not a
+// guess: a remote session's --base-url is built from the contract port before
+// anything has been asked, so a connection naming it is meant for this row.
+const channels = new Map();
+
+// preferred is optional on purpose: a channel that only ever lives on a port the
+// far side picks has no contract port, and null says so.
+function registerChannel(name, { preferred, local, remote, setRemote, what }) {
+  if (typeof name !== "string" || !name) throw new Error("a reverse channel needs a name");
+  if (typeof local !== "function") throw new Error(`reverse channel "${name}" has no local listener to route to`);
+  // Where the granted port is remembered: the row's own field, unless the caller
+  // brings its own getter/setter pair (the model path's lives in state, because
+  // the rest of the tunnel — the session claim, the teardown — reads it by name).
+  // Half a pair is a channel that can read where it listens and never write it,
+  // which cannot be what anyone meant.
+  const hasRemote = typeof remote === "function";
+  const hasSetRemote = typeof setRemote === "function";
+  if (hasRemote !== hasSetRemote) {
+    throw new Error(`reverse channel "${name}" must give both remote() and setRemote(), or neither`);
+  }
+  const port = Number(preferred);
+  const own = { port: null };
+  const row = {
+    name,
+    preferred: Number.isFinite(port) && port > 0 ? port : null,
+    local,
+    remote: hasRemote ? remote : () => own.port,
+    setRemote: hasSetRemote ? setRemote : (granted) => {
+      own.port = granted;
+    },
+    // what the far side is reaching, for the one log line each install writes:
+    // "listening 127.0.0.1:8892 -> client proxy :54123" reads better than a name
+    what: what || name,
+  };
+  channels.set(name, row);
+  return row;
+}
+
+function channel(name) {
+  return channels.get(name) || null;
+}
+
+// The row a connection naming `port` belongs to, or null for a port this process
+// never asked the far side for. Order matters and is deliberate: a port some row
+// HAS been granted wins over one another row merely prefers, so a hop that moved
+// its model path does not answer on the contract port any more — that listener
+// belongs to a session that is gone, and answering it would be answering as
+// somebody else.
+function channelFor(port) {
+  const n = Number(port);
+  if (!Number.isFinite(n)) return null;
+  for (const row of channels.values()) {
+    const granted = row.remote();
+    if (granted != null && Number(granted) === n) return row;
+  }
+  for (const row of channels.values()) {
+    if (row.remote() == null && row.preferred === n) return row;
+  }
+  return null;
+}
+
 // Where the far side's model requests arrive. 8892 is the contract — it is what
 // a remote session's --base-url is built from, so it is always tried first — but
 // the port belongs to the FAR host, and a listener an earlier hop left behind
@@ -80,8 +153,13 @@ const HEAL_INTERVAL_MS = 15000;
 // talks into nothing until the far side reaps it (supervise.py STALE_S). That is
 // the cost of moving the model path, and it is paid only when the port really
 // cannot be had — never as a preference.
+//
+// The model path is the first reverse channel (the rows are declared below, once
+// the constants are), and this is its port: the one it was granted if an install
+// has landed, the contract port otherwise.
 function remoteLlmPort() {
-  return state.llmProxyRemotePort || LLM_PROXY_REMOTE_PORT;
+  const model = channel("model");
+  return (model && model.remote()) || LLM_PROXY_REMOTE_PORT;
 }
 
 // The LLM base a remote session is spawned with. It must be read at SPAWN time
@@ -102,11 +180,38 @@ function tunnelLog(...args) {
   }
 }
 
+// ---- the channels this process serves ----
+//
+// The model path, declared with the rest of the wire contract: a remote session's
+// --base-url points here, so the port is the contract first and whatever the far
+// side granted after that (installReverseForward). state.llmProxyRemotePort stays
+// the field it is remembered in, so a fresh module graph forgets it with the rest
+// of the tunnel.
+//
+// The frontend plugin endpoint (the channel the far side calls a component that
+// runs HERE through) is the second row, and it is deliberately absent: there is
+// no listener behind it yet, so a row would route a connection into nothing.
+// It registers itself when its listener is started — one registerChannel call,
+// and the accept handler routes it with no change here or in tunnel-connect.
+registerChannel("model", {
+  preferred: LLM_PROXY_REMOTE_PORT,
+  local: () => state.llmProxyPort,
+  remote: () => state.llmProxyRemotePort,
+  setRemote: (port) => {
+    state.llmProxyRemotePort = port;
+  },
+  what: "client proxy",
+});
+
 module.exports = {
   REMOTE_API_PORT,
   LLM_PROXY_REMOTE_PORT,
   CONNECT_TIMEOUT_MS,
   HEAL_INTERVAL_MS,
+  channels,
+  registerChannel,
+  channel,
+  channelFor,
   remoteLlmPort,
   remoteLlmBase,
   state,

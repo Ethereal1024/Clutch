@@ -526,8 +526,11 @@ async function main() {
   // moment a newer connect owns the session, and reports failure instead of
   // pretending the model path is up.
   {
-    const { state, remoteLlmBase, LLM_PROXY_REMOTE_PORT } = require("../ui/tunnel-core");
+    const { state, remoteLlmBase, LLM_PROXY_REMOTE_PORT, channel } = require("../ui/tunnel-core");
     const { installReverseForward } = require("../ui/tunnel-connect");
+    // these cases are the MODEL path's ladder: the row is what says which port has
+    // the contract, and the install itself knows nothing about which channel it is
+    const model = channel("model");
     state.sshClient = null;
 
     let calls = 0;
@@ -539,7 +542,7 @@ async function main() {
       },
     };
     state.sshClient = flaky;
-    const landed = await installReverseForward(flaky, { tries: 5, retryMs: 5, maxWaitMs: 20 });
+    const landed = await installReverseForward(flaky, model, { tries: 5, retryMs: 5, maxWaitMs: 20 });
     check(landed === true && calls === 3, `a refused reverse-forward bind is retried until it lands (${calls} tries)`);
 
     // ...and a session that is no longer this client's is left alone: the new
@@ -547,7 +550,7 @@ async function main() {
     let late = 0;
     const replaced = { forwardIn() { late++; } };
     state.sshClient = flaky; // someone else's session already owns the tunnel
-    const abandoned = await installReverseForward(replaced, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    const abandoned = await installReverseForward(replaced, model, { tries: 3, retryMs: 5, maxWaitMs: 10 });
     check(abandoned === false && late === 0, "a replaced session's forward is never installed at all");
 
     // A port that never frees up is not automatically a dead model path, though:
@@ -568,7 +571,7 @@ async function main() {
       },
     };
     state.sshClient = held;
-    const elsewhere = await installReverseForward(held, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    const elsewhere = await installReverseForward(held, model, { tries: 3, retryMs: 5, maxWaitMs: 10 });
     check(elsewhere === true && refused === 3, `a held port does not sink the connection (${refused} retries, then the far side's own port)`);
     check(
       asked.length === 4 && asked[3] === 0 && asked.slice(0, 3).every((p) => p === 8892),
@@ -586,7 +589,7 @@ async function main() {
     let refusedBoth = 0;
     const closed = { forwardIn(_host, _port, cb) { refusedBoth++; cb(new Error("bind: refused")); } };
     state.sshClient = closed;
-    const never = await installReverseForward(closed, { tries: 3, retryMs: 5, maxWaitMs: 10 });
+    const never = await installReverseForward(closed, model, { tries: 3, retryMs: 5, maxWaitMs: 10 });
     check(
       never === false && refusedBoth === 4,
       `a host that forwards to nobody fails the connect loudly: 3 tries on ${LLM_PROXY_REMOTE_PORT}, then one ask for its own (${refusedBoth} calls)`
@@ -610,7 +613,7 @@ async function main() {
     };
     state.sshClient = silent;
     let t0 = Date.now();
-    const unbound = await installReverseForward(silent, { tries: 3, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 40 });
+    const unbound = await installReverseForward(silent, model, { tries: 3, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 40 });
     let elapsed = Date.now() - t0;
     check(
       unbound === false && elapsed >= 30 && elapsed < 1500,
@@ -640,7 +643,7 @@ async function main() {
     dying.forwardIn = () => {};
     state.sshClient = dying;
     t0 = Date.now();
-    const pending = installReverseForward(dying, { tries: 1, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 5000 });
+    const pending = installReverseForward(dying, model, { tries: 1, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 5000 });
     setTimeout(() => {
       state.sshClient = null;
       dying.emit("close");

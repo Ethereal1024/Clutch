@@ -20,6 +20,11 @@
 //   * an inbound forward naming the granted port reaches this window's LLM proxy
 //     (the proxy answers 404 on a non-LLM path — an answer is the proof), while
 //     one naming 8892 is refused rather than answered by nobody.
+//   * the routing rule is a TABLE (tunnel-core's channels), not a model special
+//     case: a port no row names is refused, a row with no listener behind it is
+//     refused, and a second row sends its own port to its own listener and
+//     remembers the port the far side granted it. That is the shape stage 4's
+//     frontend plugin channel is added in — one row, no change to the tunnel.
 //
 // The wire is faked (ssh2 module seam, as in tunnel-concurrent-dial-test.js) but
 // nothing else is: the real llm-proxy is started, the real local forward serves
@@ -124,7 +129,16 @@ ssh2Mod.exports = { Client: FakeClient };
 require.cache[ssh2Path] = ssh2Mod;
 
 const { connectTunnel, stopTunnel, awaitModelPath, tunnelStatus } = require("../ui/ssh-tunnel");
-const { state, remoteLlmBase, remoteLlmPort, LLM_PROXY_REMOTE_PORT } = require("../ui/tunnel-core");
+const {
+  state,
+  remoteLlmBase,
+  remoteLlmPort,
+  LLM_PROXY_REMOTE_PORT,
+  registerChannel,
+  channelFor,
+} = require("../ui/tunnel-core");
+// the install itself, per channel (used by section 5 to drive a row of its own)
+const { installReverseForward } = require("../ui/tunnel-connect");
 
 // the ports the fake far side holds: 8892, and only until the far side releases
 // it (step 3 re-dials after that, which is the ordinary reconnect case)
@@ -155,6 +169,20 @@ async function armInbound(client, destPort) {
   // let the pipes land: accept() is synchronous, the socket it returns is not
   for (let i = 0; i < 100 && !inbound && rejected === 0; i++) await sleep(5);
   return { accepted, rejected, inbound };
+}
+
+// write into the far side's end of a forwarded connection and read whatever
+// comes back: the answer is the proof that a route reached a real listener
+function readFrom(sock, text) {
+  return new Promise((resolve) => {
+    let body = "";
+    sock.setEncoding("utf8");
+    sock.on("data", (d) => (body += d));
+    sock.on("end", () => resolve(body));
+    sock.on("error", () => resolve(body));
+    sock.write(text);
+    setTimeout(() => resolve(body), 3000);
+  });
 }
 
 (async () => {
@@ -261,6 +289,93 @@ async function armInbound(client, destPort) {
   check(state.llmProxyRemotePort === null, "nothing is remembered from a bind the far side never answered");
   FakeClient.silent = false;
 
+  // 5. the routing rule is the channel TABLE, not a model special case.
+  //
+  // Everything a second channel needs is a row: which port the far side asks for,
+  // which local listener answers it, and where the port that landed is remembered.
+  // Nothing in the accept handler, the ladder or the install knows the difference —
+  // which is exactly the claim this section makes, with a listener that is not the
+  // model proxy standing in for the plugin endpoint stage 4 adds.
+  peer.removeAllListeners("connection");
+  const nobodyAsked = await armInbound(quietClient, 8899);
+  check(
+    nobodyAsked.accepted === 0 && nobodyAsked.rejected === 1,
+    "an inbound forward naming a port no channel asked for is refused, not dialled blind"
+  );
+
+  // the second channel's service: it answers with its own word, so an answer is
+  // proof of WHICH listener the far side's connection reached
+  const pluginSrv = net.createServer((s) => {
+    s.setEncoding("utf8");
+    s.on("data", () => s.end("plugin-ok"));
+  });
+  await new Promise((r) => pluginSrv.listen(0, "127.0.0.1", r));
+
+  const probe = registerChannel("probe-test", {
+    preferred: 8899,
+    local: () => pluginSrv.address().port,
+    what: "a test listener",
+  });
+  check(channelFor(8899) === probe, "a registered row makes its contract port routable");
+  const probeOk = await installReverseForward(quietClient, probe);
+  check(
+    probeOk === true && probe.remote() === 8899 && channelFor(8899) === probe,
+    `…and installing it asks for that port and remembers what landed (${probe.remote()})`
+  );
+
+  peer.removeAllListeners("connection");
+  const toProbe = await armInbound(quietClient, 8899);
+  check(toProbe.accepted === 1, "an inbound forward naming the row's port is accepted");
+  const probeAnswer = await readFrom(toProbe.inbound, "hello");
+  check(
+    /^plugin-ok/.test(probeAnswer),
+    `…and lands on the row's own listener, not the model proxy (${probeAnswer})`
+  );
+
+  // a channel that only ever lives where the far side puts it: no contract port,
+  // so the FIRST thing asked for is port 0 — never 8892, which is the model's port
+  let pickPort = null;
+  const pick = registerChannel("pick-test", {
+    local: () => pluginSrv.address().port,
+    remote: () => pickPort,
+    setRemote: (p) => (pickPort = p),
+  });
+  const askedBefore = quietClient.forwards.length;
+  await installReverseForward(quietClient, pick);
+  const asked = quietClient.forwards.slice(askedBefore);
+  check(
+    asked.length === 1 && asked[0] === 0,
+    `a channel with no contract port is never asked for on 8892 (${asked.join(",")})`
+  );
+  check(
+    pickPort === GRANTED && channelFor(GRANTED) === pick,
+    `…and the port the far side picked routes back to that row, not the model's (${pickPort})`
+  );
+
+  // a row whose listener is not up (the plugin endpoint before it is started, or
+  // after its client module gave up): refused, because accepting it would leave
+  // the far side talking into a connection nobody answers
+  registerChannel("dead-test", { preferred: 8897, local: () => null });
+  check(channelFor(8897) !== null, "a row with no listener behind it is still a known port");
+  check(channelFor(null) === null && channelFor("nothing") === null, "a port that is not a port routes nowhere");
+  let halfPair = null;
+  try {
+    registerChannel("half-test", { local: () => 1, remote: () => 1 });
+  } catch (e) {
+    halfPair = e.message;
+  }
+  check(
+    /both remote\(\) and setRemote\(\)/.test(halfPair || ""),
+    "a row that can read its port but never write it is refused at registration"
+  );
+  peer.removeAllListeners("connection");
+  const toDead = await armInbound(quietClient, 8897);
+  check(
+    toDead.accepted === 0 && toDead.rejected === 1,
+    "…and a connection naming it is refused, never accepted into nothing"
+  );
+
+  await new Promise((r) => pluginSrv.close(r));
   await stopTunnel();
   peer.close();
   await new Promise((r) => far.close(r));

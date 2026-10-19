@@ -12,7 +12,15 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
-const { state, tunnelLog, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, remoteLlmPort } = require("./tunnel-core");
+const {
+  state,
+  tunnelLog,
+  REMOTE_API_PORT,
+  CONNECT_TIMEOUT_MS,
+  remoteLlmPort,
+  channelFor,
+  channel,
+} = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeSupervisorShape } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
 const { PROBE_CMD, parseProbe, installServer, installComponents } = require("./tunnel-bootstrap");
@@ -194,16 +202,21 @@ async function connectTunnel({ host, user, port, password }, progress) {
     // runtime handlers (once per connection). Guard mutations of state.sshClient: a
     // stale tunnel's 'end' may fire after a reconnect and must not clobber it.
     client.on("tcp connection", (info, accept, reject) => {
-      // no live proxy port (it failed to start, or the tunnel is being torn
-      // down): refuse the forward instead of calling net.connect(null), which
-      // throws synchronously inside this handler — an uncaught throw in the main
-      // process takes the whole window down
-      if (info.destPort !== remoteLlmPort() || !state.llmProxyPort) {
+      // Which channel is this? Only the ports this process asked the far side for
+      // are reachable (tunnel-core's channel table); a port nobody asked for is
+      // refused here rather than dialled blind. A row with no listener behind it
+      // right now (the client module failed to start, or the tunnel is being torn
+      // down) has nothing to route to either: refuse the forward instead of
+      // calling net.connect(null), which throws synchronously inside this handler
+      // — an uncaught throw in the main process takes the whole window down.
+      const chan = channelFor(info.destPort);
+      const local = chan && chan.local();
+      if (!local) {
         reject();
         return;
       }
       const stream = accept();
-      const proxy = net.connect(state.llmProxyPort, "127.0.0.1");
+      const proxy = net.connect(local, "127.0.0.1");
       // An error on either half must end BOTH halves. A socket left hanging here
       // is the worst shape there is: the far side's connection has been ACCEPTED,
       // so it looks alive to whoever is reading it, and nothing will ever answer
@@ -412,6 +425,8 @@ function bindReverseForward(client, port, timeoutMs = REVERSE_FORWARD_BIND_TIMEO
 // is usually an sshd releasing a dead hop's listener and it is gone a moment
 // later. abandoned is not failure — it means a newer connect owns the session
 // now, so this forward belongs to a dead connect and must not be installed.
+// It knows nothing about channels: the port IS the channel here, and the row
+// (and the memory of what landed) belongs to installReverseForward.
 async function bindReverseForwardWithLadder(client, port, opts = {}) {
   const tries = opts.tries || REVERSE_FORWARD_TRIES;
   const first = opts.retryMs || REVERSE_FORWARD_RETRY_MS;
@@ -439,42 +454,64 @@ async function bindReverseForwardWithLadder(client, port, opts = {}) {
   return { ok: false, error: last };
 }
 
-// true only when the far side really has a listener that forwards back here.
-async function installReverseForward(client, opts = {}) {
-  const preferred = remoteLlmPort();
-  const first = await bindReverseForwardWithLadder(client, preferred, opts);
-  if (first.ok) {
-    state.llmProxyRemotePort = first.port;
-    tunnelLog(
-      `[phase] reverse forward listening 127.0.0.1:${first.port} -> client proxy :${state.llmProxyPort}` +
-        (first.attempt > 1 ? ` (try ${first.attempt})` : "")
-    );
-    return true;
-  }
-  if (first.abandoned) return false;
-  if (first.silent) {
-    // the far side never answered — asking it for a port of its own is the SAME
-    // question with a different number, and it would be silent about that too
-    tunnelLog(`[phase] reverse forward unanswered (${first.error}); not asking for a port of its own`);
+// Install ONE reverse channel: the port it prefers is asked for with the ladder,
+// and if the far side refuses that port rather than falling silent, it is asked to
+// pick a port for itself (port 0) — a port held by a hop it has not reaped yet
+// costs the channel a different port, not the connect. The port that really landed
+// is written to the row, so every later hop re-binds THAT port and every session is
+// told where the channel went (tunnel-core's remoteLlmPort).
+//
+// `chan` is a row from tunnel-core's table, and nothing here knows which one it is:
+// the ladder, the silence rule, the port-0 fallback and the memory are the same
+// question for every channel the far side may reach this machine through.
+async function installReverseForward(client, chan, opts = {}) {
+  if (!chan) {
+    tunnelLog("[phase] reverse forward asked for a channel this process never registered; refused");
     return false;
   }
-  // 8892 is the contract with the far side's --base-url, not a right: a listener
-  // we cannot reach and cannot kill costs us a different port, not the connect.
-  tunnelLog(
-    `[phase] reverse forward on ${preferred} refused (${first.error}); asking the far side for a port of its own`
-  );
+  // a channel granted a port earlier is re-bound on THAT port first: the far side's
+  // sessions are already pointed at it and cannot be re-pointed. A channel with no
+  // contract port has nothing to prefer and goes straight to the far side's pick.
+  const preferred = chan.remote() || chan.preferred;
+  if (preferred != null) {
+    const first = await bindReverseForwardWithLadder(client, preferred, opts);
+    if (first.ok) {
+      chan.setRemote(first.port);
+      tunnelLog(
+        `[phase] reverse forward listening 127.0.0.1:${first.port} -> ${chan.what} :${chan.local()}` +
+          (first.attempt > 1 ? ` (try ${first.attempt})` : "")
+      );
+      return true;
+    }
+    if (first.abandoned) return false;
+    if (first.silent) {
+      // the far side never answered — asking it for a port of its own is the SAME
+      // question with a different number, and it would be silent about that too
+      tunnelLog(
+        `[phase] reverse forward unanswered (${first.error}); not asking for a port of its own (${chan.name})`
+      );
+      return false;
+    }
+    // the contract port is a contract, not a right: a listener we cannot reach and
+    // cannot kill costs us a different port, not the connect.
+    tunnelLog(
+      `[phase] reverse forward on ${preferred} refused (${first.error}); asking the far side for a port of its own` +
+        ` (${chan.name})`
+    );
+  }
   const second = await bindReverseForwardWithLadder(client, 0, { ...opts, tries: 1 });
   if (second.ok) {
-    state.llmProxyRemotePort = second.port;
+    chan.setRemote(second.port);
     tunnelLog(
-      `[phase] reverse forward listening 127.0.0.1:${second.port} (chosen by the far side: ${preferred} is held) ` +
-        `-> client proxy :${state.llmProxyPort}`
+      `[phase] reverse forward listening 127.0.0.1:${second.port} (` +
+        (preferred != null ? `chosen by the far side: ${preferred} is held` : "chosen by the far side") +
+        `) -> ${chan.what} :${chan.local()}`
     );
     return true;
   }
   if (!second.abandoned && !second.silent) {
     tunnelLog(
-      `[phase] reverse forward failed: the far side would not forward to us at all (${second.error})`
+      `[phase] reverse forward failed: the far side would not forward to us at all (${second.error}) (${chan.name})`
     );
   }
   return false;
@@ -566,7 +603,7 @@ function startModelPath(client) {
   state.modelPathClient = client;
   state.modelPath = "installing";
   clearModelPathRepair(); // this attempt IS the repair
-  const install = installReverseForward(client).then(
+  const install = installReverseForward(client, channel("model")).then(
     (ok) => finishModelPath(client, ok),
     // installReverseForward answers false rather than rejecting, but a rejection
     // here must still settle the promise a claim is waiting on
