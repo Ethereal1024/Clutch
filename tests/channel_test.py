@@ -41,6 +41,7 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from agent.base import Broadcaster, RunState
 from agent.config import Config
@@ -300,6 +301,89 @@ def check_a_bad_push_is_refused_whole() -> None:
         client.close()
 
 
+def _pushed_projection(manifest: dict) -> dict:
+    """What `ui/plugin-server.js#declarations()` actually sends for one plugin.
+
+    Kept beside the check rather than shared with anything: it exists to prove the
+    shipped file works on the far side of the wire, and a helper the sender also
+    used would prove only that the sender agrees with itself. Two things are
+    dropped on purpose — `entry` (a path inside the installed version, which names
+    this machine's files) and any tool field that says how to RUN something.
+    """
+    keep = ("name", "version", "interface", "runs_on", "subject", "requires", "ui", "prompt")
+    pushed = {key: manifest[key] for key in keep if key in manifest}
+    tools = []
+    for tool in manifest.get("tools") or []:
+        one = {"name": str(tool.get("name", "") or "")}
+        if isinstance(tool.get("description"), str):
+            one["description"] = tool["description"]
+        if isinstance(tool.get("parameters"), dict):
+            one["parameters"] = tool["parameters"]
+        for word in ("access", "access_arg", "snapshot_arg", "modes", "gate", "preview"):
+            if tool.get(word) not in (None, ""):
+                one[word] = tool[word]
+        tools.append(one)
+    pushed["tools"] = tools
+    return pushed
+
+
+# The first REAL client plugin, in the submodule beside this repository. Its own
+# node suite owns the behaviour; what is pinned here is the CLAIM the session reads.
+CLIENT_PLUGIN = Path(__file__).resolve().parents[1] / "clutch-websearch" / "plugin" / "component.json"
+
+
+def check_the_real_websearch_plugin() -> None:
+    """The shipped `clutch-websearch/plugin/component.json` through the push parser.
+
+    A plugin's declaration is a declaration: it is read by the same parser a
+    manifest goes through, and the two fatal rules for this interface are that its
+    tools carry a model-facing description and that they carry no statement a
+    second host could try to run. A file that only ever travelled in a test would
+    not catch a typo in the one that ships, so the real file is the input.
+    """
+    if not CLIENT_PLUGIN.exists():
+        print(f"  skip: {CLIENT_PLUGIN} is not checked out (the submodule is absent)")
+        return
+    with isolated_host():
+        manifest = json.loads(CLIENT_PLUGIN.read_text(encoding="utf-8"))
+        check(manifest.get("interface") == "plugin", "the shipped plugin calls itself a plugin")
+        check(manifest.get("runs_on") == "other", "and says its process runs on the client")
+
+        pushed = _pushed_projection(manifest)
+        check("entry" not in pushed, "its entry point stays on the machine that has the file")
+
+        component = channel._plugin_of(pushed, 0)
+        check(component.name == manifest["name"], "the push accepts it under its own name")
+        check(
+            [tool.name for tool in component.tools] == ["web_search", "web_fetch"],
+            "carrying the two tools it publishes, in the order it publishes them",
+        )
+        check(
+            all(isinstance(tool.description, str) and tool.description for tool in component.tools),
+            "each with the prose the model is offered",
+        )
+        check(
+            all(tool.command is None for tool in component.tools),
+            "and no command line this host could be tricked into running",
+        )
+        check(
+            not ({tool.name for tool in component.tools} & set(catalog.HOST_TOOL_NAMES)),
+            "under no name the host already owns",
+        )
+        fatal = [d.message for d in catalog.component_diagnostics(component) if d.fatal]
+        check(not fatal, f"with no fatal diagnostic ({'; '.join(fatal) or 'none'})")
+
+        # The whole push, not just the one component: the file has to survive the
+        # door it will actually walk through, not only the parser behind it.
+        client = Client()
+        try:
+            held = _push(client, pushed)
+            check(held.holds(component.name), "and a whole push holding it opens a door")
+        finally:
+            channel.clear()
+            client.close()
+
+
 def _request(url: str, method: str = "GET", body: dict | None = None) -> tuple[int, str, dict]:
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = urllib.request.Request(
@@ -397,6 +481,7 @@ def main() -> int:
     check_one_push_opens_the_door()
     check_a_dead_listener_is_a_sentence()
     check_a_bad_push_is_refused_whole()
+    check_the_real_websearch_plugin()
     check_the_endpoint()
     print("\nall passed")
     return 0
