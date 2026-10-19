@@ -106,6 +106,11 @@ function main() {
   const stale = list.filter((f) => !fs.existsSync(path.join(UI_DIR, f)));
   check(stale.length === 0, "every UI_NODE entry exists in ui/" + (stale.length ? `: ${stale.join(", ")}` : ""));
   check(list.every((f) => /^[A-Za-z0-9._-]+$/.test(f)), "no entry carries a path separator (ui/$f stays inside ui/)");
+  // ui/plugin-host.js starts its runtime by PATH (child_process.fork), not by
+  // require, so the walk above cannot see that dependency: shipping the host
+  // without its child would fail on the phone at the first call and nowhere else.
+  check(!list.includes("plugin-host.js") || list.includes("plugin-child.js"),
+    "a shipped plugin-host.js ships its forked runtime too");
 
   // 4. the copy must LOAD on the phone: no shipped module reaches for Electron
   //    at load time (the whole reason the subset is hand-written — the renderer's
