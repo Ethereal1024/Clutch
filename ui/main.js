@@ -235,6 +235,16 @@ if (!app.requestSingleInstanceLock()) {
       })
     );
 
+    // the mirrors a failed fetch is retried through: a read of the list this
+    // build ships plus the user's own, and the two writes that move the user's
+    // half of it. Each write answers with the list as it now is, so the page
+    // draws what was written rather than asking again (ui/components-view.js).
+    ipcMain.handle("components:mirrors", async () => componentsView.mirrors());
+    ipcMain.handle("components:mirror-add", async (_e, url) => componentsView.addMirror(String(url || "")));
+    ipcMain.handle("components:mirror-remove", async (_e, url) =>
+      componentsView.removeMirror(String(url || ""))
+    );
+
     ipcMain.handle("tunnel:connect", async (e, cfg) =>
       // every connect goes through the ladder: the user's own dial owns the wire,
       // and a connect that WINS is the standing intent it may redial on the next

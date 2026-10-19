@@ -203,7 +203,11 @@ const COMPONENTS = [
 ];
 
 // a fresh page: the real panel file, a fresh mini-DOM, a fake channel
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {} } = {}) {
+// `mirror` is the fake of the mirror channel (ui/components-view.js mirrors/add/
+// removeMirror). Passed, this page HAS that channel (three reads, and the section
+// under the list); omitted, it is a shell that predates the feature and must draw
+// exactly as it did before — the reason the default is null and not a stub.
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -228,11 +232,16 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     },
     confirms: [],
     answer: true,
-    // the host channel the mirror row writes through (clutchSettings.save): the
-    // window's copy of the knob is only kept when this answers ok
+    // the host channel the mirror FIELD row writes through (clutchSettings.save):
+    // the window's copy of the knob is only kept when this answers ok
     settingsSaves: [],
     settingsReply: { ok: true },
     settingsControl: null,
+    // the mirror LIST channel (ui/components-view.js mirrors/add/removeMirror)
+    mirrorCalls: 0,
+    mirrorAdds: [],
+    mirrorRemoves: [],
+    mirrorControl: null, // a deferred read, for the "still reading" frame
   };
   const api = {
     list: async () => {
@@ -264,6 +273,37 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       return world.switchReply;
     },
   };
+  // the mirror channel, when this page is given one: a mutable list the fake
+  // answers from, in the shape ui/mirrors.js speaks — every write answers with
+  // the list AS IT NOW IS, and a refusal is a sentence rather than a rejection
+  if (mirror) {
+    const state = { list: (mirror.list || []).map((e) => ({ ...e })), forced: mirror.forced || "" };
+    // the order ui/mirrors.js `entries()` answers in: the user's entries first,
+    // then the ones this build ships — so a page drawing this list is drawing the
+    // order a fallback would actually try
+    const snapshot = () =>
+      [...state.list.filter((e) => e.source === "user"), ...state.list.filter((e) => e.source !== "user")].map((e) => ({ ...e }));
+    world.mirrorState = state;
+    api.mirrors = async () => {
+      world.mirrorCalls++;
+      if (world.mirrorControl) return world.mirrorControl.promise;
+      if (mirror.error) return { mirrors: [], forced: "", error: mirror.error };
+      return { mirrors: snapshot(), forced: state.forced, error: null };
+    };
+    api.addMirror = async (raw) => {
+      world.mirrorAdds.push(raw);
+      if (mirror.addError) return { ok: false, error: mirror.addError };
+      if (state.list.some((e) => e.url === raw)) return { ok: false, error: `${raw} is already in the list` };
+      state.list = [...state.list, { url: raw, source: "user" }];
+      return { ok: true, mirrors: snapshot(), forced: state.forced, error: null };
+    };
+    api.removeMirror = async (raw) => {
+      world.mirrorRemoves.push(raw);
+      if (mirror.removeError) return { ok: false, error: mirror.removeError };
+      state.list = state.list.filter((e) => e.url !== raw);
+      return { ok: true, mirrors: snapshot(), forced: state.forced, error: null };
+    };
+  }
   const ctx = {
     console,
     setImmediate,
@@ -332,9 +372,36 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
         .filter((n) => /(^| )plug-filter-count( |$)/.test(n.className))
         .map((n) => n.textContent.trim()),
     nameBox: () => walk(dom.byId.get("#plug-filter")).find((n) => n.tag === "input"),
+    // the component names on the page, and NOTHING ELSE: the Mirrors section draws
+    // its rows through the same row builder, so a mirror's URL lands in a
+    // `.plug-name` too. The mirror rows mark themselves (`.plug-mirrors`), and a
+    // name inside one of them is not a component name.
     names: () => walk(dom.byId.get("#plug-body"))
       .filter((n) => /(^| )plug-name( |$)/.test(n.className))
+      .filter((n) => {
+        for (let c = n; c; c = c.parent) if (/(^| )plug-mirrors( |$)/.test(c.className)) return false;
+        return true;
+      })
       .map((n) => textOf(n)),
+    // the mirror rows themselves, and the controls/fields they carry
+    mirrorRows: () => walk(dom.byId.get("#plug-body")).filter((n) => /(^| )plug-mirrors( |$)/.test(n.className)),
+    mirrorRemoves: () => walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /plug-mirrors-remove/.test(n.className)),
+    mirrorInput: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-input( |$)/.test(n.className)),
+    mirrorAddBtn: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-add-btn( |$)/.test(n.className)),
+    mirrorNote: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-note( |$)/.test(n.className)),
+    mirrorForced: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-forced( |$)/.test(n.className)),
+    mirrorResult: () => walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-mirrors-result( |$)/.test(n.className)),
+    // the Mirrors section itself, by its heading — so "the section is drawn" is a
+    // claim about the page and not about a class that could be anything
+    mirrorSection: () =>
+      walk(dom.byId.get("#plug-body")).find(
+        (n) => /(^| )plug-section( |$)/.test(n.className) && walk(n).some((c) => /(^| )plug-section-title( |$)/.test(c.className) && c.textContent === "Mirrors")
+      ) || null,
+    // the chips inside the mirror rows, as drawn: "yours" / "shipped"
+    mirrorChips: () =>
+      walk(dom.byId.get("#plug-body"))
+        .filter((n) => /(^| )plug-mirrors( |$)/.test(n.className))
+        .map((r) => walk(r).filter((c) => /(^| )plug-chip( |$)/.test(c.className)).map((c) => c.textContent).join("")),
     note: () => dom.byId.get("#plug-note"),
     text: () => drawnText(dom.byId.get("#plug-body")),
     // the state line of one component's row, or null when that row is not drawn
@@ -1337,6 +1404,10 @@ const CODE = mod ? mod.code : "";
       /github\.com/.test(hints()[0].textContent) && /pin/.test(hints()[0].textContent),
       "and says WHY the mirror is safe: the source is this build's own github one, and the digests are still the release's"
     );
+    check(
+      /Mirrors/.test(hints()[0].textContent),
+      "and names the section the list is managed in, so the automatic retry is something the user can see and edit"
+    );
     check(dead.buttons().length === 2 && dead.buttons().every((b) => !b.disabled), "the line is a sentence, not a second control: the offers the sources that DID answer are untouched");
     const lines = walk(body).filter((n) => /(^| )plug-source-(error|hint)( |$)/.test(n.className));
     check(
@@ -1473,6 +1544,150 @@ const CODE = mod ? mod.code : "";
       (m) => /\.plug-mirror-note\.error\b/.test(m[1]) && /var\(--danger\)/.test(m[2])
     );
     check(dangerRules.length === 1, "while a refused value takes the failure colour, not the muted one the note is written in");
+  }
+
+  // 38. the mirror list: where a release host that could not be reached is retried
+  //     (ui/mirrors.js). One more section of the SAME page, because it serves the
+  //     same list — and it is drawn only when this shell has the channel for it,
+  //     so a bridge that predates the feature draws exactly what it drew before.
+  {
+    const MINE = { url: "https://mine.example/", source: "user" };
+    const list = [MINE, { url: "https://gh-proxy.com/", source: "builtin" }, { url: "https://ghfast.top/", source: "builtin" }];
+
+    // (a) a shell with no mirror channel is the page it always was
+    {
+      const none = page();
+      await none.open();
+      check(none.mirrorSection() === null, "a shell with no mirror channel draws no Mirrors section");
+      check(none.mirrorInput() === undefined && none.mirrorAddBtn() === undefined, "and no field or button for a list it cannot read");
+      check(none.names().join(",") === "clutch-workspace,clutch-memory", "the components it does know are drawn exactly as before");
+    }
+
+    // (b) the section: the user's entries first, the build's after
+    {
+      const p = page({ mirror: { list } });
+      await p.open();
+      check(p.world.mirrorCalls === 1, "opening the tab reads the mirror list, once");
+      check(p.mirrorRows().length === 3, "one row per mirror this machine would try");
+      check(
+        p.mirrorRows().map((r) => textOf(nameOf(r))).join(",") === "https://mine.example/,https://gh-proxy.com/,https://ghfast.top/",
+        "the user's own entry is drawn first, the shipped ones after it — the order they are tried in"
+      );
+      check(p.mirrorChips().join(",") === "yours,shipped,shipped", "each row says where it came from");
+      check(/1 of yours · 2 shipped/.test(textOf(p.mirrorSection())), "and the heading counts the two halves of the list");
+      check(
+        /tried in this order/.test(p.mirrorNote().textContent) && /digest/.test(p.mirrorNote().textContent),
+        "the note says the order is what is tried, and that the bytes are still weighed against the release's own digest"
+      );
+      check(p.mirrorRemoves().length === 1, "only an entry the user added carries a Remove — the shipped ones are what the fallback is made of");
+      check(ownerName(p.mirrorRemoves()[0]) === "https://mine.example/", "and it is the user's own row");
+      check(p.names().join(",") === "clutch-workspace,clutch-memory", "the mirror rows are not component rows: the component list is untouched beside them");
+    }
+
+    // (c) adding one: the field's value is what is written, and the section is
+    //     redrawn from the list the write ANSWERED with, not from what was asked
+    {
+      const q = page({ mirror: { list } });
+      await q.open();
+      const input = q.mirrorInput();
+      check(Boolean(input) && input.getAttribute("aria-label") === "a mirror to add, as an https URL", "the field names itself, and says what a mirror is");
+      check(q.mirrorAddBtn().disabled, "with nothing typed the Add button is dead");
+      input.value = "https://new.example";
+      input.handlers.input[0]();
+      vm.runInContext("renderPlugins()", q.ctx);
+      check(!q.mirrorAddBtn().disabled, "typing one makes it live");
+      q.mirrorAddBtn().click();
+      await settle();
+      check(q.world.mirrorAdds.join(",") === "https://new.example", "the value in the field is what the list is asked to hold");
+      check(
+        q.mirrorRows().length === 4 && q.mirrorChips().join(",") === "yours,yours,shipped,shipped",
+        "and the section is redrawn from the list that was written, with the new entry among the user's own"
+      );
+      const ok1 = q.mirrorResult();
+      check(/is in your list/.test(ok1.textContent) && !/(^| )error( |$)/.test(ok1.className), "the write is confirmed in the list's own words, as an answer and not a failure");
+      check(q.mirrorInput().value === "", "and the field is empty again, because the list took what it was given");
+    }
+
+    // (d) a value the list refuses is a sentence under the field, and nothing moved
+    {
+      const refused = page({ mirror: { list, addError: "https://gh-proxy.com/ is already in the list (this build ships it)" } });
+      await refused.open();
+      const ri = refused.mirrorInput();
+      ri.value = "https://gh-proxy.com/";
+      ri.handlers.input[0]();
+      vm.runInContext("renderPlugins()", refused.ctx);
+      refused.mirrorAddBtn().click();
+      await settle();
+      const line = refused.mirrorResult();
+      check(
+        Boolean(line) && /already in the list \(this build ships it\)/.test(line.textContent) && /(^| )error( |$)/.test(line.className),
+        "a value the list refuses is drawn under the field, in the list's own words and as the failure it is"
+      );
+      check(refused.mirrorRows().length === 3 && refused.mirrorInput().value === "https://gh-proxy.com/", "and nothing was written, so the field keeps what the user typed");
+    }
+
+    // (e) removing one: the row's own prefix is what is asked for, and the answer
+    //     is the list without it
+    {
+      const gone = page({ mirror: { list } });
+      await gone.open();
+      gone.mirrorRemoves()[0].click();
+      await settle();
+      check(gone.world.mirrorRemoves.join(",") === "https://mine.example/", "Remove asks for exactly the row's own prefix");
+      check(
+        gone.mirrorRows().length === 2 && gone.mirrorChips().join(",") === "shipped,shipped",
+        "the row goes with the entry, and the shipped ones — which cannot be removed — stay"
+      );
+      check(
+        /is no longer tried/.test(gone.mirrorResult().textContent) && !/(^| )error( |$)/.test(gone.mirrorResult().className),
+        "and the removal is confirmed in words, not drawn as a failure"
+      );
+    }
+
+    // (f) the knob that outranks the list: while source_mirror is set, every source
+    //     AND every release URL was already rewritten, so this list is not read —
+    //     the page says which setting to clear instead of offering a dead field
+    {
+      const forced = page({ mirror: { list, forced: "https://gh-proxy.com/" } });
+      await forced.open();
+      check(
+        Boolean(forced.mirrorForced()) && /not used while that is set/.test(forced.mirrorForced().textContent),
+        "with source_mirror set the section names the prefix that outranks the list"
+      );
+      check(forced.mirrorInput().disabled && forced.mirrorAddBtn().disabled, "and both the field and the Add button are dead behind it");
+      check(forced.mirrorRemoves()[0].disabled, "as is the Remove on a user's entry: the list is not read at all while that setting is");
+      check(
+        /CLUTCH_SOURCE_MIRROR/.test(forced.mirrorRemoves()[0].title) && /settings\.json/.test(forced.mirrorRemoves()[0].title),
+        "and the dead control says which knob to clear"
+      );
+    }
+
+    // (g) a list that could not be read at all: the reason, and no field to write
+    //     into a file this machine cannot open
+    {
+      const broken = page({ mirror: { list, error: "EACCES: permission denied, open ~/.clutch/components.mirrors.json" } });
+      await broken.open();
+      check(broken.mirrorRows().length === 0, "a list that could not be read draws no rows it does not have");
+      check(broken.mirrorInput() === undefined, "and no field to add to it");
+      check(
+        walk(broken.body()).some((n) => /(^| )plug-source-error( |$)/.test(n.className) && /EACCES/.test(n.textContent)),
+        "the reason is drawn in the failure's own voice"
+      );
+      check(/unreadable/.test(textOf(broken.mirrorSection())), "and the heading says the list is unreadable rather than empty");
+    }
+
+    // (h) the third read is not a second chance to be wrong: while it is still in
+    //     flight the page says it is reading, not that there is no mirror
+    {
+      const d = page({ mirror: { list } });
+      d.world.mirrorControl = defer();
+      await d.open();
+      check(d.note().textContent === "reading…", "while the list is still being read the page is still reading");
+      check(/reading the list/.test(d.text()), "and the section says so in its own voice, instead of claiming there is no mirror");
+      d.world.mirrorControl.res({ mirrors: list.map((e) => ({ ...e })), forced: "", error: null });
+      await settle();
+      check(d.mirrorRows().length === 3, "when the read lands, the rows are there");
+    }
   }
 
   summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");

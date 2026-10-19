@@ -113,4 +113,4 @@ function mirrored(url, prefix) {
   return url.startsWith(p + "/") ? url : `${p}/${url}`;
 }
 
-module.exports = { netFetch, mirrorPrefix, mirrored };
+module.exports = { netFetch, mirrorPrefix, mirrored, normalize };

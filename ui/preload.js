@@ -22,10 +22,11 @@ contextBridge.exposeInMainWorld("clutchSettings", {
 });
 
 // the plugin tab's channel: what the target machine holds, what this client
-// could give it, and the three writes (an install onto that machine, a removal
-// off it, and the switch that stops driving a component there or starts it
-// again). Everything crosses ui/main.js, which talks to the target machine's
-// supervisor (ui/components-view.js) — the renderer never writes anything itself.
+// could give it, the writes (an install onto that machine, a removal off it, and
+// the switch that stops driving a component there or starts it again), and the
+// mirrors a failed fetch is retried through. Everything crosses ui/main.js,
+// which talks to the target machine's supervisor (ui/components-view.js) — the
+// renderer never writes anything itself.
 contextBridge.exposeInMainWorld("clutchComponents", {
   list: () => ipcRenderer.invoke("components:list"),
   market: (opts) => ipcRenderer.invoke("components:market", opts),
@@ -33,6 +34,9 @@ contextBridge.exposeInMainWorld("clutchComponents", {
   versions: (name) => ipcRenderer.invoke("components:versions", name),
   remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
   setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
+  mirrors: () => ipcRenderer.invoke("components:mirrors"),
+  addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
+  removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),
   onProgress: (cb) => {
     const wrap = (_e, stage) => cb(stage);
     ipcRenderer.on("components:progress", wrap);

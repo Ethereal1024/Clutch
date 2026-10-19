@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "mirrors": [
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+    "https://ghfast.top/"
+  ]
+}

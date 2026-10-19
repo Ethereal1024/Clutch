@@ -212,7 +212,7 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       },
     },
     // the plugin tab, one for one with the desktop's `components:*` ipcMain
-    // handlers (ui/main.js:173-197). The bridge route names no window — this app
+    // handlers (ui/main.js:178-211). The bridge route names no window — this app
     // IS one window (N5) — so every verb is asked about THIS window's session,
     // which is what makes "install onto the machine I am working on" resolve to
     // the tunnel's far side.
@@ -233,6 +233,12 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
           // subscribes to; the window handle fans it out over the bridge's SSE
           progress: (stage) => window.send("components:progress", stage),
         }),
+      // the mirrors a failed fetch is retried through: a read, and the two writes
+      // that move the user's half of the list (ui/mirrors.js). Each write answers
+      // with the list as it now is, so the page draws what was written.
+      mirrors: async () => componentsView.mirrors(),
+      addMirror: async (url) => componentsView.addMirror(String(url || "")),
+      removeMirror: async (url) => componentsView.removeMirror(String(url || "")),
     },
   };
 

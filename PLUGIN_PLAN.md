@@ -302,8 +302,10 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 
 本机网络约束（硬条件）：`github.com` 的 HTTPS 不通（curl 28），`api.github.com` 可达。所以
 任何"从 Release 下载"的用法都必须有**本地目录 source** 的对照（`isRemote()` 为假时直接读
-文件），发布物只能用 `api.github.com` 的资产接口验证。镜像（`ui/net-fetch.js` 那一个门）绕开
-的正是这条约束，它的契约写在 `COMPONENTS.md` 第八节，不在本文件。
+文件），发布物只能用 `api.github.com` 的资产接口验证。镜像绕开的正是这条约束，它现在有两层：
+整体改道的前缀（`ui/net-fetch.js` 那一个门，取 `CLUTCH_SOURCE_MIRROR`/`source_mirror`），与只在
+上游"够不着"时才用的回退列表（`ui/mirrors.js` ＋ 随发行版打包的 `components.mirrors.json`）。
+两层的契约都写在 `COMPONENTS.md` 第八节，不在本文件。
 
 ## 五、风险
 

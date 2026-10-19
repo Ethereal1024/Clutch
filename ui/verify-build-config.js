@@ -89,6 +89,11 @@ const REQUIRED_ASSETS = [
   // bundle, a packaged app installs no component at all: no workspace, memory,
   // websearch or skills fact ever reaches the supervisor.
   "components.sources.json",
+  // The mirrors a failed fetch is retried through (ui/mirrors.js BUILTIN_FILE,
+  // read from __dirname). Dropped from the bundle, a packaged app silently
+  // installs nothing on a machine that cannot reach the release host directly —
+  // which is the one failure this list exists for.
+  "components.mirrors.json",
   // The renderer is one program in classic scripts; ui/index.html lists them in
   // load order, and a module the packager drops (or a `files` glob that stops at
   // the top level) is a blank window, not a missing font. List them all.

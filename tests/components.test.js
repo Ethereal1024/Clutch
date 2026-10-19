@@ -36,6 +36,10 @@ const path = require("path");
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-components-home-"));
 if (process.platform !== "win32") process.env.HOME = HOME; // components.js reads it at load
+// A mirror forced by the environment would move every source before anything is
+// read, and this runner is about the OTHER path (the per-source fallback): the
+// machine's configuration must not decide what these checks exercise.
+delete process.env.CLUTCH_SOURCE_MIRROR;
 // The manifest budget is the suite's, not the release's: a case that wants to see
 // the timeout branch must not spend 30 s learning that it works. Set before
 // ui/components is required, because that is where the number is read.
@@ -113,6 +117,74 @@ function serveBadly(file, { dieFirst = 0, silent = false } = {}) {
     server.listen(0, "127.0.0.1", () =>
       resolve({ server, base: `http://127.0.0.1:${server.address().port}`, hits: () => hits })
     );
+  });
+}
+
+// A release whose ARTIFACT is the fetch that fails. The manifest and the
+// declaration — the two small files THIS client reads — are served normally, and
+// the artifact, the tens-of-megabytes fetch the TARGET machine makes for itself,
+// comes back the way a bad network gives it back: `die` kills the socket before
+// any response, `missing` answers 404, `busy` answers 502. Each path is counted
+// separately, so "who asked for the bytes, and how often" is a fact this test can
+// read rather than infer.
+function serveRelease(dir, { artifact = "die" } = {}) {
+  const hits = { manifest: 0, declaration: 0, artifact: 0 };
+  const server = http.createServer((req, res) => {
+    const name = decodeURIComponent(req.url.replace(/^\/+/, "").split("?")[0]);
+    const kind = name.endsWith(".tar.gz") ? "artifact" : name === "clutch-component.json" ? "manifest" : "declaration";
+    hits[kind]++;
+    if (kind === "artifact") {
+      if (artifact === "die") {
+        res.socket.destroy(); // a connection that dies mid-fetch: the host reads it as "Remote end closed connection"
+        return;
+      }
+      res.writeHead(artifact === "missing" ? 404 : 502);
+      res.end("not here");
+      return;
+    }
+    const file = path.join(dir, name);
+    if (!name || !file.startsWith(dir + path.sep) || !fs.existsSync(file)) {
+      res.writeHead(404);
+      res.end("not here");
+      return;
+    }
+    res.writeHead(200, { "Content-Length": String(fs.statSync(file).size) });
+    res.end(fs.readFileSync(file));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve({ server, base: `http://127.0.0.1:${server.address().port}`, hits }));
+  });
+}
+
+// A stand-in for an accelerator: anything under /m/ is served by FILE NAME, with
+// the absolute URL it carries taken as the mirror's own business (a real one maps
+// it; this one only has to record what was asked for). `busy` answers 503 and
+// `refuse` kills the socket — the two ways a mirror is as unreachable as the
+// release host was.
+function serveMirror(files, { how = "serve" } = {}) {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(req.url);
+    if (how === "refuse") {
+      res.socket.destroy();
+      return;
+    }
+    if (how === "busy") {
+      res.writeHead(503);
+      res.end("later");
+      return;
+    }
+    const name = decodeURIComponent(req.url.split("?")[0]).split("/").pop();
+    if (!Object.prototype.hasOwnProperty.call(files, name)) {
+      res.writeHead(404);
+      res.end("not here");
+      return;
+    }
+    res.writeHead(200, { "Content-Length": String(files[name].length) });
+    res.end(files[name]);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve({ server, base: `http://127.0.0.1:${server.address().port}`, seen }));
   });
 }
 
@@ -481,7 +553,207 @@ async function main() {
     }
   }
 
-  // 10. the reverse verbs, against the same real machine: which versions it holds
+  // 10. when the release host cannot be reached, and the bytes are the TARGET
+  //     machine's fetch (PLUGIN_PLAN.md 零之四.4), the retry is the HOST's: the
+  //     same pin, asked of another place (ui/mirrors.js). Everything that makes
+  //     that safe is checked here — a mirror is a URL prefix and nothing more (the
+  //     digest is still the release's own pin, so bytes a mirror made up are
+  //     refused), the places are tried in order, and an ANSWER is never retried
+  //     (a 404 and a body that does not hash are facts a mirror cannot change).
+  {
+    // A release of this test's OWN — the same component, built once more under a
+    // name of its own — so that landing it cannot disturb the version the other
+    // groups install and then check (a host runs one version per component).
+    const rel = tmp("clutch-components-mirror-");
+    const inside = path.join(rel, "clutch-mirror");
+    fs.mkdirSync(inside);
+    for (const f of ["memory.py", "pyproject.toml"]) {
+      fs.copyFileSync(path.join(ROOT, "clutch-memory", f), path.join(inside, f));
+    }
+    // the declaration travels WITH the bytes, and one naming another component is a
+    // refusal rather than a merge: this one names exactly what it is
+    const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-memory", "component.json"), "utf8"));
+    fs.writeFileSync(
+      path.join(inside, "component.json"),
+      JSON.stringify({ ...own, name: "clutch-mirror", version: "0.2.0" }, null, 2)
+    );
+    fs.writeFileSync(path.join(inside, "MIRRORED"), "the bytes a mirror serves\n"); // its own release, so its own digest
+    buildTar(inside, path.join(rel, "clutch-mirror-any.tar.gz"));
+    fs.copyFileSync(path.join(inside, "component.json"), path.join(rel, "component.json"));
+    const bytes = fs.readFileSync(path.join(rel, "clutch-mirror-any.tar.gz"));
+    const artPin = sha256(path.join(rel, "clutch-mirror-any.tar.gz"));
+    const declPin = sha256(path.join(rel, "component.json"));
+    fs.writeFileSync(
+      path.join(rel, "clutch-component.json"),
+      JSON.stringify({
+        schema: 1,
+        name: "clutch-mirror",
+        interface: "cli",
+        version: "0.2.0",
+        declaration: { asset: "component.json", sha256: declPin },
+        artifacts: { any: { asset: "clutch-mirror-any.tar.gz", sha256: artPin } },
+      })
+    );
+
+    const dead = "http://127.0.0.1:1/m"; // nothing listens here: a prefix as unreachable as the release host
+    const host = await serveRelease(rel); // the artifact fetch dies; the manifest is read fine
+    const mirror = await serveMirror({ "clutch-mirror-any.tar.gz": bytes });
+    const source = `${host.base}/clutch-component.json`;
+    try {
+      const spec = (await components.componentSpecs({ sources: [source] })).specs.find((s) => s.name === "clutch-mirror");
+      check(
+        Boolean(spec && spec.source === source && spec.artifacts.any.sha256 === artPin),
+        "the release itself reads normally: what is broken is the artifact, not the manifest"
+      );
+      const handed = await components.artifactFor(spec, { checkout: false, mirrorFallback: [mirror.base + "/m"] });
+      check(
+        handed.mirrors.length === 1 && handed.mirrors[0] === mirror.base + "/m",
+        "the spec carries the places this install may be retried through, in the caller's order"
+      );
+      check(handed.via === "" && handed.digest === artPin, "and says nothing is already read through one: the pin is the release's own");
+
+      const retries = [];
+      const out = await components.fetchInstall(base, handed, 8000, {
+        onRetry: (prefix, reason) => retries.push(`${prefix} | ${reason}`),
+      });
+      check(
+        out.status === "installed" && out.via === mirror.base + "/m",
+        `an artifact the release host cannot answer is fetched through the mirror, and the answer says which (${out.status}, via ${out.via})`
+      );
+      check(
+        host.hits.artifact === 1 && mirror.seen.length === 1,
+        `each place was asked once, in order (${host.hits.artifact} of the release host, ${mirror.seen.length} of the mirror)`
+      );
+      check(
+        /^\/m\/https?:\/\//.test(String(mirror.seen[0] || "")),
+        `and the mirror was asked for the artifact under its own prefix — <mirror>/<the absolute url> (${mirror.seen[0]})`
+      );
+      check(
+        retries.length === 1 && retries[0].startsWith(mirror.base + "/m") && /closed connection|refused|reset/.test(retries[0]),
+        `the page learns which mirror is being tried, and why, before it takes its own timeout (${retries[0]})`
+      );
+      check(
+        fs.existsSync(path.join(hostRoot, "clutch-mirror", `0.2.0+${artPin.slice(0, 16)}`)),
+        "and what landed is the release's own version + the pin's digest: the mirror carried the bytes, it did not vouch for them"
+      );
+      const held = (await components.hostInventory(base)).find((c) => c.name === "clutch-mirror");
+      check(
+        Boolean(held && held.version === `0.2.0+${artPin.slice(0, 16)}` && held.digest === artPin),
+        "the host records exactly what it weighed, so a page can name what it holds"
+      );
+    } finally {
+      host.server.close();
+      mirror.server.close();
+    }
+
+    // a mirror that serves SOMETHING ELSE is refused by the pin, and refused as an
+    // answer: the first place that answered about the bytes has settled them. The
+    // pin here is one this host does not hold, so the bytes really are weighed (an
+    // install it already has is answered "current" before the digests are compared).
+    fs.writeFileSync(
+      path.join(rel, "wrong-pin.json"),
+      JSON.stringify({
+        schema: 1,
+        name: "clutch-mirror",
+        interface: "cli",
+        version: "0.2.0",
+        declaration: { asset: "component.json", sha256: declPin },
+        artifacts: { any: { asset: "clutch-mirror-any.tar.gz", sha256: "a".repeat(64) } },
+      })
+    );
+    const liar = await serveMirror({ "clutch-mirror-any.tar.gz": Buffer.from("not the release's bytes\n") });
+    const next = await serveMirror({ "clutch-mirror-any.tar.gz": bytes });
+    const lyingHost = await serveRelease(rel);
+    try {
+      const spec = (await components.componentSpecs({ sources: [`${lyingHost.base}/wrong-pin.json`] })).specs.find(
+        (s) => s.name === "clutch-mirror"
+      );
+      const handed = await components.artifactFor(spec, {
+        checkout: false,
+        mirrorFallback: [liar.base + "/m", next.base + "/m"],
+      });
+      let refusal = "";
+      try {
+        await components.fetchInstall(base, handed, 8000);
+      } catch (e) {
+        refusal = (e && e.message) || "";
+      }
+      check(
+        /the artifact hashes to .+, not the declared /.test(refusal),
+        `bytes a mirror made up are refused by the host that fetched them (${refusal})`
+      );
+      check(next.seen.length === 0, "and no further mirror is asked: the pin already answered what the first one was asked");
+    } finally {
+      liar.server.close();
+      next.server.close();
+      lyingHost.server.close();
+    }
+
+    // an ANSWER is never retried, at any level: the release host's 404 is about the
+    // path, and every mirror serves the same path, so it is quoted as it stands
+    const absent = await serveRelease(rel, { artifact: "missing" });
+    const unused = await serveMirror({ "clutch-mirror-any.tar.gz": bytes });
+    try {
+      const spec = (await components.componentSpecs({ sources: [`${absent.base}/clutch-component.json`] })).specs.find(
+        (s) => s.name === "clutch-mirror"
+      );
+      const handed = await components.artifactFor(spec, { checkout: false, mirrorFallback: [unused.base + "/m"] });
+      let answer = "";
+      try {
+        await components.fetchInstall(base, handed, 8000);
+      } catch (e) {
+        answer = (e && e.message) || "";
+      }
+      check(/^HTTP Error 404: Not Found$/.test(answer), `a 404 is the host's verdict on the path, quoted in the host's own words (${answer})`);
+      check(unused.seen.length === 0, "and nothing else is asked: the same bytes are at the same path");
+    } finally {
+      absent.server.close();
+      unused.server.close();
+    }
+
+    // every place tried and none answering: ONE sentence a page can draw in a single
+    // row — what the release host said, how many places were tried, and the last
+    // thing one of them said
+    const stubborn = await serveRelease(rel);
+    const busy = await serveMirror({}, { how: "busy" });
+    try {
+      const spec = (await components.componentSpecs({ sources: [`${stubborn.base}/clutch-component.json`] })).specs.find(
+        (s) => s.name === "clutch-mirror"
+      );
+      const handed = await components.artifactFor(spec, {
+        checkout: false,
+        mirrorFallback: [dead, busy.base + "/m"],
+      });
+      // the release host on its own first, so that the longer sentence below can
+      // be held to BEGIN with exactly what it said: the failure is reported, not
+      // paraphrased, and the fetch implementation's wording is not this test's to
+      // know (it differs by machine and by how the socket died)
+      let alone = "";
+      try {
+        await components.fetchInstall(base, handed, 8000, { mirrorFallback: [] });
+      } catch (e) {
+        alone = (e && e.message) || "";
+      }
+      check(/closed connection|refused|reset|timed?[-_ ]?out/.test(alone), `the release host's own failure is a network one (${alone})`);
+      let covered = "";
+      try {
+        await components.fetchInstall(base, handed, 8000);
+      } catch (e) {
+        covered = (e && e.message) || "";
+      }
+      check(
+        covered.startsWith(`${alone} — and not through 2 mirrors (`) && covered.includes(dead) &&
+          covered.includes(busy.base + "/m") && /either: the last one said HTTP Error 503/.test(covered),
+        `a failure everywhere is one sentence naming the first failure, the places tried, and the last thing said (${covered})`
+      );
+      check(busy.seen.length === 1, "every place was tried exactly once, and the order was the list's");
+    } finally {
+      stubborn.server.close();
+      busy.server.close();
+    }
+  }
+
+  // 11. the reverse verbs, against the same real machine: which versions it holds
   //    for ONE component (newest first, and the one it would run), stopping or
   //    starting the driving of it, and letting that component go. The verdicts
   //    that matter are all here — "removed" with the versions that went, "absent"
@@ -538,7 +810,7 @@ async function main() {
     check((await components.hostVersions(base, "clutch-memory")).length === 0, "and the host names no version of it any more");
   }
 
-  // 11. cleanup: this run's supervisor goes away (its root is a temp dir)
+  // 12. cleanup: this run's supervisor goes away (its root is a temp dir)
   try {
     await fetch(`${base}/api/shutdown`, { method: "POST" });
   } catch (e) {

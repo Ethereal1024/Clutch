@@ -118,6 +118,9 @@
     versions: (name) => call("clutchComponents", "versions", [name]),
     remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
     setDisabled: (name, disabled) => call("clutchComponents", "setDisabled", [name, disabled]),
+    mirrors: () => call("clutchComponents", "mirrors"),
+    addMirror: (url) => call("clutchComponents", "addMirror", [url]),
+    removeMirror: (url) => call("clutchComponents", "removeMirror", [url]),
     onProgress: (cb) => subscribe("components:progress", cb),
   });
 

@@ -1,6 +1,7 @@
 // the plugin page's backend: the target machine, what it holds, what this
-// client could give it, and the three writes that move it (an install onto the
-// machine, a removal off it, and the switch that drives it or stops it)
+// client could give it, and the writes that move it (an install onto the
+// machine, a removal off it, the switch that drives it or stops it, and the list
+// of mirrors a failed fetch is retried through)
 //
 // Everything the plugin tab shows crosses this file. The renderer may not touch
 // the filesystem, a supervisor, or a release, so it asks and receives facts.
@@ -17,10 +18,12 @@
 //                      (absent on a host that owns none — the phone, N4)
 //   log(...)          => sink
 //   lib               => ui/components.js (the install layer itself)
+//   mirrorStore       => ui/mirrors.js (the list a failed fetch is retried through)
 //   now()             => clock (the market cache's TTL)
 "use strict";
 
 const defaultLib = require("./components");
+const defaultMirrors = require("./mirrors");
 
 // The market is one HTTP read per source and does not change second to second,
 // so a page re-opened a moment later must not re-read every release. Five
@@ -44,6 +47,7 @@ function createComponentsView(deps) {
     ensureSupervisor = null,
     log = () => {},
     lib = defaultLib,
+    mirrorStore = defaultMirrors,
     now = Date.now,
   } = deps;
 
@@ -238,12 +242,22 @@ function createComponentsView(deps) {
     // run them — and only bytes this client alone holds travel as a body. The
     // page is told which one is happening, since that is the slow step and it is
     // not the same step.
+    //
+    // A fetch the release host cannot answer is retried through the mirrors this
+    // machine knows of (ui/mirrors.js, already carried on `file` by `artifactFor`):
+    // the bytes still have to hash to the release's own pin, so a mirror can only
+    // move them, never vouch for them. `onRetry` is why the page hears about it —
+    // one attempt can spend its whole timeout, and a page that says "installing…"
+    // for two minutes is indistinguishable from a broken one.
     const sends = Boolean(file.path);
     say(sends ? "upload" : "fetch", { version: file.version, digest: file.digest });
     try {
       const res = sends
         ? await lib.upload(t.base, file, lib.REQUEST_TIMEOUT_MS)
-        : await lib.fetchInstall(t.base, file, lib.REQUEST_TIMEOUT_MS);
+        : await lib.fetchInstall(t.base, file, lib.REQUEST_TIMEOUT_MS, {
+            onRetry: (prefix, reason) =>
+              say("mirror", { version: file.version, digest: file.digest, prefix, reason }),
+          });
       say(res.status === "current" ? "current" : "installed", { version: file.version });
       return {
         ok: true,
@@ -251,6 +265,9 @@ function createComponentsView(deps) {
         status: res.status,
         version: res.version || file.version,
         digest: res.digest || file.digest,
+        // the prefix the bytes this machine now runs came through, when they did
+        // not come from the release's own URL
+        via: res.via || file.via || "",
         path: res.path || "",
         target: t,
       };
@@ -332,6 +349,49 @@ function createComponentsView(deps) {
     }
   }
 
+  // The mirrors this machine retries a failed fetch through: the shipped list
+  // (ui/components.mirrors.json, inside the app bundle) merged with the user's own
+  // (ui/mirrors.js `entries()`), each row saying which it is — a user entry can be
+  // removed and a shipped one cannot, and a page that draws them alike is drawing
+  // a button that does nothing.
+  //
+  // `forced` is the prefix this machine reads EVERY source through
+  // (CLUTCH_SOURCE_MIRROR, or `source_mirror` in ~/.clutch/settings.json). While
+  // one is set there is no per-source fallback left to take, so the page says
+  // which knob is in charge rather than offering a list that would be ignored.
+  function mirrorList() {
+    try {
+      return { mirrors: mirrorStore.entries(), forced: mirrorStore.forced(), error: null };
+    } catch (e) {
+      return { mirrors: [], forced: "", error: (e && e.message) || String(e) };
+    }
+  }
+
+  // Add one mirror to the USER's list. The refusal is the list's own (a value
+  // already there, a value that is not an http(s) prefix) and travels as `error`,
+  // because it is a sentence to draw under the field rather than a failure of the
+  // page. Both writes answer with the list as it now is: the page then draws what
+  // was actually written, not what it hoped it asked for.
+  function addMirror(raw) {
+    let res;
+    try {
+      res = mirrorStore.add(raw);
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+    return res.ok ? { ok: true, ...mirrorList() } : { ok: false, error: res.error };
+  }
+
+  function removeMirror(raw) {
+    let res;
+    try {
+      res = mirrorStore.remove(raw);
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+    return res.ok ? { ok: true, ...mirrorList() } : { ok: false, error: res.error };
+  }
+
   return {
     target,
     list,
@@ -340,6 +400,9 @@ function createComponentsView(deps) {
     versions,
     remove,
     setDisabled,
+    mirrors: mirrorList,
+    addMirror,
+    removeMirror,
     marketCache: () => market,
   };
 }

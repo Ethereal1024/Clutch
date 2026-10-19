@@ -573,7 +573,143 @@ async function main() {
     check(l.held.length === 0 && /did not answer/.test(l.error || ""), "a read of a machine that is not running stays a sentence, not a wake");
   }
 
-  summary("components-view", "all passed (target machine, inventory, market cache, install + remove + switch verdicts)");
+  // ---- 12. the mirrors: a fetch the release host could not answer is retried
+  //         through the list this machine knows of (ui/mirrors.js), the page is
+  //         told which place is being tried and why, and the list itself is one
+  //         read and two writes — never a throw at the page
+  {
+    // what a retried install looks like from HERE: the install layer (ui/components.js
+    // fetchInstall) calls `onRetry` before each attempt past the first, and the
+    // verdict names the prefix the bytes actually came through
+    const URLFILE = {
+      name: "clutch-skills",
+      url: "https://example.invalid/clutch-skills.tar.gz",
+      artifact: "clutch-skills.tar.gz",
+      digest: DIGEST,
+      version: VERSION,
+    };
+    const lib = fakeLib({ specs: [RELEASE], file: URLFILE, held: [] });
+    lib.fetchInstall = async (base, f, timeoutMs, opts = {}) => {
+      lib.calls.fetches.push({ base, timeoutMs, url: f.url });
+      // the direct attempt failed; the hook says which mirror is next, and why
+      if (opts.onRetry) opts.onRetry("https://gh-proxy.com/", "HTTP Error 504: Gateway Time-out");
+      return { status: "installed", name: "clutch-skills", version: VERSION, digest: DIGEST, via: "https://gh-proxy.com/" };
+    };
+    const stages = [];
+    const retried = view({ lib });
+    const r = await retried.api.install("clutch-skills", EMPTY_WIN, { progress: (s) => stages.push(s) });
+    check(r.ok && r.via === "https://gh-proxy.com/", "an install whose bytes came through a mirror reports the prefix that served them");
+    const mirrorStage = stages.find((s) => s.stage === "mirror");
+    check(
+      Boolean(mirrorStage) && mirrorStage.prefix === "https://gh-proxy.com/" && /504/.test(mirrorStage.reason || ""),
+      "and the page is told which mirror is being tried, and what the host said before it — one slow attempt is not a frozen page"
+    );
+    check(
+      stages.map((s) => s.stage).indexOf("mirror") > stages.map((s) => s.stage).indexOf("fetch") &&
+        stages.map((s) => s.stage).indexOf("mirror") < stages.map((s) => s.stage).indexOf("installed"),
+      "the retry arrives between the fetch and the verdict (" + stages.map((s) => s.stage).join(" → ") + ")"
+    );
+    check(
+      retried.lib.calls.fetches.length === 1 && !stages.some((s) => s.stage === "upload"),
+      "and it is still the target machine's own fetch — no bytes left this client to try a mirror"
+    );
+
+    // the same fact from the other side: the artifact itself carries the prefix
+    // its bytes came through, when the verdict does not name one
+    const prefixed = view({ lib: fakeLib({ specs: [RELEASE], file: { ...URLFILE, via: "https://ghfast.top/" }, held: [] }) });
+    const r2 = await prefixed.api.install("clutch-skills", EMPTY_WIN, {});
+    check(r2.ok && r2.via === "https://ghfast.top/", "an artifact that already carries the mirror path reports it, verdict or not");
+
+    // a machine-policy install with no mirror in play says nothing about one
+    const plain = view({ lib: fakeLib({ specs: [RELEASE], file: URLFILE, held: [] }) });
+    const r3 = await plain.api.install("clutch-skills", EMPTY_WIN, {});
+    check(r3.ok && r3.via === "", "an install that came from the release's own host invents no mirror");
+
+    // ...and the list itself: one read, two writes, each answered with the list AS
+    // IT NOW IS, and a refusal as a sentence under the field
+    const store = {
+      list: [
+        { url: "https://mine.example/", source: "user" },
+        { url: "https://gh-proxy.com/", source: "builtin" },
+      ],
+      calls: { adds: [], removes: [] },
+      entries() {
+        return this.list.map((e) => ({ ...e }));
+      },
+      forced() {
+        return "";
+      },
+      add(raw) {
+        this.calls.adds.push(raw);
+        if (raw === "https://dup.example/") return { ok: false, error: `${raw} is already in the list` };
+        this.list = [...this.list, { url: raw, source: "user" }];
+        return { ok: true, url: raw };
+      },
+      remove(raw) {
+        this.calls.removes.push(raw);
+        if (raw === "https://gh-proxy.com/") {
+          return { ok: false, error: `${raw} is a mirror this build ships — it is always tried, so there is nothing to remove` };
+        }
+        this.list = this.list.filter((e) => e.url !== raw);
+        return { ok: true };
+      },
+    };
+    const { api } = view({ deps: { mirrorStore: store } });
+    const m = api.mirrors();
+    check(
+      m.error === null && m.forced === "" && m.mirrors.length === 2 && m.mirrors[0].url === "https://mine.example/",
+      "the page can read the list a failed fetch is retried through, the user's entries first"
+    );
+    const added = api.addMirror("https://mine.example/");
+    check(
+      added.ok && added.mirrors.length === 3 && added.mirrors[2].source === "user",
+      "an add answers with the list as it now is, not with what was asked for"
+    );
+    const refused = api.addMirror("https://dup.example/");
+    check(!refused.ok && /already in the list/.test(refused.error), "a value the list already holds comes back as a sentence, not a duplicate");
+    const gone = api.removeMirror("https://gh-proxy.com/");
+    check(!gone.ok && /this build ships/.test(gone.error), "a shipped entry cannot be removed, and the refusal says why");
+    const dropped = api.removeMirror("https://mine.example/");
+    check(dropped.ok && dropped.mirrors.length === 1, "a user entry is removed, and the answer is the list without it");
+
+    // the knob that outranks the list travels with the read
+    const forced = view({
+      deps: {
+        mirrorStore: {
+          entries: () => [{ url: "https://gh-proxy.com/", source: "builtin" }],
+          forced: () => "https://gh-proxy.com/",
+          add: () => ({ ok: true }),
+          remove: () => ({ ok: true }),
+        },
+      },
+    }).api.mirrors();
+    check(forced.forced === "https://gh-proxy.com/", "with source_mirror set, the page is told which prefix outranks the list");
+
+    // a store that cannot be read is a reason on the page, not a throw out of it
+    const broken = view({
+      deps: {
+        mirrorStore: {
+          entries() {
+            throw new Error("EACCES: permission denied, open ~/.clutch/components.mirrors.json");
+          },
+          forced() {
+            return "";
+          },
+          add() {
+            throw new Error("EACCES: permission denied, open ~/.clutch/components.mirrors.json");
+          },
+          remove() {
+            throw new Error("EACCES: permission denied, open ~/.clutch/components.mirrors.json");
+          },
+        },
+      },
+    });
+    const bad = broken.api.mirrors();
+    check(bad.mirrors.length === 0 && /EACCES/.test(bad.error || ""), "a list that cannot be read is reported as its reason, not thrown at the page");
+    check(broken.api.addMirror("https://x.example/").ok === false, "and a write into that store is a sentence as well");
+  }
+
+  summary("components-view", "all passed (target machine, inventory, market cache, install + remove + switch verdicts, mirror list + retry)");
 }
 
 main().catch((e) => {

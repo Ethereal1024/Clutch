@@ -656,7 +656,7 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   错误，而且不再去问，用户看到的就是"这页坏了"。现在再打开一次就是再问一次；答上来的那些 source 仍然
   留在列表里（半个市场也是市场）。
 
-### 12.3 页面给出的那条出路：镜像（仍然是 opt-in）
+### 12.3 页面给出的那条出路：镜像（0.1.38 当时：opt-in）
 
 * 视图把 `unreachable` 这个位交给页面，`ui/js/components-panel.js` 就在错误行下面多画一条
   `.plug-source-hint`（`ui/style.css`：字号 `--fs-xs`、颜色 `--muted`，出路不该和故障一样响）。
@@ -668,8 +668,10 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
 * **0.1.47 补**：0.1.38 那个"用户自己写、手改设置文件"的 opt-in 在手机上等于没有入口（HOME 是 App
   的 filesDir）。插件页顶端现在有一个 `Source mirror` 字段（`#mirror-input` + Save +
   `role="status"` 的判词行），保存经 `clutchSettings.save` 落进 `~/.clutch/settings.json` 并重读市场；
-  hint 那句改成指向这个字段。策略没变：**仍然不默认、仍然不自动回退**，变的是开关真的够得着
-  （`android/README.md`「源镜像在手机上够不着」一节）。
+  hint 那句改成同时指向这个字段与 Mirrors 一节（`android/README.md`「源镜像在手机上够不着」一节）。
+* **§12.3 那条"不自动回退"已在 §十四 反转**：自带一份回退镜像列表，工件取数碰到"够不着"时自动轮着试。
+  反转的理由也写在那节：一个前缀只换**到同一份被钉住的字节的另一条路**，不等于默认任意代码执行；而
+  "够不着就装不上"是实测的报障。字段仍然在，它整体改道（清单在内）；列表只在工件那一跳逐条回退。
 
 ### 12.4 测试
 
@@ -748,3 +750,54 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   本轮没有组件版本变化（`clutch-skills` 仍是 0.1.1）。
 * 仍然缺浏览器级验证（§10.4 的环境限制）：真机上的判断交给用户——思考时计数是否一直在走、思考块
   是否随点随开、结尾是否还会一次性涌出。
+
+## 十四、自带一份回退镜像列表：取数失败时自动改道（反转 §12.3）
+
+* **为什么反转**：§12 那轮把"够不着"整件事交回用户，代价是**组件装不上**。报障的机器读得到清单
+  （`api.github.com` 通），但**目标机自取工件**的那一跳 504/超时（宿主原话
+  `<urlopen error timed out>`、`HTTP Error 504: Gateway Time-out`），而用户手上只有"去改
+  `settings.json`"这一条路。回退与 §12.3 担心的东西并不冲突：一个前缀只**换到同一份被钉住的字节的
+  另一条路**，字节到达后照样按 release 自己的 `sha256` 校验，所以默认一个镜像**不是**默认任意代码
+  执行。**清单本身仍然不自动回退**（那是"要显示什么"，不是"要运行什么"，§12.3 的理由在那里照旧
+  成立）；能被自动改道的只有**工件那次取数**。
+* **新的一层在 `ui/mirrors.js`**：自带 `ui/components.mirrors.json`（三条实测前缀，并用
+  `clutch-memory.tar.gz` 对过 sha256）＋ 用户 `~/.clutch/components.mirrors.json`（先试）。
+  `asMirror()` 是进列表的唯一规则（裸主机按 https，非 http(s)、空 host 一律丢弃）；
+  `fallbackFor(source, explicit)` 给出该来源能走的前缀（显式数组字面量、`false` 为"永不回退"）；
+  `looksLikeNetwork(reason)` 判"够不着"（一小组连接层措辞 + 网关/超时状态码，整数字匹配）；
+  `forced()` 读 `source_mirror`——设了就整体改道，逐条回退不参与。`add`/`remove` 只写用户那一份，
+  自带条目删不掉（能让 UI 清空的回退等于没有回退）。
+* **只重试"够不着"**：一条 404、读不懂的 schema、对不上摘要、release 没发的平台都是**回答**，不重试。
+* **接线**：`ui/components.js` 的 `fetchInstall` 依次把 `<前缀>/<原始 URL>` 塞进 `artifact_url`，
+  每次重试前回调 `onRetry(prefix, reason)`；处处失败时把首句与试过的地方合成一句（`coveredFailure`）。
+  `ui/components-view.js` 把 `onRetry` 转成 `mirror` 阶段，页面因此能显示"够不着发布主机——改试
+  <镜像>"，装完还能在结果里带上 ` · via <镜像>`。
+* **页面**：插件页多出 Mirrors 一节——用户条目可删、自带条目只读（标 `yours`/`shipped`）、一个 Add
+  字段写用户清单、一条 note 说明"顺序即尝试顺序、字节仍按 release 自己的 digest 量"；
+  `source_mirror` 生效时整节写明是哪个旋钮在生效并锁住控件。§12.3 那条 hint 改写成：说清清单不回退、
+  工件取数会自动从 Mirrors 试、要清单也一起改道才写 `source_mirror`。
+* **测试**：`tests/mirrors.test.js`（规则/顺序/回退/分类器/两个写入）、`tests/components.test.js`
+  新增一组（直接失败→镜像成功、处处失败合成一句、403/摘要不符不重试）、
+  `tests/components-view.test.js` 第 12 组（`via`、`mirror` 阶段、mirrors/add/remove 三个口子与
+  一个读不到的 store）、`tests/components-panel.test.js` 第 37 组（无 channel 不画、行的顺序与
+  来源、加/删与拒绝文案、forced 锁控件、读不到、读取中的那一帧）。`ui/verify-build-config.js`
+  的 `REQUIRED_ASSETS` 与 `scripts/sync-android-host.sh` 的 `UI_NODE` 都加上这份清单与新文件。
+* **真机跑过一遍（0.1.39 的工作树，尚未发版）**：删掉 `~/.clutch/settings.json` 里的 `source_mirror`
+  （`forced()` 因此为空，环境变量也没设）之后，用本仓库的 client（`artifactFor`/`fetchInstall`，与插件页
+  同一组调用）对着**一次性宿主**（`CLUTCH_COMPONENTS_DIR=/tmp/… --port 8891`、空 registry，沿用 §12 的
+  手测配方）真装了一次 `clutch-memory`：发布主机的直取撞上本机此刻够不着 github.com，宿主回自己的原话
+  `<urlopen error timed out>`（30 s），`looksLikeNetwork` 判成"够不着"，自动改走自带第一条
+  `https://gh-proxy.com` 并把包装上，同一次在真实组件根上跑的结果是 `status: "current"` 且带
+  ` · via https://gh-proxy.com`——**不设 `source_mirror` 时自带列表确实被用上了**。空 registry 那次是
+  真正的"装"（宿主要给自己取回的字节做 `digest()`）：`status: "installed"`、版本
+  `0.1.0+48b5200320dc1a3b`（release 自己钉的摘要）。
+* **校验门在镜像那条路上同样成立（真机）**：把用户列表指到一份**故意给错字节**的本地镜像再装一次，宿主
+  照样拒收——`the artifact hashes to 210aad66…, not the declared 48b52003…`，而且 client 只试了这一个
+  镜像就停手（四个候选只试了一个）：摘要不符是**回答**，"回答不重试"在真机上按原样生效。（同一套流程里
+  把先头那一跳指到关闭的端口时，宿主那句 `<urlopen error [Errno 111] Connection refused>` 被判成
+  "够不着"、于是接着往下试——两种原话走的是两条路。）
+* **还缺的两件**：①浏览器级（§10.4 的环境限制：无 chrome/chromium、无 Xvfb、`DISPLAY` 为空，而
+  `/opt/Clutch` 里装的 asar 还是 0.1.39 的旧 UI——Mirrors 一节没在真窗口里看过，够不着时是否看到
+  `mirror` 阶段、顺序是否用户在前，仍由用户真机过目）；②**清单读**：按设计不自动回退，而本机实测
+  github.com 会整段不通（分钟级的通断），那段窗口里市场读不出来、也就谈不上"要装什么"，这时
+  `source_mirror` 仍是唯一能把清单一起挪走的旋钮（hint 与本节上一条都这么写）。

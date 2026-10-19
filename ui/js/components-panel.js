@@ -51,6 +51,12 @@ const plugState = {
   market: null, // {entries, errors, sources}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
+  mirrors: null, // [{url, source}] — the list a failed fetch is retried through, or null while unread
+  mirrorsError: null, // why that list could not be read
+  mirrorForced: "", // the prefix every source is forced through, when one is set
+  mirrorDraft: "", // the mirror being typed into the field (never persisted)
+  mirrorBusy: false, // an add/remove in flight: the field and the buttons are dead behind it
+  mirrorResult: null, // {ok, text} — what the list said about the last add or remove
   busy: null, // {name, verb, stage} — a write in flight, nothing else may start
   result: null, // {ok, text} — the host's verdict on the last write
   versions: null, // {name, rows, error} — the one open version list, as just read
@@ -691,21 +697,155 @@ function plugList() {
     sec.appendChild(el);
   }
   // ...and when the failure is the network rather than an answer (the view says
-  // which: `unreachable`), one more line says what can be done about it. This is
-  // the one place the list mentions the mirror, because it is the one place it is
-  // the answer: a source this build ships is read from github.com, and a machine
-  // that cannot reach it is not going to be talked out of it by a reload. The
-  // FIELD is drawn above, out of this list's reach — this line is the pointer to
-  // it, and the file it names is where the same key lands on a desktop.
+  // which: `unreachable`), one more line says what can be done about it. Two
+  // answers, and the page has to name both: a fetch that fails for a
+  // network-looking reason is retried through the mirror list (the Mirrors
+  // section below — this build's own entries plus the user's), while the
+  // `source_mirror` FIELD drawn above this list moves every read there was,
+  // manifest included. This line is the pointer to both, and the file it names
+  // is where the same key lands on a desktop.
   if (plugState.market && plugState.market.unreachable) {
     const hint = document.createElement("p");
     hint.className = "plug-source-hint";
     hint.textContent =
-      "a source this build ships is read from github.com. If this machine cannot reach it, " +
-      "set a source mirror in the box above (it writes \"source_mirror\" into " +
-      "~/.clutch/settings.json) and look again — a mirror only moves the bytes: every " +
-      "digest is still checked against the release's own pin";
+      "a source this build ships is read from github.com. A fetch that fails for a " +
+      "network reason is retried through the mirrors listed under Mirrors below, and " +
+      "the source mirror box above (it writes \"source_mirror\" into " +
+      "~/.clutch/settings.json) moves every read, manifests included. Either way a " +
+      "mirror only moves the bytes: every digest is still checked against the " +
+      "release's own pin";
     sec.appendChild(hint);
+  }
+  return sec;
+}
+
+// ---- the mirrors -----------------------------------------------------------
+//
+// Where a fetch the release host cannot answer is retried (ui/mirrors.js). The
+// retry happens on the MACHINE the install is aimed at — its own fetch of the
+// bytes is the one that failed (ui/components.js fetchInstall) — so this section
+// owns one thing only: the LIST as this machine reads it, which is why it is one
+// more read beside the inventory and the market and not a setting of its own.
+//
+// A shipped entry carries no Remove: it is what the fallback is made of, and a
+// build whose list could be emptied from here would lose the feature without
+// saying so (ui/mirrors.js `remove` refuses it in those words). The user's own
+// entries are the ones this page writes, and the order they are tried in is the
+// plain one — the user's first, then the build's.
+function plugMirrorRow(entry) {
+  const own = entry.source === "user";
+  const row = plugRow(entry.url, {
+    chips: [[own ? "yours" : "shipped"]],
+    desc: own ? "tried before the entries this build ships" : "shipped by this build: always tried, never removable",
+    actions: own ? [plugMirrorRemoveButton(entry.url)] : [],
+    role: "listitem",
+  });
+  // a row that names a MIRROR and not a component: the same box for a different
+  // kind of thing, and the page's own readers of `.plug-name` skip it by this
+  row.classList.add("plug-mirrors");
+  return row;
+}
+
+function plugMirrorRemoveButton(url) {
+  const forced = plugState.mirrorForced;
+  const btn = document.createElement("button");
+  btn.className = "plug-mirrors-remove";
+  btn.type = "button";
+  btn.textContent = "Remove";
+  btn.disabled = Boolean(forced || plugState.mirrorBusy);
+  btn.title = forced
+    ? `every source is already read through ${forced} (CLUTCH_SOURCE_MIRROR, or "source_mirror" in ~/.clutch/settings.json), so this list is not used — clear that setting to fall back through it`
+    : `stop trying ${url} when a release host cannot be reached`;
+  btn.addEventListener("click", () => plugMirrorRemove(url));
+  return btn;
+}
+
+// The one field on this page that writes a LIST rather than bytes: an http(s)
+// prefix, added to the user's half of it. The refusal (a value already in either
+// list, a value that is not a prefix) is drawn under the field, in the list's own
+// words — a write this page cannot confirm any other way.
+function plugMirrorForm() {
+  const wrap = document.createElement("div");
+  wrap.className = "plug-mirrors-add";
+  const forced = plugState.mirrorForced;
+  const input = document.createElement("input");
+  input.className = "plug-mirrors-input";
+  input.type = "text";
+  input.value = plugState.mirrorDraft || "";
+  input.placeholder = "https://gh-proxy.com";
+  input.title = "a mirror is a URL prefix: <prefix>/<the release's absolute URL>";
+  input.disabled = Boolean(forced || plugState.mirrorBusy);
+  input.setAttribute("aria-label", "a mirror to add, as an https URL");
+  // no redraw per keystroke: the caret stays where the user is typing, and the
+  // field's value is state (a redraw puts it back)
+  input.addEventListener("input", () => {
+    plugState.mirrorDraft = input.value || "";
+  });
+  const btn = document.createElement("button");
+  btn.className = "plug-mirrors-add-btn";
+  btn.type = "button";
+  btn.textContent = plugState.mirrorBusy ? "Adding…" : "Add";
+  btn.disabled = Boolean(forced || plugState.mirrorBusy || !String(plugState.mirrorDraft || "").trim());
+  btn.title = forced
+    ? `the list is not used while every source is read through ${forced}`
+    : "try this mirror when a release host cannot be reached";
+  btn.addEventListener("click", () => plugMirrorAdd());
+  wrap.appendChild(input);
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+// The mirror list, as one more section of the same page — directly under the
+// components, because that is what it silently serves.
+function plugMirrors() {
+  const list = plugState.mirrors || [];
+  const mine = list.filter((m) => m.source === "user").length;
+  const meta = plugState.mirrorsError
+    ? "unreadable"
+    : plugState.mirrors
+      ? `${mine} of yours · ${list.length - mine} shipped`
+      : "reading…";
+  const empty = plugState.mirrorsError
+    ? "the list of mirrors could not be read"
+    : plugState.mirrors
+      ? "no mirror is tried: this build ships none and none was added"
+      : "reading the list…";
+  const sec = plugSection("Mirrors", meta, list.map(plugMirrorRow), empty);
+  // what a mirror IS here, and what it cannot do: the target machine fetches the
+  // same pinned bytes through each one, and the digest is still the release's own
+  // pin — a mirror can move the bytes, it can never vouch for them
+  const note = document.createElement("p");
+  note.className = "plug-mirrors-note";
+  note.textContent =
+    "tried in this order when a release host cannot be reached — the target machine fetches the same pinned " +
+    "bytes through each one and weighs them against the release's own digest, so a mirror can move the bytes " +
+    "but never vouch for them";
+  sec.appendChild(note);
+  if (plugState.mirrorsError) {
+    const err = document.createElement("p");
+    err.className = "plug-source-error";
+    err.textContent = plugState.mirrorsError;
+    sec.appendChild(err);
+  } else {
+    sec.appendChild(plugMirrorForm());
+  }
+  if (plugState.mirrorForced) {
+    // the knob that outranks the list: with a prefix set, every source AND every
+    // release URL was already rewritten before anything was read, so there is no
+    // per-source fallback left to take
+    const forced = document.createElement("p");
+    forced.className = "plug-mirrors-forced";
+    forced.textContent =
+      `every source is read through ${plugState.mirrorForced} before anything else ` +
+      '(CLUTCH_SOURCE_MIRROR, or "source_mirror" in ~/.clutch/settings.json), so this list is not used while that is set';
+    sec.appendChild(forced);
+  }
+  const res = plugState.mirrorResult;
+  if (res) {
+    const line = document.createElement("p");
+    line.className = "plug-mirrors-result" + (res.ok ? "" : " error");
+    line.textContent = res.text;
+    sec.appendChild(line);
   }
   return sec;
 }
@@ -973,6 +1113,11 @@ function plugStageLine(busy) {
       // no bytes are in flight from here: the machine that will run the component
       // is getting them from the release, which is why this says so
       return `${where} is fetching ${busy.name} ${busy.version || ""}…`.replace("  ", " ");
+    case "mirror":
+      // the release's own URL did not answer and the machine is asking the SAME
+      // pin of another place (ui/mirrors.js): one line, enough to tell a slow
+      // install from a broken one, and it names the place being tried
+      return `${where} could not reach the release host — trying ${busy.prefix || "a mirror"} instead…`;
     case "current":
       return `${busy.name} is already current on ${where} — nothing was sent`;
     case "installed":
@@ -993,7 +1138,10 @@ function plugInstallResult(entry, res, where) {
     return { ok: true, name: entry.name, text: `${entry.name} was already current (${res.version}) on ${where} — nothing was sent` };
   }
   const path = res.path ? " · " + res.path : "";
-  return { ok: true, name: entry.name, text: `installed ${entry.name} ${res.version} on ${where}${path}` };
+  // which place the bytes came from, when it was not the release's own URL: the
+  // install worked, and the user is the one who decided what may be tried
+  const via = res.via ? ` · via ${res.via}` : "";
+  return { ok: true, name: entry.name, text: `installed ${entry.name} ${res.version} on ${where}${via}${path}` };
 }
 
 // The host's verdict on a removal, in the host's words. Three outcomes, and
@@ -1187,6 +1335,61 @@ async function plugSwitch(held) {
   }
 }
 
+// The two mirror writes. Neither touches the target machine, so neither asks:
+// a confirmation in front of a field the user just typed into is a second place
+// to say the same thing, and an entry added by mistake is undone by the Remove
+// on the row it creates. Both answer with the list AS IT NOW IS — the page then
+// draws what was written, not what it hoped it asked for.
+async function plugMirrorAdd() {
+  const api = window.clutchComponents;
+  const raw = String(plugState.mirrorDraft || "").trim();
+  if (!api || !api.addMirror || plugState.mirrorBusy || !raw) return;
+  plugState.mirrorBusy = true;
+  plugState.mirrorResult = null;
+  renderPlugins();
+  let res;
+  try {
+    res = await api.addMirror(raw);
+  } catch (e) {
+    // the channel itself failed: still an answer this page has to draw
+    res = { ok: false, error: (e && e.message) || String(e) };
+  }
+  plugState.mirrorBusy = false;
+  if (res && res.ok) {
+    plugState.mirrors = res.mirrors || [];
+    plugState.mirrorsError = res.error || null;
+    plugState.mirrorDraft = ""; // the field has taken what it was given
+    plugState.mirrorResult = { ok: true, text: `${raw} is in your list: it is tried before the entries this build ships` };
+  } else {
+    // the list's own refusal, quoted: it says which list already has the entry
+    plugState.mirrorResult = { ok: false, text: (res && res.error) || "no answer" };
+  }
+  renderPlugins();
+}
+
+async function plugMirrorRemove(url) {
+  const api = window.clutchComponents;
+  if (!api || !api.removeMirror || plugState.mirrorBusy) return;
+  plugState.mirrorBusy = true;
+  plugState.mirrorResult = null;
+  renderPlugins();
+  let res;
+  try {
+    res = await api.removeMirror(url);
+  } catch (e) {
+    res = { ok: false, error: (e && e.message) || String(e) };
+  }
+  plugState.mirrorBusy = false;
+  if (res && res.ok) {
+    plugState.mirrors = res.mirrors || [];
+    plugState.mirrorsError = res.error || null;
+    plugState.mirrorResult = { ok: true, text: `${url} is no longer tried` };
+  } else {
+    plugState.mirrorResult = { ok: false, text: (res && res.error) || "no answer" };
+  }
+  renderPlugins();
+}
+
 // Ask, then write. The question names the machine and states the one fact the
 // page must not hide (the write cannot be undone from here), and the answer is
 // either an install that was actually started or nothing at all.
@@ -1279,17 +1482,25 @@ function renderPlugins() {
   }
   plugDrawFilter();
   plugBodyEl.appendChild(plugList());
+  // the mirrors are one more section of the same page, and only when this shell
+  // has the channel for them: a build whose preload predates them draws the
+  // components and says nothing about a list it cannot read
+  if (window.clutchComponents.mirrors) plugBodyEl.appendChild(plugMirrors());
 }
 
-// Read both halves, render each as it lands: the machine's own inventory is one
-// local HTTP call, the market is one per source (a release manifest, and every
-// source is a network hop that can take its time).
+// Read all three halves, render each as it lands: the machine's own inventory is
+// one local HTTP call, the market is one per source (a release manifest, and
+// every source is a network hop that can take its time), and the mirror list is a
+// read of two local files (ui/mirrors.js). A shell with no mirror channel — an
+// older bridge — has two reads, not three with one that never lands.
 function plugRead({ force = false } = {}) {
   const api = window.clutchComponents;
   if (!api || plugState.pending) return; // no channel, or a read already running
   plugState.heldError = null;
   plugState.marketError = null;
-  plugState.pending = 2;
+  plugState.mirrorsError = null;
+  const mirrors = api.mirrors ? api.mirrors() : null;
+  plugState.pending = mirrors ? 3 : 2;
   renderPlugins();
   api
     .list()
@@ -1320,6 +1531,24 @@ function plugRead({ force = false } = {}) {
       plugState.pending--;
       renderPlugins();
     });
+  if (mirrors) {
+    mirrors
+      .then((m) => {
+        plugState.mirrors = (m && m.mirrors) || [];
+        // the list's own reason, when it could not be read at all (a file this
+        // machine cannot open): the section says so instead of drawing "none"
+        plugState.mirrorsError = (m && m.error) || null;
+        plugState.mirrorForced = (m && m.forced) || "";
+      })
+      .catch((e) => {
+        plugState.mirrors = null;
+        plugState.mirrorsError = (e && e.message) || String(e);
+      })
+      .then(() => {
+        plugState.pending--;
+        renderPlugins();
+      });
+  }
 }
 
 // ---- the source mirror ------------------------------------------------------
@@ -1437,7 +1666,7 @@ function pluginTabShown() {
 if (window.clutchComponents && window.clutchComponents.onProgress) {
   window.clutchComponents.onProgress((stage) => {
     if (!stage || !plugState.busy || stage.name !== plugState.busy.name) return;
-    plugState.busy = { name: stage.name, stage: stage.stage, version: stage.version };
+    plugState.busy = { name: stage.name, stage: stage.stage, version: stage.version, prefix: stage.prefix || "" };
     renderPlugins();
   });
 }

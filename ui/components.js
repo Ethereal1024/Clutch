@@ -72,6 +72,7 @@ const { resolveBash, platformTag, isPackagedApp, fileHash, treeHash } = require(
 // Which fetch a remote read uses, and the mirror the shipped source list is read
 // under — both are "the network this app runs on", see ui/net-fetch.js.
 const { netFetch, mirrorPrefix, mirrored } = require("./net-fetch");
+const mirrors = require("./mirrors");
 
 const REPO = path.join(__dirname, "..");
 const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
@@ -516,7 +517,14 @@ function installVersion(named, digest) {
 // `checkout` is false for the machine that already holds the checkout beside the
 // host repo (there is nothing to send it that it does not have, so a checkout
 // spec falls back to the release its module published, if any).
-async function artifactFor(spec, { checkout = true } = {}) {
+//
+// `mirrorFallback` is the caller's answer about mirrors, spelled the way the
+// source list spells it (ui/mirrors.js `fallbackFor`): null is this machine's own
+// configuration, an array is exactly that list, false is none at all. It is
+// carried on the returned spec as `mirrors` — the places the TARGET machine could
+// read these same bytes from — because the bytes travel by URL, so the retry is
+// the host's fetch and not this client's (fetchInstall).
+async function artifactFor(spec, { checkout = true, mirrorFallback = null } = {}) {
   const local = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
   if (local) {
     // the bytes are this machine's own: the declaration is the one that travels
@@ -539,6 +547,14 @@ async function artifactFor(spec, { checkout = true } = {}) {
     url: remote.url, // the target machine's own fetch: no copy of this here
     artifact: remote.artifact, // its own file name, so the host reads its shape
     digest: remote.digest,
+    // the others a network failure may fall back to, in the order it tries them:
+    // an artifact is a SIBLING of the manifest source, so the prefixes that apply
+    // to the source are the ones these bytes can be read through (ui/mirrors.js)
+    mirrors: mirrors.fallbackFor(published.source, mirrorFallback),
+    // where this URL is ALREADY read from, when that is a mirror (an explicit
+    // source_mirror, or a source somebody wrote pre-mirrored): the page says
+    // which, so "installed" never hides whose copy of the bytes it was
+    via: mirrors.viaPrefix(remote.url),
     // the release's own manifest names its version too, and a manifest that pins
     // no separate declaration is a legal (thinner) install
     version: installVersion(declaration || published, remote.digest),
@@ -674,9 +690,69 @@ async function upload(base, spec, timeoutMs) {
 // so a client on a slow uplink — a phone — never has to hold the tens of
 // megabytes it is installing. The digest travels with the URL, so the host weighs
 // what it fetched against exactly the pin a body would have been weighed against.
-async function fetchInstall(base, spec, timeoutMs) {
-  const manifest = { ...manifestFor(spec), [ARTIFACT_URL_FIELD]: spec.url };
-  return postInstall(base, manifest, Buffer.alloc(0), timeoutMs);
+//
+// The URL is also the one thing an unreachable network can be worked around: a
+// release on github.com is a request the TARGET machine makes, and a machine
+// whose path to it is broken (a 504 from a proxy, a timeout, a name that will not
+// resolve) has somewhere else to try (ui/mirrors.js). So the request is made
+// again, under another prefix, whenever the host's refusal is a sentence about
+// reaching the bytes rather than about the bytes themselves — and a refusal that
+// IS about them (a 404, a digest that does not match, a platform the release
+// published nothing for) is quoted as it stands, because a mirror serves the same
+// path and would answer the same way.
+//
+// `onRetry(prefix, reason)` is called before each second attempt: the bytes may
+// take their own timeout each time, and a page that shows nothing for two minutes
+// is indistinguishable from a page that is broken.
+async function fetchInstall(base, spec, timeoutMs, { mirrorFallback = null, via = "", onRetry = null } = {}) {
+  const list = mirrorFallback === false ? [] : Array.isArray(mirrorFallback) ? mirrorFallback : spec.mirrors || [];
+  // A URL already under a prefix is not prefixed again (that URL is served by
+  // nobody), which is also what keeps an explicit source_mirror from stacking.
+  const already = mirrors.viaPrefix(spec.url);
+  const places = [{ prefix: via || already, url: spec.url }];
+  if (!already) {
+    for (const prefix of list) {
+      if (!prefix || prefix === via) continue;
+      const url = mirrored(spec.url, prefix);
+      if (url !== spec.url) places.push({ prefix, url });
+    }
+  }
+  let first = ""; // what the release's own URL said: the reason this loop exists
+  const tried = []; // the prefixes that did not answer either
+  for (let i = 0; i < places.length; i++) {
+    const place = places[i];
+    const manifest = { ...manifestFor(spec), [ARTIFACT_URL_FIELD]: place.url };
+    try {
+      const out = await postInstall(base, manifest, Buffer.alloc(0), timeoutMs);
+      return place.prefix ? { ...out, via: place.prefix } : out;
+    } catch (e) {
+      const reason = (e && e.message) || String(e);
+      if (i === 0) first = reason;
+      else tried.push(place.prefix);
+      const more = i < places.length - 1;
+      if (!more || !mirrors.looksLikeNetwork(reason)) {
+        // Nothing further to try, or nothing further worth trying: an answer is
+        // the host's verdict on the bytes, and it goes back as the host wrote it
+        // (the one exception is a first attempt that failed in the network and
+        // was followed by mirrors — then the answer has to carry all of it).
+        throw new Error(tried.length ? coveredFailure(first, tried, reason) : reason);
+      }
+      if (onRetry) onRetry(place.prefix || places[i + 1].prefix, reason);
+    }
+  }
+  // unreachable: the loop returns or throws on its last place
+  throw new Error(first || "the install produced no answer");
+}
+
+// What a page shows when the release's own URL could not be reached AND the
+// mirrors did not answer either: the failure that started it, the number of other
+// places this machine tried, and the last thing one of them said. A single
+// sentence on purpose — the plugin page has one row to draw it in — and it keeps
+// the host's own words at both ends.
+function coveredFailure(first, tried, last) {
+  const n = tried.length;
+  const where = `${n} mirror${n === 1 ? "" : "s"} (${tried.join(", ")})`;
+  return `${first} — and not through ${where} either: the last one said ${last}`;
 }
 
 // Make sure `base`'s machine holds every component this client can give it.

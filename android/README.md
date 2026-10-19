@@ -467,8 +467,16 @@ TCP keepalive（默认 2 小时）；以及"替别人收回 8892"在协议上做
 而手机上的 HOME 是 App 自己的 filesDir（N2 在 Node 起来之前设好）：没有 shell 可 export，
 也没有文件管理器能写进去。`writeSettingsMirror()` 之前更是**没有** `source_mirror` 这一支，
 UI 里也没有这个字段。也就是说"写进 ~/.clutch/settings.json"这句话在手机上是一句谁也做不到
-的事。按文档 §12.3 的定案（**不默认镜像、不自动回退**）不能塞一个第三方加速器进去，
-能做的是**把开关修成真的能用**。手机侧唯一的 github 取数就是 pylibs 的索引与 tar
+的事。文档 §12.3 当时的定案是（**不默认镜像、不自动回退**），这里只能拒绝塞一个第三方
+加速器进去；那条定案已被 `PLUGIN_UI_PLAN.md` §十四 翻转——随包带一份**可回退镜像表**
+（`ui/components.mirrors.json`，三条前缀，用户自己的条目排在前面），但它**只**在"看起来
+是网络原因"的失败上重试（超时、`ECONNRESET`、网关/超时状态码），404、digest 不符、
+schema 错**一次都不重试**，manifest 读取也不自动回退。手机侧因此多出三条 IPC
+（`android/host/android-host.js` 的 `components:mirrors` / `components:mirror-add` /
+`components:mirror-remove`，与桌面 `ui/main.js` 同名同形），插件页多出 Mirrors 一节。
+字段仍然是那条"整条线都走镜像"的开关，两者互不替代：设了 `source_mirror` 就走它、
+镜像表不再被读（页面上那句 `every source is read through …` 说的就是这个）。这一节讲的
+仍是**把开关修成真的能用**。手机侧唯一的 github 取数就是 pylibs 的索引与 tar
 （`android/host/artifact-provider-android.js`），所以这条线上"没生效"最刺眼。
 
 **修法**：三处，一个开关。
@@ -502,7 +510,10 @@ UI 里也没有这个字段。也就是说"写进 ~/.clutch/settings.json"这句
 后的前缀、`marketCalls` 与 `listCalls` 各 +1）、空值 = 回到 github.com、宿主拒绝/通道抛错/
 通道缺席三种失败都不在本窗口留副本，最后还钉住样式表：`.plug-mirror` 是 `flex: none`
 （会滚走的字段不是判词行指向的那个门）、输入框把宽度让给 Save、`.plug-mirror-note.error`
-才是失败色。
+才是失败色。镜像表自己另有单测（`tests/mirrors.test.js`：用户条目在前、去重、只有看起来
+像网络问题的失败才回退、`forced()` 压过全表）；`tests/components-panel.test.js` 第 38 节
+钉住这一节在桌面与手机上的读取和两个写入（`mirrors()` / `addMirror()` / `removeMirror()`
+三条通道，随包条目没有 Remove，设了 `source_mirror` 时字段与按钮一起变灰）。
 `tests/settings-mirror.test.js` 第 6 节：`{source_mirror}` 这种"只带一个键"的保存写在
 `~/.clutch/settings.json` 里、与 `ssh_secrets`/`custom` 合并、不再提它时保留、`""` 清空。
 `tests/android-provider-test.js` 第 10b 节：**env 完全不设**，只把 `source_mirror` 写进沙箱

@@ -1766,6 +1766,57 @@ mjx-container[display="true"] {
    way out, not a second complaint */
 .plug-source-hint { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 
+/* the mirror list: rows in the same box as a component row, because it is the
+   same kind of thing on the same page — a list this machine reads. A mirror's
+   name is a URL rather than a component, so it is set in the same mono face at
+   the same size but NOT in the semibold a component's identity carries. */
+.plug-mirrors .plug-name { font-weight: 400; }
+/* the remove control joins the row-control family above (same box, same resting
+   grey) and carries the accent under the pointer only: it deletes a line from a
+   file, so it is not the loud thing on its row, but it is a removal. */
+.plug-mirrors-remove {
+  min-height: var(--ctl-h-sm);
+  padding: 3px var(--s2);
+  font-size: var(--fs-sm);
+  background: transparent;
+  color: var(--muted);
+}
+.plug-mirrors-remove:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+/* the add field: the same box as the name filter (same height, same mono face),
+   beside its button on one line */
+.plug-mirrors-add { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+.plug-mirrors-input {
+  flex: 1 1 200px;
+  width: auto;
+  min-width: 120px;
+  height: var(--ctl-h-sm);
+  padding: 3px var(--s2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+.plug-mirrors-add-btn {
+  min-height: var(--ctl-h-sm);
+  padding: 3px var(--s2);
+  font-size: var(--fs-sm);
+  background: transparent;
+  color: var(--muted);
+}
+.plug-mirrors-add-btn:hover:not(:disabled) { color: var(--text); }
+/* what a mirror is here, and what it cannot do — the same quiet voice as the
+   source hint, because both answer a question the list just raised */
+.plug-mirrors-note { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
+/* the knob that outranks the list: a fact about THIS machine's configuration,
+   not a failure, so it is a caution line rather than an error */
+.plug-mirrors-forced { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+/* what the list said about the last add or remove: a refusal keeps the accent
+   every other failure on this page carries */
+.plug-mirrors-result { margin: var(--s2) 0 0; font-size: var(--fs-sm); color: var(--muted); overflow-wrap: anywhere; }
+.plug-mirrors-result.error { color: var(--accent); }
+
 .fs-conn { margin-bottom: var(--s3); padding-bottom: var(--s3); border-bottom: 1px solid var(--border); }
 /* when the picker body is collapsed (SSH connect/failure), the conn bar is the
    last thing in the modal — drop its divider and bottom spacing so no stray line
