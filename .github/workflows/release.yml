@@ -31,6 +31,15 @@ jobs:
   # nothing, so every job below lists this one in `needs:` and a failing check
   # stops the run before any asset is attached.
   #
+  # What that does NOT buy, and 0.1.56 showed it: the gate sits UPSTREAM of the
+  # attach steps, so it is not a transaction around them. `win`'s `uv sync`
+  # exited 1 (uv.lock unchanged since 0.1.55, where the same job passed — no log
+  # beyond the exit code is readable without admin) while the release already
+  # carried the deb, the dmg, the APK and the pylibs tars: 20 of 21 assets,
+  # published, with nothing to roll back. The repair is a re-run of the failed
+  # job from the run page — it attaches to the SAME release — not a new tag,
+  # which leaves the partial one standing next to it forever.
+  #
   # Stdlib only, on purpose: the three scans import no third-party package, so
   # `python3 -m` works on the runner image without uv sync / npm ci — the gate
   # costs seconds and cannot itself fail for a dependency reason.
