@@ -193,7 +193,12 @@ function start(client) {
   const run = async () => {
     try {
       if (!state.server) {
-        state.server = createPluginServer({ log });
+        // `host` is the client plugin domain the APP owns (ui/main.js): the page
+        // installs into it through the components view, and this server is what
+        // declares what it holds. One table, one writer, one reader — a server
+        // that made its own would declare a domain nothing was ever installed
+        // into, and the page and the session would disagree about what exists.
+        state.server = createPluginServer({ log, host: host || undefined });
         await state.server.listen();
         log(`listening 127.0.0.1:${state.server.port()} for this client's plugins`);
       }
@@ -289,6 +294,15 @@ async function stop() {
   if (server) await server.stop();
 }
 
+// The client plugin domain this path speaks for (ui/plugin-host.js), handed in by
+// the shell that owns it. Absent, the server makes one over its default root —
+// which is what the tests and a host with no components page still want.
+let host = null;
+function useHost(next) {
+  host = next || null;
+  return host;
+}
+
 // What the tunnel calls when its hop dies: the forward is gone, so the far-side
 // port is no longer ours. The listener stays (a re-connect re-uses it) but the
 // row must forget the port it was granted, or the next push would name a dead one.
@@ -309,6 +323,7 @@ function hopLost() {
 module.exports = {
   PUSH_TIMEOUT_MS,
   state,
+  useHost,
   start,
   offer,
   forget,

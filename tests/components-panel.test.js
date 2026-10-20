@@ -172,8 +172,6 @@ function stateOf(body, name) {
 
 const IDS = [
   "plug-body",
-  "plug-target",
-  "plug-base",
   "plug-note",
   "plug-reload",
   "plug-filter",
@@ -207,7 +205,7 @@ const COMPONENTS = [
 // removeMirror). Passed, this page HAS that channel (three reads, and the section
 // under the list); omitted, it is a shell that predates the feature and must draw
 // exactly as it did before — the reason the default is null and not a stub.
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null } = {}) {
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session" } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -247,9 +245,26 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     list: async () => {
       world.listCalls++;
       if (listError) throw new Error(listError);
-      return { target, held, error: heldError };
+      // the shape ui/components-view.js list() answers in: two places, and for
+      // each one the difference between "cannot be aimed at" (`error` / no
+      // `client`) and "answered without its own list" (`inventoryError`)
+      return {
+        sessionBase: target.base,
+        held: held.map((h) => ({ place: heldPlace, ...h })),
+        error: target.kind === "remote" && !target.base ? "the tunnel is up but carries no supervisor URL yet" : null,
+        inventoryError: heldError,
+        client,
+        clientError,
+        clientInventoryError: clientHeldError,
+      };
     },
-    market: async () => { world.marketCalls++; return { entries, errors, unreachable, sources: 4 }; },
+    market: async () => {
+      world.marketCalls++;
+      // a market row as ui/components-view.js entry() answers it: the place comes
+      // off the declaration (`destinationOf`), and `problem` is the refusal when
+      // the two words name a pair that cannot exist
+      return { entries: entries.map((e) => ({ place: entryPlace, problem: "", runs_on: "self", ...e })), errors, unreachable, sources: 4 };
+    },
     install: async (name) => {
       world.installCalls.push(name);
       if (world.control) return world.control.promise;
@@ -441,7 +456,7 @@ const CODE = mod ? mod.code : "";
     const lost = page({ listError: "the supervisor did not answer" });
     await lost.open();
     check(lost.buttons().every((b) => b.disabled), "a target whose read failed leaves every button dead");
-    check(/has not been read yet/.test(lost.buttons()[0].title), "and the button says nothing may be sent before it is");
+    check(/the supervisor did not answer/.test(lost.buttons()[0].title), "and the button is the failure itself, not an empty offer");
     check(/the supervisor did not answer/.test(lost.note().textContent), "while the note carries the reason the read failed");
 
     // an unreadable INVENTORY is different: the machine is known and has a URL,
@@ -461,7 +476,10 @@ const CODE = mod ? mod.code : "";
     check(/already holds clutch-workspace 0.1.0\+5f900739/.test(p.buttons()[0].title), "and its title says what it will rewrite");
   }
 
-  // 4. the question names the machine and the fact that cannot be undone
+  // 4. the question names the PLACE the bytes land in, and the fact that cannot
+  // be undone. The place is not chosen and not discovered here: it came off the
+  // declaration (ui/components.js destinationOf), which is why a question that
+  // named a machine would be asking the user to confirm a fact nobody picks.
   {
     const p = page({ store: { clutch_ssh_host: "10.0.0.5", clutch_ssh_user: "ubuntu", clutch_ssh_port: "22" } , target: REMOTE });
     await p.open();
@@ -470,39 +488,106 @@ const CODE = mod ? mod.code : "";
     await settle();
     const ask = p.world.confirms[0];
     check(p.world.confirms.length === 1 && ask.ok === "Install", "installing asks first, with the verb on the button");
-    check(/SSH ubuntu@10\.0\.0\.5:22/.test(ask.text), "the question names the machine the write lands on");
+    check(/into the component directory on this session/.test(ask.text), "the question names the place the bytes land in");
     check(/neither act is a rollback/.test(ask.text), "and says what the write costs: removable again, but never a rollback (I5)");
     check(p.world.installCalls.length === 0, "a declined install writes nothing");
     check(p.note().textContent === "", "and leaves no verdict behind");
   }
 
-  // 4b. the ✓ on the remote's label is THIS window's session, not the machine's (⑤)
-  // One profile, several windows: clutch_ssh_connected is one fact for the whole
-  // process, but the URL that says a window is ON the remote belongs to the window
-  // that claimed it — read from localStorage, the next window ticked a machine it
-  // was never on.
+  // 4b. no machine is NAMED on this page, and none can be picked (I2). The place a
+  // component goes to is a fact of its declaration, so the page neither asks for it
+  // nor prints it as a heading: a session on the far side of an SSH bridge is the
+  // case that used to be drawn as "Local (this machine)", because the page was
+  // describing the window it lived in instead of where the bytes go.
   {
     const remote = { clutch_ssh_host: "10.0.0.5", clutch_ssh_user: "ubuntu", clutch_ssh_port: "22" };
-    const label = (p) => p.el("plug-target").textContent;
-    const shared = page({
-      store: { ...remote, clutch_ssh_connected: "1", clutch_api_url: "http://127.0.0.1:7788" },
-      target: REMOTE,
-    });
-    await shared.open();
-    check(label(shared) === "SSH ubuntu@10.0.0.5:22",
-      `a URL another window remembered in the shared storage does not tick this one's machine (got ${JSON.stringify(label(shared))})`);
-    const mine = page({
-      store: { ...remote, clutch_ssh_connected: "1" },
-      session: { clutch_api_url: "http://127.0.0.1:7788" },
-      target: REMOTE,
-    });
-    await mine.open();
-    check(label(mine) === "SSH ubuntu@10.0.0.5:22 ✓",
-      `this window's own session does tick it (got ${JSON.stringify(label(mine))})`);
-    const noIntent = page({ store: { ...remote }, session: { clutch_api_url: "http://127.0.0.1:7788" }, target: REMOTE });
-    await noIntent.open();
-    check(label(noIntent) === "SSH ubuntu@10.0.0.5:22",
-      "and a window with a session and no standing intent behind it is not connected either");
+    const p = page({ store: { ...remote, clutch_ssh_connected: "1" }, session: { clutch_api_url: "http://127.0.0.1:7788" }, target: REMOTE });
+    await p.open();
+    check(p.el("plug-target") === undefined && p.el("plug-base") === undefined, "the header has no target element to fill in");
+    check(!/10\.0\.0\.5|ubuntu@|this machine|Local \(/.test(p.text()), "and nothing in the pane names a machine or an ssh address");
+    check(p.world.listCalls === 1, "the page still read the session inventory, which is what the place means");
+  }
+
+  // 4c. a plugin goes to this client, and every sentence that would once have
+  //     named a machine names the place instead: the row facts, the control, the
+  //     question, the stage line. The routing is NOT this page business
+  //     (ui/components-view.js dispatches on the same declaration), which is why
+  //     the page can only be right about WHERE by quoting the declaration.
+  {
+    const entry = { name: "clutch-websearch", interface: "plugin", place: "client", runs_on: "other", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null };
+    const p = page({ entries: [entry], client: true });
+    await p.open();
+    check(/goes to this client/.test(rowNamed(p.body(), "clutch-websearch").title), "the row facts name the place the declaration names");
+    check(p.buttons()[0].title === "install clutch-websearch on this client", "and the control says the same place, with no third one to pick");
+    p.world.control = defer();
+    p.buttons()[0].click();
+    await settle(2);
+    check(/written into the component directory on this client/.test(p.world.confirms[0].text), "the question names the client the bytes stay on");
+    check(p.world.installCalls.join(",") === "clutch-websearch", "and the same one channel carries it: the page never routes bytes itself");
+    p.world.progress({ stage: "copy", name: "clutch-websearch", version: "0.2.0" });
+    check(
+      /bringing clutch-websearch 0\.2\.0 onto this client…/.test(p.stateText("clutch-websearch")),
+      "the copy stage is the one a plugin install has, and it says where the bytes are going"
+    );
+    p.world.control.res({ ok: true, name: "clutch-websearch", place: "client", version: "0.2.0", path: "/home/u/.clutch/client/clutch-websearch" });
+    await settle();
+    check(
+      /^installed clutch-websearch 0\.2\.0 on this client · \/home\/u\/\.clutch\/client/.test(p.stateText("clutch-websearch")),
+      "and the verdict says the client, with the path it landed at"
+    );
+  }
+
+  // 4d. a declaration that cannot be placed is refused BEFORE any byte is built,
+  //     and the refusal is the declaration own sentence — not a dead button with
+  //     no reason beside it (a place this build cannot derive is not a place the
+  //     user may choose)
+  {
+    const problem = "a plugin is held by this client, so a plugin declaring the session machine cannot be installed anywhere";
+    const p = page({ entries: [{ name: "clutch-odd", interface: "plugin", place: null, problem, version: "1.0.0", origin: "release", source: "…/clutch-odd", published: null }] });
+    await p.open();
+    check(p.buttons()[0].disabled, "the Install beside a contradictory declaration is dead");
+    check(p.buttons()[0].title === problem, "and its title is that sentence, quoted rather than paraphrased");
+    check(p.text().includes(problem), "the row line is the sentence too, so it is readable without hovering");
+    p.buttons()[0].click();
+    await settle();
+    check(p.world.confirms.length === 0 && p.world.installCalls.length === 0, "and a click on it asks nothing and writes nothing");
+  }
+
+  // 4e. the two places fail on their own, and each row carries the reason of ITS
+  //     place: a session inventory that did not arrive is one sentence (the page
+  //     line), a client domain that would not open is another (the client row
+  //     facts), and neither is ever drawn as "nothing is installed there"
+  {
+    const entries = [
+      { name: "clutch-workspace", interface: "daemon", place: "session", version: "0.1.0", origin: "checkout", source: "…/clutch-workspace", published: null },
+      { name: "clutch-websearch", interface: "plugin", place: "client", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null },
+    ];
+    const p = page({ entries, heldError: "the supervisor did not answer", client: true, clientHeldError: "the plugin table is unreadable" });
+    await p.open();
+    check(/the supervisor did not answer/.test(p.note().textContent), "the session reason is the page line");
+    const clientRow = rowNamed(p.body(), "clutch-websearch");
+    check(/on this client, unknown/.test(drawnText(clientRow)), "while the client row says its place is unknown, not empty");
+    check(/the plugin table is unreadable/.test(clientRow.title), "and its facts carry the sentence that explains it");
+    check(p.buttons().every((b) => !b.disabled), "a place whose list failed still receives bytes: it is a shelf that was not read, not a place that is gone");
+    check(
+      /what this session holds could not be read; the host still decides/.test(p.buttons()[0].title) &&
+        /what this client holds could not be read; the host still decides/.test(p.buttons()[1].title),
+      "and both controls say the host is still the one deciding"
+    );
+  }
+
+  // 4f. nothing is offered for a place this page has not found yet: a read still
+  //     in flight is not a licence to write somewhere
+  {
+    const p = page();
+    vm.runInContext(
+      "plugState.market = { entries: [{ name: 'clutch-workspace', place: 'session', interface: 'daemon', version: '0.1.0', origin: 'release', source: 'x' }], errors: [] }; renderPlugins();",
+      p.ctx
+    );
+    check(p.buttons().length === 1 && p.buttons()[0].disabled, "a row drawn before the read answered has a dead Install");
+    check(/not been read yet/.test(p.buttons()[0].title), "and its title says nothing is sent to a place the page has not found");
+    await p.open();
+    check(!p.buttons()[0].disabled, "once the read lands, the same row offers the write");
   }
 
   // 5. the happy path: stages as they happen, then the host's verdict, then a re-read
@@ -525,12 +610,12 @@ const CODE = mod ? mod.code : "";
     // when it is idle): the page says so, because the first start is the slow one
     p.world.progress({ stage: "wake", name: "clutch-workspace" });
     check(
-      /Local \(this machine\) is starting its supervisor/.test(p.stateText("clutch-workspace")),
+      /this session is starting its supervisor/.test(p.stateText("clutch-workspace")),
       "the wake stage says the target machine's supervisor is coming up"
     );
 
     p.world.progress({ stage: "upload", name: "clutch-workspace", version: "0.1.0+5f900739" });
-    check(/sending clutch-workspace 0\.1\.0\+5f900739 to Local \(this machine\)/.test(p.stateText("clutch-workspace")), "the upload stage names the bytes and the machine");
+    check(/sending clutch-workspace 0\.1\.0\+5f900739 to this session/.test(p.stateText("clutch-workspace")), "the upload stage names the bytes and the machine");
     p.world.progress({ stage: "upload", name: "clutch-memory" });
     check(/sending clutch-workspace/.test(p.stateText("clutch-workspace")), "a stage from another window's install is ignored");
 
@@ -538,7 +623,7 @@ const CODE = mod ? mod.code : "";
     // which machine is doing the moving
     p.world.progress({ stage: "fetch", name: "clutch-workspace", version: "0.1.0+5f900739" });
     check(
-      /Local \(this machine\) is fetching clutch-workspace 0\.1\.0\+5f900739/.test(p.stateText("clutch-workspace")),
+      /this session is fetching clutch-workspace 0\.1\.0\+5f900739/.test(p.stateText("clutch-workspace")),
       "the fetch stage says the target machine is getting its own bytes, not receiving ours"
     );
     p.world.progress({ stage: "fetch", name: "clutch-memory" });
@@ -546,7 +631,7 @@ const CODE = mod ? mod.code : "";
 
     p.world.control.res({ ok: true, status: "installed", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", path: "/home/u/.clutch/components/clutch-workspace" });
     await settle();
-    check(/^installed clutch-workspace 0\.1\.0\+5f900739 on Local \(this machine\) · \/home\/u/.test(p.stateText("clutch-workspace")), "the verdict is the host's, with the path it landed at, and it stays on that row");
+    check(/^installed clutch-workspace 0\.1\.0\+5f900739 on this session · \/home\/u/.test(p.stateText("clutch-workspace")), "the verdict is the host's, with the path it landed at, and it stays on that row");
     check(/busy/.test(p.state("clutch-workspace").className) === false, "the row is no longer drawn as busy once the write is over");
     check(p.state("clutch-workspace").className.includes("error") === false, "a successful install is not drawn as an error");
     check(p.world.listCalls > before, "the machine's inventory is read again after it changed");
@@ -559,7 +644,7 @@ const CODE = mod ? mod.code : "";
     p.world.reply = { ok: true, status: "current", version: "0.1.0+5f900739", digest: "5f900739e6a35f43" };
     p.buttons()[0].click();
     await settle();
-    check(/already current \(0\.1\.0\+5f900739\) on Local \(this machine\) — nothing was sent/.test(p.stateText("clutch-workspace")), "the host's 'current' verdict is reported as nothing sent");
+    check(/already current \(0\.1\.0\+5f900739\) on this session — nothing was sent/.test(p.stateText("clutch-workspace")), "the host's 'current' verdict is reported as nothing sent");
   }
 
   // 7. a refusal is quoted, not paraphrased, and drawn as a failure
@@ -592,7 +677,7 @@ const CODE = mod ? mod.code : "";
     check(p.removes().length === 1, "an installed component gets a removal control, one per held row");
     check(ownerName(p.removes()[0]) === "clutch-workspace", "and it belongs to the row it would empty");
     check(p.removes()[0].textContent === "Remove", "the control says what it does");
-    check(/remove clutch-workspace 0\.1\.0\+5f900739 from Local \(this machine\)/.test(p.removes()[0].title), "and its title names the machine that would lose the bytes");
+    check(/remove clutch-workspace 0\.1\.0\+5f900739 from this session/.test(p.removes()[0].title), "and its title names the machine that would lose the bytes");
   }
 
   // 10. asking first, and the question is the whole point: a removal is a
@@ -605,7 +690,7 @@ const CODE = mod ? mod.code : "";
     await settle();
     const ask = p.world.confirms[0];
     check(p.world.confirms.length === 1 && ask.ok === "Remove", "removing asks first, with the verb on the button");
-    check(/is deleted from Local \(this machine\)/.test(ask.text), "the question says the bytes are deleted, and where");
+    check(/is deleted from the component directory on this session/.test(ask.text), "the question says the bytes are deleted, and where");
     check(/cannot be undone from here/.test(ask.text), "and that nothing here can put them back (I5)");
     check(p.world.removeCalls.length === 0, "a declined removal deletes nothing");
     check(p.note().textContent === "", "and leaves no verdict behind");
@@ -621,7 +706,7 @@ const CODE = mod ? mod.code : "";
     p.removes()[0].click();
     await settle();
     check(p.world.removeCalls.join(",") === "clutch-workspace", "the confirmed removal hands that name to the channel");
-    check(/^removed clutch-workspace 0\.1\.0\+5f900739 from Local \(this machine\)$/.test(p.stateText("clutch-workspace")), "the host's verdict names the versions that went");
+    check(/^removed clutch-workspace 0\.1\.0\+5f900739 from this session$/.test(p.stateText("clutch-workspace")), "the host's verdict names the versions that went");
     check(p.state("clutch-workspace").className.includes("error") === false, "a completed removal is not drawn as an error");
     check(p.world.listCalls > before, "and the machine's inventory is read again after it changed");
   }
@@ -634,7 +719,7 @@ const CODE = mod ? mod.code : "";
     p.world.removeReply = { ok: true, status: "absent", removed: [] };
     p.removes()[0].click();
     await settle();
-    check(/^clutch-workspace was not installed on Local \(this machine\) — there was nothing to remove$/.test(p.stateText("clutch-workspace")), "a component that was already gone is reported as nothing to remove");
+    check(/^clutch-workspace was not installed on this session — there was nothing to remove$/.test(p.stateText("clutch-workspace")), "a component that was already gone is reported as nothing to remove");
     check(p.state("clutch-workspace").className.includes("error") === false, "and it is not drawn as a failure");
   }
 
@@ -670,7 +755,7 @@ const CODE = mod ? mod.code : "";
     p.world.control = defer();
     p.removes()[0].click();
     await settle(3);
-    check(/removing clutch-workspace from Local \(this machine\)/.test(p.stateText("clutch-workspace")), "the row says what is being removed from it, while it is being removed");
+    check(/removing clutch-workspace from this session/.test(p.stateText("clutch-workspace")), "the row says what is being removed from it, while it is being removed");
     check(p.removes().every((b) => b.disabled), "and the removal control is dead for the duration");
     check(p.buttons().every((b) => b.disabled), "as is every install control (one write at a time)");
     p.world.control.res({ ok: true, status: "removed", removed: ["0.1.0+5f900739"] });
@@ -715,7 +800,7 @@ const CODE = mod ? mod.code : "";
     check(ownerName(p.switches()[0]) === "clutch-workspace", "and it belongs to the row whose fact it changes");
     check(p.switches()[0].textContent === "Disable", "a component the machine is driving offers 'Disable'");
     check(
-      /stop Local \(this machine\) driving clutch-workspace/.test(p.switches()[0].title),
+      /stop this session driving clutch-workspace/.test(p.switches()[0].title),
       "and its title names the machine it stops, not the bytes"
     );
     check(/nothing is deleted/.test(p.switches()[0].title), "the title says the bytes are untouched");
@@ -727,7 +812,7 @@ const CODE = mod ? mod.code : "";
     const held = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
     await held.open();
     check(held.switches()[0].textContent === "Enable", "a component that is held but not driven offers 'Enable'");
-    check(/drive clutch-workspace on Local \(this machine\) again/.test(held.switches()[0].title), "and its title names the machine it drives again");
+    check(/drive clutch-workspace on this session again/.test(held.switches()[0].title), "and its title names the machine it drives again");
     check(/its bytes stay where they are/.test(held.switches()[0].title), "still saying the bytes are what does not move");
     check(
       /^clutch-workspace stopped$/.test(textOf(headOf(rowNamed(held.body(), "clutch-workspace")))),
@@ -737,7 +822,7 @@ const CODE = mod ? mod.code : "";
       /(^| )stopped( |$)/.test(rowNamed(held.body(), "clutch-workspace").className),
       "and the whole row is coloured as stopped, not just the chip (U-7)"
     );
-    check(/held on this machine, but not driven/.test(held.text()), "and a line saying it is still held (so 'stopped' is not read as 'gone')");
+    check(/held on this session, but not driven/.test(held.text()), "and a line saying it is still held (so 'stopped' is not read as 'gone')");
     check(held.removes().length === 1, "a stopped component is still listed and can still be removed");
   }
 
@@ -754,7 +839,7 @@ const CODE = mod ? mod.code : "";
     check(p.world.confirms.length === 0, "switching asks no question (nothing is destroyed and the act is its own undo)");
     check(JSON.stringify(p.world.switchCalls) === JSON.stringify([["clutch-workspace", true]]), "the state asked for goes on the wire, not a verb");
     check(
-      /^stopped driving clutch-workspace on Local \(this machine\) — it is still held there, its tools are no longer offered$/.test(p.stateText("clutch-workspace")),
+      /^stopped driving clutch-workspace on this session — it is still held there, its tools are no longer offered$/.test(p.stateText("clutch-workspace")),
       "the verdict says the component is still held (the machine's own bit, when it sent one, else the state asked for)"
     );
     check(p.state("clutch-workspace").className.includes("error") === false, "a completed switch is not drawn as a failure");
@@ -770,7 +855,7 @@ const CODE = mod ? mod.code : "";
     await settle();
     check(JSON.stringify(p.world.switchCalls) === JSON.stringify([["clutch-workspace", false]]), "an Enable sends disabled=false — the state, the way the host spells it");
     check(
-      /^driving clutch-workspace on Local \(this machine\) again — its tools are offered once more$/.test(p.stateText("clutch-workspace")),
+      /^driving clutch-workspace on this session again — its tools are offered once more$/.test(p.stateText("clutch-workspace")),
       "and the verdict says the tools are offered again"
     );
     check(p.world.confirms.length === 0, "starting a component again is as unceremonious as stopping it");
@@ -786,7 +871,7 @@ const CODE = mod ? mod.code : "";
     p.switches()[0].click();
     await settle();
     check(
-      /^clutch-workspace is not held by Local \(this machine\) — there was nothing to stop or start$/.test(p.stateText("clutch-workspace")),
+      /^clutch-workspace is not held by this session — there was nothing to stop or start$/.test(p.stateText("clutch-workspace")),
       "a component that machine does not hold is reported as nothing to switch"
     );
     check(p.state("clutch-workspace").className.includes("error") === false, "and it is not drawn as a failure");
@@ -825,7 +910,7 @@ const CODE = mod ? mod.code : "";
     p.world.control = defer();
     p.switches()[0].click();
     await settle(3);
-    check(/stopping clutch-workspace on Local \(this machine\)…/.test(p.stateText("clutch-workspace")), "the row says what is being stopped, while it is being stopped");
+    check(/stopping clutch-workspace on this session…/.test(p.stateText("clutch-workspace")), "the row says what is being stopped, while it is being stopped");
     check(/is being stopped/.test(p.removes()[0].title), "and the removal control names the act that is holding it up, not 'installed'");
     check(p.switches().every((b) => b.disabled), "the switch is dead for the duration");
     check(p.buttons().every((b) => b.disabled), "so is every install control");
@@ -838,7 +923,7 @@ const CODE = mod ? mod.code : "";
     back.world.control = defer();
     back.switches()[0].click();
     await settle(3);
-    check(/driving clutch-workspace on Local \(this machine\) again…/.test(back.stateText("clutch-workspace")), "the other direction has its own sentence");
+    check(/driving clutch-workspace on this session again…/.test(back.stateText("clutch-workspace")), "the other direction has its own sentence");
     back.world.control.res({ ok: true, status: "enabled", disabled: false });
     await settle();
   }
@@ -857,7 +942,7 @@ const CODE = mod ? mod.code : "";
     p.ctx.window.clutchComponents.setDisabled = undefined;
     await p.open();
     check(p.switches()[0].disabled, "a shell without setDisabled leaves the switch dead rather than silently inert");
-    check(/cannot switch components/.test(p.switches()[0].title), "and it says the shell cannot, not that the machine refused");
+    check(/cannot switch components at all/.test(p.switches()[0].title), "and it says the shell cannot, not that the place refused");
   }
 
   // 25. the version list is a disclosure on the held row: the machine's own
@@ -870,12 +955,12 @@ const CODE = mod ? mod.code : "";
     check(ownerName(p.versionBtns()[0]) === "clutch-workspace", "and it belongs to the row whose versions it would show");
     check(p.versionBtns()[0].textContent === "Versions", "closed, it offers to open");
     check(/newest first/.test(p.versionBtns()[0].title), "its title says what will be shown");
-    check(/the marked one is what that machine runs/.test(p.versionBtns()[0].title), "and which mark is the one that matters");
+    check(/the marked one is what that place runs/.test(p.versionBtns()[0].title), "and which mark is the one that matters");
     check(p.ones().length === 0, "nothing per-version is drawn before it is asked for");
     p.versionBtns()[0].click();
     await settle();
     check(p.world.versionsCalls.join(",") === "clutch-workspace", "opening reads that one component from the machine that holds it");
-    check(/this machine runs it/.test(p.text()), "the version the host resolved is marked as the one that runs");
+    check(/this one is run/.test(p.text()), "the version the host resolved is marked as the one that runs");
     check(/held beside it/.test(p.text()), "and the others are drawn as held beside it, not as failures");
     check(/0\.1\.0\+bbbb/.test(p.text()) && /0\.1\.0\+aaaa/.test(p.text()), "every version the machine named is drawn");
     check(
@@ -884,7 +969,7 @@ const CODE = mod ? mod.code : "";
     );
     check(p.ones().length === 2, "each version gets its own removal control");
     check(ownerName(p.ones()[0]) === "0.1.0+bbbb", "and each control belongs to the version row that names what it takes");
-    check(/remove clutch-workspace 0\.1\.0\+bbbb from Local \(this machine\)/.test(p.ones()[0].title), "its title names the machine that would lose those bytes");
+    check(/remove clutch-workspace 0\.1\.0\+bbbb from this session/.test(p.ones()[0].title), "its title names the machine that would lose those bytes");
     check(/the versions beside it stay/.test(p.ones()[0].title), "and says the versions beside it stay — one version is not the whole component");
     p.versionBtns()[0].click();
     await settle();
@@ -952,7 +1037,7 @@ const CODE = mod ? mod.code : "";
     deaf.ctx.window.clutchComponents.versions = undefined;
     await deaf.open();
     check(deaf.versionBtns()[0].disabled, "a shell without versions leaves the disclosure dead rather than silently inert");
-    check(/cannot read the versions/.test(deaf.versionBtns()[0].title), "and it says the shell cannot, not that the machine refused");
+    check(/cannot read a version list at all/.test(deaf.versionBtns()[0].title), "and it says the shell cannot, not that the place refused");
   }
 
   // 29. letting ONE version go: asks first, names that version, and quotes the
@@ -985,7 +1070,7 @@ const CODE = mod ? mod.code : "";
     await settle();
     check(go.world.removeCalls.join(",") === "clutch-workspace", "the name goes to the channel like any removal");
     check(go.world.removeOpts[0] && go.world.removeOpts[0].version === "0.1.0+bbbb", "and the version names which one — the whole-component removal sends no such thing");
-    check(/^removed clutch-workspace 0\.1\.0\+bbbb from Local \(this machine\)$/.test(go.stateText("clutch-workspace")), "the host's verdict names the version that went");
+    check(/^removed clutch-workspace 0\.1\.0\+bbbb from this session$/.test(go.stateText("clutch-workspace")), "the host's verdict names the version that went");
     check(go.world.listCalls > before, "the machine's inventory is read again after it changed");
     check(go.world.versionsCalls.length === 2, "and so is the open version list — what it shows is what the machine now holds");
 
@@ -1024,7 +1109,7 @@ const CODE = mod ? mod.code : "";
     one.world.control = defer();
     one.ones()[0].click();
     await settle(3);
-    check(/removing clutch-workspace 0\.1\.0\+bbbb from Local \(this machine\)/.test(one.stateText("clutch-workspace")), "a removal of ONE version names that version while it happens");
+    check(/removing clutch-workspace 0\.1\.0\+bbbb from this session/.test(one.stateText("clutch-workspace")), "a removal of ONE version names that version while it happens");
     check(one.removes().every((b) => b.disabled) && one.switches().every((b) => b.disabled) && one.buttons().every((b) => b.disabled), "one write at a time, across every control");
     one.world.control.res({ ok: true, status: "removed", removed: ["0.1.0+bbbb"] });
     await settle();
@@ -1189,10 +1274,10 @@ const CODE = mod ? mod.code : "";
 
     const bare = page({ held: [], entries: [] });
     await bare.open();
-    check(/no component is installed on it or known to this client/.test(bare.text()), "while a machine that really holds nothing keeps its own sentence");
+    check(/nothing is installed in either place/.test(bare.text()), "while a page whose places are really empty keeps its own sentence");
     bare.chips()[3].click();
     check(
-      !/matches this filter/.test(bare.text()) && /no component is installed on it or known to this client/.test(bare.text()),
+      !/matches this filter/.test(bare.text()) && /nothing is installed in either place/.test(bare.text()),
       "and no filter turns that sentence into the other one"
     );
   }
@@ -1212,7 +1297,7 @@ const CODE = mod ? mod.code : "";
     await settle();
     check(p.state("solo") === null, "the row went away with the bytes it held");
     check(
-      /^removed solo 1\.0\.0\+bbbbbbbb from Local \(this machine\)$/.test(p.note().textContent),
+      /^removed solo 1\.0\.0\+bbbbbbbb from this session$/.test(p.note().textContent),
       "so the host's verdict falls back to the note instead of going missing with the row"
     );
 
@@ -1373,7 +1458,7 @@ const CODE = mod ? mod.code : "";
     const stopped = page({ held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", digest: "5f900739e6a35f43", disabled: true }] });
     await stopped.open();
     const srow = rowNamed(stopped.body(), "clutch-workspace");
-    check(drawnText(srow).includes("held on this machine, but not driven"), "a stopped row's sentence says it is still held");
+    check(drawnText(srow).includes("held on this session, but not driven"), "a stopped row's sentence says it is still held");
     check(stopped.switches()[0].textContent === "Enable", "and its control offers the way back, not the way out");
   }
 
@@ -1690,5 +1775,5 @@ const CODE = mod ? mod.code : "";
     }
   }
 
-  summary("components-panel: the plugin tab's writes (target, confirm text, verdicts, re-read)");
+  summary("components-panel: the plugin tab's writes (destination, confirm text, verdicts, re-read)");
 })();

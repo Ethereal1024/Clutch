@@ -165,7 +165,7 @@ async function main() {
     const down = view({ lib: fakeLib({ inventoryError: "the host did not answer: fetch failed" }) });
     const l2 = await down.api.list(EMPTY_WIN);
     check(
-      l2.held.length === 0 && /the host did not answer/.test(l2.error || ""),
+      l2.held.length === 0 && /the host did not answer/.test(l2.inventoryError || ""),
       "a supervisor that did not answer is reported as the reason, not as an empty machine"
     );
   }
@@ -570,7 +570,7 @@ async function main() {
       deps: { ensureSupervisor: never },
     });
     const l = await read.api.list(EMPTY_WIN);
-    check(l.held.length === 0 && /did not answer/.test(l.error || ""), "a read of a machine that is not running stays a sentence, not a wake");
+    check(l.held.length === 0 && /did not answer/.test(l.inventoryError || "") && !l.error, "a read of a machine that is not running stays a sentence, not a wake -- and not a place that cannot be aimed at");
   }
 
   // ---- 12. the mirrors: a fetch the release host could not answer is retried
@@ -709,7 +709,84 @@ async function main() {
     check(broken.api.addMirror("https://x.example/").ok === false, "and a write into that store is a sentence as well");
   }
 
-  summary("components-view", "all passed (target machine, inventory, market cache, install + remove + switch verdicts, mirror list + retry)");
+  // ---- 13. where a component goes is a FACT of its declaration, never a choice.
+  //          `destinationOf` (ui/components.js) answers it from the two words the
+  //          manifest already speaks: interface + runs_on. This is the one place
+  //          the answer exists in the page, so these are the checks that keep it
+  //          there: a plugin is this client, a cli/daemon is the session machine,
+  //          a contradiction is a sentence, and a byte never crosses.
+  {
+    // the two words, read as the four pairs they can make
+    const pluginSpec = { name: "clutch-websearch", interface: "plugin", runs_on: "other", checkout: true, source: "/repo/clutch-websearch" };
+    const daemonSpec = { name: "clutch-workspace", interface: "daemon", runs_on: "self", checkout: true, source: "/repo/clutch-workspace" };
+    const oddSpec = { name: "clutch-odd", interface: "plugin", runs_on: "self", checkout: true, source: "/repo/clutch-odd" };
+    check(components.destinationOf(pluginSpec).place === components.PLACE_CLIENT, "a plugin runs in this client process");
+    check(components.destinationOf(daemonSpec).place === components.PLACE_SESSION, "a daemon runs where the session commands run");
+    check(/has to say/.test(components.destinationOf(oddSpec).error || ""), "a plugin on the session machine is a contradiction, said in words");
+    check(
+      components.destinationOf({ name: "x", interface: "daemon" }).place === components.PLACE_SESSION,
+      "a daemon with no runs_on is the session machine: the declaration defaults, the page does not guess"
+    );
+
+    // a client domain, faked as ui/plugin-host.js answers it
+    const clientRows = [];
+    const put = [];
+    const pluginHost = {
+      list: () => clientRows.map((r) => ({ ...r })),
+      versions: (name) => (name === "clutch-websearch" ? [{ name, version: "0.2.0", resolved: true }] : []),
+      install: (opts) => {
+        put.push(opts);
+        const row = { name: opts.manifest.name, version: opts.version, interface: "plugin", digest: opts.manifest.digest };
+        clientRows.push(row);
+        return row;
+      },
+      remove: () => ({ status: "removed", removed: ["0.2.0"] }),
+      setDisabled: () => ({ status: "disabled", disabled: true }),
+    };
+    const lib = fakeLib({ specs: [pluginSpec, daemonSpec, oddSpec] });
+    lib.localArtifact = async (file) => file.path;
+    lib.manifestFor = (file) => ({ name: file.name, version: file.version, interface: file.interface });
+    const { api } = view({ lib, deps: { plugins: () => pluginHost } });
+
+    // 1. the market row says where it goes, and the page is told by whom
+    const m = await api.market();
+    const rows = m.entries;
+    const pluginRow = rows.find((r) => r.name === "clutch-websearch");
+    const oddRow = rows.find((r) => r.name === "clutch-odd");
+    check(pluginRow.place === "client" && pluginRow.runs_on === "other", "the market row carries the place its declaration names");
+    check(oddRow.place === null && /has to say/.test(oddRow.problem), "and a contradiction arrives as a problem, with no place at all");
+
+    // 2. the two inventories are ONE list, each row tagged with its place
+    const l = await api.list(EMPTY_WIN);
+    check(l.client === true && l.clientError === null && l.error === null, "both domains answered, and the shape says so");
+    check(l.held.every((r) => r.place === "session" || r.place === "client"), "every row says which of the two places holds it");
+
+    // 3. a plugin install never touches the session machine: no artifact, no
+    //    upload, no fetch, no supervisor — the app process lays the bytes down
+    const before = { artifacts: lib.calls.artifacts.length, uploads: lib.calls.uploads.length, fetches: lib.calls.fetches.length };
+    const out = await api.install("clutch-websearch", EMPTY_WIN, {});
+    check(out.ok === true && out.place === "client", "a plugin installs into this client");
+    check(put.length === 1 && put[0].manifest.name === "clutch-websearch", "through the client host own install, measured by it again");
+    check(
+      lib.calls.uploads.length === before.uploads && lib.calls.fetches.length === before.fetches,
+      "and nothing was uploaded to, or fetched by, the session machine"
+    );
+
+    // 4. a contradiction is refused BEFORE any byte is built
+    const odd = await api.install("clutch-odd", EMPTY_WIN, {});
+    check(odd.ok === false && /has to say/.test(odd.error), "a contradictory declaration is refused");
+    check(lib.calls.artifacts.length === before.artifacts + 1, "with not one byte built for it beyond the one install above");
+
+    // 5. a shell with no client plugin domain says so, and writes nothing
+    const bare = view({ lib: fakeLib({ specs: [pluginSpec] }) });
+    bare.lib.localArtifact = async (file) => file.path;
+    bare.lib.manifestFor = (file) => ({ name: file.name, version: file.version });
+    const none = await bare.api.install("clutch-websearch", EMPTY_WIN, {});
+    check(none.ok === false && /no client plugin domain/.test(none.error), "no domain is a sentence, not a write to somewhere else");
+    check(bare.lib.calls.artifacts.length === 0, "and no bytes were prepared for a place that is not there");
+  }
+
+  summary("components-view", "all passed (the two places, inventory, market cache, install + remove + switch verdicts, mirror list + retry)");
 }
 
 main().catch((e) => {

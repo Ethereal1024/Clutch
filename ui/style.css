@@ -1455,14 +1455,11 @@ mjx-container[display="true"] {
 .plug-mirror input { flex: 1; width: auto; min-width: 0; }
 .plug-mirror-note { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
 .plug-mirror-note.error { color: var(--danger); }
-/* plugin tab: the target machine, what it holds, and the market */
-.plug-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
-.plug-target { display: flex; flex-direction: column; min-width: 0; }
-/* an eyebrow, the same shape as .modal-box label and .modal-tab: it names a
-   FIELD, and only a label is ever uppercased. The machine's name is DATA and is
-   never set in caps — see .plug-section-title below */
-.plug-target-label { font-size: var(--fs-xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-.plug-target-name { font-family: var(--font-display); font-size: var(--fs-lg); color: var(--text); overflow-wrap: anywhere; }
+/* plugin tab: what the two places hold, and the market */
+/* the head holds ONE control and no machine: the reload sits at the right end of
+   a line that no longer names where the bytes go (there is nothing to name and
+   nothing to choose — ui/index.html says why) */
+.plug-head { display: flex; align-items: center; justify-content: flex-end; gap: var(--s3); }
 #plug-reload {
   flex: none;
   width: var(--ctl-h);
@@ -1470,26 +1467,22 @@ mjx-container[display="true"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* the glyph is type, so it is sized from the type scale like the name it sits
-     beside — the 14px it carried was a size the scale does not have */
+  /* the glyph is type, so it is sized from the type scale — the 14px it carried
+     was a size the scale does not have */
   font-size: var(--fs-lg);
 }
-/* this line's min-height is the same guard the note carries below: the target
-   resolves a beat after the tab opens, and without it the head steps down the
-   moment the URL arrives */
-#plug-base { margin: var(--s2) 0 0; font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
 .plug-note { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
 .plug-note.error { color: var(--accent); }
-/* the plugin tab: which machine, what it holds, the filter row — and then the ONE
-   list, which is the only thing that scrolls. Those four are `flex: none` so they
-   are always on screen; a list tall enough to carry its own filter row off the
-   screen is a list you cannot filter. */
+/* the plugin tab: the reload, the note, the filter row — and then the ONE list,
+   which is the only thing that scrolls. Those three are `flex: none` so they are
+   always on screen; a list tall enough to carry its own filter row off the screen
+   is a list you cannot filter. */
 #settings-pane-plugins:not(.hidden) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-.plug-head, #plug-base, .plug-note, #plug-filter { flex: none; }
+.plug-head, .plug-note, #plug-filter { flex: none; }
 .plug-mirror { flex: none; }
 .plug-body { margin-top: var(--s3); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* the filter row: the views of the ONE list, plus a box to narrow it by name. It

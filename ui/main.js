@@ -11,6 +11,9 @@ const { createTunnelLadder } = require("./tunnel-ladder");
 // the client's plugin path: the /call listener, the reverse row it answers on, and
 // the push that tells a session what this client runs (ui/plugin-link.js)
 const pluginLink = require("./plugin-link");
+// this client plugin domain: the table the plugin page installs into and the one
+// the /call listener declares from. ONE object, because two would be two truths
+const { createPluginHost } = require("./plugin-host");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -72,6 +75,19 @@ const hostCore = createHostCore({
 // declaration landing a heartbeat later is a plugin appearing in a session that
 // is already running — not a reason to make the window wait on a push. A failure
 // is a sentence in the tunnel log; the session reads "this host has no channel".
+// A write that changed THIS CLIENT plugins changed what every session is offered,
+// so the declarations are re-pushed before the answer reaches the page: a plugin
+// installed in one window is a tool the session can call in the next breath, and
+// the answer about a client write is the only place that knows a write happened.
+// A session-domain write changes nothing here (its host declares nothing to
+// itself), and a failed write changed nothing at all.
+function redeclare(res) {
+  if (res && res.ok && res.place === "client") {
+    pluginLink.refresh().catch((e) => tunnelLog(`[plugin] re-declaring failed: ${(e && e.message) || e}`));
+  }
+  return res;
+}
+
 function announcePlugins(winId, base) {
   if (!base || hostCore.backendKind(winId) !== "tunnel") return;
   pluginLink
@@ -114,10 +130,18 @@ const ladder = createTunnelLadder({
 // `ensureSupervisor` is this machine's wake: the supervisor exits when it is
 // idle, so an install onto THIS machine starts it again instead of failing with
 // "did not answer" (八 G1). The far side of a tunnel starts its own.
+// The client half of the same page: a plugin registered anywhere is held HERE,
+// by this app process, and there is no supervisor in its path at all — which is
+// why it works whatever machine the session is on (ui/components-view.js
+// clientInstall, ui/plugin-host.js).
+const pluginHost = createPluginHost({ log: tunnelLog });
+pluginLink.useHost(pluginHost);
+
 const componentsView = createComponentsView({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
   tunnelStatus: () => tunnel.tunnelStatus(),
   windowKind: (wc) => hostCore.backendKind(wc.id),
+  plugins: () => pluginHost,
   ensureSupervisor,
   log: tunnelLog,
 });
@@ -246,21 +270,21 @@ if (!app.requestSingleInstanceLock()) {
       componentsView.versions(String(name || ""), e.sender)
     );
     ipcMain.handle("components:remove", async (e, name, opts) =>
-      componentsView.remove(String(name || ""), opts || {}, e.sender)
+      redeclare(await componentsView.remove(String(name || ""), opts || {}, e.sender))
     );
     // the switch: the one write here that is reversible, so the state is sent
     // rather than a verb translated (ui/components-view.js setDisabled)
     ipcMain.handle("components:set-disabled", async (e, name, disabled) =>
-      componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender)
+      redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender))
     );
     ipcMain.handle("components:install", async (e, name) =>
-      componentsView.install(String(name || ""), e.sender, {
+      redeclare(await componentsView.install(String(name || ""), e.sender, {
         // one line at a time to the window that asked; a closed window is not an
         // error, it is a page that stopped caring
         progress: (stage) => {
           if (!e.sender.isDestroyed()) e.sender.send("components:progress", stage);
         },
-      })
+      }))
     );
 
     // the mirrors a failed fetch is retried through: a read of the list this

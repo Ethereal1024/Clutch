@@ -158,6 +158,12 @@ function parseManifest(data, source) {
   return {
     name: data.name,
     interface: typeof data.interface === "string" ? data.interface : "",
+    // WHOSE machine this component's code runs on, spelled the way the host reads
+    // it (agent/tools/catalog.py `runs_on`): "self" is the machine that runs the
+    // session, "other" is this client. It rides through the market so the page can
+    // DERIVE where an install goes instead of asking — a component's domain is a
+    // fact of its declaration, never a choice (PLUGIN_PLAN.md C7).
+    runs_on: typeof data.runs_on === "string" ? data.runs_on : "",
     version: typeof data.version === "string" ? data.version : "",
     declaration: null, // what this client will send: filled from the asset below
     declarationRef: data.declaration && typeof data.declaration === "object" ? data.declaration : null,
@@ -373,6 +379,7 @@ function checkoutComponents() {
     out.push({
       name: declaration.name,
       interface: typeof declaration.interface === "string" ? declaration.interface : "",
+      runs_on: typeof declaration.runs_on === "string" ? declaration.runs_on : "",
       declaration,
       checkout: true,
       source: path.join(REPO, entry.name),
@@ -559,6 +566,45 @@ async function artifactFor(spec, { checkout = true, mirrorFallback = null } = {}
     // no separate declaration is a legal (thinner) install
     version: installVersion(declaration || published, remote.digest),
   };
+}
+
+// The bytes of ONE published artifact, brought to THIS machine, for the domain
+// that has no other machine to ask: a client plugin is installed by this client
+// itself (ui/plugin-host.js), and `install()` there is handed a path, not a URL —
+// nothing on the far side of anything is going to fetch these bytes for us.
+//
+// The two shapes `artifactFor` returns are the two answers here: a `path` is
+// already local (a checkout, a prebuilt artifact) and needs no network at all,
+// and a `url` is downloaded ONCE into the digest-named file in the cache, so a
+// second install of the same release reads the disk. The pin is checked by
+// `downloadPinned`, which is the same gate the receiving host applies.
+async function localArtifact(file) {
+  if (!file) return null;
+  if (file.path) return file.path;
+  if (!file.url) return null;
+  const name = [file.name || "component", String(file.digest || "").slice(0, 16), file.artifact || "artifact"]
+    .filter(Boolean)
+    .join("-");
+  const dest = path.join(CACHE, name);
+  try {
+    return await downloadPinned(file.url, file.digest, dest);
+  } catch (e) {
+    // a release host that cannot be reached is retried through the mirrors this
+    // machine knows of (the same ones `fetchInstall` sends a HOST to) — the bytes
+    // still have to hash to the release's own pin, so a mirror only moves them.
+    // artifactFor already resolved that list against the caller answer, so the
+    // only list to retry here is the one it carried on the spec.
+    const prefixes = Array.isArray(file.mirrors) ? file.mirrors : [];
+    let last = e;
+    for (const prefix of Array.isArray(prefixes) ? prefixes : []) {
+      try {
+        return await downloadPinned(mirrored(prefix, file.url), file.digest, dest);
+      } catch (retry) {
+        last = retry;
+      }
+    }
+    throw last;
+  }
 }
 
 // One JSON call to a machine's component endpoints, with the timeout every
@@ -755,6 +801,72 @@ function coveredFailure(first, tried, last) {
   return `${first} — and not through ${where} either: the last one said ${last}`;
 }
 
+// ---- where a component goes ------------------------------------------------
+//
+// A declaration already answers this, and it is the ONLY thing that answers it:
+// `interface` says how the component is spoken to and `runs_on` says whose
+// machine runs it (agent/tools/catalog.py, "interface / runs_on"), and the two
+// are paired, not free:
+//
+//   interface: "plugin"        + runs_on: "other"  -> THIS CLIENT. The
+//       implementation is the app process the user is looking at (a plugin is
+//       declared to a session, never installed onto it), so its bytes live where
+//       the window lives and nowhere else.
+//   interface: "cli"/"daemon"  + runs_on: "self"   -> THE SESSION MACHINE. The
+//       host spawns it and calls it over loopback there, so its bytes have to be
+//       on the machine the session commands run on.
+//   anything else -> a contradiction, refused with a sentence. A plugin that
+//       says `self` describes an implementation the host would have to hold (the
+//       split exists so that it holds none), and a cli/daemon that says `other`
+//       names a third machine this app has no channel to.
+//
+// So there is no place for a user to choose and no place for a page to display:
+// one component, one machine, decided by the declaration and the same in every
+// session. `place` is what the install layer routes on; `error` is the refusal
+// (null when there is none), spelled as a sentence because that is what the page
+// draws.
+const PLACE_CLIENT = "client";
+const PLACE_SESSION = "session";
+
+function declaredWords(spec) {
+  const declaration = (spec && spec.declaration) || {};
+  const published = (spec && spec.published) || {};
+  // the same defaults the host parses with: a declaration that omits them is a
+  // daemon it runs itself (agent/tools/catalog.py Component)
+  const iface = String(declaration.interface || (spec && spec.interface) || published.interface || "daemon");
+  const runsOn = String(declaration.runs_on || (spec && spec.runs_on) || published.runs_on || "self");
+  return { iface, runsOn };
+}
+
+function destinationOf(spec) {
+  const name = (spec && spec.name) || "this component";
+  const { iface, runsOn } = declaredWords(spec);
+  if (iface === "plugin") {
+    if (runsOn === "other") return { place: PLACE_CLIENT, error: null };
+    return {
+      place: null,
+      error:
+        `${name} is a plugin, so its implementation is this client: its declaration has to say ` +
+        `runs_on: "other", and this one says ${JSON.stringify(runsOn)}`,
+    };
+  }
+  if (iface === "cli" || iface === "daemon") {
+    if (runsOn === "self") return { place: PLACE_SESSION, error: null };
+    return {
+      place: null,
+      error:
+        `${name} declares runs_on: "other", so its process runs on a machine that is neither this ` +
+        `client nor the machine the session runs on — there is no channel to install onto that one`,
+    };
+  }
+  return {
+    place: null,
+    error:
+      `${name} declares interface ${JSON.stringify(iface)}, which has no place here: a plugin is this ` +
+      `client and a cli/daemon is the session machine, and it is neither`,
+  };
+}
+
 // Make sure `base`'s machine holds every component this client can give it.
 // Never throws: the returned summary is what the caller logs, and components
 // that were deferred or refused simply stay absent — the host then offers no
@@ -775,6 +887,16 @@ async function ensureComponents(base, { checkout = true, sources: list = null, p
   out.errors.push(...known.errors);
   const deadline = Date.now() + budgetMs;
   for (const spec of known.specs) {
+    // the automatic pass is about ONE machine (the session machine): a component
+    // whose declaration puts it on this client is not its business, and sending
+    // those bytes here would give one implementation two homes (destinationOf).
+    // Not an error and not a deferral: nothing was asked of this machine.
+    const place = destinationOf(spec);
+    if (place.place !== PLACE_SESSION) {
+      out.skipped.push(spec.name);
+      say(`${spec.name} is not for this machine: ${place.error || "its declaration puts it on the client"}`);
+      continue;
+    }
     let file;
     try {
       file = await artifactFor(spec, { checkout });
@@ -819,9 +941,15 @@ module.exports = {
   componentSpecs,
   readManifest,
   downloadPinned,
+  localArtifact,
   checkoutArtifact,
   checkoutComponents,
   sources,
+  destinationOf,
+  declaredWords,
+  PLACE_CLIENT,
+  PLACE_SESSION,
+  manifestFor,
   hostInventory,
   hostVersions,
   hostRemove,

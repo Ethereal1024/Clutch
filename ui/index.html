@@ -64,7 +64,7 @@
     <div class="modal-box">
       <h3 id="settings-title">Settings</h3>
       <!-- three surfaces in one modal: the model this client runs, the model's
-           VOICE (which components the target machine holds / could be given),
+           VOICE (what each of the two places holds, and what can be given it),
            and the build's name plate. The tab strip is what keeps each one out
            of the others' way; ui/js/settings.js owns the switch and the About
            pane, ui/js/components-panel.js fills the second one. -->
@@ -95,8 +95,8 @@
              hand-written ~/.clutch/settings.json key, and on Android HOME is the
              app's own filesDir: neither is reachable on a phone. It is a CLIENT
              setting (this window's network, ui/net-fetch.js reads it per fetch), so
-             it is drawn above the target machine rather than among its components —
-             and it is the only door to it there is. -->
+             it is drawn above the component list rather than among its rows — and
+             it is the only door to it there is. -->
         <div class="plug-mirror">
           <label for="mirror-input">Source mirror</label>
           <div class="fs-conn-row">
@@ -111,16 +111,16 @@
                the same `role="status"` line the pane uses above the list -->
           <p id="mirror-note" class="plug-mirror-note" role="status" aria-live="polite"></p>
         </div>
+        <!-- no machine is named here, and none is offered: WHERE a component goes
+             is a fact of its declaration (ui/components.js destinationOf), the same
+             one in every session, so there is nothing to choose and nothing to
+             report. The rows carry the only machine-dependent fact there is —
+             whether the place that would receive the bytes can be reached. -->
         <div class="plug-head">
-          <div class="plug-target">
-            <span class="plug-target-label">target machine</span>
-            <span id="plug-target" class="plug-target-name">…</span>
-          </div>
           <!-- the label is a glyph (↻), which reads as nothing: the button carries
                the words its title spells out -->
-          <button id="plug-reload" class="ghost" type="button" aria-label="re-read the target machine and the market" title="re-read the target machine and the market">↻</button>
+          <button id="plug-reload" class="ghost" type="button" aria-label="read the components and the market again" title="read the components and the market again">↻</button>
         </div>
-        <p id="plug-base" class="plug-base"></p>
         <!-- the page's one status line: reads in flight, and the verdict on a write
              whose row is gone. It is announced as it changes (`role="status"`), the
              way #notice is. -->

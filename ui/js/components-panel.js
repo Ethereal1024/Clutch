@@ -1,43 +1,50 @@
-// the plugin tab: which machine this window is working with, what that machine
-// holds, and what this client could give it
+// the plugin tab: what the two places hold, and what this client can still give
+// them
 //
-// Three facts, drawn as they arrive (ui/components-view.js answers them over the
-// clutchComponents channel):
-//   * the TARGET — the machine's SUPERVISOR, not the session API the rest of the
-//     UI talks to (a session child serves no /api/components). Local, or the far
-//     side of a tunnel; ui/main.js resolves which one, this file only names it.
-//   * what that machine HOLDS, from its own inventory.
+// There is no machine picker here, and no machine named, because there is nothing
+// to pick: WHERE a component goes is a fact of its declaration (`destinationOf`
+// in ui/components.js) — a plugin is THIS client (the app process holds it and
+// runs it), a cli/daemon is the machine the session runs its commands on — and
+// that answer is the same in every session. A page that offered the choice would
+// be asking the user to learn a rule it already knows, and a page that printed
+// the answer would spend a line on a fact nobody can act on.
+//
+// What is left to say is what the page can observe (ui/components-view.js answers
+// all of it over the clutchComponents channel):
+//   * what each place HOLDS, from its own inventory: the session machine over its
+//     supervisor, this client from its plugin domain. Each half can fail on its
+//     own and says so in its own words.
 //   * the MARKET this client knows: the checkouts beside the host repo plus every
 //     release manifest its source list names.
 //
-// A read that failed is DATA here, never a blank page: the supervisor that did
-// not answer and the source that did not answer are both drawn as the reason
-// they did not. "No plugins exist" and "the network ate the answer" look exactly
-// alike in an empty list, and that is the one reading this page must not give.
+// A read that failed is DATA here, never a blank page: a place that did not
+// answer is drawn as the reason it did not. "Nothing is installed" and "the
+// machine could not be asked" look exactly alike in an empty list, and that is
+// the one reading this page must not give.
 //
 // Three writes this page can perform, offered according to what each one costs
-// (PLUGIN_PLAN.md I5). Every button names WHICH machine it acts on, the
+// (PLUGIN_PLAN.md I5). A sentence that has to say WHERE says which of the two
+// places it means ("this client", "this session") and never offers a third; the
 // confirmations say what the act actually costs (an install writes bytes over
 // whatever version is there; a removal DELETES them — neither is a rollback,
 // because nothing here keeps a copy of what it replaces or takes away), and the
-// outcome is always the host's own verdict, quoted. The switch is the one write
-// that touches no bytes and is reversible from the very control that asks for
-// it, so it asks nothing: teaching the user to click through a confirmation on a
+// outcome is always the host own verdict, quoted. The switch is the one write
+// that touches no bytes and is reversible from the very control that asks for it,
+// so it asks nothing: teaching the user to click through a confirmation on a
 // free, undoable act is how they learn to click through the two that are neither.
-// A read that failed never becomes an offer to write: an unreachable target
-// disables the controls instead of pretending the write will land.
+// A place this build cannot reach never becomes an offer to write: the control is
+// dead and its title is the sentence, instead of a button that pretends the write
+// will land.
 //
 // Load order is the contract: these are CLASSIC scripts (Electron loads the
 // renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// sees every `const`/`let`/`function` the earlier files declared. It may rely on
+// anything above it in ui/index.html and on nothing below it.
 
 "use strict";
 
 const plugBodyEl = $("#plug-body");
 const plugFilterEl = $("#plug-filter");
-const plugTargetEl = $("#plug-target");
-const plugBaseEl = $("#plug-base");
 const plugNoteEl = $("#plug-note");
 const plugReloadBtn = $("#plug-reload");
 const plugMirrorInput = $("#mirror-input");
@@ -45,9 +52,16 @@ const plugMirrorSaveBtn = $("#mirror-save");
 const plugMirrorNoteEl = $("#mirror-note");
 
 const plugState = {
-  target: null, // {kind, base} — which machine this page is about
-  held: null, // its inventory, or null while unread
-  heldError: null, // why that could not be read
+  // the list has answered once — a place that was never read is not a place that
+  // holds nothing, and this is the bit that tells the two apart
+  read: false,
+  sessionBase: "", // the session machine supervisor URL, as the view resolved it
+  sessionError: null, // why the session machine cannot be AIMED at at all
+  sessionHeldError: null, // why its own list did not arrive (the place itself is reachable)
+  client: false, // this shell holds a client plugin domain
+  clientError: null, // why that domain cannot be aimed at (or why it would not open)
+  clientHeldError: null, // why its own list did not arrive
+  held: [], // the rows BOTH places hold, each tagged with its own `place`
   market: null, // {entries, errors, sources}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
@@ -66,20 +80,55 @@ const plugState = {
   query: "", // the name filter, as typed (never persisted)
 };
 
-// The machine this page is about, named the way the rest of the UI names it: the
-// SSH host this window is connected to when one is saved, else this machine. The
-// URL below it is the authority — a name is a label, never the target.
-function plugTargetName(target) {
-  if (!target) return "…";
-  if (target.kind !== "remote") return "Local (this machine)";
-  const host = localStorage.getItem("clutch_ssh_host");
-  const user = localStorage.getItem("clutch_ssh_user");
-  const port = localStorage.getItem("clutch_ssh_port");
-  // per-window, like every reader of the session URL: localStorage is shared by
-  // every window in the process (js/backend-lifecycle.js)
-  const connected = sessionStorage.getItem("clutch_api_url") && localStorage.getItem("clutch_ssh_connected");
-  const label = host ? `${user ? user + "@" : ""}${host}${port ? ":" + port : ""}` : "the tunneled machine";
-  return `SSH ${label}${connected ? " ✓" : ""}`;
+// Where ONE row bytes live, in the two words the declaration speaks. This is not
+// a field and not a choice: `destinationOf` (ui/components.js) derives it from the
+// declaration, so it is the same in every session and there is no third value to
+// offer. The page says it only inside a sentence that would otherwise be about
+// nothing ("removed from where?"), never as a heading a user has to read.
+function plugPlace(item) {
+  const place = item && item.place;
+  if (place === "client") return "this client";
+  if (place === "session") return "this session";
+  return "";
+}
+
+// Whether the place a row names can be reached BY THIS BUILD right now, as a
+// sentence, or null when it can. This is the whole of what used to be a machine
+// selector: a plugin is held by the app process itself (always here, or this
+// shell has no plugin domain at all), and a cli/daemon is held by the machine the
+// session runs its commands on — out of reach exactly when that domain did not
+// answer, because a degraded session runs its tools over an exec bridge, and an
+// exec bridge is not a component channel.
+function plugPlaceReady(place) {
+  if (place === "client") {
+    return plugState.client
+      ? null
+      : plugState.clientError || "this shell has no client plugin domain, so a plugin has nowhere to go here";
+  }
+  if (place === "session") {
+    if (!plugState.read) {
+      return "the components have not been read yet — nothing is sent to a place this page has not found";
+    }
+    return plugState.sessionError || null;
+  }
+  return "this component declares no place, so there is no machine that could receive it";
+}
+
+// Whether a place that CAN be written to simply did not tell us what it holds.
+// This is not a refusal: a supervisor that answers writes but not an inventory is
+// a place with an unseen shelf, and the page says which of the two it is instead
+// of killing a write it could make (the host still decides what a name means).
+function plugHeldError(place) {
+  if (place === "client") return plugState.clientHeldError || null;
+  if (place === "session") return plugState.sessionHeldError || null;
+  return null;
+}
+
+// The one sentence a row needs when its place is unknown: either the place cannot
+// be reached at all, or it answered without its list. Both leave the row unsaid
+// and neither is "not installed".
+function plugPlaceUnknown(place) {
+  return plugPlaceReady(place) || plugHeldError(place);
 }
 
 function plugChip(text, cls) {
@@ -140,7 +189,7 @@ function plugDescribeTree(el, id) {
 // i.e. one line, cut short; the version/rating counts beside the name are the only
 // numbers the row shows). Here it goes on the row's own `title=`, which is the one
 // place a summary can be complete without being drawn — and into the Versions
-// disclosure, which is the machine's own answer, not ours.
+// disclosure, which is the holding place's own answer, not ours.
 //
 // `desc` is the row's one sentence (`plugItemDesc`), drawn in a quieter voice and
 // cut to one line; a row that names a version instead of a component (a version
@@ -151,7 +200,7 @@ function plugDescribeTree(el, id) {
 // host's verdict on the last one — and it is drawn here rather than in the page's
 // note line, because a status with no row in it belongs to no component: the user
 // has to find which of ten rows the sentence is about. It may also colour the row
-// itself (`state.row`), which is how "this machine holds it but is not driving
+// itself (`state.row`), which is how "this place holds it but is not driving
 // it" is said without a second block of text (VS Code: `.disabled` on the row,
 // extensionsList.ts:185-191).
 function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra = null, state = null, title = "", role = "" } = {}) {
@@ -264,11 +313,12 @@ function plugSection(title, meta, rows, empty) {
   return sec;
 }
 
-// The whole list model, and the reason there is only one list: the machine's
-// inventory and the market this client knows are joined BY NAME, so a component
-// that is both held and offered is ONE row. The user never lines up two sections
-// to learn whether something is installed (PLUGIN_UI_PLAN.md, "the panel is about
-// exactly one machine").
+// The whole list model, and the reason there is only one list: both
+// inventories (the session machine's and this client's) and the market this
+// client knows are joined BY NAME, so a component held in EITHER place and
+// offered is ONE row. The user never lines up two sections to learn whether
+// something is installed, and a row held in one place and offered for the other
+// says both, which is exactly how the declaration is meant to read.
 function plugModel() {
   const byName = new Map();
   const order = [];
@@ -280,14 +330,20 @@ function plugModel() {
     return byName.get(name);
   };
   // the client's known set first (that is the order a user scans), then anything
-  // the machine holds that no source this client reads offers
+  // either place holds that no source this client reads offers
   for (const e of plugState.market ? plugState.market.entries : []) slot(e.name).entry = e;
-  for (const h of plugState.held || []) slot(h.name).held = h;
+  for (const h of plugState.held || []) {
+    const cell = slot(h.name);
+    // ONE name has ONE place (the declaration says which), so when both domains
+    // hold the same name the row is the one the declaration names and the other is
+    // a leftover this page will not install over
+    if (!cell.held || (cell.entry && h.place === cell.entry.place)) cell.held = h;
+  }
   return order.map((n) => byName.get(n));
 }
 
-// The five views of the ONE list. A view is a way of LOOKING at what the machine
-// holds and what this client knows, not a fact about either: nothing here is
+// The five views of the ONE list. A view is a way of LOOKING at what the two
+// places hold and what this client knows, not a fact about either: nothing here is
 // asked of the host, and nothing here is written down (a filter that survived a
 // reload would be a second copy of a state the page does not own).
 const PLUG_FILTERS = [
@@ -353,7 +409,7 @@ function plugFilterRow() {
     btn.type = "button";
     btn.textContent = label;
     btn.setAttribute("aria-pressed", String(id === plugState.filter));
-    btn.title = `show only ${label.toLowerCase()} of what this machine holds and this client knows`;
+    btn.title = `show only ${label.toLowerCase()} of what the two places hold and this client knows`;
     // the count sits beside the label, in the same voice as the title's counts:
     // "Updates 2" is a reason to click, "Updates" alone is not
     const count = document.createElement("span");
@@ -411,27 +467,33 @@ function plugItemChips(item) {
   return chips;
 }
 
-// The row's ONE line: what this component's relationship to the target machine is,
+// The row's ONE line: what this component's relationship to the place it names is,
 // in one sentence. VS Code's list gives the description line the same job — one
 // line, cut short (`extensionsList.ts:167-170`, `.description.ellipsis`) — and it
 // is the row's only prose because everything else a row could say (digest, source,
-// path, the versions it holds) is either the machine's own answer in the Versions
+// path, the versions it holds) is either the holding place's own answer in the Versions
 // disclosure or one of the facts below.
 function plugItemDesc(item) {
   const held = item.held;
   const entry = item.entry;
-  if (held && held.disabled) return "held on this machine, but not driven: its tools are not offered here";
+  const where = plugPlace(entry || held);
+  if (held && held.disabled) return `held on ${where}, but not driven: its tools are not offered here`;
   if (held && entry) {
     return plugItemUpdate(item)
       ? `installed — this client offers ${entry.version || "another version"}`
       : "installed — nothing newer is offered here";
   }
   if (held) return "installed — no source this client reads offers it";
-  if (entry && plugState.held === null) {
-    // the machine could not be read at all: "unknown" is a fact, not an empty list
-    return "on this machine: unknown";
+  // a declaration that names no place (or names a pair that cannot exist) is
+  // refused before any byte is built, and its own sentence is the row's line
+  if (entry && entry.problem) return entry.problem;
+  if (entry && plugPlaceUnknown(entry.place)) {
+    // the place was not read, cannot be reached, or answered without its list:
+    // "unknown" is a fact, not an empty list — and it is the one thing that
+    // explains a dead Install beside us
+    return `on ${where}, unknown`;
   }
-  return "not installed here";
+  return "not installed";
 }
 
 // The facts that answer "what exactly is this row about", for the row's `title=`
@@ -449,10 +511,19 @@ function plugItemMeta(item) {
     if (held.digest) meta.push("digest " + String(held.digest).slice(0, 16));
     if (held.disabled) meta.push("stopped");
     if (held.interface) meta.push(held.interface);
-  } else if (plugState.held === null && plugState.heldError) {
-    meta.push("what this machine holds could not be read: " + plugState.heldError);
   }
   if (entry) {
+    // the one placement fact a row has: which of the two places its declaration
+    // names. It is not a choice and not a field — it is what the row IS
+    const place = plugPlace(entry);
+    if (place) meta.push("goes to " + place);
+    if (entry.problem) meta.push("refused: " + entry.problem);
+    if (!held) {
+      // a place that could not be read, or one this build cannot reach, is why the
+      // Install beside this row is dead — the tooltip says it in full
+      const refuse = plugPlaceUnknown(entry.place);
+      if (refuse) meta.push(refuse);
+    }
     meta.push(`offered ${entry.version || "at an unnamed version"} (${entry.origin}${entry.interface ? ", " + entry.interface : ""})`);
     if (entry.published && entry.published.version) {
       // a checkout this client can archive, with the release under it: the release
@@ -472,8 +543,8 @@ function plugItemMeta(item) {
 // (`UpdateAction.computeAndUpdateEnablement()`, `:990-1010`) and the switch (Enable
 // / Disable, in the Manage menu, `ManageExtensionAction.getActionGroups()`,
 // `:1371-1405`) otherwise. Nothing else about the row is expressed by its lead
-// button: a component this client can offer leads with the write that puts it on
-// the machine, and only the machine holds it -> the switch.
+// button: a component this client can offer leads with the write that puts it in
+// the place its declaration names, and a row already held there -> the switch.
 function plugItemLead(item) {
   if (item.entry && !item.held) return "install";
   if (item.held && item.entry && plugItemUpdate(item)) return "update";
@@ -502,7 +573,7 @@ function plugItemActions(item) {
   const secondary = plugItemMenuItems(item, lead);
   if (secondary.length) {
     const menu = plugMenu(secondary);
-    actions.push(plugMoreButton(item.name, menu), menu);
+    actions.push(plugMoreButton(item, menu), menu);
   }
   return actions;
 }
@@ -511,14 +582,14 @@ function plugItemActions(item) {
 // (unless the switch IS what the row leads with), then the write this client can
 // still make (the same release again — the "Reinstall" an installed component
 // keeps in its menu, the way VS Code keeps "Install Another Version…" in the
-// Manage menu, extensionsActions.ts:1338-1405), then the versions the machine
+// Manage menu, extensionsActions.ts:1338-1405), then the versions the place
 // holds, then the removal, which is the one write that DELETES and is exactly why
 // it is never the button a row leads with (PLUGIN_PLAN.md I5). The comparison is
 // by KIND and not by node: the items are built here, so identity would say
 // "different" about two buttons that are the same control.
 function plugItemMenuItems(item, lead) {
   const items = [];
-  if (!item.held) return items; // a component this machine does not hold has nothing else to offer
+  if (!item.held) return items; // a component neither place holds has nothing else to offer
   if (lead !== "switch") items.push(plugSwitchButton(item.held));
   if (item.entry && lead !== "install" && lead !== "update") items.push(plugInstallButton(item.entry));
   items.push(plugVersionsButton(item.held), plugRemoveButton(item.held));
@@ -538,17 +609,20 @@ function plugMenu(items) {
 }
 
 // The "…" itself: never a write, so it is live whenever the row is, and its title
-// says the two things its label cannot — which component, and on which machine.
-// The label is a GLYPH, which reads as "…" and nothing else, so the button carries
-// the name it means; and because what it opens is drawn once and shown by a class,
-// its expanded state is said out loud rather than only drawn.
-function plugMoreButton(name, menu) {
+// says the two things its label cannot — which component, and which of the two
+// places the row is about. The label is a GLYPH, which reads as "…" and nothing
+// else, so the button carries the name it means; and because what it opens is
+// drawn once and shown by a class, its expanded state is said out loud rather than
+// only drawn.
+function plugMoreButton(item, menu) {
+  const name = item.name;
+  const where = plugPlace(item.held || item.entry);
   const btn = document.createElement("button");
   btn.className = "plug-more";
   btn.type = "button";
   btn.textContent = "…";
-  btn.title = `everything else ${name} can do on ${plugTargetName(plugState.target)}`;
-  btn.setAttribute("aria-label", `more actions for ${name} on ${plugTargetName(plugState.target)}`);
+  btn.title = `everything else ${name} can do on ${where}`;
+  btn.setAttribute("aria-label", `more actions for ${name} on ${where}`);
   btn.setAttribute("aria-haspopup", "true");
   btn.setAttribute("aria-controls", menu.id);
   btn.setAttribute("aria-expanded", String(menu.classList.contains("open")));
@@ -648,36 +722,54 @@ function plugItemState(item) {
   return { text: "", cls: "", row: row.join(" ") };
 }
 
-// What "nothing to draw" means here. A machine that could not be read is NOT a
-// machine holding nothing: an empty list and an unanswered read must not look
+// What "nothing to draw" means here. A place that could not be read is NOT a place
+// holding nothing: an empty list and an unanswered read must not look
 // alike (a failed read is data on this page). And a filter that hides every row
-// is a third thing again — the machine does hold components, this view is simply
+// is a third thing again — the places do hold components, this view is simply
 // not showing them.
 function plugEmptyText(known, shown) {
-  if (plugState.held === null && plugState.market === null) {
-    const why = plugState.heldError || plugState.marketError;
+  if (!plugState.read && plugState.market === null) {
+    const why = plugReadProblem();
     return why ? "could not be read — " + why : "reading…";
   }
   if (known && !shown) return "no component here matches this filter";
-  return "no component is installed on it or known to this client";
+  return "nothing is installed in either place, and no source this client reads offers anything";
 }
 
-// The one list. Its title is the MACHINE this window is acting on — not "On this
-// machine", which lies the moment the target is the far side of a tunnel — and
-// its counts say how much of the list the machine already holds.
+// The page own read failures, in the order they explain an empty or short list:
+// the session machine (the place a cli/daemon lives, and the one out of reach in a
+// degraded session), then this client plugin domain, then the market. A row that
+// needs the missing half says the same sentence in its own title; this is the one
+// line under the list, so a page WITH rows in it still says what it could not see.
+function plugReadProblem() {
+  return (
+    plugState.sessionError ||
+    plugState.sessionHeldError ||
+    plugState.clientError ||
+    plugState.clientHeldError ||
+    plugState.marketError ||
+    null
+  );
+}
+
+// The one list. It is not titled with a machine, because there is no single
+// machine this window acts on: some of what it holds belongs to this client and
+// some to the session machine, and WHICH is which is a fact of each row
+// declaration, not of the page. The counts say how much of the list is held
+// somewhere, and how much of it the market offers.
 function plugList() {
   const items = plugModel();
   const shown = items.filter(plugItemShown);
   const meta = [];
-  if (plugState.held !== null) meta.push(`${plugState.held.length} installed`);
-  else if (plugState.heldError) meta.push("inventory unreadable");
+  if (plugState.read) meta.push(`${plugState.held.length} installed`);
+  else meta.push("reading");
   if (plugState.market) meta.push(`${plugState.market.entries.length} known`);
   else if (plugState.marketError) meta.push("market unreadable");
-  // a filtered list says so: the count behind the title is about the machine,
+  // a filtered list says so: the count behind the title is about both places,
   // this one about what is on screen
   if (shown.length !== items.length) meta.push(`${shown.length} shown`);
   const sec = plugSection(
-    plugTargetName(plugState.target),
+    "Components",
     meta.join(" · "),
     shown.map(plugItemRow),
     plugEmptyText(items.length, shown.length)
@@ -685,7 +777,7 @@ function plugList() {
   if (plugState.market && plugState.market.entries.length) {
     const caution = document.createElement("p");
     caution.className = "plug-caution";
-    caution.textContent = "install writes bytes on the target machine and Remove deletes them — neither is a rollback, since nothing here keeps a copy of what it replaces or takes away (the switch is the third write: it deletes nothing, and pressing it again is the undo)";
+    caution.textContent = "install writes bytes where the declaration puts them, and Remove deletes them — neither is a rollback, since nothing here keeps a copy of what it replaces or takes away (the switch is the third write: it deletes nothing, and pressing it again is the undo)";
     sec.appendChild(caution);
   }
   // a source that did not answer explains a short list: one line each, together
@@ -722,9 +814,9 @@ function plugList() {
 // ---- the mirrors -----------------------------------------------------------
 //
 // Where a fetch the release host cannot answer is retried (ui/mirrors.js). The
-// retry happens on the MACHINE the install is aimed at — its own fetch of the
+// retry happens on the PLACE the install is aimed at — its own fetch of the
 // bytes is the one that failed (ui/components.js fetchInstall) — so this section
-// owns one thing only: the LIST as this machine reads it, which is why it is one
+// owns one thing only: the LIST as this client reads it, which is why it is one
 // more read beside the inventory and the market and not a setting of its own.
 //
 // A shipped entry carries no Remove: it is what the fallback is made of, and a
@@ -811,13 +903,13 @@ function plugMirrors() {
       ? "no mirror is tried: this build ships none and none was added"
       : "reading the list…";
   const sec = plugSection("Mirrors", meta, list.map(plugMirrorRow), empty);
-  // what a mirror IS here, and what it cannot do: the target machine fetches the
-  // same pinned bytes through each one, and the digest is still the release's own
-  // pin — a mirror can move the bytes, it can never vouch for them
+  // what a mirror IS here, and what it cannot do: the place a component goes to
+  // fetches the same pinned bytes through each one, and the digest is still the
+  // release own pin — a mirror can move the bytes, it can never vouch for them
   const note = document.createElement("p");
   note.className = "plug-mirrors-note";
   note.textContent =
-    "tried in this order when a release host cannot be reached — the target machine fetches the same pinned " +
+    "tried in this order when a release host cannot be reached — the place a component goes to fetches the same pinned " +
     "bytes through each one and weighs them against the release's own digest, so a mirror can move the bytes " +
     "but never vouch for them";
   sec.appendChild(note);
@@ -879,8 +971,8 @@ function plugBusyLabel(busy, fallback) {
 // It lives on the held row because that is the row whose fact it changes, and it
 // is offered with the least ceremony of the three writes — it deletes nothing and
 // its own label is the undo, so there is no question to ask. What it must still
-// say is what the user cannot see: which machine is being switched, and that the
-// bytes are not what moves.
+// say is what the user cannot see: which of the two places is being switched, and
+// that the bytes are not what moves.
 function plugSwitchButton(held) {
   const busy = plugState.busy && plugState.busy.name === held.name;
   const stopped = Boolean(held.disabled);
@@ -888,21 +980,25 @@ function plugSwitchButton(held) {
   btn.className = "plug-switch" + (stopped ? " stopped" : "");
   btn.type = "button";
   btn.textContent = busy ? plugBusyLabel(plugState.busy, stopped ? "Starting…" : "Stopping…") : stopped ? "Enable" : "Disable";
-  if (!plugState.target || !plugState.target.base) {
+  const refuse = plugPlaceReady(held.place);
+  const where = plugPlace(held);
+  if (refuse) {
+    // the place that holds it cannot be reached from here: the sentence, not a
+    // button that pretends the write would land
     btn.disabled = true;
-    btn.title = "no supervisor URL for the target machine yet";
+    btn.title = refuse;
   } else if (!window.clutchComponents || !window.clutchComponents.setDisabled) {
     // a shell without the verb must not draw a control that looks like one
     btn.disabled = true;
-    btn.title = "this shell cannot switch components on a machine";
+    btn.title = "this shell cannot switch components at all";
   } else if (plugState.busy) {
     btn.disabled = true;
     btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else if (stopped) {
-    btn.title = `drive ${held.name} on ${plugTargetName(plugState.target)} again — its bytes stay where they are`;
+    btn.title = `drive ${held.name} on ${where} again — its bytes stay where they are`;
   } else {
     btn.title =
-      `stop ${plugTargetName(plugState.target)} driving ${held.name} — it stays installed and listed, ` +
+      `stop ${where} driving ${held.name} — it stays installed and listed, ` +
       "its tools are no longer offered, and nothing is deleted";
   }
   btn.addEventListener("click", () => plugSwitch(held));
@@ -911,34 +1007,35 @@ function plugSwitchButton(held) {
 
 // The reverse verb for one installed component: the row IS the thing that can
 // go, so the control lives beside it and names it. Same discipline as the
-// install control — it is dead while the machine is unknown (which machine would
-// lose the bytes is exactly what must not be guessed) and while any write is in
-// flight, and its title says what it would take off where.
+// install control — it is dead while the place that holds it cannot be reached
+// (which place would lose the bytes is exactly what must not be guessed) and while
+// any write is in flight, and its title says what it would take off where.
 function plugRemoveButton(held) {
   const busy = plugState.busy && plugState.busy.name === held.name;
   const btn = document.createElement("button");
   btn.className = "plug-remove";
   btn.type = "button";
   btn.textContent = busy ? plugBusyLabel(plugState.busy, "Removing…") : "Remove";
-  if (!plugState.target || !plugState.target.base) {
+  const refuse = plugPlaceReady(held.place);
+  if (refuse) {
     btn.disabled = true;
-    btn.title = "no supervisor URL for the target machine yet";
+    btn.title = refuse;
   } else if (plugState.busy) {
     btn.disabled = true;
     btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else {
     const version = held.version ? " " + held.version : "";
-    btn.title = `remove ${held.name}${version} from ${plugTargetName(plugState.target)}`;
+    btn.title = `remove ${held.name}${version} from ${plugPlace(held)}`;
   }
   btn.addEventListener("click", () => plugRemove(held));
   return btn;
 }
 
 // The disclosure for one held row: what every version of this component looks
-// like ON THE MACHINE that holds it. It is a READ, not a write — so it is never
+// like IN THE PLACE that holds it. It is a READ, not a write — so it is never
 // dead behind a write in flight (the reload is not either), and what it opens is
-// the machine's own answer, kept only as long as the block is open: this page
-// keeps no second copy of a machine's truth (frozen decision 3).
+// the place's own answer, kept only as long as the block is open: this page
+// keeps no second copy of a place's truth (frozen decision 3).
 function plugVersionsButton(held) {
   const open = Boolean(plugState.versions && plugState.versions.name === held.name);
   const reading = plugState.versionsPending === held.name;
@@ -950,22 +1047,23 @@ function plugVersionsButton(held) {
   // list under the row, and its own label flips with it — `aria-expanded` is the
   // same fact for a reader who cannot see the list appear
   btn.setAttribute("aria-expanded", String(open));
-  if (!plugState.target || !plugState.target.base) {
+  const refuse = plugPlaceReady(held.place);
+  if (refuse) {
     btn.disabled = true;
-    btn.title = "no supervisor URL for the target machine yet";
+    btn.title = refuse;
   } else if (!window.clutchComponents || !window.clutchComponents.versions) {
     // a shell without the verb must not draw a control that looks like one
     btn.disabled = true;
-    btn.title = "this shell cannot read the versions a machine holds";
+    btn.title = "this shell cannot read a version list at all";
   } else if (reading) {
     btn.disabled = true;
-    btn.title = `reading the versions of ${held.name} on ${plugTargetName(plugState.target)}…`;
+    btn.title = `reading the versions of ${held.name} on ${plugPlace(held)}…`;
   } else if (open) {
     btn.title = `close the version list for ${held.name}`;
   } else {
     btn.title =
-      `every version of ${held.name} that ${plugTargetName(plugState.target)} holds, newest first — ` +
-      "the marked one is what that machine runs";
+      `every version of ${held.name} that ${plugPlace(held)} holds, newest first — ` +
+      "the marked one is what that place runs";
   }
   btn.addEventListener("click", () => plugVersionsToggle(held));
   return btn;
@@ -989,7 +1087,7 @@ function plugVersionRows(held) {
     box.appendChild(el);
   };
   if (reading) {
-    line("reading the versions this machine holds…");
+    line("reading the versions held there…");
     return box;
   }
   if (state.error) {
@@ -1006,7 +1104,7 @@ function plugVersionRows(held) {
     const version = String(record.version || "no version");
     const chips = [];
     if (record.disabled) chips.push(["stopped", "warn"]);
-    chips.push([record.resolved ? "this machine runs it" : "held beside it", record.resolved ? "accent" : ""]);
+    chips.push([record.resolved ? "this one is run" : "held beside it", record.resolved ? "accent" : ""]);
     const lines = [record.digest ? "digest " + String(record.digest).slice(0, 16) : ""];
     if (record.path) lines.push("at " + record.path);
     box.appendChild(
@@ -1017,7 +1115,7 @@ function plugVersionRows(held) {
 }
 
 // The removal of ONE version. Same discipline as the whole-component one — dead
-// while the machine is unknown or another write is flying, and asking first —
+// while the place cannot be read or another write is flying, and asking first —
 // but its title and its question name the version, because that is the ONLY
 // thing it takes: the versions beside it stay. The host still decides what a
 // name and version mean (a version not installed is a refusal, not "absent"),
@@ -1029,24 +1127,25 @@ function plugRemoveOneButton(held, record) {
   btn.className = "plug-remove plug-remove-one";
   btn.type = "button";
   btn.textContent = busy ? plugBusyLabel(plugState.busy, "Removing…") : "Remove";
-  if (!plugState.target || !plugState.target.base) {
+  const refuse = plugPlaceReady(held.place);
+  if (refuse) {
     btn.disabled = true;
-    btn.title = "no supervisor URL for the target machine yet";
+    btn.title = refuse;
   } else if (plugState.busy) {
     btn.disabled = true;
     btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else {
-    btn.title = `remove ${held.name} ${version} from ${plugTargetName(plugState.target)} — the versions beside it stay`;
+    btn.title = `remove ${held.name} ${version} from ${plugPlace(held)} — the versions beside it stay`;
   }
   btn.addEventListener("click", () => plugRemoveVersion(held, record));
   return btn;
 }
 
 // The install control for one market row. The label is derived from what the
-// target already holds, the way VS Code derives it from the gallery
+// place that row goes to already holds, the way VS Code derives it from the gallery
 // (`UpdateAction.computeAndUpdateEnablement()`, extensionsActions.ts:990-1010
 // relabels Install to Update when the gallery has a newer version): an offered
-// version this machine does not hold under that name installs, a different
+// version neither place holds under that name installs, a different
 // release under a name it DOES hold is an update, and the same release again is a
 // reinstall (the same bytes rewritten). While any write runs every button is dead
 // — one write at a time, and the page can always name which one.
@@ -1057,46 +1156,50 @@ function plugInstallButton(entry) {
   const same = Boolean(held) && heldRelease === offered;
   const newer = Boolean(held) && !same;
   const busy = plugState.busy && plugState.busy.name === entry.name;
+  const where = plugPlace(entry);
   const btn = document.createElement("button");
   btn.className = "plug-install";
   btn.type = "button";
   btn.textContent = busy ? plugBusyLabel(plugState.busy, "Installing…") : same ? "Reinstall" : newer ? "Update" : "Install";
-  if (!plugState.target) {
+  // two refusals, and neither is a machine to pick: a declaration that names no
+  // place (or names a pair that cannot exist) is refused by the view before any
+  // byte is built, and a place this build cannot reach is a sentence rather than a
+  // button that would fail after the click
+  const refuse = entry.problem || plugPlaceReady(entry.place);
+  if (refuse) {
     btn.disabled = true;
-    // the target is unresolvable (the read is still running, or it failed):
-    // which machine would receive the bytes is exactly what must not be guessed
-    btn.title = "the target machine has not been read yet — nothing may be sent before it is";
-  } else if (!plugState.target.base) {
-    // a tunnel with no supervisor URL is no machine yet: no button may imply a write
-    btn.disabled = true;
-    btn.title = "no supervisor URL for the target machine yet";
+    btn.title = refuse;
   } else if (plugState.busy) {
     btn.disabled = true;
     btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else if (same) {
-    btn.title = `this machine already holds ${entry.name} ${held.version}`;
+    btn.title = `${where} already holds ${entry.name} ${held.version}`;
   } else if (newer) {
     btn.title =
-      `put ${entry.name} ${offered} on ${plugTargetName(plugState.target)} — ` +
+      `put ${entry.name} ${offered} on ${where} — ` +
       `it holds ${held.version} now, and the older one is replaced, not kept`;
-  } else if (plugState.held === null) {
-    btn.title = "what this machine holds could not be read; the host still decides";
+  } else if (plugHeldError(entry.place)) {
+    // the place is reachable and its shelf is unseen: the write is still the
+    // place's to accept or refuse, and the title says which of the two this is
+    btn.title = `what ${where} holds could not be read; the host still decides`;
   } else {
-    btn.title = `install ${entry.name} on ${plugTargetName(plugState.target)}`;
+    btn.title = `install ${entry.name} on ${where}`;
   }
   btn.addEventListener("click", () => plugInstall(entry));
   return btn;
 }
 
-// Where an in-flight install is, in words the user can act on: the two slow
-// steps differ in kind (building bytes off a local checkout and sending them over
-// the tunnel, vs the target machine fetching its own copy), and the two host
-// verdicts differ in what they cost.
+// Where an in-flight install is, in words the user can act on. The slow steps
+// differ in kind, and the two domains differ in ALL of them: a session install
+// either ships bytes over the tunnel or has the far machine fetch its own, while a
+// client install never leaves this machine (its bytes are already here, or arrive
+// as a release, and the app process lays them down). The stage names the place it
+// belongs to, because that is the only sentence the two shapes do not share.
 function plugStageLine(busy) {
-  const where = plugTargetName(plugState.target);
+  const where = plugPlace(busy) || "…";
   if (busy.verb === "remove") return `removing ${busy.name}${busy.version ? " " + busy.version : ""} from ${where}…`;
   // the switch is the one write with no bytes to build or send: it has one stage
-  // and one machine, and the sentence says which way it is going
+  // and one place, and the sentence says which way it is going
   if (busy.verb === "disable") return `stopping ${busy.name} on ${where}…`;
   if (busy.verb === "enable") return `driving ${busy.name} on ${where} again…`;
   switch (busy.stage) {
@@ -1105,6 +1208,11 @@ function plugStageLine(busy) {
       // starts it again: this is the slow first start (the binary unpacks), not a
       // step of the install itself
       return `${where} is starting its supervisor…`;
+    case "copy":
+      // a plugin install has no tunnel and no supervisor in its path: the bytes are
+      // brought onto this machine (a checkout is already here, a release is fetched
+      // once into the digest-named cache) and the app process lays them down itself
+      return `bringing ${busy.name} ${busy.version || ""} onto ${where}…`.replace("  ", " ");
     case "artifact":
       return `preparing the bytes for ${busy.name}…`;
     case "upload":
@@ -1162,10 +1270,10 @@ function plugRemoveResult(held, res, where) {
 // The host's verdict on the switch, in the host's words. Nothing is destroyed
 // here, so there is no cost to recite — but one fact must not be blurred: a
 // stopped component is still HELD, its bytes are where they were, its row stays
-// on this page, and the only thing that changed is whether this machine offers
+// on this page, and the only thing that changed is whether this place offers
 // its tools. "absent" is an ANSWER, not a failure: the request was already true
-// on that machine, so there was nothing there to stop or start — which usually
-// means the switch was aimed at a machine that does not hold the component at
+// in that place, so there was nothing there to stop or start — which usually
+// means the switch was aimed at a place that does not hold the component at
 // all, and the page has to say so instead of reporting a phantom success.
 function plugSwitchResult(held, res, where) {
   if (!res || !res.ok) {
@@ -1189,19 +1297,19 @@ function plugSwitchResult(held, res, where) {
 // harder thing: these bytes are DELETED, and this page keeps no copy to put back.
 async function plugRemove(held) {
   const api = window.clutchComponents;
-  if (!api || !api.remove || plugState.busy || !plugState.target || !plugState.target.base) return;
-  const where = plugTargetName(plugState.target);
+  if (!api || !api.remove || plugState.busy || plugPlaceReady(held.place)) return;
+  const where = plugPlace(held);
   const version = held.version ? " " + held.version : "";
   const go = await askConfirm({
     title: `Remove ${held.name}?`,
     text:
-      `${held.name}${version} is deleted from ${where}'s component directory, together with any other version of it that machine holds.` +
+      `${held.name}${version} is deleted from the component directory on ${where}, together with any other version of it held there.` +
       " This cannot be undone from here: nothing in this app keeps a copy of what it removes," +
       " so putting it back means installing it again from a source.",
     ok: "Remove",
   });
   if (!go) return;
-  plugState.busy = { name: held.name, verb: "remove", stage: "removing" };
+  plugState.busy = { name: held.name, verb: "remove", stage: "removing", place: held.place };
   plugState.result = null;
   renderPlugins();
   let res;
@@ -1214,7 +1322,7 @@ async function plugRemove(held) {
   plugState.busy = null;
   plugState.result = plugRemoveResult(held, res, where);
   renderPlugins();
-  // the machine's inventory just changed: read both halves back (the counts and
+  // an inventory just changed: read both halves back (the counts and
   // the rows), exactly as an install does
   if (res && res.ok) {
     plugRead();
@@ -1227,20 +1335,20 @@ async function plugRemove(held) {
 // DELETED and nothing here keeps a copy (I5).
 async function plugRemoveVersion(held, record) {
   const api = window.clutchComponents;
-  if (!api || !api.remove || plugState.busy || !plugState.target || !plugState.target.base) return;
-  const where = plugTargetName(plugState.target);
+  if (!api || !api.remove || plugState.busy || plugPlaceReady(held.place)) return;
+  const where = plugPlace(held);
   const version = String(record.version || "");
   const go = await askConfirm({
     title: `Remove ${held.name} ${version}?`,
     text:
-      `${held.name} ${version} is deleted from ${where}'s component directory — exactly the version named;` +
+      `${held.name} ${version} is deleted from the component directory on ${where} — exactly the version named;` +
       " the versions beside it stay." +
       " This cannot be undone from here: nothing in this app keeps a copy of what it removes," +
       " so putting it back means installing it again from a source.",
     ok: "Remove",
   });
   if (!go) return;
-  plugState.busy = { name: held.name, verb: "remove", stage: "removing", version };
+  plugState.busy = { name: held.name, verb: "remove", stage: "removing", version, place: held.place };
   plugState.result = null;
   renderPlugins();
   let res;
@@ -1311,10 +1419,10 @@ function plugRefreshVersions() {
 // what it is doing and then quotes the host, including the "absent" answer.
 async function plugSwitch(held) {
   const api = window.clutchComponents;
-  if (!api || !api.setDisabled || plugState.busy || !plugState.target || !plugState.target.base) return;
-  const where = plugTargetName(plugState.target);
+  if (!api || !api.setDisabled || plugState.busy || plugPlaceReady(held.place)) return;
+  const where = plugPlace(held);
   const disabled = !held.disabled; // the state being asked for, not the one it is in
-  plugState.busy = { name: held.name, verb: disabled ? "disable" : "enable", stage: "starting" };
+  plugState.busy = { name: held.name, verb: disabled ? "disable" : "enable", stage: "starting", place: held.place };
   plugState.result = null;
   renderPlugins();
   let res;
@@ -1327,7 +1435,7 @@ async function plugSwitch(held) {
   plugState.busy = null;
   plugState.result = plugSwitchResult(held, res, where);
   renderPlugins();
-  // what this machine offers just changed: read the inventory back, so the row
+  // what this place holds just changed: read the inventory back, so the row
   // that was stopped is drawn as stopped rather than as it was a moment ago
   if (res && res.ok) {
     plugRead();
@@ -1335,7 +1443,7 @@ async function plugSwitch(held) {
   }
 }
 
-// The two mirror writes. Neither touches the target machine, so neither asks:
+// The two mirror writes. Neither installs anything anywhere, so neither asks:
 // a confirmation in front of a field the user just typed into is a second place
 // to say the same thing, and an entry added by mistake is undone by the Remove
 // on the row it creates. Both answer with the list AS IT NOW IS — the page then
@@ -1390,20 +1498,22 @@ async function plugMirrorRemove(url) {
   renderPlugins();
 }
 
-// Ask, then write. The question names the machine and states the one fact the
+// Ask, then write. The question names the place and states the one fact the
 // page must not hide (the write cannot be undone from here), and the answer is
 // either an install that was actually started or nothing at all.
 async function plugInstall(entry) {
   const api = window.clutchComponents;
-  if (!api || plugState.busy || !plugState.target || !plugState.target.base) return;
-  const where = plugTargetName(plugState.target);
+  if (!api || plugState.busy || entry.problem) return; // no place, no write
+  if (plugPlaceReady(entry.place)) return; // and no unreachable one either
+  const where = plugPlace(entry);
   const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
-  const knows = plugState.held === null ? " Whether this machine already holds it could not be read." : "";
+  const read = plugPlaceUnknown(entry.place);
+  const knows = read ? ` Whether ${where} already holds it could not be read.` : "";
   const again = held ? ` It already holds ${held.version}; installing rewrites that same version.` : "";
   const go = await askConfirm({
     title: `Install ${entry.name}?`,
     text:
-      `${entry.name}${entry.version ? " " + entry.version : ""} is written into ${where}'s component directory.` +
+      `${entry.name}${entry.version ? " " + entry.version : ""} is written into the component directory on ${where}.` +
       " It can be removed again from this page, but a removal DELETES bytes: nothing here keeps a copy," +
       " so neither act is a rollback." +
       again +
@@ -1411,7 +1521,7 @@ async function plugInstall(entry) {
     ok: "Install",
   });
   if (!go) return;
-  plugState.busy = { name: entry.name, stage: "starting" };
+  plugState.busy = { name: entry.name, stage: "starting", place: entry.place };
   plugState.result = null;
   renderPlugins();
   let res;
@@ -1425,7 +1535,7 @@ async function plugInstall(entry) {
   plugState.busy = null;
   plugState.result = plugInstallResult(entry, res, where);
   renderPlugins();
-  // the machine's inventory just changed: read it back. The market is cached
+  // an inventory just changed: read it back. The market is cached
   // (ui/components-view.js MARKET_TTL_MS), so this is one local HTTP call, not a
   // second pass over the network.
   if (res && res.ok) {
@@ -1453,14 +1563,12 @@ function plugOrphanLine() {
 
 function renderPlugins() {
   plugBodyEl.innerHTML = ""; // full redraw: one list, one state object
-  plugTargetEl.textContent = plugTargetName(plugState.target);
-  plugBaseEl.textContent = plugState.target && plugState.target.base ? plugState.target.base : "";
   // the note is the PAGE's line now, not the log of a write: what a write is doing
   // and what the host answered are drawn on the row they are about (plugItemState),
   // so what is left here is what no row can say — this page's own reads. A read
   // that failed outranks everything (it is why the list is short), then a write
   // whose row is not on screen, then a read still running.
-  const problem = plugState.heldError || plugState.marketError;
+  const problem = plugReadProblem();
   const orphan = problem ? null : plugOrphanLine();
   let note = "";
   let bad = false;
@@ -1488,15 +1596,18 @@ function renderPlugins() {
   if (window.clutchComponents.mirrors) plugBodyEl.appendChild(plugMirrors());
 }
 
-// Read all three halves, render each as it lands: the machine's own inventory is
-// one local HTTP call, the market is one per source (a release manifest, and
+// Read all three halves, render each as it lands: the two inventories are two
+// local calls, the market is one per source (a release manifest, and
 // every source is a network hop that can take its time), and the mirror list is a
 // read of two local files (ui/mirrors.js). A shell with no mirror channel — an
 // older bridge — has two reads, not three with one that never lands.
 function plugRead({ force = false } = {}) {
   const api = window.clutchComponents;
   if (!api || plugState.pending) return; // no channel, or a read already running
-  plugState.heldError = null;
+  plugState.sessionError = null;
+  plugState.sessionHeldError = null;
+  plugState.clientError = null;
+  plugState.clientHeldError = null;
   plugState.marketError = null;
   plugState.mirrorsError = null;
   const mirrors = api.mirrors ? api.mirrors() : null;
@@ -1505,15 +1616,21 @@ function plugRead({ force = false } = {}) {
   api
     .list()
     .then((r) => {
-      plugState.target = r.target;
-      // a machine that could not be read is NOT a machine holding nothing: the
-      // empty list is what the read leaves behind on failure, and drawing it as
-      // "no component installed" is exactly the reading this page must not give
-      plugState.held = r.error ? null : r.held;
-      plugState.heldError = r.error;
+      plugState.sessionBase = r.sessionBase || "";
+      // each half answers on its own, and the rows that DID arrive are drawn: a
+      // place that could not be read is not a place holding nothing, and an empty
+      // list is exactly the reading this page must not give
+      plugState.sessionError = r.error || null;
+      plugState.sessionHeldError = r.inventoryError || null;
+      plugState.client = Boolean(r.client);
+      plugState.clientError = r.clientError || null;
+      plugState.clientHeldError = r.clientInventoryError || null;
+      plugState.held = Array.isArray(r.held) ? r.held : [];
+      plugState.read = true;
     })
     .catch((e) => {
-      plugState.heldError = (e && e.message) || String(e);
+      plugState.sessionError = (e && e.message) || String(e);
+      plugState.read = true;
     })
     .then(() => {
       plugState.pending--;
@@ -1659,6 +1776,44 @@ function pluginTabShown() {
   plugRead();
 }
 
+// Whether the plugins pane is the one on screen: the modal is open and its tab is
+// the one selected (ui/js/settings.js owns both, ui/index.html draws them).
+function plugPaneVisible() {
+  const pane = $("#settings-pane-plugins");
+  const box = $("#settings-modal");
+  if (!pane || !box) return false;
+  return !pane.classList.contains("hidden") && !box.classList.contains("hidden");
+}
+
+// A session that MOVES is a different session machine, so what the session half of
+// this list holds is stale the moment the backend base changes — a tunnel that
+// just came up, a window re-bound to another host, a hop back after an outage. The
+// client half does not care, and neither does an untouched page: only a pane
+// somebody is looking at is read again, because a hidden one would spend a network
+// read on nothing (the same discipline as the mirror list above).
+if (window.clutchApi && window.clutchApi.onBaseChanged) {
+  window.clutchApi.onBaseChanged(() => {
+    if (!plugPaneVisible()) return;
+    // the market did not move with the session (a release list) and neither did
+    // this client plugin domain: only the two inventories are re-read, and the
+    // market comes back from its own cache
+    plugState.result = null;
+    plugRead();
+  });
+}
+
+// ...and the other direction of the same fact: a tunnel that ENDS takes the
+// session machine with it, whether or not the host re-binds this window to a local
+// session. A row that was the far machine is not that machine any more, and a page
+// still drawing it would be the reported lie in reverse.
+if (window.clutchTunnel && window.clutchTunnel.onEnd) {
+  window.clutchTunnel.onEnd(() => {
+    if (!plugPaneVisible()) return;
+    plugState.result = null;
+    plugRead();
+  });
+}
+
 // The install runs in the main process (it holds the filesystem and the network);
 // the stages come back as they happen, so a slow tunnel does not look like a
 // frozen button. A stage for anything but the install this page started is
@@ -1666,7 +1821,17 @@ function pluginTabShown() {
 if (window.clutchComponents && window.clutchComponents.onProgress) {
   window.clutchComponents.onProgress((stage) => {
     if (!stage || !plugState.busy || stage.name !== plugState.busy.name) return;
-    plugState.busy = { name: stage.name, stage: stage.stage, version: stage.version, prefix: stage.prefix || "" };
+    // the place travels with the stage: it is what every sentence in
+    // `plugStageLine` says the step is happening on, and the main process never
+    // chooses it — the declaration did, before the write started
+    plugState.busy = {
+      name: stage.name,
+      stage: stage.stage,
+      version: stage.version,
+      prefix: stage.prefix || "",
+      place: plugState.busy.place,
+      verb: plugState.busy.verb,
+    };
     renderPlugins();
   });
 }
