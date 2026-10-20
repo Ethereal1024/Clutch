@@ -64,8 +64,9 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   只是"要运行它的那台机器"变成了**用户正坐着的那台**——`~/.clutch/client/components`
   （`ui/plugin-host.js`，`CLUTCH_CLIENT_COMPONENTS_DIR` 可重指；目录、tar/zip、单文件三种
   工件形状与第八节同一套判断）。字节因此一次都不过隧道，过隧道的只有那句声明（第三节
-  plugin）。**页面还没有这条路**：插件页的 `target()` 至今只指"某台机器的 supervisor"，
-  客户端的插件根目前由 `plugin-host.install()` 直接写入（测试与将来的入口都走它）。
+  plugin）。**页面上两个域都通**（C7）：客户端域直呼 `ui/plugin-host.js`，会话域仍走那台
+  机器的 supervisor；而"去哪一个是声明说的，不是页面上选的"——`destinationOf`（第三节
+  「一台机器，一个答案」）。
 - **平台查找先精确后兜底**：按客户端的平台标签（`linux-x86_64` / `darwin-arm64` /
   `windows-x86_64`）取键，取不到用 `any`。今天的四个模块都只发一个平台无关的
   **tar**（`clutch-skills` 的 tar 里是代码 + `skills/`——技能库随组件自己的发行版走，
@@ -242,6 +243,19 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 `tests/client-plugin-websearch.test.js`（装 → 推 → `/call` → 删，真 fork），以及
 `tests/channel_test.py` 把那**随包发出去的** `component.json` 钉在 `channel._plugin_of` 上
 ——声明的形状因此不是测试里编的。
+
+**一台机器，一个答案（C7）**：三种 interface 各自只有一个落脚点，规则写在
+`ui/components.js#destinationOf` 里，页面上没有任何旋钮参与——`plugin` + `runs_on: "other"`
+是**这台客户端**；`cli` / `daemon` + `runs_on: "self"` 是**会话命令跑的那台机器**。`runs_on`
+缺省即 `self`、`interface` 缺省即 `daemon`，与 `agent/tools/catalog.py` 的默认一致，所以早于
+这个字段的清单落点不变。任何别的配对——`plugin` + `self`、`cli`/`daemon` + `other`、或者一个
+不认识的 interface——都是**自相矛盾**：不装、不猜，只说那句话，于是也没有"第三个选项"可给。
+自动装（`ensureComponents`）同用这一条：不是会话那台的声明，它一个字节都不碰。
+
+**"够不着"与"没读到"是两件事**：前者是那个落脚点今天拨不过去（会话那台没有 supervisor URL、
+这台壳没有客户端插件域），控制项因此关掉；后者是那个落脚点自己的清单没回来（宿主仍然要裁定，
+装也许还是对的），控制项照旧可用，行上只说"未知"并把原因写出来。把这两种情形合成一种，就会
+在"清单读失败"时对着一个活得好好的宿主说"我不能装"。
 
 客户端怎么把它接上会话，是**声明 + 反向通道**，不是把字节送过去：
 
@@ -478,7 +492,8 @@ POST   /api/components/<name>/enable           启用：重新驱动
   来源清单里读到 `declaration` 的位置，取回后验摘要）+ 安装事实覆盖。检出态是同一件
   事的本地形态：直接读仓库旁的 `component.json`。发布包因此**不含任何一个组件的字节**
   ——声明随 manifest 走，一个 tar（或 onefile）+ 旁边一份 `component.json` 即完整组件；
-  往哪台机器装、装哪个版本，由来源清单和模块自己的 release 决定（第一节末）。
+  装哪个版本由来源清单和模块自己的 release 决定（第一节末）；装到**哪台机器**由组件自己的
+  声明决定（第三节「一台机器，一个答案」），不是页面上的一项选择。
   发布态递过去的是**URL + 摘要**（`fetchInstall()`）；只有手里真有字节文件的检出态/
   预构建产物才退回 `upload()`（字节进请求体）。
 

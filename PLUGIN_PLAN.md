@@ -34,7 +34,7 @@
 | C4 声明推送端点 | **已完成** | `90f8bab` | 目标侧半边：`agent/tools/channel.py`（端口/令牌/整集声明、内存、fail-closed）、`catalog.PLUGIN`、`registry.Tool.remote`、`POST/DELETE/GET /api/channel` |
 | C5 客户端自己的 `/call` 监听 | **已完成** | `219694e` | `ui/plugin-server.js`：`Authorization: Bearer` 门、并发上限、答案封顶、只认 `/call`；`tests/plugin-server.test.js` |
 | C6 声明推给会话 | **已完成** | `69d2279` | `ui/plugin-link.js`：认领时装（远侧端口 + 转发）、整集推、按 base 记、失败重试、非 loopback 拒绝、丢跳清端口与 base；`ui/main.js` 挂在 `api:base` / 梯子 `onUp` / `onTunnelEnd` / 退出；`tests/plugin-link.test.js` |
-| C7 插件页的第三种目标 | 未动工（**明确留着**） | — | `ui/components-view.js#target()` 今天只认"某台机器的 supervisor"；客户端插件根目前由 `plugin-host.install()` 直接写。C8 之后这一条更好走也更该做：`ui/plugin-host.js` 已经有 `list`/`install`/`remove`/`resolve`/`setDisabled`，缺的只是 view 那一层的 dep 注入（第三个 dest，像 `supervisorBase` 那样）与面板上的第三个选项；在此之前，装一个客户端插件要么走认领时的自动装（C6），要么走 `plugin-host.install()` 的代码路径 |
+| C7 目的地由声明推出，页面不选 | **已完成** | `b9af086` | 组件落在哪台机器是声明的事实，不是用户的选项：`ui/components.js#destinationOf` 是**唯一**说这话的地方（`plugin` + `runs_on: "other"` → 这台客户端；`cli`/`daemon` + `runs_on: "self"` → 会话命令跑的那台；别的配对 = 自相矛盾，只说那句话且不装）。页面因此不再点名任何一台机器、也不再显示"目标机"，`ui/components-view.js` 装上客户端域（`plugin-host`）与会话域两条路，安装/卸载/版本/停用全按声明的落脚点分派，`ensureComponents` 跳过不属于会话那台的声明。**明确留着的那一块**：降级会话（隧道断了、只剩 ssh 执行桥）里往远侧装一个 daemon——桥是执行通道不是 supervisor，装不了，页面就说这一句，**绝不改写到本机**；要能装得先有远侧的 supervisor 通道（见 `ui/js/backend-lifecycle.js#tryDegradeToSshTools`） |
 | C8 一个真的客户端插件 | **已完成** | `8522543` | `clutch-websearch/plugin/`（子模块 `9bbe191`）：`web_search`/`web_fetch` 的 JS 移植，只用 `http/https/dns/zlib`，没有 `node_modules`；`exports.call(tool, args)`，一次调用 fork 一个子进程；`_assert_public_host` 随迁成每一跳都查的围栏，覆盖率 guard 随迁成 WEAK/NOTE/LEGS 三行答案。与 Python 版的分叉（块级换行、无 curl_cffi、coverage 为 null 不再崩、不把 positions 传过线、坏数字回落默认）写在 `plugin/README.md`。测试：子模块 `tests/plugin-test.js`（14 项，无网络）、父仓 `tests/client-plugin-websearch.test.js`（装→推→`/call`→删，真 fork）、`tests/channel_test.py` 把真实 `component.json` 钉在 `channel._plugin_of` 上 |
 
 C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推声明（`scripts/sync-android-host.sh`
@@ -51,9 +51,12 @@ C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推�
    与 `POST /api/components/install` 属于 supervisor 进程（本机 `127.0.0.1:8890`，远端 =
    隧道的 `tunnelStatus().url`），而**窗口的 session base 是另一个端口、另一个进程，对组件
    一无所知**。照 session base 去写这个页面会"看起来正确"——每台机器都显示"没有装任何组件"。
-   所以页面写入的 base 一律取 supervisor（`ui/components-view.js` 的 `target()`），而"装到哪台
-   机器"由**窗口的会话种类**（`hostCore.backendKind`）决定：会话在隧道对端 → 装对端；其余
-   （包括隧道在线但窗口回退到本地会话的情形）→ 装本机；没有窗口也没有隧道 → 本机。
+   所以页面写入的 base 一律取 supervisor（`ui/components-view.js`），而**送到哪台机器**由组件
+   自己的声明决定（C7、第三节「一台机器，一个答案」）：`plugin` + `runs_on: "other"` 走客户端
+   域（`ui/plugin-host.js`），`cli`/`daemon` + `runs_on: "self"` 走会话那台的 supervisor。会话
+   那台的**地址**才来自窗口的会话种类（`hostCore.backendKind`：隧道对端是 `tunnelStatus().url`，
+   其余是本机，包括隧道在线但窗口回退到本地会话的情形）。这一段当初写的是"目的地由会话种类
+   决定"——C7 之后只剩地址由它决定；`target()` 那个名字也随之不见。
 2. **supervisor 会空闲退出**（**已补上唤醒**，`31d5ec6`，落点是第八节 G1）：本机那个是
    `--idle-timeout 25` 起的，空闲即退出，由 app 按需重启——于是"本机安装"在 supervisor 没在跑
    时会直接失败，而当初**没有任何东西会为这次安装把它叫起来**（`ui/server-bootstrap.js` 全文
@@ -199,8 +202,9 @@ flowchart LR
 ### P1 只读可见（通道 + 标签页）（**已完成**，`2c473f6`）
 
 `clutchComponents { list, market, install, onProgress }` 落进 `ui/preload.js` 与 `ui/main.js`
-的 `components:*` handler；新增的 `ui/components-view.js` 从这里开始承载"目标机是谁 / 市场缓存
-/ 安装裁定"三件事。设置弹窗加了第二个标签（`ui/style.css` 此前没有 tab 样式；渲染层是 19 个
+的 `components:*` handler；新增的 `ui/components-view.js` 从这里开始承载"要送到谁 / 市场缓存
+/ 安装裁定"三件事（C7 之后第一件收窄成"会话那台的地址是哪儿"：送到哪台机器由声明推出，
+不是页面决定的）。设置弹窗加了第二个标签（`ui/style.css` 此前没有 tab 样式；渲染层是 19 个
 经典脚本，装序是契约，`tests/ui-load-order-test.js` 守）。两条纪律：页面必须画出**来源错误**
 （`errors` 是 data 不是异常，否则用户在空市场前不知道是网络问题）；读失败时 `held` 一律
 `null` 而不是空数组——"读不到"与"没装"绝不能混为一谈（`0b7229e`）。本阶段**不画安装按钮**（I5）。
@@ -312,8 +316,8 @@ flowchart LR
 ## 四、验证
 
 ```bash
-node tests/components-panel.test.js               # 插件标签页：目标机、确认、裁定、重读、开关（DOM 假件）
-node tests/components-view.test.js                # 主进程插件后端：目标机/清单/市场缓存/安装/卸载/停用切换
+node tests/components-panel.test.js               # 插件标签页：两个落脚点、确认、裁定、重读、开关（DOM 假件）
+node tests/components-view.test.js                # 主进程插件后端：目的地推导/两个域/清单/市场缓存/安装/卸载/停用切换
 node tests/server-bootstrap.test.js               # 机器 supervisor + 每窗口会话；收尾用真的 spawn 证一次 G1 的唤醒（空闲退出后再起）
 node tests/ui-load-order-test.js                  # ui/index.html 的 19 个脚本装序
 node tests/bridge-shim.test.js                    # 桌面端与手机端暴露同一组名字
