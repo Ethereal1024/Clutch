@@ -14,7 +14,7 @@
 //
 // The oracle is the COMPONENT, not scripts/ws-stopgap. The stopgap is a shell CLI
 // that prints: its stdout gains a trailing newline the tool's content does not
-// have (VERSION is "0.1.55" with no newline on disk), and it has no separate diff
+// have (the VERSION file carries no trailing newline), and it has no separate diff
 // field. Comparing against it would have "found" two bugs that are not there.
 //
 // Not named *.test.js on purpose: it needs a Python interpreter (and the
