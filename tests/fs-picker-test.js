@@ -185,15 +185,26 @@ async function main() {
     "renderConnSelector",
     "updateConnConnect",
     "setConnBusy",
+    // the door a status element names (below in the file, but a plain function
+    // declaration: connSwitch's failure path is exercised in section 3c, long
+    // before the bar's own section re-evals it with the rest of the chrome)
+    "doorOf",
   ]) {
     (0, eval)(fnBody(name));
   }
 
   const done = [];
+  // whether the next dial this runner makes answers like a host that is there (a
+  // move that lands) or one that is not (a move that fails, and must leave nothing
+  // of itself behind — section 3c)
+  let dialOk = true;
   global.window = { clutchTunnel: { disconnect: async () => done.push("disconnect") } };
-  global.handleSshConnect = async (host, user, port) => {
+  global.handleSshConnect = async (host, user, port, statusEl) => {
     done.push(`dial:"${host}" "${user}" "${port}"`);
-    return true;
+    // the failed attempt's verdict is written where the flow writes it: on the door
+    // that made it (setFsConnectError), so connSwitch has one to put back
+    if (!dialOk && statusEl) statusEl.textContent = "connection failed: went nowhere";
+    return dialOk;
   };
   global.switchBackendResolved = async () => {
     done.push("switchBackendResolved");
@@ -201,11 +212,22 @@ async function main() {
   };
   global.resetBackendLocal = async () => done.push("resetBackendLocal");
   global.refreshPicker = () => done.push("refreshPicker");
+  // the failed move's clean-up (js/backend-lifecycle.js): the base names a session
+  // whose forward died with the hop it left, so the stub does the one thing the
+  // real one does that the picker reads back — it lets go of the base
+  global.dropStaleBackend = () => {
+    done.push("dropStaleBackend");
+    global.API_BASE = null;
+  };
   // the door also spends the exit's note (js/conn-lost.js connLostExitClear) before
   // it validates: that note belongs to its own runner, and this one only needs the
   // call to exist and to stay out of the sequence it is counting
   global.connLostExitClear = () => {};
   (0, eval)(fnBody("connConnect"));
+  // the move itself (connSwitch in js/conn-flow.js): the one door both host-naming
+  // paths go through, so what it leaves behind on a failure is what this runner has
+  // to see. doorOf arrives with the bar's own section below.
+  (0, eval)(fnBody("connSwitch"));
 
   // the REAL wiring from conn-flow.js: the list's change listener and the folded
   // bar's click listener, exactly as the page installs them
@@ -236,6 +258,7 @@ async function main() {
     global.connOnValue = "";
     global.connBusy = false;
     global.fsListing = false;
+    dialOk = true;
     done.length = 0;
   };
   const HOSTS = [
@@ -302,6 +325,70 @@ async function main() {
     `leaving one remote for another drops the tunnel first (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
     "the standing intent goes before the drop, so the move is not announced as a loss");
+  global.API_BASE = null;
+
+  // ---- 3c) a move that FAILS leaves no claim behind, and the host it left stays a
+  // choice ----
+  // The report: this window is on A, the user adds a new host B in the popup, B
+  // cannot be reached — and the picker went on saying B was connected, over A's file
+  // system (the tunnel had been reused, so the connect "succeeded" for B). And once
+  // the lie was there, selecting A again did nothing: A still carried the ✓, and
+  // connOnValue said this window was already there (connConnect's first guard), so
+  // the previous host could not be dialled at all. Both halves are one rule: a move
+  // spends what it leaves (connSwitch) and, when it fails, leaves NOTHING of itself
+  // — no intent, no base, no ✓, and the host it left is a choice again.
+  global.API_BASE = "http://127.0.0.1:31001";
+  seed(HOSTS, SESSION);
+  renderConnSelector();
+  check(connOnValue === "ssh:me@new.example.com:22" && connSelect.value === connOnValue,
+    `the window is on new.example.com before the move (got ${JSON.stringify(connOnValue)})`);
+  dialOk = false; // the new host is not reachable — the report's failed move
+  const moveStatus = { id: "conn-new-status", textContent: "" };
+  const moved = await connSwitch("gone.example.com", "me", "22", moveStatus);
+  check(moved === false, `a move to a host that is not there reports the failure (got ${JSON.stringify(moved)})`);
+  check(done.join(",") ===
+    'disconnect,dial:"gone.example.com" "me" "22",disconnect,dropStaleBackend,refreshPicker',
+    `the move drops the old hop first, dials the new host, and then cleans up after itself (got ${done.join(",")})`);
+  check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
+    "the standing intent is spent by the move and not put back: this window is on nothing");
+  check(global.API_BASE === null,
+    "and the base that named the old host's session is dropped with the hop it rode");
+  // what refreshPicker does next (a fold, the chrome, and the store redrawn): the
+  // redraw is the half this runner can read
+  renderConnSelector();
+  check(!connSelect.opts.some((o) => o.mark),
+    "no host carries a ✓ after the failed move: nothing is connected");
+  check(connOnValue === "" && connTarget() === "ssh:me@new.example.com:22",
+    `and the host it left is a CHOICE again, not the place this window "already is" (got connOnValue=${JSON.stringify(connOnValue)}, target=${JSON.stringify(connTarget())})`);
+  dialOk = true;
+  done.length = 0;
+  connSelect.fire(); // the user goes back to the host they were on...
+  await flush();
+  check(/dial:"new\.example\.com" "me" "22"/.test(done.join("|")),
+    `...and it is dialled: the previous host can be reached again (got ${done.join(",")})`);
+
+  // the bar's door: the same clean-up, but the bar's own verdict is the bar's (its
+  // error stays on the line, with Retry/Cancel under it) — what connSwitch redraws
+  // is the store's half, under that verdict
+  global.API_BASE = "http://127.0.0.1:31001";
+  seed(HOSTS, SESSION);
+  renderConnSelector();
+  const realRender = renderConnSelector;
+  let renders = 0;
+  global.renderConnSelector = () => {
+    renders++;
+    realRender();
+  };
+  dialOk = false;
+  const barMoved = await connSwitch("gone.example.com", "me", "22", connStatus);
+  global.renderConnSelector = realRender;
+  check(barMoved === false && !/refreshPicker/.test(done.join(",")),
+    `a failed move from the list reports nothing to the popup's door (got ${done.join(",")})`);
+  check(renders === 1, `it redraws the picker under the verdict, once (got ${renders})`);
+  check(connStatus.textContent === "connection failed: went nowhere",
+    `and the attempt's verdict is still the bar's line (got ${JSON.stringify(connStatus.textContent)})`);
+  check(!connSelect.opts.some((o) => o.mark) && connOnValue === "",
+    "with no ✓ and nothing this window is on: the bar offers the host it left as the next move");
   global.API_BASE = null;
 
   // ---- 3b) a session URL in the SHARED storage is not this window's session ----

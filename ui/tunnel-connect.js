@@ -57,16 +57,43 @@ function friendlyError(e) {
 }
 
 async function connectTunnel({ host, user, port, password }, progress) {
+  // The host this request is FOR. One tunnel belongs to one host, and the reuse
+  // below is a reuse of THIS target or it is a lie: a live hop to A answering a
+  // request for B reported success for B while every byte still went to A — the
+  // picker then ticked B as connected over A's file system. A request for a
+  // different host is a MOVE: the old hop is spent first, exactly as the
+  // renderer's own switch does, and its failure cannot be papered over with the
+  // tunnel it left behind.
+  const target = { host, user, port: Number(port) || 22 };
   if (state.sshClient) {
-    // reuse a live tunnel; a dead/partial one is reset so a reconnect works
-    const up = state.currentUrl ? await waitForServer(state.currentUrl + "/api/health", 3000) : false;
-    if (up) {
-      tunnelLog("[connect] reusing live tunnel");
-      return { ok: true, url: state.currentUrl };
+    const current = state.target;
+    const same =
+      current &&
+      current.host === target.host &&
+      current.user === target.user &&
+      current.port === target.port;
+    if (!same) {
+      tunnelLog(
+        `[connect] the live tunnel belongs to ${
+          current ? `${current.user}@${current.host}:${current.port}` : "an unknown host"
+        }; resetting it for ${user}@${host}:${target.port}`
+      );
+      await stopTunnel();
+    } else {
+      // reuse a live tunnel; a dead/partial one is reset so a reconnect works
+      const up = state.currentUrl ? await waitForServer(state.currentUrl + "/api/health", 3000) : false;
+      if (up) {
+        tunnelLog("[connect] reusing live tunnel");
+        return { ok: true, url: state.currentUrl };
+      }
+      tunnelLog("[connect] existing tunnel is dead or still starting; resetting");
+      await stopTunnel();
     }
-    tunnelLog("[connect] existing tunnel is dead or still starting; resetting");
-    await stopTunnel();
   }
+  // from here on the hop being built is this request's, and state.target says so
+  // from the same step that installs the client (see the executor below): a second
+  // dial reads the two together, so it can never see this request's client wearing
+  // another request's host
   // the auth secret, resolved the way llm-proxy resolves the API key: an
   // explicit value from the caller first, then the ssh_secrets cache in the
   // settings mirror (typed once per host, reused on reconnect/restart)
@@ -125,6 +152,9 @@ async function connectTunnel({ host, user, port, password }, progress) {
       client = new Client();
       dialling = client;
       state.sshClient = client;
+      // the host this client is for: installed with the client, so the reuse gate
+      // reads the two facts together (a client with no target is not reused)
+      state.target = target;
       client.on("ready", resolve);
       client.on("error", reject);
       client.on("keyboard-interactive", (_n, _i, _l, _p, finish) => finish(secret ? [secret] : []));
@@ -151,6 +181,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
       // only the CURRENT client may tear down shared state
       if (state.sshClient !== client) return;
       state.sshClient = null;
+      state.target = null; // the host this hop belonged to went with it
       state.currentUrl = null;
       if (state.localSrv) {
         state.localSrv.close();

@@ -19,6 +19,13 @@ const fs = require("fs");
 // visible to every other module on the next call, with no export to keep in step.
 const state = {
   sshClient: null,
+  // The host THIS hop belongs to: { host, user, port }, or null with no hop.
+  // One tunnel carries one host, and connectTunnel may only ever hand it back
+  // for that host — a request for another one is a MOVE and has to dial its own
+  // wire (see the reuse gate in tunnel-connect). Keeping the target here (and
+  // not in the renderer) is what lets the engine ladder, the page's redial and
+  // a picker switch share the one answer.
+  target: null,
   localSrv: null,
   llmProxyPort: null,
   // The far-side port this process's model path lives on — null until the

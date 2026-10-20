@@ -313,6 +313,67 @@ async function handleSshConnect(host, user, port, statusEl) {
   }
 }
 
+// Dial a host as a MOVE. Both doors that name a host — choosing one in the list
+// and the new-connection popup's Connect — are attempts to BE on that host, and a
+// window is on one host at a time: the standing intent (and the tunnel that
+// carried it) is spent BEFORE the new attempt, exactly as the list's choice always
+// did. The popup used not to do this, so an attempt for a new host was made ON TOP
+// of the live tunnel: the engine reused the hop it still held and reported the new
+// host as connected while the bytes never left the old one (the picker ticked the
+// new host over the previous host's file system).
+//
+// A move that fails must also leave no claim behind. The tunnel it dropped is
+// gone, so the base and the listing that described it are dead: saying "connected"
+// over them is the same lie in the other direction, and it kept the old host
+// marked as the place the window already was — selecting it could not dial it
+// again (connConnect refuses to "connect" where it believes it already is). So a
+// failed move drops the stale base and redraws the picker: no ✓, no old listing,
+// and the host it left is a choice that can be dialled again.
+async function connSwitch(host, user, port, statusEl) {
+  // a request with nothing to dial (or no engine to dial it with, or an attempt
+  // already in flight) is not a move: the flow answers it in place, and the host
+  // this window is on is left exactly where it is
+  if (!host || !user || !window.clutchTunnel || connBusy) {
+    return await handleSshConnect(host, user, port, statusEl);
+  }
+  const leaving = Boolean(localStorage.getItem("clutch_ssh_connected"));
+  if (leaving) {
+    // the intent goes FIRST, so the teardown below is the user leaving on purpose
+    // and is not announced as a lost session (js/backend-lifecycle.js)
+    localStorage.removeItem("clutch_ssh_connected");
+    localStorage.removeItem("clutch_degrade");
+    if (window.clutchTunnel) await window.clutchTunnel.disconnect();
+  }
+  const ok = await handleSshConnect(host, user, port, statusEl);
+  if (!ok && leaving) {
+    // the attempt may have left a partial hop (the SSH session kept for SSH-tools,
+    // a dial the failure path could not tear down): the move is over either way,
+    // so nothing of it may outlive the verdict
+    if (window.clutchTunnel) {
+      try {
+        await window.clutchTunnel.disconnect();
+      } catch (e) {
+        /* the host is gone or unreachable: the state below is still the honest one */
+      }
+    }
+    dropStaleBackend(); // API_BASE names a session whose forward died with the hop
+    if (doorOf(statusEl) === "popup") {
+      // nothing of the popup's attempt is drawn on the picker: it folds, forgets
+      // the old listing and shows the host it left as a choice again, while the
+      // popup keeps the error that explains why the new host is not there
+      refreshPicker();
+    } else {
+      // the bar's attempt owns the bar's verdict (its error, then Retry/Cancel):
+      // redraw only the store's half — no ✓, and the host it left is a choice
+      // again — and put the verdict back on top of the honest state
+      const verdict = statusEl.textContent;
+      renderConnSelector();
+      statusEl.textContent = verdict;
+    }
+  }
+  return ok;
+}
+
 // Connect — the user's own act. The picker has two doors onto it: choosing a host
 // in the list (below), and pressing Connect while the body is folded — the welcome
 // state, where the list's first entry (the host this device was last on) is one
@@ -342,17 +403,12 @@ async function connConnect(v) {
     return;
   }
   if (v.startsWith("ssh:") && !v.includes("__connected__")) {
-    // switching: drop any current tunnel first, then connect to the new host.
-    // The intent is cleared before the drop, for the same reason as above: the
-    // user is leaving this host on purpose, so it is not a lost session.
-    if (localStorage.getItem("clutch_ssh_connected")) {
-      localStorage.removeItem("clutch_ssh_connected");
-      localStorage.removeItem("clutch_degrade");
-      await window.clutchTunnel.disconnect();
-    }
+    // switching: the standing intent and the tunnel it names are spent first, then
+    // the new host is dialled (connSwitch owns both halves, and the failed move's
+    // clean-up: see above)
     const [user, hostPort] = v.slice(4).split("@");
     const [host, port] = hostPort.split(":");
-    await handleSshConnect(host, user, port || "22", connStatus);
+    await connSwitch(host, user, port || "22", connStatus);
   }
 }
 // The list's door: choosing a host connects to it, immediately — selection IS the
@@ -389,7 +445,9 @@ $("#conn-new-connect").addEventListener("click", async () => {
   const host = connNewHost.value.trim();
   const user = connNewUser.value.trim();
   const port = connNewPort.value.trim() || "22";
-  const ok = await handleSshConnect(host, user, port, connNewStatus);
+  // the popup names a host exactly like the list does: a move, not a second
+  // connection beside the one this window is on (see connSwitch)
+  const ok = await connSwitch(host, user, port, connNewStatus);
   if (ok) closeConnNew(); // stay in the picker
 });
 dismissOnOverlayPress(connNewModal, closeConnNew);

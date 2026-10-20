@@ -99,6 +99,7 @@ async function stopTunnel(notify = false) {
     state.sshClient = null;
     cur.end();
   }
+  state.target = null; // the hop's host dies with the hop
   state.currentUrl = null;
   if (state.sftpHandle) {
     state.sftpHandle = null;
