@@ -23,6 +23,10 @@ files:
   - "!dev.sh"
   # the asset survey doc next to the vendored fonts is for the repo, not runtime
   - "!vendor/fonts/README.md"
+  # the deleted per-client source list: a stale checkout (or a glob that brought it
+  # back) must not put it back in the bundle. Nothing reads it — the market index
+  # (ui/market.snapshot.json) is what a build ships.
+  - "!components.sources.json"
 
 # Native-dependency rebuild is OFF on purpose — it is what made `npm run dist`
 # depend on the host compiler.

@@ -101,6 +101,17 @@ function fakeTargetSupervisor() {
   const HELD = "c".repeat(64); // other bytes of the same component, already there
   const HELD_VERSION = "0.1.0+" + HELD.slice(0, 16);
   const ARTIFACT = `${NAME}.tar.gz`;
+  // the release this test publishes, as bytes: a market row pins a manifest by
+  // its digest, so the row the test writes has to pin these exact bytes
+  const manifest = {
+    schema: 1,
+    name: NAME,
+    interface: "cli",
+    version: "0.1.0",
+    artifacts: { any: { asset: ARTIFACT, sha256: PIN } },
+  };
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const manifestSha256 = require("crypto").createHash("sha256").update(manifestBytes).digest("hex");
   const state = { calls: [], install: null };
   const server = http.createServer((req, res) => {
     state.calls.push(`${req.method} ${req.url}`);
@@ -111,13 +122,7 @@ function fakeTargetSupervisor() {
     // the release: a manifest naming an artifact for `any` platform, so the
     // target machine is the one that would fetch the bytes (this client has none)
     if (req.method === "GET" && req.url === "/clutch-component.json") {
-      return send(200, {
-        schema: 1,
-        name: NAME,
-        interface: "cli",
-        version: "0.1.0",
-        artifacts: { any: { asset: ARTIFACT, sha256: PIN } },
-      });
+      return send(200, manifest);
     }
     if (req.method === "GET" && req.url === "/api/components") {
       return send(200, {
@@ -162,7 +167,7 @@ function fakeTargetSupervisor() {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const base = `http://127.0.0.1:${server.address().port}`;
-      resolve({ state, name: NAME, artifact: ARTIFACT, base, pin: PIN, version: VERSION, held: HELD_VERSION, manifestUrl: `${base}/clutch-component.json`, close: () => new Promise((r) => server.close(r)) });
+      resolve({ state, name: NAME, artifact: ARTIFACT, base, pin: PIN, version: VERSION, held: HELD_VERSION, manifestBytes, manifestSha256, manifestUrl: `${base}/clutch-component.json`, close: () => new Promise((r) => server.close(r)) });
     });
   });
 }
@@ -448,21 +453,36 @@ async function main() {
   {
     const sup = await fakeTargetSupervisor();
     const realFetch = globalThis.fetch;
-    // This runner has no internet: the shipped source list is four GitHub
-    // releases, so every URL but the fake target machine's is refused. Those
-    // refusals land in the market as its "why is this empty" rows, which keeps
-    // the read deterministic and offline.
+    // This runner has no internet: the ONE market index this build names is a
+    // github URL, so it is refused — which is exactly the degraded start the
+    // chain exists for. What is left is the last good copy this machine heard,
+    // so the test writes that copy (the shape readIndex caches) with one row for
+    // the release the fake target machine publishes.
     globalThis.fetch = (url, opts) => {
       const u = String(url);
       if (u.startsWith(sup.base) || u.startsWith(BRIDGE)) return realFetch(url, opts);
       return Promise.reject(new Error("no network in this test"));
     };
     try {
-      // this client's OWN list names one manifest, and it names it the way a
-      // release does — a URL. The phone reads it over HTTP, not from disk.
-      const userSources = path.join(HOME, ".clutch", "components.sources.json");
-      fs.mkdirSync(path.dirname(userSources), { recursive: true });
-      fs.writeFileSync(userSources, JSON.stringify({ schema: 1, sources: [sup.manifestUrl] }));
+      const cached = path.join(HOME, ".clutch", "market", "index.json");
+      fs.mkdirSync(path.dirname(cached), { recursive: true });
+      fs.writeFileSync(
+        cached,
+        JSON.stringify({
+          schema: 2,
+          entries: [
+            {
+              id: `Ethereal1024/${sup.name}`,
+              name: sup.name,
+              manifest: sup.manifestUrl,
+              manifest_sha256: sup.manifestSha256,
+              version: "0.1.0",
+              summary: "the release this phone last read about",
+              tags: ["test"],
+            },
+          ],
+        })
+      );
       // the window's session is on the far side of the tunnel: components are
       // installed on the machine that will RUN them, so that is the target
       tunnel.state.status = { active: true, url: sup.base };
@@ -485,11 +505,16 @@ async function main() {
       // 9b. the market: what this client could hand that machine
       const mkt = await globalThis.clutchComponents.market({});
       const row = mkt.entries.find((e) => e.name === sup.name);
-      assert(row, "the manifest this client holds shows up as a market row");
-      assert.strictEqual(row.origin, "release");
-      assert.strictEqual(row.source, sup.manifestUrl, "the row names where the release is");
-      assert(mkt.errors.length > 0, "an unreadable source is named, never hidden");
-      assert(mkt.errors.every((r) => !r.includes(sup.base)), "the one reachable source never failed");
+      assert(row, "the row the index lists shows up in the market");
+      assert.strictEqual(row.origin, "market", "and it says it is the market's row, not a local checkout");
+      assert.strictEqual(row.source, sup.manifestUrl, "the row points where the release is");
+      // the live index was out of reach, so the page must say WHICH copy it drew:
+      // an old list is still a list, but never passed off as this moment's
+      assert.strictEqual(mkt.origin, "cache", "the market says it is this machine's cached copy");
+      assert(/could not be read/.test(mkt.note), "and why the live one is not the one drawn");
+      assert.deepStrictEqual(mkt.errors, [], "nothing else failed: the cached row and its manifest both answered");
+      assert.strictEqual(sup.state.calls.filter((c) => c.endsWith("/clutch-component.json")).length, 0,
+        "and the page did not read the manifest to draw a row — an index is one request");
 
       // 9c. the one write: the bytes stay on the far side — the request carries
       //     the URL and the pin, never the tens of megabytes (零之四.4)

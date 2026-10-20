@@ -1,0 +1,80 @@
+# Publish the market index: the ONE list every Clutch client reads.
+#
+# Why a workflow of its own: the index is not a release of the app. A module
+# publishes its own release (its own repo, its own tag, its own CI), and adding it
+# to the market is one line PRed into market/entries.json — no host release, no new
+# client version, nothing to rebuild. This job turns that file into the document
+# every client fetches, at a FIXED tag (`market`) and a FIXED asset name
+# (`index.json`), so the URL a client ships with never changes:
+#
+#   https://github.com/Ethereal1024/Clutch/releases/download/market/index.json
+#
+# Three things it is careful about:
+#
+#  * `--check` before publishing: the committed snapshot (ui/market.snapshot.json,
+#    the offline fallback inside every bundle) must equal what entries.json
+#    produces today. An entry bump without a regenerated snapshot fails here
+#    instead of shipping a market that disagrees with the app it ships in.
+#  * The asset is the COMMITTED bytes, not a second generation: --check already
+#    proved they are what the entries produce, and publishing the same file keeps
+#    the asset and the bundle identical byte for byte (the digest of a manifest is
+#    what a row pins, so a mismatch would be a market that cannot install).
+#  * `--check` reads every pinned manifest over the network. That is the point: a
+#    row's digest is a claim about bytes on github.com, and a module that moved or
+#    re-tagged its release has to break this job rather than a user's install.
+#
+# The tag's commit never matters — the assets are replaced on every publish — so
+# `make_latest: false` keeps this from wearing the app's "latest release" badge.
+name: market
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "market/**"
+      - "scripts/market_index.py"
+      - "ui/market.snapshot.json"
+      - ".github/workflows/market.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-index
+  cancel-in-progress: false # two publishes racing would leave one asset behind
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stdlib only, on purpose (scripts/market_index.py imports nothing else):
+      # no uv sync, no npm ci — this gate costs seconds and cannot fail for a
+      # dependency reason.
+      - name: Verify the index is current and every pin still holds
+        run: python3 scripts/market_index.py --check
+
+      - name: Stage the asset
+        run: |
+          mkdir -p dist
+          cp ui/market.snapshot.json dist/index.json
+          ls -l dist/index.json
+
+      - name: Publish to the fixed `market` tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: market
+          name: market index
+          body: |
+            The market index — one document, every Clutch client and every
+            version. Generated from `market/entries.json` by
+            `scripts/market_index.py`; each row names a module's own release
+            manifest and pins its sha256.
+
+            Add a plugin by PRing one line into `market/entries.json`. A module
+            release on its own installs nothing until its row here says so.
+          files: dist/index.json
+          overwrite_files: true # every publish replaces the asset in place
+          make_latest: false # this is not a release of the app

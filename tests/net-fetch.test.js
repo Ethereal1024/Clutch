@@ -37,8 +37,7 @@ const { netFetch, mirrorPrefix, mirrored } = require("../ui/net-fetch");
 const components = require("../ui/components");
 
 const ROOT = path.join(__dirname, "..");
-const SHIPPED = JSON.parse(fs.readFileSync(path.join(ROOT, "ui", "components.sources.json"), "utf8")).sources;
-const SRC = "https://github.com/Ethereal1024/clutch-skills/releases/latest/download/clutch-component.json";
+const SRC = "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.1/clutch-component.json";
 const MIRROR = "https://ghproxy.invalid/";
 
 function writeSettings(data) {
@@ -141,43 +140,45 @@ async function main() {
     alive.server.close();
   }
 
-  // ---- 4. the shipped list, read through the mirror ----------------------
-  check(components.sources()[0] === SHIPPED[0], "with no mirror, the list this build ships is read as written");
-  check(components.sources([]).length === 0, "and a caller that names its own list still gets exactly that list");
+  // ---- 4. the ONE index, read through the mirror -------------------------
+  // What a build carries is no longer a list of module URLs but ONE document
+  // every client and every version reads (ui/components.js readIndex). A mirror
+  // is still the one string that moves it, and a caller who names an index of
+  // its own is taken literally — write the URL (or path) you mean.
+  check(
+    components.INDEX_URL === "https://github.com/Ethereal1024/Clutch/releases/download/market/index.json",
+    "the build names one index, at a fixed tag: a client version never has to learn a new URL"
+  );
+  check(mirrorPrefix() === "", "with no mirror, the index is read exactly where it points");
+  check(mirrored(components.INDEX_URL, MIRROR) === MIRROR + components.INDEX_URL, "a prefix moves the index like any other source");
 
-  process.env.CLUTCH_SOURCE_MIRROR = alive.base + "/m/";
-  const underMirror = components.sources();
-  check(
-    underMirror[0] === `${alive.base}/m/${SHIPPED[0]}` && underMirror.length === SHIPPED.length,
-    "the shipped list is read under the mirror — every entry, path and all"
-  );
-  check(
-    components.sources([SRC])[0] === SRC,
-    "a caller's own list is taken literally: a build pointed at a LAN index is not sent through a public accelerator"
-  );
-  if (process.platform === "win32") {
-    console.log("SKIP: the user-list check needs HOME, which win32 does not read");
-  } else {
-    fs.mkdirSync(path.dirname(components.USER_SOURCES_FILE), { recursive: true });
-    fs.writeFileSync(components.USER_SOURCES_FILE, JSON.stringify({ schema: 1, sources: [SRC] }));
+  const market = await serveMirror({ "index.json": Buffer.from(JSON.stringify({ schema: 2, entries: [] })) });
+  process.env.CLUTCH_SOURCE_MIRROR = market.base + "/m/";
+  try {
+    const read = await components.readIndex();
     check(
-      components.sources()[0] === SRC,
-      "a list the user wrote is taken literally too: write the URL you mean, mirrored or not"
+      read.origin === "remote" && read.errors.length === 0 && read.entries.length === 0,
+      "the index is read through the prefix, and what it holds is the market"
     );
-    // the user's entry leads, and the shipped list is still behind it — itself
-    // mirrored, because the shipped list is the one a mirror rewrites
-    const withUser = components.sources();
     check(
-      withUser[0] === SRC && SHIPPED.every((s) => withUser.includes(`${alive.base}/m/${s}`)),
-      "the shipped list stays the fallback: a user's list is a head start, not a replacement"
+      market.seen.includes(`/m/${components.INDEX_URL}`),
+      `and the mirror was asked for it by its absolute URL (${market.seen.join(", ")})`
     );
-    fs.rmSync(components.USER_SOURCES_FILE);
+    const given = await components.readIndex({ index: path.join(ROOT, "ui", "market.snapshot.json") });
+    check(
+      given.origin === "given" && given.entries.length > 0,
+      "a caller's own index is taken literally: an index written down is not sent through an accelerator"
+    );
+  } finally {
+    market.server.close();
+    delete process.env.CLUTCH_SOURCE_MIRROR;
   }
 
   // ---- 5. one prefix moves the whole supply line -------------------------
-  // A release stand-in, served BY the mirror only: the manifest names its
-  // declaration and its artifact as siblings, exactly as a real one does, and the
-  // URLs the client ends up holding are the mirror's.
+  // A market and release stand-in, served BY the mirror only: the index names the
+  // release and pins its manifest, the manifest names its declaration and its
+  // artifact as siblings exactly as a real one does, and the URLs the client ends
+  // up holding are the mirror's.
   const decl = Buffer.from(JSON.stringify({ name: "clutch-memory", interface: "cli", version: "9.9.9" }));
   const artifact = Buffer.from("the artifact's bytes are the target machine's business, not this client's");
   const manifest = Buffer.from(
@@ -190,7 +191,25 @@ async function main() {
       artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: sha256(artifact) } },
     })
   );
+  const manifestUrl = "https://github.com/Ethereal1024/clutch-memory/releases/download/v9.9.9/clutch-component.json";
+  const index = Buffer.from(
+    JSON.stringify({
+      schema: 2,
+      entries: [
+        {
+          id: "Ethereal1024/clutch-memory",
+          name: "clutch-memory",
+          manifest: manifestUrl,
+          manifest_sha256: sha256(manifest),
+          version: "9.9.9",
+          interface: "cli",
+          runs_on: "self",
+        },
+      ],
+    })
+  );
   const release = await serveMirror({
+    "index.json": index,
     "clutch-component.json": manifest,
     "component.json": decl,
     "clutch-memory-any.tar.gz": artifact,
@@ -200,11 +219,11 @@ async function main() {
     const specs = await components.componentSpecs({});
     const spec = specs.specs.find((s) => s.name === "clutch-memory");
     check(
-      Boolean(spec && spec.published && spec.published.source === `${release.base}/m/${SHIPPED[0]}`),
-      "a manifest is read through the mirror, and it knows where it came from"
+      Boolean(spec && spec.published && spec.published.source === `${release.base}/m/${manifestUrl}`),
+      "the index is read through the mirror, the manifest it names too, and the manifest knows where it came from"
     );
     const handed = await components.artifactFor(spec, { checkout: false });
-    const expected = `${release.base}/m/${SHIPPED[0].replace(/clutch-component\.json$/, "clutch-memory-any.tar.gz")}`;
+    const expected = `${release.base}/m/${manifestUrl.replace(/clutch-component\.json$/, "clutch-memory-any.tar.gz")}`;
     check(
       Boolean(handed && !handed.path && handed.url === expected),
       `the artifact the TARGET machine fetches is the mirror's own sibling URL (${handed && handed.url})`

@@ -1,5 +1,5 @@
 // The two things a remote read has to decide before it happens: WHICH fetch this
-// machine uses, and WHERE a source this build ships is read from. Both are
+// machine uses, and WHERE the reads this build makes are sent. Both are
 // "the network this app runs on" questions, so both live in one small seam.
 //
 // 1. WHICH fetch. node's global fetch has no proxy of its own: HTTPS_PROXY is not
@@ -21,14 +21,14 @@
 //    side of the SSH tunnel — a proxy there is a hop to our own machine, which is
 //    why those calls keep the plain global fetch.
 //
-// 2. WHERE. A source is already data (ui/components.sources.json plus the user's
-//    own list), and a mirror is the one string that moves all of it: the prefix
-//    every source this build SHIPS is read under. It is applied once, where a
-//    source becomes a URL (components.js `sources()`), because everything a
-//    manifest names is its SIBLING (components.js `assetLocation`) — so one
-//    prefix moves the manifest, the declaration AND the artifact the target
-//    machine fetches for itself, with every digest still verified against the
-//    release's own pins. A prefix is all a mirror has to be:
+// 2. WHERE. A source is already data (one market index URL in ui/components.js),
+//    and a mirror is the one string that moves all of it: the prefix every read
+//    this build makes is sent under. It is applied once, where a source becomes a
+//    URL (components.js `readIndex` -> `mirrored`), because everything a manifest
+//    names is its SIBLING (components.js `assetLocation`) — so one prefix moves
+//    the index, the manifest, the declaration AND the artifact the target machine
+//    fetches for itself, with every digest still verified against the release's
+//    own pins. A prefix is all a mirror has to be:
 //
 //      <mirror>/<the absolute github url>
 //
@@ -37,9 +37,9 @@
 //    mirror serves the same bytes, and a mirror that serves others is refused by
 //    the pin rather than believed.
 //
-//    The user's own list is NOT rewritten: a list somebody wrote is taken
-//    literally (write the URL you mean, mirror or not), the same way a caller
-//    that names its own list gets exactly that list.
+//    What never goes through here: a caller that names its own index (`readIndex`'s
+//    `index`). A URL somebody wrote is taken literally — write the URL you mean,
+//    mirror or not.
 //
 // The prefix comes from CLUTCH_SOURCE_MIRROR first (a build, a script, a LAN
 // deployment's shell) and then from source_mirror in ~/.clutch/settings.json — a
@@ -105,7 +105,7 @@ function mirrorPrefix() {
 
 // One URL under the prefix. Only http(s) is rewritten — a source may be a path
 // on disk, and a path has no mirror — and a URL already under the prefix is left
-// alone, so a list that was written pre-mirrored (or a source read twice) is not
+// alone, so a URL that was written pre-mirrored (or a source read twice) is not
 // rewritten twice into a URL nobody serves.
 function mirrored(url, prefix) {
   const p = normalize(prefix);

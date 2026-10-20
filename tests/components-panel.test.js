@@ -263,7 +263,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       // a market row as ui/components-view.js entry() answers it: the place comes
       // off the declaration (`destinationOf`), and `problem` is the refusal when
       // the two words name a pair that cannot exist
-      return { entries: entries.map((e) => ({ place: entryPlace, problem: "", runs_on: "self", ...e })), errors, unreachable, sources: 4 };
+      return { entries: entries.map((e) => ({ place: entryPlace, problem: "", runs_on: "self", ...e })), errors, unreachable, origin: "remote", note: "" };
     },
     install: async (name) => {
       world.installCalls.push(name);
@@ -348,7 +348,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
   ctx.window.clutchComponents = api;
   // the mirror row's channel, one for one with ui/preload.js + ui/bridge-shim.js:
   // a save is asked of the HOST (it holds ~/.clutch/settings.json), so this is the
-  // only way a value becomes the mirror the sources are read under
+  // only way a value becomes the mirror reads are sent under
   ctx.window.clutchSettings = {
     save: async (data) => {
       world.settingsSaves.push(data);
@@ -788,7 +788,7 @@ const CODE = mod ? mod.code : "";
     check(p.stateText("clutch-workspace") === "", "a reload drops the last verdict with the row it was drawn on");
     check(/reading/.test(p.note().textContent), "and the note says what it is doing now");
     await settle();
-    check(p.world.marketCalls >= 2, "and it re-reads the sources (force)");
+    check(p.world.marketCalls >= 2, "and it re-reads the market (force)");
   }
 
   // 17. the switch is offered where the held fact is, and it says what it does
@@ -1493,7 +1493,7 @@ const CODE = mod ? mod.code : "";
       /Mirrors/.test(hints()[0].textContent),
       "and names the section the list is managed in, so the automatic retry is something the user can see and edit"
     );
-    check(dead.buttons().length === 2 && dead.buttons().every((b) => !b.disabled), "the line is a sentence, not a second control: the offers the sources that DID answer are untouched");
+    check(dead.buttons().length === 2 && dead.buttons().every((b) => !b.disabled), "the line is a sentence, not a second control: the rows the index DID answer for are untouched");
     const lines = walk(body).filter((n) => /(^| )plug-source-(error|hint)( |$)/.test(n.className));
     check(
       lines.length === 2 && /plug-source-error/.test(lines[0].className) && /plug-source-hint/.test(lines[1].className),
@@ -1548,13 +1548,13 @@ const CODE = mod ? mod.code : "";
     const bad = (p) => /(^| )error( |$)/.test(note(p).className);
 
     // what the field says when nothing was saved in this session: the copy this
-    // window kept, and — with none — that the sources are read from github.com
+    // window kept, and — with none — that the market index is read from github.com
     const fresh = page();
     check(box(fresh).value === "", "a window that never set a mirror leaves the field empty");
-    check(/no mirror/.test(note(fresh).textContent) && !bad(fresh), "and says so in the plain words of the thing it decides: sources are read from github.com");
+    check(/no mirror/.test(note(fresh).textContent) && !bad(fresh), "and says so in the plain words of the thing it decides: the index and every manifest are read from github.com");
     const seeded = page({ store: { clutch_source_mirror: "https://mirror.example" } });
     check(box(seeded).value === "https://mirror.example", "a window that did set one comes back with the field filled from its own copy of it");
-    check(/read under https:\/\/mirror\.example/.test(note(seeded).textContent), "and the note names the prefix the sources are read under");
+    check(/read under https:\/\/mirror\.example/.test(note(seeded).textContent), "and the note names the prefix the index and every manifest are read under");
 
     // a value that is not http(s) never reaches the file: obeying it would rewrite
     // every source into something that is not a URL, and the page would then blame
@@ -1580,8 +1580,8 @@ const CODE = mod ? mod.code : "";
       "the host is asked for exactly the one key (ui/settings-mirror.js merges it, so the LLM knobs beside it survive) and a trailing slash is the same mirror"
     );
     check(saved.store.clutch_source_mirror === "https://mirror.example", "and the window remembers the prefix it saved, not the text that was typed");
-    check(saved.world.marketCalls === marketsBefore + 1 && saved.world.listCalls === listsBefore + 1, "the sources are read again under it, because the mirror moves where the bytes come from");
-    check(!bad(saved) && /read under https:\/\/mirror\.example/.test(note(saved).textContent), "and the line then says what the sources follow");
+    check(saved.world.marketCalls === marketsBefore + 1 && saved.world.listCalls === listsBefore + 1, "the market is read again under it, because the mirror moves where the bytes come from");
+    check(!bad(saved) && /read under https:\/\/mirror\.example/.test(note(saved).textContent), "and the line then says what the index follows");
     check(/pin/.test(note(saved).textContent), "and repeats what a mirror cannot change: the digest is still the release's own");
 
     // clearing it is a save too (an empty value is the answer "github.com again")
@@ -1591,7 +1591,7 @@ const CODE = mod ? mod.code : "";
     await settle();
     check(cleared.world.settingsSaves.length === 1 && cleared.world.settingsSaves[0].source_mirror === "", "an empty field clears the knob rather than leaving the old prefix in the file");
     check(cleared.store.clutch_source_mirror === "", "and this window's copy with it");
-    check(/github\.com again/.test(note(cleared).textContent), "the line says the sources are back to github.com");
+    check(/github\.com again/.test(note(cleared).textContent), "the line says the index and manifests are back to github.com");
 
     // a write the host refused is not remembered as if it had landed: a filled
     // field would claim a mirror this window is not reading under

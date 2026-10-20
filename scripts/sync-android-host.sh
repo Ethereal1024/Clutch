@@ -18,14 +18,14 @@ UI_ASSETS=$ASSETS/ui
 
 # the pure-Node subset the host resolves via useUI(): the modules it names plus
 # their own ui/-relative requires (the tunnel is six files over one state
-# object), plus the shared transport defaults and the component source list
-# (components.js reads it from __dirname; without it the phone hands the far
-# side nothing to install). components-view.js is the plugin page's backend
+# object), plus the shared transport defaults and the market index snapshot
+# (components.js reads market.snapshot.json from __dirname; without it an offline
+# phone hands the far side nothing to install). components-view.js is the plugin page's backend
 # (android-host.js names it); it requires components.js, right beside it, and
 # components.js requires mirrors.js — which reads components.mirrors.json from
 # __dirname, so the phone falls back through the same mirrors the desktop does
 # (without the list it hands the far side nothing to retry through).
-UI_NODE="components-view.js components.js components.mirrors.json components.sources.json exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json"
+UI_NODE="components-view.js components.js components.mirrors.json market.snapshot.json exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"

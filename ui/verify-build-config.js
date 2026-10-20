@@ -84,11 +84,13 @@ const REQUIRED_ASSETS = [
   "index.html",
   "app.js",
   "style.css",
-  // The component source list is read by the main process from __dirname, i.e.
-  // from inside the asar (ui/components.js SOURCES_FILE). Dropped from the
-  // bundle, a packaged app installs no component at all: no workspace, memory,
+  // The market index this build ships. Read by the main process from
+  // __dirname, i.e. from inside the asar (ui/components.js SNAPSHOT_FILE), as the
+  // last tier of the degradation chain: remote index, this machine's cache, then
+  // this. Dropped from the bundle, an offline cold start on a machine that has
+  // never read the market installs no component at all — no workspace, memory,
   // websearch or skills fact ever reaches the supervisor.
-  "components.sources.json",
+  "market.snapshot.json",
   // The mirrors a failed fetch is retried through (ui/mirrors.js BUILTIN_FILE,
   // read from __dirname). Dropped from the bundle, a packaged app silently
   // installs nothing on a machine that cannot reach the release host directly —
@@ -121,6 +123,9 @@ const EXCLUDED_FILES = [
   "dev.sh",
   "package-lock.json",
   "vendor/fonts/README.md", // survey/licence rationale lives in the repo, not in the app
+  // the old per-client list of five source URLs: deleted, and a packager glob
+  // that brought it back would be shipping a file nothing reads
+  "components.sources.json",
 ];
 
 const FILE = { isDirectory: () => false, isFile: () => true };

@@ -15,7 +15,7 @@
 //     supervisor, this client from its plugin domain. Each half can fail on its
 //     own and says so in its own words.
 //   * the MARKET this client knows: the checkouts beside the host repo plus every
-//     release manifest its source list names.
+//     release the one market index names.
 //
 // A read that failed is DATA here, never a blank page: a place that did not
 // answer is drawn as the reason it did not. "Nothing is installed" and "the
@@ -62,7 +62,7 @@ const plugState = {
   clientError: null, // why that domain cannot be aimed at (or why it would not open)
   clientHeldError: null, // why its own list did not arrive
   held: [], // the rows BOTH places hold, each tagged with its own `place`
-  market: null, // {entries, errors, sources}
+  market: null, // {entries, errors, unreachable, origin, note}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
   mirrors: null, // [{url, source}] — the list a failed fetch is retried through, or null while unread
@@ -330,7 +330,7 @@ function plugModel() {
     return byName.get(name);
   };
   // the client's known set first (that is the order a user scans), then anything
-  // either place holds that no source this client reads offers
+  // either place holds that the market does not list
   for (const e of plugState.market ? plugState.market.entries : []) slot(e.name).entry = e;
   for (const h of plugState.held || []) {
     const cell = slot(h.name);
@@ -483,7 +483,7 @@ function plugItemDesc(item) {
       ? `installed — this client offers ${entry.version || "another version"}`
       : "installed — nothing newer is offered here";
   }
-  if (held) return "installed — no source this client reads offers it";
+  if (held) return "installed — the market does not list it";
   // a declaration that names no place (or names a pair that cannot exist) is
   // refused before any byte is built, and its own sentence is the row's line
   if (entry && entry.problem) return entry.problem;
@@ -524,7 +524,10 @@ function plugItemMeta(item) {
       const refuse = plugPlaceUnknown(entry.place);
       if (refuse) meta.push(refuse);
     }
-    meta.push(`offered ${entry.version || "at an unnamed version"} (${entry.origin}${entry.interface ? ", " + entry.interface : ""})`);
+    // a row is offered by the market, or by a checkout beside the host repo (a
+    // contributor's edit) — the page says which, because the bytes differ
+    const from = entry.origin === "checkout" ? "from this checkout" : "from the market";
+    meta.push(`offered ${entry.version || "at an unnamed version"} (${from}${entry.interface ? ", " + entry.interface : ""})`);
     if (entry.published && entry.published.version) {
       // a checkout this client can archive, with the release under it: the release
       // is what a machine that already holds the checkout can still receive
@@ -733,7 +736,7 @@ function plugEmptyText(known, shown) {
     return why ? "could not be read — " + why : "reading…";
   }
   if (known && !shown) return "no component here matches this filter";
-  return "nothing is installed in either place, and no source this client reads offers anything";
+  return "nothing is installed in either place, and the market lists nothing for this build";
 }
 
 // The page own read failures, in the order they explain an empty or short list:
@@ -765,6 +768,11 @@ function plugList() {
   else meta.push("reading");
   if (plugState.market) meta.push(`${plugState.market.entries.length} known`);
   else if (plugState.marketError) meta.push("market unreadable");
+  // WHICH index answered: the remote one is the ordinary case and needs no
+  // words; a cached or shipped copy is not the current market, and a page that
+  // showed it as if it were would be saying something it does not know
+  const origin = plugState.market && plugState.market.origin;
+  if (origin && origin !== "remote") meta.push(`index ${origin}`);
   // a filtered list says so: the count behind the title is about both places,
   // this one about what is on screen
   if (shown.length !== items.length) meta.push(`${shown.length} shown`);
@@ -780,12 +788,24 @@ function plugList() {
     caution.textContent = "install writes bytes where the declaration puts them, and Remove deletes them — neither is a rollback, since nothing here keeps a copy of what it replaces or takes away (the switch is the third write: it deletes nothing, and pressing it again is the undo)";
     sec.appendChild(caution);
   }
-  // a source that did not answer explains a short list: one line each, together
-  // at the end rather than scattered through the rows it shortened
+  // a row that did not survive the index (a bad line, a manifest that failed its
+  // pin) explains a short list: one line each, together at the end rather than
+  // scattered through the rows it shortened
   for (const reason of (plugState.market && plugState.market.errors) || []) {
     const el = document.createElement("p");
     el.className = "plug-source-error";
     el.textContent = reason;
+    sec.appendChild(el);
+  }
+  // ...and when the list is not the current market, the view says why in one
+  // sentence (the remote index did not answer just now, so this is the copy this
+  // machine cached, or the one this build ships). A list should say which list it
+  // is — that sentence is the difference between "nothing new" and "I could not
+  // ask".
+  if (plugState.market && plugState.market.note) {
+    const el = document.createElement("p");
+    el.className = "plug-source-hint";
+    el.textContent = plugState.market.note;
     sec.appendChild(el);
   }
   // ...and when the failure is the network rather than an answer (the view says
@@ -800,12 +820,11 @@ function plugList() {
     const hint = document.createElement("p");
     hint.className = "plug-source-hint";
     hint.textContent =
-      "a source this build ships is read from github.com. A fetch that fails for a " +
-      "network reason is retried through the mirrors listed under Mirrors below, and " +
-      "the source mirror box above (it writes \"source_mirror\" into " +
-      "~/.clutch/settings.json) moves every read, manifests included. Either way a " +
-      "mirror only moves the bytes: every digest is still checked against the " +
-      "release's own pin";
+      "the market index and every release manifest are read from github.com. A fetch that " +
+      "fails for a network reason is retried through the mirrors listed under Mirrors below, " +
+      "and the source mirror box above (it writes \"source_mirror\" into " +
+      "~/.clutch/settings.json) moves every read there was. Either way a mirror only moves " +
+      "the bytes: every digest is still checked against the release's own pin";
     sec.appendChild(hint);
   }
   return sec;
@@ -1597,8 +1616,9 @@ function renderPlugins() {
 }
 
 // Read all three halves, render each as it lands: the two inventories are two
-// local calls, the market is one per source (a release manifest, and
-// every source is a network hop that can take its time), and the mirror list is a
+// local calls, the market is ONE read (the index; a module's manifest is read
+// when something is installed from it, and
+// every read is a network hop that can take its time), and the mirror list is a
 // read of two local files (ui/mirrors.js). A shell with no mirror channel — an
 // older bridge — has two reads, not three with one that never lands.
 function plugRead({ force = false } = {}) {
@@ -1670,7 +1690,8 @@ function plugRead({ force = false } = {}) {
 
 // ---- the source mirror ------------------------------------------------------
 //
-// Where a source this build SHIPS is read from. ui/net-fetch.js applies the prefix
+// Where the reads this build makes are sent: the market index, a module's
+// manifest, and the artifact a machine fetches. ui/net-fetch.js applies the prefix
 // once, where a source becomes a URL, and the fetch that obeys it happens in the
 // HOST process — this file cannot reach it, and on the phone the host's own
 // artifact downloads read the same key — so this field is not the knob: it is the
@@ -1683,7 +1704,7 @@ function plugRead({ force = false } = {}) {
 //
 // The knob is a decision with a network consequence, so it is one deliberate act
 // (the Save button, never the keystroke) and the line under it is the verdict:
-// what the sources are read under now, or why the value was refused.
+// what the reads are sent through now, or why the value was refused.
 function plugMirrorStored() {
   try {
     return localStorage.getItem("clutch_source_mirror") || "";
@@ -1699,14 +1720,14 @@ function plugMirrorNote(text, bad) {
 }
 
 // What the line says when it is NOT the answer to a just-pressed Save: the mirror
-// in force, said as the sentence the sources follow ("read under X" / "read from
+// in force, said as the sentence the reads follow ("read under X" / "read from
 // github.com") rather than as the value's own name for itself.
 function plugMirrorIdleNote() {
   const cur = plugMirrorStored();
   plugMirrorNote(
     cur
-      ? `sources this build ships are read under ${cur}`
-      : "no mirror: sources this build ships are read from github.com",
+      ? `the market index and every manifest are read under ${cur}`
+      : "no mirror: the market index and every manifest are read from github.com",
     false
   );
 }
@@ -1751,12 +1772,12 @@ async function plugMirrorSave() {
   }
   plugMirrorNote(
     value
-      ? `sources this build ships are now read under ${value} — every digest is still checked against the release's own pin`
-      : "no mirror: sources this build ships are read from github.com again",
+      ? `the market index and every manifest are now read under ${value} — every digest is still checked against the release's own pin`
+      : "no mirror: the market index and every manifest are read from github.com again",
     false
   );
   // the mirror moves where the BYTES come from, so the list has to be read again:
-  // a source that could not be reached a moment ago may answer now
+  // a read that could not be reached a moment ago may answer now
   plugState.result = null;
   plugRead({ force: true });
 }

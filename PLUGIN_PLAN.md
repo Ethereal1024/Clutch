@@ -8,7 +8,7 @@
 
 | # | 不变量 | 现状依据 |
 | --- | --- | --- |
-| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（5 行，五个模块各一条）、`components.sources()`（`ui/components.js`） |
+| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `market/entries.json`（5 行，五个模块各一条，人维护那一栏）→ `ui/market.snapshot.json`（生成物）→ tag `market` 的 `index.json`；读它的是 `readIndex()` / `marketEntries()`（`ui/components.js`） |
 | I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()`（`ui/components.js`） |
 | I3 | **声明说词、宿主释义**：能力词汇（access / gate / mode）归宿主 | `agent/tools/gates.py:1-20`（导入期 `_check_vocabulary` 断言） |
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
@@ -27,7 +27,7 @@
 | P3d 版本明细 | **已完成** | `cdc1625` | 已装行上的一个"…"披露该机持有的每一版（版本、摘要、是否 `resolved`），逐版点名卸载 |
 | 零之四.4 目标机自取字节 | **已完成** | `0899dc8`（宿主）+ `abab8cb`（页面） | 安装请求两种形状：body 有字节 = `upload()` 兜底（客户端独有的字节），空 body + `artifact_url` = 目标机自取（默认）；同一道 `accept` 门按 `digest` 量**取到的**字节；客户端不再下载 release，只带走几百字节的声明 |
 | P4 工具集 | 未动工 | — | `interface: "data"`，见 §三 |
-| P5 静态索引 | 未动工 | — | 可选，见 §三 |
+| P5 静态索引 | **已落地（最小形态）** | 见 §三 | 一份索引所有客户端共读：`market/entries.json`（人维护）→ `ui/market.snapshot.json`（生成、随包）→ tag `market` 的 `index.json`（CI 发布）；行是钉死版本的指针 + 清单 sha256，检索/分类仍是页面上的本地动作，私有源未做 |
 | C1 别的机器上的进程 | **已完成** | `7cb224e` | `runs_on: "other"` 在这台机器上是**拒绝**而不是悄悄本地代跑：`rendezvous.unavailable_reason` 是唯一的门（已装说"no channel"、推来的说"unknown component"）；`tests/catalog_test.py` |
 | C2 客户端自己的组件域 | **已完成** | `75414ee` | `ui/plugin-host.js` + `ui/plugin-child.js`：根是 `~/.clutch/client`（`CLUTCH_CLIENT_COMPONENTS_DIR` 可重指），登记表 + 摘要门 + 版本 + 停用位；一次调用 fork 一个子进程（可杀、不阻塞主进程），ABI 是 `exports.call(tool, args)` |
 | C3 反向转发改成端口表 | **已完成** | `52c8950` | `tunnel-core` 的 `channels`：一行 = 首选端口 + 本地监听 + 记住远侧给的端口 + 认领 inbound；模型路径只是其中一行，不再有模型特例 |
@@ -40,7 +40,9 @@
 
 `ssh-workspace` 已落地（上表 C9，实现在 `clutch-ssh-workspace/`；`SSH_WORKSPACE_PLAN.md` 从施工计划变成了设计记录与验收判据，四个待拍板已在它的 §五 拍完）。它接的是 C1–C8 铺完之后仍然空着的那个位置——别的机器上的文件系统——**不是**给工具加分支：宿主只多了一个环境（执行桥），四个工具名照旧由声明里的 `subject: foreign-fs` 决定出不出现（`COMPONENTS.md` §七）。
 
-C1–C9 之后还空着的一处已写进上表的"尚未做"与 `SSH_WORKSPACE_PLAN.md`：**真机验收**（打包已完成：`v0.1.56` 的 Release 带 `clutch-ui_0.1.56_amd64.deb`，装上它、在建好的隧道里跑一次，跑通后 `scripts/ws-stopgap` 按 §2.4 退场）。**分发**已经落地：组件在自己的仓库里按 tag 发 `clutch-component.json` + `clutch-ssh-workspace.tar.gz`（`v0.1.0`），`ui/components.sources.json` 里是第 5 行来源——这一行随**下一个**宿主版本出厂，`v0.1.56` 的 asar 里还是四条。P4 工具集与 P5 静态索引仍是可选项，不在这条线上。
+C1–C9 之后还空着的一处已写进上表的"尚未做"与 `SSH_WORKSPACE_PLAN.md`：**真机验收**（打包已完成：`v0.1.56` 的 Release 带 `clutch-ui_0.1.56_amd64.deb`，装上它、在建好的隧道里跑一次，跑通后 `scripts/ws-stopgap` 按 §2.4 退场）。**分发**已经落地：组件在自己的仓库里按 tag 发 `clutch-component.json` + `clutch-ssh-workspace.tar.gz`（`v0.1.0`），`market/entries.json` 里是第 5 行——**这一行不再等宿主发行**：索引是一份独立发布的数据，`v0.1.56` 的 asar 里那份快照仍是四条，但它读索引时就会看到第五行（读不到活索引时退回随包快照，如实说 `origin`）。P4 工具集仍是可选项；P5 静态索引已经以最小形态落地（§三）。
+
+市场从"一份随版本打包的来源清单"变成"一份所有客户端共读的索引"（`market/entries.json` → `ui/market.snapshot.json` → tag `market` 的 `index.json`），因此加一个模块是**一行 JSON 的 PR**，不是一次宿主发行；用户自定义来源那条路随之退场（`~/.clutch/components.sources.json` 不再被读，页面上的入口也删了），"装哪一版"由此只由索引与模块自己的 release 决定。
 
 C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推声明（`scripts/sync-android-host.sh`
 的 `UI_NODE` 不动）。这不是省事，而是**手机目前没有"这台客户端的插件"这个概念**——根、入口、
@@ -201,7 +203,7 @@ flowchart LR
   P3 --> P3c['P3c 停用/启用<br/>留着但不驱动 ✅']
   P3c --> P3d['P3d 版本明细<br/>每版点名 ✅']
   P3d --> P4['P4 工具集<br/>interface data']
-  P4 --> P5['P5 可选<br/>静态索引 / 私有源']
+  P4 --> P5['P5 静态索引 ✅<br/>私有源未做']
 ```
 
 ### P0 版本语义：一次安装的版本必须可读（**已完成**，`42e6ee6`）
@@ -316,15 +318,26 @@ flowchart LR
   并说明"缺谁"——先例是 `prompt.components_unavailable()` `:102`。
 - 保留 `chat` / `work` 为内建工具集，不删。
 
-### P5 可选：静态索引与私有源
+### P5 静态索引与私有源（索引已落地，私有源未做）
 
-- **索引**：market 仓库里的静态 `index.json`（搜索/分类/精选），页面读它做展示，**权威仍是
-  各模块的 manifest**；零服务器。
-- **私有源**：`downloadPinned()` 与 `readManifest()`（`ui/components.js`）的 `fetch(url, {signal})`
-  **不带任何 header**，要支持 token 必须改；来源项从字符串扩成对象时保持 `readSourceList()`
-  的 `schema: 1` 兼容。零之四.4 之后**字节是目标机去取**（`download()`
-  `agent/tools/components.py:710`，同样不带任何 header），所以 token 不光要给客户端，还得递到
-  每一台要装的机器上——私有源至今是"没做"，不是"快有了"。
+- **索引（已做）**：一份静态 `index.json`，固定地址
+  `https://github.com/Ethereal1024/Clutch/releases/download/market/index.json`（tag `market`，
+  资产名固定），**所有客户端、所有版本读同一份**。人维护的只有 `market/entries.json`（一行一个
+  模块：`id` / `name` / `manifest` / `version` / `summary` / `tags` / `homepage` / `license`）；
+  `python3 scripts/market_index.py --write` 取回每行钉住的那份清单、量 `manifest_sha256`、抄出
+  `interface` 与 `runs_on`，生成随发行版打包的 `ui/market.snapshot.json`（没有时间戳：市场没变
+  则逐字节相同）。`--check` 是 CI 门（快照必须等于今天的 entries）；`.github/workflows/market.yml`
+  过门之后把同一份字节发到 tag `market`。客户端读的顺序是活的索引 → `~/.clutch/market/index.json`
+  → 随包快照，`origin` / `note` / `unreachable` 如实说明读自哪一层。
+  **权威仍是各模块的 manifest**：索引只说"去哪读、读到的该是哪一份"，`declaration.sha256`
+  照样由清单自己钉，索引换不来信任。零服务器：托管是 GitHub Release。
+- **加一个模块 = 一行 PR**：`market/entries.json` 多一行 + `--write` + PR。宿主代码不改，也
+  不用等宿主发行——这是这次替换的全部目的（旧形状是每个客户端版本自带一份来源清单，
+  `v0.1.56` 的 asar 里就还是四条，所谓"加一个模块"实际要等下一次打包）。
+- **私有源（未做）**：`readManifest()` / `marketEntries()`（`ui/components.js`）的
+  `fetch(url, {signal})` **不带任何 header**，要支持 token 必须改；零之四.4 之后**字节是目标机
+  去取**（`download()` `agent/tools/components.py:710`，同样不带任何 header），所以 token 不光
+  要给客户端，还得递到每一台要装的机器上——私有源至今是"没做"，不是"快有了"。
 - **撤销**：签名过的静态撤销列表（可选）。
 
 ## 四、验证
@@ -376,14 +389,16 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 | 版本语义断层 | 新旧两种"版本"形状并存 | P0 先统一；宿主落地自带清理，无需迁移脚本 |
 | 越权 | 工具集想让宿主执行它定义的行为 | 守 I3：只能引用宿主词汇，导入期断言会大声报错 |
 | 动态模式爆炸半径 | P4 改的是"模型看得到哪些工具" | 模式仍由宿主裁定（`registry.py` 的过滤保留），`chat` 语义不因插件变松 |
-| 生态空转 | 有页面没插件 | 先跑通 4 个自家模块 + 一个工具集样本，再谈索引（**已满足并超出**：5 行来源全在 `ui/components.sources.json`，第 5 个 `clutch-ssh-workspace` 的 `v0.1.0` 已按同一套 tag→CI→release 流程发出，市场读得到 `runs_on: other` 的声明） |
+| 生态空转 | 有页面没插件 | 先跑通 4 个自家模块 + 一个工具集样本，再谈索引（**已满足并超出**：5 行全在 `market/entries.json`，第 5 个 `clutch-ssh-workspace` 的 `v0.1.0` 已按同一套 tag→CI→release 流程发出，市场读得到 `runs_on: other` 的声明；索引本身也已落地——见 §三 P5） |
 
 ## 六、为什么不需要自建服务器
 
 - 分发：sha256 钉死（`pinnedAsset()` `ui/components.js`）⇒ 托管方不可信也安全——而且钉子
   是在**取字节的那台机器**上兑现的（`accept()` `agent/tools/components.py:770` 量它取到的
   字节）；asset 相对 source（`assetLocation()` `ui/components.js`）⇒ 换托管零成本。
-- 发现：来源列表是数据文件（`readSourceList()` `ui/components.js`），第 5 个模块 = 多一行 URL，宿主零代码改动。
+- 发现：索引是数据文件（`readIndex()` / `marketEntries()` `ui/components.js`）——一份
+  `index.json` 所有客户端共读，第 5 个模块 = `market/entries.json` 多一行 + 一个 PR，
+  宿主零代码改动、也不用发新版。
 - 安装：`POST /api/components/install` 长在**目标机**的 supervisor 上，没有账号、配额、
   每机器注册表。
 - 只有"账号 / 付费 / 统计 / 集中发布"才逼出服务器，而每一项都与 I1 / I2 冲突，需单独决策。
@@ -394,10 +409,11 @@ curl -s http://127.0.0.1:8899/api/components          # 空
    P2 同批紧跟（`8d11845`）。
 2. **旧记录**：是否强制重装以统一版本形状（`install()` 会清掉旧版本目录，所以代价只是一次
    上传），或让两种形状长期并存。
-3. **索引仓库（P5）**：模块数 ≤4 时先不建。→ **判据已到期**：`ui/components.sources.json`
-   现在是 5 行，第 5 个 `clutch-ssh-workspace` 已发布（上面"生态空转"那条的样本条件也
-   已满足），"先不建"的理由随之消失。P5 因此从"不必谈"变成"要拍板"，但**本轮不启动**——
-   它要新增一处托管、与 I1/I2 的关系得单独定。
+3. ~~**索引仓库（P5）是否建**~~ → **已决并已实施**：不另建仓库、不新增托管——索引就发在
+   本仓库固定的 `market` tag 上（`index.json`），人维护的是 `market/entries.json`。这样一来
+   与 I1/I2 的关系是清楚的：索引只存 URL 与摘要（不含任何组件字节），发布是覆盖一个资产，
+   而"哪一版是当前版"从"各模块的 `releases/latest`"改成"这一行写了哪个版本"。检索/分类
+   仍是页面上的本地动作，私有源见 §三 P5 的未做部分。
 4. ~~**`DELETE` 不带版本号是什么意思**~~ → **已决（P3a）**：整个组件一起拿掉（"卸载这个
    组件"就是这个意思），返回 `removed:[…]` 说明删掉了哪几版；本来就没装 → `absent`，**不是
    错误**（要求已经成立）。`?version=` 指向没装的版本 → 拒绝。
@@ -406,11 +422,11 @@ curl -s http://127.0.0.1:8899/api/components          # 空
    `disabled`）。语义与理由见 §零之四.2 与 P3c。
 6. ~~**"目标机自取字节"什么时候做**~~ → **已决并已做**（§零之四.4）。安装端点认两种形状
    （body 有字节 / 空 body + `artifact_url`），页面按"字节在哪"选一条（`file.path ? upload :
-   fetchInstall`）。来源清单**不必两边都读到**：URL 是客户端从清单里解出来的
-   （`assetLocation`），跟着 manifest 递给目标机——目标机只认 URL，不认清单。已知边界：来源
-   清单点名**磁盘上的**清单时，解出来的工件位置也是本地路径，而宿主只取 http(s)（`download()`
-   拒绝 `file:`），这种来源今天装不上（清单本身照读；`upload()` 兜底覆盖的是检出与预编译
-   产物，不是镜像目录）。
+   fetchInstall`）。索引**不必两边都读到**：URL 是客户端从**索引那一行点名的清单**里解出来的
+   （`entryManifest` + `assetLocation`），跟着 manifest 递给目标机——目标机只认 URL，不认索引。已知边界：显式传入
+   的**磁盘上的**索引（`{index: <路径>}`）解出来的工件位置也是本地路径，而宿主只取 http(s)（`download()`
+   拒绝 `file:`），这种索引给出的安装今天装不上（索引本身照读；`upload()` 兜底覆盖的是检出与预编译
+   产物，不是磁盘目录）。
 
 ## 八、待办（本轮明确留着的缺口）
 

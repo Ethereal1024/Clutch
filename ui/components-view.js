@@ -42,18 +42,18 @@ const defaultMirrors = require("./mirrors");
 // would be testing its own copy of it.
 const rule = defaultLib;
 
-// The market is one HTTP read per source and does not change second to second,
-// so a page re-opened a moment later must not re-read every release. Five
-// minutes is short enough that a release published while the app is open shows
-// up without a restart, long enough that the tab is instant to re-open.
+// The market is one HTTP read and does not change second to second, so a page
+// re-opened a moment later must not re-read the index. Five minutes is short
+// enough that a release published while the app is open shows up without a
+// restart, long enough that the tab is instant to re-open.
 const MARKET_TTL_MS = 5 * 60_000;
 
-// A read that LOST a source is the exception to that: keeping a failure for five
+// A read that LOST the index is the exception to that: keeping a failure for five
 // minutes is how a moment of bad network becomes "this page is broken" — every
-// re-open draws the same four errors without asking again. So a read that failed
-// a source is fresh only for a moment; the next look is the next ask. (Entries
-// from the sources that did answer are kept in the meantime — half a market is
-// still a market.)
+// re-open draws the same error without asking again. So a read that fell back to
+// the cached or shipped copy is fresh only for a moment; the next look is the
+// next ask. (The rows that did answer are kept in the meantime — a list from the
+// snapshot is still a market.)
 const MARKET_ERROR_TTL_MS = 30_000;
 
 const NO_CLIENT =
@@ -228,9 +228,16 @@ function createComponentsView(deps) {
   // is a directory this client could archive, a release is a manifest it could
   // download, and a checkout that has a release under it says so (the release is
   // then the only thing a machine that already holds the checkout can receive).
+  //
+  // The display words come from the index ROW when there is one (`spec.entry`):
+  // a module's own declaration carries what an installer needs and nothing about
+  // how to describe itself in a market, so the curator's summary and tags ride
+  // with the row instead. `origin` says which of the two this row is — a
+  // contributor's checkout, or a line the market lists.
   function entry(spec) {
     const declared = spec.declaration || null;
     const published = spec.published || null;
+    const row = spec.entry || null;
     // the two words the declaration is read for, and the one answer they give
     // (`destinationOf`): a page that had to combine them itself would be a second
     // copy of the rule, and a page that asked the user would be a third
@@ -238,6 +245,7 @@ function createComponentsView(deps) {
     const where = rule.destinationOf(spec);
     return {
       name: spec.name,
+      id: (row && row.id) || spec.id || "",
       // where this component goes: "client" | "session" | null (contradiction)
       place: where.place,
       problem: where.error || "",
@@ -245,16 +253,21 @@ function createComponentsView(deps) {
       interface:
         spec.interface || (declared && declared.interface) || (published && published.interface) || "",
       version: (declared && declared.version) || (published && published.version) || "",
-      origin: spec.checkout ? "checkout" : "release",
+      origin: spec.checkout ? "checkout" : "market",
       source: spec.checkout ? spec.source : (published && published.source) || spec.source || "",
       published: published
         ? { version: published.version || "", source: published.source || "" }
         : null,
+      // what the row says ABOUT the component, for the page's benefit only
+      summary: (row && row.summary) || "",
+      tags: (row && row.tags) || [],
+      homepage: (row && row.homepage) || "",
+      license: (row && row.license) || "",
     };
   }
 
   async function readMarket() {
-    const known = await lib.componentSpecs(); // errors are data, never a throw
+    const known = await lib.marketEntries(); // errors are data, never a throw
     const value = {
       entries: known.specs.map(entry),
       // the reasons as drawn, and the one bit a page can act on
@@ -263,10 +276,17 @@ function createComponentsView(deps) {
       // is the answer to it. An answer that said no is not that question.
       errors: known.errors.map((e) => e.reason),
       unreachable: known.errors.some((e) => e.unreachable),
-      sources: lib.sources().length,
+      // WHICH index answered — remote, this machine's cache, or the copy this
+      // build ships — and, when it was not the remote one, why (the page draws
+      // that reason as a hint; a list should say which list it is)
+      origin: known.origin || "",
+      note: known.note || "",
     };
     market = { at: now(), value, specs: known.specs };
-    log(`[components] market read: ${value.entries.length} known, ${value.errors.length} source(s) failed`);
+    log(
+      `[components] market read: ${value.entries.length} known (index: ${value.origin || "none"}), ` +
+        `${value.errors.length} reason(s)`
+    );
     return market;
   }
 
@@ -287,18 +307,29 @@ function createComponentsView(deps) {
       const fresh = await readMarket();
       return fresh.value;
     } catch (e) {
-      // componentSpecs reports as data; this only catches something broken
+      // marketEntries reports as data; this only catches something broken
       // underneath it, and still answers with a shape the page can draw
-      const value = { entries: [], errors: [(e && e.message) || String(e)], unreachable: false, sources: 0 };
+      const value = { entries: [], errors: [(e && e.message) || String(e)], unreachable: false, origin: "", note: "" };
       market = { at: now(), value, specs: [] };
       return value;
     }
   }
 
   // The market row for one name, from the cached read when it is still fresh.
+  //
+  // A row from the index is a POINTER, not a spec: the index's interface and
+  // runs_on are display previews, and which machine receives the bytes has to
+  // come from the module's own declaration. So a market row's manifest is read
+  // (and checked against the row's pin, name and version) HERE — once, when
+  // something is actually about to be installed — while a checkout needs no read
+  // at all: its declaration and its bytes are the directory itself.
   async function specFor(name) {
     const fresh = stillFresh() ? market : await readMarket();
-    return fresh.specs.find((s) => s.name === name) || null;
+    const listed = fresh.specs.find((s) => s.name === name) || null;
+    if (!listed) return null;
+    if (listed.checkout || listed.published || !listed.entry) return listed;
+    const manifest = await lib.entryManifest(listed.entry);
+    return { ...listed, ...manifest, published: manifest };
   }
 
   // Hand ONE component to the place its declaration names.

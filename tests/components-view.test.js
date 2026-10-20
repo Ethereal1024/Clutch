@@ -18,7 +18,8 @@ function fakeLib(opts = {}) {
   const {
     specs = [],
     errors = [],
-    sourceCount = 4,
+    origin = "remote",
+    note = "",
     held = [],
     inventoryError = null,
     file = { path: "/tmp/clutch-memory.tar.gz", digest: DIGEST, version: VERSION },
@@ -37,10 +38,11 @@ function fakeLib(opts = {}) {
   return {
     calls,
     REQUEST_TIMEOUT_MS: 120000,
-    sources: () => new Array(sourceCount).fill("https://example.invalid/clutch-component.json"),
-    componentSpecs: async () => {
+    marketEntries: async () => {
+      // what ui/components.js marketEntries() answers: the checkouts beside this
+      // repo, then one row per index entry, and no manifest read
       calls.specReads++;
-      return { specs, errors };
+      return { specs, errors, origin, note, unreachable: errors.some((e) => e.unreachable) };
     },
     hostInventory: async () => {
       calls.inventories++;
@@ -178,12 +180,12 @@ async function main() {
     });
     const { api } = view({ lib });
     const m = await api.market();
-    check(m.entries.length === 2 && m.sources === 4, "every readable source contributes a market entry");
+    check(m.entries.length === 2 && m.origin === "remote", "every row the index lists is a market entry, and the page knows which index answered");
     check(
       m.entries[0].origin === "checkout" && m.entries[0].published.version === "0.1.0",
       "a checkout says so, and keeps the release under it (the only thing a machine holding the checkout can receive)"
     );
-    check(m.entries[0].version === "0.1.0" && m.entries[1].origin === "release", "a release is read straight from its manifest");
+    check(m.entries[0].version === "0.1.0" && m.entries[1].origin === "market", "a row the index names is the market's, and it is drawn without reading its manifest");
     check(m.errors.length === 1 && /404/.test(m.errors[0]), "a source that did not answer is drawn as its reason");
 
     // the cache: a page reopened a moment later must not re-read four sources

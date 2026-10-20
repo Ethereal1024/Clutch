@@ -180,7 +180,8 @@ clutch-skills/         技能模块（子模块）：load_skill 与技能库（�
                        发行包走；本机 dev-only 的写作技能不入库、也不进任何发行包）
 eval/                  评测场景（落地页 / 修 bug / 重构）
 tests/                 测试
-scripts/               打包与构建脚本
+scripts/               打包与构建脚本（market_index.py 生成市场索引）
+market/                市场索引里人维护的那一栏：entries.json，一行一个模块
 ```
 
 四个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
@@ -193,18 +194,28 @@ scripts/               打包与构建脚本
 一个组件都没装时，宿主只有 AI 聊天本身，没有可调用的文件/联网/记忆/技能工具。
 
 宿主发行物里**没有任何模块的字节**：发行版只装宿主自己，"有哪些模块"是一份数据。
-应用自带的 `ui/components.sources.json` 是五条 URL，每条指向该模块自己 release 里的
-`clutch-component.json`（模块自己声明版本、接口与各平台工件的摘要）；用户还可以写一份
-`~/.clutch/components.sources.json` 追加来源——它排在自带清单之前，同名模块以用户写的
-为准。客户端读清单、按平台选工件、核对 sha256，再把工件上传到"要运行它的那台机器"。
-清单里缺 sha256、摘要对不上、schema 不认识都只拒那一条，不影响其他模块。要加第六个
-模块，就是往这份 JSON 里加一行（不需要改宿主代码，也不需要重发宿主）。
+这份数据是**一份市场索引**，一个固定地址：
+`https://github.com/Ethereal1024/Clutch/releases/download/market/index.json`，每一版客户端
+都读它。文档一行一个模块，行里写着该模块自己 release 里 `clutch-component.json` 的**钉死
+版本**地址（`/download/v<version>/…`，不是 `releases/latest`）和这份清单的 sha256——所以
+"当前是哪一版"由索引说了算，模块发一个新 release 不会自己变成可装的。客户端读索引、取回
+那一行点名的清单、按平台选工件、核对 sha256，再把工件交给"要运行它的那台机器"（字节由那台
+机器自取，本机只递几百字节的声明）。摘要对不上、schema 不认识、版本与索引不符都只拒那一条，
+不影响其他模块。
 
-自带的那五条 URL 可以整体走镜像：设 `CLUTCH_SOURCE_MIRROR=https://<加速前缀>`（或
-`~/.clutch/settings.json` 里的 `source_mirror`，桌面 GUI 继承不到环境变量），每条自带
-来源就变成 `<前缀>/<原始 URL>`、路径原样保留——于是清单里那些"兄弟"地址（声明、以及
-"要运行它的那台机器"自取的工件 URL）一起跟着走。用户自己写的清单原样照用，摘要也仍按
-各模块 release 自己的 pin 校验：镜像只搬字节，不为字节背书。桌面端读远程清单/工件走
+索引本身是生成物：人只维护 `market/entries.json` 里的一行（名字、地址、版本、简介、标签），
+`python3 scripts/market_index.py --write` 取回被钉住的那几份清单、量摘要，写成随发行版打包的
+`ui/market.snapshot.json`；CI 重跑 `--check`，并把同一份字节发成 tag `market` 的 `index.json`。
+**加第六个模块 = 往 `market/entries.json` 加一行、提一个 PR**——不用改宿主代码，也不用等
+下一次宿主发行，已经装着的客户端下次读索引就看见。客户端读索引的顺序是活的索引 →
+`~/.clutch/market/index.json` → 随包快照，`origin` 说明这一份读自哪一层，够不着时页面照实
+说明。随版本打包的清单与 `~/.clutch/components.sources.json` 那条用户清单都已退场。
+
+索引与各模块清单可以整体走镜像：设 `CLUTCH_SOURCE_MIRROR=https://<加速前缀>`（或
+`~/.clutch/settings.json` 里的 `source_mirror`，桌面 GUI 继承不到环境变量），每次读的地址
+就变成 `<前缀>/<原始 URL>`、路径原样保留——于是清单里那些"兄弟"地址（声明、以及
+"要运行它的那台机器"自取的工件 URL）一起跟着走。摘要仍按索引行与各模块 release 自己的 pin
+校验：镜像只搬字节，不为字节背书。桌面端读远程清单/工件走
 Electron 的 `net.fetch`，机器的系统代理设置因此生效；手机端只有直连或镜像。
 
 发行版里还自带一份**回退镜像列表**（`ui/components.mirrors.json`，三条实测过的加速前缀）：

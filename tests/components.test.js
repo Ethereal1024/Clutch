@@ -15,15 +15,15 @@
 //   - a DEV CHECKOUT beside this repo, tarred by scripts/build-component-tar.sh
 //     (so bash + tar are required; without them those checks SKIP — an
 //     environment limit), and
-//   - a module's PUBLISHED release manifest, fetched over http from a server
-//     this test runs: the file it names is relative to the manifest and pinned by
+//   - a module's PUBLISHED release, listed by ONE row of a market index this test
+//     writes and fetched over http from a server it runs: the file it names is relative to the manifest and pinned by
 //     the sha256 the manifest carries, and the HOST is the one that fetches it —
 //     the install request carries the URL and the pin, no bytes (PLUGIN_PLAN.md
 //     零之四.4), and nothing lands unless what the host fetched matches the pin.
 //
 // The run gets its own HOME: the client caches downloads in ~/.clutch/artifacts,
 // so pointing the cache at a temp directory keeps the user's real one untouched
-// (and makes the source-list override below a file, not a stub).
+// (and makes the market index below a file, not a stub).
 
 "use strict";
 
@@ -68,6 +68,31 @@ function buildTar(src, out) {
   const r = spawnSync(resolveBash(), [TAR_SCRIPT, src, out], { stdio: "pipe" });
   if (r.status !== 0 || !fs.existsSync(out)) throw new Error(`build-component-tar.sh failed: ${r.stderr}`);
   return out;
+}
+
+// The ONE document every read goes through now (ui/components.js readIndex): a
+// market index holding exactly the rows a case needs, written where the client can
+// read it as a path — the same code as a URL, minus the network.
+function indexOf(dir, rows) {
+  const file = path.join(dir, "index.json");
+  fs.writeFileSync(file, JSON.stringify({ schema: 2, entries: rows }));
+  return file;
+}
+
+// One row pointing at a manifest this test serves, pinned to the bytes it wrote:
+// a row's manifest is read through its digest (components.js entryManifest), so a
+// row this test makes is a pinned one by construction.
+function rowFor(manifestFile, manifestUrl, extra = {}) {
+  const bytes = fs.readFileSync(manifestFile);
+  const doc = JSON.parse(bytes.toString("utf8"));
+  return {
+    id: `test/${doc.name}`,
+    name: doc.name,
+    manifest: manifestUrl,
+    manifest_sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+    version: doc.version || "",
+    ...extra,
+  };
 }
 
 // A stand-in for a module's release: one directory holding the manifest and every
@@ -225,19 +250,16 @@ async function main() {
   supervisor = await startSupervisor({ ...process.env, CLUTCH_COMPONENTS_DIR: hostRoot });
   const base = supervisor.base;
 
-  // 1. where a component comes from is DATA this build ships, not code: the list
-  //    of module release manifests, with the user's own list read first so a
-  //    user can override a source this build knows.
-  const listed = components.sources();
-  check(listed.length > 0 && listed.every((s) => /^https?:\/\//.test(s)), "the build ships a source list, and a source is a URL");
-  check(listed.every((s) => /clutch-component\.json$/.test(s)), "and each source is a module's own release manifest");
-  check(components.sources([]).length === 0, "a caller that names its own list gets exactly that list");
-  fs.mkdirSync(path.dirname(components.USER_SOURCES_FILE), { recursive: true });
-  fs.writeFileSync(components.USER_SOURCES_FILE, JSON.stringify({ schema: 1, sources: ["https://example.invalid/mine.json"] }));
-  const withUser = components.sources();
-  check(withUser[0] === "https://example.invalid/mine.json", "a user's own list is read first, so it outranks a source this build ships");
-  check(withUser.includes(listed[0]), "and the shipped list stays as the fallback");
-  fs.rmSync(components.USER_SOURCES_FILE);
+  // 1. where a component comes from is ONE INDEX DOCUMENT, not a list baked into
+  //    every client: a row names a module's manifest and pins it. What the
+  //    document's own shape has to be is tests/market.test.js; here the point is
+  //    that a caller who names an index gets exactly it, and that an EMPTY market
+  //    is still a working one — the checkouts beside this repo, nothing to report.
+  const indexDir = tmp("clutch-components-index-");
+  const emptyIndex = indexOf(indexDir, []);
+  const empty = await components.readIndex({ index: emptyIndex });
+  check(empty.entries.length === 0 && empty.origin === "given", "a caller that names its own index gets exactly that index");
+  check(empty.errors.length === 0 && empty.note === "", "and a readable index holding no rows is not a failure");
 
   // 2. a fresh host holds nothing
   const before = await components.hostInventory(base);
@@ -245,8 +267,8 @@ async function main() {
 
   // 3. the components beside this repo are the dev supply, read from each
   //    checkout's OWN component.json — nothing here holds a roster of them.
-  const dev = await components.componentSpecs({ sources: [] });
-  check(dev.errors.length === 0, `a pass with no sources has nothing to report (${JSON.stringify(dev.errors)})`);
+  const dev = await components.componentSpecs({ index: emptyIndex });
+  check(dev.errors.length === 0, `a pass with an empty market has nothing to report (${JSON.stringify(dev.errors)})`);
   check(dev.specs.length >= 4, `every checkout beside the host repo is a component this client knows (${dev.specs.length})`);
   check(dev.specs.every((s) => s.checkout && s.declaration && s.declaration.name === s.name), "and each one declared itself, in its own manifest");
 
@@ -270,7 +292,7 @@ async function main() {
   if (haveBash) {
     const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-memory", "component.json"), "utf8")).version;
     const versioned = await components.artifactFor(
-      (await components.componentSpecs({ sources: [] })).specs.find((s) => s.name === "clutch-memory"),
+      (await components.componentSpecs({ index: emptyIndex })).specs.find((s) => s.name === "clutch-memory"),
       { checkout: true }
     );
     check(
@@ -283,7 +305,7 @@ async function main() {
   }
 
   // 5. the install pass: upload what the host lacks, land it, gate it next time
-  const res = await components.ensureComponents(base, { sources: [], progress: null });
+  const res = await components.ensureComponents(base, { index: emptyIndex, progress: null });
   check(res.errors.length === 0, `every component installs (${JSON.stringify(res.errors)})`);
   check(res.installed.includes("clutch-memory"), "a missing component is uploaded");
   check(res.current.length === 0 && res.deferred.length === 0, "nothing is skipped on a fresh host");
@@ -309,7 +331,7 @@ async function main() {
   );
 
   // 6. the gate: the second pass sends nothing (the point of a content hash)
-  const again = await components.ensureComponents(base, { sources: [] });
+  const again = await components.ensureComponents(base, { index: emptyIndex });
   check(again.installed.length === 0, "the second pass uploads nothing");
   check(again.current.includes("clutch-memory"), "what the host already holds is reported current");
   check(again.errors.length === 0, "and the pass is clean");
@@ -349,11 +371,13 @@ async function main() {
   );
   const pubServer = await serve(pub);
   const source = `${pubServer.base}/clutch-component.json`;
+  // the market row that offers this release: one line, pinned to the manifest's bytes
+  const releaseIndex = indexOf(tmp("clutch-components-release-index-"), [rowFor(manifestPath, source)]);
   try {
     const manifest = await components.readManifest(source);
     check(manifest.name === "clutch-memory" && manifest.artifacts.any.sha256 === artDigest, "a published manifest names its artifact and its digest");
     check((await components.readManifest(manifestPath)).name === "clutch-memory", "the same manifest works from disk: a source is a URL or a path");
-    const merged = (await components.componentSpecs({ sources: [source] })).specs.find((s) => s.name === "clutch-memory");
+    const merged = (await components.componentSpecs({ index: releaseIndex })).specs.find((s) => s.name === "clutch-memory");
     check(
       Boolean(merged && merged.checkout && merged.published && merged.published.artifacts.any.sha256 === artDigest),
       "a checkout outranks the release it came from, but keeps the release reachable under it"
@@ -382,7 +406,7 @@ async function main() {
       "and the version it would be recorded under: the release's own, with the content digest appended"
     );
 
-    const pinned = await components.ensureComponents(base, { checkout: false, sources: [source], progress: null });
+    const pinned = await components.ensureComponents(base, { checkout: false, index: releaseIndex, progress: null });
     check(pinned.errors.length === 0, `a published artifact installs (${JSON.stringify(pinned.errors)})`);
     check(pinned.installed.includes("clutch-memory"), "and it is the release that lands, not the checkout beside the repo");
     // Only the DECLARATION comes through this client (a few hundred bytes, pinned
@@ -408,7 +432,7 @@ async function main() {
       "and the host hands that version back, so a page can name what this machine holds"
     );
 
-    const repinned = await components.ensureComponents(base, { checkout: false, sources: [source] });
+    const repinned = await components.ensureComponents(base, { checkout: false, index: releaseIndex });
     check(repinned.installed.length === 0 && repinned.current.includes("clutch-memory"), "a second pass against the same pin uploads nothing");
 
     // a manifest that pins nothing is refused rather than trusted: the pin is the
@@ -436,11 +460,13 @@ async function main() {
         artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: "0".repeat(64) } },
       })
     );
-    const deceived = await components.ensureComponents(base, {
-      checkout: false,
-      sources: [`${pubServer.base}/lying.json`],
-      progress: null,
-    });
+    // the row pins the MANIFEST's own bytes (so the manifest reads), and the
+    // manifest's own artifact pin is the lie: the bytes a host fetches are weighed
+    // there, not here
+    const lyingIndex = indexOf(tmp("clutch-components-lying-index-"), [
+      rowFor(path.join(pub, "lying.json"), `${pubServer.base}/lying.json`),
+    ]);
+    const deceived = await components.ensureComponents(base, { checkout: false, index: lyingIndex, progress: null });
     check(
       deceived.errors.length === 1 && /hashes to/.test(deceived.errors[0].reason),
       `bytes that do not hash to the pin are refused by the host that fetched them (${JSON.stringify(deceived.errors)})`
@@ -500,7 +526,9 @@ async function main() {
       );
       check(!/fetch failed/.test(reason), "and not in the words of the fetch implementation, which name neither the layer nor whether the source ever spoke");
       check(dead.hits() === components.MANIFEST_ATTEMPTS, `and it is asked ${components.MANIFEST_ATTEMPTS} times, not forever`);
-      const report = await components.componentSpecs({ sources: [`${dead.base}/clutch-component.json`] });
+      const report = await components.componentSpecs({
+        index: indexOf(tmp("clutch-components-dead-index-"), [rowFor(manifestPath, `${dead.base}/clutch-component.json`)]),
+      });
       check(
         report.errors.length === 1 && report.errors[0].reason === `${dead.base}/clutch-component.json: ${reason}`,
         "the pass reports that reason with the source it belongs to"
@@ -520,7 +548,11 @@ async function main() {
         reason = (e && e.message) || "";
       }
       check(/^the source answered 404$/.test(reason) && missing.hits() === 1, "a 404 is an ANSWER: reported as the status it is, and not asked again");
-      const report = await components.componentSpecs({ sources: [`${missing.base}/nope.json`] });
+      // the manifest is never served, so its digest is never weighed: the row
+      // exists to be asked for, and the answer is the 404 the case is about
+      const report = await components.componentSpecs({
+        index: indexOf(tmp("clutch-components-404-index-"), [rowFor(manifestPath, `${missing.base}/nope.json`)]),
+      });
       check(
         report.errors.length === 1 && report.errors[0].unreachable === false,
         "and it is not the failure a mirror answers: the trouble is what the source has, not how this machine reached it"
@@ -542,7 +574,9 @@ async function main() {
       }
       check(/^the source did not answer within 1 s$/.test(reason), `a source that never speaks is a timeout, in seconds (${reason})`);
       check(mute.hits() === 1, "and a budget already spent is not spent again: it is asked once");
-      const report = await components.componentSpecs({ sources: [`${mute.base}/clutch-component.json`] });
+      const report = await components.componentSpecs({
+        index: indexOf(tmp("clutch-components-mute-index-"), [rowFor(manifestPath, `${mute.base}/clutch-component.json`)]),
+      });
       check(
         report.errors.length === 1 && report.errors[0].unreachable === true,
         "a source that never answers is one this machine cannot reach, so a mirror is the way out of it too"
@@ -598,9 +632,11 @@ async function main() {
     const dead = "http://127.0.0.1:1/m"; // nothing listens here: a prefix as unreachable as the release host
     const host = await serveRelease(rel); // the artifact fetch dies; the manifest is read fine
     const mirror = await serveMirror({ "clutch-mirror-any.tar.gz": bytes });
+    const manifestFile = path.join(rel, "clutch-component.json");
     const source = `${host.base}/clutch-component.json`;
+    const mirrorIndex = indexOf(tmp("clutch-components-mirror-index-"), [rowFor(manifestFile, source)]);
     try {
-      const spec = (await components.componentSpecs({ sources: [source] })).specs.find((s) => s.name === "clutch-mirror");
+      const spec = (await components.componentSpecs({ index: mirrorIndex })).specs.find((s) => s.name === "clutch-mirror");
       check(
         Boolean(spec && spec.source === source && spec.artifacts.any.sha256 === artPin),
         "the release itself reads normally: what is broken is the artifact, not the manifest"
@@ -665,9 +701,10 @@ async function main() {
     const next = await serveMirror({ "clutch-mirror-any.tar.gz": bytes });
     const lyingHost = await serveRelease(rel);
     try {
-      const spec = (await components.componentSpecs({ sources: [`${lyingHost.base}/wrong-pin.json`] })).specs.find(
-        (s) => s.name === "clutch-mirror"
-      );
+      const wrongIndex = indexOf(tmp("clutch-components-wrong-pin-index-"), [
+        rowFor(path.join(rel, "wrong-pin.json"), `${lyingHost.base}/wrong-pin.json`),
+      ]);
+      const spec = (await components.componentSpecs({ index: wrongIndex })).specs.find((s) => s.name === "clutch-mirror");
       const handed = await components.artifactFor(spec, {
         checkout: false,
         mirrorFallback: [liar.base + "/m", next.base + "/m"],
@@ -694,9 +731,10 @@ async function main() {
     const absent = await serveRelease(rel, { artifact: "missing" });
     const unused = await serveMirror({ "clutch-mirror-any.tar.gz": bytes });
     try {
-      const spec = (await components.componentSpecs({ sources: [`${absent.base}/clutch-component.json`] })).specs.find(
-        (s) => s.name === "clutch-mirror"
-      );
+      const absentIndex = indexOf(tmp("clutch-components-absent-index-"), [
+        rowFor(manifestFile, `${absent.base}/clutch-component.json`),
+      ]);
+      const spec = (await components.componentSpecs({ index: absentIndex })).specs.find((s) => s.name === "clutch-mirror");
       const handed = await components.artifactFor(spec, { checkout: false, mirrorFallback: [unused.base + "/m"] });
       let answer = "";
       try {
@@ -717,9 +755,10 @@ async function main() {
     const stubborn = await serveRelease(rel);
     const busy = await serveMirror({}, { how: "busy" });
     try {
-      const spec = (await components.componentSpecs({ sources: [`${stubborn.base}/clutch-component.json`] })).specs.find(
-        (s) => s.name === "clutch-mirror"
-      );
+      const stubbornIndex = indexOf(tmp("clutch-components-stubborn-index-"), [
+        rowFor(manifestFile, `${stubborn.base}/clutch-component.json`),
+      ]);
+      const spec = (await components.componentSpecs({ index: stubbornIndex })).specs.find((s) => s.name === "clutch-mirror");
       const handed = await components.artifactFor(spec, {
         checkout: false,
         mirrorFallback: [dead, busy.base + "/m"],

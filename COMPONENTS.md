@@ -84,14 +84,35 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 - **声明是位置而不是内容**：`declaration` 说的是**一份文件在哪**（资产 + 摘要），不是
   声明本身——清单因此只有几百字节，只有真要递给某台宿主时才把那几 KB 取回来（取回
   后同样验摘要）。
-- **一个模块一条 URL**：客户端读的是**来源清单**——随宿主发行版打包的
-  `ui/components.sources.json`（`{"schema": 1, "sources": ["https://…/clutch-component.json", …]}`），
-  以及可选的用户清单 `~/.clutch/components.sources.json`（**用户清单先读，先命名一个
-  组件的那个说了算**，用户因此能覆盖某个模块、或在宿主不认识的地方挂上自己的发行版）。
-  这就是加一个模块的全部代价：多一条 URL，宿主代码一行不用改。
-- **自带清单可以整体走镜像**：自带清单里是五条 `github.com` URL，而"某些网络下
-  `github.com` 根本不可达"是实测（能通的往往只有 `api.github.com`）。所以在一个来源
-  **变成 URL 的那一处**（`ui/components.js` 的 `sources()`）应用一次前缀：
+- **一份市场索引，所有客户端读同一份**：页面读的是**索引文档**，不是一份随版本打包的
+  清单——一个固定地址
+  `https://github.com/Ethereal1024/Clutch/releases/download/market/index.json`（`schema: 2`），
+  装过的每一版客户端、每一台机器都读它。文档一行一个模块：`id`（`owner/name`）、`name`、
+  `manifest`（该模块 release 里那份 `clutch-component.json` 的**钉死版本**地址
+  `/download/v<version>/…`，永不 `releases/latest`）、`version`、`summary`、`tags`、
+  `homepage`、`license`，以及生成出来的 `manifest_sha256`、`interface`、`runs_on`。一行是
+  **指针**：字节仍由各模块自己的 release 发，索引只说"去哪读、读到的该是哪一份"。两道钉子
+  都在，且都不在索引这边松口：先按行的 `manifest_sha256` 验清单，再由清单自己的
+  `declaration.sha256` 验工件。
+- **索引是生成物，人只维护一栏**：`market/entries.json` 里是 5 行"人该决定的东西"（地址、
+  版本、一句话简介、标签、主页、许可），`python3 scripts/market_index.py --write` 逐行取回
+  被钉住的那份清单、量摘要、抄出 `interface` / `runs_on`，写成 `ui/market.snapshot.json`。
+  市场没变时输出**逐字节相同**（文档里没有时间戳），所以"变了没有"就是一次 diff。CI 在这些
+  文件被推上来时重跑 `--check`（快照必须等于今天 entries 生成的东西：推了一行却没重生成就
+  红），再把这份快照发成固定 tag `market` 的 `index.json`
+  （`.github/workflows/market.yml`）——**发索引就是替换这一个资产**。
+- **读的顺序，三层都答不上来才没有市场**：活的索引 → `~/.clutch/market/index.json`（这台
+  机器上一次好读的副本）→ `ui/market.snapshot.json`（随发行版打包）。读自哪一层由 `origin`
+  （`remote` / `cache` / `snapshot` / 调用方显式传入的 `given`）说明，`note` 说清为什么没
+  读到上一层，够不着时 `unreachable` 为真。
+- **加一个模块 = 一行 JSON 的 PR**：在 `market/entries.json` 里加一行，跑一次 `--write`，
+  提 PR。宿主代码一行不改，**也不用等下一次宿主发行**——已经装着的客户端下一次读索引就看见。
+  随发行版打包的清单与 `~/.clutch/components.sources.json` 那条用户清单都已退场（页面上
+  "自定义来源"的入口一并删掉）：一个模块可不可以被装上，不再取决于"用户装的是哪一版客户端"。
+- **每一次读都可以整体走镜像**：索引与各模块清单都在 `github.com` 上，而"某些网络下
+  `github.com` 根本不可达"是实测（能通的往往只有 `api.github.com`）。所以在一个地址
+  **变成 URL 的那一处**（`ui/components.js` 的 `mirrored()`：`readIndex` 与 `entryManifest`
+  都过它）应用一次前缀：
   `<镜像>/<原始绝对 URL>`，路径原样保留——因为清单里其余地址都是它的**兄弟**（见上文
   "声明是位置而不是内容"），于是**声明**与**目标机自取工件**的那条 URL 一起跟着走。
   前缀取 `CLUTCH_SOURCE_MIRROR` 环境变量，其次取 `~/.clutch/settings.json` 的
@@ -106,10 +127,10 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   ```
 
   非 http(s) 的前缀**丢弃**而不是照用（照用会把 http 来源改写成不是 URL 的东西，
-  报出来却是"网络失败"）；字段这一层更早一步就拒绝它，并且一个字节都不写。用户自己写的
-  清单与调用方显式传入的清单**原样照用**：写的人已经写清了要从哪读，一个局域网索引不该
-  被送去公网加速器。镜像只搬字节、不为字节背书：
-  摘要仍按 release 自己的 pin 校验，镜像换了字节就是那一条被拒。
+  报出来却是"网络失败"）；字段这一层更早一步就拒绝它，并且一个字节都不写。显式传入的
+  索引（`{index: <url|path>}`，测试与局域网市场用它）**原样照用**：写的人已经写清了要从
+  哪读，一个本地索引不该被送去公网加速器。镜像只搬字节、不为字节背书：
+  摘要仍按索引行与 release 自己的 pin 校验，镜像换了字节就是那一条被拒。
 - **自带清单，另外一份"够不着才用"的回退镜像列表**：上面那个前缀是**整体改道**——一设就
   作用于每一次读（清单与工件一起）。列表不同，它是**逐条回退**：只在某一条取数以
   "网络上够不着"的方式失败时才轮番上阵，别的地方一概不动。自带三条前缀随发行版打包在
@@ -131,9 +152,10 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   * **有意不动**：**市场/清单**的读取仍然没有自动回退——那是"要显示什么"，不是
     "要运行什么"。清单读不到就照原样报出来；要把整条供给线（清单在内）都改道，仍然只有
     `source_mirror` 那一个旋钮。
-- **一次读有三种结局，只有一种重问**：清单读取把失败分成"回答"（非 2xx、读不懂的 JSON——再问
-  一次拿到的还是同一个回答）、"自己放弃"（这台机器的 30 s 预算耗尽，`CLUTCH_MANIFEST_TIMEOUT_MS`
-  可改，测试拿它把预算压到 1 s）与"够不着"（请求根本没换来响应，例如连接被重置）。只有第三种会
+- **一次读有三种结局，只有一种重问**：索引与清单的读取把失败分成"回答"（非 2xx、
+  读不懂的 JSON——再问一次拿到的还是同一个回答）、"自己放弃"（这台机器的 30 s 预算耗尽，
+  `CLUTCH_MANIFEST_TIMEOUT_MS` 可改，测试拿它把预算压到 1 s）与"够不着"（请求根本没换来
+  响应，例如连接被重置）。只有第三种会
   重问，最多三次、退避从 500 ms 起翻倍。给出的话是一句人能用的，例如
   `the source could not be reached (ECONNRESET, asked 3 times)`：node 的 fetch 只会说一句
   `fetch failed`，它同时代表重置、DNS 失败与被拒的连接（Electron 那边也只有 `net::ERR_…`），
@@ -522,10 +544,12 @@ POST   /api/components/<name>/enable           启用：重新驱动
   自带声明 + 请求 manifest（后者点名的字段覆盖）。所以**薄 header 也能落地一个完整
   组件**；自带声明若点名了**别的**组件，安装被拒——字节不是请求所说的那个组件。
 - 客户端发送（`ui/components.js`）：manifest = **组件发行版自己发布的那份声明**（从
-  来源清单里读到 `declaration` 的位置，取回后验摘要）+ 安装事实覆盖。检出态是同一件
-  事的本地形态：直接读仓库旁的 `component.json`。发布包因此**不含任何一个组件的字节**
+  索引那一行读到 `manifest` 的位置，取回后按行的 `manifest_sha256` 验摘要）+ 安装事实
+  覆盖。检出态是同一件事的本地形态：直接读仓库旁的 `component.json`。发布包因此
+  **不含任何一个组件的字节**
   ——声明随 manifest 走，一个 tar（或 onefile）+ 旁边一份 `component.json` 即完整组件；
-  装哪个版本由来源清单和模块自己的 release 决定（第一节末）；装到**哪台机器**由组件自己的
+  装哪个版本由索引那一行的 `version` 和模块自己的 release 决定（第一节末：两者不一致就拒，
+  所以发一个 release 不等于"装得上"）；装到**哪台机器**由组件自己的
   声明决定（第三节「一台机器，一个答案」），不是页面上的一项选择。
   发布态递过去的是**URL + 摘要**（`fetchInstall()`）；只有手里真有字节文件的检出态/
   预构建产物才退回 `upload()`（字节进请求体）。
@@ -553,8 +577,8 @@ POST   /api/components/<name>/enable           启用：重新驱动
 `digest` 量，所以一个前缀换来的只是**到同一份被钉住的字节的另一条路**，换不来信任。失败里属于
 "回答"的（404、摘要不符、schema 读不懂）不试下一个：镜像服务的是同一条路径，答案还是那一个。
 
-已知边界（PLUGIN_PLAN.md §七 6）：来源清单点名**磁盘**上的清单时，工件也解析成本地
-路径，而宿主只取 http(s)——磁盘镜像的安装今天会失败（清单照样读得懂）。`upload()`
+已知边界（PLUGIN_PLAN.md §七 6）：`{index: <路径>}` 点名**磁盘**上的索引时，工件也解析成本地
+路径，而宿主只取 http(s)——磁盘索引给出的安装今天会失败（清单照样读得懂）。`upload()`
 兜底的是检出/预构建产物，不是镜像目录。
 
 ### 停用（disabled）：唯一不动字节的写入
@@ -621,7 +645,9 @@ PLUGIN_PLAN.md 零之四.3），位只能住在机器上；反过来说，住在
   `tests/components_api_test.py`（安装协议）、`tests/rendezvous_test.py`（寻址）、
   `tests/tools_inst_test.py`（每个工具的命令契约）；客户端 `tests/mirrors.test.js`
   （镜像列表的规则、顺序、回退与"够不着"分类器）、`tests/components.test.js`
-  （来源读取与取数重试）、`tests/net-fetch.test.js`（那一道前缀门本身）。
+  （索引读取、行的字段与取数重试）、`tests/market.test.js`（索引文档本身：行是钉死版本的
+  指针、与 `market/entries.json` 逐字段一致、三层回退链与降级话术）、
+  `tests/net-fetch.test.js`（那一道前缀门本身，索引与清单都过它）。
 
 ## 十、第三方组件示例
 
