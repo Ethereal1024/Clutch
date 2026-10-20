@@ -37,6 +37,8 @@
 | C7 目的地由声明推出，页面不选 | **已完成** | `b9af086` | 组件落在哪台机器是声明的事实，不是用户的选项：`ui/components.js#destinationOf` 是**唯一**说这话的地方（`plugin` + `runs_on: "other"` → 这台客户端；`cli`/`daemon` + `runs_on: "self"` → 会话命令跑的那台；别的配对 = 自相矛盾，只说那句话且不装）。页面因此不再点名任何一台机器、也不再显示"目标机"，`ui/components-view.js` 装上客户端域（`plugin-host`）与会话域两条路，安装/卸载/版本/停用全按声明的落脚点分派，`ensureComponents` 跳过不属于会话那台的声明。**明确留着的那一块**：降级会话（隧道断了、只剩 ssh 执行桥）里往远侧装一个 daemon——桥是执行通道不是 supervisor，装不了，页面就说这一句，**绝不改写到本机**；要能装得先有远侧的 supervisor 通道（见 `ui/js/backend-lifecycle.js#tryDegradeToSshTools`） |
 | C8 一个真的客户端插件 | **已完成** | `8522543` | `clutch-websearch/plugin/`（子模块 `9bbe191`）：`web_search`/`web_fetch` 的 JS 移植，只用 `http/https/dns/zlib`，没有 `node_modules`；`exports.call(tool, args)`，一次调用 fork 一个子进程；`_assert_public_host` 随迁成每一跳都查的围栏，覆盖率 guard 随迁成 WEAK/NOTE/LEGS 三行答案。与 Python 版的分叉（块级换行、无 curl_cffi、coverage 为 null 不再崩、不把 positions 传过线、坏数字回落默认）写在 `plugin/README.md`。测试：子模块 `tests/plugin-test.js`（14 项，无网络）、父仓 `tests/client-plugin-websearch.test.js`（装→推→`/call`→删，真 fork）、`tests/channel_test.py` 把真实 `component.json` 钉在 `channel._plugin_of` 上 |
 
+下一轮要做的组件是 `ssh-workspace`（`interface: plugin` + `runs_on: other` + `subject: foreign-fs`）：它接的是 C1–C8 铺完之后仍然空着的那个位置——别的机器上的文件系统。施工计划、四个待拍板与逐步验收写在 `SSH_WORKSPACE_PLAN.md`，上表 C1–C8 是它的全部前置。
+
 C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推声明（`scripts/sync-android-host.sh`
 的 `UI_NODE` 不动）。这不是省事，而是**手机目前没有"这台客户端的插件"这个概念**——根、入口、
 认领时的推送都还没有在那边长出来；把四个文件塞进资源子集只会得到一份没人调用的死代码，
