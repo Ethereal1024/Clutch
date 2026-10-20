@@ -473,8 +473,10 @@ async function main() {
 
       // 9a. what the target machine holds — the read that used to be an error
       const listed = await globalThis.clutchComponents.list();
-      assert.deepStrictEqual(listed.target, { kind: "remote", base: sup.base },
-        "the target is the tunnel's machine, not this phone");
+      // b9af086 stopped naming a machine the page could pick: a read now carries
+      // the URL of the machine the session runs on, and nothing else about it.
+      assert.strictEqual(listed.sessionBase, sup.base,
+        "the machine is the tunnel's, not this phone");
       assert.strictEqual(listed.error, null, "the inventory answered");
       assert.strictEqual(listed.held[0].name, sup.name);
       assert.strictEqual(listed.held[0].version, sup.held);
@@ -506,21 +508,23 @@ async function main() {
 
       // 9d. the reverse verbs, same channel, same answers as the desktop
       const vers = await globalThis.clutchComponents.versions(sup.name);
-      assert.deepStrictEqual(vers.target, { kind: "remote", base: sup.base });
+      // the same b9af086 rule: a row says WHICH place answered, never which
+      // machine the page would have picked
+      assert.strictEqual(vers.place, "session");
       assert.strictEqual(vers.error, null);
       assert.strictEqual(vers.versions[0].resolved, true, "the machine says which version it would run");
 
       const off = await globalThis.clutchComponents.setDisabled(sup.name, true);
       assert.deepStrictEqual(off, {
         ok: true, name: sup.name, status: "disabled", disabled: true,
-        target: { kind: "remote", base: sup.base },
+        place: "session", target: { kind: "remote", base: sup.base },
       });
       assert(sup.state.calls.includes(`POST /api/components/${sup.name}/disable`), "the switch was asked of the far machine");
 
       const gone = await globalThis.clutchComponents.remove(sup.name, { version: sup.held });
       assert.deepStrictEqual(gone, {
         ok: true, name: sup.name, status: "removed", removed: [sup.held],
-        target: { kind: "remote", base: sup.base },
+        place: "session", target: { kind: "remote", base: sup.base },
       });
       assert(sup.state.calls.includes(`DELETE /api/components/${sup.name}?version=${encodeURIComponent(sup.held)}`));
 
@@ -528,7 +532,7 @@ async function main() {
       //     page can draw — the answer a phone with nothing to install on owes
       tunnel.state.status = { active: false, url: "" };
       const offline = await globalThis.clutchComponents.list();
-      assert.deepStrictEqual(offline.target, { kind: "local", base: null });
+      assert.strictEqual(offline.sessionBase, null, "no machine at all, not a placeholder one");
       assert.strictEqual(offline.error, "this build has no supervisor URL for the local machine");
       assert.deepStrictEqual(offline.held, [], "no placeholder port, so no misleading empty machine");
 
