@@ -88,8 +88,8 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   `ui/components.sources.json`（`{"schema": 1, "sources": ["https://…/clutch-component.json", …]}`），
   以及可选的用户清单 `~/.clutch/components.sources.json`（**用户清单先读，先命名一个
   组件的那个说了算**，用户因此能覆盖某个模块、或在宿主不认识的地方挂上自己的发行版）。
-  这就是加第五个模块的全部代价：多一条 URL，宿主代码一行不用改。
-- **自带清单可以整体走镜像**：自带清单里是四条 `github.com` URL，而"某些网络下
+  这就是加一个模块的全部代价：多一条 URL，宿主代码一行不用改。
+- **自带清单可以整体走镜像**：自带清单里是五条 `github.com` URL，而"某些网络下
   `github.com` 根本不可达"是实测（能通的往往只有 `api.github.com`）。所以在一个来源
   **变成 URL 的那一处**（`ui/components.js` 的 `sources()`）应用一次前缀：
   `<镜像>/<原始绝对 URL>`，路径原样保留——因为清单里其余地址都是它的**兄弟**（见上文

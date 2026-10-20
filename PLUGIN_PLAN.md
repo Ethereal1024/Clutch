@@ -8,7 +8,7 @@
 
 | # | 不变量 | 现状依据 |
 | --- | --- | --- |
-| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（4 行）、`components.sources()`（`ui/components.js`） |
+| I1 | **发布归模块**：每个模块自己发 `clutch-component.json`，宿主只存 URL 来源 | `ui/components.sources.json`（5 行，五个模块各一条）、`components.sources()`（`ui/components.js`） |
 | I2 | **宿主零字节**：宿主发行包不含 `components/` | `shippedArtifact()`（`ui/components.js`） |
 | I3 | **声明说词、宿主释义**：能力词汇（access / gate / mode）归宿主 | `agent/tools/gates.py:1-20`（导入期 `_check_vocabulary` 断言） |
 | I4 | **不自建分发服务器**：分发=各模块 Release，索引=静态 JSON，安装=目标机 supervisor | 见本文件第六节 |
@@ -40,7 +40,7 @@
 
 `ssh-workspace` 已落地（上表 C9，实现在 `clutch-ssh-workspace/`；`SSH_WORKSPACE_PLAN.md` 从施工计划变成了设计记录与验收判据，四个待拍板已在它的 §五 拍完）。它接的是 C1–C8 铺完之后仍然空着的那个位置——别的机器上的文件系统——**不是**给工具加分支：宿主只多了一个环境（执行桥），四个工具名照旧由声明里的 `subject: foreign-fs` 决定出不出现（`COMPONENTS.md` §七）。
 
-C1–C9 之后还空着的两处，都已写进上表的"尚未做"与 `SSH_WORKSPACE_PLAN.md`：**真机验收**（打包已完成：`v0.1.56` 的 Release 带 `clutch-ui_0.1.56_amd64.deb`，装上它、在建好的隧道里跑一次，跑通后 `scripts/ws-stopgap` 按 §2.4 退场）与**分发**（组件还没有 Release、`ui/components.sources.json` 里也没有它，所以打包版市场看不到这个插件）。P4 工具集与 P5 静态索引仍是可选项，不在这条线上。
+C1–C9 之后还空着的一处已写进上表的"尚未做"与 `SSH_WORKSPACE_PLAN.md`：**真机验收**（打包已完成：`v0.1.56` 的 Release 带 `clutch-ui_0.1.56_amd64.deb`，装上它、在建好的隧道里跑一次，跑通后 `scripts/ws-stopgap` 按 §2.4 退场）。**分发**已经落地：组件在自己的仓库里按 tag 发 `clutch-component.json` + `clutch-ssh-workspace.tar.gz`（`v0.1.0`），`ui/components.sources.json` 里是第 5 行来源——这一行随**下一个**宿主版本出厂，`v0.1.56` 的 asar 里还是四条。P4 工具集与 P5 静态索引仍是可选项，不在这条线上。
 
 C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推声明（`scripts/sync-android-host.sh`
 的 `UI_NODE` 不动）。这不是省事，而是**手机目前没有"这台客户端的插件"这个概念**——根、入口、
@@ -376,7 +376,7 @@ curl -s http://127.0.0.1:8899/api/components          # 空
 | 版本语义断层 | 新旧两种"版本"形状并存 | P0 先统一；宿主落地自带清理，无需迁移脚本 |
 | 越权 | 工具集想让宿主执行它定义的行为 | 守 I3：只能引用宿主词汇，导入期断言会大声报错 |
 | 动态模式爆炸半径 | P4 改的是"模型看得到哪些工具" | 模式仍由宿主裁定（`registry.py` 的过滤保留），`chat` 语义不因插件变松 |
-| 生态空转 | 有页面没插件 | 先跑通 4 个自家模块 + 一个工具集样本，再谈索引（**已满足**：4 行来源全在 `ui/components.sources.json`，第 5 个 `clutch-ssh-workspace` 备好待发） |
+| 生态空转 | 有页面没插件 | 先跑通 4 个自家模块 + 一个工具集样本，再谈索引（**已满足并超出**：5 行来源全在 `ui/components.sources.json`，第 5 个 `clutch-ssh-workspace` 的 `v0.1.0` 已按同一套 tag→CI→release 流程发出，市场读得到 `runs_on: other` 的声明） |
 
 ## 六、为什么不需要自建服务器
 
@@ -394,8 +394,8 @@ curl -s http://127.0.0.1:8899/api/components          # 空
    P2 同批紧跟（`8d11845`）。
 2. **旧记录**：是否强制重装以统一版本形状（`install()` 会清掉旧版本目录，所以代价只是一次
    上传），或让两种形状长期并存。
-3. **索引仓库（P5）**：模块数 ≤4 时先不建。→ **判据即将到期**：`ui/components.sources.json`
-   今天 4 行，`clutch-ssh-workspace` 发布后就是第 5 个（上面"生态空转"那条的样本条件那时也
+3. **索引仓库（P5）**：模块数 ≤4 时先不建。→ **判据已到期**：`ui/components.sources.json`
+   现在是 5 行，第 5 个 `clutch-ssh-workspace` 已发布（上面"生态空转"那条的样本条件也
    已满足），"先不建"的理由随之消失。P5 因此从"不必谈"变成"要拍板"，但**本轮不启动**——
    它要新增一处托管、与 I1/I2 的关系得单独定。
 4. ~~**`DELETE` 不带版本号是什么意思**~~ → **已决（P3a）**：整个组件一起拿掉（"卸载这个
