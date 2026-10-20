@@ -21,12 +21,12 @@ contextBridge.exposeInMainWorld("clutchSettings", {
   ensure: (data) => ipcRenderer.invoke("settings:ensure", data),
 });
 
-// the plugin tab's channel: what the target machine holds, what this client
-// could give it, the writes (an install onto that machine, a removal off it, and
-// the switch that stops driving a component there or starts it again), and the
-// mirrors a failed fetch is retried through. Everything crosses ui/main.js,
-// which talks to the target machine's supervisor (ui/components-view.js) — the
-// renderer never writes anything itself.
+// the plugin tab's channel: what each of the two places holds, what can be given
+// either one, the writes (an install onto one, a removal off it, and the switch
+// that stops driving a component there or starts it again), and the mirrors a
+// failed fetch is retried through. Everything crosses ui/main.js, which picks the
+// place from the component's own declaration (ui/components-view.js) — the
+// renderer never writes anything itself and never chooses a machine.
 contextBridge.exposeInMainWorld("clutchComponents", {
   list: () => ipcRenderer.invoke("components:list"),
   market: (opts) => ipcRenderer.invoke("components:market", opts),

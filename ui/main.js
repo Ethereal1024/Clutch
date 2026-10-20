@@ -258,7 +258,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    // the plugin tab: what the target machine holds and what this client knows.
+    // the plugin tab: what each of the two places holds and what this client knows.
     // Reads, so a failure comes back inside the answer (the page draws the
     // reason) instead of rejecting the invoke.
     ipcMain.handle("components:list", async (e) => componentsView.list(e.sender));
