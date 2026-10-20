@@ -278,9 +278,20 @@ def main() -> int:
     for other in (modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
-    check(all(mod.runs_on == catalog.SELF for mod in catalog.table().values()),
-          "every component in the table runs on the host that asks (the OTHER axis is unused)")
-    check(all(mod.requires for mod in catalog.table().values()), "every component declares what it stands on")
+    # the OTHER half of the same axis: a component that reaches ANOTHER machine's
+    # filesystem (clutch-ssh-workspace, a client plugin over the ssh tunnel). It is
+    # the first declaration in this repo that says runs_on=other, which is why the
+    # check below no longer claims that axis is unused.
+    ssh_workspace = "clutch-ssh-workspace"
+    check(rendezvous.serves_foreign_fs(ssh_workspace), "the ssh plugin serves a foreign filesystem")
+    for other in (modules.WORKSPACE, modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
+        check(not rendezvous.serves_foreign_fs(other), f"{other} is not a foreign filesystem")
+    check(not rendezvous.serves_foreign_fs("clutch-nope"), "an unknown component serves nothing there either")
+    elsewhere = [mod.name for mod in catalog.table().values() if mod.runs_on != catalog.SELF]
+    check(elsewhere == [ssh_workspace],
+          f"exactly one component in the table runs somewhere else, and it is the ssh plugin ({elsewhere})")
+    check(all(mod.requires for mod in catalog.table().values() if mod.runs_on == catalog.SELF),
+          "every component the host drives declares what it stands on")
     check(
         rendezvous.unavailable_reason("clutch-nope") == "unknown component: clutch-nope",
         "an unknown component says so in one sentence",

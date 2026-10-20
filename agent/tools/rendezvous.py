@@ -317,6 +317,20 @@ def serves_workspace_fs(module: str) -> bool:
     return mod is not None and mod.subject == catalog.WORKSPACE_FS
 
 
+def serves_foreign_fs(module: str) -> bool:
+    """True when the component serves a filesystem that is NOT the root's machine.
+
+    The other half of the sentence above, and the one `TODO(ssh-workspace)` asked
+    for: a `foreign-fs` component reaches the machine on the far side of a
+    channel (clutch-ssh-workspace, over an ssh tunnel), so it is the workspace
+    that has to be somewhere else for its tools to mean anything. On a local
+    session the same tools exist natively, and calling this one there would read
+    or write a different machine than the root names.
+    """
+    mod = catalog.table().get(module)
+    return mod is not None and mod.subject == catalog.FOREIGN_FS
+
+
 def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     """The host facts a component's declaration asks for, by their published
     names (catalog.Component.vars: "host.port_url" -> {base}).

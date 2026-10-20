@@ -127,26 +127,34 @@ def components_unavailable(config: Config) -> list[dict[str, str]]:
 def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
     """Why this host cannot run `module`'s statements for THIS call ("" = it can).
 
-    Two facts, both local. The component has to be here and drivable
-    (`rendezvous.unavailable_reason` — nothing on the host's side can stand in
-    for it), and a component whose SUBJECT is the workspace root's own
-    filesystem additionally needs the root to live HERE, because it serves the
-    filesystem of the machine it runs on. A component serving anything else runs
-    on the app host whatever kind of workspace the call came from — its subject
-    is the project file / the network / the skill library, never the workspace's
-    machine.
+    Two facts, and the second one is symmetric. The component has to be here and
+    drivable (`rendezvous.unavailable_reason` — nothing on the host's side can
+    stand in for it), and a component whose SUBJECT is *a* workspace filesystem
+    only serves the machine that filesystem is on:
+
+      * `workspace-fs` serves the root's own machine, so the root has to live HERE;
+      * `foreign-fs` reaches a machine over a channel of its own (the ssh tunnel),
+        so the root has to be somewhere ELSE.
+
+    Both questions are the same one — is this workspace local? — asked in opposite
+    directions, which is why one `isinstance` answers them. A component serving
+    anything else (the project file, the network, the skill library) is unaffected
+    by where the workspace lives.
     """
     if module is None:
         return "no component serves this tool"
     missing = rendezvous.unavailable_reason(module)
     if missing:
         return missing
-    # TODO(ssh-workspace): this branch disappears with the component that serves
-    # a foreign filesystem over a channel of its own — that component's subject
-    # is FOREIGN_FS and it is driven from here, so the root's home stops mattering.
-    if rendezvous.serves_workspace_fs(module) and not isinstance(workspace, LocalWorkspace):
+    local = isinstance(workspace, LocalWorkspace)
+    if not local and rendezvous.serves_workspace_fs(module):
         return (
             f"{module} serves the filesystem of the machine this workspace root lives on, "
             f"and this root is another machine's"
+        )
+    if local and rendezvous.serves_foreign_fs(module):
+        return (
+            f"{module} serves the filesystem of another machine over a channel, "
+            f"and this workspace root is a local one"
         )
     return ""

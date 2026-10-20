@@ -411,6 +411,60 @@ async function main() {
   await pluginLink.stop();
   check(pluginLink.state.bases.size === 0, "stopping twice is a no-op, not a second round of DELETEs");
 
+  // ---- 11. a declaration about ANOTHER machine only travels with a live hop --
+  //
+  // `subject: foreign-fs` (clutch-ssh-workspace) says "the filesystem over there",
+  // so its tools are only meaningful while a hop reaches there. Declared without
+  // one, it would shadow the session's own `workspace-fs` component — whose
+  // `read_file` works on this machine — with one that can only answer "no tunnel".
+  // The gate is the hop's client, which this file already knows: set by start(),
+  // cleared by stop() and by the tunnel's own hopLost().
+  const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-link-foreign-"));
+  write(
+    path.join(foreign, "component.json"),
+    JSON.stringify(
+      {
+        name: "clutch-ssh-workspace",
+        version: "0.1.0",
+        interface: "plugin",
+        subject: "foreign-fs",
+        entry: "plugin.js",
+        tools: [{ name: "read_file", description: "read a file on the far side", parameters: { properties: {} } }],
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  write(path.join(foreign, "plugin.js"), `exports.call = async () => ({content: 'far'});\n`);
+  host.install({
+    manifest: { name: "clutch-ssh-workspace", version: "0.1.0", interface: "plugin", subject: "foreign-fs" },
+    artifact: foreign,
+    version: "0.1.0",
+  });
+  check(pluginLink.state.client === null, "no hop is live right after stop()");
+  check(pluginLink.snapshot().length === 0, "…and with no listener there is nothing to declare, far side or not");
+
+  const wire3 = new FakeWire();
+  FakeWire.grant = 47033;
+  tunnelCore.state.sshClient = wire3;
+  await pluginLink.start(wire3);
+  const warm = pluginLink.snapshot();
+  check(pluginLink.state.client === wire3, "a live hop's client is remembered, and that is what the snapshot reads");
+  check(warm.some((c) => c.subject === "foreign-fs"), "on a live hop the far side's declaration travels");
+  check(warm.some((c) => c.tools.some((t) => t.name === "read_file")), "…carrying the names the session offers");
+
+  pluginLink.hopLost(); // what the tunnel does when the hop dies
+  const cold = pluginLink.snapshot();
+  check(
+    !cold.some((c) => c.subject === "foreign-fs"),
+    `and a hop that dies takes it back out of the set (${cold.map((c) => c.name).join(", ")})`
+  );
+  check(
+    cold.some((c) => c.name === COMPONENT),
+    "…while the client-local plugin stays: the rule is the subject, not the plugin"
+  );
+  await pluginLink.stop();
+
   await apiA.close();
   await apiB.close();
   fs.rmSync(SCRATCH, { recursive: true, force: true });

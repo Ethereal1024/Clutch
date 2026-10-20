@@ -18,6 +18,10 @@
 //   * NOTHING is pushed before the forward is installed. A session told to dial a
 //     port nobody serves fails every call with "the channel is not answering",
 //     which is a worse lie than "this host has no channel".
+//   * A declaration ABOUT another machine (`subject: foreign-fs` — the far side's
+//     filesystem, clutch-ssh-workspace) is only offered while a hop is live
+//     (snapshot): its tools are only meaningful where the tunnel reaches, and on
+//     this side the same names belong to the local component.
 //   * A push is the WHOLE set (agent/tools/channel.py refuses a partial one), so
 //     a change is a re-push, and "I have no plugins" is a DELETE — the session's
 //     refusal is then a sentence about the state, not a dial that times out.
@@ -125,9 +129,20 @@ function session(method, base, payload) {
 // What a session should be told right now, as the exact bytes that would be
 // pushed. Compared as JSON because the push is a replacement: "the same set" has
 // to mean the same bytes, or every sync would be a new generation.
+// A `foreign-fs` declaration (clutch-ssh-workspace, catalog.FOREIGN_FS) is a
+// promise about ANOTHER machine: its tools arrive over this client's reverse
+// channel and run on the far side of the hop that carries it. Without a live hop
+// there is nothing to run them on, and the session's own `workspace-fs`
+// component is the one that works for those names — so a declaration pushed then
+// would shadow working tools with ones that can only answer "no tunnel". The hop
+// is `state.client`: set when a forward is installed for a live ssh client,
+// cleared by stop() and by the tunnel's own hopLost().
+const FOREIGN_FS = "foreign-fs";
+
 function snapshot() {
   const components = state.server ? state.server.declarations() : [];
-  return components;
+  if (state.client) return components;
+  return components.filter((c) => c.subject !== FOREIGN_FS);
 }
 
 async function pushTo(base) {

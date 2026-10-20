@@ -47,9 +47,9 @@ from agent.base import Broadcaster, RunState
 from agent.config import Config
 from agent.server import build
 from agent.tools import catalog, channel, rendezvous
-from agent.tools.registry import ToolRegistry, build_tools
-from agent.tools.workspace import LocalWorkspace
-from tests.catalog_test import isolated_host
+from agent.tools.registry import ToolRegistry, build_tools, module_blocked_reason
+from agent.tools.workspace import LocalWorkspace, RemoteWorkspace
+from tests.catalog_test import _third_party, _write_registration, isolated_host
 from tests.testsupport import check, http_get
 
 TOKEN = "channel-token-4f2a9c0d7e"  # a push's token: >= 16 chars, no spaces
@@ -477,11 +477,94 @@ def check_the_endpoint() -> None:
             client.close()
 
 
+def check_the_machine_a_component_serves() -> None:
+    """`subject` is a machine, and the surface follows it (SSH_WORKSPACE_PLAN C9.4).
+
+    The situation two subjects exist for: the workspace's own `read_file`
+    (`workspace-fs`, spoken to the machine the root lives on) and the ssh plugin's
+    (`foreign-fs`, reached over a channel to another machine) publish the SAME name.
+    Whose tool the model is offered has to follow the root's machine, not the order
+    the table happened to fold — so both directions are pinned here, and so are the
+    two sentences a call would read when only the wrong one is installed.
+    """
+    client = Client()
+    with isolated_host() as root:
+        code = root / "local-fs"
+        code.mkdir()
+        (code / "tool.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        local = _third_party("clutch-workspace", tool="read_file", directory=str(code))
+        local["subject"] = "workspace-fs"
+        _write_registration(local)
+        try:
+            cfg = Config()
+            check(
+                "read_file" in [t.name for t in build_tools(cfg)],
+                "before any session, the local component's read_file is offered",
+            )
+
+            _push(client, _plugin(name="clutch-ssh-workspace", tool="read_file", subject="foreign-fs"))
+            check(channel.holds("clutch-ssh-workspace"), "and the client's far-side component arrives over the channel")
+
+            # a LOCAL root: the plugin's tools are dropped, not merely shadowed —
+            # keeping them would put a foreign `read_file` in front of the one that
+            # really works here (the table folds pushed declarations last).
+            here = LocalWorkspace(tempfile.mkdtemp(prefix="clutch-c94-"))
+            local_set = build_tools(cfg, workspace=here)
+            check(
+                [t.name for t in local_set].count("read_file") == 1,
+                "a local root is offered ONE read_file, not a same-name pair",
+            )
+            check(
+                ToolRegistry(local_set).tool("read_file").module == "clutch-workspace",
+                "…the local component's, because this is the machine the root names",
+            )
+            check(
+                "another machine" in module_blocked_reason(here, "clutch-ssh-workspace"),
+                "and the far-side component answers for itself if it is asked anyway",
+            )
+
+            # a root on ANOTHER machine: the plugin's tool is the one that works.
+            there = RemoteWorkspace("/srv/proj", "http://127.0.0.1:1/exec")
+            remote_set = build_tools(cfg, workspace=there)
+            check(
+                [t.name for t in remote_set].count("read_file") == 2,
+                "an ssh root sees both declarations of the name — the local one is kept on purpose",
+            )
+            tool = ToolRegistry(remote_set).tool("read_file")
+            check(
+                tool is not None and tool.remote and tool.module == "clutch-ssh-workspace",
+                "…and the remote one is the tool the model calls (a push replaces by name, folded last)",
+            )
+            check(
+                "another machine's" in module_blocked_reason(there, "clutch-workspace"),
+                "while the local component's call reads why it cannot serve this root",
+            )
+            check(
+                module_blocked_reason(there, "clutch-ssh-workspace") == "",
+                "and the far-side component has nothing to explain for an ssh root",
+            )
+
+            # the subject, not the name or the interface, is what decides
+            check(
+                not rendezvous.serves_workspace_fs("clutch-ssh-workspace")
+                and rendezvous.serves_foreign_fs("clutch-ssh-workspace"),
+                "the two predicates answer for the two subjects and nothing else",
+            )
+            check(
+                rendezvous.serves_workspace_fs("clutch-workspace") and not rendezvous.serves_foreign_fs("clutch-workspace"),
+                "…symmetrically",
+            )
+        finally:
+            channel.clear()
+            client.close()
+
+
 def main() -> int:
     check_one_push_opens_the_door()
     check_a_dead_listener_is_a_sentence()
     check_a_bad_push_is_refused_whole()
     check_the_real_websearch_plugin()
+    check_the_machine_a_component_serves()
     check_the_endpoint()
     print("\nall passed")
     return 0

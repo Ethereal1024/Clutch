@@ -72,7 +72,7 @@ from .gates import (
 from .inst import InstError
 from .prompt import components_unavailable, module_blocked_reason, prompt_section
 from .transport import TransportError, failure_envelope
-from .workspace import Workspace
+from .workspace import LocalWorkspace, Workspace
 
 # The words the host refuses a declaration over, said ONCE per process (a
 # component's typo is a fact about its manifest, not something to repeat on every
@@ -259,7 +259,38 @@ def _bootstrap(config: Config) -> list[Tool]:
     return out
 
 
-def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Tool]:
+def _serves_this_workspace(component: catalog.Component, workspace: Workspace | None) -> bool:
+    """May `component`'s tools be offered for a call rooted in `workspace`?
+
+    Only the components that serve *a* workspace filesystem have a machine to be
+    wrong about, and they are wrong in opposite directions (`prompt.
+    module_blocked_reason` asks the same question per call):
+
+      * `workspace-fs` serves the root's own machine. It is KEPT even when the
+        root is elsewhere, on purpose: its refusal is a sentence that says why
+        ("this root is another machine's"), which is more use to the model than a
+        tool that silently is not there (SSH_WORKSPACE_PLAN.md 七). When a
+        `foreign-fs` component is also present it publishes the same names and
+        wins — the table folds pushed declarations last — so the local one is
+        only the sentence you read when the plugin is not installed.
+      * `foreign-fs` reaches another machine over a channel. On a LOCAL workspace
+        it is dropped, not kept-and-refused: its tools share their names with the
+        ones that really work here, so keeping it would shadow a working local
+        `read_file` with one that reads some other machine a tunnel happens to
+        reach.
+
+    `workspace` None (a tool list built before any run has a root: the schema
+    surface, a test) is no machine to judge by, and every component is offered."""
+    if workspace is None:
+        return True
+    if component.subject == catalog.FOREIGN_FS:
+        return not isinstance(workspace, LocalWorkspace)
+    return True
+
+
+def build_tools(
+    config: Config, memories: MemoryStore | None = None, workspace: Workspace | None = None
+) -> list[Tool]:
     """Every tool this host can offer right now, in one pass over the catalog.
 
     A component that is not installed contributes nothing here: no schema, no
@@ -278,9 +309,16 @@ def build_tools(config: Config, memories: MemoryStore | None = None) -> list[Too
     just its tool — the model never sees the schema of a call the host would
     judge wrongly. Each refusal is said once (registry._report). Which components
     can be driven at all is one filter for the whole model-facing surface
-    (`_drivable`), shared with the prompt fragments they carry."""
+    (`_drivable`), shared with the prompt fragments they carry.
+
+    `workspace` is the session's root, when there is one: it decides which
+    machine each component may be offered for (`_serves_this_workspace`). It is
+    a filter on the surface, not a second implementation — a call still asks
+    `module_blocked_reason` before it runs."""
     tools: list[Tool] = _bootstrap(config)
     for component in _drivable():
+        if not _serves_this_workspace(component, workspace):
+            continue
         for spec in component.tools:
             if config.mode not in spec.modes:
                 continue
@@ -572,6 +610,7 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "build_tools",
+    "_serves_this_workspace",
     # what the model and the UI are told
     "prompt_section",
     "components_unavailable",

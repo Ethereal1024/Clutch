@@ -278,9 +278,18 @@ class BaseServer(ABC):
 
     def build_tools(self, project: Project | None = None, config: Config | None = None) -> ToolRegistry:
         """Tools for a run; config overrides self.config for a per-run mode
-        (chat read-only toolset vs work's full set)."""
+        (chat read-only toolset vs work's full set).
+
+        The run's workspace goes with them: which components may be offered
+        depends on which machine the root is on (`registry._serves_this_workspace`),
+        and a local session must not be handed a plugin that reads a DIFFERENT
+        machine's files under the local `read_file` name. `state.workspace` is
+        the run's workspace by the time this is asked (start_task claims the slot
+        first); before any run it is None, which offers everything."""
         cfg = config or self.config
-        return ToolRegistry(build_tools(cfg, memories=project.memories if project else None))
+        return ToolRegistry(
+            build_tools(cfg, memories=project.memories if project else None, workspace=self.state.workspace)
+        )
 
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:

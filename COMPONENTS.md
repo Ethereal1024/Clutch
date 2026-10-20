@@ -3,7 +3,9 @@
 Clutch 宿主**零内置工具**：`run_command` 之外的一切工具都来自**组件**（component）——
 一个独立发布的工件（本仓库的四个子模块 `clutch-workspace` / `clutch-memory` /
 `clutch-websearch` / `clutch-skills`——子模块只是**开发检出**，宿主发行版一份组件字节
-都不带，见第一节末；也可以是任何第三方的同类物）。宿主不为任何组件保留第二份实现，
+都不带，见第一节末；也可以是任何第三方的同类物）。第五个组件 `clutch-ssh-workspace/` 就在
+这棵树里（不是子模块、还没有发布）：它服务**别台机器**的文件系统，见 `subject` 表末的
+`foreign-fs` 与 `SSH_WORKSPACE_PLAN.md`。宿主不为任何组件保留第二份实现，
 也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进循环。
 
 `run_command` 是唯一的例外，而且它同样是**被声明**的：宿主为自己写的唯一一条工具
@@ -169,8 +171,10 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 ```
 
 `subject` 词汇（宿主定义，组件从中选）：`workspace-fs`（服务工作区所在机器的文件
-系统——该机器上必须有工作区根才能为它服务）、`foreign-fs`（别的机器的文件系统，
-预留）、`project-file`（.clc 项目文件）、`network`（网络）、`skill-library`（技能库）。
+系统——该机器上必须有工作区根才能为它服务）、`foreign-fs`（别的机器的文件系统——工作区根
+**不在**这台机器上，今天由 `clutch-ssh-workspace` 经客户端插件域、走 ssh 隧道服务它，
+见 `SSH_WORKSPACE_PLAN.md`）、`project-file`（.clc 项目文件）、`network`（网络）、
+`skill-library`（技能库）。
 
 `prompt` 是组件**自己的话**：一段 markdown 片段（相对组件目录，像 `launch.entry`），
 宿主读出来后接在系统提示词的通用部分之后——**只在这个组件可驱动时**才接
@@ -287,7 +291,15 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
   绝一切不是 `127.0.0.1` / `localhost` / `::1` 的地址）。它是"只有我推过的那个会话能问
   我"，不是沙箱：插件以应用权限跑在自己机器上（见 PLUGIN_PLAN.md 零之五）。
 - **只推给远端的会话**：本地会话里客户端和会话是同一台机器，客户端插件在那儿就是普通
-  的本地组件，这个通道只会重复组件页已有的东西（`ui/main.js#announcePlugins`）。
+  的本地组件，这个通道只会重复组件页已有的东西（`ui/main.js#announcePlugins`）。隧道断了
+  也一样：`ui/plugin-link.js#snapshot()` 在 `state.client` 为空时把 `subject: foreign-fs` 的
+  声明从整集里拿掉（`hopLost()`），于是"记住的 base + 刚死的 hop"不会留下一个拨不通的声明。
+- **执行桥也是一份环境，不是设施词**：需要在**远侧**跑命令的插件（`clutch-ssh-workspace`
+  是第一个）从 fork env 里读 `CLUTCH_EXEC_BRIDGE`（`http://127.0.0.1:<port>`，隧道不在时
+  是空串）以及 `CLUTCH_EXEC_MAX_COMMAND_BYTES` / `CLUTCH_EXEC_CHUNK_BYTES`（宿主没意见
+  就不写）。地址是**没有令牌的 loopback**，拿到它等于拿到远侧任意 shell——插件本来就是
+  应用权限的受信代码，这不是新增授权，但安装文案必须写明。`catalog.FACILITIES` 因此没有
+  多出一个词：桥是客户端**提供**给插件的环境，不是宿主必须先备好的设施。
 
 ## 四、工具级字段
 
@@ -428,6 +440,19 @@ token：`skills`（技能库目录表）——它正是宿主过去自己扫 `*/
 schema（提示词片段同理，`registry._drivable` 是同一道筛选），客户端用
 `unavailable_reason()` 向用户解释（声明 `ui.status: true` 的才解释，其余安静缺席）。**停用**
 走的是同一道门、同一条解释路径：字节能读、声明完整，只是这台机器决定不驱动它（第八节末）。
+
+**谁在场还取决于根在哪台机器**：`build_tools(config, memories, workspace)` 收下工作区，按声明的
+`subject` 与"根是不是本机"筛一遍（`registry._serves_this_workspace`）。方向是**不对称**的，故意的：
+
+- `foreign-fs` 的组件要求根**不在**本机。本地根上它被**丢掉**，不是"留着再拒绝"——它的工具与
+  本机真正能用的那些同名，留着就等于让后折叠的客户端声明盖掉一个能用的 `read_file`。
+- `workspace-fs` 的组件即使在 ssh 根上也**保留**：它的拒绝（"this root is another machine's"）
+  正是插件没装时该说的那句话，比"工具静默不在"有用得多。插件在场时同名工具因为折叠在后而获胜，
+  这条顺序由 `tests/channel_test.py` 钉住，不许退化成巧合。
+- 没有工作区（还没跑过任何任务、只看 schema 的调用方）就是没有机器可判，每个组件都出场。
+
+两个谓词在 `rendezvous.serves_workspace_fs()` / `serves_foreign_fs()` 里互为镜像，逐次调用的那句
+话在 `prompt.module_blocked_reason`，与这里用的是同一条事实。
 
 ## 八、安装、卸载与停用/启用的 wire 协议
 
