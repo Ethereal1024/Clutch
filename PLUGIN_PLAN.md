@@ -108,6 +108,14 @@ C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推�
    参数名原来叫 `state`——两个方向读起来都对——而单测只钉了组件层（`set_disabled` 本身没错）。
    现在参数一律叫 `disabled`（**表里存的那个位**），每条路由传自己那个词的**含义**。教训与
    零之三.6 同类：**名字和动词是两条独立的信息，极性错位的时候两边都读得通**。
+9. **发行清单少了 `runs_on`，插件在市场上"看得见、装不了"**（**已修**，C9 分发时才暴露）：
+   `parseManifest()` 从**发行清单**取 `runs_on`（`declaration` 只在真要装机时才下载），
+   `destinationOf` 靠它 + `interface` 定域；打包版客户端手上没有 checkout，漏写就按 `"self"`
+   兜底，于是 `interface: "plugin"` 的组件被页面拒绝安装（"has to say runs_on: other, this one
+   says self"）。生成清单的脚本只写 name/interface/version，`COMPONENTS.md` 的示例形状里也没有
+   这个词——两边都补上了，`clutch-ssh-workspace/scripts/release-manifest.py` 把插件的缺省当**硬
+   错误**。教训：**"声明说词"（I3）的前提是发行侧也把那个词重复一遍**，少一遍不是默认值，是
+   另一句话。
 
 ## 零之四、已冻结的五个决定（本轮拍板，施工据此）
 
