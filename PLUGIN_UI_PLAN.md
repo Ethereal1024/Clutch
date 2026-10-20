@@ -196,9 +196,12 @@ VS Code 唯一会把同一扩展放到两个标题下的地方，是**多服务�
 
 ### 唯一要留的余地
 
-`runs_on: "other"` 是**预留**（`COMPONENTS.md` 声明示例里 `"runs_on": "self"` 那行的注释；`rendezvous.py:19-23`）：将来若出现
+`runs_on: "other"` 曾经是**预留**（`COMPONENTS.md` 声明示例里 `"runs_on": "self"` 那行的注释；`rendezvous.py:19-23`）：将来若出现
 "服务另一台机器文件系统"或"被另一个宿主反向调用的客户端组件"，设计意图是**往表里加一条
-entry，而不是给工具加一个分支**——每台机器仍渲染自己的那张表，单机视角不变。真到
+entry，而不是给工具加一个分支**——每台机器仍渲染自己的那张表，单机视角不变。**今天它已兑现**：
+C7（`ui/components.js#destinationOf`）把 `plugin` + `runs_on: "other"` 判成"这台客户端"，
+`clutch-ssh-workspace` 是第一个真的客户端插件（`interface: plugin` + `subject: foreign-fs`，
+服务别的机器上的文件系统，见 `SSH_WORKSPACE_PLAN.md`）。真到
 "同一名字在目标机与客户端各有一份"的那天，答案仍旧是 VS Code 那一条：**一行 + 一枚角标**，
 不新开板块。U-8 的角标因此保留为那个未来的位置，今天不默认挂上。
 
