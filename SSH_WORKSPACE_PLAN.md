@@ -1,7 +1,10 @@
 # SSH_WORKSPACE_PLAN.md（`ssh-workspace`：别的机器的文件系统）
 
-状态：**未动工**。本文件是下一步的施工计划。临时措施已经落地（`scripts/ws-stopgap`，
-见第二节），它的删除条件写在第五节。
+状态：**已实施**。主体在 `clutch-ssh-workspace/`（它的 README 是规格现文），
+C9.1–C9.4 落地，C9.5 只走第一阶段（不起远侧 daemon，因此组件内部没有那道围栏）。
+本文件余下部分是设计记录与拍板依据；第四节的每一拍都带验收，第六节是怎么跑。
+临时措施 `scripts/ws-stopgap` **仍在**：C9.1 要重打包才生效，而那条判据（第六节最后一条的
+真机端到端）还没跑过，所以它按 2.4 自己写的条件退场。
 
 ## 一、缺口：一句话与三重断点
 
@@ -84,14 +87,14 @@ fallback）。所以下面这条已经是可用的执行器，读写都走 daemo
 ## 三、组件形态（实施前先冻结的部分）
 
     {
-      "name": "ssh-workspace",          // 名字见第五节 Q1
+      "name": "clutch-ssh-workspace",   // 名字见第五节 Q1
       "version": "0.1.0",
       "interface": "plugin",
       "runs_on": "other",
       "subject": "foreign-fs",
       "entry": "index.js",
       "ui": { "label": "workspace files (over ssh)" },
-      "tools": ["read_file", "grep", "write_file", "edit_file"]
+      "tools": ["read_file", "grep", "write_file", "edit_file"]   // 声明里是完整 schema
     }
 
 - `plugin` 强制 `runs_on: other`：`catalog.component_diagnostics` 把 `interface: plugin`
@@ -118,6 +121,10 @@ fallback）。所以下面这条已经是可用的执行器，读写都走 daemo
   所以这不是新增授权，但必须写进声明与安装文案，别让装它的人以为它只是个读文件的工具。
 - 验收：`tests/plugin-host.test.js` 里断言子进程 env 带着桥地址；无隧道时该值为空串且
   `call()` 仍按原样失败（不是挂住）。
+- 落地时同一处还给了预算：`createPluginHost({ execLimits })` 把 `CLUTCH_EXEC_MAX_COMMAND_BYTES` /
+  `CLUTCH_EXEC_CHUNK_BYTES` 写进 fork env（只在是正的有限数时才写，宿主没意见就什么都不说），
+  数值来自 `ui/transport_defaults.json`，也就是会话自己的 exec 路径已经在用的那份（C9.3）。
+  插件在宿主什么都不说时回落到 4000 / 2000。
 
 ### C9.2 第一根柱子：`read_file`
 - `index.js` 只做四件事：把 `(tool, args)` 翻成远侧一条 `sh -c` 行；经 `POST /exec`
@@ -136,20 +143,22 @@ fallback）。所以下面这条已经是可用的执行器，读写都走 daemo
 ### C9.3 大载荷：stdin 与分块
 - 桥只收一条命令字符串，**没有 stdin 通道**；命令长度上限在 `agent/tools/workspace.py:481`
   `_EXEC_MAX_COMMAND_BYTES`（`agent/transport_defaults.json` 里是 6000 字节，实测约 6.5 KB
-  开始报 command too long）。所以 `write_file` / `edit_file` 的内容走 heredoc：
-
-      python3 -m clutch_workspace write_file --path P --content - <<CLUTCH_EOF
-      ...正文...
-      CLUTCH_EOF
-
-- 超过一屏的正文按 `RemoteWorkspace.write` 的既有做法分块：`printf %s <base64 片段> >> tmp`
-  若干次，`base64 -d tmp > payload`，最后 `--content - < payload`。分块阈值沿用
-  `_EXEC_CHUNK_BYTES`（同一份 defaults），不要在插件里另立一个数。
+  开始报 command too long）。
+- **不用 heredoc**（落地时的修正）：`<<EOF` 会在正文尾部补一个换行，于是"写进去的字节"与
+  "模型给的字节"不再逐字相等，而这套工具的全部价值就在这里。改成：正文在客户端 base64，
+  远侧一条命令里 `base64 -d` 到 `"$HOME/.clutch-ssh-workspace"/p-<token>.payload`，再用
+  `--content -` 读它，同一条命令删掉它。
+- 超过一屏的正文按 `RemoteWorkspace.write` 的既有做法分块：`mkdir -p … && : > p-<tok>.b64`，
+  若干次 `printf %s <base64 片段> >> …`，`base64 -d`，最后 `--content -`。分块阈值沿用
+  `_EXEC_CHUNK_BYTES`（同一份 defaults，经 `CLUTCH_EXEC_MAX_COMMAND_BYTES` /
+  `CLUTCH_EXEC_CHUNK_BYTES` 下发，见 C9.1），不要在插件里另立一个数。
+- `edit_file` 是两个载荷，而两个 stdin 旗标会读同一条流两次，所以按"谁装得下"依次退化：
+  两个都内联 → `--old-string -` → `--new-string -` → 都装不下就说一句诚实的拒绝，不猜。
 - 验收：64 KB 文件写读回环字节相等；一个切在 UTF-8 多字节中间的 `--limit` 读不产生乱码
   （对照 `tests/rendezvous_test.py` 钉住的字节对齐规矩）。
 
-### C9.4 表面：谁在场由"根在哪台机器"决定（未拍板，见 Q2）
-两个选项，二选一：
+### C9.4 表面：谁在场由"根在哪台机器"决定（已按 (b) 落地，见 Q2）
+当时是两个选项，二选一：
 
 - **(a) 同名替换**：`catalog.table()` 把客户端推来的声明折叠在最后并按名替换
   （`catalog.py:913-916`）。插件只要也叫 `clutch-workspace`，表里就没有第二份同名声明，
@@ -166,6 +175,20 @@ fallback）。所以下面这条已经是可用的执行器，读写都走 daemo
   否则只是巧合。**本地会话不受影响的办法**：客户端只在隧道活着时推这份声明
   （`ui/plugin-link.js:128 snapshot()` 一处就知道 `state.sshClient`）。
 
+**落地（(b) 的两半都做了，不只靠折叠顺序）**：
+
+- 宿主侧：`rendezvous.serves_foreign_fs()` 出现，`prompt.module_blocked_reason()` 因此成为对称的
+  两句，`TODO(ssh-workspace)` 退场。`registry.build_tools(config, memories, workspace)` 收下工作区，
+  `_serves_this_workspace()` 按"声明的 subject 要求哪台机器"筛：本地根**不含** `foreign-fs` 的工具
+  （留着会让后折叠的插件盖掉本机能用的 `read_file`），ssh 根**保留** `workspace-fs` 的名字——那正是
+  "插件没装"时该说的拒绝，插件在场时同名工具靠折叠在后获胜。
+- 客户端侧：`ui/plugin-link.js snapshot()` 在 `state.client` 为空时丢掉 `foreign-fs` 的声明
+  （`start()` 置上、`stop()` / `hopLost()` 清掉）；`ui/main.js announcePlugins` 本来就只在
+  `backendKind(winId) === "tunnel"` 时动作，这一层是"记住的 base 遇上刚断的 hop"的兜底。
+- 钉住它的测试：`tests/channel_test.py` 的 `check_the_machine_a_component_serves()`（本地根只有一份
+  `read_file` 且是本机组件的；ssh 根两份声明都在、插件的远侧工具获胜；两句拒绝；两个谓词互为镜像）、
+  `tests/plugin-link.test.js` 第 11 节（隧道活着才推，`hopLost()` 立刻收回而本地插件仍在）。
+
 ### C9.5 围栏：`--protect` 跟不跟过去
 - 今天远侧 daemon 的围栏是宿主在 spawn 时下发的（`rendezvous.py` 首段：the fence IS spawn-time
   policy），而 CLI 的懒启动**不带**围栏。插件若在远侧自己起 daemon，就得自己带 `--protect`，
@@ -178,20 +201,23 @@ fallback）。所以下面这条已经是可用的执行器，读写都走 daemo
   `rendezvous.service` 改成经 `workspace.run` 在远侧发现/启动 daemon（记录是
   `~/.clutch-workspace/d-<sha256(root)[:32]>.json`，语句本来就是 `runner=workspace`）。
   S1 不碰 `/call`，但要重打包，而且和插件的职责重叠，所以本轮不推荐先做。
+- **落地**：走的是第一阶段，插件 README 有一节把"远侧没有 fence"写在明处，这一拍没有代码改动。
 
-## 五、待拍板（四条）
+## 五、已拍板（四条）
 
-- **Q1 名字**。`ssh-workspace` 是四处注释里已经在用的词（`TODO(ssh-workspace)`），但目录约定
-  是 `clutch-*`，而"一个能力两个体"的先例用两个名字（`clutch-websearch` +
-  `clutch-websearch-client`）。建议：目录 `clutch-ssh-workspace/`，声明名 `clutch-ssh-workspace`；
-  若选 Q2 的 (a)，则声明名必须是 `clutch-workspace`。
-- **Q2 表面规则**：同名替换 (a) 还是两个名字 + subject 规则 (b)。建议 (b)。
-- **Q3 daemon 在哪起**：插件在远侧起（要下发围栏），还是宿主按 S1 经 `workspace.run` 起
-  （要重打包）。建议第一阶段都不做，CLI 已经够用。
-- **Q4 桥要不要成为一个设施词**。`catalog.FACILITIES` 现在只有 `python` / `posix-shell` /
-  `curl`，声明里写别的词会被 `_known(FACILITIES)` 判成致命诊断。要不要加一个
-  `exec-bridge`，让 `rendezvous.unavailable_reason` 能替插件说"这台宿主没有到客户端的执行
-  通道"？加了就得同时改 `COMPONENTS.md` 的设施表；不加就得让插件在调用时自己报 no bridge。
+- **Q1 名字**：目录 `clutch-ssh-workspace/`，声明名 `clutch-ssh-workspace`。`workspace-fs` 那个体
+  仍叫 `clutch-workspace`，两个名字各自服务一台机器——这是 Q2 (b) 的必然结果，不是笔误。
+- **Q2 表面规则**：两个名字 + 一条按 subject 的对称规则（(b)）。`prompt.module_blocked_reason`
+  的两句都按"根在哪台机器"判；`registry.build_tools(config, memories, workspace)` 再按同一事实
+  筛一遍，于是本地工作区里 `foreign-fs` 的工具**根本不在表里**（留着会让后折叠的插件盖掉本机能用的
+  `read_file`），而 ssh 工作区里 `workspace-fs` 的名字**保留**——那正是"插件没装"时该说的那句拒绝，
+  插件在场时同名工具靠折叠在后获胜，这条巧合由 `tests/channel_test.py` 钉住。客户端只在隧道活着时推
+  这份声明（`ui/plugin-link.js snapshot()`）。
+- **Q3 daemon 在哪起**：第一阶段都不起，走 CLI（一次调用一个子进程）。远侧没有 daemon，
+  于是没有组件内部的围栏——`--protect` 不跟过去，这条缺口与今天的 `ws-stopgap` 一样由 README 写明。
+- **Q4 桥要不要成为一个设施词**：不加。`catalog.FACILITIES` 仍是三个词；插件在调用时自己报
+  "no exec bridge"（`clutch-ssh-workspace/index.js` 的 `NO_BRIDGE`），宿主侧的
+  `rendezvous.unavailable_reason` 不需要认识它。
 
 ## 六、验证（每一拍的跑法）
 
