@@ -301,6 +301,57 @@ async function main() {
     const where = await runtime.call({ name: "local", tool: "read" });
     check(where.content === "beside@beside", "call: cwd is the plugin's own directory and the env names it too");
 
+    // the exec bridge (C9.1): the far side of a tunnel, handed to the child as an
+    // address. It is asked for at every call, because the port only exists while a
+    // tunnel is up; "no tunnel" must be the empty string, not a stale port.
+    const BRIDGE = "http://127.0.0.1:47111";
+    let bridge = "";
+    const bridged = pluginHost.createPluginHost({
+      root: freshRoot("bridge"),
+      execBridge: () => bridge,
+    });
+    const asker = pluginSource("asker", {
+      code: "exports.call = async () => 'bridge=' + JSON.stringify(process.env.CLUTCH_EXEC_BRIDGE);\n",
+      tools: [{ name: "echo" }],
+    });
+    bridged.install({ manifest: { ...MANIFEST, name: "asker" }, artifact: asker });
+    check((await bridged.call({ name: "asker", tool: "echo" })).content === 'bridge=""',
+      "exec bridge: with no tunnel the child is told there is no bridge (empty, not a guess)");
+    bridge = BRIDGE;
+    check((await bridged.call({ name: "asker", tool: "echo" })).content === `bridge=${JSON.stringify(BRIDGE)}`,
+      "exec bridge: a tunnel that came up after the host was created still reaches the child");
+    const bare = pluginHost.createPluginHost({ root: freshRoot("bridge-unwired") });
+    bare.install({ manifest: { ...MANIFEST, name: "asker" }, artifact: asker });
+    check((await bare.call({ name: "asker", tool: "echo" })).content === 'bridge=""',
+      "exec bridge: a host with no bridge source passes an empty value rather than refusing to run plugins");
+
+    // no bridge is a fact a plugin answers WITH, not a call that hangs
+    const stranded = pluginSource("stranded", {
+      code: "exports.call = async () => { if (!process.env.CLUTCH_EXEC_BRIDGE) throw new Error('no exec bridge right now'); return 'ok'; };\n",
+      tools: [{ name: "echo" }],
+    });
+    bare.install({ manifest: { ...MANIFEST, name: "stranded" }, artifact: stranded });
+    check(await rejects(bare.call({ name: "stranded", tool: "echo" }), /no exec bridge right now/),
+      "exec bridge: without one the call fails the way any plugin failure does, and does not hang");
+
+    // the exec budget (C9.3): the bridge takes one command and no stdin, so the
+    // numbers that bound it come from the host (ui/transport_defaults.json), not
+    // from each plugin's memory of them.
+    const budgeted = pluginHost.createPluginHost({
+      root: freshRoot("budget"),
+      execLimits: { maxCommandBytes: 6000, chunkBytes: 3500 },
+    });
+    const sized = pluginSource("sized", {
+      code: "exports.call = async () => [process.env.CLUTCH_EXEC_MAX_COMMAND_BYTES, process.env.CLUTCH_EXEC_CHUNK_BYTES].join('/');\n",
+      tools: [{ name: "echo" }],
+    });
+    budgeted.install({ manifest: { ...MANIFEST, name: "sized" }, artifact: sized });
+    check((await budgeted.call({ name: "sized", tool: "echo" })).content === "6000/3500",
+      "exec budget: both numbers reach the child when the host states them");
+    bare.install({ manifest: { ...MANIFEST, name: "sized" }, artifact: sized });
+    check((await bare.call({ name: "sized", tool: "echo" })).content === "/",
+      "exec budget: a host with no opinion says nothing at all, rather than inventing a number");
+
     // a plugin's own logging cannot corrupt the result channel
     const noisy = pluginSource("noisy", {
       code: "console.log('noise'); console.error('more noise');\nexports.call = async () => 'clean';\n",

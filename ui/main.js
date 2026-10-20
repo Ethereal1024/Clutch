@@ -14,6 +14,13 @@ const pluginLink = require("./plugin-link");
 // this client plugin domain: the table the plugin page installs into and the one
 // the /call listener declares from. ONE object, because two would be two truths
 const { createPluginHost } = require("./plugin-host");
+// the one place the exec budget is written down (ui/transport_defaults.json is a
+// copy of agent/transport_defaults.json); main.js reads it so the host can hand it
+// to plugins instead of each plugin inventing its own number
+const {
+  exec_max_command_bytes: EXEC_MAX_COMMAND_BYTES,
+  exec_chunk_bytes: EXEC_CHUNK_BYTES,
+} = require("./transport_defaults.json");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -134,7 +141,26 @@ const ladder = createTunnelLadder({
 // by this app process, and there is no supervisor in its path at all — which is
 // why it works whatever machine the session is on (ui/components-view.js
 // clientInstall, ui/plugin-host.js).
-const pluginHost = createPluginHost({ log: tunnelLog });
+//
+// `execBridge` is the one capability a client plugin needs that lives in THIS
+// process: the loopback port that reaches the far side of the ssh tunnel. Asked
+// per call, so a tunnel that comes up later is still handed to the plugin, and
+// empty while no tunnel is up (SSH_WORKSPACE_PLAN.md C9.1). `execLimits` is the
+// other half of that same sentence: the bridge takes one command and no stdin, so
+// it also carries the byte budget one such command obeys — the numbers are already
+// written down once for the session's own exec path, and a plugin repeating them
+// from memory is how two sides drift (C9.3).
+const pluginHost = createPluginHost({
+  log: tunnelLog,
+  execBridge: () => {
+    const ts = tunnel.tunnelStatus() || {};
+    return typeof ts.execBridge === "string" ? ts.execBridge : "";
+  },
+  execLimits: {
+    maxCommandBytes: EXEC_MAX_COMMAND_BYTES,
+    chunkBytes: EXEC_CHUNK_BYTES,
+  },
+});
 pluginLink.useHost(pluginHost);
 
 const componentsView = createComponentsView({

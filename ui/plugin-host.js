@@ -36,6 +36,23 @@
 // privileges either way, but not in this app's event loop, so a plugin that spins
 // cannot freeze the window and a plugin that must be stopped has a pid to kill.
 //
+// One thing the child is handed beyond its own bytes: the address of the exec
+// bridge (`CLUTCH_EXEC_BRIDGE`), the loopback port that reaches the far side of
+// an ssh tunnel. It is a capability, not a courtesy — whoever holds that address
+// can run anything on the other machine — so it exists for the plugins whose
+// whole job is the far machine's filesystem (`subject: foreign-fs`) and for
+// nothing else does the value mean anything. It is read at every call rather than
+// captured at construction, because the port only lives while a tunnel is up; an
+// empty string is "there is no bridge right now", a fact a plugin can answer with,
+// as opposed to a guess or a timeout. See SSH_WORKSPACE_PLAN.md C9.1.
+//
+// The bridge carries one command string and has no stdin, so how long that string
+// may be is a fact a far-side plugin needs: it is also handed the size budget the
+// command obeys (`CLUTCH_EXEC_MAX_COMMAND_BYTES` / `CLUTCH_EXEC_CHUNK_BYTES`, from
+// ui/transport_defaults.json through the `execLimits` option). Both are the
+// numbers the session's own exec path already uses, passed down rather than
+// rediscovered by each plugin (C9.3).
+//
 // Stdlib only (node builtins): this module is shipped to Android's embedded
 // node as well, where there is no npm tree.
 
@@ -290,6 +307,35 @@ function createPluginHost(options = {}) {
   const root = options.root || defaultRoot();
   const log = options.log || (() => {});
   const childEntry = options.childEntry || CHILD;
+  // Where a plugin can reach the far side of a tunnel: a FUNCTION, because the
+  // bridge port only lives while a tunnel is up and a captured string would go
+  // stale the moment the tunnel is rebuilt. No bridge configured (no tunnel
+  // feature in this host, or no tunnel yet) reads as "" — the child then knows
+  // there is nothing to call rather than trying an address that cannot answer.
+  const execBridge = typeof options.execBridge === "function" ? options.execBridge : () => "";
+  function bridgeAddress() {
+    try {
+      const url = execBridge();
+      return typeof url === "string" ? url : "";
+    } catch (e) {
+      return "";
+    }
+  }
+  // How long one far-side command may be, and how much one chunk of a payload may
+  // carry (`ui/transport_defaults.json`, the same two numbers the session's own
+  // exec path obeys). Handed down as bytes so a plugin never invents a number sshd
+  // might disagree with; absent means "this host has no opinion", and the plugin
+  // then uses its own conservative default rather than guessing large.
+  const execLimits = options.execLimits && typeof options.execLimits === "object" ? options.execLimits : {};
+  function execLimitEnv() {
+    const bytes = (value) => (Number.isFinite(value) && value > 0 ? String(Math.floor(value)) : "");
+    const max = bytes(execLimits.maxCommandBytes);
+    const chunk = bytes(execLimits.chunkBytes);
+    const env = {};
+    if (max) env.CLUTCH_EXEC_MAX_COMMAND_BYTES = max;
+    if (chunk) env.CLUTCH_EXEC_CHUNK_BYTES = chunk;
+    return env;
+  }
 
   // What this client holds: the table, and nothing else. A read never touches the
   // root, so a client with no plugins has no root either.
@@ -573,6 +619,11 @@ function createPluginHost(options = {}) {
             CLUTCH_PLUGIN_DIR: target.directory,
             CLUTCH_PLUGIN_ENTRY: target.entry,
             CLUTCH_PLUGIN_NAME: name,
+            // the far side of the tunnel, when there is one (C9.1). Read per call:
+            // a tunnel that came up after this host was created still shows here.
+            CLUTCH_EXEC_BRIDGE: bridgeAddress(),
+            // ...and the budget one far-side command may spend in bytes (SSH_WORKSPACE_PLAN.md C9.3):
+            ...execLimitEnv(),
           },
           // stdout is nobody's: a plugin's console.log must not be able to land
           // in this app's output. stderr is kept — it is the only thing left to
