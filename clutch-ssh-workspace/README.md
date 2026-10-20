@@ -138,3 +138,23 @@ the suite pins the argv shape of all four tools, the envelope passthrough, the
 error mapping (66 / 74 / non-envelope / 503), the base64 chunking (64 KB written
 and read back byte for byte) and the `CLUTCH_SSH_PYTHON` override — with no ssh,
 no network and no real fork.
+
+`node tests/ssh-workspace-e2e.js` (parent repo) goes one hop further: the real
+component, the real installer and the real `/call`, so the four answers are
+compared with `python -m clutch_workspace --json`'s own.
+
+## Publish
+
+The module publishes its own release manifest (`PLUGIN_PLAN.md` I1); the host ships
+no component bytes and only stores the URL in `ui/components.sources.json`.
+
+```
+bash ../scripts/build-component-tar.sh . clutch-ssh-workspace.tar.gz
+python3 scripts/release-manifest.py clutch-ssh-workspace.tar.gz component.json clutch-component.json
+```
+
+Upload `clutch-component.json`, `component.json` and the tarball to one release,
+then add `…/releases/latest/download/clutch-component.json` to the host's sources.
+The manifest repeats `runs_on: "other"`: a packaged client has no checkout to ask,
+and a plugin's manifest that omits it is offered in the market and refused on
+install (`ui/components.js#destinationOf`). The script treats that as a hard error.

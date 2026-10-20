@@ -234,13 +234,17 @@ Mirrors 一节**里加/删；随发行版打包的那几条只读。要把**清�
 无框架，逐个模块跑：`uv run python -m tests.<name>`（断言共享 `tests/testsupport.py`）
 与 `node tests/<name>.test.js`（断言共享 `tests/harness.js`）。**清单就是目录本身**——
 `tests/*.py` 与 `tests/*test*.js`，每个文件头部都写明它钉住的约定，这里不再抄第二份
-（抄下来的那份只会落后于目录）。除下面两个例外，全部离线：不联网、不要密钥、不花额度。
+（抄下来的那份只会落后于目录）。除下面几条额外要东西的（真 LLM / 真远端 / 一个 python
+解释器），全部离线：不联网、不要密钥、不花额度。
 
 ```bash
 uv run python -m eval.harness   # 三个评测场景；要真 LLM，离线必然红
 
 # 需要一台真远端（见文件头：CLUTCH_E2E_HOST / _PORT / _USER / _PASS）
 CLUTCH_E2E_HOST=10.x.x.x CLUTCH_E2E_USER=me CLUTCH_E2E_PASS=… node tests/remote-bootstrap-e2e.js
+
+# 需要 python 解释器与 clutch-workspace checkout（没有就自己 skip）：真组件的四个工具
+node tests/ssh-workspace-e2e.js
 ```
 
 模块自己的套件在模块目录里跑：`cd clutch-skills && python3 -m pytest`（memory /

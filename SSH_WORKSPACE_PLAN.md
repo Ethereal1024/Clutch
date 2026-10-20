@@ -229,9 +229,18 @@ fallback）。所以下面这条已经是可用的执行器，读写都走 daemo
   `node tests/plugin-server.test.js`、`node tests/client-plugin-websearch.test.js`、
   `node tests/components.test.js`。一次只跑一个，不要把所有 test 文件串成一条命令。
 - 新增：`node tests/ssh-workspace.test.js`（假桥 + argv 断言）。
-- 真机端到端：装上插件 -> 建隧道 -> 会话里 `read_file VERSION` 的结果必须与
-  `scripts/ws-stopgap read_file --path VERSION` 逐字相同；同一模式的 `grep` 命中数相同；
-  `write_file` 的 diff 相同。这一条是"临时措施退场"的判据。
+- 新增：`node tests/ssh-workspace-e2e.js`（真组件：把 `python -m clutch_workspace --json`
+  当作远侧，锚的安装器与 `/call` 都是真的，只有 ssh 那一跳被本地 `POST /exec` 替换）。
+  它不进 `tests/*test*.js` 清单：要 python 解释器和 `clutch-workspace` checkout，
+  与 `tests/remote-bootstrap-e2e.js` 同一个理由；没有这两样时它自己打印 skip 并退出 0。
+- 真机端到端：装上插件 -> 建隧道 -> 会话里 `read_file VERSION` 的结果必须与远侧组件自己的答案
+  逐字相同（`python -m clutch_workspace --json read_file --path VERSION` 的 `content`）；
+  同一模式的 `grep` 命中数相同；`write_file` 的 diff 相同。
+  **不要拿 `scripts/ws-stopgap` 当参照**：那是一个会 print 的 CLI，它给 stdout 补了一个
+  文件本来没有的换行（`VERSION` 盘上就是 `0.1.55`，没有结尾换行），而且 diff 在 envelope 的
+  另一个字段里，stdout 根本看不到。用它做参照会"发现"两个并不存在的 bug（本计划的旧版本
+  正是这么写的，2026-10-20 由 `tests/ssh-workspace-e2e.js` 纠正）。
+  这一条是"临时措施退场"的判据。
 
 ## 七、风险
 

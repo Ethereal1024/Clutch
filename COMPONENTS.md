@@ -46,6 +46,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   "schema": 1,                        // 必填；不是 1 即整条被拒
   "name": "clutch-skills",            // 必填：组件身份
   "interface": "cli",                 // 怎么被调用（第三节）
+  "runs_on": "self",                  // 谁跑它：self = 会话那台，other = 这台客户端
   "version": "0.3.1",                 // 这份发行版自报的版本
   "declaration": { "asset": "component.json", "sha256": "<64 hex>" },
   "artifacts": {                      // 平台标签 -> 工件；键 "any" 兜底
@@ -55,6 +56,13 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   }
 }
 ```
+
+- **`runs_on` 必须在发行清单里再说一遍，不只是写在 `component.json` 里**：打包版客户端手上
+  没有 checkout 可问，`parseManifest()` 只从这份清单取这个词，页面再靠 `interface` +
+  `runs_on` 推出装到哪台机器（第八节 `destinationOf`）。少写一次就按 `"self"` 兜底，于是
+  `interface: "plugin"` 的组件在市场上"能看见、装不了"——报错原文是
+  `its declaration has to say runs_on: "other", and this one says "self"`。
+  `clutch-ssh-workspace/scripts/release-manifest.py` 因此把缺 `runs_on` 的插件清单当硬错误。
 
 - **资产相对清单**：`asset` 是清单**旁边**的名字（文件名或相对路径），清单自己的
   地址给出基准——模块因此不必知道自己的绝对 URL，一份清单放进本地目录同样能用

@@ -394,7 +394,8 @@ v0.1.32 的成品被用户判为"极其不专业"并逐条指出。这一轮**�
   拼成行的 `title=`。CSS 补 `.plug-row-desc`（单行 + ellipsis + muted）与
   `.plug-row-head .plug-name`（nowrap + ellipsis）。
 * 数据前提（已核实）：发布清单 `clutch-component.json` 只有
-  `schema/name/interface/version/declaration/artifacts`，**没有 description**（`ui/components.js`
+  `schema/name/interface/runs_on/version/declaration/artifacts`（`runs_on` 是 C7 之后
+  `parseManifest()` 就读的，`destinationOf` 靠它定去哪个域），**没有 description**（`ui/components.js`
   的 `parseManifest()` 只按 checkout 的 `declaration` 取 `ui.label`），所以行里那句"简介"只能是
   **按状态推导**的一句，不能凭空造组件简介。
 
