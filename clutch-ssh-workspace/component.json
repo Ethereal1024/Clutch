@@ -1,0 +1,165 @@
+{
+  "name": "clutch-ssh-workspace",
+  "version": "0.1.0",
+  "interface": "plugin",
+  "runs_on": "other",
+  "subject": "foreign-fs",
+  "entry": "index.js",
+  "ui": {
+    "label": "workspace files (over ssh)"
+  },
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a file OR list a directory in the workspace (path relative to the workspace root). A directory returns its entry listing (subdirectories end with '/'). For a file, prefer the line-range form: pass offset (1-based start line) and limit (line count) to read only the slice you need — output is line-numbered and ends with a \"(showing lines X-Y of N; use offset=Y+1 to continue)\" hint when more remains. A range larger than the read budget returns an error; narrow the limit or use grep. Without offset/limit the whole file is read and truncated at max_chars (default $config.read_max_chars) with a \"use offset=N to continue\" hint — never re-read a file from the top, continue with that offset instead. Only read files relevant to the task; content-creation tasks do not need to explore the workspace. Runs on the machine the workspace root lives on, over the ssh tunnel: paths are relative to THAT machine’s workspace root, and the answer is that machine’s own clutch-workspace component’s (same line numbers, same hints, same diff).",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "file path OR directory path, relative to the workspace root"
+          },
+          "max_chars": {
+            "type": "integer",
+            "description": "max chars to read (default $config.read_max_chars)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "1-based start line for a line-range read"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "max lines to read when offset is given"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "access": "read",
+      "ui": {
+        "group": "read",
+        "form": "row",
+        "body": "code",
+        "collapse": "always",
+        "highlight": "path",
+        "preview": "none",
+        "summary": "read {path} ({lines} lines)"
+      }
+    },
+    {
+      "name": "grep",
+      "description": "Search files in the workspace for a regex pattern. Use this to locate code before reading files — it is cheaper than reading whole files or running grep in the shell. pattern is a Python-style regex (e.g. \"def build_\\w+\", \"TODOs?\"). path limits the search to a subdirectory or file (default: whole workspace); include filters by filename glob (e.g. \"*.py\", \"*.md\"). Hidden files and binary files are skipped. Output is capped at 100 hits as \"path:  Line N: text\"; narrow the pattern or path if the result is truncated. Workspace-relative paths returned here can be passed straight to read_file. Runs on the machine the workspace root lives on, over the ssh tunnel: paths are relative to THAT machine’s workspace root, and the answer is that machine’s own clutch-workspace component’s (same line numbers, same hints, same diff).",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "regex to search for"
+          },
+          "path": {
+            "type": "string",
+            "description": "subdirectory or file to search (default: whole workspace)"
+          },
+          "include": {
+            "type": "string",
+            "description": "filename glob filter (e.g. '*.py')"
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      },
+      "access": "sweep",
+      "ui": {
+        "group": "read",
+        "form": "row",
+        "body": "code",
+        "collapse": "always",
+        "highlight": "path",
+        "preview": "none",
+        "summary": "grep {pattern} ({lines} lines)"
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Create or overwrite a file in the workspace. path is relative to the workspace root. This is the only way to create/modify code files: whole-file rewrite, do not edit files any other way. Runs on the machine the workspace root lives on, over the ssh tunnel: paths are relative to THAT machine’s workspace root, and the answer is that machine’s own clutch-workspace component’s (same line numbers, same hints, same diff).",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "file path, relative to the workspace root"
+          },
+          "content": {
+            "type": "string",
+            "description": "full file content"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      },
+      "access": "write",
+      "snapshot": true,
+      "modes": [
+        "work"
+      ],
+      "ui": {
+        "chrome": "accent",
+        "header": "✓ wrote {path}",
+        "body": "diff",
+        "collapse": "long",
+        "preview": {
+          "mode": "content",
+          "keys": [
+            "✎path",
+            "content"
+          ]
+        }
+      }
+    },
+    {
+      "name": "edit_file",
+      "description": "Edit an existing file by replacing one exact occurrence of old_string with new_string (path relative to the workspace root). Use this to MODIFY existing code — a targeted edit costs a few hundred tokens instead of re-emitting the whole file, keeps the context small, and never risks truncating the file. old_string must appear exactly once in the file; if it is missing or ambiguous the tool errors and asks for more context — include surrounding lines to make it unique. The result shows a unified diff. For NEW files use write_file. Runs on the machine the workspace root lives on, over the ssh tunnel: paths are relative to THAT machine’s workspace root, and the answer is that machine’s own clutch-workspace component’s (same line numbers, same hints, same diff).",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "file path, relative to the workspace root"
+          },
+          "old_string": {
+            "type": "string",
+            "description": "exact text to replace (must appear exactly once)"
+          },
+          "new_string": {
+            "type": "string",
+            "description": "replacement text"
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ]
+      },
+      "access": "write",
+      "snapshot": true,
+      "modes": [
+        "work"
+      ],
+      "ui": {
+        "chrome": "accent",
+        "header": "✎ edited {path}",
+        "body": "diff",
+        "collapse": "long",
+        "preview": {
+          "mode": "content",
+          "keys": [
+            "✎path",
+            "-old_string",
+            "+new_string"
+          ]
+        }
+      }
+    }
+  ]
+}
