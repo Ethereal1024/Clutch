@@ -56,7 +56,8 @@ C1–C6 只落在桌面壳：手机宿主不装 `ui/plugin-*.js`，也就不推�
    域（`ui/plugin-host.js`），`cli`/`daemon` + `runs_on: "self"` 走会话那台的 supervisor。会话
    那台的**地址**才来自窗口的会话种类（`hostCore.backendKind`：隧道对端是 `tunnelStatus().url`，
    其余是本机，包括隧道在线但窗口回退到本地会话的情形）。这一段当初写的是"目的地由会话种类
-   决定"——C7 之后只剩地址由它决定；`target()` 那个名字也随之不见。
+   决定"——C7 之后只剩地址由它决定，`components-view.js` 里那个 `target()` 也只剩这一件事
+   （只有客户端域的 plugin 连地址都不需要：`ui/plugin-host.js` 就在这个进程里）。
 2. **supervisor 会空闲退出**（**已补上唤醒**，`31d5ec6`，落点是第八节 G1）：本机那个是
    `--idle-timeout 25` 起的，空闲即退出，由 app 按需重启——于是"本机安装"在 supervisor 没在跑
    时会直接失败，而当初**没有任何东西会为这次安装把它叫起来**（`ui/server-bootstrap.js` 全文
