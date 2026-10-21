@@ -476,6 +476,23 @@ const CODE = mod ? mod.code : "";
     check(/already holds clutch-workspace 0.1.0\+5f900739/.test(p.buttons()[0].title), "and its title says what it will rewrite");
   }
 
+  // 3b. a record from before installs carried a version is an UPDATE, not a
+  // reinstall: the release was never recorded, so there is no release to compare
+  // against — the page must not call a bare digest "already holds 0.1.0"
+  // (PLUGIN_PLAN.md 七.2: old records are replaced, not kept beside the new shape).
+  {
+    const p = page({ held: [{ name: "clutch-workspace", version: "5f900739e6a35f43", digest: "5f900739e6a35f43" }] });
+    await p.open();
+    check(p.buttons()[0].textContent === "Update", "a digest-only record is an update, never 'Reinstall'");
+    check(
+      /before installs carried a version/.test(p.buttons()[0].title) &&
+        /0\.1\.0\+5f900739e6a35f43 replaces it/.test(p.buttons()[0].title),
+      "the title names the record being replaced and the version the reinstall gives it"
+    );
+    p.chips()[3].click();
+    check(p.names().join(",") === "clutch-workspace", "the Updates view counts it before any release number moves");
+  }
+
   // 4. the question names the PLACE the bytes land in, and the fact that cannot
   // be undone. The place is not chosen and not discovered here: it came off the
   // declaration (ui/components.js destinationOf), which is why a question that

@@ -359,8 +359,22 @@ const PLUG_FILTERS = [
 // it differs per machine, and calling that an update would be wrong.
 function plugItemUpdate(item) {
   if (!item.held || !item.entry) return false;
+  if (plugHeldLegacy(item.held)) return true;
   const offered = String(item.entry.version || "");
   return Boolean(offered) && String(item.held.version || "").split("+")[0] !== offered;
+}
+
+// A record from before every install carried a version: the inventory then says
+// `5f900739e6a35f43` — the identity of the bytes and nothing else, so the release
+// was never recorded at all. The gate already refuses to call such a record
+// current (it compares version AND digest, agent/tools/components.py `current()`,
+// ui/components-view.js), so any pass or click replaces it; what this predicate is
+// for is SAYING that, because a bare digest under "held" reads like a version that
+// merely looks odd. Old records are reinstalled rather than kept beside the new
+// shape (PLUGIN_PLAN.md 七.2).
+function plugHeldLegacy(held) {
+  const version = String((held && held.version) || "");
+  return Boolean(version) && !version.includes("+");
 }
 
 // Whether one component belongs to one view. Kept apart from the name query
@@ -511,6 +525,12 @@ function plugItemMeta(item) {
     if (held.digest) meta.push("digest " + String(held.digest).slice(0, 16));
     if (held.disabled) meta.push("stopped");
     if (held.interface) meta.push(held.interface);
+    // what the record IS, when it predates versions: the number above is a digest,
+    // and the reinstall beside this row is what turns it into a release
+    if (plugHeldLegacy(held) && entry && entry.version) {
+      const digest = String(held.digest || "").slice(0, 16) || String(held.version);
+      meta.push(`an old record: a reinstall names it ${entry.version}+${digest}`);
+    }
   }
   if (entry) {
     // the one placement fact a row has: which of the two places its declaration
@@ -1193,6 +1213,12 @@ function plugInstallButton(entry) {
     btn.title = plugState.busy.name + " is " + plugBusyWord(plugState.busy);
   } else if (same) {
     btn.title = `${where} already holds ${entry.name} ${held.version}`;
+  } else if (newer && plugHeldLegacy(held)) {
+    const digest = String(held.digest || "").slice(0, 16) || String(held.version);
+    btn.title =
+      `put ${entry.name} ${offered} on ${where} — it holds ${held.version}, a record from before ` +
+      `installs carried a version: ${offered}+${digest} replaces it, and the old directory is ` +
+      `deleted, not kept`;
   } else if (newer) {
     btn.title =
       `put ${entry.name} ${offered} on ${where} — ` +

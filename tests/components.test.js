@@ -336,6 +336,43 @@ async function main() {
   check(again.current.includes("clutch-memory"), "what the host already holds is reported current");
   check(again.errors.length === 0, "and the pass is clean");
 
+  // 6b. an OLD RECORD is replaced by the next pass, never kept beside the new
+  //     shape (PLUGIN_PLAN.md 七.2, decided: force the reinstall). The force is
+  //     the gate itself — the gate compares version AND digest, and a record from
+  //     before installs carried a version names nothing but the digest, so no pass
+  //     can call it current. This writes exactly what a 0.1.55 install left: a
+  //     directory named after the digest, and a manifest whose own `version` is
+  //     that digest.
+  {
+    const tablePath = path.join(hostRoot, "registry.json");
+    const table = JSON.parse(fs.readFileSync(tablePath, "utf8"));
+    const record = table.components.find((c) => c.name === "clutch-memory");
+    const legacy = String(record.digest).slice(0, 16);
+    const oldShape = path.join(hostRoot, "clutch-memory", legacy);
+    fs.renameSync(path.join(hostRoot, record.location), oldShape);
+    const manifestPath = path.join(oldShape, "component.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest.version = legacy;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+    record.version = legacy;
+    record.location = "clutch-memory/" + legacy;
+    fs.writeFileSync(tablePath, JSON.stringify(table, null, 2) + "\n", "utf8");
+
+    const old = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    check(old && old.version === legacy, "an old install reads as the digest alone, which is the shape being retired");
+
+    const unify = await components.ensureComponents(base, { index: emptyIndex });
+    check(unify.installed.includes("clutch-memory"), "so the next pass reinstalls it rather than calling it current");
+    check(!unify.current.includes("clutch-memory"), "and that component is not reported current while its record is in the old shape");
+    const dirs = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
+    check(dirs.length === 1 && !dirs.includes(legacy), "the digest-named directory is gone: one shape, not two");
+    const unified = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    check(
+      unified && unified.version.endsWith("+" + unified.digest.slice(0, 16)),
+      "and the record names the release again, with the bytes under it"
+    );
+  }
+
   // 7. a host that cannot be reached is reported, never thrown: the pass runs
   //    in the background, so a session starts without waiting for it
   const dead = await components.ensureComponents("http://127.0.0.1:1");
