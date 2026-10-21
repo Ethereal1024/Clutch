@@ -493,7 +493,7 @@ def check_the_endpoint() -> None:
 
 
 def check_the_machine_a_component_serves() -> None:
-    """`subject` is a machine, and the surface follows it (SSH_WORKSPACE_PLAN C9.4).
+    """`subject` is a machine, and the surface follows it (COMPONENTS.md 第七节).
 
     The situation two subjects exist for: the workspace's own `read_file`
     (`workspace-fs`, spoken to the machine the root lives on) and the ssh plugin's

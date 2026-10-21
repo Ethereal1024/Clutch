@@ -325,7 +325,7 @@ async function main() {
     const where = await runtime.call({ name: "local", command: S("read") });
     check(where.content === "beside@beside", "call: cwd is the plugin's own directory and the env names it too");
 
-    // the exec bridge (C9.1): the far side of a tunnel, handed to the child as an
+    // the exec bridge (COMPONENTS.md §三): the far side of a tunnel, handed to the child as an
     // address. It is asked for at every call, because the port only exists while a
     // tunnel is up; "no tunnel" must be the empty string, not a stale port.
     const BRIDGE = "http://127.0.0.1:47111";
@@ -358,7 +358,7 @@ async function main() {
     check(await rejects(bare.call({ name: "stranded", command: S("echo") }), /no exec bridge right now/),
       "exec bridge: without one the call fails the way any plugin failure does, and does not hang");
 
-    // the exec budget (C9.3): the bridge takes one command and no stdin, so the
+    // the exec budget (COMPONENTS.md §三): the bridge takes one command and no stdin, so the
     // numbers that bound it come from the host (ui/transport_defaults.json), not
     // from each plugin's memory of them.
     const budgeted = pluginHost.createPluginHost({

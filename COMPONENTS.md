@@ -4,7 +4,8 @@ Clutch 宿主**零内置工具**：`run_command` 之外的一切工具都来自*
 一个独立发布的工件（本仓库的五个子模块 `clutch-workspace` / `clutch-memory` /
 `clutch-websearch` / `clutch-skills` / `clutch-ssh-workspace`——子模块只是**开发检出**，宿主
 发行版一份组件字节都不带，见第一节末；也可以是任何第三方的同类物）。最后一个子模块服务
-**别台机器**的文件系统，见 `subject` 表末的 `foreign-fs` 与 `SSH_WORKSPACE_PLAN.md`。宿主
+**别台机器**的文件系统，见 `subject` 表末的 `foreign-fs`；它的规格现文是自己的
+`clutch-ssh-workspace/README.md`。宿主
 不为任何组件保留第二份实现，也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进
 循环。
 
@@ -206,7 +207,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 `subject` 词汇（宿主定义，组件从中选）：`workspace-fs`（服务工作区所在机器的文件
 系统——该机器上必须有工作区根才能为它服务）、`foreign-fs`（别的机器的文件系统——工作区根
 **不在**这台机器上，今天由 `clutch-ssh-workspace` 经客户端插件域、走 ssh 隧道服务它，
-见 `SSH_WORKSPACE_PLAN.md`）、`project-file`（.clc 项目文件）、`network`（网络）、
+见它的 `README.md`）、`project-file`（.clc 项目文件）、`network`（网络）、
 `skill-library`（技能库）。
 
 `prompt` 是组件**自己的话**：一段 markdown 片段（相对组件目录，像 `launch.entry`），
@@ -706,6 +707,12 @@ POST   /api/components/<name>/enable           启用：重新驱动
   （索引读取、行的字段与取数重试）、`tests/market.test.js`（索引文档本身：行是钉死版本的
   指针、与 `market/entries.json` 逐字段一致、三层回退链与降级话术）、
   `tests/net-fetch.test.js`（那一道前缀门本身，索引与清单都过它）。
+- **`foreign-fs` 的真机判据**：装上插件 → 建隧道 → 会话里四个工具的回答必须与远侧组件
+  自己的回答**逐字相同**（`python3 -m clutch_workspace --json <tool> …` 的 `content`、
+  `grep` 的命中数、`write_file` 的 diff），不是"看起来对"。**别拿会 print 的 CLI 当
+  参照**：stdout 会补一个文件本来没有的换行（`VERSION` 盘上就没有结尾换行），diff 又在
+  信封的另一个字段里——那条路会"发现"两个并不存在的 bug，`tests/ssh-workspace-e2e.js`
+  用真组件当锚正是为此。
 - **发布前**：UI 文本保持英文；**`ui/` 的注释里不写 `§`**（v0.1.30 第一次打 tag 就栽在这），
   改完跑 `.venv/bin/python -m tests.ui_fonts_check`。改过 `ui/` 还要跑
   `scripts/sync-android-host.sh` 与 `node tests/android-assets.test.js`——Android 宿主的 `UI_NODE`

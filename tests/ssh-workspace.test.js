@@ -7,7 +7,7 @@
 // plugin, its planning, its quoting and its envelope handling are the real files
 // from clutch-ssh-workspace/. Nothing here needs ssh, a network or the far side;
 // the far side's own component is verified by tests/rendezvous_test.py and by the
-// live check in SSH_WORKSPACE_PLAN.md 六.
+// live check in COMPONENTS.md 第九节.
 //
 // Run: node tests/ssh-workspace.test.js
 
@@ -63,7 +63,7 @@ function bridge() {
 }
 
 // The environment a call sees. Every case states it whole, because the plugin
-// reads the host's variables at call time on purpose (C9.1).
+// reads the host's variables at call time on purpose (COMPONENTS.md 第三节).
 function configure(url, extra = {}) {
   for (const name of [
     "CLUTCH_EXEC_BRIDGE",

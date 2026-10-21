@@ -44,14 +44,14 @@
 // nothing else does the value mean anything. It is read at every call rather than
 // captured at construction, because the port only lives while a tunnel is up; an
 // empty string is "there is no bridge right now", a fact a plugin can answer with,
-// as opposed to a guess or a timeout. See SSH_WORKSPACE_PLAN.md C9.1.
+// as opposed to a guess or a timeout. See COMPONENTS.md 第三节.
 //
 // The bridge carries one command string and has no stdin, so how long that string
 // may be is a fact a far-side plugin needs: it is also handed the size budget the
 // command obeys (`CLUTCH_EXEC_MAX_COMMAND_BYTES` / `CLUTCH_EXEC_CHUNK_BYTES`, from
 // ui/transport_defaults.json through the `execLimits` option). Both are the
 // numbers the session's own exec path already uses, passed down rather than
-// rediscovered by each plugin (C9.3).
+// rediscovered by each plugin.
 //
 // Stdlib only (node builtins): this module is shipped to Android's embedded
 // node as well, where there is no npm tree.
@@ -818,10 +818,10 @@ function createPluginHost(options = {}) {
             CLUTCH_PLUGIN_DIR: target.directory,
             CLUTCH_PLUGIN_ENTRY: target.entry,
             CLUTCH_PLUGIN_NAME: name,
-            // the far side of the tunnel, when there is one (C9.1). Read per call:
+            // the far side of the tunnel, when there is one (COMPONENTS.md 第三节). Read per call:
             // a tunnel that came up after this host was created still shows here.
             CLUTCH_EXEC_BRIDGE: bridgeAddress(),
-            // ...and the budget one far-side command may spend in bytes (SSH_WORKSPACE_PLAN.md C9.3):
+            // ...and the budget one far-side command may spend in bytes (COMPONENTS.md 第三节):
             ...execLimitEnv(),
           },
           // stdout is nobody's: a plugin's console.log must not be able to land

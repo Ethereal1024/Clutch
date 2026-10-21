@@ -4,8 +4,7 @@
 准确位置）+ 还欠什么。未拍板的单独放在第九节，不混进来，也不写成"倾向于"。
 
 **编号不复用、不删除。** 一条决定被推翻时留原文，在下面补一行"→ 由 Dn 取代"。
-计划文档已经退役（`PLUGIN_PLAN.md` 已删，`SSH_WORKSPACE_PLAN.md` 等真机 e2e 之后删，
-D7），所以这里就是唯一还活着的地方：代码注释引用编号或 `COMPONENTS.md` 的节，不引用
+计划文档已经退役（`PLUGIN_PLAN.md` 与 `SSH_WORKSPACE_PLAN.md` 都已删，D7），所以这里就是唯一还活着的地方：代码注释引用编号或 `COMPONENTS.md` 的节，不引用
 已经不在的文件。
 
 总则（贯穿全部条目）：**不留兼容层、不留兜底补丁、不留回滚。** 形状不对就换掉，语义不对就
@@ -437,9 +436,10 @@ CLI 那种语句不属于任何工作区。`launch_prefix()` 对带服务的声�
 各条与 `COMPONENTS.md` 里，代码注释改指 `Dn` 或 `COMPONENTS.md` 的节。**不要把它复活**——
 一份"当前做到哪"的文档只要还在，就会被当成第二份真相（D7）。
 
-`SSH_WORKSPACE_PLAN.md` **还在**：它是 `clutch-ssh-workspace` 的真机 e2e 判据（C9 系列），
-那份 e2e 没在真机上跑过之前不删；删它的时候同样把 `C9.x` 的引用改指 `D3`，并确认
-`scripts/ws-stopgap` 已经退役。
+`SSH_WORKSPACE_PLAN.md` **已删**：真机 e2e 跑过、`scripts/ws-stopgap` 同步退场之后删的。
+它的规格现文是 `clutch-ssh-workspace/README.md`，宿主侧结论在 `COMPONENTS.md` 第三节
+（执行桥是**一份环境**，不是设施词）与第七节（同名工具按"根在哪台机器"对称筛），
+判据在第九节。代码里的 `C9.x` 引用已全部改指那两节，旧锚点留下面那张表。
 
 旧锚点 → 现在的对照（只为查旧提交留一眼）：
 

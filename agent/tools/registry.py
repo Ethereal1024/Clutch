@@ -261,7 +261,7 @@ def _serves_this_workspace(component: catalog.Component, workspace: Workspace | 
       * `workspace-fs` serves the root's own machine. It is KEPT even when the
         root is elsewhere, on purpose: its refusal is a sentence that says why
         ("this root is another machine's"), which is more use to the model than a
-        tool that silently is not there (SSH_WORKSPACE_PLAN.md 七). When a
+        tool that silently is not there (COMPONENTS.md 第七节). When a
         `foreign-fs` component is also present it publishes the same names and
         wins — the table folds pushed declarations last — so the local one is
         only the sentence you read when the plugin is not installed.
