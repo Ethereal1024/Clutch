@@ -8,14 +8,15 @@
 // still answer what the component answers, because its far side is a canned
 // string. Here the far side is the actual `python -m clutch_workspace --json`,
 // so the answer is compared with the component's own — and that comparison is
-// the whole promise of this plugin (see SSH_WORKSPACE_PLAN.md 五: no second
+// the whole promise of this plugin (see COMPONENTS.md §三: no second
 // definition of what "read" means). The ssh hop in between is what
 // tests/tunnel*.test.js pins; nothing here needs a network or a key.
 //
-// The oracle is the COMPONENT, not scripts/ws-stopgap. The stopgap is a shell CLI
-// that prints: its stdout gains a trailing newline the tool's content does not
-// have (the VERSION file carries no trailing newline), and it has no separate diff
-// field. Comparing against it would have "found" two bugs that are not there.
+// The oracle is the COMPONENT, not a shell CLI that prints. A printing wrapper's
+// stdout gains a trailing newline the tool's content does not have (the VERSION
+// file carries no trailing newline) and it has no separate diff field, so
+// comparing against one would have "found" two bugs that are not there — that is
+// exactly what the retired scripts/ws-stopgap taught, and why it is gone.
 //
 // Not named *.test.js on purpose: it needs a Python interpreter (and the
 // clutch-workspace checkout), so it stays out of the offline `tests/*test*.js`
@@ -195,7 +196,15 @@ async function main() {
 
     listener = pluginServer.createPluginServer({ host, token: "e2e-token-0123456789abcdef" });
     const callPort = await listener.listen(0);
-    const invoke = (tool, args) => call(callPort, { component: record.name, tool, args });
+    // A call carries the tool's STATEMENT, read out of the declaration the way a
+    // client reads it — never the tool's name (D3 落地③). `{*}` is what the tool
+    // itself forwards, so the far side still receives `--json <tool> …`.
+    const statementOf = (tool) => {
+      const spec = (manifest.tools || []).find((entry) => entry.name === tool);
+      if (!spec || !spec.command) throw new Error(`the declaration has no statement for ${tool}`);
+      return spec.command;
+    };
+    const invoke = (tool, args) => call(callPort, { component: record.name, command: statementOf(tool), args });
 
     // 1. read_file: the component's own answer. VERSION has no trailing newline,
     //    so a transport that "tidies" stdout is caught right here.
