@@ -1,12 +1,12 @@
 # 组件规范（COMPONENTS.md）
 
 Clutch 宿主**零内置工具**：`run_command` 之外的一切工具都来自**组件**（component）——
-一个独立发布的工件（本仓库的四个子模块 `clutch-workspace` / `clutch-memory` /
-`clutch-websearch` / `clutch-skills`——子模块只是**开发检出**，宿主发行版一份组件字节
-都不带，见第一节末；也可以是任何第三方的同类物）。第五个组件 `clutch-ssh-workspace/` 就在
-这棵树里（不是子模块、还没有发布）：它服务**别台机器**的文件系统，见 `subject` 表末的
-`foreign-fs` 与 `SSH_WORKSPACE_PLAN.md`。宿主不为任何组件保留第二份实现，
-也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进循环。
+一个独立发布的工件（本仓库的五个子模块 `clutch-workspace` / `clutch-memory` /
+`clutch-websearch` / `clutch-skills` / `clutch-ssh-workspace`——子模块只是**开发检出**，宿主
+发行版一份组件字节都不带，见第一节末；也可以是任何第三方的同类物）。最后一个子模块服务
+**别台机器**的文件系统，见 `subject` 表末的 `foreign-fs` 与 `SSH_WORKSPACE_PLAN.md`。宿主
+不为任何组件保留第二份实现，也不内置任何组件的声明；它只做两件事：**发现**声明、把声明接进
+循环。
 
 `run_command` 是唯一的例外，而且它同样是**被声明**的：宿主为自己写的唯一一条工具
 声明（`agent/tools/host.py`），见第十一节。
@@ -78,7 +78,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   机器的 supervisor；而"去哪一个是声明说的，不是页面上选的"——`destinationOf`（第三节
   「一台机器，一个答案」）。
 - **平台查找先精确后兜底**：按客户端的平台标签（`linux-x86_64` / `darwin-arm64` /
-  `windows-x86_64`）取键，取不到用 `any`。今天的四个模块都只发一个平台无关的
+  `windows-x86_64`）取键，取不到用 `any`。今天每个模块都只发一个平台无关的
   **tar**（`clutch-skills` 的 tar 里是代码 + `skills/`——技能库随组件自己的发行版走，
   宿主不留第二份），将来要发 PyInstaller onefile 也不必改协议。
 - **声明是位置而不是内容**：`declaration` 说的是**一份文件在哪**（资产 + 摘要），不是

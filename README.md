@@ -17,7 +17,7 @@ tool-calling 接口调用（DeepSeek 等均可），需要自备 API key。
 需要 Python ≥ 3.10 和 Node.js，包管理用 uv。
 
 ```bash
-git submodule update --init --recursive   # 四个工具模块的检出（开发用；发行版不带模块）
+git submodule update --init --recursive   # 五个工具模块的检出（开发用；发行版不带模块）
 pip install uv && uv sync    # 后端依赖
 cd ui && npm install         # 前端依赖
 export CLUTCH_API_KEY=...    # API key
@@ -178,15 +178,18 @@ clutch-memory/         记忆模块（子模块）：save_memory / load_memory /
 clutch-websearch/      联网模块（子模块）：web_search / web_fetch，自带后端链
 clutch-skills/         技能模块（子模块）：load_skill 与技能库（库随组件自己的
                        发行包走；本机 dev-only 的写作技能不入库、也不进任何发行包）
+clutch-ssh-workspace/  别的机器的文件系统（子模块）：客户端插件，read_file / grep /
+                       write_file / edit_file 经 ssh 到远侧的 clutch-workspace
 eval/                  评测场景（落地页 / 修 bug / 重构）
 tests/                 测试
 scripts/               打包与构建脚本（market_index.py 生成市场索引）
 market/                市场索引里人维护的那一栏：entries.json，一行一个模块
 ```
 
-四个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
+五个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
 宿主不 import 它们的代码，只依赖它们发布的接口（HTTP 表面或 CLI 的 stdout 契约）：
-`clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起。宿主里没有任何工具的第
+`clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起；`clutch-ssh-workspace` 是客户端
+插件，字节只住在客户端域，工具经 ssh 到远侧的同名 CLI。宿主里没有任何工具的第
 二份实现，也没有任何内置声明——工具的名字、参数、命令模板，以及它在界面里的呈现
 方式，全部写在组件自带的 `component.json` 里（随组件走，规范见
 [COMPONENTS.md](COMPONENTS.md)），宿主只负责发现与合并。因此删掉任何一个
