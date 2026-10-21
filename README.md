@@ -1,9 +1,15 @@
-# Clutch
+<p align="center">
+  <img src="ui/build/icon.png" width="96" height="96" alt="Clutch 图标">
+</p>
 
-[![License: MIT](https://img.shields.io/github/license/Ethereal1024/Clutch)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/Ethereal1024/Clutch?label=Release&color=blue)](https://github.com/Ethereal1024/Clutch/releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=Build)](https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+<p align="center">
+  <a href="https://github.com/Ethereal1024/Clutch/blob/master/LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/Ethereal1024/Clutch"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Ethereal1024/Clutch?label=Release&amp;color=blue"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=Build"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/blob/master/pyproject.toml"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white"></a>
+</p>
+
+# Clutch
 
 Clutch 是一个本地运行的编程智能体（coding agent）。用户提交任务描述后，Clutch 调用
 大语言模型，在指定的工作目录中读取与修改文件、执行命令，直至模型结束任务或满足终止
