@@ -3,8 +3,11 @@
 //
 // The target-side half is agent/tools/channel.py, and the two files are one
 // contract read from opposite ends: `POST /call`, `Authorization: Bearer <token>`,
-// body `{component, tool, args}`, answer `{content, error?}` where `content` is
-// the model-facing text. Anything else the target's channel would refuse is
+// body `{component, command, args}`, answer `{content, error?}` where `content` is
+// the model-facing text. The `command` is the tool's statement exactly as THIS
+// client declared it in its component.json — the session sends it back verbatim
+// and this side renders it into argv (ui/plugin-host.js `renderArgv`), refusing a
+// template it did not declare. Anything else the target's channel would refuse is
 // refused HERE first, with a sentence the model can act on.
 //
 // Why a listener with a token at all: this window's machine holds the bytes, the
@@ -115,9 +118,10 @@ function declarations(host) {
 }
 
 // One tool, projected: everything the session's declaration parser reads about a
-// tool (name, description, parameters, policy words), and nothing that describes
-// how THIS machine would run it (`command`, `defaults` — a plugin is called
-// through /call, so a statement template would be a second implementation).
+// tool (name, description, parameters, policy words) plus the STATEMENT it runs —
+// the `command` template, which is what the session sends back on a call and what
+// makes the wire contract checkable on this side. `defaults`, not being something
+// the client renders, is still dropped.
 const TOOL_POLICY = ["access", "access_arg", "snapshot_arg", "modes", "gate", "preview"];
 
 function toolOf(raw) {
@@ -125,6 +129,7 @@ function toolOf(raw) {
   const name = String(raw.name || "");
   if (!name) return null;
   const tool = { name };
+  if (typeof raw.command === "string" && raw.command) tool.command = raw.command;
   if (typeof raw.description === "string") tool.description = raw.description;
   if (raw.parameters && typeof raw.parameters === "object") tool.parameters = raw.parameters;
   for (const word of TOOL_POLICY) {
@@ -213,9 +218,9 @@ function createPluginServer(options = {}) {
         return;
       }
       const name = call && typeof call === "object" ? String(call.component || "") : "";
-      const tool = call && typeof call === "object" ? String(call.tool || "") : "";
-      if (!name || !tool) {
-        answer(res, 400, { error: "a call names a component and a tool" });
+      const command = call && typeof call === "object" ? String(call.command || "") : "";
+      if (!name || !command) {
+        answer(res, 400, { error: "a call names a component and a statement" });
         return;
       }
       const args = call.args && typeof call.args === "object" ? call.args : {};
@@ -229,22 +234,23 @@ function createPluginServer(options = {}) {
       }
       running += 1;
       const started = Date.now();
-      host.call({ name, tool, args, timeoutMs }).then(
+      const where = `${name} (${command})`;
+      host.call({ name, command, args, timeoutMs }).then(
         (envelope) => {
           running -= 1;
           answer(res, 200, { content: String(envelope.content), error: !!envelope.error });
-          log(`[plugin] ${name}.${tool} answered in ${Date.now() - started}ms`);
+          log(`[plugin] ${where} answered in ${Date.now() - started}ms`);
         },
         (e) => {
           running -= 1;
-          // The host's refusals (not installed, stopped, no such tool) and a
+          // The host's refusals (not installed, stopped, no such statement) and a
           // plugin that threw are the SAME thing to the model: this call did not
           // produce an answer, and the sentence says why. A 2xx with `error:true`
           // keeps the sentence intact; a 4xx/5xx would have the target prefix it
           // with "the client refused the call", which is false — it ran and
           // failed.
           answer(res, 200, { content: String((e && e.message) || e || "the plugin failed"), error: true });
-          log(`[plugin] ${name}.${tool} failed in ${Date.now() - started}ms: ${String((e && e.message) || e)}`);
+          log(`[plugin] ${where} failed in ${Date.now() - started}ms: ${String((e && e.message) || e)}`);
         }
       );
     });

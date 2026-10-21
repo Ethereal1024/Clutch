@@ -312,9 +312,12 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
     And what the declaration says about a service, which the interface word beside
     it still has to agree with (two spellings of one fact until step ④ of D3). And
     the two words a `plugin` fixes: its process is the client's (so `runs_on` must
-    say `other`) and it has no launch or statement here (so neither may be
-    declared) — the same check for a declaration read from disk and for one the
-    client pushed over its channel (tools/channel.py).
+    say `other`) and it has no launch here (so it may not declare one) — the same
+    check for a declaration read from disk and for one the client pushed over its
+    channel (tools/channel.py). Its tools, on the other hand, MUST carry a
+    `command`: that template is the statement the client itself runs, sent to it
+    verbatim (tools/statement.py, tools/channel.py) — a plugin tool without one is
+    a tool nothing could carry out.
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
@@ -430,13 +433,13 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     f"cannot publish it — rename this tool",
                 )
             )
-        if component.interface == PLUGIN and spec.command:
+        if component.interface == PLUGIN and not spec.command:
             out.append(
                 Diagnostic(
                     component.name,
                     spec.name,
-                    f"a {PLUGIN} tool carries no command: the client implements it, and a statement here "
-                    f"would be a second implementation of one tool",
+                    f"a {PLUGIN} tool must carry a command: it IS the statement the client declared, and a "
+                    f"tool without one names nothing this host could ask the client to run",
                 )
             )
         out.extend(tool_diagnostics(component.name, spec))

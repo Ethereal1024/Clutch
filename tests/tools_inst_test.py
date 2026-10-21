@@ -106,7 +106,9 @@ def _offline(stub: Stub, *, available: bool = True):
             vars_ = rendezvous.Service(module, FAKE_PORT, FAKE_TOKEN, os.getpid()).vars()
         else:
             vars_ = statement.host_vars(mod, config)
-        return statement.Statement(vars=vars_, runner=stub, prefix=statement.launch_prefix(mod))
+        # the component that declared it: what a failure names, and the name the
+        # real prepare() charges the statement to
+        return statement.Statement(vars=vars_, runner=stub, prefix=statement.launch_prefix(mod), module=mod.name)
 
     rendezvous.available = lambda module: available
     statement.prepare = fake_prepare

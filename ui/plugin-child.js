@@ -15,7 +15,16 @@
 // The ABI, stated once, here (the entry module is CommonJS; it is `require`d
 // with cwd = the plugin's own directory, so a plugin's own relative reads work):
 //
-//   exports.call = async (tool, args) => string | {content, error?}
+//   exports.run = async (argv) => string | {content, error?}
+//
+// `argv` is the tool call already rendered into WORDS: `argv[0]` is the tool's
+// own name (the first word of the `command` the component declared for it) and
+// `argv[1]` is the model's arguments as ONE JSON string, so a plugin takes its
+// arguments the way the model spelled them and no host has to know how a tool
+// is started — the declaration's `command` template is the whole of that. A
+// plugin whose tools all take a single JSON object is therefore one line:
+//
+//   exports.run = (argv) => call(argv[0], JSON.parse(argv[1] || "{}"));
 //
 // `content` is the model-facing text of the result and `error` says whether the
 // tool failed — the same shape `Envelope` has on the session side
@@ -29,7 +38,7 @@
 //
 //   child -> parent  {type:"ready"}                    loaded, waiting
 //   child -> parent  {type:"error", error}             load failed, exiting 1
-//   parent -> child  {type:"call", tool, args}         exactly one per child
+//   parent -> child  {type:"call", argv}               exactly one per child
 //   child -> parent  {type:"result", envelope}         done, exiting 0
 //   child -> parent  {type:"error", error}             threw / bad shape, exit 1
 //
@@ -95,10 +104,22 @@ let loaded = null;
 process.on("message", (message) => {
   if (!message || message.type !== "call" || !loaded) return;
   Promise.resolve()
-    .then(() => loaded.call(String(message.tool || ""), message.args || {}))
+    .then(() => loaded.run(argvOf(message.argv)))
     .then((out) => reply({ type: "result", envelope: normalize(out) }, 0))
     .catch((e) => reply({ type: "error", error: describe(e) }, 1));
 });
+
+// The rendered statement, checked for the one thing the ABI promises: it is
+// words, and it starts with the tool's own name (which is what makes `run` able
+// to tell one of its tools from another). The host rendered it, so a malformed
+// one here is a host bug — say so in the plugin's name rather than throwing a
+// TypeError out of a `map` on `undefined`.
+function argvOf(argv) {
+  if (!Array.isArray(argv) || argv.length === 0) {
+    throw new Error(`${name}: a call must carry argv (the rendered words of its statement)`);
+  }
+  return argv.map((word) => String(word));
+}
 
 // The return value, narrowed to what a result renderer can draw. A string is
 // the common case (a tool's text); `{content, error}` is the full one. Anything
@@ -111,13 +132,13 @@ function normalize(out) {
     return { content: out.content, error: !!out.error };
   }
   const seen = out === null ? "null" : Array.isArray(out) ? "an array" : typeof out;
-  throw new Error(`${name}: call() returned ${seen}, expected a string or {content, error?}`);
+  throw new Error(`${name}: run(argv) returned ${seen}, expected a string or {content, error?}`);
 }
 
 try {
   const mod = require(entry);
-  if (!mod || typeof mod.call !== "function") {
-    throw new Error(`${name}: its entry (${entry}) exports no call(tool, args)`);
+  if (!mod || typeof mod.run !== "function") {
+    throw new Error(`${name}: its entry (${entry}) exports no run(argv)`);
   }
   loaded = mod;
 } catch (e) {

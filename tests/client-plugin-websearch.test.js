@@ -159,14 +159,18 @@ async function main() {
     "each with the model-facing description the host's parser requires"
   );
   check(
-    tools.every((tool) => !("command" in tool) && !("defaults" in tool)),
-    "and no statement a second host could try to run"
+    tools.every((tool) => tool.command === `${tool.name} {*}`),
+    "and the statement it runs — the template the session sends back verbatim"
+  );
+  check(
+    tools.every((tool) => !("defaults" in tool)),
+    "…while `defaults` stays here: no host renders a plugin's arguments"
   );
 
   const listener = pluginServer.createPluginServer({ host, token: TOKEN });
   const port = await listener.listen(0);
 
-  const searched = await call(port, { component: NAME, tool: "web_search", args: { query: "alpha beta" } });
+  const searched = await call(port, { component: NAME, command: "web_search {*}", args: { query: "alpha beta" } });
   check(searched.status === 200 && searched.data && searched.data.error === false, "a search through /call answers");
   check(
     searched.data && /results for "alpha beta" \(via searxng\)/.test(searched.data.content || ""),
@@ -175,7 +179,7 @@ async function main() {
   check((net.hits["/search"] || 0) >= 1, "the call really reached the stub (the forked child saw the seams)");
   check((net.hits["/bing"] || 0) === 0, "and never contacted the keyless tier");
 
-  const fetched = await call(port, { component: NAME, tool: "web_fetch", args: { url: `http://127.0.0.1:${net.port}/` } });
+  const fetched = await call(port, { component: NAME, command: "web_fetch {*}", args: { url: `http://127.0.0.1:${net.port}/` } });
   check(
     fetched.status === 200 && fetched.data && fetched.data.error === true,
     "a model-supplied loopback URL is a 200 carrying a failure, not a refusal of the call"
@@ -185,14 +189,17 @@ async function main() {
     "and the sentence names the host"
   );
 
-  const unknown = await call(port, { component: NAME, tool: "delete_everything", args: {} });
+  const unknown = await call(port, { component: NAME, command: "delete_everything {*}", args: {} });
   check(
     unknown.status === 200 && unknown.data && unknown.data.error === true,
     "an unpublished tool is the same kind of answer"
   );
-  check(/publishes no tool "delete_everything"/.test(unknown.data.content || ""), "and says what it publishes");
+  check(
+    /declares no tool with the statement/.test(unknown.data.content || ""),
+    "and says what it declares instead"
+  );
 
-  const unauthorised = await call(port, { component: NAME, tool: "web_search", args: { query: "x" } }, { token: "wrong-token-wrong-token" });
+  const unauthorised = await call(port, { component: NAME, command: "web_search {*}", args: { query: "x" } }, { token: "wrong-token-wrong-token" });
   check(unauthorised.status === 401, "a wrong token is a 401 at the door");
   check(/bad or missing token/.test((unauthorised.data && unauthorised.data.error) || ""), "with a sentence, not the token");
 

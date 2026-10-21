@@ -36,6 +36,14 @@ what that process published, and the line is spoken to one workspace. If it does
 not, the statement is a line this host runs itself and `launch` is its prefix.
 Everything downstream of that pick (facts ∪ arguments → template → prefix →
 runner) is blind to kinds: it is the same four lines for every component.
+
+The one runner that renders NOTHING is the client's (`Client`, D3 step ③). A
+component whose process lives on the client declared the statement itself, and
+this host sends the template verbatim with the model's arguments: the client
+validates it against the declaration it installed, turns it into argv words and
+forks its plugin. Rendering it here would be a second implementation of the
+client's own shell — and a statement the client never declared would be one this
+host invented.
 """
 
 from __future__ import annotations
@@ -44,7 +52,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import catalog, inst, modules, rendezvous
+from . import catalog, channel, inst, modules, rendezvous
+from .envelope import Envelope
 from .localshell import shq
 from .transport import LocalTransport
 
@@ -104,19 +113,52 @@ def launch_prefix(mod: catalog.Component) -> str:
 
 
 @dataclass(frozen=True)
+class Client:
+    """The runner for a statement the CLIENT runs (D3 step ③).
+
+    There is nothing to render here and nothing to start: the template IS the
+    statement the client declared for one of its own tools, sent VERBATIM with the
+    model's arguments (tools/channel.py). The client validates it against the
+    declaration it installed, turns it into argv words and forks its plugin — so a
+    line rendered here would be a second implementation of a shell this host does
+    not own, and a template the client never declared would be one this host made
+    up.
+
+    A marker, not a transport: the channel is the process-wide value the client
+    pushed to (channel.current()), and a call is made against the push held when
+    it is made.
+    """
+
+
+@dataclass(frozen=True)
 class Statement:
     """One statement, ready to render and run: what fills it, where it runs.
 
     `vars` are the host values the template may name (a service's port/token/pid,
     a one-process component's endpoint/root facts); `runner` is the transport
-    that carries the rendered line; `prefix` is how the component's own process
-    starts, when the line is one the app host runs itself ("" for a service,
-    whose line is the whole loopback call).
+    that carries the rendered line — or `Client`, whose line is sent unrendered;
+    `prefix` is how the component's own process starts, when the line is one the
+    app host runs itself ("" for a service, whose line is the whole loopback
+    call). `module` is the component that declared it: what a failure names, and
+    for a client statement the component the channel call is addressed to.
     """
 
     vars: Mapping[str, str]
     runner: Any
     prefix: str = ""
+    module: str = ""
+
+    @property
+    def local(self) -> bool:
+        """Whether this statement runs on THIS host's machine.
+
+        Still not a question about kinds — it is about whose bookkeeping the call
+        touches. The per-file undo the host keeps (`snapshot`) records content
+        read from a file on this machine; a write the CLIENT performs lands in the
+        client's filesystem, where this process can neither read the old content
+        nor restore it.
+        """
+        return not isinstance(self.runner, Client)
 
     def line(
         self,
@@ -135,6 +177,35 @@ class Statement:
         command = inst.render(template, args, vars=self.vars, defaults=defaults or {})
         return f"{self.prefix} {command}".rstrip() if self.prefix else command
 
+    def run(
+        self,
+        template: str,
+        args: Mapping[str, Any] | None = None,
+        defaults: Mapping[str, Any] | None = None,
+        *,
+        timeout: float,
+        cancel: Any = None,
+    ) -> Envelope:
+        """Carry out one statement: its answer, whatever the runner was.
+
+        The runner decides how, and there are exactly two. The client's sends the
+        template VERBATIM and answers with what came back — a refusal there is the
+        channel's sentence, not a second try here. This host's renders the line,
+        runs it through its transport and unwraps the output.
+
+        A transport failure is deliberately NOT answered here: the caller maps it
+        to the model's own words (registry._exec_statement), so a timeout, a Stop
+        and an unrunnable command keep reading differently.
+        """
+        if isinstance(self.runner, Client):
+            try:
+                reply = channel.call(self.module, template, args or {}, timeout)
+            except channel.ChannelError as e:
+                return Envelope(f"ERROR: {e}", error=True)
+            return Envelope(reply.content, error=reply.error)
+        result = self.runner.run(self.line(template, args, defaults), timeout, cancel=cancel)
+        return inst.unwrap(result, service=f"the {self.module} service")
+
 
 def prepare(module: str, workspace: Any, config) -> Statement:
     """Everything one statement needs before it can be rendered and run.
@@ -146,12 +217,23 @@ def prepare(module: str, workspace: Any, config) -> Statement:
     one is running, or whether one has to be started. Everything else is the
     artifact's own line, run on the app host's machine, whatever kind of workspace
     the call came from.
+
+    Two exceptions to "this host renders it", and neither is a kind of component:
+    a `runs_on: other` declaration has its statement spoken by the CLIENT (which
+    declared it and where to call it), and a declaration no live channel holds has
+    no statement at all — fail closed, with the channel's own sentence, before
+    anything could be rendered for it.
     """
     mod = _declared(module)
+    if mod.runs_on == catalog.OTHER:
+        reason = channel.current().reason_for(mod.name)
+        if reason:
+            raise rendezvous.RendezvousError(reason)
+        return Statement(vars={}, runner=Client(), module=mod.name)
     if mod.service is None:
         return _artifact(mod, config)
     live = rendezvous.service(workspace.root, mod.name, protect=workspace.protected())
-    return Statement(vars=live.vars(), runner=workspace)
+    return Statement(vars=live.vars(), runner=workspace, module=mod.name)
 
 
 def prepare_cli(module: str, config) -> Statement:
@@ -169,6 +251,11 @@ def prepare_cli(module: str, config) -> Statement:
     if mod.service is not None:
         raise rendezvous.RendezvousError(
             f"{mod.name} publishes a service: its statements belong to one workspace, and this one belongs to none"
+        )
+    if mod.runs_on == catalog.OTHER:
+        raise rendezvous.RendezvousError(
+            f"{mod.name} runs on the client that calls it: its statements are the "
+            "client's, and a host fact is answered here"
         )
     return _artifact(mod, config)
 
@@ -193,11 +280,12 @@ def _artifact(mod: catalog.Component, config) -> Statement:
     `launch_prefix` says so in the component's own terms
     (rendezvous.unavailable_reason): for a plugin — whose statements are the
     CLIENT's to render and run, and which registry sends down the channel instead of
-    here — the sentence is "runs on the client that calls it, and this host has no
-    channel to that client".
+    here — prepare() never reaches this function (it takes the `runs_on: other`
+    branch first).
     """
     return Statement(
         vars=host_vars(mod, config),
         runner=LocalTransport(str(modules.repo_root())),
         prefix=launch_prefix(mod),
+        module=mod.name,
     )

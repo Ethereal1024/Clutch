@@ -301,6 +301,165 @@ function mergeDeclaration(staging, wire) {
   return { ...declared, ...wire };
 }
 
+// ------------------------------------------------------------- the statement --
+
+// A tool's declaration is a STATEMENT, and this is where it becomes words. The
+// comment on `call` says why the plugin ABI is argv and not arguments; this is the
+// one translation, so a plugin never parses a command line and this host never
+// guesses at a shell.
+//
+// The template is the component's own (`component.json`'s `tools[].command`, sent
+// back verbatim by the session), and its vocabulary is the session's
+// (agent/tools/inst.py), one word of it different:
+//
+//   {name}   ONE argv word, the model's argument — kept whole when it holds
+//            spaces or newlines, because a word is a word and there is no shell
+//            here to re-split it
+//   {*}      ALL model arguments as ONE JSON object (sorted keys, the same bytes
+//            `inst.jarg` builds, because it is the same request body)
+//   {dir}    the fact this client owns: the directory the component is installed
+//            in. The FACT vocabulary is this file's and it is one word long, so
+//            an argument called `dir` cannot hijack it — and every other name,
+//            `{name}` included, is the model's argument and must never be
+//            silently answered by this host (clutch-memory's tool takes an
+//            argument called `name`).
+//   [ ... ]  an optional group: dropped whole, brackets and all, when one of the
+//            placeholders inside has no value. `[[` / `]]` are a literal bracket.
+//
+// Fail closed: a placeholder with no value outside a group is an error with the
+// name in it, a malformed `{` is an error, and a template that renders to no
+// words is an error — none of them is "run it with the hole in place".
+const PLACEHOLDER = /^\{([A-Za-z_][A-Za-z0-9_]*|\*)\}/;
+
+// One JSON object, keys sorted at every level: the same bytes the session's own
+// `jarg` builds (`json.dumps(..., sort_keys=True)`), so a statement renders the
+// same words whatever order the caller's map happened to have. A JSON object has
+// no order to speak of, so pinning one costs nothing and makes the argv a fact of
+// the call rather than of the caller.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = canonical(value[key]);
+    return out;
+  }
+  return value;
+}
+
+function statementTokens(template) {
+  const out = [];
+  let at = 0;
+  while (at < template.length) {
+    const ch = template[at];
+    if (ch === "{") {
+      const match = PLACEHOLDER.exec(template.slice(at));
+      if (!match) {
+        throw new Error(`bad placeholder in the statement: ${JSON.stringify(template.slice(at, at + 40))}`);
+      }
+      out.push({ kind: "ph", name: match[1] });
+      at += match[0].length;
+    } else if (ch === "[") {
+      if (template.startsWith("[[", at)) {
+        out.push({ kind: "text", text: "[" });
+        at += 2;
+      } else {
+        out.push({ kind: "open" });
+        at += 1;
+      }
+    } else if (ch === "]") {
+      if (template.startsWith("]]", at)) {
+        out.push({ kind: "text", text: "]" });
+        at += 2;
+      } else {
+        out.push({ kind: "close" });
+        at += 1;
+      }
+    } else {
+      const stops = ["{", "[", "]"].map((stop) => template.indexOf(stop, at)).filter((found) => found !== -1);
+      const end = stops.length ? Math.min(...stops) : template.length;
+      out.push({ kind: "text", text: template.slice(at, end) });
+      at = end;
+    }
+  }
+  return out;
+}
+
+// The rendered words of one tool call. Throws a sentence (the caller prefixes the
+// component and the tool) on a template that cannot be rendered truthfully.
+function renderArgv(template, args, facts) {
+  const statement = String(template === undefined || template === null ? "" : template);
+  const given = args && typeof args === "object" ? args : {};
+  const known = facts && typeof facts === "object" ? facts : {};
+  const has = (bag, key) => Object.prototype.hasOwnProperty.call(bag, key);
+  const value = (name) => {
+    if (name === "*") return JSON.stringify(canonical(given));
+    // the client's own fact first (a fixed, one-word vocabulary), then the
+    // model's argument — the order that keeps `{dir}` the directory it says it is
+    if (has(known, name)) return String(known[name]);
+    if (has(given, name) && given[name] !== undefined && given[name] !== null) return String(given[name]);
+    return null;
+  };
+
+  const tokens = statementTokens(statement);
+  const drop = new Array(tokens.length).fill(false);
+  let opened = null; // {at, missing} — one group, not nested: the session's rule too
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.kind === "open") {
+      if (opened) throw new Error("nested optional groups are not supported in a tool statement");
+      opened = { at: index, missing: false };
+    } else if (token.kind === "close") {
+      if (!opened) throw new Error(`unmatched ']' in the statement: ${JSON.stringify(statement)}`);
+      if (opened.missing) for (let k = opened.at; k <= index; k += 1) drop[k] = true;
+      opened = null;
+    } else if (token.kind === "ph" && value(token.name) === null) {
+      if (opened) opened.missing = true;
+      else {
+        throw new Error(
+          `missing value for {${token.name}} in its statement (the call carried: ${Object.keys(given).sort().join(", ") || "nothing"})`
+        );
+      }
+    }
+  }
+  if (opened) throw new Error(`unclosed '[' in the statement: ${JSON.stringify(statement)}`);
+
+  const words = [];
+  let word = null;
+  const flush = () => {
+    if (word !== null) {
+      words.push(word);
+      word = null;
+    }
+  };
+  const add = (chunk, opaque) => {
+    if (opaque) {
+      word = (word === null ? "" : word) + chunk;
+      return;
+    }
+    let at = 0;
+    while (at < chunk.length) {
+      if (/\s/.test(chunk[at])) {
+        flush();
+        at += 1;
+        continue;
+      }
+      let end = at;
+      while (end < chunk.length && !/\s/.test(chunk[end])) end += 1;
+      word = (word === null ? "" : word) + chunk.slice(at, end);
+      at = end;
+    }
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (drop[index] || token.kind === "open" || token.kind === "close") continue;
+    if (token.kind === "ph") add(value(token.name), true);
+    else add(token.text || "", false);
+  }
+  flush();
+  if (!words.length) throw new Error(`the statement ${JSON.stringify(statement)} renders to no words`);
+  return words;
+}
+
 // -------------------------------------------------------------------- host --
 
 function createPluginHost(options = {}) {
@@ -570,23 +729,38 @@ function createPluginHost(options = {}) {
 
   // Run ONE tool a plugin publishes, in a forked child, and answer with the
   // plugin's envelope. This is the only entry the target-side host has into this
-  // domain: it names a component and a tool, never a path, and it cannot reach a
-  // plugin this client has stopped.
+  // domain: it names a component and a STATEMENT — the tool's `command`, exactly
+  // as this client declared it in its own component.json — and never a path, and
+  // it cannot reach a plugin this client has stopped.
+  //
+  // Why a statement and not a tool name (D3 step ③): the session renders nothing
+  // for a plugin. It sends the template the client declared, verbatim, and the
+  // client turns it into words (renderArgv) and hands those to the plugin's
+  // `run(argv)`. So the wire contract is one the client can check against its own
+  // declaration, byte for byte: a template it did not declare is refused, and a
+  // session cannot invent a tool, a flag or a command. What the template renders
+  // to is *this* machine's business — the directory a payload was installed into
+  // is a fact only this side knows, and no shell is involved on either side.
   //
   // Refusals are sentences, because every one of them is something the caller
   // would otherwise silently do the wrong thing about: a component that is not
   // here is not "no tools" (the caller must fall back or say why), a STOPPED one
-  // must not run, and a tool the declaration does not publish is a bug in the
-  // caller, not an empty answer.
+  // must not run, a statement the declaration does not carry is a bug in the
+  // caller, and a statement whose first word is not the tool's own name does not
+  // meet the ABI (`run(argv)` is how a plugin knows which of its tools it got).
   function call(request = {}) {
     const name = String(request.name || "");
-    const tool = String(request.tool || "");
+    const statement = typeof request.command === "string" ? request.command : "";
     const args = request.args && typeof request.args === "object" ? request.args : {};
     const limit = Number.isFinite(request.timeoutMs) && request.timeoutMs > 0 ? request.timeoutMs : CALL_TIMEOUT_MS;
 
-    if (!tool) return Promise.reject(new Error("call() needs the tool to run"));
+    if (!statement) {
+      return Promise.reject(new Error("call() needs the statement to run (the `command` its component declared)"));
+    }
 
     let target;
+    let tool;
+    let argv;
     try {
       checkName(name);
       target = resolve(name);
@@ -596,14 +770,24 @@ function createPluginHost(options = {}) {
         throw new Error(`${name} is held but its payload is unreadable — reindex() or install it again`);
       }
       if (target.record.disabled) {
-        throw new Error(`${name} is stopped on this client — start it before calling ${tool}`);
+        throw new Error(`${name} is stopped on this client — start it before calling it`);
       }
       const declared = Array.isArray(target.declaration.tools) ? target.declaration.tools : [];
-      const offered = declared
-        .map((t) => (typeof t === "string" ? t : t && t.name))
-        .filter((t) => typeof t === "string" && t);
-      if (offered.length && !offered.includes(tool)) {
-        throw new Error(`${name} publishes no tool ${JSON.stringify(tool)} (it offers ${offered.join(", ")})`);
+      const offered = declared.map((t) => (typeof t === "string" ? t : t && t.name)).filter((t) => typeof t === "string" && t);
+      const match = declared.find((t) => t && typeof t === "object" && t.command === statement);
+      if (!match) {
+        throw new Error(
+          `${name} declares no tool with the statement ${JSON.stringify(statement)} — this client runs only what its ` +
+            `own component.json declares (${offered.join(", ") || "nothing"})`
+        );
+      }
+      tool = String(match.name || "");
+      argv = renderArgv(statement, args, { dir: target.directory });
+      if (argv[0] !== tool) {
+        throw new Error(
+          `${name}.${tool}: its statement renders as ${JSON.stringify(argv[0])} first, and a tool's first word is its own ` +
+            `name (the plugin ABI is run(argv), and argv[0] is the tool)`
+        );
       }
     } catch (e) {
       return Promise.reject(e);
@@ -683,7 +867,7 @@ function createPluginHost(options = {}) {
           // the call goes out only now: a message sent before the child attached
           // its listener is dropped by node, not queued
           try {
-            child.send({ type: "call", tool, args });
+            child.send({ type: "call", argv });
           } catch (e) {
             finish(new Error(`${name} could not be handed the call: ${e.message}`));
           }
@@ -719,5 +903,7 @@ module.exports = {
   defaultRoot,
   registryPath,
   installVersion,
+  renderArgv,
+  statementTokens,
   createPluginHost,
 };

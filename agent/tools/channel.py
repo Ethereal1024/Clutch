@@ -30,12 +30,20 @@ to a plugin exactly as they do to an installed component; and
 holds, and no other. This file is the transport and the bookkeeping.
 
 The call itself: `POST http://127.0.0.1:<port>/call`, `Authorization: Bearer
-<token>`, body `{component, tool, args}`, answer `{content, error?}` — the same
+<token>`, body `{component, command, args}`, answer `{content, error?}` — the same
 `{content}` the envelope carries to the model, because the client's plugin
-returns model-facing text by contract (ui/plugin-host.js). 127.0.0.1 is the port
-a reverse forward of the client's own listening on THIS machine; the listener
-behind it is the client's, never the supervisor's /api/components port (which can
-install code and must not be the thing a session is allowed to dial).
+returns model-facing text by contract (ui/plugin-host.js).
+
+Why the body carries a `command` and not a tool name (D3 step ③): a tool call has
+one form — a template plus its arguments — and for a component the CLIENT runs the
+template is the client's own: it declared that statement with the component, so it
+is the protocol unit both sides agree on. The host sends it VERBATIM (it renders
+nothing: the client's shell is not this host's) and the client refuses any
+template it did not declare, so a session can ask for a tool the client offered
+and cannot invent one. 127.0.0.1 is the port a reverse forward of the client's own
+listening on THIS machine; the listener behind it is the client's, never the
+supervisor's /api/components port (which can install code and must not be the
+thing a session is allowed to dial).
 """
 
 from __future__ import annotations
@@ -270,8 +278,13 @@ def _plugin_of(data: Any, index: int) -> catalog.Component:
     return component
 
 
-def call(component: str, tool: str, args: Mapping[str, Any], timeout_s: float) -> Reply:
+def call(component: str, command: str, args: Mapping[str, Any], timeout_s: float) -> Reply:
     """One tool call, over the channel: its answer, or the reason it is not here.
+
+    `command` is the client's OWN statement for that tool, exactly as it travelled
+    in the push — this host does not render it (tools/statement.py Client), so what
+    crosses the wire is a template and the model's raw arguments, and the client
+    decides what argv words those make.
 
     A call is made against the push that is held NOW and never re-read midway; if
     the client clears the channel while the request is in flight the request still
@@ -284,7 +297,10 @@ def call(component: str, tool: str, args: Mapping[str, Any], timeout_s: float) -
     reason = held.reason_for(component)
     if reason:
         raise ChannelError(reason)
-    body = json.dumps({"component": component, "tool": tool, "args": dict(args)}, ensure_ascii=False).encode("utf-8")
+    where = f"{component} ({command})"
+    body = json.dumps(
+        {"component": component, "command": command, "args": dict(args)}, ensure_ascii=False
+    ).encode("utf-8")
     request = urllib.request.Request(
         f"http://{DIAL_HOST}:{held.port}{CALL_PATH}",
         data=body,
@@ -299,23 +315,21 @@ def call(component: str, tool: str, args: Mapping[str, Any], timeout_s: float) -
             raw = response.read(MAX_ANSWER_BYTES + 1)
     except urllib.error.HTTPError as e:
         detail = _detail(e)
-        raise ChannelError(f"the client refused the call to {component}/{tool}: {detail}") from None
+        raise ChannelError(f"the client refused the call to {where}: {detail}") from None
     except (urllib.error.URLError, OSError, ValueError) as e:
         # ValueError covers a request urllib cannot even build; URLError wraps the
         # socket-level ones; TimeoutError is an OSError. All of them mean the same
         # thing to the model: the reverse forward is not answering.
         raise ChannelError(f"the channel to the client is not answering: {_reason_of(e)}") from None
     if len(raw) > MAX_ANSWER_BYTES:
-        raise ChannelError(
-            f"the client's answer to {component}/{tool} was larger than {MAX_ANSWER_BYTES} bytes"
-        )
+        raise ChannelError(f"the client's answer to {where} was larger than {MAX_ANSWER_BYTES} bytes")
     try:
         answer = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        raise ChannelError(f"the client's answer to {component}/{tool} was not JSON") from None
+        raise ChannelError(f"the client's answer to {where} was not JSON") from None
     if not isinstance(answer, dict) or not isinstance(answer.get("content"), str):
         raise ChannelError(
-            f"the client's answer to {component}/{tool} carried no content "
+            f"the client's answer to {where} carried no content "
             f"(the plugin ABI is {{content: string, error?: bool}})"
         )
     return Reply(content=answer["content"], error=bool(answer.get("error", False)))

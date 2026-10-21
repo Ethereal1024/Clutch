@@ -19,8 +19,9 @@ useful:
     channel holds and for NOTHING else — a `runs_on: other` declaration nobody
     implements is still "no channel", never a quiet local run;
   * a call goes over the channel and its answer is the envelope: the component,
-    the tool and the model's arguments reach the client, the token rides along,
-    and a failure the plugin reports is a failure the model sees.
+    the statement it declared and the model's raw arguments reach the client (this
+    host renders nothing — the client's argv is the client's), the token rides
+    along, and a failure the plugin reports is a failure the model sees.
 
 Isolation: the fixture is catalog_test's isolated_host — a temp install root, a
 temp catalog directory and a temp repo root — so the run never sees the user's
@@ -110,8 +111,9 @@ class Client:
 
 
 def _plugin(name: str = "clutch-probe", tool: str = "probe_search", **extra) -> dict:
-    """A declaration the way the client writes one: no launch, no command — the
-    implementation is its own code, behind the channel."""
+    """A declaration the way the client writes one: no launch (the implementation
+    is its own code, behind the channel) and each tool's own statement — the
+    template the CLIENT renders and runs, which is what crosses the wire."""
     declaration = {
         "name": name,
         "interface": "plugin",
@@ -122,6 +124,7 @@ def _plugin(name: str = "clutch-probe", tool: str = "probe_search", **extra) -> 
                 "name": tool,
                 "description": "search the web from the client's own network",
                 "parameters": {"properties": {"q": {"type": "string"}}, "required": ["q"]},
+                "command": f"{tool} {{*}}",
             }
         ],
     }
@@ -169,8 +172,8 @@ def check_one_push_opens_the_door() -> None:
             reg = ToolRegistry(build_tools(cfg))
             tool = reg.tool("probe_search")
             check(
-                tool is not None and tool.remote and tool.inst is None and tool.host is None,
-                "wired remote: no statement here and no host implementation",
+                tool is not None and tool.inst is not None and tool.host is None,
+                "wired as a statement: the client's own, with no host implementation",
             )
             check(reg.ui("probe_search")["mutates"] is False, "a plugin call is not a host mutation by default")
             check(reg.ui("probe_search")["undo"] is False, "and carries no undo record")
@@ -183,8 +186,8 @@ def check_one_push_opens_the_door() -> None:
             check(sent["auth"] == f"Bearer {TOKEN}", "with the token the push gave, and nothing else")
             check(sent["path"] == channel.CALL_PATH, "on the channel's one path")
             check(
-                sent["body"] == {"component": "clutch-probe", "tool": "probe_search", "args": {"q": "hello"}},
-                "naming the component, the tool and the model's arguments",
+                sent["body"] == {"component": "clutch-probe", "command": "probe_search {*}", "args": {"q": "hello"}},
+                "naming the component, the statement it declared and the model's arguments — unrendered",
             )
 
             # A failure the PLUGIN reports is the model's failure: an error result
@@ -279,11 +282,11 @@ def check_a_bad_push_is_refused_whole() -> None:
                 "a plugin that declares how to start it here is refused",
             )
             bad_tool = _plugin()
-            bad_tool["tools"][0]["command"] = "--envelope {q}"
+            bad_tool["tools"][0].pop("command")
             _refused(
                 {**good, "components": [bad_tool]},
-                "carries no command",
-                "a plugin tool with a statement would be a second implementation",
+                "must carry a command",
+                "a plugin tool with no statement names nothing this host could ask the client to run",
             )
             _refused(
                 {**good, "components": [dict(_plugin()), dict(_plugin())]},
@@ -308,7 +311,9 @@ def _pushed_projection(manifest: dict) -> dict:
     shipped file works on the far side of the wire, and a helper the sender also
     used would prove only that the sender agrees with itself. Two things are
     dropped on purpose — `entry` (a path inside the installed version, which names
-    this machine's files) and any tool field that says how to RUN something.
+    this machine's files). What a tool DOES travel with is its `command`: for a
+    plugin that template is the statement the client itself runs (D3 step ③), and
+    this host sends it back verbatim.
     """
     keep = ("name", "version", "interface", "runs_on", "subject", "requires", "ui", "prompt")
     pushed = {key: manifest[key] for key in keep if key in manifest}
@@ -319,7 +324,7 @@ def _pushed_projection(manifest: dict) -> dict:
             one["description"] = tool["description"]
         if isinstance(tool.get("parameters"), dict):
             one["parameters"] = tool["parameters"]
-        for word in ("access", "access_arg", "snapshot_arg", "modes", "gate", "preview"):
+        for word in ("command", "access", "access_arg", "snapshot_arg", "modes", "gate", "preview"):
             if tool.get(word) not in (None, ""):
                 one[word] = tool[word]
         tools.append(one)
@@ -336,10 +341,12 @@ def check_the_real_websearch_plugin() -> None:
     """The shipped `clutch-websearch/plugin/component.json` through the push parser.
 
     A plugin's declaration is a declaration: it is read by the same parser a
-    manifest goes through, and the two fatal rules for this interface are that its
-    tools carry a model-facing description and that they carry no statement a
-    second host could try to run. A file that only ever travelled in a test would
-    not catch a typo in the one that ships, so the real file is the input.
+    manifest goes through, and the two rules for this interface are that its tools
+    carry a model-facing description (the tool the model is offered) and that they
+    carry the `command` the client itself declared — the template this host sends
+    back verbatim and the client renders into argv. A file that only ever travelled
+    in a test would not catch a typo in the one that ships, so the real file is the
+    input.
     """
     if not CLIENT_PLUGIN.exists():
         print(f"  skip: {CLIENT_PLUGIN} is not checked out (the submodule is absent)")
@@ -363,8 +370,11 @@ def check_the_real_websearch_plugin() -> None:
             "each with the prose the model is offered",
         )
         check(
-            all(tool.command is None for tool in component.tools),
-            "and no command line this host could be tricked into running",
+            all(
+                isinstance(tool.command, str) and tool.command.split()[:1] == [tool.name] and "{*}" in tool.command
+                for tool in component.tools
+            ),
+            "each with a statement the client declared: its own name first, then the model's arguments as one word",
         )
         check(
             not ({tool.name for tool in component.tools} & set(catalog.HOST_TOOL_NAMES)),
@@ -532,7 +542,7 @@ def check_the_machine_a_component_serves() -> None:
             )
             tool = ToolRegistry(remote_set).tool("read_file")
             check(
-                tool is not None and tool.remote and tool.module == "clutch-ssh-workspace",
+                tool is not None and tool.inst is not None and tool.module == "clutch-ssh-workspace",
                 "…and the remote one is the tool the model calls (a push replaces by name, folded last)",
             )
             check(

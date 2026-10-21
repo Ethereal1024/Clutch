@@ -170,7 +170,8 @@ schema 与说明（`registry._wire`）。唯一残留是 `tool.remote`（plugin 
 **唯一不可约的差别是服务的所有权，不是"种类"**：谁起、谁收、多个工作区各一份、怎么确认
 端口里那一个就是这一版（pid + version + digest）、空闲多久释放。工具层看不见它，但宿主必须
 知道——声明要交代的只是"这条语句的 `{port}` 由谁给"，主语是**语句/事实**，不是包的类型。
-具体写法仍未决（§未决 1：`launch.service.publish` 还是 `facts` 那样的一条命令）。
+具体写法见 **落地②**：一块 `service` 的**有无**就是全部声明，语句本身由各工具自己的 `command`
+承担，回收策略是宿主策略，不进清单。
 
 `facts.py:93` 的"只有 CLI 能发布宿主事实"同理不是类型规则，而是"事实不属于任何工作区，
 服务属于某一个工作区"；按上表推导后它自动成立（无工作区的语句命不中服务缓存），不需要写成
@@ -221,9 +222,58 @@ schema 与说明（`registry._wire`）。唯一残留是 `tool.remote`（plugin 
 `Statement`。`prepare_cli()` 明确拒绝带 `service` 的声明：服务的事实属于某一个工作区，而
 CLI 那种语句不属于任何工作区。`launch_prefix()` 对带服务的声明返回空串——服务语句不加前缀。
 
-**进度**：①（`statement.py` 缝、`rendezvous` 收回到进程生命周期）与②（本节）已落地，
-③（`/call` 统一、删 `tool.remote` / `channel.call`）与④（删 `interface` / `INTERFACES`、
-place 推导、市场 schema）未做。
+**进度**：①（`statement.py` 缝、`rendezvous` 收回到进程生命周期）、②（本节）与③（`/call`
+统一、删 `tool.remote`）已落地，④（删 `interface` / `INTERFACES`、place 推导、市场 schema）未做。
+
+### D3 落地③：语句是客户端的声明，`/call` 只送这句话
+
+**协议只剩一条语句**：`POST /call` 的 body 是 `{component, command, args}`，`command` 是客户端
+推上来的声明里**逐字**的那条模板。宿主不再保存 plugin 的模板、也不再发工具名——发一个名字等于
+第二次编码"要跑什么"，而客户端自己的声明已经是答案。`/call` 要 `component` 只是因为一个客户端
+可以装多个组件，得说清这句话属于谁。
+
+**`tool.remote` 删除**：布线只回答"实现是不是一条语句"（`Tool.inst` 是不是 `None`），执行器由
+`runs_on` 决定，`registry._invoke` 里 `if tool.remote` 那一段随之消失。宿主侧的语句形状因此只有
+一个分叉：`Statement.runner` 是 `Client()`（`statement.Client`，一个标记）就把模板**原样**交给
+`channel.call(component, command, args, timeout)`，`ChannelError` 变成 `ERROR:` 信封；否则在本机
+渲染（`Statement.line`）再交给 transport 并 `inst.unwrap`。`Statement.module` 记下"这句话是谁声明
+的"：失败句用它点名，客户端语句用它当收件人。
+
+**客户端是渲染者**（`ui/plugin-host.js#renderArgv`）：模板 → argv 词，然后 fork。规则只有一张表：
+
+| 写法 | 变成 |
+| --- | --- |
+| 空白分词 | 词与词；不做 shell 引号，因为根本没有 shell |
+| `{name}` | 一个不透明词：模型参数原样（空格、换行都留着） |
+| `{*}` | 全部参数当一个词：JSON，键在每一层都排序（镜像 `inst.jarg` 的 `sort_keys=True`） |
+| `{dir}` | 客户端**唯一**的事实词：组件安装目录；它遮蔽同名模型参数 |
+| `[ … ]` | 组内任一占位符缺失则整组丢掉 |
+| `[[` / `]]` | 字面量 `[` / `]` |
+
+组外的缺参、坏 `{`、未闭合 `[`、孤立 `]`、嵌套组、渲染成一个词都没有——全是错误，带句子。
+只有 `{dir}` 是事实，别的一律是模型参数：`{name}` 永远不能是事实，因为 `clutch-memory` 就有一个
+参数叫 `name`。渲染完还要校验 `argv[0]` 等于这条语句所属工具的名字——ABI 是 `run(argv)`，
+`argv[0]` 就是工具名，错位了不执行。
+
+**插件 ABI**：entry 导出 `run(argv)`，`argv[0]` = 工具名，`argv[1]` = 参数的 JSON 字符串；工具命令
+写 `"<tool> {*}"`。`ui/plugin-child.js` 拒绝"entry 没有导出 `run(argv)`"，**不做兼容**（D1）。
+
+**安全边界照旧**（D3 补注）：宿主不带语句，只能填参数与事实；客户端只跑自己 `component.json` 里
+声明过的那条模板，逐字比对，没有第二条路。
+
+**undo 的门没有变成"按种类开门"**：`Statement.local`（`not isinstance(runner, Client)`）回答的是
+"这次写是不是落在这台机器上"，`_invoke` 用它门控 `snapshot`（`tool.snapshot and ready.local`）——
+客户端写的文件，这台机器既读不到旧内容也恢复不了，所以不该留快照。
+
+**`component_diagnostics` 的 plugin 检查翻面**：从"plugin 的工具不得有 `command`"改成"必须有"——
+没有 `command` 就没有可执行的语句，声明不完整（这是 fatal，不是兜底）。
+
+**不发布兼容层**：旧客户端只认 `{tool, args}`，它会被新宿主的话问倒，这是故意的。两个插件
+（`clutch-websearch`、`clutch-ssh-workspace`）的清单与入口在这次提交里一起改（各自子模块里一次
+提交），但**父仓库的 gitlink 没有动**，两条理由：市场索引读的是 release manifest，不是 gitlink；
+而 gitlink 必须指向上游**存在**的提交——这两个子模块提交还没推。把它们升到带 `command` 的版本
+是 0.1.57 重打包的事：推子模块、切 v0.1.1 发布、bump gitlink、更新 `market/entries.json`。
+在那之前，父仓库这一版自己跑得通（测试读工作树），而市场里发的仍是 0.1.0 的旧插件。
 
 ---
 
@@ -316,13 +366,13 @@ place 推导、市场 schema）未做。
 
 ## 未决（不要当成已决去实现）
 
-1. **服务语句的形状**：`"facts": {"service": "<command>"}`（语句打印 `{port,token,pid}` 的
-   JSON），还是 `"service": {"statement": …, "idle": <秒>}`（带生命周期与回收策略）？定形之前
-   不动 D3 的第②步。
-2. **技能文件归属**：(a) 宿主发现各包的 `*/skills/*.md`，`load_skill` 只是工具（推荐）；
+1. **技能文件归属**：(a) 宿主发现各包的 `*/skills/*.md`，`load_skill` 只是工具（推荐）；
    (b) 仍投稿到 `clutch-skills` 一个组件（需要跨组件写协议，更像过度设计）。定形之前不动
    D4 的落地。
-3. **D3 与 C9 的先后**：统一会推翻 `clutch-ssh-workspace` 现状的声明与客户端 `/call`，而它正卡
-   在 C9 真机 e2e 上。要么先收尾 C9，要么明确"接受重写"；两件事不能并行改同一批文件。
-4. **`clutch-workspace/pyproject.toml` 0.2.0 vs 其 `component.json` 0.1.0**：修它需要在子模块
+2. **`clutch-workspace/pyproject.toml` 0.2.0 vs 其 `component.json` 0.1.0**：修它需要在子模块
    里单独提交并弄脏 superproject 的 gitlink，待授权。
+
+**已决、移出本表**：服务语句的形状（原 1）＝ 落地②：清单里 `service` 的**有无**就是全部声明，
+语句由各工具自己的 `command` 承担，回收策略归宿主。D3 与 C9 的先后（原 3）＝ 接受重写（落地
+③）：`/call` 与两个插件的清单已经改成新形状，C9 的真机 e2e 跑的是新协议，不回退。
+

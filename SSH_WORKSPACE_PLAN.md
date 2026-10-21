@@ -7,6 +7,11 @@ C9.5 只走第一阶段（不起远侧 daemon，因此组件内部没有那道�
 临时措施 `scripts/ws-stopgap` **仍在**：C9.1 要重打包才生效，而那条判据（§六 最后一条的真机
 端到端）还没跑过，所以它按 §2.4 自己写的条件退场。
 
+> 注（D3 落地③）：`/call` 的 body 已从 `{component, tool, args}` 改成 `{component, command,
+> args}`，插件 ABI 从 `exports.call(tool, args)` 改成 `exports.run(argv)`（结论在
+> `DECISIONS.md` 的 D3 落地③，契约在 `COMPONENTS.md` §三/§五）。本文件里提到旧 body 与旧 ABI
+> 的地方是**历史记录**，照它实现会得到一个跑不起来的插件；本文件只等真机 e2e 跑完就退场。
+
 ## 一、缺口：一句话与三重断点
 
 一句话：在 ssh 工作区里 `run_command` 能用，`read_file` / `grep` / `write_file` /

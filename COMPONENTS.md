@@ -180,7 +180,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   "version": "0.1.0",                // 必填；安装版可携带内容摘要（0.2.0+<hex>）
   "interface": "cli",                // 必填："daemon" | "cli" | "plugin"（怎么被调用，见下节）
   "runs_on": "self",                 // 进程跑在谁的机器上："self"（默认）| "other"（进程在**调用它的那个客户端**：plugin 必填 other，没有通道时 fail-closed，绝不本地代跑）
-  "entry": "",                       // plugin 专用：入口模块（相对组件目录），一份只导出 call(tool, args) 的 CommonJS 文件
+  "entry": "",                       // plugin 专用：入口模块（相对组件目录），一份导出 run(argv) 的 CommonJS 文件
   "subject": "workspace-fs",         // 服务谁的资源（见下），决定语句能否为某工作区运行
   "launch": {                        // 宿主如何**启动**一个进程（工件的形状，不是接口）
     "argv": ["{py}", "{script}"],    // argv 词模板；{py} 解释器、{dir} 组件目录、{name} 组件名、{script} 入口文件
@@ -268,18 +268,25 @@ daemon 退出时按 pid 匹配才删记录，所以被顶替的 daemon 删不掉
 搜索、剪贴板、客户端自己机器上的东西——**字节在这边、密钥在这边、出口在这边**，只有一
 句"我声明了什么工具"需要过隧道。
 
-所以它没有 `launch`、没有 `command`、没有语句：工具集来自组件目录里那份
-`component.json` 的 `tools`，一次调用交回给客户端自己的运行时。声明里多一个 `entry`
-（相对组件目录，像 `launch.entry` 一样是路径、不是语句），指向那份 CommonJS 模块，它只
-导出一个 `call`：
+所以它没有 `launch`：工具集来自组件目录里那份 `component.json` 的 `tools`，每条工具带一句
+**自己的** `command`——那就是这条语句，宿主不改写、不填事实，只把模型的参数原样附在它后面
+（见第五节"语句在哪台机器上渲染"）。声明里多一个 `entry`（相对组件目录，像 `launch.entry` 一样
+是路径、不是语句），指向那份 CommonJS 模块，它导出一个 `run(argv)`：
 
 ```js
-// entry 指向的文件；tool 来自 component.json 的 tools，args 是模型给的参数
-exports.call = async (tool, args) => {
+// entry 指向的文件；argv 是这条语句渲染出来的词：
+//   argv[0] = 工具名（= 工具名，错位了不执行）
+//   argv[1] = 模型参数的 JSON 字符串
+module.exports.run = async (argv) => {
+  const [tool, raw] = [argv[0], argv[1] || "{}"];
+  const args = JSON.parse(raw);
   // 回答：一段字符串，或 {content, error?}——形状与信封同源，只是语言不同
   return { content: "…" };
 };
 ```
+
+工具的 `command` 因此只写一种形状：`"<tool> {*}"`。这一句既是"哪个工具"，也是"怎么把参数
+变成一个词"——`{*}` 渲染成键排序过的 JSON，客户端拆都不拆就交给 entry。
 
 一个真的例子：`clutch-websearch/plugin`（子模块里，`web_search`/`web_fetch` 的 JS 移植，
 只用 `http/https/dns/zlib`，组件目录没有 `node_modules`）。它的 `README.md` 逐条写下与
@@ -311,8 +318,12 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
         ◀── ②（只是记忆：这张表活在这个会话进程里，重启即空）
 
 [会话里的 agent.server] ──③ POST http://127.0.0.1:<port>/call──▶  客户端的监听（带令牌）
-        { component, tool, args }   ◀── ④ { content, error? }
+        { component, command, args }   ◀── ④ { content, error? }
 ```
+
+`command` 是客户端**自己推上来的**那条工具语句，逐字回送：宿主不渲染它，也不知道它的第二个词
+是什么；客户端拿它和自己装的那份 `component.json` 逐字比对（不是自己声明的语句，一句都不跑）。
+工具名不出现在这条请求里——有了语句，"要跑什么"就已经说清楚了。
 
 要点，每一条都对应一处 fail-closed：
 
@@ -323,9 +334,10 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 - **推送是整集**：一次 `POST` 就是这张表的全部，`DELETE` 是"我没有插件"（于是拒绝变成一
   句关于状态的话，而不是一次拨到空处的等待）。没有"改一个"的动词，因为两张表对不上时
   "以谁为准"没有答案。
-- **推送里没有字节**：`name` / `version` / `interface` / `runs_on` / `tools`，没有 `entry`、
-  `digest`、`launch`、`command`、`location`。字节在哪台机器上是那台机器的私事
-  （PLUGIN_PLAN.md 零之四.1 的同一条界线）。
+- **推送里没有字节，但有那句话**：`name` / `version` / `interface` / `runs_on` / `tools`，没有
+  `entry`、`digest`、`launch`、`location`。字节在哪台机器上是那台机器的私事
+  （PLUGIN_PLAN.md 零之四.1 的同一条界线）。`tools` 里带 `command` 不是泄露：那句话本来就是
+  客户端自己声明、自己执行的，宿主只是把它送回来——**宿主不能自带语句**，这才是边界。
 - **转发是先决条件**：端口是远侧 sshd 分配的一个 loopback 端口，一行反向转发把它送回客
   户端的监听。转发没落地就不推——让会话去拨一个没人应答的端口，比"没有通道"更假。
 - **令牌是栅栏**：`/call` 要 `Authorization: Bearer <token>`，令牌只在推给本机会话的那
@@ -353,7 +365,7 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
     "properties": { "path": { "type": "string" } },
     "required": ["path"]
   },
-  "command": "…",                    // 语句模板（第三节）；没有 command 的声明不会成为工具（宿主自己那条除外，第十一节）
+  "command": "…",                    // 语句模板（第三节）；没有 command 的声明不会成为工具（宿主自己那条除外，第十一节），plugin 的工具没有它则整份声明 fatal
   "defaults": { "max_chars": "$config.read_max_chars" }, // 语句载荷默认值，垫在模型参数之下
   "access": "read",                  // 宿主策略词汇："read" | "sweep" | "write" | "command" | ""（不受限）
   "snapshot": false,                 // true = 该语句覆写 path，宿主为界面保留 per-file undo
@@ -384,6 +396,30 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 宿主值遮蔽同名模型参数，模型参数劫持不了宿主占位符；正因如此，`vars` 的键与某个工具的
 参数同名的声明**在接线时被拒绝**（`catalog.component_diagnostics` 报一条 fatal），而不是
 静默吞掉模型给的值。
+
+**语句在哪台机器上渲染，由 `runs_on` 一句话决定**（`statement.Statement.run`）：
+
+- `runs_on: "self"` —— 宿主渲染上面那张表，得到一条**命令行**，交给 transport（shell / 服务
+  的 loopback 调用）。
+- `runs_on: "other"` —— 宿主**不渲染**：模板逐字走 `/call` 送到客户端，客户端渲染成 **argv
+  词**再 fork（`ui/plugin-host.js#renderArgv`）。语法是同一张表，落点不同：没有 shell，所以
+  没有引号那一层。
+
+客户端那份渲染器的规则，一条不多：
+
+| 写法 | 变成 |
+| --- | --- |
+| 空白分词 | 词与词 |
+| `{参数名}` | 一个不透明词：值原样（空格、换行都留着） |
+| `{*}` | 一个词：`JSON.stringify`，键在每一层都排序（与 `inst.jarg` 的 `sort_keys=True` 同形） |
+| `{dir}` | 客户端唯一的事实词：组件安装目录；它遮蔽同名模型参数 |
+| `[ … ]` | 组内任一占位符缺失则整组丢掉 |
+| `[[` / `]]` | 字面量 `[` / `]` |
+
+组外的缺参、坏 `{`、未闭合 `[`、孤立 `]`、嵌套组、渲染成一个词都没有——全是错误，各带一句
+话。**只有 `{dir}` 是事实**：`{name}` 永远读模型参数，因为 `clutch-memory` 就有一个参数叫
+`name`——事实词表越长，撞名的可能性越大，所以它只有一项。渲染完还要求 `argv[0]` 等于这条语句
+所属工具的名字（ABI：`run(argv)`，`argv[0]` 是工具名）；错位不是"尽力执行"，是拒绝。
 
 **schema 占位符**（声明是数据，宿主接线时把只有自己知道的事实填进去）：
 
