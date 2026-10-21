@@ -6,7 +6,9 @@ point at nothing but the component's PUBLISHED interface, in the two shapes that
 comes in: a per-workspace daemon named by a record (this file starts it, watches
 its pid, and hands a statement the facts it needs — the SPEAKING is the
 statement's own text), and a one-process command line the app host runs itself.
-`prepare()` returns whichever one a statement needs.
+Which of the two a call needs, and the line it renders, is tools/statement.py:
+this file's job ends at a live `Service` (or a resolved artifact), never at a
+rendered statement.
 
 A component that is not on this machine is not an error to be papered over: it
 has no tools (registry.build_tools) and `unavailable_reason()` is the sentence a
@@ -62,8 +64,7 @@ from pathlib import Path
 from typing import Any
 
 from . import catalog, channel, components, modules
-from .localshell import local_shell, shq
-from .transport import LocalTransport
+from .localshell import local_shell
 
 RECORD_VERSION = 1
 READY_SECONDS = 10.0  # how long a daemon we just spawned has to publish itself
@@ -329,117 +330,6 @@ def serves_foreign_fs(module: str) -> bool:
     """
     mod = catalog.table().get(module)
     return mod is not None and mod.subject == catalog.FOREIGN_FS
-
-
-def host_vars(mod: catalog.Component, config) -> dict[str, str]:
-    """The host facts a component's declaration asks for, by their published
-    names (catalog.Component.vars: "host.port_url" -> {base}).
-
-    These are the values only the host knows and only a particular component
-    needs: the project file's content service. The prefix of a CLI line is NOT
-    here — that is the artifact's own launch, rendered by launch_prefix() so a
-    checkout, a package and an installed onefile all drive the same declaration.
-    """
-    # NB: a key here must never be one of a tool's own argument names — the
-    # renderer fills {name} from the CALL's arguments, and a host var of the
-    # same name would silently overwrite the model's value (clutch-memory's
-    # `--title {name}` is exactly that).
-    facts = {
-        "host.port_url": lambda: f"http://127.0.0.1:{config.port}",
-    }
-    out: dict[str, str] = {}
-    for name, fact in mod.vars.items():
-        make = facts.get(fact)
-        if make is None:
-            continue
-        resolved = make()
-        # A host fact the host has no value for is not a fact: it is left out of
-        # `vars` entirely, which is what makes an optional group naming it drop
-        # whole (inst.render) instead of rendering a placeholder as an empty word
-        # the component would then have to read as a value.
-        if resolved:
-            out[name] = resolved
-    return out
-
-
-def launch_prefix(module: str) -> str:
-    """How one CLI component process STARTS, as a line prefix ("" for a daemon,
-    whose process this file starts itself when a statement needs a service).
-
-    This is the launch contract: the artifact's shape decides the prefix — an
-    interpreter plus an entry-point file for a checkout, `-m <package>` with its
-    directory on PYTHONPATH for a package, a bare executable for an installed
-    onefile — and the declaration only says which flags follow it. A component
-    therefore needs no second implementation to be installed as a binary.
-    """
-    mod = catalog.table().get(module)
-    if mod is None or mod.interface != catalog.CLI:
-        return ""
-    resolved = resolve(module)
-    if resolved is None:
-        raise RendezvousError(unavailable_reason(module))
-    words = [shq(word) for word in resolved.argv]
-    if resolved.module.launch.importable:
-        words.insert(0, f"PYTHONPATH={shq(str(resolved.directory))}")
-    return " ".join(words)
-
-
-@dataclass(frozen=True)
-class Statement:
-    """One statement, ready to render and run: where it runs and what fills it.
-
-    `prefix` is how the component's process starts (a CLI's launch; "" for a
-    daemon, whose line is the whole loopback call); `vars` are the host
-    placeholders the template names (a daemon's port/token/status, a CLI's
-    endpoint/root facts); `runner` is the transport that carries the rendered
-    line (the workspace's own for a daemon module — the filesystem it serves is
-    its machine's — the app host's for a CLI, whose subject is the app's project
-    file / the network / the skill library).
-    """
-
-    vars: dict[str, str]
-    runner: Any
-    prefix: str = ""
-
-
-def prepare(module: str, workspace: Any, config) -> Statement:
-    """Everything one statement needs before it can be rendered and run.
-
-    A daemon module is reached through the workspace's own transport (loopback
-    from the machine that owns the files); a CLI module is reached through the
-    app host's, whatever kind of workspace the call came from.
-    """
-    mod = catalog.table().get(module)
-    if mod is None:
-        raise RendezvousError(f"unknown module: {module}")
-    if mod.interface == catalog.CLI:
-        return prepare_cli(module, config)
-    service_ = service(workspace.root, module, protect=workspace.protected())
-    return Statement(vars=service_.vars(), runner=workspace)
-
-
-def prepare_cli(module: str, config) -> Statement:
-    """A CLI component's statement, ready to render and run WITHOUT a workspace.
-
-    Separate from prepare() because not every question is a call: a host fact a
-    component publishes (tools/facts.py) is asked of the component's own line,
-    outside any workspace and outside any turn, and a daemon cannot answer it
-    (its statements are spoken to a service that belongs to one workspace — see
-    catalog.component_diagnostics). The runner is the app host's, which is whose
-    machine these statements run on.
-    """
-    mod = catalog.table().get(module)
-    if mod is None:
-        raise RendezvousError(f"unknown module: {module}")
-    if mod.interface != catalog.CLI:
-        raise RendezvousError(
-            f"{module} is a {mod.interface} component: only a CLI's statement runs without a workspace"
-        )
-    return Statement(
-        vars=host_vars(mod, config),
-        runner=LocalTransport(str(modules.repo_root())),
-        prefix=launch_prefix(module),
-    )
 
 
 def fence_globs(protected: Iterable[Path | str], root: str | Path) -> tuple[str, ...]:

@@ -30,7 +30,7 @@ from agent.events import (
     event_from_dict,
     event_to_json,
 )
-from agent.tools import inst, modules, rendezvous
+from agent.tools import modules, rendezvous, statement
 from agent.tools.registry import ToolRegistry, build_tools, prompt_section
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
@@ -87,9 +87,9 @@ def check_skills(config: Config) -> None:
     # declaration only carries the flags that follow it.
     with tempfile.TemporaryDirectory() as stmp:
         if rendezvous.available(modules.SKILLS):
-            statement = rendezvous.prepare(modules.SKILLS, LocalWorkspace(stmp), config)
-            line = inst.render(tool.inst, {"name": first}, vars=statement.vars, defaults=tool.defaults or {})
-            check("clutch_skills" in statement.prefix and "show" in line, "load_skill renders the skills CLI")
+            ready = statement.prepare(modules.SKILLS, LocalWorkspace(stmp), config)
+            line = ready.line(tool.inst, {"name": first}, tool.defaults)
+            check("clutch_skills" in ready.prefix and "show" in line, "load_skill renders the skills CLI")
             check(first in line and "--envelope" in line, "the statement carries the skill and the envelope flag")
 
 
@@ -375,8 +375,8 @@ def check_project_file(config: Config) -> None:
         # clutch-memory's own suite and driven live by tests/tools_inst_test.
         ws = LocalWorkspace(str(ptmp))
         mreg = ToolRegistry(build_tools(config, memories=reloaded.memories))
-        statement = rendezvous.prepare(modules.MEMORY, ws, config)
-        mvars = statement.vars
+        ready = statement.prepare(modules.MEMORY, ws, config)
+        mvars = ready.vars
         check(mvars.get("base") == f"http://127.0.0.1:{config.port}", "the memory CLI is pointed at this process")
         # ...and that has to be the port the socket really got. A session child is
         # spawned with --port 0 (agent/supervisor.py), so a config left at 0 would
@@ -392,7 +392,7 @@ def check_project_file(config: Config) -> None:
             bound = probe.server_address[1]
             check(bound > 0 and zero.port == bound, "a --port 0 bind publishes the port the OS chose")
             check(
-                rendezvous.prepare(modules.MEMORY, ws, zero).vars["base"] == f"http://127.0.0.1:{bound}",
+                statement.prepare(modules.MEMORY, ws, zero).vars["base"] == f"http://127.0.0.1:{bound}",
                 "the memory endpoint names the BOUND port, never 0",
             )
         finally:
@@ -404,7 +404,7 @@ def check_project_file(config: Config) -> None:
         ):
             tool = mreg.tool(name)
             assert tool is not None and tool.inst is not None  # the registry always carries one
-            line = f"{statement.prefix} {inst.render(tool.inst, sample, vars=mvars)}".strip()
+            line = ready.line(tool.inst, sample)
             check("memory.py" in line and "--envelope" in line, f"{name} renders the memory CLI")
             check("--endpoint" in line and str(config.port) in line, f"{name} names the .clc endpoint")
             check(carried in line, f"{name} carries the model's argument verbatim")

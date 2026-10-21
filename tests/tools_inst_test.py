@@ -53,7 +53,7 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.memory import MemoryStore
-from agent.tools import catalog, components, modules, rendezvous
+from agent.tools import catalog, components, modules, rendezvous, statement
 from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import CommandResult, Transport, TransportError
 from agent.tools.workspace import LocalWorkspace
@@ -92,28 +92,28 @@ class Stub(Transport):
 
 @contextlib.contextmanager
 def _offline(stub: Stub, *, available: bool = True):
-    """Pin the rendezvous seam: `available` answers with `available`, and
+    """Pin the statement seam: `available` answers with `available`, and
     `prepare` hands back the stub as the statement's transport.
 
     Only the two questions the executor asks are replaced — the host vars are
-    still built by the real code (`host_vars`, `Service.vars()`), so the line
-    under test is the line a real call renders."""
-    real_available, real_prepare = rendezvous.available, rendezvous.prepare
+    still built by the real code (`statement.host_vars`, `Service.vars()`), so the
+    line under test is the line a real call renders."""
+    real_available, real_prepare = rendezvous.available, statement.prepare
 
-    def fake_prepare(module: str, workspace, config) -> rendezvous.Statement:
+    def fake_prepare(module: str, workspace, config) -> statement.Statement:
         mod = catalog.table()[module]
         if mod.interface == catalog.DAEMON:
             vars_ = rendezvous.Service(module, FAKE_PORT, FAKE_TOKEN, os.getpid()).vars()
         else:
-            vars_ = rendezvous.host_vars(mod, config)
-        return rendezvous.Statement(vars=vars_, runner=stub, prefix=rendezvous.launch_prefix(module))
+            vars_ = statement.host_vars(mod, config)
+        return statement.Statement(vars=vars_, runner=stub, prefix=statement.launch_prefix(module))
 
     rendezvous.available = lambda module: available
-    rendezvous.prepare = fake_prepare
+    statement.prepare = fake_prepare
     try:
         yield
     finally:
-        rendezvous.available, rendezvous.prepare = real_available, real_prepare
+        rendezvous.available, statement.prepare = real_available, real_prepare
 
 
 def _call(reg: ToolRegistry, ws, cfg, name, args, answer=None, *, available: bool = True):
@@ -245,7 +245,6 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
 
 
 def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
-    py = modules.python_exe()
     # The launch PREFIX is this host's own resolution of the artifact (an
     # installed onefile, an installed package, or the dev checkout) — asked of the
     # real code rather than restated, so this check stays about the flags the
@@ -253,9 +252,9 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # tests/rendezvous_test.py (_install_probe), where the install root is a temp
     # dir; here it is whatever this machine has, and either spelling drives the
     # same declaration.
-    memory = shell_words(rendezvous.launch_prefix(modules.MEMORY))
-    search = shell_words(rendezvous.launch_prefix(modules.WEBSEARCH))
-    skills = shell_words(rendezvous.launch_prefix(modules.SKILLS))
+    memory = shell_words(statement.launch_prefix(modules.MEMORY))
+    search = shell_words(statement.launch_prefix(modules.WEBSEARCH))
+    skills = shell_words(statement.launch_prefix(modules.SKILLS))
     # The `[--root {root}]` group this declaration once carried is gone, together
     # with the host var that filled it (config.skills_dir): the COMPONENT owns its
     # library root, so the line names no root at all and the CLI serves its own

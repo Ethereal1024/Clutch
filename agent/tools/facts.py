@@ -37,7 +37,7 @@ from functools import lru_cache
 from typing import NamedTuple
 
 from ..config import Config
-from . import catalog, inst, modules, rendezvous
+from . import catalog, inst, modules, rendezvous, statement
 from .transport import CommandResult, LocalTransport, TransportError
 
 
@@ -87,24 +87,22 @@ def ask(component: catalog.Component, token: str, config: Config) -> Answer:
     `{root}`-style host facts a tool statement does, and nothing else — there is
     no model argument to fill, because nobody called anything.
     """
-    statement = component.facts.get(token, "")
-    if not statement:
+    text = component.facts.get(token, "")
+    if not text:
         return Answer((), component.name, "")
     if component.interface != catalog.CLI:
         # A daemon's statements are spoken to a service that belongs to one
-        # workspace (rendezvous.prepare), and a host fact belongs to none.
+        # workspace (statement.prepare), and a host fact belongs to none.
         # component_diagnostics refuses this declaration as well; the answer here
         # keeps the fact fail-closed for a table that got in before the check.
         return Answer((), component.name, f"a {component.interface} component cannot publish the host fact {token!r}")
     try:
-        ready = rendezvous.prepare_cli(component.name, config)
-        command = inst.render(statement, vars=ready.vars)
+        ready = statement.prepare_cli(component.name, config)
+        command = ready.line(text)
     except rendezvous.RendezvousError as e:
         return Answer((), component.name, str(e))
     except inst.InstError as e:
         return Answer((), component.name, f"the statement for {token!r} cannot be rendered: {e}")
-    if ready.prefix:
-        command = f"{ready.prefix} {command}".rstrip()
     return _asked(command, config.command_timeout)._replace(owner=component.name)
 
 

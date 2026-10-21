@@ -13,7 +13,8 @@ Clutch 宿主**零内置工具**：`run_command` 之外的一切工具都来自*
 
 这份文档是组件与宿主之间的契约，模型面向的 schema、安装协议与界面呈现都从这里读。
 代码对应关系：发现与合并在 `agent/tools/catalog.py`，声明 → 工具在
-`agent/tools/registry.py`，寻址与启动在 `agent/tools/rendezvous.py`，安装落地在
+`agent/tools/registry.py`，**一句话的渲染**（事实 + 模板 → 命令行，`Statement`）在
+`agent/tools/statement.py`，寻址与进程生命周期在 `agent/tools/rendezvous.py`，安装落地在
 `agent/tools/components.py`，发送端在 `ui/components.js`。
 
 核心定调一句话：**声明随组件走**——组件是什么、怎么被调用、在界面里长什么样，全部

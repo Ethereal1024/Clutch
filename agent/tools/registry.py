@@ -45,7 +45,7 @@ from typing import Any
 from ..config import Config
 from ..memory import MemoryStore
 from ..prompts import render
-from . import catalog, channel, host, inst, rendezvous
+from . import catalog, channel, host, inst, rendezvous, statement
 from .answers import (
     _drivable,
     _entries,
@@ -537,24 +537,22 @@ class ToolRegistry:
         args: dict[str, Any],
         cancel: threading.Event | None,
     ) -> Envelope:
-        """Run one tool statement: the launch, then the component's own flags.
+        """Run one tool statement: the facts it names, then the component's flags.
 
-        Which transport carries the line — and which host placeholders the
-        template gets — is the component's kind: a daemon is spoken to on the
-        workspace's machine through the service it publishes, a CLI on the app
-        host through whatever the artifact's launch turns out to be (an
-        interpreter and a checkout, or an installed executable)."""
+        Three steps and no branch — where the facts come from
+        (statement.prepare), the line itself (Statement.line), and the transport
+        (its runner). None of them asks what kind of component this is: the
+        template is the declaration's, the arguments are the call's, and a fact is
+        a value with a provider (tools/statement.py)."""
         try:
-            statement = rendezvous.prepare(tool.module, workspace, config)
-            command = inst.render(tool.inst, args, vars=statement.vars, defaults=tool.defaults or {})
+            ready = statement.prepare(tool.module, workspace, config)
+            command = ready.line(tool.inst, args, tool.defaults)
         except rendezvous.RendezvousError as e:
             return Envelope(f"ERROR: {e}", error=True)
         except InstError as e:
             return Envelope(render("errors/invalid_arguments.md", error=e), error=True)
-        if statement.prefix:
-            command = f"{statement.prefix} {command}".rstrip()
         try:
-            result = statement.runner.run(command, config.command_timeout, cancel=cancel)
+            result = ready.runner.run(command, config.command_timeout, cancel=cancel)
         except TransportError as e:
             return failure_envelope(e, timeout_seconds=config.command_timeout)
         return inst.unwrap(result, service=f"the {tool.module} service")

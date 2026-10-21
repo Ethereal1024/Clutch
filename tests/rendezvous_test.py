@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 
 from agent.config import Config
-from agent.tools import catalog, components, modules, rendezvous
+from agent.tools import catalog, components, modules, rendezvous, statement
 from agent.tools.inst import render, unwrap
 from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import LocalTransport
@@ -364,7 +364,7 @@ def main() -> int:
         #     as it stands, so changing it is a deliberate edit, not a drift.
         app_cfg = Config()
         ws_obj = LocalWorkspace(workspace)
-        daemon_statement = rendezvous.prepare(modules.WORKSPACE, ws_obj, app_cfg)
+        daemon_statement = statement.prepare(modules.WORKSPACE, ws_obj, app_cfg)
         check(daemon_statement.runner is ws_obj, "a daemon statement rides the workspace's own transport")
         check(
             daemon_statement.runner.run("pwd", 10).stdout.strip() == str(Path(workspace).resolve()),
@@ -375,7 +375,7 @@ def main() -> int:
             "",
         )
         if cli:
-            cli_statement = rendezvous.prepare(cli, ws_obj, app_cfg)
+            cli_statement = statement.prepare(cli, ws_obj, app_cfg)
             check(
                 cli_statement.runner.run("pwd", 10).stdout.strip() == str(modules.repo_root()),
                 f"a CLI statement ({cli}) runs in the app host's own directory",
