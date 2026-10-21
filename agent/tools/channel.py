@@ -20,7 +20,7 @@ and the components page reads it. A pushed declaration is not an artifact. It
 describes a process on the client that exists while the user has this session
 open, and the moment the app goes away it means nothing. Writing it down would
 put two writers on one table and leave a component behind that nobody can fix by
-deleting a file (PLUGIN_PLAN.md 零之四.1/3). So it is memory, and the push is a
+deleting a file (D6 in DECISIONS.md). So it is memory, and the push is a
 REPLACEMENT rather than a merge: the client is the source of truth for what the
 client runs, and a push of one component means "this is the whole set".
 

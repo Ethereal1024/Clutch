@@ -345,14 +345,14 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 - **推送里没有字节，但有那句话**：`name` / `version` / `entry` / `tools`，没有 `digest`、
   `launch`、`location`。`entry` 是一个路径、不是语句（像 `launch.entry`），说清"客户端拿哪个
   文件跑这句话"；字节在哪台机器上是那台机器的私事
-  （PLUGIN_PLAN.md 零之四.1 的同一条界线）。`tools` 里带 `command` 不是泄露：那句话本来就是
+  （D6 的同一条界线）。`tools` 里带 `command` 不是泄露：那句话本来就是
   客户端自己声明、自己执行的，宿主只是把它送回来——**宿主不能自带语句**，这才是边界。
 - **转发是先决条件**：端口是远侧 sshd 分配的一个 loopback 端口，一行反向转发把它送回客
   户端的监听。转发没落地就不推——让会话去拨一个没人应答的端口，比"没有通道"更假。
 - **令牌是栅栏**：`/call` 要 `Authorization: Bearer <token>`，令牌只在推给本机会话的那
   一个请求里出现，所以推送只发往 loopback 的 http base（`ui/plugin-link.js#session()` 拒
   绝一切不是 `127.0.0.1` / `localhost` / `::1` 的地址）。它是"只有我推过的那个会话能问
-  我"，不是沙箱：插件以应用权限跑在自己机器上（见 PLUGIN_PLAN.md 零之五）。
+  我"，不是沙箱：插件以应用权限跑在自己机器上（见 D3 落地③）。
 - **只推给远端的会话**：本地会话里客户端和会话是同一台机器，客户端插件在那儿就是普通
   的本地组件，这个通道只会重复组件页已有的东西（`ui/main.js#announcePlugins`）。隧道断了
   也一样：`ui/plugin-link.js#snapshot()` 在 `state.client` 为空时把 `subject: foreign-fs` 的
@@ -572,15 +572,15 @@ POST   /api/components/<name>/enable           启用：重新驱动
    一个是请求本身说错了对象——后者一删就要 400，且**不许**顺手删掉别的版本。
 2. **拒绝必须落在动手之前**。`remove()` 把"有没有在跑"作为调用方的 `stop` 回调接进来，且
    **只在确实有东西可删时**才调用它；名字/版本的判断同样在 `stop` 之前。否则一次注定被拒的
-   删除会先把 daemon 杀掉再报错（见 PLUGIN_PLAN.md 零之三.6）。
+   删除会先把 daemon 杀掉再报错。
 3. **先停后删，且只停自己启动的**。本进程启动的 daemon 先停再删（属主规则与 `release` 一致）；
    收养的句柄（`proc is None`）或只在磁盘上有活记录的一律拒绝，并把 **pid 写进句子**——
    "磁盘上读到的 pid 不是开枪许可"。已知边界：一个**记录被删掉**的活 daemon 查不出来，
-   记录是宿主唯一的名册（PLUGIN_PLAN.md 零之三.5）。
+   记录是宿主唯一的名册。
 4. **停用不是删除，删不掉的东西不用二次确认**。`disabled` 与"在不在"正交：`inventory()` 照
    列出（多带 `disabled:true`）、`DELETE` 照能删，没有任何一条路径因为停用去动一个字节；重复
    停用/启用是幂等的。反向也成立——它撤得回来，所以它是协议里唯一**不要求**用户确认的写入
-   （PLUGIN_PLAN.md I5 只约束撤不回来的动作）。
+   （D6 只约束撤不回来的动作）。
 
 头的值必须是 base64——HTTP 头是 ByteString（每个码点 ≤ 0xFF），而声明按设计就是
 组件自己的语言（中文照写），裸 JSON 过不去。解码在宿主端只有一处：
@@ -635,7 +635,7 @@ POST   /api/components/<name>/enable           启用：重新驱动
 `digest` 量，所以一个前缀换来的只是**到同一份被钉住的字节的另一条路**，换不来信任。失败里属于
 "回答"的（404、摘要不符、schema 读不懂）不试下一个：镜像服务的是同一条路径，答案还是那一个。
 
-已知边界（PLUGIN_PLAN.md §七 6）：`{index: <路径>}` 点名**磁盘**上的索引时，工件也解析成本地
+已知边界：`{index: <路径>}` 点名**磁盘**上的索引时，工件也解析成本地
 路径，而宿主只取 http(s)——磁盘索引给出的安装今天会失败（清单照样读得懂）。`upload()`
 兜底的是检出/预构建产物，不是镜像目录。
 
@@ -654,7 +654,7 @@ POST   /api/components/<name>/enable           启用：重新驱动
 分得开）、`versions()` 照报每一版、`DELETE` 照能删。拦截点只有一个，而且**故意晚于解析、
 早于交付**：在 `rendezvous.unavailable_reason()` 里先问 `components.disabled()` 再谈别的，
 于是 **dev 检出也递不上替身**——否则会出现最难看的组合：页面写着已停用，工具却还在，
-因为真正跑的是检出那一份（PLUGIN_PLAN.md 零之三.7）。与安装的关系是正交的：装新版本时
+因为真正跑的是检出那一份。与安装的关系是正交的：装新版本时
 组件的 `disabled` 位**跟着过去**（换版本不会偷偷把机器重新驱动起来），而停用本身幂等，
 重复一次不产生第二次效果。
 
@@ -669,8 +669,8 @@ POST   /api/components/<name>/enable           启用：重新驱动
 **与 VS Code 的一处有意的偏离**：VS Code 把"停没停"记在**客户端**
 （`extensionsIdentifiers/disabled` / `…enabled`，写进 `IStorageService` 的
 `StorageScope.PROFILE` + `StorageTarget.MACHINE`，`extensionManagement.ts:645-646`），
-因为它的客户端自己握着已装清单。Clutch **没有客户端侧的已装清单**（页面每次都问机器，
-PLUGIN_PLAN.md 零之四.3），位只能住在机器上；反过来说，住在机器上正是这份清单要求的：
+因为它的客户端自己握着已装清单。Clutch **没有客户端侧的已装清单**（页面每次都问机器），位只能住在机器上；反过来
+说，住在机器上正是这份清单要求的：
 第二个客户端连上来时，看到的是这台机器真实在驱动什么，而不是"我没停过，所以它在跑"。
 
 页面侧（`ui/js/components-panel.js`）：持有但停用的行，在版本号之后多一个 `stopped` 标记
@@ -706,6 +706,10 @@ PLUGIN_PLAN.md 零之四.3），位只能住在机器上；反过来说，住在
   （索引读取、行的字段与取数重试）、`tests/market.test.js`（索引文档本身：行是钉死版本的
   指针、与 `market/entries.json` 逐字段一致、三层回退链与降级话术）、
   `tests/net-fetch.test.js`（那一道前缀门本身，索引与清单都过它）。
+- **发布前**：UI 文本保持英文；**`ui/` 的注释里不写 `§`**（v0.1.30 第一次打 tag 就栽在这），
+  改完跑 `.venv/bin/python -m tests.ui_fonts_check`。改过 `ui/` 还要跑
+  `scripts/sync-android-host.sh` 与 `node tests/android-assets.test.js`——Android 宿主的 `UI_NODE`
+  是手写清单，漏一个名字不会报"少个功能"，而是宿主 require 不到、桥还没 bind 就死。
 
 ## 十、第三方组件示例
 

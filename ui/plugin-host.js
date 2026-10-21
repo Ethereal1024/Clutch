@@ -13,8 +13,8 @@
 // Why a separate root is not cosmetic: on a desktop the session machine can BE
 // this machine (the local supervisor serves `~/.clutch/components`). Sharing one
 // directory would give one registry.json two writers — the app process and that
-// supervisor — which is exactly the "two truths" PLUGIN_PLAN.md 零之四.1/3 rules
-// out. Two domains, two roots, one writer each:
+// supervisor — which is exactly the "two truths" D6 rules out. Two domains, two
+// roots, one writer each:
 //
 //   ~/.clutch/components          the session machine (a supervisor)
 //   ~/.clutch/client              this client (this app process)

@@ -18,8 +18,9 @@
 //   - a module's PUBLISHED release, listed by ONE row of a market index this test
 //     writes and fetched over http from a server it runs: the file it names is relative to the manifest and pinned by
 //     the sha256 the manifest carries, and the HOST is the one that fetches it —
-//     the install request carries the URL and the pin, no bytes (PLUGIN_PLAN.md
-//     零之四.4), and nothing lands unless what the host fetched matches the pin.
+//     the install request carries the URL and the pin, no bytes
+//     (COMPONENTS.md 第八节「字节怎么到」), and nothing lands unless what the host
+//     fetched matches the pin.
 //
 // The run gets its own HOME: the client caches downloads in ~/.clutch/artifacts,
 // so pointing the cache at a temp directory keeps the user's real one untouched
@@ -337,7 +338,7 @@ async function main() {
   check(again.errors.length === 0, "and the pass is clean");
 
   // 6b. an OLD RECORD is replaced by the next pass, never kept beside the new
-  //     shape (PLUGIN_PLAN.md 七.2, decided: force the reinstall). The force is
+  //     shape (D1, decided: force the reinstall). The force is
   //     the gate itself — the gate compares version AND digest, and a record from
   //     before installs carried a version names nothing but the digest, so no pass
   //     can call it current. This writes exactly what a 0.1.55 install left: a
@@ -379,7 +380,7 @@ async function main() {
   check(dead.errors.length === 1 && dead.installed.length === 0, "an unreachable host is a report, not a crash");
 
   // 8. the published supply: a module's release manifest, whose artifact the
-  //    TARGET MACHINE fetches for itself (PLUGIN_PLAN.md 零之四.4 — this client
+  //    TARGET MACHINE fetches for itself (COMPONENTS.md 第八节 — this client
   //    never holds those bytes), pinned by the digest the manifest carries. The
   //    bytes are a DELIBERATELY different artifact than the checkout (one extra
   //    file), so the install is a fetch and not a cache hit.
@@ -622,7 +623,7 @@ async function main() {
   }
 
   // 10. when the release host cannot be reached, and the bytes are the TARGET
-  //     machine's fetch (PLUGIN_PLAN.md 零之四.4), the retry is the HOST's: the
+  //     machine's fetch (COMPONENTS.md 第八节), the retry is the HOST's: the
   //     same pin, asked of another place (ui/mirrors.js). Everything that makes
   //     that safe is checked here — a mirror is a URL prefix and nothing more (the
   //     digest is still the release's own pin, so bytes a mirror made up are

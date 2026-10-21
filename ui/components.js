@@ -64,7 +64,7 @@
 //     own manifest pinned is what that machine weighs them against (an unpinned
 //     artifact is refused here, not guessed at) — so this client never has to
 //     hold the tens of megabytes it is installing, which is what makes an
-//     install from a phone sane (PLUGIN_PLAN.md 零之四.4). Bytes only this
+//     install from a phone sane (COMPONENTS.md 第八节「字节怎么到」). Bytes only this
 //     machine has (the two sources above) still travel in the request body.
 //
 // The declaration comes from the same places: the checkout's own component.json,
@@ -618,7 +618,7 @@ function checkoutComponents() {
 // its bytes changes the name. What still comes down through here is the
 // DECLARATION (a few hundred bytes, and it has to be inlined into the manifest a
 // host reads); an ARTIFACT's bytes are the target machine's to fetch, not this
-// client's (PLUGIN_PLAN.md 零之四.4).
+// client's (COMPONENTS.md 第八节「字节怎么到」).
 async function downloadPinned(url, sha256, dest, timeoutMs = REQUEST_TIMEOUT_MS) {
   if (fs.existsSync(dest)) return dest;
   const ctl = new AbortController();
@@ -661,7 +661,7 @@ function pinnedAsset(entry, what, name) {
 //
 // What comes back is a LOCATION plus the digest the release pinned it with, not
 // bytes: the machine that will RUN the component fetches it and is measured
-// against that pin (PLUGIN_PLAN.md 零之四.4). So this client can hand over an
+// against that pin (COMPONENTS.md 第八节「字节怎么到」). So this client can hand over an
 // install it has never held, which is the point — and the pin keeps a URL from
 // being a weaker promise than a body.
 function publishedArtifact(manifest) {
@@ -753,8 +753,8 @@ function installVersion(named, digest) {
 }
 
 // The artifact one install would hand over, or null when there is none. Where the
-// bytes ARE decides which of the two shapes the install takes (PLUGIN_PLAN.md
-// 零之四.4):
+// bytes ARE decides which of the two shapes the install takes
+// (COMPONENTS.md 第八节「字节怎么到」):
 //
 //   - `path`: bytes on THIS machine — a checkout beside the host repo, a prebuilt
 //     artifact beside the app. There is nothing to fetch them from, so they travel
@@ -972,7 +972,7 @@ async function upload(base, spec, timeoutMs) {
   return postInstall(base, manifestFor(spec), fs.readFileSync(spec.path), timeoutMs);
 }
 
-// The default shape (PLUGIN_PLAN.md 零之四.4): the request carries NO bytes and
+// The default shape (COMPONENTS.md 第八节「字节怎么到」): the request carries NO bytes and
 // names the URL the release published, and the machine that will RUN the
 // component fetches it for itself. That machine is the one that needs the bytes,
 // so a client on a slow uplink — a phone — never has to hold the tens of

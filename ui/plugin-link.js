@@ -29,7 +29,7 @@
 //     session does not re-publish, and a base that FAILED is not remembered (the
 //     next sync retries it).
 //   * The token and the port travel; nothing about the bytes does. What this
-//     client runs is its own business (PLUGIN_PLAN.md 零之四.1).
+//     client runs is its own business (D6).
 //
 // It is deliberately NOT part of the supervisor: a frontend component is managed
 // by the frontend, and the session child is the process that holds tool state.

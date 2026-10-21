@@ -451,7 +451,7 @@ async function main() {
   // 9. the plugin tab on the phone: the SAME `clutchComponents` channel the
   //    desktop shell serves (ui/main.js:173-197), registered in the Android host.
   //    Before this, every line of the tab ended at "no such bridge method:
-  //    clutchComponents.list" (PLUGIN_PLAN.md 零之三.3); what the page reads now
+  //    clutchComponents.list"); what the page reads now
   //    is the target machine's own answers.
   {
     const sup = await fakeTargetSupervisor();

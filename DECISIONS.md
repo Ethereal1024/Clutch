@@ -3,9 +3,10 @@
 这份文档只装**已经拍板的事**：每一条 = 一个编号 + 一句定调 + 依据 + 落点（代码与文档的
 准确位置）+ 还欠什么。未拍板的单独放在第九节，不混进来，也不写成"倾向于"。
 
-**编号不复用、不删除。** 一条决定被推翻时留原文，在下面补一行"→ 由 Dn 取代"，因为计划
-文档（`PLUGIN_PLAN.md`、`SSH_WORKSPACE_PLAN.md`）退役之后，这里就是唯一还活着的地方；
-代码注释引用编号即可（`PLUGIN_PLAN 七.2` → `D1`）。
+**编号不复用、不删除。** 一条决定被推翻时留原文，在下面补一行"→ 由 Dn 取代"。
+计划文档已经退役（`PLUGIN_PLAN.md` 已删，`SSH_WORKSPACE_PLAN.md` 等真机 e2e 之后删，
+D7），所以这里就是唯一还活着的地方：代码注释引用编号或 `COMPONENTS.md` 的节，不引用
+已经不在的文件。
 
 总则（贯穿全部条目）：**不留兼容层、不留兜底补丁、不留回滚。** 形状不对就换掉，语义不对就
 改语义，中间态只允许存在于分支上，不随发行版出厂。
@@ -58,9 +59,8 @@ tooltip 点名"这是旧记录、重装后叫 `<version>+<digest16>`、旧目录
 3b、`tests/components.test.js` 6b（植入一枚 0.1.55 形状的记录，断言 pass 重装、`current` 排除它、
 裸摘要目录消失、记录重新命名版本）。
 
-**欠账**：`components-panel.js:1557` 的确认句对旧记录仍说 "installing rewrites that same
-version"——这句话不真（换的是形状，且旧目录会被删），要按 `plugHeldLegacy` 分支改写并加断言；
-`PLUGIN_PLAN.md:253-254` 仍写"仍未拍板"，要改成"已决 + 强制点在哪 + 代价"。
+**落点已补齐**：`components-panel.js` 的确认句对旧记录按 `plugHeldLegacy` 分支说真话
+（"换的是形状，旧目录会被删"），`tests/components-panel.test.js` 钉住那句话。
 
 ---
 
@@ -92,7 +92,7 @@ version / interface / digest / disabled，`_prune` 也不关心包里是什么�
 **落点**：`COMPONENTS.md` §二/§三 重写成"包 / 能力 / 传输"三层；`components.py` 两个门、
 `catalog.py` 的默认值与定义句、`market_index.py` 的校验、`ui/components.js` 的 place 推导；
 place 改为由"贡献的种类 → 谁消费"推导（模型消费 → session 机；主题给本 app 渲染 → client
-域），`interface` 不再是 place 的来源。`PLUGIN_PLAN.md:28,188` 的 P4 措辞随之改写。
+域），`interface` 不再是 place 的来源（`interface` 自己也在 D3 落地④里删了）。
 
 ---
 
@@ -367,9 +367,9 @@ CLI 那种语句不属于任何工作区。`launch_prefix()` 对带服务的声�
 `readManifest()` / `marketEntries()` / `components.download()` 加 header、"签名过的撤销列表"
 这一整块设计作废；字节由目标机自取之后也永远不需要 header。
 
-**落点（文档里要删干净）**：`PLUGIN_PLAN.md:29`（表格行里的"私有源未做"）、`:203`（标题）、
-`:217-219`（token 要递到每台机器的实现提示）、`:258`（"私有源见 §三 P5"）；
-`:220` 的"撤销是签名过的静态列表（可选）"同属过度设计，一并删。
+**落点**：`PLUGIN_PLAN.md` 已删，"私有源未做""撤销是签名过的静态列表"这些句子随它一起
+消失；`COMPONENTS.md` 第一节末只留一句"不做私有源"，不给它留实现入口（`artifact_headers`
+这类词不许被重新发明）。
 
 ---
 
@@ -402,15 +402,54 @@ CLI 那种语句不属于任何工作区。`launch_prefix()` 对带服务的声�
 
 ---
 
-## 锚点对照（计划文档 → 本文件）
+## D8 插件面板：单机、一行一组件、确认句一句都不许删
+
+**定调**（`PLUGIN_UI_PLAN.md` 的结论，那份文件早已删；面板这一层的结论落在这里，因为
+`COMPONENTS.md` 是组件与宿主之间的契约，不是界面契约）：
+
+- **面板恒为单机**：一次会话只有一个后端，页面问的是哪一台由
+  `ui/components-view.js#target()` 一处决定，`list()` 拿这一个 base 去问，交回的就是**这一台
+  机器**的名册——**没有任何一条代码路径把两台机器的名册并起来**，所以同一个组件不可能被这个
+  面板同时看见两份。
+- **一张清单，一个组件一行**：`plugModel()` 按 name 把 `held` 与 `market` 合成一条记录，先
+  市场顺序、再只有机器持有的那些；"未装 / 已装 / 已装 · 可更新 / 已停用 / 本机有、市场不
+  认识 / 市场有、本机没有"是同一行的状态，两侧独有的信息都进这一行的 chips，**没有信息
+  丢失**。
+- **机器身份只住页头**（"作用于 <名字> · <base>"）：行内**不加**"哪台机器"这一列，也不默认
+  挂远端角标。D3 落地④之后"哪边"由声明推出（第三节的两种落点），所以真到同一名字两边各有
+  一份的那天，答案仍是**一行 + 一枚角标**，不新开板块。
+- **纯渲染期**：过滤（五个 chip + 一个名字框，默认 `All`）、合并、`…` 菜单都不碰通道
+  （`window.clutchComponents` 六个动词不变），也不引入"可更新 / 可回滚"这类新语义——
+  `Updates` 只是"市场报的版本与所持版本不同"这一条事实的说法，D1 的"没有回滚"原样成立。
+  菜单化只能挪**入口**，**D6 的确认句子一句都不许删**。
+- **测试契约**：`tests/components-panel.test.js` 按 `.plug-row` / `.plug-name` 定位
+  （`rowOf()` / `rowNamed()` / `stateOf()`；`.plug-row` 按整词匹配，因为行还会带 `.stopped` /
+  `.busy`）——**这两个类名不许改**，其余类名可以随布局动。行的事实由行末尾**恰一个** sr-only
+  节点承载，行里每个控件（含菜单项）用 `aria-describedby` 指向它；`.active` / `.open` /
+  `.busy` 表达的状态必须同时有 `aria-pressed` / `aria-expanded` / `aria-busy`；
+  `drawnText()` 仍要求行里除了名字与一句话什么都不画（sr-only 不算"画出来"）。
+
+---
+
+## 计划文档的退役
+
+`PLUGIN_PLAN.md` **已删**：不变量、施工中得到的事实、五个冻结的决定、面板不变量都已经在上面的
+各条与 `COMPONENTS.md` 里，代码注释改指 `Dn` 或 `COMPONENTS.md` 的节。**不要把它复活**——
+一份"当前做到哪"的文档只要还在，就会被当成第二份真相（D7）。
+
+`SSH_WORKSPACE_PLAN.md` **还在**：它是 `clutch-ssh-workspace` 的真机 e2e 判据（C9 系列），
+那份 e2e 没在真机上跑过之前不删；删它的时候同样把 `C9.x` 的引用改指 `D3`，并确认
+`scripts/ws-stopgap` 已经退役。
+
+旧锚点 → 现在的对照（只为查旧提交留一眼）：
 
 | 旧锚点 | 现在 |
 | --- | --- |
 | `PLUGIN_PLAN.md` §七 2（旧记录待拍板） | **D1**（已决，代码在 `cec6376`） |
-| `PLUGIN_PLAN.md` §三 P4（工具集） | **D2 / D3 / D4**（措辞要删"提示词"，见 D4） |
+| `PLUGIN_PLAN.md` §三 P4（工具集） | **D2 / D3 / D4** |
 | `PLUGIN_PLAN.md` §三 P5（私有源未做） | **D5**（不做） |
 | `PLUGIN_PLAN.md` 八 G5（纯声明包 400） | **D2**（门本身要被删掉，不是修 bug） |
-| `PLUGIN_PLAN.md` 零之六（面板不变量） | **D6**（可撤回性决定要不要问） |
+| `PLUGIN_PLAN.md` 零之六（面板不变量） | **D6 / D8** |
 | `SSH_WORKSPACE_PLAN.md` C9 系列（客户端插件域） | **D3**（统一会重写 `/call` 与声明） |
 
 ---

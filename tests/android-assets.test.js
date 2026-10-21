@@ -6,7 +6,7 @@
 // nobody added to UI_NODE — and it fails silently here and loudly on the phone:
 // the Node host dies before the bridge ever binds ("Cannot find module").
 //
-// That is how the plugin tab shipped broken (PLUGIN_PLAN.md 零之三.3): the host
+// That is how the plugin tab shipped broken: the host
 // did not name components-view.js at all, so nothing failed at boot — the app
 // booted and every read on the tab ended at `no such bridge method:
 // clutchComponents.list`. So this runner walks the subset the way the phone's

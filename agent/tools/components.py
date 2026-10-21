@@ -20,7 +20,7 @@ artifact, and this module is the receiving half. It receives it two ways
 (`receive`): the request's own body, or an `artifact_url` the host fetches
 ITSELF — the default, because the machine that will RUN the bytes is the one that
 needs them, and a client no longer has to hold a 30 MB copy to install one
-(PLUGIN_PLAN.md 零之四.4). A client that alone holds the bytes (a checkout, a
+(COMPONENTS.md 第八节「字节怎么到」). A client that alone holds the bytes (a checkout, a
 prebuilt artifact beside the app) still sends them. Either way one gate decides:
 `accept` measures what arrived against the `digest` the request declared.
 
