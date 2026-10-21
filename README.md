@@ -1,275 +1,185 @@
+<p align="center">
+  <img src="ui/build/icon.png" width="96" height="96" alt="Clutch 图标">
+</p>
+
+<p align="center">
+  <a href="https://github.com/Ethereal1024/Clutch/blob/master/LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/Ethereal1024/Clutch"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Ethereal1024/Clutch?label=Release&amp;color=blue"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=Build"></a>
+  <a href="https://github.com/Ethereal1024/Clutch/blob/master/pyproject.toml"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white"></a>
+</p>
+
 # Clutch
 
-[![License: MIT](https://img.shields.io/github/license/Ethereal1024/Clutch)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/Ethereal1024/Clutch/release.yml?label=CI)](https://github.com/Ethereal1024/Clutch/actions/workflows/release.yml)
-[![Release](https://img.shields.io/github/v/release/Ethereal1024/Clutch?label=Release&color=blue)](https://github.com/Ethereal1024/Clutch/releases/latest)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+Clutch 是一个本地运行的编程智能体（coding agent）。用户提交任务描述后，Clutch 调用
+大语言模型，在指定的工作目录中读取与修改文件、执行命令，直至模型结束任务或满足终止
+条件。
 
-Clutch 是一个编程智能体：给它一句话任务，它会调用大语言模型，自主地读写文件、
-执行命令、运行测试，直到任务完成或触发停止条件。
+Clutch 提供桌面应用与 Android 应用，并支持通过 SSH 在远端主机上工作。模型通过兼容
+OpenAI 的接口接入，可使用任何提供该接口的服务，API 密钥由用户自行提供。
 
-循环里的关键逻辑都是自己实现的：对话历史的维护、工具的定义与本地执行、模型输出的
-解析、循环终止、错误处理，没有使用现成的 agent 框架或 SDK。模型通过 OpenAI 兼容的
-tool-calling 接口调用（DeepSeek 等均可），需要自备 API key。
+## 功能
 
-## 快速开始
+- **任务执行**：模型在多轮循环中调用工具；模型不再调用工具时任务结束，最大轮数与重复
+  调用检测用于终止无效循环。
+- **文件与命令工具**：读取、检索、写入与编辑文件，执行命令。命令在工作目录内运行，受
+  超时与输出长度限制。
+- **网络检索**：网页搜索与正文抓取。内置无需密钥的搜索后端，也可配置 Tavily 或自建
+  SearXNG。
+- **项目记忆**：跨会话保存、读取与检索项目相关的事实。
+- **技能**：技能按需加载，未加载的技能只占用提示中的一行描述。
+- **会话文件**：一个会话对应一个文件，重新打开即恢复完整对话。
+- **权限确认**：删除文件、写入工作目录之外等操作需要人工确认。
+- **远程工作区**：通过 SSH 连接远端主机，在远端读写文件与执行命令。
+- **组件化扩展**：文件、记忆、检索、技能与远程工作区以独立组件提供，可按需安装。
 
-需要 Python ≥ 3.10 和 Node.js，包管理用 uv。
+## 支持的平台
 
-```bash
-git submodule update --init --recursive   # 五个工具模块的检出（开发用；发行版不带模块）
-pip install uv && uv sync    # 后端依赖
-cd ui && npm install         # 前端依赖
-export CLUTCH_API_KEY=...    # API key
-npm start                    # 启动界面，后端由应用自动拉起
-```
+| 版本 | 支持环境 |
+| --- | --- |
+| 桌面应用 | Linux x86_64（deb 安装包）、macOS Apple Silicon（dmg 磁盘映像）、Windows x86_64（exe 安装程序）。安装包自带运行时，不需要 Python 与 Node.js。 |
+| Android 应用 | Android 7.0 及以上，arm64-v8a 或 x86_64。 |
+| 从源码运行 | Python 3.10 及以上、Node.js、uv。 |
 
-`npm run dev` 由脚本先起后端再起界面（自动清理端口占用），效果等同。只跑后端的话
-也可以手动起：`uv run python -m agent.server --port 0`，`--verify "命令"` 可为任务
-指定验证命令。
+## 安装
 
-启动后在欢迎界面新建或打开一个 `.clc` 文件，输入任务即可开始对话。一个对话对应一个
-`.clc` 文件，工作目录就是文件所在目录，重新打开即恢复整个对话。
+### 桌面应用
 
-模型、接口地址和 key 在界面的设置弹窗里填，也可以用环境变量 `CLUTCH_MODEL`、
-`CLUTCH_BASE_URL`、`CLUTCH_API_KEY` 提供。默认走 chat completions；同一个 base URL
-同时提供 Responses API 的服务（如 DeepSeek 的 Codex 兼容端点）可在设置里把
-「API protocol」切到 responses，工具调用与思考流不变。
+从 [GitHub Releases](https://github.com/Ethereal1024/Clutch/releases/latest) 下载对应
+平台的安装包。
 
-联网搜索工具 `web_search` / `web_fetch` 开箱即用（内置 Bing RSS 免 key 后端）；可选
-后端优先：`CLUTCH_TAVILY_API_KEY` 启用 Tavily，`CLUTCH_SEARXNG_URL` 指向自建 SearXNG。
-抓取只支持文本页面，带 SSRF 防护（拒绝内网地址与重定向）。
-
-## 跨设备使用
-
-在设置的 SSH 里填远端 host / user / port 即可连接，隧道由程序化 ssh2 建立（密码在
-应用内输入，或用本机密钥）。远端不需要预装任何东西：客户端会按远端的系统和 Python
-版本自动上传并运行后端（远端无需外网；没有 Python 的同架构机器用自包含二进制，其余
-情况由模型引导安装）。远端每个窗口是一个独立会话，LLM 请求经隧道转发回客户端本地
-反代，因此远端不需要 API key。
-
-```mermaid
-flowchart LR
-    subgraph local["本机"]
-        UI["Clutch 界面"]
-        PXY["LLM 反代"]
-    end
-    subgraph remote["远端"]
-        SUP["supervisor"]
-        S["agent 会话"]
-    end
-    UI -- "SSH 隧道 (ssh2)" --> SUP
-    SUP -. "分配端口" .-> S
-    S -- "tool calling" --> PXY
-    PXY -- "HTTPS" --> LLM["大模型"]
-    S -- "读写 / 执行" --> WS["远端工作目录"]
-```
-
-## 桌面版（Linux / macOS）
-
-安装包发布在 GitHub Releases（顶部 Release 徽章直通最新版）：
-
-**[https://github.com/Ethereal1024/Clutch/releases](https://github.com/Ethereal1024/Clutch/releases)**
-
-**Linux**：下载 `clutch-ui_<版本>_amd64.deb`，目标机器不需要 Python / Node / 网络：
+Linux：
 
 ```bash
 sudo dpkg -i clutch-ui_<版本>_amd64.deb
 ```
 
-**macOS（Apple Silicon）**：下载 `Clutch-<版本>-arm64.dmg`，打开后把 Clutch.app 拖进
-Applications。安装包未签名，首次打开会被 Gatekeeper 拦——**提示"已损坏，无法打开"
-并不是文件真的坏了**，只是 macOS 对无签名 + 隔离标记应用的统一说辞（macOS 15 起连
-右键 → 打开的入口也移除了）。任选一种方式放行：
+macOS（Apple Silicon）：下载 `Clutch-<版本>-arm64.dmg`，打开后将 `Clutch.app` 拖入
+`/Applications`。安装包未做代码签名，首次启动会被 Gatekeeper 阻止。“已损坏，无法打开”
+的提示由隔离标记与缺少签名共同导致，文件本身并未损坏。清除隔离标记后即可打开：
 
 ```bash
-# 方式一（推荐）：清除隔离标记后直接打开
 xattr -cr /Applications/Clutch.app
+```
 
-# 方式二：先双击 Clutch 触发拦截，然后 系统设置 -> 隐私与安全性 ->
-#         底部"安全性"里点 Clutch 的"仍要打开"
+若清除标记后仍无法打开，对应用重新签名：
 
-# 若上面之后仍提示损坏（少数机器），补一次 ad-hoc 重签：
+```bash
 codesign --force --deep --sign - /Applications/Clutch.app
 ```
 
-构建：Linux 上 `bash scripts/release.sh`（deb）；Mac 上
-`bash scripts/release-mac.sh [--install]`（dmg，`--install` 顺带装进
-/Applications 并放行 Gatekeeper）。推送 vX.Y.Z 的 tag 会触发 CI 同时构建两者并
-附加到 Release（见 `.github/workflows/release.yml`）。安装包内的后端绑定构建机的
-系统与架构（mac 为 arm64），跨平台场景建议用上面的 SSH 路径。
+Windows：运行 `Clutch.Setup.<版本>.exe`。安装包未做代码签名，SmartScreen 首次运行时会
+提示“Windows 已保护你的电脑”，依次选择“更多信息”与“仍要运行”。
 
-## 工作原理
+### Android 应用
 
-前后端解耦：Electron 界面（`ui/`）与 Python 后端（`agent/`）通过 HTTP + SSE 通信。
-后端由 supervisor 统一管理——每个窗口向 supervisor 申请一个独立会话（随机端口），
-窗口关闭会话即停止，末窗退出后 supervisor 自动退出。
+从 Releases 下载 `clutch-android-<版本>.apk`（Android 安装包）并手动安装。安装前需要在
+系统中允许该来源安装应用。
+
+### 从源码运行
+
+```bash
+git clone https://github.com/Ethereal1024/Clutch.git
+cd Clutch
+pip install uv
+uv sync                  # 后端依赖
+cd ui && npm install     # 前端依赖
+npm start                # 启动应用，后端会话按需拉起
+```
+
+## 配置
+
+模型、接口地址与 API 密钥在应用的设置中配置，也可通过环境变量提供：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `CLUTCH_API_KEY` | 模型服务的密钥 |
+| `CLUTCH_BASE_URL` | 模型服务接口地址 |
+| `CLUTCH_MODEL` | 模型名称 |
+
+默认使用 Chat Completions 接口；若服务同时提供 Responses 接口，可在设置中切换。
+
+联网检索的默认后端无需配置，可选后端由以下环境变量启用：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `CLUTCH_TAVILY_API_KEY` | 使用 Tavily 搜索后端 |
+| `CLUTCH_SEARXNG_URL` | 使用自建 SearXNG 实例 |
+
+## 使用
+
+1. 启动应用，在欢迎页新建或打开一个会话文件，扩展名为 `.clc`。
+2. 会话的工作目录是该文件所在的目录；重新打开文件即恢复该会话的完整对话。
+3. 在输入框中提交任务描述。模型调用工具的过程与结果实时显示在界面中。
+4. 出现权限确认请求时，选择允许或拒绝。被拒绝的操作不执行，模型会收到对应的错误信息。
+5. 在设置的 Plugins 页面安装、更新或卸载组件。
+
+## 架构
+
+Clutch 分为界面层与后端。界面层负责交互与事件显示，后端负责模型调用、工具执行与会话
+状态；二者通过 HTTP 接口与服务端事件推送通信。每个窗口对应一个独立的后端会话，窗口
+关闭时该会话结束。
 
 ```mermaid
 flowchart LR
-    UI["Clutch 界面"] -- "HTTP + SSE" --> S["agent 会话"]
-    SUP["supervisor"] -. "分配 / 回收" .-> S
-    S -- "tool calling" --> LLM["大模型"]
-    S -- "读写 / 执行" --> WS["工作目录"]
+    UI["Clutch 界面"] -- "HTTP 与事件推送" --> API["后端会话"]
+    API -- "工具调用" --> LLM["大语言模型"]
+    API -- "读写文件 / 执行命令" --> WS["工作目录"]
 ```
 
-单个任务在会话里的执行循环：
+使用远程工作区时，后端运行在远端主机，界面与后端之间的连接经 SSH 隧道建立。模型请求由
+本地客户端转发，因此远端主机不需要配置密钥。
 
 ```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant A as Clutch 会话
-    participant M as 大模型
-    participant T as 工具
-
-    U->>A: 一句话任务
-    loop 迭代，直到验证门通过或轮数耗尽
-        A->>M: 上下文与事件日志
-        M-->>A: 工具调用 / 声明完成
-        alt 工具调用
-            A->>T: 读写 / 执行
-            T-->>A: 结果（含错误原文）
-        else 声明完成
-            A->>A: 可选验证命令
-            A-->>U: 任务结果
-        end
+flowchart LR
+    subgraph local["本地客户端"]
+        UI["Clutch 界面"]
+        PXY["模型请求转发"]
     end
+    subgraph remote["远端主机"]
+        SUP["会话管理"]
+        AG["后端会话"]
+    end
+    UI -- "SSH 隧道" --> SUP
+    SUP -. "启动与回收" .-> AG
+    AG -- "工具调用" --> PXY
+    PXY -- "HTTPS" --> LLM["大语言模型"]
+    AG -- "读写 / 执行" --> WS["远端工作目录"]
 ```
 
-几个设计选择：
+设计要点：
 
-- 事件流：会话日志、界面、回放都从同一条事件流派生，历史与上下文管理基于事件日志，
-  而不是增量拼接的字符串。
-- 验证门：任务可以附带一个验证命令（比如测试套件）。模型说"完成了"不算数，验证
-  命令通过才判定成功；不附带则自然终止。
-- 错误即数据：工具执行失败会连同错误原文喂回给模型，让它自己读错、自己修。
-- 项目即文件：一个对话就是一个 `.clc` 文件，重新打开即恢复整个对话，没有集中的
-  会话管理。
-- Skills：系统提示里只列技能的名字和一句话描述，模型按需用 load_skill 拉取详情，
-  基础提示保持精简。
-- 权限确认：危险操作（`rm -rf`、写到项目目录之外）会弹确认框，由人决定放行或拒绝。
-  模型被这个弹窗挡住，所以回答只有两条明路——点按钮，或按 Enter 放行；点击弹窗外的
-  空白不会关闭它，避免一次误点变成一次误拒。
+- 会话状态由事件记录生成：对话历史与界面显示来自同一份事件序列。
+- 工具的执行结果与错误信息一并返回模型，供其调整后续操作。
+- 工具的名称、参数、执行方式与界面显示由组件声明，客户端不内置工具的具体实现。
+- 权限由规则表判定：工作目录内的常规操作默认允许，删除文件与超出工作目录的写入需要
+  确认。
 
-## 项目结构
+## 组件
 
-```
-agent/                 宿主后端（会话循环 + 模型调用 + registry + 传输层）
-  core/                上下文管理（context.py）、输出解析（parse.py）、
-                       终止条件（terminate.py）、错误处理（errors.py）
-  tools/               工具定义与调用：catalog.py（发现并合并各组件自带的
-                       component.json 声明：工具名、参数、命令模板、它在界面里的
-                       样子）、registry.py（声明 -> 模型可见的
-                       工具，宿主只保留策略）、components.py（安装层：把组件落到
-                       运行它的那台机器）、rendezvous.py（daemon/CLI 寻址与启动）、
-                       inst.py（一次调用 = 一条终端命令）、transport.py、modules.py
-  llm/                 OpenAI 兼容客户端（流式、重试、错误归一化）；keepalive.py
-                       给连接打开内核探活，被静默丢包的请求 ~35s 就报错，不再等
-                       240s 的读预算（选项装在后端上，走代理的连接也生效）
-  browsing.py          目录浏览（项目选择器 + 工作区文件树，本地/SSH 双传输）
-  server.py            HTTP + SSE 服务（会话入口，含 .clc 内容服务端点）
-  supervisor.py        会话进程管理
-ui/                    Electron 前端（设置、SSH 隧道、LLM 反代）；渲染层是
-                       app.js + js/*，按 index.html 的脚本顺序加载
-clutch-workspace/      文件工具模块（子模块）：read_file / grep / write_file /
-                       edit_file 与 undo，per-workspace daemon
-clutch-memory/         记忆模块（子模块）：save_memory / load_memory /
-                       search_memory，消费宿主的 .clc 内容服务
-clutch-websearch/      联网模块（子模块）：web_search / web_fetch，自带后端链
-clutch-skills/         技能模块（子模块）：load_skill 与技能库（库随组件自己的
-                       发行包走；本机 dev-only 的写作技能不入库、也不进任何发行包）
-clutch-ssh-workspace/  别的机器的文件系统（子模块）：客户端插件，read_file / grep /
-                       write_file / edit_file 经 ssh 到远侧的 clutch-workspace
-eval/                  评测场景（落地页 / 修 bug / 重构）
-tests/                 测试
-scripts/               打包与构建脚本（market_index.py 生成市场索引）
-market/                市场索引里人维护的那一栏：entries.json，一行一个模块
-```
+文件操作、项目记忆、网络检索、技能库与远程工作区以独立组件的形式提供，不随主程序打包。
+组件安装在运行后端的那台机器上，因此在本地使用与在远程工作区使用时需要分别安装。设置
+的 Plugins 页面列出可用组件、安装状态与来源。
 
-五个工具模块都是独立仓库（submodule），形式不限（daemon / 一次性脚本 / CLI），
-宿主不 import 它们的代码，只依赖它们发布的接口（HTTP 表面或 CLI 的 stdout 契约）：
-`clutch-workspace` 每个工作区一个常驻 daemon，其余按需拉起；`clutch-ssh-workspace` 是客户端
-插件，字节只住在客户端域，工具经 ssh 到远侧的同名 CLI。宿主里没有任何工具的第
-二份实现，也没有任何内置声明——工具的名字、参数、命令模板，以及它在界面里的呈现
-方式，全部写在组件自带的 `component.json` 里（随组件走，规范见
-[COMPONENTS.md](COMPONENTS.md)），宿主只负责发现与合并。因此删掉任何一个
-模块，宿主只会失去对应工具（工具表里不再出现），其余工具与会话循环不受影响；
-一个组件都没装时，宿主只有 AI 聊天本身，没有可调用的文件/联网/记忆/技能工具。
+组件来源默认为应用内置的来源列表，每条来源指向该组件自身的发布包。用户可以追加自定义
+来源，也可以把本地目录中的组件注册到清单中。卸载组件后，对应工具从工具列表中移除，其余
+功能不受影响；未安装任何组件时，Clutch 仅提供对话能力。
 
-宿主发行物里**没有任何模块的字节**：发行版只装宿主自己，"有哪些模块"是一份数据。
-这份数据是**一份市场索引**，一个固定地址：
-`https://github.com/Ethereal1024/Clutch/releases/download/market/index.json`，每一版客户端
-都读它。文档一行一个模块，行里写着该模块自己 release 里 `clutch-component.json` 的**钉死
-版本**地址（`/download/v<version>/…`，不是 `releases/latest`）和这份清单的 sha256——所以
-"当前是哪一版"由索引说了算，模块发一个新 release 不会自己变成可装的。客户端读索引、取回
-那一行点名的清单、按平台选工件、核对 sha256，再把工件交给"要运行它的那台机器"（字节由那台
-机器自取，本机只递几百字节的声明）。摘要对不上、schema 不认识、版本与索引不符都只拒那一条，
-不影响其他模块。
-
-索引本身是生成物：人只维护 `market/entries.json` 里的一行（名字、地址、版本、简介、标签），
-`python3 scripts/market_index.py --write` 取回被钉住的那几份清单、量摘要，写成随发行版打包的
-`ui/market.snapshot.json`；CI 重跑 `--check`，并把同一份字节发成 tag `market` 的 `index.json`。
-**加第六个模块 = 往 `market/entries.json` 加一行、提一个 PR**——不用改宿主代码，也不用等
-下一次宿主发行，已经装着的客户端下次读索引就看见。客户端读索引的顺序是活的索引 →
-`~/.clutch/market/index.json` → 随包快照，`origin` 说明这一份读自哪一层，够不着时页面照实
-说明。随版本打包的清单与 `~/.clutch/components.sources.json` 那条用户清单都已退场。
-
-索引与各模块清单可以整体走镜像：设 `CLUTCH_SOURCE_MIRROR=https://<加速前缀>`（或
-`~/.clutch/settings.json` 里的 `source_mirror`，桌面 GUI 继承不到环境变量），每次读的地址
-就变成 `<前缀>/<原始 URL>`、路径原样保留——于是清单里那些"兄弟"地址（声明、以及
-"要运行它的那台机器"自取的工件 URL）一起跟着走。摘要仍按索引行与各模块 release 自己的 pin
-校验：镜像只搬字节，不为字节背书。桌面端读远程清单/工件走
-Electron 的 `net.fetch`，机器的系统代理设置因此生效；手机端只有直连或镜像。
-
-发行版里还自带一份**回退镜像列表**（`ui/components.mirrors.json`，三条实测过的加速前缀）：
-一次取数以**够不着**的方式失败时才按序轮着试——404、对不上摘要、读不懂的 schema 都是"回答"，
-不会被当成网络问题重试。重试发生在**要运行组件的那台机器**上，字节到达后照样按 release
-自己的 sha256 校验，所以列表再长也换不来一份没被钉住的字节。用户可以写
-`~/.clutch/components.mirrors.json` 追加自己的前缀（排在前，先试），或者直接在**插件页的
-Mirrors 一节**里加/删；随发行版打包的那几条只读。要把**清单也一起**改道（不只是工件那一次
-取数），仍然只有上面那个 `source_mirror` 旋钮，插件页会写明当前是哪个在生效。
-
-组件由客户端上传到"要运行它的那台机器"的 supervisor（`POST /api/components/install`，
-工件摘要对内容负责），落在该机器的用户目录里；宿主每次调用工具时按需解析，所以后台
-晚装上的组件会被后续调用看到。第三方组件不必进主仓库：把一份声明 JSON 放进
-`~/.clutch/components/catalog.d/`（或用同一个安装接口上传工件），声明里 `directory`
-指向代码、`tools` 列出它发布的工具，它就会出现在工具表里。
-
-工具在界面里的样子也是声明的一部分：每个工具事件都带上它组件声明的 `ui` 块，前端里
-没有任何工具名——所以后装的组件不用改界面就能被渲染。每个键只管一个部件，比如 `chip`
-（行首的工具名，`summary` 已经把这次调用说清时关掉）、`preview`（流式那行显示什么）、
-`body`（结果正文是文本 / 代码面板 / diff / 不显示）、`group`（同组调用合并成一个密集块：
-一串 read/grep 扫成一列单行，write 不会被打包进去）；**完整表与默认值在
-[COMPONENTS.md](COMPONENTS.md) 第六节**，这里不复述。消费方是 UI 渲染层（`ui/app.js`
-与 `ui/js/*`，加载顺序见 `ui/index.html`；绘制这块表的是 `ui/js/tool-render.js`）。
-
-## 测试
-
-无框架，逐个模块跑：`uv run python -m tests.<name>`（断言共享 `tests/testsupport.py`）
-与 `node tests/<name>.test.js`（断言共享 `tests/harness.js`）。**清单就是目录本身**——
-`tests/*.py` 与 `tests/*test*.js`，每个文件头部都写明它钉住的约定，这里不再抄第二份
-（抄下来的那份只会落后于目录）。除下面几条额外要东西的（真 LLM / 真远端 / 一个 python
-解释器），全部离线：不联网、不要密钥、不花额度。
-
-```bash
-uv run python -m eval.harness   # 三个评测场景；要真 LLM，离线必然红
-
-# 需要一台真远端（见文件头：CLUTCH_E2E_HOST / _PORT / _USER / _PASS）
-CLUTCH_E2E_HOST=10.x.x.x CLUTCH_E2E_USER=me CLUTCH_E2E_PASS=… node tests/remote-bootstrap-e2e.js
-
-# 需要 python 解释器与 clutch-workspace checkout（没有就自己 skip）：真组件的四个工具
-node tests/ssh-workspace-e2e.js
-```
-
-模块自己的套件在模块目录里跑：`cd clutch-skills && python3 -m pytest`（memory /
-websearch / workspace 同理）。
+如需通过镜像下载组件，设置环境变量 `CLUTCH_SOURCE_MIRROR`。镜像仅提供文件传输，组件的
+完整性仍按各组件发布包中的摘要校验。
 
 ## 安全
 
-- 命令默认在工作目录内运行，带超时与输出截断
-- 路径逃逸有防护，危险操作需人工确认
-- API key 通过环境变量或界面设置提供，不写入仓库
+- 命令在工作目录内执行，受超时与输出长度限制。
+- 文件路径受工作目录约束，越界访问需要人工确认。
+- 网页抓取会校验目标地址，拒绝内网地址与指向内网的重定向。
+- API 密钥保存在应用本地配置或环境变量中，不写入仓库。
 
-## License
+## 参与贡献
 
-MIT，见 [LICENSE](LICENSE)。
+缺陷报告与功能建议请提交到 [GitHub Issues](https://github.com/Ethereal1024/Clutch/issues)。
+提交代码变更前，请确认相关测试通过。
+
+## 许可证
+
+本项目使用 MIT 许可证，详见 [LICENSE](LICENSE)。
