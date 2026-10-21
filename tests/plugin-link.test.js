@@ -76,7 +76,7 @@ function pluginDir() {
         version: "0.1.0",
         subject: "network",
         // no `service`, no `launch`: the statements are this client's, and this is
-        // the module that runs them (D3 step ④)
+        // the module that runs them
         entry: "plugin.js",
         tools: [{ name: TOOL, description: "probe the client's own network", parameters: { properties: {} } }],
       },
@@ -135,7 +135,7 @@ function refusePush(body) {
     if (typeof one.name !== "string" || !one.name) return "a declaration must name a component";
     if (seen.has(one.name)) return `the channel push names ${one.name} twice`;
     seen.add(one.name);
-    // D3 step ④: who runs a statement is read from what the declaration
+    // who runs a statement is read from what the declaration
     // CONTRIBUTES (agent/tools/catalog.py component_diagnostics), never from a
     // kind. A pushed component is one with no process on the session machine and
     // an `entry` for this client to run.

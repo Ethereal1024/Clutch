@@ -8,8 +8,8 @@
 // root; an install is atomic and prunes the version it replaces; the digest is
 // measured HERE and a mismatch lays nothing down; a bad name / version is refused
 // by the same spelling the session domain uses, and a declaration that starts a
-// process on the session machine is refused as another domain's component (D3
-// step ④: a contribution says who runs it, a kind does not); a removal of
+// process on the session machine is refused as another domain's component
+// (a contribution says who runs it, a kind does not); a removal of
 // something not held is a refusal while a removal of nothing is "absent"; the
 // table — not the disk — is what `list` means, and reindex() is the only way a
 // hand-placed payload becomes a component; and the runtime answers, throws,
@@ -245,8 +245,8 @@ async function main() {
       "refuse: a name that is a path is not a component name");
     check(refuses(() => host3.install({ manifest: { ...MANIFEST }, artifact: src, version: "../1" }), /bad component version/),
       "refuse: a version that is a path is not a version");
-    // who runs a statement is read from what the declaration CONTRIBUTES (D3 step
-    // ④), so the refusal is spelled with a process and not with a kind
+    // who runs a statement is read from what the declaration CONTRIBUTES,
+    // so the refusal is spelled with a process and not with a kind
     check(refuses(() => host3.install({ manifest: { ...MANIFEST, service: {} }, artifact: src }),
       /belongs to the machine that runs the session/),
       "refuse: a manifest that keeps a service on the session machine is not this client's component");
@@ -325,7 +325,7 @@ async function main() {
     const where = await runtime.call({ name: "local", command: S("read") });
     check(where.content === "beside@beside", "call: cwd is the plugin's own directory and the env names it too");
 
-    // the exec bridge (COMPONENTS.md §三): the far side of a tunnel, handed to the child as an
+    // the exec bridge: the far side of a tunnel, handed to the child as an
     // address. It is asked for at every call, because the port only exists while a
     // tunnel is up; "no tunnel" must be the empty string, not a stale port.
     const BRIDGE = "http://127.0.0.1:47111";
@@ -358,7 +358,7 @@ async function main() {
     check(await rejects(bare.call({ name: "stranded", command: S("echo") }), /no exec bridge right now/),
       "exec bridge: without one the call fails the way any plugin failure does, and does not hang");
 
-    // the exec budget (COMPONENTS.md §三): the bridge takes one command and no stdin, so the
+    // the exec budget: the bridge takes one command and no stdin, so the
     // numbers that bound it come from the host (ui/transport_defaults.json), not
     // from each plugin's memory of them.
     const budgeted = pluginHost.createPluginHost({

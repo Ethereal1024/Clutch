@@ -49,7 +49,7 @@ function pluginDir(name, { delayMs = 0, tool = "probe_search", extra = {} } = {}
         version: "0.1.0",
         subject: "network",
         // no `service`, no `launch`: these statements are the CLIENT's, and this is
-        // the module that runs them (agent/tools/catalog.py, D3 step ④)
+        // the module that runs them (agent/tools/catalog.py)
         entry: "plugin.js",
         ui: { label: "probe" },
         tools: [
@@ -57,7 +57,7 @@ function pluginDir(name, { delayMs = 0, tool = "probe_search", extra = {} } = {}
             name: tool,
             description: "probe the client's own network",
             parameters: { properties: { q: { type: "string" } }, required: ["q"] },
-            // the statement the client itself will render (D3 step ③): the
+            // the statement the client itself will render: the
             // session sends it back verbatim and this side makes argv of it
             command: `${tool} {*}`,
             // a plugin tool may carry policy words: they travel, they do not run

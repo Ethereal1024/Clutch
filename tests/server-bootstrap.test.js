@@ -150,7 +150,7 @@ async function main() {
 
   // ---- the plugin tab's wake: a write aimed at THIS machine starts its
   // supervisor when it has idle-exited instead of reporting "did not answer"
-  // (ui/components-view.js injects this as its ensureSupervisor dep, COMPONENTS.md 第八节)
+  // (ui/components-view.js injects this as its ensureSupervisor dep)
   const { ensureSupervisor } = fresh();
   assert(typeof ensureSupervisor === "function", "server-bootstrap exports the wake the plugin tab injects");
   assert(await ensureSupervisor(), "the wake brings an idle-exited supervisor back up");

@@ -22,8 +22,8 @@
 // machine could not be asked" look exactly alike in an empty list, and that is
 // the one reading this page must not give.
 //
-// Three writes this page can perform, offered according to what each one costs
-// (D6). A sentence that has to say WHERE says which of the two
+// Three writes this page can perform, offered according to what each one costs.
+// A sentence that has to say WHERE says which of the two
 // places it means ("this client", "this session") and never offers a third; the
 // confirmations say what the act actually costs (an install writes bytes over
 // whatever version is there; a removal DELETES them — neither is a rollback,
@@ -393,7 +393,7 @@ function plugItemUpdate(item) {
 // ui/components-view.js), so any pass or click replaces it; what this predicate is
 // for is SAYING that, because a bare digest under "held" reads like a version that
 // merely looks odd. Old records are reinstalled rather than kept beside the new
-// shape (D1).
+// shape.
 function plugHeldLegacy(held) {
   const version = String((held && held.version) || "");
   return Boolean(version) && !version.includes("+");
@@ -629,7 +629,7 @@ function plugItemActions(item) {
 // keeps in its menu, the way VS Code keeps "Install Another Version…" in the
 // Manage menu, extensionsActions.ts:1338-1405), then the versions the place
 // holds, then the removal, which is the one write that DELETES and is exactly why
-// it is never the button a row leads with (D6). The comparison is
+// it is never the button a row leads with. The comparison is
 // by KIND and not by node: the items are built here, so identity would say
 // "different" about two buttons that are the same control.
 function plugItemMenuItems(item, lead) {

@@ -1,6 +1,6 @@
 """Host facts a component publishes: the other direction of `vars`.
 
-`vars` (COMPONENTS.md §五) is what a component CONSUMES from the host: it names
+`vars` is what a component CONSUMES from the host: it names
 one of the host's own facts and the host fills the placeholder. A `facts` entry
 is the reverse — a host fact the component PUBLISHES, because only its own code
 can compute it. `skills` is the one this host has: the catalog of the library

@@ -12,8 +12,8 @@ body that lies or ends early leaves the host exactly as it was.
 The artifact reaches a host two ways, and both go through that one gate: the
 request's body (a client that alone holds the bytes — a checkout, a prebuilt
 artifact) or an `artifact_url` the host fetches FOR ITSELF, which is the default
-because the machine that will run the bytes is the one that needs them
-(COMPONENTS.md 第八节「字节怎么到」). The fetch is exercised over a real socket, not a patched
+because the machine that will run the bytes is the one that needs them.
+The fetch is exercised over a real socket, not a patched
 `urlopen`: only http(s) is spoken, the response is capped and never read whole,
 and what arrives is weighed against the declared digest like any other body.
 
@@ -69,7 +69,7 @@ def _post_artifact(base: str, name: str, data: bytes, *, digest: str, artifact: 
 
     The manifest names what it CONTRIBUTES — here the installed executable itself,
     `launch.binary` — because a record naming none of `service`/`launch`/`entry`
-    has no process and no module a client could run, and is refused (D3 step ④)."""
+    has no process and no module a client could run, and is refused."""
     manifest = {"name": name, "version": digest[:16], "launch": {"binary": name}, "digest": digest, **extra}
     if artifact:
         manifest["artifact"] = artifact
@@ -90,7 +90,7 @@ def _post_artifact(base: str, name: str, data: bytes, *, digest: str, artifact: 
 def _post_manifest(base: str, name: str, *, digest: str, data: bytes = b"", **extra) -> tuple[int, str]:
     """One install request that carries NO bytes: the manifest in the header names
     the artifact's URL (`artifact_url`) and the host fetches it for itself. This is
-    the default shape of an install (COMPONENTS.md 第八节「字节怎么到」); `_post_artifact`
+    the default shape of an install; `_post_artifact`
     above is the fallback, for when the client alone holds the bytes. The manifest
     carries its own contribution for the same reason as above."""
     manifest = {"name": name, "version": digest[:16], "launch": {"binary": name}, "digest": digest, **extra}
@@ -340,7 +340,7 @@ def main() -> int:
         )
 
         # 4. what a declaration CONTRIBUTES is the one thing a record must say
-        #    (D3 step ④): naming none of `service`/`launch`/`entry` names no process
+        #    naming none of `service`/`launch`/`entry` names no process
         #    and no module a client could run, so it is refused before it lands —
         #    and the retired `interface` word beside it is not a contribution
         try:
@@ -488,7 +488,7 @@ def main() -> int:
             "the inventory grew by each install and by neither refusal",
         )
 
-        # 7b. the other way an artifact arrives (COMPONENTS.md 第八节「字节怎么到」): a request
+        # 7b. the other way an artifact arrives: a request
         #     with NO body that names the URL its bytes are at, so the machine that
         #     will RUN them fetches them itself. The gate afterwards is the same one
         #     — the digest the request declared is measured against what arrived —

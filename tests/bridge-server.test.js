@@ -104,7 +104,7 @@ function fakeTargetSupervisor() {
   // the release this test publishes, as bytes: a market row pins a manifest by
   // its digest, so the row the test writes has to pin these exact bytes. It keeps
   // the `interface` word a v0.1.56 release still says — the client ignores it (the
-  // contribution says who runs a statement, D3 step ④), and a released manifest is
+  // contribution says who runs a statement), and a released manifest is
   // not something this repo rewrites under a user.
   const manifest = {
     schema: 1,

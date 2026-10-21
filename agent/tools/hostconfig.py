@@ -1,12 +1,12 @@
 """The host's own document: the tables that ARE this host's half of the protocol.
 
-A declaration is data (COMPONENTS.md) — but the words it may use were, until this
+A declaration is data (a component.json) — but the words it may use were, until this
 document, the host's Python constants: which `access` words exist and what each
 one is enforced by, which `gate` words a tool can stand behind, what a tool's
 events look like when its `ui` block says nothing, and which search backends this
 machine's config can switch on. Those are the HOST's vocabulary, and a host that
 only ever read them from its own source could not be taught a word without
-editing that source (COMPONENTS.md 十二: the one thing the host was not
+editing that source — the one thing the host was not
 file-driven about). So one document may name them:
 
     {

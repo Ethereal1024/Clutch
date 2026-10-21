@@ -12,7 +12,7 @@
 //   * ui/plugin-server.js#declarations() is what travels — the assertion that
 //     matters most, because a field that leaks here (a `location`, a `digest`)
 //     would describe this machine's files to another one. `entry` DOES travel,
-//     and only because it is what says whose statements these are (D3 step ④):
+//     and only because it is what says whose statements these are:
 //     a path inside the component, not a place on this machine.
 //
 // The search stub is a real loopback socket and the legs are pointed at it with

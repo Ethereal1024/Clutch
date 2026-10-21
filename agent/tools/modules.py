@@ -3,7 +3,7 @@
 Each decoupled tool component has its own repository (clutch-workspace /
 clutch-memory / clutch-websearch / clutch-skills), checked out next to the host
 repo in the dev layout. The host never imports them, and — since the host ships
-no built-in component (see COMPONENTS.md) — the RUNTIME never names them either:
+no built-in component — the RUNTIME never names them either:
 a component is discovered through its own manifest (tools/catalog.py), and these
 names are kept in one place for the consumers that are allowed to point — the
 tests, and the UI's list of what to ship on install (ui/components.js).

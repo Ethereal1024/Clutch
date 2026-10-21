@@ -1,13 +1,13 @@
 """One statement, ready to run: a template, the facts it may name, a runner.
 
-D3 says a call has exactly one form —
+A call has exactly one form —
 
     render(template, the model's arguments ∪ the host's facts) → a runner → an envelope
 
 — and nothing here asks WHAT KIND of component is being called. A statement is a
 line of text; its placeholders are facts with providers; the runner is a
 transport. The question a declaration answers is "where does `{port}` come
-from", never "am I a daemon" (DECISIONS.md D3 / D3.1).
+from", never "am I a daemon".
 
 The facts, and who answers them:
 
@@ -37,7 +37,7 @@ not, the statement is a line this host runs itself and `launch` is its prefix.
 Everything downstream of that pick (facts ∪ arguments → template → prefix →
 runner) is blind to kinds: it is the same four lines for every component.
 
-The one runner that renders NOTHING is the client's (`Client`, D3 step ③). A
+The one runner that renders NOTHING is the client's (`Client`). A
 component whose process lives on the client declared the statement itself, and
 this host sends the template verbatim with the model's arguments: the client
 validates it against the declaration it installed, turns it into argv words and
@@ -114,7 +114,7 @@ def launch_prefix(mod: catalog.Component) -> str:
 
 @dataclass(frozen=True)
 class Client:
-    """The runner for a statement the CLIENT runs (D3 step ③).
+    """The runner for a statement the CLIENT runs.
 
     There is nothing to render here and nothing to start: the template IS the
     statement the client declared for one of its own tools, sent VERBATIM with the

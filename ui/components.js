@@ -64,7 +64,7 @@
 //     own manifest pinned is what that machine weighs them against (an unpinned
 //     artifact is refused here, not guessed at) — so this client never has to
 //     hold the tens of megabytes it is installing, which is what makes an
-//     install from a phone sane (COMPONENTS.md 第八节「字节怎么到」). Bytes only this
+//     install from a phone sane. Bytes only this
 //     machine has (the two sources above) still travel in the request body.
 //
 // The declaration comes from the same places: the checkout's own component.json,
@@ -618,7 +618,7 @@ function checkoutComponents() {
 // its bytes changes the name. What still comes down through here is the
 // DECLARATION (a few hundred bytes, and it has to be inlined into the manifest a
 // host reads); an ARTIFACT's bytes are the target machine's to fetch, not this
-// client's (COMPONENTS.md 第八节「字节怎么到」).
+// client's.
 async function downloadPinned(url, sha256, dest, timeoutMs = REQUEST_TIMEOUT_MS) {
   if (fs.existsSync(dest)) return dest;
   const ctl = new AbortController();
@@ -661,7 +661,7 @@ function pinnedAsset(entry, what, name) {
 //
 // What comes back is a LOCATION plus the digest the release pinned it with, not
 // bytes: the machine that will RUN the component fetches it and is measured
-// against that pin (COMPONENTS.md 第八节「字节怎么到」). So this client can hand over an
+// against that pin. So this client can hand over an
 // install it has never held, which is the point — and the pin keeps a URL from
 // being a weaker promise than a body.
 function publishedArtifact(manifest) {
@@ -735,8 +735,8 @@ async function componentSpecs({ index = null } = {}) {
 
 // The version ONE install is recorded under: the component's own version with
 // the content digest appended — `0.1.0+<hex16>`. The host already reads that
-// shape (agent/tools/components.py `_VERSION_RE`, and COMPONENTS.md says an
-// installed manifest may carry it), so nothing new is being asked of it; what it
+// shape (agent/tools/components.py `_VERSION_RE`), so nothing new is being
+// asked of it; what it
 // buys is a version a client can LIST. A bare digest is an identity, not a
 // version: a host holding only that can say which bytes it has but not which
 // release, and an upgrade or a rollback has to be asked FOR a version.
@@ -753,8 +753,7 @@ function installVersion(named, digest) {
 }
 
 // The artifact one install would hand over, or null when there is none. Where the
-// bytes ARE decides which of the two shapes the install takes
-// (COMPONENTS.md 第八节「字节怎么到」):
+// bytes ARE decides which of the two shapes the install takes:
 //
 //   - `path`: bytes on THIS machine — a checkout beside the host repo, a prebuilt
 //     artifact beside the app. There is nothing to fetch them from, so they travel
@@ -972,7 +971,7 @@ async function upload(base, spec, timeoutMs) {
   return postInstall(base, manifestFor(spec), fs.readFileSync(spec.path), timeoutMs);
 }
 
-// The default shape (COMPONENTS.md 第八节「字节怎么到」): the request carries NO bytes and
+// The default shape: the request carries NO bytes and
 // names the URL the release published, and the machine that will RUN the
 // component fetches it for itself. That machine is the one that needs the bytes,
 // so a client on a slow uplink — a phone — never has to hold the tens of
@@ -1046,7 +1045,7 @@ function coveredFailure(first, tried, last) {
 // ---- where a component goes ------------------------------------------------
 //
 // A declaration already answers this, and it is the ONLY thing that answers it:
-// what the component CONTRIBUTES (agent/tools/catalog.py, D3 step ④). A
+// what the component CONTRIBUTES (agent/tools/catalog.py). A
 // declaration says what it gives, never what "kind" it is, and the place is read
 // out of which contribution is there:
 //

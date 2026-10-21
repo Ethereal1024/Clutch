@@ -19,8 +19,8 @@ host is this desktop or a remote machine. Nothing in the install path is
 artifact, and this module is the receiving half. It receives it two ways
 (`receive`): the request's own body, or an `artifact_url` the host fetches
 ITSELF — the default, because the machine that will RUN the bytes is the one that
-needs them, and a client no longer has to hold a 30 MB copy to install one
-(COMPONENTS.md 第八节「字节怎么到」). A client that alone holds the bytes (a checkout, a
+needs them, and a client no longer has to hold a 30 MB copy to install one.
+A client that alone holds the bytes (a checkout, a
 prebuilt artifact beside the app) still sends them. Either way one gate decides:
 `accept` measures what arrived against the `digest` the request declared.
 
@@ -816,7 +816,7 @@ def verify(directory: Path | str, *, name: str) -> str:
     artifact is not the one the host asked for — refusing to use it is the only
     safe answer, and it is a sentence the caller can show. There is nothing else
     to compare: how a component is spoken to is read off the declaration itself
-    now (catalog.Component), not off a word beside it (D3 step ④).
+    now (catalog.Component), not off a word beside it.
     """
     manifest = read_manifest(directory)
     if manifest is None:
@@ -891,7 +891,7 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
             exe = staging / name
             shutil.copyfile(artifact, exe)
             exe.chmod(exe.stat().st_mode | 0o755)
-        # WHAT the declaration contributes is where its statement runs (D3 step ④),
+        # WHAT the declaration contributes is where its statement runs,
         # and a record naming none of the three is an artifact with nothing to
         # drive: refused here, before the bytes land, the same way a bad name is.
         if not any(key in record for key in CONTRIBUTIONS):
@@ -943,7 +943,7 @@ def _merge_declaration(staging: Path, wire: dict[str, Any]) -> dict[str, Any]:
     """The installed record: the artifact's own declaration, refined by the
     request's facts.
 
-    A component's declaration travels WITH it (COMPONENTS.md): an archive that
+    A component's declaration travels WITH it: an archive that
     carries its own component.json declares its tools, its launch shape and its
     UI block, and the header the client sent needs to carry only the install
     facts — so a thin header over a declaring artifact still lands a component

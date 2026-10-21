@@ -4,7 +4,7 @@ With nothing installed the host's whole surface is `run_command` — the loop's
 escape hatch, the way anything gets looked at on a machine before a component is
 there. It cannot be a component: the component that declared it could only be
 installed by first running a command, so the host would have nothing to install
-it with. It is therefore the ONE declared bootstrap exception (COMPONENTS.md),
+it with. It is therefore the ONE declared bootstrap exception,
 and "declared" is what this module is for: what the model sees of it — its name,
 its prose, its schema, the policy it runs under, how its call looks — is data in
 the very vocabulary a manifest's tool entry speaks (catalog.Tool), parsed by the
@@ -50,7 +50,7 @@ HostImpl = Callable[..., Envelope]
 class Declaration(NamedTuple):
     """One tool the host declares for itself.
 
-    `declaration` is manifest-shaped data (a `tools` entry of COMPONENTS.md §四),
+    `declaration` is manifest-shaped data (a `tools` entry of a component.json),
     without the name and the prose, which `declarations()` fills in from the two
     fields beside it; `implementation` is the host code that satisfies it — the
     one field a component's declaration never has, because a component's

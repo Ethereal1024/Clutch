@@ -468,7 +468,7 @@ TCP keepalive（默认 2 小时）；以及"替别人收回 8892"在协议上做
 也没有文件管理器能写进去。`writeSettingsMirror()` 之前更是**没有** `source_mirror` 这一支，
 UI 里也没有这个字段。也就是说"写进 ~/.clutch/settings.json"这句话在手机上是一句谁也做不到
 的事。最初的定案是**不默认镜像、不自动回退**，这里只能拒绝塞一个第三方加速器进去；那条
-定案后来被翻转——随包带一份**可回退镜像表**（契约在 `COMPONENTS.md` §八）
+定案后来被翻转——随包带一份**可回退镜像表**（契约在 `ui/components.js` 的安装路径）
 （`ui/components.mirrors.json`，三条前缀，用户自己的条目排在前面），但它**只**在"看起来
 是网络原因"的失败上重试（超时、`ECONNRESET`、网关/超时状态码），404、digest 不符、
 schema 错**一次都不重试**，manifest 读取也不自动回退。手机侧因此多出三条 IPC

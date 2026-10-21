@@ -2,7 +2,7 @@
 
 Run: .venv/bin/python -m tests.catalog_test
 
-The host ships NO component (COMPONENTS.md): what it can drive is whatever its
+The host ships NO component: what it can drive is whatever its
 three registration sources hold — a dev checkout beside the repo, an installed
 artifact, a file in the user's catalog directory — merged by name, a later
 source overriding only the fields it names. This suite pins that pipeline with
@@ -235,7 +235,7 @@ def _publisher(
 def check_the_host_declares_its_own_tool() -> None:
     """The one tool that is not a component's is declared like one all the same.
 
-    `run_command` is the host's bootstrap exception (COMPONENTS.md §十一): the
+    `run_command` is the host's bootstrap exception (agent/tools/host.py): the
     host always has it, whatever is installed, so it cannot live in a component —
     the component that declared it could only be installed by first running a
     command. What makes it an exception rather than an accident is that it is
@@ -325,7 +325,7 @@ def check_checkout_discovery_and_precedence() -> None:
         {
             "clutch-x": declaration,
             # a manifest that names nothing at all: the retired `interface` word
-            # beside it is not a declaration of anything (D3 step ④)
+            # beside it is not a declaration of anything
             "clutch-nameless": {"interface": "cli"},
         }
     ) as root:
@@ -339,7 +339,7 @@ def check_checkout_discovery_and_precedence() -> None:
         # every field it leaves out carries over from the checkout. It has to name
         # a contribution of its own — `launch` is what makes it a component this
         # host can start, and the install gate reads that off the record, never a
-        # word beside it (D3 step ④)
+        # word beside it
         artifact = root / "artifact"
         artifact.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         components.install(
@@ -1108,7 +1108,7 @@ def check_registration() -> None:
             result = reg.execute(ws, cfg, "say_hello", {"who": "世界"})
             check(not result.error and result.content == "echo:世界", "and the tool is executable end to end")
 
-        # What a declaration CONTRIBUTES is where its statement runs (D3 step ④):
+        # What a declaration CONTRIBUTES is where its statement runs:
         # no `service` and no `launch` means no process here, so its statements are
         # the CLIENT's and `entry` names the module that client runs. The one wrong
         # answer — running it here because a word beside it was read as a kind —
@@ -1145,7 +1145,7 @@ def check_registration() -> None:
 
         # the retired words are IGNORED, not read: a released manifest still
         # carrying `interface`/`runs_on` drives exactly as one without them (the
-        # words are retired with the 0.1.57 repack — DECISIONS.md D3)
+        # words are retired with the 0.1.57 repack)
         legacy = _third_party("clutch-legacy", tool="say_legacy", directory=str(code))
         legacy.update({"interface": "cli", "runs_on": "self"})
         _write_registration(legacy)

@@ -1,7 +1,7 @@
 """Declarative tool registry: the components' declarations, wired for the model.
 
 One source of truth: each component's own manifest (a component.json that
-travels with it — see COMPONENTS.md), discovered by tools/catalog.py. From it
+travels with it), discovered by tools/catalog.py. From it
 this module builds the OpenAI function-calling schema the model sees AND the
 statement that satisfies a call — there is no second, host-side implementation
 of any tool. A tool no manifest describes does not exist for the model, and a
@@ -29,7 +29,7 @@ This file is the module's public face as well as its runtime. The host's policy
 vocabulary lives in gates.py, what the components say to the model in prompt.py,
 the host's answers to what a declaration asks in answers.py — and every name
 those files own is re-exported here, because `registry.<name>` is the handle this
-repo, COMPONENTS.md and the tests call them by (see __all__). What is left is
+repo and the tests call them by (see __all__). What is left is
 what the name promises: the wiring from a declaration to the tool the model
 calls, and the call itself.
 """
@@ -114,7 +114,7 @@ class Tool:
     declares it itself and brings the implementation (see build_tools).
 
     `inst` is the statement for EVERY component tool, including one the client
-    runs: D3 says a call has one form — a template plus its arguments — and a
+    runs: a call has one form — a template plus its arguments — and a
     client component's `command` IS that template (it is the statement the client
     declared, sent to it verbatim by tools/statement.py). So there is no third
     field for "the client's": which runner carries the statement is decided where
@@ -231,7 +231,7 @@ def _bootstrap(config: Config) -> list[Tool]:
     """The host's OWN declarations (tools/host.py), wired like any other.
 
     The one exception to "the declaration belongs to a component", and it is a
-    DECLARATION all the same (COMPONENTS.md §十一): the same shape, the same
+    DECLARATION all the same (HOST_TOOL_NAMES, tools/host.py): the same shape, the same
     parser (catalog.tool_of), the same diagnostics a manifest goes through. What
     it adds is the implementation — host code, where a component's statement is
     its implementation — and it is why this tool can never be absent: with
@@ -261,7 +261,7 @@ def _serves_this_workspace(component: catalog.Component, workspace: Workspace | 
       * `workspace-fs` serves the root's own machine. It is KEPT even when the
         root is elsewhere, on purpose: its refusal is a sentence that says why
         ("this root is another machine's"), which is more use to the model than a
-        tool that silently is not there (COMPONENTS.md 第七节). When a
+        tool that silently is not there. When a
         `foreign-fs` component is also present it publishes the same names and
         wins — the table folds pushed declarations last — so the local one is
         only the sentence you read when the plugin is not installed.

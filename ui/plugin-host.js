@@ -13,8 +13,8 @@
 // Why a separate root is not cosmetic: on a desktop the session machine can BE
 // this machine (the local supervisor serves `~/.clutch/components`). Sharing one
 // directory would give one registry.json two writers — the app process and that
-// supervisor — which is exactly the "two truths" D6 rules out. Two domains, two
-// roots, one writer each:
+// supervisor — which is exactly the "two truths" this split rules out.
+// Two domains, two roots, one writer each:
 //
 //   ~/.clutch/components          the session machine (a supervisor)
 //   ~/.clutch/client              this client (this app process)
@@ -44,7 +44,7 @@
 // nothing else does the value mean anything. It is read at every call rather than
 // captured at construction, because the port only lives while a tunnel is up; an
 // empty string is "there is no bridge right now", a fact a plugin can answer with,
-// as opposed to a guess or a timeout. See COMPONENTS.md 第三节.
+// as opposed to a guess or a timeout.
 //
 // The bridge carries one command string and has no stdin, so how long that string
 // may be is a fact a far-side plugin needs: it is also handed the size budget the
@@ -80,8 +80,8 @@ const CALL_TIMEOUT_MS = 30000;
 // plugin-host.js to UI_NODE must add plugin-child.js on the same line, or the
 // phone's every call fails at fork time with a missing file.
 const CHILD = path.join(__dirname, "plugin-child.js");
-// What this domain can hold, said as a CONTRIBUTION and never as a kind (D3 step
-// ④, agent/tools/catalog.py): a declaration whose statements are this client's
+// What this domain can hold, said as a CONTRIBUTION and never as a kind
+// (agent/tools/catalog.py): a declaration whose statements are this client's
 // names the module to run (`entry`) and names NO process on the session machine
 // (`service`, `launch`). One that starts a process there belongs to the machine
 // that runs the session, and installing it here would land bytes where nothing
@@ -748,7 +748,7 @@ function createPluginHost(options = {}) {
   // as this client declared it in its own component.json — and never a path, and
   // it cannot reach a plugin this client has stopped.
   //
-  // Why a statement and not a tool name (D3 step ③): the session renders nothing
+  // Why a statement and not a tool name: the session renders nothing
   // for a plugin. It sends the template the client declared, verbatim, and the
   // client turns it into words (renderArgv) and hands those to the plugin's
   // `run(argv)`. So the wire contract is one the client can check against its own
@@ -818,10 +818,10 @@ function createPluginHost(options = {}) {
             CLUTCH_PLUGIN_DIR: target.directory,
             CLUTCH_PLUGIN_ENTRY: target.entry,
             CLUTCH_PLUGIN_NAME: name,
-            // the far side of the tunnel, when there is one (COMPONENTS.md 第三节). Read per call:
+            // the far side of the tunnel, when there is one. Read per call:
             // a tunnel that came up after this host was created still shows here.
             CLUTCH_EXEC_BRIDGE: bridgeAddress(),
-            // ...and the budget one far-side command may spend in bytes (COMPONENTS.md 第三节):
+            // ...and the budget one far-side command may spend in bytes:
             ...execLimitEnv(),
           },
           // stdout is nobody's: a plugin's console.log must not be able to land

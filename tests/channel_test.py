@@ -310,8 +310,8 @@ def _pushed_projection(manifest: dict) -> dict:
     dropped on purpose — an installed `directory`, and the `launch` a checkout
     declares: both name this machine's files. `entry` DOES travel, because it is
     the client's own module — the one name that says these statements run there
-    (D3 step ④). What a tool travels with is its `command`: for a plugin that
-    template is the statement the client itself runs (D3 step ③), and this host
+    . What a tool travels with is its `command`: for a plugin that
+    template is the statement the client itself runs, and this host
     sends it back verbatim.
     """
     keep = ("name", "version", "entry", "subject", "requires", "ui", "prompt")
@@ -493,7 +493,7 @@ def check_the_endpoint() -> None:
 
 
 def check_the_machine_a_component_serves() -> None:
-    """`subject` is a machine, and the surface follows it (COMPONENTS.md 第七节).
+    """`subject` is a machine, and the surface follows it.
 
     The situation two subjects exist for: the workspace's own `read_file`
     (`workspace-fs`, spoken to the machine the root lives on) and the ssh plugin's

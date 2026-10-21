@@ -145,7 +145,7 @@ const ladder = createTunnelLadder({
 // `execBridge` is the one capability a client plugin needs that lives in THIS
 // process: the loopback port that reaches the far side of the ssh tunnel. Asked
 // per call, so a tunnel that comes up later is still handed to the plugin, and
-// empty while no tunnel is up (COMPONENTS.md 第三节). `execLimits` is the
+// empty while no tunnel is up. `execLimits` is the
 // other half of that same sentence: the bridge takes one command and no stdin, so
 // it also carries the byte budget one such command obeys — the numbers are already
 // written down once for the session's own exec path, and a plugin repeating them

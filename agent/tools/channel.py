@@ -20,7 +20,7 @@ and the components page reads it. A pushed declaration is not an artifact. It
 describes a process on the client that exists while the user has this session
 open, and the moment the app goes away it means nothing. Writing it down would
 put two writers on one table and leave a component behind that nobody can fix by
-deleting a file (D6 in DECISIONS.md). So it is memory, and the push is a
+deleting a file. So it is memory, and the push is a
 REPLACEMENT rather than a merge: the client is the source of truth for what the
 client runs, and a push of one component means "this is the whole set".
 
@@ -35,7 +35,7 @@ The call itself: `POST http://127.0.0.1:<port>/call`, `Authorization: Bearer
 `{content}` the envelope carries to the model, because the client's plugin
 returns model-facing text by contract (ui/plugin-host.js).
 
-Why the body carries a `command` and not a tool name (D3 step ③): a tool call has
+Why the body carries a `command` and not a tool name: a tool call has
 one form — a template plus its arguments — and for a component the CLIENT runs the
 template is the client's own: it declared that statement with the component, so it
 is the protocol unit both sides agree on. The host sends it VERBATIM (it renders

@@ -85,8 +85,8 @@ function fakeLib(opts = {}) {
 }
 
 // A checkout carries its own declaration, and this one names a process the
-// SESSION machine starts: `launch`, with no `entry` of its own (D3 step ④ — a
-// declaration says what it CONTRIBUTES, never what kind it is).
+// SESSION machine starts: `launch`, with no `entry` of its own — a
+// declaration says what it CONTRIBUTES, never what kind it is.
 const CHECKOUT = {
   name: "clutch-memory",
   checkout: true,
@@ -717,7 +717,7 @@ async function main() {
   //          thing a declaration says: `service` (a process that stays on the
   //          session machine), `launch` (one process per call there), or neither
   //          — and then the statement is the CLIENT's and the declaration has to
-  //          name the `entry` module that runs it (D3 step ④). This is the one
+  //          name the `entry` module that runs it. This is the one
   //          place the answer exists in the page, so these are the checks that
   //          keep it there: a contradiction is a sentence and a byte never
   //          crosses.

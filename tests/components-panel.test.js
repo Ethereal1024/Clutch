@@ -1,6 +1,6 @@
 "use strict";
 
-// The plugin tab is the ONE place this UI can write to a machine (D6), so all
+// The plugin tab is the ONE place this UI can write to a machine, so all
 // three of its write paths are what must not drift silently: which
 // machine a control claims, what the confirmation says, what a refusal looks
 // like, and what the page does afterwards — for the install, for the removal
@@ -479,7 +479,7 @@ const CODE = mod ? mod.code : "";
   // 3b. a record from before installs carried a version is an UPDATE, not a
   // reinstall: the release was never recorded, so there is no release to compare
   // against — the page must not call a bare digest "already holds 0.1.0"
-  // (D1: old records are replaced, not kept beside the new shape).
+  // (old records are replaced, not kept beside the new shape).
   {
     const p = page({ held: [{ name: "clutch-workspace", version: "5f900739e6a35f43", digest: "5f900739e6a35f43" }] });
     await p.open();

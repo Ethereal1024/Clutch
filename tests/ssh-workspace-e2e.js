@@ -8,7 +8,7 @@
 // still answer what the component answers, because its far side is a canned
 // string. Here the far side is the actual `python -m clutch_workspace --json`,
 // so the answer is compared with the component's own — and that comparison is
-// the whole promise of this plugin (see COMPONENTS.md §三: no second
+// the whole promise of this plugin (no second
 // definition of what "read" means). The ssh hop in between is what
 // tests/tunnel*.test.js pins; nothing here needs a network or a key.
 //
@@ -197,7 +197,7 @@ async function main() {
     listener = pluginServer.createPluginServer({ host, token: "e2e-token-0123456789abcdef" });
     const callPort = await listener.listen(0);
     // A call carries the tool's STATEMENT, read out of the declaration the way a
-    // client reads it — never the tool's name (D3 落地③). `{*}` is what the tool
+    // client reads it — never the tool's name. `{*}` is what the tool
     // itself forwards, so the far side still receives `--json <tool> …`.
     const statementOf = (tool) => {
       const spec = (manifest.tools || []).find((entry) => entry.name === tool);

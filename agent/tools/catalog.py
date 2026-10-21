@@ -19,7 +19,7 @@ registry.build_tools). A host with nothing installed can chat and nothing more.
 One declaration is not a component's, and it is declared rather than assumed:
 `run_command`, the single bootstrap exception, whose declaration lives in
 tools/host.py in this very vocabulary and whose name no component may publish
-(HOST_TOOL_NAMES below). See COMPONENTS.md §十一.
+(HOST_TOOL_NAMES below).
 
 Zero built-ins, three sources
 -----------------------------
@@ -41,7 +41,7 @@ The declaration is data. Nothing here executes a tool; `registry` turns a
 declaration into the Tool the model sees, `rendezvous` turns its coordinates
 into a running process, and `ui/js/tool-render.js` turns its `ui` block into
 pixels (`ui/app.js` + `ui/js/*` are the renderer; ui/index.html fixes the order).
-The full manifest spec is COMPONENTS.md at the repo root.
+The full manifest spec is what `read_manifest` and the validators below accept.
 
 The UI protocol (declared per tool, consumed by ui/js/tool-render.js)
 ----------------------------------------------------------
@@ -126,7 +126,7 @@ from ..config import Config
 from . import components, hostconfig, modules
 
 # How a component is spoken to is not a word in the declaration: the declaration
-# already says what it CONTRIBUTES, and that is the answer (D3 step ④). A `service`
+# already says what it CONTRIBUTES, and that is the answer. A `service`
 # block = a process that stays and publishes what a statement names (started by
 # `launch` when it declares one); a `launch` alone = a process this host starts per
 # call; NEITHER = no process here at all, so the statement is the CLIENT's and the
@@ -217,8 +217,8 @@ MODES: tuple[str, ...] = ("work", "chat")
 # requires: the host facilities a component may declare it stands on
 # (rendezvous.unavailable_reason answers whether each holds on this host).
 FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
-# The tool names the HOST itself declares: the bootstrap exception (COMPONENTS.md
-# §五). The host always has exactly these — with nothing installed they ARE its
+# The tool names the HOST itself declares: the bootstrap exception (tools/host.py).
+# The host always has exactly these — with nothing installed they ARE its
 # whole surface — so a component cannot publish one of them: a name the model
 # already means something by is not a component's to redefine (see
 # component_diagnostics). The declarations behind the names live in
@@ -306,7 +306,7 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
     service's statement is spoken to one workspace and a client-side component's is
     the client's, while a host fact belongs to no workspace and is answered here
     (tools/facts.py). And what the declaration CONTRIBUTES, which every other word
-    is now derived from (D3 step ④): a `service` is a process that STAYS, a
+    is now derived from: a `service` is a process that STAYS, a
     `launch` alone is one this host starts per call, and `entry` is the CLIENT's own
     module — so `entry` beside either is a declaration speaking two languages, and
     neither of the first two with no `entry` is a component nothing could run. A
@@ -319,7 +319,7 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
         for f in component.requires
         if f not in FACILITIES
     ]
-    # The third axis is now a DERIVATION, not a word (D3 step ④): a declaration
+    # The third axis is now a DERIVATION, not a word: a declaration
     # says what it contributes and the host reads the rest out of that. `entry` is
     # the client's own module, so naming it beside a process here is one
     # declaration speaking two languages — refused rather than half-read, because
@@ -510,7 +510,7 @@ class Service:
     is a line the host runs per call — its `launch` is then that line's prefix — or
     the client's, which this host never runs at all. PRESENCE, never a word about a
     kind, is what decides that, so "daemon" stops being something a manifest has to
-    claim (DECISIONS.md D3).
+    claim.
 
     `discovery_env` is the env var that repoints the directory (tests, parallel
     checkouts), `app_dir` the directory itself under %LOCALAPPDATA% (or
@@ -552,7 +552,7 @@ class Component:
     registration says its code lives (a component registered out-of-tree).
 
     `subject` is whose resources it serves, and what it CONTRIBUTES is the whole
-    answer to where its statements run (D3 step ④) — the declaration says that
+    answer to where its statements run — the declaration says that
     once and the three predicates below read it out: `service` present means the
     process STAYS and publishes the facts a statement needs (`launch` starts it),
     `launch` alone means one process per call here, and neither means no process
@@ -677,7 +677,7 @@ def _service_of(data: Mapping[str, Any]) -> Service | None:
     presence of the KEY decides, never its truthiness. The same three keys used to
     ride the top level of a manifest, and are still read from there, so a component
     published before this host learned the word drives exactly as it did; that fold
-    goes away with the interface word it was written beside (DECISIONS.md D3).
+    goes away with the interface word it was written beside.
     """
     raw = data.get("service")
     if not isinstance(raw, Mapping):
@@ -741,7 +741,7 @@ def tool_of(raw: Any) -> Tool | None:
     """One tool declaration -> a Tool, or None when it names no usable tool.
 
     A description that is not text is a malformed tool, and the tool is refused:
-    the spec (COMPONENTS.md) says a description is the model-facing string, and
+    the spec says a description is the model-facing string, and
     a declaration the host cannot read as written is better absent than
     garbled.
 
