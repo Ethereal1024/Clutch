@@ -188,9 +188,11 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
     "binary": "",                    // 安装版内自带的可执行文件名，存在则取代整个模板（PyInstaller onefile 用）
     "importable": false              // true = 以 `-m 包名` 驱动，组件目录须进 PYTHONPATH
   },
-  "discovery_env": "",               // daemon 专用：重指发现目录的环境变量名
-  "app_dir": "",                     // daemon 专用：发现记录所在目录（%LOCALAPPDATA% / ~/. 下）
-  "prefix": "",                      // daemon 专用：发现记录文件名前缀
+  "service": {                       // 这一块 = 这个进程**留下**并发布语句要用的事实（第三节）；没有它，`launch` 只是每条语句的前缀
+    "discovery_env": "",             // 重指发现目录的环境变量名
+    "app_dir": "",                   // 发现记录所在目录（%LOCALAPPDATA% / ~/. 下）
+    "prefix": ""                     // 发现记录文件名前缀（名字里带工作区根的摘要，所以一个目录放全部）
+  },
   "requires": ["python"],            // 宿主设施清单："python" | "posix-shell" | "curl"；缺席会点名解释，而不是静默消失
   "vars": { "base": "host.port_url" }, // 语句占位符 -> 宿主事实（见第五节）
   "facts": { "skills": "--facts list" }, // 本组件**发布**的宿主事实（第五节）：token 是宿主的，回答的形状也是
@@ -220,9 +222,18 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 它接受调用契约（daemon：`--workspace <根> --idle <秒>`，围栏时另有 `--protect <glob>`；
 cli：`--envelope` 信封输出）。argv 词逐一交给 Popen，**没有 shell**——引号属于语句层。
 
+`service` 的**存在**（哪怕写的是 `{}`）就是那句话："这个进程起一次就留下，并且发布语句
+要用的 `{port} {token} {pid}`"。没有这一块，`launch` 就只能当每条语句的前缀用——那是一次
+调用一个进程。宿主不读种类词来分辨这两件事（D3）。三个字段都只是**坐标**：记录本身是
+`{"version":1,"workspace":…,"port":…,"token":…,"pid":…,"started":…}`（第三节），文件名是
+`<prefix><sha256(normcase(工作区根))[:32]>.json`。这三个键写在清单顶层是同一份声明的**旧
+拼法**：0.1.57 之前发布的清单仍然被这样读入、折进 `service`，所以旧组件不必先改清单才能
+被新宿主驱动；反过来不成立——旧宿主读新清单会丢掉发现坐标，因此清单迁移搭 0.1.57 那次
+组件重打包的车，不抢先。
+
 ## 三、三种接口
 
-**daemon**：每个工作区一个常驻进程，loopback HTTP。宿主按发现记录（`app_dir` 下
+**daemon**：每个工作区一个常驻进程，loopback HTTP。宿主按发现记录（`service` 的 `app_dir` 下
 `<prefix><digest>.json`，`discovery_env` 可重指）找到它，没有就按 `launch` 拉起。
 组件的 `command` 是**整条**语句（loopback 调用即接口），典型形状：
 

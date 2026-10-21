@@ -1059,6 +1059,7 @@ def check_a_component_publishes_the_host_fact() -> None:
             {
                 "name": "clutch-daemon",
                 "interface": "daemon",
+                "service": {},  # where its record would go: the home directory
                 "directory": str(daemon),
                 "facts": {"skills": "--envelope list"},
                 "tools": [],

@@ -30,11 +30,12 @@ A provider that cannot answer RAISES; a fact is never invented and a component
 this host cannot drive is never rendered at all (rendezvous.available /
 unavailable_reason is the sentence the client shows instead).
 
-The pick of providers is the one thing still keyed on `interface` (`SOURCES`) —
-that is exactly the branch step ② of D3 deletes, when a statement names the facts
-it needs and the declaration says who publishes them. Everything downstream of
-the pick (facts ∪ arguments → template → prefix → runner) is already blind to
-kinds: it is the same six lines for every component.
+The pick of providers asks ONE question, and it is the declaration's to answer:
+does this component publish a `service`? If it does, the statement's values are
+what that process published, and the line is spoken to one workspace. If it does
+not, the statement is a line this host runs itself and `launch` is its prefix.
+Everything downstream of that pick (facts ∪ arguments → template → prefix →
+runner) is blind to kinds: it is the same four lines for every component.
 """
 
 from __future__ import annotations
@@ -53,8 +54,8 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     names (catalog.Component.vars: "host.port_url" -> {base}).
 
     These are the values only the host knows and only a particular component
-    needs: the project file's content service. The prefix of a CLI line is NOT
-    here — that is the artifact's own launch, rendered by launch_prefix() so a
+    needs: the project file's content service. The prefix of a one-process line is
+    NOT here — that is the artifact's own launch, rendered by launch_prefix() so a
     checkout, a package and an installed onefile all drive the same declaration.
     """
     # NB: a key here must never be one of a tool's own argument names — the
@@ -79,8 +80,8 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     return out
 
 
-def launch_prefix(module: str) -> str:
-    """How one one-process component STARTS, as a line prefix ("" for a service,
+def launch_prefix(mod: catalog.Component) -> str:
+    """How a one-process component STARTS, as a line prefix ("" for a service,
     whose process rendezvous starts itself when a statement needs it).
 
     This is the launch contract: the artifact's shape decides the prefix — an
@@ -89,12 +90,13 @@ def launch_prefix(module: str) -> str:
     onefile — and the declaration only says which flags follow it. A component
     therefore needs no second implementation to be installed as a binary.
     """
-    mod = catalog.table().get(module)
-    if mod is None or mod.interface != catalog.CLI:
+    if mod.service is not None:
+        # Its launch starts a process that STAYS; a statement is the loopback call
+        # that process answers, with no prefix of its own.
         return ""
-    resolved = rendezvous.resolve(module)
+    resolved = rendezvous.resolve(mod.name)
     if resolved is None:
-        raise rendezvous.RendezvousError(rendezvous.unavailable_reason(module))
+        raise rendezvous.RendezvousError(rendezvous.unavailable_reason(mod.name))
     words = [shq(word) for word in resolved.argv]
     if resolved.module.launch.importable:
         words.insert(0, f"PYTHONPATH={shq(str(resolved.directory))}")
@@ -134,97 +136,68 @@ class Statement:
         return f"{self.prefix} {command}".rstrip() if self.prefix else command
 
 
-class Source:
-    """Where a component's statements get their facts, and who runs them.
-
-    One method, two implementations today (a one-process artifact, a per-workspace
-    service). A Source answers with a Statement — never with a rendered line: the
-    template belongs to the declaration and the arguments belong to the call, so
-    only those two can fill it in.
-    """
-
-    name = ""
-
-    def statement(self, mod: catalog.Component, workspace: Any, config) -> Statement:
-        raise NotImplementedError
-
-
-class Artifact(Source):
-    """A statement whose component is ONE PROCESS per call.
-
-    Its launch is the call's prefix — an installed onefile is one word, a
-    checkout is `PYTHONPATH=… {py} {script}`, a package is `PYTHONPATH=… {py} -m
-    …` — and the line runs on the APP HOST's machine: the subject of these
-    components is the app's own project file, the network or the skill library,
-    none of which belongs to a workspace.
-    """
-
-    name = "artifact"
-
-    def statement(self, mod: catalog.Component, workspace: Any, config) -> Statement:
-        return Statement(
-            vars=host_vars(mod, config),
-            runner=LocalTransport(str(modules.repo_root())),
-            prefix=launch_prefix(mod.name),
-        )
-
-
-class Service(Source):
-    """A statement spoken to a SERVICE that belongs to one workspace.
-
-    The values are what the daemon published about itself (`{port} {token}
-    {pid}`) and the line is carried by the workspace's own transport: a loopback
-    call has to be issued by the machine the files are on. Which workspace, and
-    whether one is running or has to be started, is rendezvous's question.
-    """
-
-    name = "service"
-
-    def statement(self, mod: catalog.Component, workspace: Any, config) -> Statement:
-        live = rendezvous.service(workspace.root, mod.name, protect=workspace.protected())
-        return Statement(vars=live.vars(), runner=workspace)
-
-
-# The one place the kind of a component still decides anything. A `plugin` has
-# no entry: its statements are the CLIENT's to render and run (registry calls the
-# channel, never this file), and saying so here is better than quietly asking a
-# service that was never meant to exist.
-SOURCES: dict[str, Source] = {catalog.CLI: Artifact(), catalog.DAEMON: Service()}
-
-
 def prepare(module: str, workspace: Any, config) -> Statement:
     """Everything one statement needs before it can be rendered and run.
 
-    A service component is reached through the workspace's own transport (loopback
-    from the machine that owns the files); a one-process component through the app
-    host's, whatever kind of workspace the call came from.
+    The declaration answers one question and this is it: does the component
+    publish a SERVICE? A service belongs to one workspace, so its statement is
+    carried by that workspace's own transport — a loopback call has to be issued by
+    the machine the files are on — and rendezvous decides which workspace, whether
+    one is running, or whether one has to be started. Everything else is the
+    artifact's own line, run on the app host's machine, whatever kind of workspace
+    the call came from.
     """
-    mod = catalog.table().get(module)
-    if mod is None:
-        raise rendezvous.RendezvousError(f"unknown module: {module}")
-    source = SOURCES.get(mod.interface)
-    if source is None:
-        raise rendezvous.RendezvousError(
-            f"{module} is a {mod.interface} component: no statement of its runs on this host"
-        )
-    return source.statement(mod, workspace, config)
+    mod = _declared(module)
+    if mod.service is None:
+        return _artifact(mod, config)
+    live = rendezvous.service(workspace.root, mod.name, protect=workspace.protected())
+    return Statement(vars=live.vars(), runner=workspace)
 
 
 def prepare_cli(module: str, config) -> Statement:
-    """A one-process component's statement, ready to run WITHOUT a workspace.
+    """A standalone statement, ready to run WITHOUT a workspace.
 
     Separate entry point because not every question is a call: a host fact a
     component publishes (tools/facts.py) is asked of the component's own line,
-    outside any workspace and outside any turn, and a service cannot answer it
-    (its statements are spoken to a service that belongs to one workspace — see
-    catalog.component_diagnostics). The runner is the app host's, which is whose
-    machine these statements run on.
+    outside any workspace and outside any turn. A service cannot answer it — its
+    statements are spoken to a service that belongs to one workspace, and a host
+    fact belongs to none (catalog.component_diagnostics refuses the declaration for
+    the same reason). The runner is the app host's, whose machine these statements
+    run on.
     """
+    mod = _declared(module)
+    if mod.service is not None:
+        raise rendezvous.RendezvousError(
+            f"{mod.name} publishes a service: its statements belong to one workspace, and this one belongs to none"
+        )
+    return _artifact(mod, config)
+
+
+def _declared(module: str) -> catalog.Component:
     mod = catalog.table().get(module)
     if mod is None:
         raise rendezvous.RendezvousError(f"unknown module: {module}")
-    if mod.interface != catalog.CLI:
-        raise rendezvous.RendezvousError(
-            f"{module} is a {mod.interface} component: only a one-process statement runs without a workspace"
-        )
-    return Artifact().statement(mod, None, config)
+    return mod
+
+
+def _artifact(mod: catalog.Component, config) -> Statement:
+    """A statement this host runs itself, once per call: its launch IS the prefix.
+
+    The component is one process per call — an installed onefile is one word, a
+    checkout is `PYTHONPATH=… {py} {script}`, a package is `PYTHONPATH=… {py} -m …`
+    — and the line runs on the APP HOST's machine, because the subject of such a
+    component is the app's own project file, the network or the skill library, none
+    of which belongs to a workspace.
+
+    A component with no artifact on this host has no such line at all, and
+    `launch_prefix` says so in the component's own terms
+    (rendezvous.unavailable_reason): for a plugin — whose statements are the
+    CLIENT's to render and run, and which registry sends down the channel instead of
+    here — the sentence is "runs on the client that calls it, and this host has no
+    channel to that client".
+    """
+    return Statement(
+        vars=host_vars(mod, config),
+        runner=LocalTransport(str(modules.repo_root())),
+        prefix=launch_prefix(mod),
+    )

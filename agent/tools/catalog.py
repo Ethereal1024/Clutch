@@ -113,6 +113,7 @@ instead of silently disappearing — see registry.components_unavailable).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -305,12 +306,15 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
     component declaring it would either shadow it or lose silently, and the model
     would have no way to tell which one it is calling. And a `facts` entry: a
     token the host does not know (it would be a fact nothing ever spends), or a
-    fact published by a component that is not a CLI — a daemon's statements are
-    spoken to a service that belongs to one workspace, while a host fact belongs
-    to none (tools/facts.py). And the two words a `plugin` fixes: its process is
-    the client's (so `runs_on` must say `other`) and it has no launch or statement
-    here (so neither may be declared) — the same check for a declaration read from
-    disk and for one the client pushed over its channel (tools/channel.py).
+    fact published by a component whose statement does not stand alone — a
+    service's statement is spoken to one workspace and a plugin's is the client's,
+    while a host fact belongs to no workspace and is answered here (tools/facts.py).
+    And what the declaration says about a service, which the interface word beside
+    it still has to agree with (two spellings of one fact until step ④ of D3). And
+    the two words a `plugin` fixes: its process is the client's (so `runs_on` must
+    say `other`) and it has no launch or statement here (so neither may be
+    declared) — the same check for a declaration read from disk and for one the
+    client pushed over its channel (tools/channel.py).
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
@@ -327,6 +331,29 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                 "",
                 f"unknown runs_on {component.runs_on!r} (host knows {_known((SELF, OTHER))}, and a component "
                 f"that runs elsewhere must say {OTHER!r})",
+            )
+        )
+    # What the declaration SAYS about a service and the word it uses for how this
+    # host speaks to it are two spellings of one fact until `interface` itself goes
+    # away (D3 step ④), so they must agree. A service is a process that STAYS and
+    # publishes the facts a statement names; a statement this host runs per call is
+    # not one, and a daemon whose record nobody publishes has no `{port}` at all.
+    if component.service is not None and component.interface != DAEMON:
+        out.append(
+            Diagnostic(
+                component.name,
+                "",
+                f"a {component.interface} component declares a service, and a service is a process that "
+                f"stays and publishes its facts: this declaration speaks two languages",
+            )
+        )
+    elif component.service is None and component.interface == DAEMON:
+        out.append(
+            Diagnostic(
+                component.name,
+                "",
+                f"a {DAEMON} component must declare `service` (where its process publishes its record): "
+                f"without it a statement's {{port}} is a fact nobody has",
             )
         )
     # The one interface whose implementation this host does NOT have fixes the
@@ -364,13 +391,22 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     f"unknown fact {token!r} (this host publishes {_known(FACT_TOKENS)})",
                 )
             )
-        elif component.interface != CLI:
+        elif component.service is not None:
             out.append(
                 Diagnostic(
                     component.name,
                     "",
-                    f"a {component.interface} component cannot publish the host fact {token!r}: a daemon's "
+                    f"a component whose service answers cannot publish the host fact {token!r}: a service's "
                     f"statement belongs to one workspace, and a host fact belongs to none",
+                )
+            )
+        elif component.interface == PLUGIN:
+            out.append(
+                Diagnostic(
+                    component.name,
+                    "",
+                    f"a {PLUGIN} component cannot publish the host fact {token!r}: its statements are the "
+                    f"client's, and a host fact is answered here",
                 )
             )
     for spec in component.tools:
@@ -461,10 +497,11 @@ class Tool:
     `command` is the statement template `inst.render` fills — the part of the
     line that is the COMPONENT's own business, never how its process starts
     (that is `Component.launch`, which rendezvous renders from the artifact's
-    shape). A daemon's statement is the whole line (the loopback call IS the
-    interface); a CLI's is only the flags after the executable, so the same
-    declaration drives a checkout under an interpreter and an installed onefile.
-    `defaults` rides the payload UNDER the model's arguments.
+    shape). When the component declares a `service`, the statement is the whole
+    line (the loopback call IS the statement); otherwise it is only the flags
+    after the executable, so the same declaration drives a checkout under an
+    interpreter and an installed onefile. `defaults` rides the payload UNDER the
+    model's arguments.
 
     `access` is the host POLICY this tool is subject to — the vocabulary the host
     defines and no declaration invents: "read" / "write" / "sweep" name a path
@@ -501,6 +538,49 @@ class Tool:
 
 
 @dataclass(frozen=True)
+class Service:
+    """Where a component's service publishes what it is serving, and how the host
+    finds it.
+
+    A `service` block is the whole statement "this component's process STAYS": the
+    host starts it once per workspace, reads `{port} {token} {pid}` off the record
+    it publishes, and releases it when idle (rendezvous). A declaration without one
+    is a line the host runs per call — its `launch` is then that line's prefix — or
+    the client's, which this host never runs at all. PRESENCE, never a word about a
+    kind, is what decides that, so "daemon" stops being something a manifest has to
+    claim (DECISIONS.md D3).
+
+    `discovery_env` is the env var that repoints the directory (tests, parallel
+    checkouts), `app_dir` the directory itself under %LOCALAPPDATA% (or
+    `~/.<app_dir>` elsewhere), `prefix` the record's file-name prefix — the record's
+    name carries a hash of the workspace it serves, so one directory holds them all.
+    """
+
+    discovery_env: str = ""
+    app_dir: str = ""
+    prefix: str = ""
+
+    def directory(self) -> Path:
+        """The directory this service publishes its records in.
+
+        Keyed on the declaration, not on a workspace: a record's NAME carries the
+        workspace (a hash of its root, see `record`), so listing the directory is
+        how a caller learns which workspaces are being served without guessing
+        roots — rendezvous.live_daemons is that caller.
+        """
+        override = os.environ.get(self.discovery_env)
+        if override:
+            return Path(override)
+        local = os.environ.get("LOCALAPPDATA")
+        return Path(local) / self.app_dir if local else Path.home() / f".{self.app_dir}"
+
+    def record(self, root: str) -> Path:
+        """The discovery file the service for workspace `root` publishes."""
+        digest = hashlib.sha256(os.path.normcase(root).encode("utf-8")).hexdigest()[:32]
+        return self.directory() / f"{self.prefix}{digest}.json"
+
+
+@dataclass(frozen=True)
 class Component:
     """A component's published coordinates (the host's side of R4).
 
@@ -511,8 +591,11 @@ class Component:
 
     `interface` is how the host talks to it; `runs_on` is whose machine its
     process runs on; `subject` is whose resources it serves. `launch` is how it
-    is started. `vars` maps a statement placeholder to the host fact that fills
-    it. `requires` names the host facilities it needs, so an unavailable
+    is started, and `service` — when the declaration has one — says the process
+    STAYS and publishes the facts a statement needs: `None` means a statement is a
+    line the host runs per call, and the declaration then says no more about where
+    those facts come from. `vars` maps a statement placeholder to the host fact
+    that fills it. `requires` names the host facilities it needs, so an unavailable
     component can say WHY instead of silently disappearing, and `ui` says how
     the user sees it.
 
@@ -527,9 +610,9 @@ class Component:
     something only the component can compute (its own catalog, its own scan). The
     tokens are the host's vocabulary (FACT_TOKENS) and so is the ANSWER SHAPE: one
     JSON array of `{"name", "description"}` on stdout, whatever the component's
-    own `--json` contract looks like. Only a CLI component may publish one (a
-    daemon's statements are spoken to a service that belongs to one workspace, and
-    a host fact belongs to none). See tools/facts.py.
+    own `--json` contract looks like. Only a component whose statement stands ALONE
+    may publish one: a service's statements are spoken to one workspace, and a host
+    fact belongs to none (see tools/facts.py).
     """
 
     name: str
@@ -537,9 +620,9 @@ class Component:
     runs_on: str = SELF
     subject: str = WORKSPACE_FS
     launch: Launch = Launch()
-    discovery_env: str = ""  # env var that repoints the discovery directory
-    app_dir: str = ""  # directory under %LOCALAPPDATA% / ~ holding the records
-    prefix: str = ""  # discovery file name prefix
+    # Presence = "this process stays and publishes what a statement names". None
+    # means the launch above is the prefix of every call instead (statement.py).
+    service: Service | None = None
     requires: tuple[str, ...] = ()
     vars: Mapping[str, str] = field(default_factory=dict)
     facts: Mapping[str, str] = field(default_factory=dict)  # host fact -> the statement that answers it
@@ -597,6 +680,30 @@ def catalog_dir() -> Path:
     return components.root() / "catalog.d"
 
 
+_LEGACY_SERVICE_KEYS = ("discovery_env", "app_dir", "prefix")
+
+
+def _service_of(data: Mapping[str, Any]) -> Service | None:
+    """The declaration's `service`, or None when it declares none.
+
+    `service: {}` is a declaration too — the three fields have defaults, so the
+    presence of the KEY decides, never its truthiness. The same three keys used to
+    ride the top level of a manifest, and are still read from there, so a component
+    published before this host learned the word drives exactly as it did; that fold
+    goes away with the interface word it was written beside (DECISIONS.md D3).
+    """
+    raw = data.get("service")
+    if not isinstance(raw, Mapping):
+        if not any(key in data for key in _LEGACY_SERVICE_KEYS):
+            return None
+        raw = data
+    return Service(
+        discovery_env=str(raw.get("discovery_env", "") or ""),
+        app_dir=str(raw.get("app_dir", "") or ""),
+        prefix=str(raw.get("prefix", "") or ""),
+    )
+
+
 def _component_of(data: Mapping[str, Any]) -> Component | None:
     """One declaration dict -> a Component, or None when it is not one.
 
@@ -631,9 +738,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
             binary=str(launch.get("binary", "") or ""),
             importable=bool(launch.get("importable", False)),
         ),
-        discovery_env=str(data.get("discovery_env", "") or ""),
-        app_dir=str(data.get("app_dir", "") or ""),
-        prefix=str(data.get("prefix", "") or ""),
+        service=_service_of(data),
         requires=tuple(str(r) for r in data.get("requires", ()) or ()),
         vars={str(k): str(v) for k, v in (data.get("vars") or {}).items()},
         facts={str(k): str(v or "").strip() for k, v in raw_facts.items() if str(v or "").strip()},
@@ -836,7 +941,7 @@ def _named(data: Mapping[str, Any], names: frozenset[str]) -> set[str]:
     """Which of `names` the declaration actually writes down.
 
     Judged on the raw JSON, never on the parsed object: the proposal is "named
-    means override", so `requires: []` and `discovery_env: ""` are a declaration
+    means override", so `requires: []` and `service: {}` are a declaration
     saying "none" — a value the `or`-chained merge could not express, because it
     read every false-y field as "not mentioned" and carried the earlier one.
     """
@@ -857,6 +962,10 @@ def _refine(known: Component, declared: Component, data: Mapping[str, Any]) -> C
     adding a field to Component meant remembering this function too.
     """
     named = {f: getattr(declared, f) for f in _named(data, _COMPONENT_FIELDS) if f != "name"}
+    if "service" not in named and any(key in data for key in _LEGACY_SERVICE_KEYS):
+        # The old spelling names the same block one key at a time, and that is still
+        # a declaration of a service: read it whole, not as three unrelated fields.
+        named["service"] = declared.service
     if "launch" in named:
         raw = data.get("launch")
         inner = _named(raw, _LAUNCH_FIELDS) if isinstance(raw, Mapping) else set()

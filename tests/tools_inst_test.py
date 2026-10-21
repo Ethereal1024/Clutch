@@ -102,11 +102,11 @@ def _offline(stub: Stub, *, available: bool = True):
 
     def fake_prepare(module: str, workspace, config) -> statement.Statement:
         mod = catalog.table()[module]
-        if mod.interface == catalog.DAEMON:
+        if mod.service is not None:
             vars_ = rendezvous.Service(module, FAKE_PORT, FAKE_TOKEN, os.getpid()).vars()
         else:
             vars_ = statement.host_vars(mod, config)
-        return statement.Statement(vars=vars_, runner=stub, prefix=statement.launch_prefix(module))
+        return statement.Statement(vars=vars_, runner=stub, prefix=statement.launch_prefix(mod))
 
     rendezvous.available = lambda module: available
     statement.prepare = fake_prepare
@@ -252,9 +252,10 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # tests/rendezvous_test.py (_install_probe), where the install root is a temp
     # dir; here it is whatever this machine has, and either spelling drives the
     # same declaration.
-    memory = shell_words(statement.launch_prefix(modules.MEMORY))
-    search = shell_words(statement.launch_prefix(modules.WEBSEARCH))
-    skills = shell_words(statement.launch_prefix(modules.SKILLS))
+    declared = catalog.table()
+    memory = shell_words(statement.launch_prefix(declared[modules.MEMORY]))
+    search = shell_words(statement.launch_prefix(declared[modules.WEBSEARCH]))
+    skills = shell_words(statement.launch_prefix(declared[modules.SKILLS]))
     # The `[--root {root}]` group this declaration once carried is gone, together
     # with the host var that filled it (config.skills_dir): the COMPONENT owns its
     # library root, so the line names no root at all and the CLI serves its own

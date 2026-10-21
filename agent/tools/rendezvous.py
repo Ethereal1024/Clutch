@@ -15,10 +15,10 @@ has no tools (registry.build_tools) and `unavailable_reason()` is the sentence a
 client can show. Nothing here answers on a component's behalf.
 
 Three facts describe a component and they are independent (see
-catalog.Component): WHAT a statement is spoken to as (interface: a per-workspace
-daemon over loopback HTTP, or one process per call), WHERE its process runs
-relative to the host being asked (runs_on), and WHOSE resources it serves
-(subject). Every component in the table today runs on the host that asks
+catalog.Component): WHAT a statement is spoken to (a `service` — a per-workspace
+process over loopback HTTP, whose record this file finds — or a line the app host
+runs itself), WHERE its process runs relative to the host being asked (runs_on),
+and WHOSE resources it serves (subject). Every component in the table today runs on the host that asks
 (runs_on=SELF), and the axis is ENFORCED rather than decorative: a declaration
 that says OTHER contributes no tools until this host has a channel to that
 other machine (`unavailable_reason` says so, as a sentence a client can show) —
@@ -51,7 +51,6 @@ dictates (see `_read_record`).
 from __future__ import annotations
 
 import atexit
-import hashlib
 import json
 import os
 import shutil
@@ -71,9 +70,10 @@ READY_SECONDS = 10.0  # how long a daemon we just spawned has to publish itself
 STOP_SECONDS = 2.0  # how long a stopped child may take to wind down before it is killed
 DEFAULT_IDLE = 600.0  # the daemon's own idle default; CLUTCH_RENDEZVOUS_IDLE overrides
 
-# The vocabulary (interface / runs_on / subject — catalog.py's constants) is the
-# DECLARATION's, and this file reads it from there rather than restating it: two
-# spellings of "cli" would be two things to keep in step.
+# The vocabulary (runs_on / subject — catalog.py's constants) is the DECLARATION's,
+# and this file reads it from there rather than restating it: two spellings of
+# "other" would be two things to keep in step.
+
 
 class RendezvousError(RuntimeError):
     """No usable service for this workspace and none could be started."""
@@ -82,7 +82,8 @@ class RendezvousError(RuntimeError):
 @dataclass(frozen=True)
 class Resolved:
     """A component found ON THIS HOST: where its code is and how one process of
-    it starts. The launch, never the interface — see catalog.Component."""
+    it starts. The launch, never where the statement is spoken — see
+    catalog.Component."""
 
     module: catalog.Component
     directory: Path
@@ -311,8 +312,8 @@ def serves_workspace_fs(module: str) -> bool:
     spoken to it while the workspace IS that machine (registry.module_blocked_reason); a
     component serving anything else — the app's project file, the network, the
     skill library — is unaffected by where the workspace lives. Keyed on the
-    subject and not on the interface: a daemon serving a foreign filesystem over
-    a channel it owns is a daemon too, and it is not this.
+    subject and not on how the statement is spoken: a service serving a foreign
+    filesystem over a channel it owns is a service too, and it is not this.
     """
     mod = catalog.table().get(module)
     return mod is not None and mod.subject == catalog.WORKSPACE_FS
@@ -395,6 +396,9 @@ def service(root: str | Path, module: str, protect: Iterable[Path | str] = ()) -
     mod = catalog.table().get(module)
     if mod is None:
         raise RendezvousError(f"unknown module: {module}")
+    if mod.service is None:
+        raise RendezvousError(f"{module} publishes no service: its statements run as one process per call")
+    record_of = mod.service
     resolved = str(Path(root).resolve())
     wanted = fence_globs(protect, resolved)
     key = (module, resolved)
@@ -402,9 +406,9 @@ def service(root: str | Path, module: str, protect: Iterable[Path | str] = ()) -
         handle = _HANDLES.get(key)
         if handle is not None and _pid_alive(handle.service.pid) and _covers(handle.fences, wanted):
             return handle.service
-        record = _read_record(resolved, mod)
+        record = _read_record(resolved, record_of)
         live = _service(module, record) if record is not None else None
-        fenced = _fenced_with(resolved, mod, live, handle)
+        fenced = _fenced_with(resolved, record_of, live, handle)
         if live is not None and _covers(fenced, wanted):
             _HANDLES[key] = Handle(service=live, fences=fenced, proc=_child(handle, live.pid))
             return live
@@ -415,7 +419,7 @@ def service(root: str | Path, module: str, protect: Iterable[Path | str] = ()) -
         # and the replacement we start publishes over it.
         _HANDLES.pop(key, None)
         _stop(handle.proc if handle is not None else None)
-        return _start(resolved, mod, _widen(fenced, wanted), key)
+        return _start(resolved, mod, record_of, _widen(fenced, wanted))
 
 
 def release(root: str | Path, module: str) -> None:
@@ -464,13 +468,14 @@ def live_daemons(module: str) -> list[Service]:
     component running? The `.host` notes beside the records are this host's
     fence bookkeeping, not records (see _note_path).
 
-    A one-process interface has no resident daemon at all: nothing to list.
+    A component that publishes no service has no resident process at all: nothing
+    to list.
     """
     mod = catalog.table().get(module)
-    if mod is None or mod.interface != catalog.DAEMON:
+    if mod is None or mod.service is None:
         return []
     try:
-        candidates = sorted(_record_dir(mod).glob(f"{mod.prefix}*.json"))
+        candidates = sorted(mod.service.directory().glob(f"{mod.service.prefix}*.json"))
     except OSError:  # no directory yet is not an error, and not a daemon either
         return []
     out: list[Service] = []
@@ -528,28 +533,7 @@ def stop_for_removal(module: str) -> str:
 # -- discovery: the record a daemon publishes, and its readiness ---------------
 
 
-def _record_path(root: str, mod: catalog.Component) -> Path:
-    """The discovery file a module daemon for this workspace publishes."""
-    digest = hashlib.sha256(os.path.normcase(root).encode("utf-8")).hexdigest()[:32]
-    return _record_dir(mod) / f"{mod.prefix}{digest}.json"
-
-
-def _record_dir(mod: catalog.Component) -> Path:
-    """The directory this module's daemons publish their records in.
-
-    Keyed on the module's own declaration, not on a workspace: a record's NAME
-    carries the workspace (a hash of its root), so listing the directory is how a
-    caller learns which workspaces have a daemon without guessing roots —
-    `stop_for_removal` is that caller.
-    """
-    override = os.environ.get(mod.discovery_env)
-    if override:
-        return Path(override)
-    local = os.environ.get("LOCALAPPDATA")
-    return Path(local) / mod.app_dir if local else Path.home() / f".{mod.app_dir}"
-
-
-def _read_record(root: str, mod: catalog.Component) -> dict | None:
+def _read_record(root: str, service: catalog.Service) -> dict | None:
     """The published record, or None when it is missing, corrupt, or dead.
 
     The record's SHAPE is the one thing the host dictates: the component writes
@@ -558,7 +542,7 @@ def _read_record(root: str, mod: catalog.Component) -> dict | None:
     declaration's statement, and the host only fills its facts in.
     """
     try:
-        payload = json.loads(_record_path(root, mod).read_text(encoding="utf-8"))
+        payload = json.loads(service.record(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return _live_record(payload)
@@ -578,7 +562,7 @@ def _live_record(payload: Any) -> dict | None:
     return payload
 
 
-def _note_path(root: str, mod: catalog.Component) -> Path:
+def _note_path(root: str, service: catalog.Service) -> Path:
     """Where this host writes down the fence it spawned the daemon with.
 
     Beside the daemon's own record, because that is what it describes: the
@@ -587,12 +571,12 @@ def _note_path(root: str, mod: catalog.Component) -> Path:
     host's policy, and no component contract has to carry it for a second
     Clutch window to ride a daemon this one already fenced properly.
     """
-    record = _record_path(root, mod)
+    record = service.record(root)
     return record.with_name(f"{record.stem}.host{record.suffix}")
 
 
 def _fenced_with(
-    root: str, mod: catalog.Component, live: Service | None, handle: Handle | None
+    root: str, service: catalog.Service, live: Service | None, handle: Handle | None
 ) -> tuple[str, ...]:
     """The fence the daemon now serving this workspace was spawned with.
 
@@ -607,15 +591,15 @@ def _fenced_with(
         return ()
     if handle is not None and handle.service.pid == live.pid:
         return handle.fences
-    note = _note(root, mod, live.pid)
+    note = _note(root, service, live.pid)
     return note if note is not None else ()
 
 
-def _note(root: str, mod: catalog.Component, pid: int) -> tuple[str, ...] | None:
+def _note(root: str, service: catalog.Service, pid: int) -> tuple[str, ...] | None:
     """The fence recorded for the daemon at `pid`, or None when no note
     describes THAT daemon (none, junk, or one left about an older daemon)."""
     try:
-        payload = json.loads(_note_path(root, mod).read_text(encoding="utf-8"))
+        payload = json.loads(_note_path(root, service).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict) or payload.get("pid") != pid:
@@ -626,12 +610,12 @@ def _note(root: str, mod: catalog.Component, pid: int) -> tuple[str, ...] | None
     return tuple(protect)
 
 
-def _write_note(root: str, mod: catalog.Component, pid: int, fences: tuple[str, ...]) -> None:
+def _write_note(root: str, service: catalog.Service, pid: int, fences: tuple[str, ...]) -> None:
     """Record the fence the daemon we just started was given.
 
     Best effort: a host that cannot write it loses reuse ACROSS processes,
     never correctness — its own handle still knows the fence."""
-    path = _note_path(root, mod)
+    path = _note_path(root, service)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"pid": pid, "protect": list(fences)}), encoding="utf-8")
@@ -715,7 +699,9 @@ def _import_dirs(resolved: Resolved) -> list[Path]:
     return [resolved.directory] if resolved.module.launch.importable else []
 
 
-def _start(root: str, mod: catalog.Component, fences: tuple[str, ...], key: tuple[str, str]) -> Service:
+def _start(
+    root: str, mod: catalog.Component, service: catalog.Service, fences: tuple[str, ...]
+) -> Service:
     """Spawn one daemon and wait for it to publish ITSELF.
 
     Readiness is the record: a daemon publishes the moment its socket is
@@ -728,7 +714,7 @@ def _start(root: str, mod: catalog.Component, fences: tuple[str, ...], key: tupl
     resolved = resolve(mod.name)
     if resolved is None:
         raise RendezvousError(unavailable_reason(mod.name))
-    before = _read_record(root, mod)
+    before = _read_record(root, service)
     was = before["pid"] if before is not None else None
     cmd = [*resolved.argv, "--workspace", root, "--idle", _idle()]
     for glob in fences:
@@ -742,14 +728,14 @@ def _start(root: str, mod: catalog.Component, fences: tuple[str, ...], key: tupl
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RendezvousError(f"the {mod.name} daemon exited during startup (status {proc.returncode})")
-        record = _read_record(root, mod)
+        record = _read_record(root, service)
         if record is not None and record["pid"] != was:
             svc = _service(mod.name, record)
             # the fence travels with the record, for the host processes that
             # did not spawn this daemon: without the note they would have to
             # replace one they could have ridden
-            _write_note(root, mod, svc.pid, fences)
-            _HANDLES[key] = Handle(service=svc, fences=fences, proc=proc)
+            _write_note(root, service, svc.pid, fences)
+            _HANDLES[(mod.name, root)] = Handle(service=svc, fences=fences, proc=proc)
             return svc
         time.sleep(0.05)
     try:  # a daemon that never published is ours to clean up

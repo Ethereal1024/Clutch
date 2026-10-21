@@ -635,11 +635,12 @@ def main() -> int:
         #     this suite can neither see nor disturb the daemons of the machine it
         #     runs on.
         workspace_mod = catalog.table()[modules.WORKSPACE]
+        discovery_env = workspace_mod.service.discovery_env
         check(
-            workspace_mod.discovery_env and workspace_mod.interface == catalog.DAEMON,
+            bool(discovery_env) and workspace_mod.interface == catalog.DAEMON,
             "the fixture is a daemon component with a repointable discovery directory",
         )
-        os.environ[workspace_mod.discovery_env] = str(Path(root) / "discovery")
+        os.environ[discovery_env] = str(Path(root) / "discovery")
         try:
             ours = _sleeper()
             key = (modules.WORKSPACE, str(Path(root) / "workspace"))
@@ -661,7 +662,7 @@ def main() -> int:
                 "a daemon component installs through the same endpoint as a one-process one",
             )
             foreign = _sleeper()
-            record = rendezvous._record_path(str(Path(root) / "elsewhere"), workspace_mod)
+            record = workspace_mod.service.record(str(Path(root) / "elsewhere"))
             try:
                 record.parent.mkdir(parents=True, exist_ok=True)
                 record.write_text(
@@ -698,7 +699,7 @@ def main() -> int:
             )
             check(components.installed(modules.WORKSPACE) is None, "and the host no longer resolves it")
         finally:
-            os.environ.pop(workspace_mod.discovery_env, None)
+            os.environ.pop(discovery_env, None)
 
         # 8c. the same two verbs over HTTP, for a component with no daemon at all
         st, body_json = http_get(f"{base}/api/components/versions?name={modules.MEMORY}")

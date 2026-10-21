@@ -193,6 +193,38 @@ schema 与说明（`registry._wire`）。唯一残留是 `tool.remote`（plugin 
 `tool.remote`；④删 `interface` / `INTERFACES` / `runs_on`，安装门与 place 改成"贡献 + 执行器"
 推导，五个组件各出一个 manifest commit。
 
+### D3 落地②：服务写进声明（`catalog.Service`）
+
+**声明说的是"谁给出 `{port}`"，不是"这是什么包"**：清单里有一块 `service`（哪怕写的是
+`{}`）= 这个进程起一次就留下，并发布语句要用的 `{port} {token} {pid}`；没有这一块 = 一次
+调用一个进程，`launch` 只能当语句前缀。宿主只看**有无**，不读种类词。
+
+**三个坐标和数据布局落在一处**：`discovery_env` / `app_dir` / `prefix` 收进
+`catalog.Service`，发现记录的目录与文件名也随它——`Service.directory()`（`discovery_env`
+可重指，否则 `%LOCALAPPDATA%/<app_dir>` 或 `~/.<app_dir>`）与 `Service.record(root)`
+（`<prefix><sha256(normcase(root))[:32]>.json`）。这两件以前是 `rendezvous` 的私有函数，
+现在由声明自己回答；`rendezvous` 只拿 `catalog.Service` 去读写记录，摘要算法因此只有一处。
+
+**宿主先行，旧的拼法照旧读**：这三个键原先是清单顶层字段，`_LEGACY_SERVICE_KEYS` +
+`_service_of` 仍从顶层读入并折成同一块（`_refine` 里也把旧拼法当成同一个声明点名的
+`service`）。理由是不对称的：新宿主读**旧**清单必须原样驱动，而旧宿主读**新**清单会丢掉
+发现坐标。所以清单迁移搭 0.1.57 那次组件重打包的车，不抢先——`clutch-workspace/component.json`
+停留在顶层三键，等那次重打包（并把它自己的 gitlink 一起推）。
+
+**临时的一致性检查**（双向、fatal，随④一起删）：声明了 `service` 的必须真是"留下的进程"
+（`interface == daemon`），是 daemon 的必须声明 `service`——否则"这句话没有主语"。它存在的
+唯一原因是枚举还在：`service ⟺ interface == daemon` 是同一件事的两种说法，等 `interface`
+被删（④）它自然消失。
+
+**`statement.prepare` 只剩一个分叉**：`mod.service is None` → `_artifact()`（`launch` 前缀 +
+`command`），否则 `rendezvous.service(...)` → 一条 `vars` 为活动记录、执行器为工作区的
+`Statement`。`prepare_cli()` 明确拒绝带 `service` 的声明：服务的事实属于某一个工作区，而
+CLI 那种语句不属于任何工作区。`launch_prefix()` 对带服务的声明返回空串——服务语句不加前缀。
+
+**进度**：①（`statement.py` 缝、`rendezvous` 收回到进程生命周期）与②（本节）已落地，
+③（`/call` 统一、删 `tool.remote` / `channel.call`）与④（删 `interface` / `INTERFACES`、
+place 推导、市场 schema）未做。
+
 ---
 
 ## D4 说明与指令属于技能层，组件声明里没有 prompt

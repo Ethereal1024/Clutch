@@ -90,12 +90,14 @@ def ask(component: catalog.Component, token: str, config: Config) -> Answer:
     text = component.facts.get(token, "")
     if not text:
         return Answer((), component.name, "")
-    if component.interface != catalog.CLI:
-        # A daemon's statements are spoken to a service that belongs to one
-        # workspace (statement.prepare), and a host fact belongs to none.
-        # component_diagnostics refuses this declaration as well; the answer here
-        # keeps the fact fail-closed for a table that got in before the check.
-        return Answer((), component.name, f"a {component.interface} component cannot publish the host fact {token!r}")
+    if component.service is not None:
+        # A service's statements are spoken to one workspace (statement.prepare),
+        # and a host fact belongs to none. component_diagnostics refuses this
+        # declaration as well; the answer here keeps the fact fail-closed for a
+        # table that got in before the check.
+        return Answer(
+            (), component.name, f"a component whose service answers cannot publish the host fact {token!r}"
+        )
     try:
         ready = statement.prepare_cli(component.name, config)
         command = ready.line(text)

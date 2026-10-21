@@ -325,14 +325,14 @@ def main() -> int:
     os.environ["CLUTCH_RENDEZVOUS_IDLE"] = "10"
     try:
         # 3. discovery: nothing published yet
-        check(rendezvous._read_record(workspace, WS) is None, "no record before the first call")
+        check(rendezvous._read_record(workspace, WS.service) is None, "no record before the first call")
 
         (Path(workspace) / "hello.txt").write_text("hello\n", encoding="utf-8")
         r = _call(workspace, READ_FILE, {"path": "hello.txt"}, {"max_chars": 20000})
         check(not r.error and r.content.strip() == "hello", "a rendered statement reads through the daemon")
 
         # 4. the published record is the frozen contract (version/port/pid/token)
-        record = rendezvous._read_record(workspace, WS)
+        record = rendezvous._read_record(workspace, WS.service)
         check(record is not None and record["version"] == 1, "the daemon published a v1 record")
         check(record["workspace"] == str(Path(workspace).resolve()), "the record names the resolved workspace")
         check(rendezvous._pid_alive(record["pid"]), "the record's pid is alive")
@@ -454,7 +454,7 @@ def main() -> int:
         # 9. release: what this process started, this process stops
         rendezvous.release(workspace, modules.WORKSPACE)
         check(wait_gone(widened.pid) and wait_gone(fenced.pid), "release() stops the daemon (no leaked process)")
-        check(rendezvous._read_record(workspace, WS) is None, "the daemon unpublished its record")
+        check(rendezvous._read_record(workspace, WS.service) is None, "the daemon unpublished its record")
 
         # 9b. a REPLACED daemon does not unpublish its replacement. The record is
         #     rewritten to name somebody else (this test process — alive, so the
@@ -464,7 +464,7 @@ def main() -> int:
         #     delete the record of whatever took over, and the next call would
         #     spawn a second daemon for a workspace that already had one.
         successor = rendezvous.service(workspace, modules.WORKSPACE)
-        record_path = rendezvous._record_path(workspace, WS)
+        record_path = WS.service.record(workspace)
         replaced = json.loads(record_path.read_text(encoding="utf-8"))
         replaced["pid"] = os.getpid()
         record_path.write_text(json.dumps(replaced), encoding="utf-8")
@@ -472,7 +472,7 @@ def main() -> int:
         check(wait_gone(successor.pid), "the daemon we started is stopped")
         check(record_path.exists(), "a replaced daemon left its replacement's record standing")
         record_path.unlink()  # the rest of the run starts from nothing, as before
-        rendezvous._note_path(workspace, WS).unlink(missing_ok=True)
+        rendezvous._note_path(workspace, WS.service).unlink(missing_ok=True)
 
         # 10. the registry: the SAME Tool definition the model sees, executed by
         #     the executor, reaches the machine's workspace module and comes back
@@ -483,7 +483,7 @@ def main() -> int:
         ws = LocalWorkspace(workspace)
         live = reg.execute(ws, cfg, "read_file", {"path": "hello.txt"})
         check(not live.error and live.content.strip() == "hello", "the registry reads through the daemon")
-        check(rendezvous._read_record(workspace, WS) is not None, "the registry started the daemon it needed")
+        check(rendezvous._read_record(workspace, WS.service) is not None, "the registry started the daemon it needed")
 
         # 11. the calls really land where the assertion says they do: written
         #     and rewritten through the daemon, read back from the disk.
