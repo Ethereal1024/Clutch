@@ -196,8 +196,8 @@ const LOCAL = { kind: "local", base: "http://127.0.0.1:8890" };
 const REMOTE = { kind: "remote", base: "http://127.0.0.1:7788" };
 
 const COMPONENTS = [
-  { name: "clutch-workspace", interface: "daemon", version: "0.1.0", origin: "checkout", source: "…/clutch-workspace", published: null },
-  { name: "clutch-memory", interface: "daemon", version: "0.1.0", origin: "release", source: "clutch-memory@v0.1.0", published: null },
+  { name: "clutch-workspace", version: "0.1.0", origin: "checkout", source: "…/clutch-workspace", published: null },
+  { name: "clutch-memory", version: "0.1.0", origin: "release", source: "clutch-memory@v0.1.0", published: null },
 ];
 
 // a fresh page: the real panel file, a fresh mini-DOM, a fake channel
@@ -263,7 +263,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       // a market row as ui/components-view.js entry() answers it: the place comes
       // off the declaration (`destinationOf`), and `problem` is the refusal when
       // the two words name a pair that cannot exist
-      return { entries: entries.map((e) => ({ place: entryPlace, problem: "", runs_on: "self", ...e })), errors, unreachable, origin: "remote", note: "" };
+      return { entries: entries.map((e) => ({ place: entryPlace, problem: "", read: true, ...e })), errors, unreachable, origin: "remote", note: "" };
     },
     install: async (name) => {
       world.installCalls.push(name);
@@ -531,7 +531,7 @@ const CODE = mod ? mod.code : "";
   //     (ui/components-view.js dispatches on the same declaration), which is why
   //     the page can only be right about WHERE by quoting the declaration.
   {
-    const entry = { name: "clutch-websearch", interface: "plugin", place: "client", runs_on: "other", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null };
+    const entry = { name: "clutch-websearch", place: "client", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null };
     const p = page({ entries: [entry], client: true });
     await p.open();
     check(/goes to this client/.test(rowNamed(p.body(), "clutch-websearch").title), "the row facts name the place the declaration names");
@@ -559,8 +559,10 @@ const CODE = mod ? mod.code : "";
   //     no reason beside it (a place this build cannot derive is not a place the
   //     user may choose)
   {
-    const problem = "a plugin is held by this client, so a plugin declaring the session machine cannot be installed anywhere";
-    const p = page({ entries: [{ name: "clutch-odd", interface: "plugin", place: null, problem, version: "1.0.0", origin: "release", source: "…/clutch-odd", published: null }] });
+    const problem =
+      "clutch-odd declares `entry` and `launch`: `entry` is the module this client runs for a component with no " +
+      "process here, and that one starts a process where the session's commands run";
+    const p = page({ entries: [{ name: "clutch-odd", place: null, problem, version: "1.0.0", origin: "release", source: "…/clutch-odd", published: null }] });
     await p.open();
     check(p.buttons()[0].disabled, "the Install beside a contradictory declaration is dead");
     check(p.buttons()[0].title === problem, "and its title is that sentence, quoted rather than paraphrased");
@@ -576,8 +578,8 @@ const CODE = mod ? mod.code : "";
   //     facts), and neither is ever drawn as "nothing is installed there"
   {
     const entries = [
-      { name: "clutch-workspace", interface: "daemon", place: "session", version: "0.1.0", origin: "checkout", source: "…/clutch-workspace", published: null },
-      { name: "clutch-websearch", interface: "plugin", place: "client", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null },
+      { name: "clutch-workspace", place: "session", version: "0.1.0", origin: "checkout", source: "…/clutch-workspace", published: null },
+      { name: "clutch-websearch", place: "client", version: "0.2.0", origin: "checkout", source: "…/clutch-websearch", published: null },
     ];
     const p = page({ entries, heldError: "the supervisor did not answer", client: true, clientHeldError: "the plugin table is unreadable" });
     await p.open();
@@ -598,7 +600,7 @@ const CODE = mod ? mod.code : "";
   {
     const p = page();
     vm.runInContext(
-      "plugState.market = { entries: [{ name: 'clutch-workspace', place: 'session', interface: 'daemon', version: '0.1.0', origin: 'release', source: 'x' }], errors: [] }; renderPlugins();",
+      "plugState.market = { entries: [{ name: 'clutch-workspace', place: 'session', version: '0.1.0', origin: 'release', source: 'x' }], errors: [] }; renderPlugins();",
       p.ctx
     );
     check(p.buttons().length === 1 && p.buttons()[0].disabled, "a row drawn before the read answered has a dead Install");
@@ -1227,8 +1229,8 @@ const CODE = mod ? mod.code : "";
   {
     const entries = [
       ...COMPONENTS,
-      { name: "clutch-websearch", interface: "tool", version: "0.3.0", origin: "release", source: "clutch-websearch@v0.3.0", published: null },
-      { name: "clutch-skills", interface: "tool", version: "0.2.0", origin: "release", source: "clutch-skills@v0.2.0", published: null },
+      { name: "clutch-websearch", version: "0.3.0", origin: "release", source: "clutch-websearch@v0.3.0", published: null },
+      { name: "clutch-skills", version: "0.2.0", origin: "release", source: "clutch-skills@v0.2.0", published: null },
     ];
     const p = page({
       entries,
@@ -1345,8 +1347,8 @@ const CODE = mod ? mod.code : "";
   {
     const entries = [
       ...COMPONENTS,
-      { name: "clutch-websearch", interface: "tool", version: "0.3.0", origin: "release", source: "clutch-websearch@v0.3.0", published: null },
-      { name: "clutch-skills", interface: "tool", version: "0.2.0", origin: "release", source: "clutch-skills@v0.2.0", published: null },
+      { name: "clutch-websearch", version: "0.3.0", origin: "release", source: "clutch-websearch@v0.3.0", published: null },
+      { name: "clutch-skills", version: "0.2.0", origin: "release", source: "clutch-skills@v0.2.0", published: null },
     ];
     const p = page({
       entries,

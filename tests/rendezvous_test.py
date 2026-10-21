@@ -82,7 +82,7 @@ def _install_probe() -> None:
             )
             version = components.install(
                 artifact,
-                {"name": modules.WORKSPACE, "version": "9.9.9", "interface": catalog.DAEMON},
+                {"name": modules.WORKSPACE, "version": "9.9.9", "launch": {"binary": modules.WORKSPACE}},
             )
             check(components.installed(modules.WORKSPACE) == version, "the install layer finds what it just laid down")
             resolved = rendezvous.resolve(modules.WORKSPACE)
@@ -111,7 +111,9 @@ def _install_probe() -> None:
 
             cli = Path(host_root) / "cli-artifact"
             cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            memdir = components.install(cli, {"name": modules.MEMORY, "version": "1.0.0", "interface": catalog.CLI})
+            memdir = components.install(
+                cli, {"name": modules.MEMORY, "version": "1.0.0", "launch": {"binary": modules.MEMORY}}
+            )
             resolved_cli = rendezvous.resolve(modules.MEMORY)
             check(
                 resolved_cli is not None and resolved_cli.installed and not resolved_cli.template,
@@ -123,8 +125,8 @@ def _install_probe() -> None:
             )
             check(rendezvous.available(modules.MEMORY), "so an installed CLI component IS the implementation")
             check(
-                components.verify(memdir, name=modules.MEMORY, interface=catalog.DAEMON) != "",
-                "a manifest contradicting the host's table is refused before use",
+                components.verify(memdir, name=modules.WORKSPACE) != "",
+                "a manifest that is not the component this host asked for is refused before use",
             )
             stray = components.component_root(modules.MEMORY) / "0.0.0-garbage"
             stray.mkdir(parents=True)
@@ -175,7 +177,7 @@ def _disabled_probe() -> None:
             artifact = Path(host_root) / "cli-artifact"
             artifact.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             payload = components.install(
-                artifact, {"name": modules.MEMORY, "version": "1.0.0", "interface": catalog.CLI}
+                artifact, {"name": modules.MEMORY, "version": "1.0.0", "launch": {"binary": modules.MEMORY}}
             )
             digest = components.installed_digest(modules.MEMORY)
             check("disabled" not in rendezvous.unavailable_reason(modules.MEMORY), "nothing is stopped to begin with")
@@ -199,7 +201,6 @@ def _disabled_probe() -> None:
                     {
                         "name": modules.MEMORY,
                         "version": "1.0.0",
-                        "interface": catalog.CLI,
                         "digest": digest,
                         "disabled": True,
                     }
@@ -227,7 +228,7 @@ def _disabled_probe() -> None:
             ws_artifact = Path(host_root) / "daemon-artifact"
             ws_artifact.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             ws_payload = components.install(
-                ws_artifact, {"name": modules.WORKSPACE, "version": "9.9.9", "interface": catalog.DAEMON}
+                ws_artifact, {"name": modules.WORKSPACE, "version": "9.9.9", "launch": {"binary": modules.WORKSPACE}}
             )
             components.set_disabled(modules.WORKSPACE)
             shutil.rmtree(ws_payload)
@@ -271,26 +272,28 @@ def main() -> int:
         check(True, "an unknown module raises")
 
     # 2b. the axes a component is described by, and the one lookup that decides
-    #     where it is. WHAT it is spoken to as (interface) is a separate fact
-    #     from WHOSE resources it serves (subject), which is what makes a
-    #     statement legal for a given workspace at all (registry.module_blocked_reason).
+    #     where it is. Whether it has a process HERE at all is derived from what it
+    #     contributes (`service`/`launch` or the client's `entry`), and that is a
+    #     separate fact from WHOSE resources it serves (subject), which is what
+    #     makes a statement legal for a given workspace at all
+    #     (registry.module_blocked_reason).
     check(rendezvous.serves_workspace_fs(modules.WORKSPACE), "the workspace component serves the workspace filesystem")
     for other in (modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
     # the OTHER half of the same axis: a component that reaches ANOTHER machine's
     # filesystem (clutch-ssh-workspace, a client plugin over the ssh tunnel). It is
-    # the first declaration in this repo that says runs_on=other, which is why the
-    # check below no longer claims that axis is unused.
+    # the first declaration in this repo with no process here at all, which is why
+    # the check below no longer claims that axis is unused.
     ssh_workspace = "clutch-ssh-workspace"
     check(rendezvous.serves_foreign_fs(ssh_workspace), "the ssh plugin serves a foreign filesystem")
     for other in (modules.WORKSPACE, modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_foreign_fs(other), f"{other} is not a foreign filesystem")
     check(not rendezvous.serves_foreign_fs("clutch-nope"), "an unknown component serves nothing there either")
-    elsewhere = [mod.name for mod in catalog.table().values() if mod.runs_on != catalog.SELF]
+    elsewhere = [mod.name for mod in catalog.table().values() if mod.client_side]
     check(elsewhere == [ssh_workspace],
           f"exactly one component in the table runs somewhere else, and it is the ssh plugin ({elsewhere})")
-    check(all(mod.requires for mod in catalog.table().values() if mod.runs_on == catalog.SELF),
+    check(all(mod.requires for mod in catalog.table().values() if mod.runs_here),
           "every component the host drives declares what it stands on")
     check(
         rendezvous.unavailable_reason("clutch-nope") == "unknown component: clutch-nope",
@@ -371,7 +374,11 @@ def main() -> int:
             "which runs in the workspace root, the machine that owns the files",
         )
         cli = next(
-            (m.name for m in catalog.table().values() if m.interface == catalog.CLI and rendezvous.available(m.name)),
+            (
+                m.name
+                for m in catalog.table().values()
+                if m.runs_here and not m.resident and rendezvous.available(m.name)
+            ),
             "",
         )
         if cli:

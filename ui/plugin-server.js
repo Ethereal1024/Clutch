@@ -73,10 +73,14 @@ function bearerOf(header) {
 
 // What this client DECLARES to a session, from what it actually holds: one entry
 // per installed, enabled plugin, projected onto the words the session's parser
-// knows. The projection is a whitelist on purpose — `entry` names a file on THIS
-// machine, `digest` and `location` describe bytes the session will never see, and
-// `launch` would be an implementation the session must never try to start. What
-// travels is what the session needs to offer the tools and nothing more.
+// knows. The projection is a whitelist on purpose — `digest` and `location`
+// describe bytes the session will never see, and `launch`/`service` would be a
+// process the session must not try to start on this machine. `entry` is the one
+// word that has to travel: it is what says these statements are the CLIENT's
+// (agent/tools/catalog.py reads a declaration with no service and no launch as a
+// client-side one, and then `entry` is the implementation). It is a path relative
+// to the component, so it names nothing the session can reach — it only answers
+// "who runs this".
 function declarations(host) {
   const out = [];
   const seen = new Set();
@@ -104,8 +108,7 @@ function declarations(host) {
     const out_one = {
       name: record.name,
       version: String(record.version || declaration.version || ""),
-      interface: "plugin",
-      runs_on: "other",
+      entry: String(declaration.entry || ""),
       tools,
     };
     if (typeof declaration.subject === "string" && declaration.subject) out_one.subject = declaration.subject;

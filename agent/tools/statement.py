@@ -210,27 +210,28 @@ class Statement:
 def prepare(module: str, workspace: Any, config) -> Statement:
     """Everything one statement needs before it can be rendered and run.
 
-    The declaration answers one question and this is it: does the component
-    publish a SERVICE? A service belongs to one workspace, so its statement is
-    carried by that workspace's own transport — a loopback call has to be issued by
-    the machine the files are on — and rendezvous decides which workspace, whether
-    one is running, or whether one has to be started. Everything else is the
-    artifact's own line, run on the app host's machine, whatever kind of workspace
-    the call came from.
+    The declaration answers one question and this is it: is there a process of
+    this component on THIS host? A component with a SERVICE belongs to one
+    workspace, so its statement is carried by that workspace's own transport — a
+    loopback call has to be issued by the machine the files are on — and
+    rendezvous decides which workspace, whether one is running, or whether one has
+    to be started. A component that only declares a `launch` is the artifact's own
+    line, run on the app host's machine, whatever kind of workspace the call came
+    from.
 
-    Two exceptions to "this host renders it", and neither is a kind of component:
-    a `runs_on: other` declaration has its statement spoken by the CLIENT (which
-    declared it and where to call it), and a declaration no live channel holds has
-    no statement at all — fail closed, with the channel's own sentence, before
-    anything could be rendered for it.
+    The exception is not a kind of component, it is the absence of one here
+    (Component.client_side): a declaration with neither a service nor a launch has
+    its statement spoken by the CLIENT (which declared it and where to call it),
+    and a declaration no live channel holds has no statement at all — fail closed,
+    with the channel's own sentence, before anything could be rendered for it.
     """
     mod = _declared(module)
-    if mod.runs_on == catalog.OTHER:
+    if mod.client_side:
         reason = channel.current().reason_for(mod.name)
         if reason:
             raise rendezvous.RendezvousError(reason)
         return Statement(vars={}, runner=Client(), module=mod.name)
-    if mod.service is None:
+    if not mod.resident:
         return _artifact(mod, config)
     live = rendezvous.service(workspace.root, mod.name, protect=workspace.protected())
     return Statement(vars=live.vars(), runner=workspace, module=mod.name)
@@ -248,11 +249,11 @@ def prepare_cli(module: str, config) -> Statement:
     run on.
     """
     mod = _declared(module)
-    if mod.service is not None:
+    if mod.resident:
         raise rendezvous.RendezvousError(
             f"{mod.name} publishes a service: its statements belong to one workspace, and this one belongs to none"
         )
-    if mod.runs_on == catalog.OTHER:
+    if mod.client_side:
         raise rendezvous.RendezvousError(
             f"{mod.name} runs on the client that calls it: its statements are the "
             "client's, and a host fact is answered here"
@@ -278,10 +279,9 @@ def _artifact(mod: catalog.Component, config) -> Statement:
 
     A component with no artifact on this host has no such line at all, and
     `launch_prefix` says so in the component's own terms
-    (rendezvous.unavailable_reason): for a plugin — whose statements are the
-    CLIENT's to render and run, and which registry sends down the channel instead of
-    here — prepare() never reaches this function (it takes the `runs_on: other`
-    branch first).
+    (rendezvous.unavailable_reason): for a component whose statements are the
+    CLIENT's to render and run — which registry sends down the channel instead of
+    here — prepare() never reaches this function (client_side is asked first).
     """
     return Statement(
         vars=host_vars(mod, config),

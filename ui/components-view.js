@@ -5,8 +5,9 @@
 //
 // The one rule this file exists to keep honest: WHERE a component goes is a fact
 // of its declaration, never a choice and never something a page offers (see
-// `destinationOf` in ui/components.js). A plugin is this client's, a cli/daemon is
-// the session machine's, and one component has one place in every session —
+// `destinationOf` in ui/components.js). A component that names only an `entry`
+// module is this client's, one that names a `service` or a `launch` is the session
+// machine's, and one component has one place in every session —
 // so this layer answers per PLACE, not per "target machine", and no caller can
 // aim a write anywhere else.
 //
@@ -238,20 +239,21 @@ function createComponentsView(deps) {
     const declared = spec.declaration || null;
     const published = spec.published || null;
     const row = spec.entry || null;
-    // the two words the declaration is read for, and the one answer they give
-    // (`destinationOf`): a page that had to combine them itself would be a second
-    // copy of the rule, and a page that asked the user would be a third
-    const words = rule.declaredWords(spec);
+    // the contribution the declaration is read for, and the one answer it gives
+    // (`destinationOf`): a page that had to derive the place itself would be a
+    // second copy of the rule, and a page that asked the user would be a third
     const where = rule.destinationOf(spec);
     return {
       name: spec.name,
       id: (row && row.id) || spec.id || "",
-      // where this component goes: "client" | "session" | null (contradiction)
+      // where this component goes: "client" | "session" | null (a contradiction,
+      // or a declaration this page has not read yet — see `read` below)
       place: where.place,
       problem: where.error || "",
-      runs_on: words.runsOn,
-      interface:
-        spec.interface || (declared && declared.interface) || (published && published.interface) || "",
+      // was there a declaration to place it by? A market row is drawn from the
+      // index alone (`marketEntries`), so its release's declaration only arrives
+      // when something is installed from it: "not read yet" is not a refusal.
+      read: where.read,
       version: (declared && declared.version) || (published && published.version) || "",
       origin: spec.checkout ? "checkout" : "market",
       source: spec.checkout ? spec.source : (published && published.source) || spec.source || "",
@@ -317,19 +319,20 @@ function createComponentsView(deps) {
 
   // The market row for one name, from the cached read when it is still fresh.
   //
-  // A row from the index is a POINTER, not a spec: the index's interface and
-  // runs_on are display previews, and which machine receives the bytes has to
-  // come from the module's own declaration. So a market row's manifest is read
-  // (and checked against the row's pin, name and version) HERE — once, when
-  // something is actually about to be installed — while a checkout needs no read
-  // at all: its declaration and its bytes are the directory itself.
+  // A row from the index is a POINTER, not a spec: the index says which release
+  // is current and pins it, and which machine receives the bytes has to come from
+  // the module's own declaration. So a market row's manifest — and the declaration
+  // it pins — is read (and checked against the row's pin, name and version) HERE,
+  // once, when something is actually about to be installed: that is the read that
+  // turns an unplaced row into a placed one. A checkout needs no read at all: its
+  // declaration and its bytes are the directory itself.
   async function specFor(name) {
     const fresh = stillFresh() ? market : await readMarket();
     const listed = fresh.specs.find((s) => s.name === name) || null;
     if (!listed) return null;
-    if (listed.checkout || listed.published || !listed.entry) return listed;
-    const manifest = await lib.entryManifest(listed.entry);
-    return { ...listed, ...manifest, published: manifest };
+    if (listed.checkout || listed.declaration || !listed.entry) return listed;
+    const manifest = listed.published || (await lib.entryManifest(listed.entry));
+    return { ...listed, ...manifest, published: manifest, declaration: await lib.remoteDeclaration(manifest) };
   }
 
   // Hand ONE component to the place its declaration names.

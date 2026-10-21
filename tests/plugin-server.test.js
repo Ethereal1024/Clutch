@@ -47,8 +47,9 @@ function pluginDir(name, { delayMs = 0, tool = "probe_search", extra = {} } = {}
       {
         name,
         version: "0.1.0",
-        interface: "plugin",
         subject: "network",
+        // no `service`, no `launch`: these statements are the CLIENT's, and this is
+        // the module that runs them (agent/tools/catalog.py, D3 step ④)
         entry: "plugin.js",
         ui: { label: "probe" },
         tools: [
@@ -90,7 +91,7 @@ exports.run = async (argv) => {
 function install(host, name, options) {
   const artifact = pluginDir(name, options);
   return host.install({
-    manifest: { name, version: "0.1.0", interface: "plugin", subject: "network" },
+    manifest: { name, version: "0.1.0", subject: "network", entry: "plugin.js" },
     artifact,
     version: "0.1.0",
   });
@@ -245,7 +246,7 @@ async function main() {
   const declared = pluginServer.declarations(host);
   const probe = declared.find((c) => c.name === "clutch-probe");
   check(!!probe, "an installed, enabled plugin is declared");
-  check(probe.interface === "plugin" && probe.runs_on === "other", "as a plugin that runs on the client");
+  check(probe.entry === "plugin.js", "as a component whose statements this client runs: the module travels, the kind does not");
   check(probe.version === "0.1.0", "with the version it is installed as");
   check(probe.subject === "network", "and the subject it serves");
   const tool = (probe.tools || [])[0] || {};
@@ -253,7 +254,10 @@ async function main() {
   check(tool.access === "read" && tool.access_arg === "q" && tool.modes.join() === "work", "policy words travel: the host interprets them");
   check(tool.command === "probe_search {*}", "and the statement it runs, because that is what a call sends back");
   check(tool.defaults === undefined, "…while `defaults` does not: no host renders a plugin's arguments");
-  check(probe.entry === undefined && probe.digest === undefined && probe.launch === undefined && probe.location === undefined, "and neither does where its bytes live on this machine");
+  check(
+    probe.digest === undefined && probe.launch === undefined && probe.service === undefined && probe.location === undefined,
+    "and neither does where its bytes live on this machine — `entry` is a path inside the component, which says who runs it and nothing the session can reach"
+  );
 
   // ---- stop is the whole of it ----
   await server.stop();

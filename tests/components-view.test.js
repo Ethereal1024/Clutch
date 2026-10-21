@@ -27,7 +27,7 @@ function fakeLib(opts = {}) {
     verdict = { status: "installed", name: "clutch-memory", version: VERSION, digest: DIGEST, path: "/root/0.1.0" },
     uploadError = null,
     fetchError = null,
-    versions = [{ name: "clutch-memory", version: VERSION, interface: "cli", digest: DIGEST, path: "/root/0.1.0", resolved: true }],
+    versions = [{ name: "clutch-memory", version: VERSION, digest: DIGEST, path: "/root/0.1.0", resolved: true }],
     versionsError = null,
     removal = { status: "removed", name: "clutch-memory", removed: [VERSION] },
     removeError = null,
@@ -84,23 +84,24 @@ function fakeLib(opts = {}) {
   };
 }
 
+// A checkout carries its own declaration, and this one names a process the
+// SESSION machine starts: `launch`, with no `entry` of its own (D3 step ④ — a
+// declaration says what it CONTRIBUTES, never what kind it is).
 const CHECKOUT = {
   name: "clutch-memory",
-  interface: "cli",
   checkout: true,
   source: "/repo/clutch-memory",
-  declaration: { name: "clutch-memory", interface: "cli", version: "0.1.0" },
+  declaration: { name: "clutch-memory", version: "0.1.0", launch: { argv: ["{py}", "{script}"], entry: "memory.py" } },
   published: {
     name: "clutch-memory",
-    interface: "cli",
     version: "0.1.0",
     source: "https://example.invalid/clutch-component.json",
+    launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
     artifacts: { any: { asset: "clutch-memory.tar.gz", sha256: DIGEST } },
   },
 };
 const RELEASE = {
   name: "clutch-skills",
-  interface: "cli",
   checkout: false,
   version: "0.2.0",
   source: "https://example.invalid/skills.json",
@@ -158,7 +159,7 @@ async function main() {
 
   // ---- 2. what the machine holds ----
   {
-    const { api } = view({ lib: fakeLib({ held: [{ name: "clutch-memory", version: VERSION, interface: "cli", digest: DIGEST }] }) });
+    const { api } = view({ lib: fakeLib({ held: [{ name: "clutch-memory", version: VERSION, digest: DIGEST }] }) });
     const l = await api.list(EMPTY_WIN);
     check(
       l.held.length === 1 && l.held[0].version === VERSION && l.error === null,
@@ -293,9 +294,9 @@ async function main() {
     check(r3.ok && stale.lib.calls.uploads.length === 1, "the same version with other bytes is uploaded, not assumed current");
 
     // a host that refuses: the verdict is the host's, and its reason is what the page shows
-    const refused = view({ lib: fakeLib({ specs: [CHECKOUT], uploadError: "manifest declares interface 'data', expected one of ('daemon', 'cli')" }) });
+    const refused = view({ lib: fakeLib({ specs: [CHECKOUT], uploadError: "manifest names no `entry`: a component this client runs is a module, and one without it has no implementation here" }) });
     const r4 = await refused.api.install("clutch-memory", EMPTY_WIN, {});
-    check(!r4.ok && /interface 'data'/.test(r4.error), "a refusal surfaces with the host's own words");
+    check(!r4.ok && /names no `entry`/.test(r4.error), "a refusal surfaces with the host's own words");
   }
 
   // ---- 5. the ways an install does not happen at all ----
@@ -369,8 +370,8 @@ async function main() {
     const { api, lib } = view({
       lib: fakeLib({
         versions: [
-          { name: "clutch-memory", version: "0.2.0+x", interface: "cli", digest: DIGEST, path: "/root/0.2.0", resolved: true },
-          { name: "clutch-memory", version: VERSION, interface: "cli", digest: DIGEST, path: "/root/0.1.0", resolved: false },
+          { name: "clutch-memory", version: "0.2.0+x", digest: DIGEST, path: "/root/0.2.0", resolved: true },
+          { name: "clutch-memory", version: VERSION, digest: DIGEST, path: "/root/0.1.0", resolved: false },
         ],
       }),
     });
@@ -711,24 +712,39 @@ async function main() {
     check(broken.api.addMirror("https://x.example/").ok === false, "and a write into that store is a sentence as well");
   }
 
-  // ---- 13. where a component goes is a FACT of its declaration, never a choice.
-  //          `destinationOf` (ui/components.js) answers it from the two words the
-  //          manifest already speaks: interface + runs_on. This is the one place
-  //          the answer exists in the page, so these are the checks that keep it
-  //          there: a plugin is this client, a cli/daemon is the session machine,
-  //          a contradiction is a sentence, and a byte never crosses.
+  // ---- 13. where a component goes is a FACT of what it contributes, never a
+  //          choice. `destinationOf` (ui/components.js) answers it from the one
+  //          thing a declaration says: `service` (a process that stays on the
+  //          session machine), `launch` (one process per call there), or neither
+  //          — and then the statement is the CLIENT's and the declaration has to
+  //          name the `entry` module that runs it (D3 step ④). This is the one
+  //          place the answer exists in the page, so these are the checks that
+  //          keep it there: a contradiction is a sentence and a byte never
+  //          crosses.
   {
-    // the two words, read as the four pairs they can make
-    const pluginSpec = { name: "clutch-websearch", interface: "plugin", runs_on: "other", checkout: true, source: "/repo/clutch-websearch" };
-    const daemonSpec = { name: "clutch-workspace", interface: "daemon", runs_on: "self", checkout: true, source: "/repo/clutch-workspace" };
-    const oddSpec = { name: "clutch-odd", interface: "plugin", runs_on: "self", checkout: true, source: "/repo/clutch-odd" };
-    check(components.destinationOf(pluginSpec).place === components.PLACE_CLIENT, "a plugin runs in this client process");
-    check(components.destinationOf(daemonSpec).place === components.PLACE_SESSION, "a daemon runs where the session commands run");
-    check(/has to say/.test(components.destinationOf(oddSpec).error || ""), "a plugin on the session machine is a contradiction, said in words");
+    const decl = (name, extra) => ({ name, checkout: true, source: `/repo/${name}`, declaration: { name, version: "0.1.0", ...extra } });
+    const pluginSpec = decl("clutch-websearch", { entry: "index.js" });
+    const daemonSpec = decl("clutch-workspace", { service: {}, launch: { argv: ["{py}", "{script}"], importable: true } });
+    const perCallSpec = decl("clutch-memory", { launch: { argv: ["{py}", "{script}"], entry: "memory.py" } });
+    const oddSpec = decl("clutch-odd", { entry: "index.js", launch: { argv: ["node", "server.js"] } });
+    const bareSpec = decl("clutch-nothing", { tools: [] });
+    check(components.destinationOf(pluginSpec).place === components.PLACE_CLIENT, "no process on the session machine, an `entry` to run: this client's");
+    check(components.destinationOf(daemonSpec).place === components.PLACE_SESSION, "a `service` runs where the session commands run");
     check(
-      components.destinationOf({ name: "x", interface: "daemon" }).place === components.PLACE_SESSION,
-      "a daemon with no runs_on is the session machine: the declaration defaults, the page does not guess"
+      components.destinationOf(perCallSpec).place === components.PLACE_SESSION,
+      "a `launch` alone is one process per call, started there: the session machine too"
     );
+    check(
+      /declares neither/.test(components.destinationOf(bareSpec).error || ""),
+      "neither a process here nor an `entry`: a component nothing could run, said in words"
+    );
+    check(
+      /declares `entry` and `launch`/.test(components.destinationOf(oddSpec).error || ""),
+      "`entry` beside a process is one declaration speaking two languages, and is refused"
+    );
+    // a row nobody has read yet is NOT a contradiction: the page says so instead
+    const unread = components.destinationOf({ name: "clutch-unread", checkout: false, entry: { manifest: "x" } });
+    check(unread.place === null && unread.read === false && unread.error === "", "a declaration not read yet is 'unknown', not a refusal");
 
     // a client domain, faked as ui/plugin-host.js answers it
     const clientRows = [];
@@ -738,7 +754,7 @@ async function main() {
       versions: (name) => (name === "clutch-websearch" ? [{ name, version: "0.2.0", resolved: true }] : []),
       install: (opts) => {
         put.push(opts);
-        const row = { name: opts.manifest.name, version: opts.version, interface: "plugin", digest: opts.manifest.digest };
+        const row = { name: opts.manifest.name, version: opts.version, digest: opts.manifest.digest };
         clientRows.push(row);
         return row;
       },
@@ -747,7 +763,7 @@ async function main() {
     };
     const lib = fakeLib({ specs: [pluginSpec, daemonSpec, oddSpec] });
     lib.localArtifact = async (file) => file.path;
-    lib.manifestFor = (file) => ({ name: file.name, version: file.version, interface: file.interface });
+    lib.manifestFor = (file) => ({ name: file.name, version: file.version, entry: file.entry });
     const { api } = view({ lib, deps: { plugins: () => pluginHost } });
 
     // 1. the market row says where it goes, and the page is told by whom
@@ -755,8 +771,8 @@ async function main() {
     const rows = m.entries;
     const pluginRow = rows.find((r) => r.name === "clutch-websearch");
     const oddRow = rows.find((r) => r.name === "clutch-odd");
-    check(pluginRow.place === "client" && pluginRow.runs_on === "other", "the market row carries the place its declaration names");
-    check(oddRow.place === null && /has to say/.test(oddRow.problem), "and a contradiction arrives as a problem, with no place at all");
+    check(pluginRow.place === "client" && pluginRow.read === true && !pluginRow.problem, "the market row carries the place its declaration names");
+    check(oddRow.place === null && /declares `entry` and `launch`/.test(oddRow.problem), "and a contradiction arrives as a problem, with no place at all");
 
     // 2. the two inventories are ONE list, each row tagged with its place
     const l = await api.list(EMPTY_WIN);
@@ -776,7 +792,7 @@ async function main() {
 
     // 4. a contradiction is refused BEFORE any byte is built
     const odd = await api.install("clutch-odd", EMPTY_WIN, {});
-    check(odd.ok === false && /has to say/.test(odd.error), "a contradictory declaration is refused");
+    check(odd.ok === false && /declares `entry` and `launch`/.test(odd.error), "a contradictory declaration is refused");
     check(lib.calls.artifacts.length === before.artifacts + 1, "with not one byte built for it beyond the one install above");
 
     // 5. a shell with no client plugin domain says so, and writes nothing

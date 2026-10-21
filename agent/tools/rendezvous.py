@@ -17,15 +17,17 @@ client can show. Nothing here answers on a component's behalf.
 Three facts describe a component and they are independent (see
 catalog.Component): WHAT a statement is spoken to (a `service` — a per-workspace
 process over loopback HTTP, whose record this file finds — or a line the app host
-runs itself), WHERE its process runs relative to the host being asked (runs_on),
-and WHOSE resources it serves (subject). Every component in the table today runs on the host that asks
-(runs_on=SELF), and the axis is ENFORCED rather than decorative: a declaration
-that says OTHER contributes no tools until this host has a channel to that
-other machine (`unavailable_reason` says so, as a sentence a client can show) —
-it must never quietly run here, which is the one thing the word forbids. So a
-component that serves ANOTHER machine's filesystem (an ssh workspace), or one
-that is called FROM another host (a client-side component behind a reverse
-channel), adds an ENTRY to the table, never a branch to a tool.
+runs itself), WHERE its process runs relative to the host being asked (derived:
+a `service` or a `launch` = here, neither = the client that declared it), and
+WHOSE resources it serves (subject). Every component that declares a process runs
+on the host that asks, and the axis is ENFORCED rather than decorative: a
+CLIENT-side declaration (Component.client_side) contributes no tools until this
+host has a channel to that client machine (`unavailable_reason` says so, as a
+sentence a client can show) — it must never quietly run here, which is the one
+thing the derivation forbids. So a component that serves ANOTHER machine's
+filesystem (an ssh workspace), or one that is called FROM another host (a
+client-side component behind a reverse channel), adds an ENTRY to the table, never
+a branch to a tool.
 
 Where a component's artifact comes from is a different question again, and
 tools/components.py answers it: the host runs the component installed on ITS own
@@ -70,9 +72,9 @@ READY_SECONDS = 10.0  # how long a daemon we just spawned has to publish itself
 STOP_SECONDS = 2.0  # how long a stopped child may take to wind down before it is killed
 DEFAULT_IDLE = 600.0  # the daemon's own idle default; CLUTCH_RENDEZVOUS_IDLE overrides
 
-# The vocabulary (runs_on / subject — catalog.py's constants) is the DECLARATION's,
-# and this file reads it from there rather than restating it: two spellings of
-# "other" would be two things to keep in step.
+# The vocabulary (subject, and the service/launch derivation — catalog.Component)
+# is the DECLARATION's, and this file reads it from there rather than restating
+# it: two spellings of "no process here" would be two things to keep in step.
 
 
 class RendezvousError(RuntimeError):
@@ -270,21 +272,21 @@ def unavailable_reason(module: str) -> str:
         return f"unknown component: {module}"
     if components.disabled(mod.name):
         return f"{mod.name} is disabled on this host (its tools are off; the bytes stay)"
-    if mod.runs_on == catalog.OTHER:
-        # Fail CLOSED, and before `resolve`: this component's process belongs to
-        # another machine (the client that called it), so its bytes are not here
-        # and "not installed on this host" would be a lie about the wrong thing.
-        # There is exactly ONE door through that refusal, and it is a live channel
-        # that holds this component's declaration (tools/channel.py): the client
-        # said what it runs and where to call it, so this host can drive it
+    if mod.client_side:
+        # Fail CLOSED, and before `resolve`: this component has no process on this
+        # machine at all (neither `service` nor `launch`), so its bytes are not
+        # here and "not installed on this host" would be a lie about the wrong
+        # thing. There is exactly ONE door through that refusal, and it is a live
+        # channel that holds this component's declaration (tools/channel.py): the
+        # client said what it runs and where to call it, so this host can drive it
         # without ever launching it. Anything else — no push, an older push that
-        # did not name it, a `runs_on: other` declaration nobody implements — is
-        # "no channel", never a quiet local run, which is what the word exists to
+        # did not name it, a client-side declaration nobody implements — is "no
+        # channel", never a quiet local run, which is what the derivation exists to
         # forbid.
-        if mod.interface == catalog.PLUGIN and channel.holds(mod.name):
+        if channel.holds(mod.name):
             return ""
         return (
-            f"{mod.name} runs on the client that calls it (runs_on=other) and this host "
+            f"{mod.name} runs on the client that calls it and this host "
             f"has no channel to that client"
         )
     resolved = resolve(module)

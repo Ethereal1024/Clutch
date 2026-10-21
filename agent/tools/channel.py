@@ -1,13 +1,14 @@
 """The channel to the client that runs part of this session's tool face.
 
-A component whose `runs_on` is `other` does not run on this machine: its bytes,
-its keys and its network belong to the CLIENT — the app the user is looking at.
-The contract keeps that honest from both directions. This host never launches
-such a component, and it never pretends it could (rendezvous.unavailable_reason
-refuses every `other` before it asks the install layer, so "not installed" is
-never said about the wrong thing). What used to be missing was the other half of
-the sentence: a way for the client to say WHAT it runs and WHERE this session may
-call it. That is this module.
+A component with no process on this machine does not run here: its bytes, its
+keys and its network belong to the CLIENT — the app the user is looking at. The
+host reads that off the declaration itself (Component.client_side: neither a
+`service` nor a `launch`), and the contract keeps it honest from both directions.
+This host never launches such a component, and it never pretends it could
+(rendezvous.unavailable_reason refuses every client-side one before it asks the
+install layer, so "not installed" is never said about the wrong thing). What used
+to be missing was the other half of the sentence: a way for the client to say
+WHAT it runs and WHERE this session may call it. That is this module.
 
 It holds exactly one thing — the declarations the client last pushed — plus the
 three facts a call needs: a loopback port, a bearer token, and the generation
@@ -249,14 +250,15 @@ def _validated(payload: Any) -> tuple[int, str, dict[str, catalog.Component]]:
 
 def _plugin_of(data: Any, index: int) -> catalog.Component:
     """One declared component, read through the SAME parser a manifest goes
-    through, then held to what a plugin is allowed to be.
+    through, then held to what a push is allowed to carry.
 
     The parser is shared on purpose: a plugin's declaration is a declaration — the
     same vocabulary, the same diagnostics — and a second reader here would be a
-    second place for the two to disagree. What is added is the two words this
-    interface fixes: `interface: "plugin"` (the client implements it) and
-    `runs_on: "other"` (it runs there, never here), plus the ordinary fatal
-    diagnostics a manifest's typo would also die on.
+    second place for the two to disagree. What is added is the one thing a push
+    cannot be: code this host runs. A declaration with a `service` or a `launch`
+    has a process HERE, and installing that is what the install path is for; only
+    a component whose statements are the client's (neither, plus the `entry`
+    module it runs) belongs on this wire.
     """
     where = f"component #{index + 1}"
     if not isinstance(data, Mapping):
@@ -266,11 +268,12 @@ def _plugin_of(data: Any, index: int) -> catalog.Component:
         where = f"component {named!r}"
     component = catalog._component_of(data)
     if component is None:
-        raise ChannelError(f"{where} is not a declaration this host can read (it needs a name and a known interface)")
-    if component.interface != catalog.PLUGIN:
+        raise ChannelError(f"{where} is not a declaration this host can read (it needs a name)")
+    if not component.client_side:
         raise ChannelError(
-            f"{where} declares interface {component.interface!r}, and only {catalog.PLUGIN!r} may be pushed: "
-            f"anything else is code this host is asked to run, which is an install"
+            f"{where} declares a process on this host (a `service` or a `launch`), and only a component "
+            f"whose statements are the client's may be pushed: anything else is code this host is asked "
+            f"to run, which is an install"
         )
     fatal = [d.message for d in catalog.component_diagnostics(component) if d.fatal]
     if fatal:

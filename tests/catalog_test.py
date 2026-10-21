@@ -128,7 +128,6 @@ def _third_party(name: str, *, tool: str = "say_hello", directory: str = "") -> 
     its own command template, its own UI block — and nothing the host named."""
     return {
         "name": name,
-        "interface": "cli",
         "subject": "network",
         "directory": directory,
         "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
@@ -206,7 +205,6 @@ def _publisher(
     (directory / entry).write_text(body, encoding="utf-8")
     declaration: dict[str, Any] = {
         "name": name,
-        "interface": "cli",
         "directory": str(directory),
         "launch": {"argv": ["{py}", "{script}"], "entry": entry},
         "requires": ["python"],
@@ -326,7 +324,9 @@ def check_checkout_discovery_and_precedence() -> None:
     with isolated_host(
         {
             "clutch-x": declaration,
-            "clutch-nameless": {"interface": "cli"},  # a manifest that names nothing
+            # a manifest that names nothing at all: the retired `interface` word
+            # beside it is not a declaration of anything (D3 step ④)
+            "clutch-nameless": {"interface": "cli"},
         }
     ) as root:
         table = catalog.table()
@@ -336,21 +336,36 @@ def check_checkout_discovery_and_precedence() -> None:
         check(table["clutch-x"].tools[0].name == "x_tool", "the checkout's tools are the table's")
 
         # an install refines: a thin manifest names only the install facts, and
-        # every field it leaves out carries over from the checkout
+        # every field it leaves out carries over from the checkout. It has to name
+        # a contribution of its own — `launch` is what makes it a component this
+        # host can start, and the install gate reads that off the record, never a
+        # word beside it (D3 step ④)
         artifact = root / "artifact"
         artifact.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        components.install(artifact, {"name": "clutch-x", "version": "9.9.9", "interface": "daemon"})
+        components.install(
+            artifact,
+            {
+                "name": "clutch-x",
+                "version": "9.9.9",
+                "prompt": "PROMPT.md",
+                "launch": {"binary": "clutch-x"},
+            },
+        )
         merged = catalog.table()["clutch-x"]
-        check(merged.interface == catalog.DAEMON, "the install's interface overrides the checkout's")
+        check(merged.prompt == "PROMPT.md", "the install's own field overrides the checkout's")
+        check(
+            merged.launch.binary == "clutch-x" and merged.launch.argv == ("{py}", "{script}"),
+            "and its launch refines field by field: the binary it names, the argv it does not",
+        )
         check(merged.subject == catalog.NETWORK, "a field the install leaves out carries")
         check(merged.tools[0].name == "x_tool", "a thin install rides on the checkout's declaration")
 
         # a catalog registration is the last word, field by field
-        _write_registration({**declaration, "interface": "cli", "subject": "workspace-fs"})
+        _write_registration({**declaration, "subject": "workspace-fs"})
         final = catalog.table()["clutch-x"]
         check(
-            final.interface == catalog.CLI and final.subject == catalog.WORKSPACE_FS,
-            "a catalog registration overrides both earlier sources",
+            final.subject == catalog.WORKSPACE_FS and final.launch.binary == "clutch-x",
+            "a catalog registration overrides the field it names and leaves the rest",
         )
 
 
@@ -366,7 +381,6 @@ def check_merge_is_named_means_override() -> None:
     """
     checkout = {
         "name": "clutch-m",
-        "interface": "cli",
         "subject": "network",
         "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
         "requires": ["python", "curl"],
@@ -391,8 +405,8 @@ def check_merge_is_named_means_override() -> None:
         )
         check(merged.launch.entry == "tool.py", "and the entry the later manifest never mentions carries too")
         check(
-            merged.interface == catalog.CLI and merged.subject == catalog.NETWORK,
-            "a field the later declaration leaves out still carries",
+            not merged.resident and merged.subject == catalog.NETWORK,
+            "a field the later declaration leaves out still carries, and a `launch` is still not a service",
         )
         check(merged.ui == {"label": "after"}, "ui is replaced whole, not deep-merged")
         check(merged.vars == {"token": "config.other"}, "vars is replaced whole too — one merge semantic")
@@ -877,7 +891,6 @@ def check_host_facts_in_schema() -> None:
     host knows, and no placeholder leaks through."""
     declaration = {
         "name": "clutch-facts",
-        "interface": "cli",
         "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
         "tools": [
             {
@@ -1058,7 +1071,6 @@ def check_a_component_publishes_the_host_fact() -> None:
         _write_registration(
             {
                 "name": "clutch-daemon",
-                "interface": "daemon",
                 "service": {},  # where its record would go: the home directory
                 "directory": str(daemon),
                 "facts": {"skills": "--envelope list"},
@@ -1096,34 +1108,54 @@ def check_registration() -> None:
             result = reg.execute(ws, cfg, "say_hello", {"who": "世界"})
             check(not result.error and result.content == "echo:世界", "and the tool is executable end to end")
 
-        # runs_on is not decoration: a component whose process belongs to ANOTHER
-        # machine (the client that calls it) is not driven here at all. The one
-        # wrong answer — running it on this host because the word was ignored —
+        # What a declaration CONTRIBUTES is where its statement runs (D3 step ④):
+        # no `service` and no `launch` means no process here, so its statements are
+        # the CLIENT's and `entry` names the module that client runs. The one wrong
+        # answer — running it here because a word beside it was read as a kind —
         # would search the wrong network from the wrong machine and look like a
-        # success, so the refusal is a sentence, said before the install check.
+        # success, so the refusal is a sentence.
         elsewhere = _third_party("clutch-elsewhere", tool="say_elsewhere", directory=str(code))
-        elsewhere["runs_on"] = "other"
+        del elsewhere["launch"]
+        elsewhere["entry"] = "index.js"
         _write_registration(elsewhere)
         check(
-            "no channel" in rendezvous.unavailable_reason("clutch-elsewhere"),
-            "runs_on=other says this host has no channel to that client, instead of running it locally",
+            "runs on the client" in rendezvous.unavailable_reason("clutch-elsewhere"),
+            "a declaration with no process here says this host has no channel to that client, "
+            "instead of running it locally",
         )
         check(
             "say_elsewhere" not in [t.name for t in build_tools(Config())],
             "and its tools never reach the model (fail closed, not fail silently-local)",
         )
 
-        # the same axis as a WORD: a typo is withheld, never read as "self"
-        typo = _third_party("clutch-typo", tool="say_typo", directory=str(code))
-        typo["runs_on"] = "server"
-        _write_registration(typo)
+        # the contradiction is `entry` BESIDE a process here: one declaration
+        # speaking two languages, refused rather than half-read
+        both = _third_party("clutch-both", tool="say_both", directory=str(code))
+        both["entry"] = "index.js"
+        _write_registration(both)
+        fatal = [d.message for d in catalog.diagnostics() if d.fatal]
         check(
-            any(d.fatal and "unknown runs_on 'server'" in d.message for d in catalog.diagnostics() if d.tool == ""),
-            "an unknown runs_on is a fatal word (a typo must not decide which machine runs it)",
+            any("declares `entry` and `launch`" in message for message in fatal),
+            "a declaration naming `entry` and a `launch` is fatal: the client's module beside a process here",
         )
         check(
-            "say_typo" not in [t.name for t in build_tools(Config())],
-            "and the component behind the typo contributes nothing",
+            "say_both" not in [t.name for t in build_tools(Config())],
+            "and the component behind the contradiction contributes nothing",
+        )
+
+        # the retired words are IGNORED, not read: a released manifest still
+        # carrying `interface`/`runs_on` drives exactly as one without them (the
+        # words are retired with the 0.1.57 repack — DECISIONS.md D3)
+        legacy = _third_party("clutch-legacy", tool="say_legacy", directory=str(code))
+        legacy.update({"interface": "cli", "runs_on": "self"})
+        _write_registration(legacy)
+        check(
+            "say_legacy" in [t.name for t in build_tools(Config())],
+            "a manifest still carrying `interface`/`runs_on` drives by what it declares",
+        )
+        check(
+            not [d for d in catalog.diagnostics() if d.component == "clutch-legacy"],
+            "and the retired words raise nothing: they are not part of the declaration any more",
         )
 
 
@@ -1143,7 +1175,7 @@ def check_installed_third_party() -> None:
             {
                 "name": "clutch-thirdparty",
                 "version": "1.0.0",
-                "interface": "cli",
+                "launch": {"binary": "clutch-thirdparty"},
                 "tools": [
                     {
                         "name": "installed_tool",

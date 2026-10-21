@@ -20,7 +20,7 @@
 //   ~/.clutch/client              this client (this app process)
 //
 // What a record IS, and what it is not: the table is bookkeeping (name, version,
-// interface, digest, location, disabled) and the DECLARATION of record stays with
+// digest, location, disabled) and the DECLARATION of record stays with
 // the bytes, in the installed `component.json` — the same split as the session
 // domain (components.py `_entry` vs `_merge_declaration`). A row nobody recorded
 // is not a component (a directory copied in by hand is picked up only by
@@ -80,10 +80,21 @@ const CALL_TIMEOUT_MS = 30000;
 // plugin-host.js to UI_NODE must add plugin-child.js on the same line, or the
 // phone's every call fails at fork time with a missing file.
 const CHILD = path.join(__dirname, "plugin-child.js");
-// The one interface this domain speaks. `daemon` / `cli` mean "a process on the
-// session machine, started by rendezvous"; a frontend plugin is neither, and
-// installing one here is a refusal rather than a component that can never run.
-const INTERFACE = "plugin";
+// What this domain can hold, said as a CONTRIBUTION and never as a kind (D3 step
+// ④, agent/tools/catalog.py): a declaration whose statements are this client's
+// names the module to run (`entry`) and names NO process on the session machine
+// (`service`, `launch`). One that starts a process there belongs to the machine
+// that runs the session, and installing it here would land bytes where nothing
+// can start them.
+function clientSide(declaration) {
+  if (!declaration || typeof declaration !== "object") return "";
+  const entry = String(declaration.entry || "");
+  if (!entry) return "";
+  if (declaration.service !== undefined && declaration.service !== null) return "";
+  const launch = declaration.launch && typeof declaration.launch === "object" ? declaration.launch : null;
+  if (launch && (launch.argv || launch.entry || launch.binary || launch.importable)) return "";
+  return entry;
+}
 
 // Names and versions are path segments: these are the traversal gate as much as a
 // spelling rule (identical to agent/tools/components.py `_NAME_RE` / `_VERSION_RE`,
@@ -142,7 +153,6 @@ function readTable(root) {
     .map((r) => ({
       name: r.name,
       version: String(r.version || ""),
-      interface: String(r.interface || ""),
       digest: String(r.digest || ""),
       location: String(r.location || ""),
       disabled: !!r.disabled,
@@ -183,7 +193,6 @@ function entryFor(root, name, version, directory, manifest, disabled) {
   return {
     name,
     version,
-    interface: String(manifest.interface || ""),
     digest: String(manifest.digest || ""),
     location,
     disabled: !!disabled,
@@ -212,14 +221,21 @@ function checkVersion(version) {
   if (!VERSION_RE.test(String(version || ""))) throw new Error(`bad component version: ${JSON.stringify(version)}`);
 }
 
-function checkInterface(manifest) {
-  const declared = String((manifest && manifest.interface) || "");
-  if (declared !== INTERFACE) {
+// The same question as `clientSide`, asked of a manifest somebody is asking this
+// client to install — and answered with the sentence that says why not.
+function checkClientSide(manifest) {
+  if (clientSide(manifest)) return;
+  const service = manifest && manifest.service !== undefined && manifest.service !== null;
+  if (!service && !(manifest && manifest.launch)) {
     throw new Error(
-      `manifest declares interface ${JSON.stringify(declared)}, expected ${JSON.stringify(INTERFACE)}: ` +
-        "a daemon/cli component belongs to the machine that runs the session, not to this client"
+      "manifest names no `entry`: a component this client runs is a module, and one without it has no " +
+        "implementation here"
     );
   }
+  throw new Error(
+    `manifest declares ${service ? "`service`" : "`launch`"}: a process on the session machine belongs to ` +
+      "the machine that runs the session, not to this client, and this client cannot start it"
+  );
 }
 
 // The version ONE install is recorded under: the component's own version with the
@@ -528,8 +544,7 @@ function createPluginHost(options = {}) {
       }
       if (!declaration || typeof declaration !== "object") continue;
       if (String(declaration.name || "") !== name) continue;
-      if (String(declaration.interface || "") !== INTERFACE) continue;
-      const entry = String(declaration.entry || "");
+      const entry = clientSide(declaration);
       if (!entry) continue;
       const full = path.resolve(dir, entry);
       if (full !== path.resolve(dir) && !full.startsWith(path.resolve(dir) + path.sep)) continue;
@@ -552,7 +567,7 @@ function createPluginHost(options = {}) {
     checkName(name);
     const ver = String(version || wire.version || "");
     checkVersion(ver);
-    checkInterface(wire);
+    checkClientSide(wire);
     if (!artifact) throw new Error("install needs an artifact: a directory or a file");
     const stat = fs.statSync(artifact);
     const isDir = stat.isDirectory();
@@ -717,7 +732,7 @@ function createPluginHost(options = {}) {
         } catch (e) {
           continue;
         }
-        if (!declaration || declaration.interface !== INTERFACE || declaration.name !== name) continue;
+        if (!clientSide(declaration) || declaration.name !== name) continue;
         found.push(entryFor(root, name, version, dir, declaration, false));
       }
     }
@@ -897,7 +912,7 @@ module.exports = {
   REGISTRY,
   REGISTRY_SCHEMA,
   ROOT_ENV,
-  INTERFACE,
+  clientSide,
   ARCHIVE_SUFFIXES,
   CALL_TIMEOUT_MS,
   defaultRoot,

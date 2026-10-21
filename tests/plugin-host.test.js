@@ -6,8 +6,10 @@
 //
 // What it pins, in the order the host itself uses them: a read never creates the
 // root; an install is atomic and prunes the version it replaces; the digest is
-// measured HERE and a mismatch lays nothing down; a bad name / version /
-// interface is refused by the same spelling the session domain uses; a removal of
+// measured HERE and a mismatch lays nothing down; a bad name / version is refused
+// by the same spelling the session domain uses, and a declaration that starts a
+// process on the session machine is refused as another domain's component (D3
+// step ④: a contribution says who runs it, a kind does not); a removal of
 // something not held is a refusal while a removal of nothing is "absent"; the
 // table — not the disk — is what `list` means, and reindex() is the only way a
 // hand-placed payload becomes a component; and the runtime answers, throws,
@@ -97,7 +99,6 @@ function pluginSource(label, opts = {}) {
   const declaration = {
     name: opts.name || label,
     version: "0.1.0",
-    interface: opts.interface || "plugin",
     entry: opts.entry || "index.js",
     tools,
   };
@@ -122,7 +123,7 @@ function freshRoot(label) {
   return path.join(ROOT, "domains", label);
 }
 
-const MANIFEST = { name: "echo", version: "0.1.0", interface: "plugin", entry: "index.js" };
+const MANIFEST = { name: "echo", version: "0.1.0", entry: "index.js" };
 const ECHO = `exports.run = async (argv) => ({content: argv[0] + ':' + (${ARGS}.text || ''), error: false});\n`;
 
 async function main() {
@@ -147,7 +148,8 @@ async function main() {
     check(record.location === "echo/0.1.0", "install: the location is recorded relative to the root (a movable root)");
 
     const rows = host.list();
-    check(rows.length === 1 && rows[0].interface === "plugin", "install: the table has one plugin row");
+    check(rows.length === 1 && rows[0].name === "echo" && rows[0].interface === undefined,
+      "install: the table has one row, and it is bookkeeping — no `interface` is invented for it");
     check(rows[0].disabled === false, "install: a fresh component is not stopped");
 
     const resolved = host.resolve("echo");
@@ -180,7 +182,6 @@ async function main() {
     table.components.unshift({
       name: "echo",
       version: "9.9.9",
-      interface: "plugin",
       digest: "",
       location: "echo/9.9.9",
       disabled: false,
@@ -201,7 +202,7 @@ async function main() {
     const file = tarball(src, "arch");
     const digest = digestOf(file);
     const record = host2.install({
-      manifest: { name: "arch", version: "0.3.0", interface: "plugin", entry: "index.js", digest },
+      manifest: { name: "arch", version: "0.3.0", entry: "index.js", digest },
       artifact: file,
     });
     check(record.digest === digest, "archive: the measured digest is what the row records");
@@ -214,7 +215,6 @@ async function main() {
     const wrong = {
       name: "bad",
       version: "0.1.0",
-      interface: "plugin",
       entry: "index.js",
       digest: DIGEST_BOGUS,
     };
@@ -226,11 +226,11 @@ async function main() {
     // and the same gate on a single-file artifact (a prebuilt runtime, a script)
     const script = write(path.join(ROOT, "src", "single", "run.sh"), "#!/bin/sh\necho hi\n");
     check(refuses(() => host2.install({
-      manifest: { name: "single", version: "0.1.0", interface: "plugin", entry: "single", digest: DIGEST_BOGUS },
+      manifest: { name: "single", version: "0.1.0", entry: "single", digest: DIGEST_BOGUS },
       artifact: script,
     }), /is not the pinned/), "gate: a single file is hashed the same way");
     const single = host2.install({
-      manifest: { name: "single", version: "0.1.0", interface: "plugin", entry: "single", digest: digestOf(script) },
+      manifest: { name: "single", version: "0.1.0", entry: "single", digest: digestOf(script) },
       artifact: script,
     });
     check(single.name === "single" && fs.existsSync(path.join(host2.root, "single", "0.1.0", "single")),
@@ -245,9 +245,17 @@ async function main() {
       "refuse: a name that is a path is not a component name");
     check(refuses(() => host3.install({ manifest: { ...MANIFEST }, artifact: src, version: "../1" }), /bad component version/),
       "refuse: a version that is a path is not a version");
-    check(refuses(() => host3.install({ manifest: { ...MANIFEST, interface: "cli" }, artifact: src }),
+    // who runs a statement is read from what the declaration CONTRIBUTES (D3 step
+    // ④), so the refusal is spelled with a process and not with a kind
+    check(refuses(() => host3.install({ manifest: { ...MANIFEST, service: {} }, artifact: src }),
       /belongs to the machine that runs the session/),
-      "refuse: a cli/daemon manifest is another domain's component, not this client's");
+      "refuse: a manifest that keeps a service on the session machine is not this client's component");
+    check(refuses(() => host3.install({ manifest: { ...MANIFEST, launch: { argv: ["node", "server.js"] } }, artifact: src }),
+      /this client cannot start it/),
+      "refuse: and neither is one that launches a process there");
+    check(refuses(() => host3.install({ manifest: { name: "bare", version: "0.1.0" }, artifact: src }),
+      /names no `entry`/),
+      "refuse: a declaration with no process here and no `entry` has no implementation to run");
     check(refuses(() => host3.install({ manifest: { ...MANIFEST } }), /needs an artifact/), "refuse: install without bytes");
     check(!fs.existsSync(host3.root), "refuse: nothing refused has created the root");
   }
@@ -270,7 +278,7 @@ async function main() {
     // the table is bookkeeping; the disk alone is not a component
     fs.mkdirSync(path.join(host4.root, "hand", "0.1.0"), { recursive: true });
     write(path.join(host4.root, "hand", "0.1.0", "component.json"),
-      JSON.stringify({ name: "hand", version: "0.1.0", interface: "plugin", entry: "index.js", tools: [{ name: "t" }] }));
+      JSON.stringify({ name: "hand", version: "0.1.0", entry: "index.js", tools: [{ name: "t" }] }));
     write(path.join(host4.root, "hand", "0.1.0", "index.js"), "exports.run = async () => 'hand';\n");
     check(host4.list().length === 0, "reindex: a payload copied in by hand is not a component until it is adopted");
     const adopted = host4.reindex();
@@ -280,7 +288,7 @@ async function main() {
     // a hand-placed payload that declares a DIFFERENT name is not adopted: the
     // declaration of record is the artifact's own, and it disagrees with the path
     write(path.join(host4.root, "liar", "0.1.0", "component.json"),
-      JSON.stringify({ name: "not-liar", version: "0.1.0", interface: "plugin", entry: "index.js" }));
+      JSON.stringify({ name: "not-liar", version: "0.1.0", entry: "index.js" }));
     check(host4.reindex().length === 1, "reindex: a payload that calls itself something else is not adopted");
 
     // a malformed table is an error, never a silent "nothing is installed"

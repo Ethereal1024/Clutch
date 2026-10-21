@@ -3,10 +3,11 @@
 A component is a standalone artifact (clutch-workspace, clutch-memory,
 clutch-websearch, clutch-skills) that a host installs FOR ITSELF, on ITS OWN
 machine — the desktop process, or a remote server the client bootstrapped behind
-an SSH tunnel. rendezvous.py owns what a component's PUBLISHED interface is;
-this module owns where its artifact lands and how a host finds it:
+an SSH tunnel. rendezvous.py owns what a component's declaration MEANS (where its
+statement runs, whose files it serves); this module owns where its artifact lands
+and how a host finds it:
 
-    <root>/<name>/<version>/component.json    the manifest (interface, launch)
+    <root>/<name>/<version>/component.json    the manifest (service, launch, entry)
     <root>/<name>/<version>/...               the artifact's own files
 
 Two properties are deliberate.
@@ -26,9 +27,9 @@ prebuilt artifact beside the app) still sends them. Either way one gate decides:
 Shape-agnostic: `install` takes opaque bytes plus a manifest and lays them down
 atomically. The artifact may be a PyInstaller onefile, an archive of scripts, a
 zipapp, a wheel unpacked by whoever built it — the shape is the component's own
-business. Only the manifest and the published interface are the host's (R4), so
-`verify` refuses a manifest whose name or interface contradicts the host's own
-table BEFORE the artifact is used.
+business. Only the manifest and what it contributes are the host's (R4), so
+`verify` refuses a manifest that names another component than the one the table
+holds BEFORE the artifact is used.
 
 Where a host keeps track of all this — the registry table
 --------------------------------------------------------
@@ -141,8 +142,13 @@ def _check_version(version: str) -> None:
     if not _VERSION_RE.match(version):
         raise ValueError(f"bad component version: {version!r}")
 
-REQUIRED_FIELDS = ("name", "version", "interface")
-INTERFACES = ("daemon", "cli")
+REQUIRED_FIELDS = ("name", "version")
+# What a declaration must name for anything to run: a process here (`service`,
+# `launch`) or the module the CLIENT runs (`entry`). One of the three is the whole
+# answer to "where does this component's statement happen" (catalog.Component), so
+# a manifest naming none of them is an artifact nothing could ever drive — refused
+# before it lands rather than installed and never offered.
+CONTRIBUTIONS = ("service", "launch", "entry")
 
 
 def root() -> Path:
@@ -203,7 +209,6 @@ def _entry(
     return {
         "name": name,
         "version": version,
-        "interface": str(manifest.get("interface", "")),
         DIGEST_FIELD: str(manifest.get(DIGEST_FIELD, "")),
         LOCATION_FIELD: location,
         DISABLED_FIELD: bool(disabled),
@@ -268,7 +273,6 @@ def _read_table() -> list[dict[str, Any]] | None:
             {
                 "name": record["name"],
                 "version": str(record.get("version", "")),
-                "interface": str(record.get("interface", "")),
                 DIGEST_FIELD: str(record.get(DIGEST_FIELD, "")),
                 LOCATION_FIELD: str(record.get(LOCATION_FIELD, "")),
                 DISABLED_FIELD: bool(record.get(DISABLED_FIELD, False)),
@@ -499,7 +503,6 @@ def inventory() -> list[dict[str, Any]]:
         {
             "name": str(record["name"]),
             "version": str(manifest.get("version", "")),
-            "interface": str(manifest.get("interface", "")),
             "digest": str(manifest.get(DIGEST_FIELD, "")),
             DISABLED_FIELD: bool(record.get(DISABLED_FIELD, False)),
         }
@@ -569,7 +572,6 @@ def versions(name: str) -> list[dict[str, Any]]:
             {
                 "name": name,
                 "version": str(record["version"]),
-                "interface": str(record.get("interface", "")),
                 "digest": str(record.get(DIGEST_FIELD, "")),
                 "path": str(directory),
                 "resolved": directory == resolved_directory,
@@ -770,8 +772,8 @@ def receive(stream: IO[bytes], length: int, manifest: dict[str, Any]) -> Path:
 def accept(artifact: Path | str, manifest: dict[str, Any]) -> dict[str, Any]:
     """Take one uploaded artifact into this host's install root, or refuse it.
 
-    `manifest` is what the uploader CLAIMS (name, version, interface, the
-    artifact's digest, plus whatever launch shape the artifact has); the
+    `manifest` is what the uploader CLAIMS (name, version, the artifact's digest,
+    plus what the declaration contributes — `service`, `launch` or `entry`); the
     artifact's bytes are what is true. Two verdicts, and a ValueError carrying
     the reason the caller reports as error-as-data:
 
@@ -805,25 +807,22 @@ def accept(artifact: Path | str, manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def verify(directory: Path | str, *, name: str, interface: str) -> str:
+def verify(directory: Path | str, *, name: str) -> str:
     """Why this host must NOT use the component installed at `directory` ("" when
     it may).
 
     The host's table is the frozen contract (R4); the manifest is what the
-    installer recorded. When they disagree about which component this is or how
-    it is spoken to, the artifact is not the one the host asked for — refusing
-    to use it is the only safe answer, and it is a sentence the caller can show.
+    installer recorded. When they disagree about WHICH component this is, the
+    artifact is not the one the host asked for — refusing to use it is the only
+    safe answer, and it is a sentence the caller can show. There is nothing else
+    to compare: how a component is spoken to is read off the declaration itself
+    now (catalog.Component), not off a word beside it (D3 step ④).
     """
     manifest = read_manifest(directory)
     if manifest is None:
         return f"{directory} is not an installed component (no usable {MANIFEST})"
     if manifest["name"] != name:
         return f"installed component is {manifest['name']!r}, expected {name!r}"
-    if manifest["interface"] != interface:
-        return (
-            f"the installed {name} is a {manifest['interface']} component, "
-            f"this host speaks to it as a {interface}"
-        )
     return ""
 
 
@@ -874,9 +873,6 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
     ver = str(version or manifest.get("version", ""))
     _check_name(name)
     _check_version(ver)
-    interface = str(manifest.get("interface", ""))
-    if interface not in INTERFACES:
-        raise ValueError(f"manifest declares interface {interface!r}, expected one of {INTERFACES}")
     if not artifact.is_file():
         raise ValueError(f"artifact is not a file: {artifact}")
 
@@ -895,6 +891,14 @@ def install(artifact: Path | str, manifest: dict[str, Any], *, version: str | No
             exe = staging / name
             shutil.copyfile(artifact, exe)
             exe.chmod(exe.stat().st_mode | 0o755)
+        # WHAT the declaration contributes is where its statement runs (D3 step ④),
+        # and a record naming none of the three is an artifact with nothing to
+        # drive: refused here, before the bytes land, the same way a bad name is.
+        if not any(key in record for key in CONTRIBUTIONS):
+            raise ValueError(
+                f"the declaration names none of {', '.join(CONTRIBUTIONS)}: "
+                f"no process here and no module a client could run"
+            )
         # the installed record is what the host later resolves the component BY
         # (catalog.registrations reads it back), so it is the declaration of
         # record: the wire manifest plus whatever the artifact itself declared

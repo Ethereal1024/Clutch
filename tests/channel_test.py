@@ -2,10 +2,10 @@
 
 Run: .venv/bin/python -m tests.channel_test
 
-A component whose process lives on the CLIENT (interface `plugin`, `runs_on:
-other`) is not installable here: its bytes, its keys and its network belong to the
-app the user is looking at. What reaches this session is a DECLARATION plus the
-coordinates to call it — a loopback port the client's reverse forward listens on
+A component whose statements are the CLIENT's (no `service`, no `launch`, an
+`entry` module) is not installable here: its bytes, its keys and its network
+belong to the app the user is looking at. What reaches this session is a
+DECLARATION plus the coordinates to call it — a loopback port the client's reverse forward listens on
 and a bearer token. This suite pins the four things that make that safe and
 useful:
 
@@ -16,7 +16,7 @@ useful:
   * arrival is visible to the memoized table through the channel's generation, so
     a push is picked up exactly like a manifest that appeared (no invalidate);
   * the door in rendezvous.unavailable_reason opens for a component the live
-    channel holds and for NOTHING else — a `runs_on: other` declaration nobody
+    channel holds and for NOTHING else — a client-side declaration nobody
     implements is still "no channel", never a quiet local run;
   * a call goes over the channel and its answer is the envelope: the component,
     the statement it declared and the model's raw arguments reach the client (this
@@ -111,13 +111,13 @@ class Client:
 
 
 def _plugin(name: str = "clutch-probe", tool: str = "probe_search", **extra) -> dict:
-    """A declaration the way the client writes one: no launch (the implementation
-    is its own code, behind the channel) and each tool's own statement — the
-    template the CLIENT renders and runs, which is what crosses the wire."""
+    """A declaration the way the client writes one: no `service` and no `launch`
+    (the implementation is its own code, behind the channel), `entry` naming the
+    module the client loads, and each tool's own statement — the template the
+    CLIENT renders and runs, which is what crosses the wire."""
     declaration = {
         "name": name,
-        "interface": "plugin",
-        "runs_on": "other",
+        "entry": "index.js",
         "subject": "network",
         "tools": [
             {
@@ -211,9 +211,9 @@ def check_one_push_opens_the_door() -> None:
             check("clutch-probe-b" not in catalog.table(), "a cleared channel takes its components out of the table")
             # A PUSHED declaration lives and dies with the channel, so after a
             # clear there is no door left to explain: the name is simply unknown
-            # here. (An INSTALLED runs_on=other declaration is the other case —
-            # it stays in the table and says "no channel"; tests/catalog_test.py
-            # pins that one.)
+            # here. (An INSTALLED client-side declaration is the other case — it
+            # stays in the table and says "no channel"; tests/catalog_test.py pins
+            # that one.)
             reason = rendezvous.unavailable_reason("clutch-probe-b")
             check(not rendezvous.available("clutch-probe-b") and "unknown component" in reason, "and the door is shut again")
             check("probe_b" not in [t.name for t in build_tools(cfg)], "with no tool left to call")
@@ -262,24 +262,21 @@ def check_a_bad_push_is_refused_whole() -> None:
             _refused({**good, "components": "probe"}, "at least one component", "components must be a list")
             _refused({**good, "components": ["nope"]}, "not an object", "a component must be an object")
             _refused(
-                {**good, "components": [{**_plugin(), "interface": "cli"}]},
-                "only 'plugin' may be pushed",
-                "a pushed component that is not a plugin is refused (that is an install)",
-            )
-            _refused(
-                {**good, "components": [{**_plugin(), "runs_on": "self"}]},
-                "say runs_on",
-                "a plugin that claims to run here is refused (there is nothing to run)",
-            )
-            _refused(
-                {**good, "components": [{**_plugin(), "runs_on": "server"}]},
-                "unknown runs_on",
-                "an unknown runs_on is fatal, on the channel as on the disk",
-            )
-            _refused(
                 {**good, "components": [{**_plugin(), "launch": {"argv": ["{py}", "{script}"]}}]},
-                "no launch on this host",
-                "a plugin that declares how to start it here is refused",
+                "declares a process on this host",
+                "a pushed component that says how to start it here is refused (that is an install)",
+            )
+            _refused(
+                {**good, "components": [{**_plugin(), "service": {}}]},
+                "declares a process on this host",
+                "and one that says its process STAYS here is refused the same way",
+            )
+            entryless = _plugin()
+            del entryless["entry"]
+            _refused(
+                {**good, "components": [entryless]},
+                "name the `entry` module",
+                "a push naming no process here and no client module runs nothing at all",
             )
             bad_tool = _plugin()
             bad_tool["tools"][0].pop("command")
@@ -310,12 +307,14 @@ def _pushed_projection(manifest: dict) -> dict:
     Kept beside the check rather than shared with anything: it exists to prove the
     shipped file works on the far side of the wire, and a helper the sender also
     used would prove only that the sender agrees with itself. Two things are
-    dropped on purpose — `entry` (a path inside the installed version, which names
-    this machine's files). What a tool DOES travel with is its `command`: for a
-    plugin that template is the statement the client itself runs (D3 step ③), and
-    this host sends it back verbatim.
+    dropped on purpose — an installed `directory`, and the `launch` a checkout
+    declares: both name this machine's files. `entry` DOES travel, because it is
+    the client's own module — the one name that says these statements run there
+    (D3 step ④). What a tool travels with is its `command`: for a plugin that
+    template is the statement the client itself runs (D3 step ③), and this host
+    sends it back verbatim.
     """
-    keep = ("name", "version", "interface", "runs_on", "subject", "requires", "ui", "prompt")
+    keep = ("name", "version", "entry", "subject", "requires", "ui", "prompt")
     pushed = {key: manifest[key] for key in keep if key in manifest}
     tools = []
     for tool in manifest.get("tools") or []:
@@ -341,7 +340,7 @@ def check_the_real_websearch_plugin() -> None:
     """The shipped `clutch-websearch/plugin/component.json` through the push parser.
 
     A plugin's declaration is a declaration: it is read by the same parser a
-    manifest goes through, and the two rules for this interface are that its tools
+    manifest goes through, and the two rules for a client-side declaration are that its tools
     carry a model-facing description (the tool the model is offered) and that they
     carry the `command` the client itself declared — the template this host sends
     back verbatim and the client renders into argv. A file that only ever travelled
@@ -353,11 +352,17 @@ def check_the_real_websearch_plugin() -> None:
         return
     with isolated_host():
         manifest = json.loads(CLIENT_PLUGIN.read_text(encoding="utf-8"))
-        check(manifest.get("interface") == "plugin", "the shipped plugin calls itself a plugin")
-        check(manifest.get("runs_on") == "other", "and says its process runs on the client")
+        check(
+            not manifest.get("service") and not manifest.get("launch"),
+            "the shipped plugin declares no process here: no `service`, no `launch`",
+        )
+        check(manifest.get("entry") == "index.js", "and names the module the client itself runs")
 
         pushed = _pushed_projection(manifest)
-        check("entry" not in pushed, "its entry point stays on the machine that has the file")
+        check(
+            pushed.get("entry") == "index.js",
+            "which travels with the push: it is the client's own module, not a path on this host",
+        )
 
         component = channel._plugin_of(pushed, 0)
         check(component.name == manifest["name"], "the push accepts it under its own name")
@@ -554,7 +559,7 @@ def check_the_machine_a_component_serves() -> None:
                 "and the far-side component has nothing to explain for an ssh root",
             )
 
-            # the subject, not the name or the interface, is what decides
+            # the subject, not the name or what it contributes, is what decides
             check(
                 not rendezvous.serves_workspace_fs("clutch-ssh-workspace")
                 and rendezvous.serves_foreign_fs("clutch-ssh-workspace"),

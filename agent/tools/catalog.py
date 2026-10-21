@@ -1,14 +1,15 @@
 """The component catalog: what this host knows how to drive, and how to show it.
 
-A component is a standalone program that publishes an interface the host speaks
-to (a per-workspace daemon over loopback HTTP, or one process per call). The
-host imports NOTHING from it: it holds a DECLARATION of the component — what it
-is spoken to as and where it runs (interface / runs_on), whose resources it
-serves (subject), how one of its processes starts (launch), which host facts its
-statements need (vars) and which host facts IT answers (facts), which tools it
-publishes (each with the model-facing schema, the one statement that satisfies a
-call, and how the UI presents it), and how the user sees the component's own
-state (ui).
+A component is a standalone program whose statements the host speaks — a process
+that stays and is spoken to over loopback HTTP, one process per call, or NO
+process here at all, in which case the client that declared it renders and runs
+the statement. The host imports NOTHING from it: it holds a DECLARATION of the
+component — what it contributes (`service` = a process that stays, `launch` = a
+process this host starts per call, neither = the client's own `entry` module),
+whose resources it serves (subject), which host facts its statements need (vars)
+and which host facts IT answers (facts), which tools it publishes (each with the
+model-facing schema, the one statement that satisfies a call, and how the UI
+presents it), and how the user sees the component's own state (ui).
 
 There is no host-side implementation behind any of it, and no fallback either:
 a tool this catalog does not describe does not exist for the model, and a
@@ -124,20 +125,15 @@ from typing import Any
 from ..config import Config
 from . import components, hostconfig, modules
 
-# How a component is spoken to.
-DAEMON = "daemon"  # a per-workspace HTTP service discovered through a record
-CLI = "cli"  # one command line per call
-# PLUGIN: no process here at all. The implementation is the CLIENT's, named by a
-# declaration the client pushes over its own channel (tools/channel.py), and this
-# host reaches it through that channel's port and token. It is the one interface
-# whose code this host never sees, which is why it also fixes `runs_on`: a plugin
-# that claimed to run here would be a declaration with no implementation behind
-# it, refused as such (component_diagnostics).
-PLUGIN = "plugin"
-
-# Where a component's process runs, RELATIVE TO THE HOST BEING ASKED.
-SELF = "self"
-OTHER = "other"  # another host, through a channel of its own (rendezvous: only while a live channel holds it)
+# How a component is spoken to is not a word in the declaration: the declaration
+# already says what it CONTRIBUTES, and that is the answer (D3 step ④). A `service`
+# block = a process that stays and publishes what a statement names (started by
+# `launch` when it declares one); a `launch` alone = a process this host starts per
+# call; NEITHER = no process here at all, so the statement is the CLIENT's and the
+# declaration names the `entry` module it runs (tools/channel.py). The old words
+# `interface` and `runs_on` are ignored when a manifest still carries them
+# (released manifests do, until the 0.1.57 repack) and refused when a declaration
+# tries to have it both ways (component_diagnostics).
 
 # Whose resources a component serves — which decides whether a statement may run
 # for a given workspace at all (registry.module_blocked_reason).
@@ -307,84 +303,46 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
     would have no way to tell which one it is calling. And a `facts` entry: a
     token the host does not know (it would be a fact nothing ever spends), or a
     fact published by a component whose statement does not stand alone — a
-    service's statement is spoken to one workspace and a plugin's is the client's,
-    while a host fact belongs to no workspace and is answered here (tools/facts.py).
-    And what the declaration says about a service, which the interface word beside
-    it still has to agree with (two spellings of one fact until step ④ of D3). And
-    the two words a `plugin` fixes: its process is the client's (so `runs_on` must
-    say `other`) and it has no launch here (so it may not declare one) — the same
-    check for a declaration read from disk and for one the client pushed over its
-    channel (tools/channel.py). Its tools, on the other hand, MUST carry a
-    `command`: that template is the statement the client itself runs, sent to it
-    verbatim (tools/statement.py, tools/channel.py) — a plugin tool without one is
-    a tool nothing could carry out.
+    service's statement is spoken to one workspace and a client-side component's is
+    the client's, while a host fact belongs to no workspace and is answered here
+    (tools/facts.py). And what the declaration CONTRIBUTES, which every other word
+    is now derived from (D3 step ④): a `service` is a process that STAYS, a
+    `launch` alone is one this host starts per call, and `entry` is the CLIENT's own
+    module — so `entry` beside either is a declaration speaking two languages, and
+    neither of the first two with no `entry` is a component nothing could run. A
+    client-side component's tools MUST carry a `command`: that template is the
+    statement the client itself runs, sent to it verbatim (tools/statement.py,
+    tools/channel.py) — a tool without one is a tool nothing could carry out.
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
         for f in component.requires
         if f not in FACILITIES
     ]
-    # The third axis, as a WORD: a `runs_on` the host does not know is a typo, and
-    # a typo here decides whether a component's process is expected on this
-    # machine. Unknown means withheld (fatal), never "assume self".
-    if component.runs_on not in (SELF, OTHER):
+    # The third axis is now a DERIVATION, not a word (D3 step ④): a declaration
+    # says what it contributes and the host reads the rest out of that. `entry` is
+    # the client's own module, so naming it beside a process here is one
+    # declaration speaking two languages — refused rather than half-read, because
+    # either reading would run a statement on a machine the author did not mean.
+    if component.entry and component.runs_here:
+        which = "`service`" if component.resident else "`launch`"
         out.append(
             Diagnostic(
                 component.name,
                 "",
-                f"unknown runs_on {component.runs_on!r} (host knows {_known((SELF, OTHER))}, and a component "
-                f"that runs elsewhere must say {OTHER!r})",
+                f"a component declares `entry` and {which}: `entry` is the module the CLIENT runs for a "
+                f"component with no process here, and {which} starts one on this host",
             )
         )
-    # What the declaration SAYS about a service and the word it uses for how this
-    # host speaks to it are two spellings of one fact until `interface` itself goes
-    # away (D3 step ④), so they must agree. A service is a process that STAYS and
-    # publishes the facts a statement names; a statement this host runs per call is
-    # not one, and a daemon whose record nobody publishes has no `{port}` at all.
-    if component.service is not None and component.interface != DAEMON:
+    elif not component.runs_here and not component.entry:
         out.append(
             Diagnostic(
                 component.name,
                 "",
-                f"a {component.interface} component declares a service, and a service is a process that "
-                f"stays and publishes its facts: this declaration speaks two languages",
+                "a component declares neither `service` nor `launch`, so it has no process here and its "
+                "statements are the client's: name the `entry` module that client runs",
             )
         )
-    elif component.service is None and component.interface == DAEMON:
-        out.append(
-            Diagnostic(
-                component.name,
-                "",
-                f"a {DAEMON} component must declare `service` (where its process publishes its record): "
-                f"without it a statement's {{port}} is a fact nobody has",
-            )
-        )
-    # The one interface whose implementation this host does NOT have fixes the
-    # other two words as well, and a declaration that got them wrong is refused
-    # rather than half-read. A plugin's process is the client's (`runs_on: other`),
-    # and it has no launch and no statement HERE: either would be this host being
-    # asked to run a copy of what the client's own declaration says it runs, and
-    # two implementations of one tool is the failure the whole split exists to
-    # avoid.
-    if component.interface == PLUGIN:
-        if component.runs_on != OTHER:
-            out.append(
-                Diagnostic(
-                    component.name,
-                    "",
-                    f"a {PLUGIN} component's implementation is the client's: say runs_on: {OTHER!r}, "
-                    f"not {component.runs_on!r}",
-                )
-            )
-        if component.launch.argv or component.launch.entry or component.launch.binary or component.launch.importable:
-            out.append(
-                Diagnostic(
-                    component.name,
-                    "",
-                    f"a {PLUGIN} component declares no launch on this host: how its process starts is the "
-                    f"client's business",
-                )
-            )
     for token in component.facts:
         if token not in FACT_TOKENS:
             out.append(
@@ -394,7 +352,7 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     f"unknown fact {token!r} (this host publishes {_known(FACT_TOKENS)})",
                 )
             )
-        elif component.service is not None:
+        elif component.resident:
             out.append(
                 Diagnostic(
                     component.name,
@@ -403,13 +361,13 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     f"statement belongs to one workspace, and a host fact belongs to none",
                 )
             )
-        elif component.interface == PLUGIN:
+        elif component.client_side:
             out.append(
                 Diagnostic(
                     component.name,
                     "",
-                    f"a {PLUGIN} component cannot publish the host fact {token!r}: its statements are the "
-                    f"client's, and a host fact is answered here",
+                    f"a component whose statement is the client's cannot publish the host fact {token!r}: "
+                    f"its statements run there, and a host fact is answered here",
                 )
             )
     for spec in component.tools:
@@ -433,13 +391,14 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     f"cannot publish it — rename this tool",
                 )
             )
-        if component.interface == PLUGIN and not spec.command:
+        if component.client_side and not spec.command:
             out.append(
                 Diagnostic(
                     component.name,
                     spec.name,
-                    f"a {PLUGIN} tool must carry a command: it IS the statement the client declared, and a "
-                    f"tool without one names nothing this host could ask the client to run",
+                    "a tool of a component whose statements are the client's must carry a command: it IS the "
+                    "statement the client declared, and a tool without one names nothing this host could ask "
+                    "the client to run",
                 )
             )
         out.extend(tool_diagnostics(component.name, spec))
@@ -462,8 +421,8 @@ def diagnostics(table_: Mapping[str, Component] | None = None) -> list[Diagnosti
 
 @dataclass(frozen=True)
 class Launch:
-    """How this host STARTS one component process — the artifact's shape, never
-    its interface.
+    """How this host STARTS one component process — the artifact's shape, never a
+    kind named beside it.
 
     `argv` is a template in argv words (not a shell line: these are handed to
     Popen as separate words, so nothing here is quoted — shell quoting belongs
@@ -477,8 +436,8 @@ class Launch:
 
     Nothing above is a restriction on what a component MAY be — a onefile, a
     script, a package, an executable of any language, as long as it accepts the
-    invocation contract (--workspace/--idle/--protect for a daemon, --envelope
-    for a CLI).
+    invocation contract (--workspace/--idle/--protect when it stays and publishes
+    a service, --envelope when it answers one call and exits).
     """
 
     argv: tuple[str, ...] = ()
@@ -592,15 +551,16 @@ class Component:
     string, so a rename is one edit). `directory` overrides where a
     registration says its code lives (a component registered out-of-tree).
 
-    `interface` is how the host talks to it; `runs_on` is whose machine its
-    process runs on; `subject` is whose resources it serves. `launch` is how it
-    is started, and `service` — when the declaration has one — says the process
-    STAYS and publishes the facts a statement needs: `None` means a statement is a
-    line the host runs per call, and the declaration then says no more about where
-    those facts come from. `vars` maps a statement placeholder to the host fact
-    that fills it. `requires` names the host facilities it needs, so an unavailable
-    component can say WHY instead of silently disappearing, and `ui` says how
-    the user sees it.
+    `subject` is whose resources it serves, and what it CONTRIBUTES is the whole
+    answer to where its statements run (D3 step ④) — the declaration says that
+    once and the three predicates below read it out: `service` present means the
+    process STAYS and publishes the facts a statement needs (`launch` starts it),
+    `launch` alone means one process per call here, and neither means no process
+    here at all — the statement is the CLIENT's, and `entry` names the module that
+    client runs. `vars` maps a statement placeholder to the host fact that fills
+    it. `requires` names the host facilities it needs, so an unavailable component
+    can say WHY instead of silently disappearing, and `ui` says how the user sees
+    it.
 
     `prompt` is the fragment of model-facing prose the component carries for the
     system prompt (a file inside its own directory, like `launch.entry`): the
@@ -619,13 +579,16 @@ class Component:
     """
 
     name: str
-    interface: str = DAEMON
-    runs_on: str = SELF
     subject: str = WORKSPACE_FS
     launch: Launch = Launch()
-    # Presence = "this process stays and publishes what a statement names". None
-    # means the launch above is the prefix of every call instead (statement.py).
+    # Presence = "this process stays and publishes what a statement names"; the
+    # launch above then only starts it. None means the launch is the prefix of
+    # every call instead (statement.py).
     service: Service | None = None
+    # Presence = "no process on this host at all": the module the CLIENT runs for
+    # each statement. The host never reads the file, only the name it refuses to
+    # do without (component_diagnostics).
+    entry: str = ""
     requires: tuple[str, ...] = ()
     vars: Mapping[str, str] = field(default_factory=dict)
     facts: Mapping[str, str] = field(default_factory=dict)  # host fact -> the statement that answers it
@@ -633,6 +596,27 @@ class Component:
     tools: tuple[Tool, ...] = ()
     directory: str = ""  # explicit code directory (a registration, not a checkout)
     prompt: str = ""  # fragment of model-facing prose, inside this component's directory
+
+    @property
+    def resident(self) -> bool:
+        """A process that STAYS here and publishes what a statement names."""
+        return self.service is not None
+
+    @property
+    def launch_declared(self) -> bool:
+        """A process this host STARTS (per call, and to bring a service up)."""
+        return bool(self.launch.argv or self.launch.entry or self.launch.binary or self.launch.importable)
+
+    @property
+    def runs_here(self) -> bool:
+        """Some process of this component is this machine's to start."""
+        return self.resident or self.launch_declared
+
+    @property
+    def client_side(self) -> bool:
+        """No process here at all: nothing but the declaration crossed, so the
+        statement is the client's to render and run (tools/statement.py Client)."""
+        return not self.runs_here
 
 
 # --------------------------------------------- host facts a schema may ask for -
@@ -712,12 +696,14 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
 
     This is the protocol all three registration sources speak — a checkout's
     manifest, an installed manifest, a catalog file. A declaration the host
-    cannot drive (no name, an interface it does not know) is refused HERE rather
-    than half-registered and mysteriously broken later.
+    cannot drive AT ALL (nothing that could name it) is refused HERE rather than
+    half-registered and mysteriously broken later; everything narrower than that
+    (what the declaration contributes, and whether one machine could satisfy it)
+    is component_diagnostics' business, because those refusals need the merged
+    table's words to say something useful.
     """
     name = str(data.get("name", ""))
-    interface = str(data.get("interface", DAEMON))
-    if not name or interface not in (DAEMON, CLI, PLUGIN):
+    if not name:
         return None
     launch = data.get("launch") if isinstance(data.get("launch"), dict) else {}
     tools: list[Tool] = []
@@ -732,8 +718,6 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
     raw_facts = data.get("facts") if isinstance(data.get("facts"), Mapping) else {}
     return Component(
         name=name,
-        interface=interface,
-        runs_on=str(data.get("runs_on", SELF)),
         subject=str(data.get("subject", WORKSPACE_FS)),
         launch=Launch(
             argv=tuple(str(w) for w in launch.get("argv", ()) or ()),
@@ -742,6 +726,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
             importable=bool(launch.get("importable", False)),
         ),
         service=_service_of(data),
+        entry=str(data.get("entry", "") or ""),
         requires=tuple(str(r) for r in data.get("requires", ()) or ()),
         vars={str(k): str(v) for k, v in (data.get("vars") or {}).items()},
         facts={str(k): str(v or "").strip() for k, v in raw_facts.items() if str(v or "").strip()},

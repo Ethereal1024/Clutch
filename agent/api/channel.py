@@ -1,11 +1,11 @@
 """POST/GET/DELETE /api/channel: what the CLIENT runs, declared to this session.
 
-A component whose process lives on the client (interface `plugin`, `runs_on:
-other`) cannot be installed here — its bytes never come to this machine — so the
-client says what it has, and where this session may call it: a loopback port its
-reverse forward listens on, a bearer token, and the declarations themselves. The
-bookkeeping, the validation and the call are all tools/channel.py; this module is
-only the three verbs.
+A component with no process on this machine (`service` absent, `launch` absent, an
+`entry` module named instead) cannot be installed here — its bytes never come to
+this machine — so the client says what it has, and where this session may call it:
+a loopback port its reverse forward listens on, a bearer token, and the
+declarations themselves. The bookkeeping, the validation and the call are all
+tools/channel.py; this module is only the three verbs.
 
 DELETION is the honest "nothing is declared": the client went away, the window
 closed, its listener died. It changes no bytes either — the same discipline as the
@@ -13,7 +13,7 @@ push, because a channel declaration is not an install and this session must not
 be able to leave one behind in the machine's component table.
 
 The token never travels back out. GET answers what this session holds — names,
-interfaces, the tool list, the generation — which is what a window needs to show
+the tool list, the generation — which is what a window needs to show
 the user its own client components; the secret is the client's, it was sent to be
 used and not to be read back (this API is also reachable through a tunnel).
 """
@@ -71,8 +71,7 @@ class ChannelMixin:
             "components": [
                 {
                     "name": component.name,
-                    "interface": component.interface,
-                    "runs_on": component.runs_on,
+                    "entry": component.entry,
                     "tools": [tool.name for tool in component.tools],
                 }
                 for component in held.components.values()

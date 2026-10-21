@@ -102,7 +102,10 @@ function fakeTargetSupervisor() {
   const HELD_VERSION = "0.1.0+" + HELD.slice(0, 16);
   const ARTIFACT = `${NAME}.tar.gz`;
   // the release this test publishes, as bytes: a market row pins a manifest by
-  // its digest, so the row the test writes has to pin these exact bytes
+  // its digest, so the row the test writes has to pin these exact bytes. It keeps
+  // the `interface` word a v0.1.56 release still says — the client ignores it (the
+  // contribution says who runs a statement, D3 step ④), and a released manifest is
+  // not something this repo rewrites under a user.
   const manifest = {
     schema: 1,
     name: NAME,
@@ -127,14 +130,14 @@ function fakeTargetSupervisor() {
     if (req.method === "GET" && req.url === "/api/components") {
       return send(200, {
         components: [
-          { name: NAME, version: HELD_VERSION, interface: "cli", digest: HELD, path: `/data/components/${NAME}` },
+          { name: NAME, version: HELD_VERSION, digest: HELD, path: `/data/components/${NAME}` },
         ],
       });
     }
     if (req.method === "GET" && req.url.startsWith("/api/components/versions")) {
       return send(200, {
         versions: [
-          { name: NAME, version: HELD_VERSION, interface: "cli", digest: HELD, path: `/data/components/${NAME}`, resolved: true },
+          { name: NAME, version: HELD_VERSION, digest: HELD, path: `/data/components/${NAME}`, resolved: true },
         ],
       });
     }

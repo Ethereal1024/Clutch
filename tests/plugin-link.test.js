@@ -74,8 +74,9 @@ function pluginDir() {
       {
         name: COMPONENT,
         version: "0.1.0",
-        interface: "plugin",
         subject: "network",
+        // no `service`, no `launch`: the statements are this client's, and this is
+        // the module that runs them (D3 step ④)
         entry: "plugin.js",
         tools: [{ name: TOOL, description: "probe the client's own network", parameters: { properties: {} } }],
       },
@@ -134,8 +135,16 @@ function refusePush(body) {
     if (typeof one.name !== "string" || !one.name) return "a declaration must name a component";
     if (seen.has(one.name)) return `the channel push names ${one.name} twice`;
     seen.add(one.name);
-    if (one.interface !== "plugin") return `${one.name} is declared interface ${JSON.stringify(one.interface)}; a pushed component is a plugin`;
-    if (one.runs_on !== "other") return `${one.name} is declared runs_on ${JSON.stringify(one.runs_on)}; a pushed component runs on the client`;
+    // D3 step ④: who runs a statement is read from what the declaration
+    // CONTRIBUTES (agent/tools/catalog.py component_diagnostics), never from a
+    // kind. A pushed component is one with no process on the session machine and
+    // an `entry` for this client to run.
+    if (one.service !== undefined || one.launch !== undefined) {
+      return `${one.name} declares ${one.service !== undefined ? "a service" : "a launch"}; a pushed component runs on the client`;
+    }
+    if (typeof one.entry !== "string" || !one.entry) {
+      return `${one.name} names no entry; a pushed component's statements are the client's, so it has to name the module that runs them`;
+    }
     if (!Array.isArray(one.tools) || !one.tools.length) return `${one.name} publishes no tool`;
     for (const tool of one.tools) if (!tool || typeof tool.name !== "string" || !tool.name) return "a tool must have a name";
   }
@@ -174,8 +183,7 @@ function makeSession(label) {
           port: body.port,
           components: body.components.map((c) => ({
             name: c.name,
-            interface: c.interface,
-            runs_on: c.runs_on,
+            entry: c.entry,
             tools: c.tools.map((t) => t.name),
           })),
         });
@@ -207,7 +215,7 @@ async function main() {
   // ---- the client's own domain: one real plugin, installed for real --------
   const host = pluginHost.createPluginHost({ root: ROOT });
   host.install({
-    manifest: { name: COMPONENT, version: "0.1.0", interface: "plugin", subject: "network" },
+    manifest: { name: COMPONENT, version: "0.1.0", subject: "network", entry: "plugin.js" },
     artifact: pluginDir(),
     version: "0.1.0",
   });
@@ -273,12 +281,12 @@ async function main() {
   check(body.components.length === 1, "one declaration for one installed plugin");
   const declared = body.components[0];
   check(declared.name === COMPONENT && declared.version === "0.1.0", "the declaration names the component and its version");
-  check(declared.interface === "plugin" && declared.runs_on === "other", "as a plugin that runs on the client");
+  check(declared.entry === "plugin.js", "as a component whose statements this client runs: `entry` says so, and no kind is invented");
   check((declared.tools || []).length === 1 && declared.tools[0].name === TOOL, "its tools travel, so the session can offer them");
   check(
-    declared.entry === undefined && declared.digest === undefined && declared.launch === undefined &&
+    declared.digest === undefined && declared.launch === undefined && declared.service === undefined &&
       declared.command === undefined && declared.location === undefined,
-    "and nothing about where its bytes live on THIS machine does"
+    "and nothing about where its bytes live on THIS machine does — `entry` is a path inside the component, not a location here"
   );
   // the fake session parsed it the way the target does, which is the proof that
   // the words line up — and the literals are pinned against the Python file, so a
@@ -426,7 +434,6 @@ async function main() {
       {
         name: "clutch-ssh-workspace",
         version: "0.1.0",
-        interface: "plugin",
         subject: "foreign-fs",
         entry: "plugin.js",
         tools: [{ name: "read_file", description: "read a file on the far side", parameters: { properties: {} } }],
@@ -437,7 +444,7 @@ async function main() {
   );
   write(path.join(foreign, "plugin.js"), `exports.call = async () => ({content: 'far'});\n`);
   host.install({
-    manifest: { name: "clutch-ssh-workspace", version: "0.1.0", interface: "plugin", subject: "foreign-fs" },
+    manifest: { name: "clutch-ssh-workspace", version: "0.1.0", subject: "foreign-fs", entry: "plugin.js" },
     artifact: foreign,
     version: "0.1.0",
   });

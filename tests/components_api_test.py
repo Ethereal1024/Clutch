@@ -65,8 +65,12 @@ SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache"}
 def _post_artifact(base: str, name: str, data: bytes, *, digest: str, artifact: str = "", **extra) -> tuple[int, str]:
     """One install request, exactly as a client sends it: manifest in the header
     (base64 of the JSON's UTF-8 bytes — components.manifest_from_header's contract),
-    artifact as the body."""
-    manifest = {"name": name, "version": digest[:16], "interface": "cli", "digest": digest, **extra}
+    artifact as the body.
+
+    The manifest names what it CONTRIBUTES — here the installed executable itself,
+    `launch.binary` — because a record naming none of `service`/`launch`/`entry`
+    has no process and no module a client could run, and is refused (D3 step ④)."""
+    manifest = {"name": name, "version": digest[:16], "launch": {"binary": name}, "digest": digest, **extra}
     if artifact:
         manifest["artifact"] = artifact
     header = base64.b64encode(json.dumps(manifest).encode("utf-8")).decode("ascii")
@@ -87,8 +91,9 @@ def _post_manifest(base: str, name: str, *, digest: str, data: bytes = b"", **ex
     """One install request that carries NO bytes: the manifest in the header names
     the artifact's URL (`artifact_url`) and the host fetches it for itself. This is
     the default shape of an install (PLUGIN_PLAN.md 零之四.4); `_post_artifact`
-    above is the fallback, for when the client alone holds the bytes."""
-    manifest = {"name": name, "version": digest[:16], "interface": "cli", "digest": digest, **extra}
+    above is the fallback, for when the client alone holds the bytes. The manifest
+    carries its own contribution for the same reason as above."""
+    manifest = {"name": name, "version": digest[:16], "launch": {"binary": name}, "digest": digest, **extra}
     header = base64.b64encode(json.dumps(manifest).encode("utf-8")).decode("ascii")
     req = urllib.request.Request(
         f"{base}/api/components/install",
@@ -182,14 +187,22 @@ def main() -> int:
         artifact = Path(root) / "spooled"
         artifact.write_bytes(blob)
         try:
-            components.accept(artifact, {"name": "clutch-memory", "version": "1.0.0", "interface": "cli"})
+            components.accept(
+                artifact,
+                {"name": "clutch-memory", "version": "1.0.0", "launch": {"binary": "clutch-memory"}},
+            )
             check(False, "an install with no declared digest is refused")
         except ValueError as err:
             check("declares no digest" in str(err), "an install with no declared digest is refused")
         try:
             components.accept(
                 artifact,
-                {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": "0" * 64},
+                {
+                    "name": "clutch-memory",
+                    "version": "1.0.0",
+                    "launch": {"binary": "clutch-memory"},
+                    "digest": "0" * 64,
+                },
             )
             check(False, "bytes that do not match the declared digest are refused")
         except ValueError as err:
@@ -197,14 +210,26 @@ def main() -> int:
         check(components.installed("clutch-memory") is None, "a refused install landed nothing")
 
         first = components.accept(
-            artifact, {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": digest}
+            artifact,
+            {
+                "name": "clutch-memory",
+                "version": "1.0.0",
+                "launch": {"binary": "clutch-memory"},
+                "digest": digest,
+            },
         )
         check(first["status"] == "installed", "an artifact whose digest matches is installed")
         check(components.installed_version("clutch-memory") == "1.0.0", "the host resolves the installed version")
         check(components.current("clutch-memory", "1.0.0", digest), "and it is current for that digest")
         check(not components.current("clutch-memory", "1.0.0", "0" * 64), "a different digest is not current")
         again = components.accept(
-            artifact, {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": digest}
+            artifact,
+            {
+                "name": "clutch-memory",
+                "version": "1.0.0",
+                "launch": {"binary": "clutch-memory"},
+                "digest": digest,
+            },
         )
         check(again["status"] == "current", "the same version + digest is the gate: nothing to check")
 
@@ -214,7 +239,12 @@ def main() -> int:
         artifact.write_bytes(blob2)
         second = components.accept(
             artifact,
-            {"name": "clutch-memory", "version": "1.0.0", "interface": "cli", "digest": components.digest_of(blob2)},
+            {
+                "name": "clutch-memory",
+                "version": "1.0.0",
+                "launch": {"binary": "clutch-memory"},
+                "digest": components.digest_of(blob2),
+            },
         )
         check(second["status"] == "installed", "the same version with different bytes is replaced")
         check(
@@ -229,7 +259,6 @@ def main() -> int:
             {
                 "name": "clutch-memory",
                 "version": "1.0.0",
-                "interface": "cli",
                 "digest": components.digest_of(blob2),
                 "disabled": False,
             }
@@ -260,7 +289,7 @@ def main() -> int:
         planted = components.component_root("clutch-planted") / "1.0.0"
         planted.mkdir(parents=True)
         (planted / components.MANIFEST).write_text(
-            json.dumps({"name": "clutch-planted", "version": "1.0.0", "interface": "cli"}),
+            json.dumps({"name": "clutch-planted", "version": "1.0.0", "launch": {"binary": "clutch-planted"}}),
             encoding="utf-8",
         )
         check(
@@ -291,7 +320,7 @@ def main() -> int:
             {
                 "name": "clutch-memory",
                 "version": composite,
-                "interface": "cli",
+                "launch": {"binary": "clutch-memory"},
                 "digest": components.digest_of(blob3),
             },
         )
@@ -310,7 +339,10 @@ def main() -> int:
             "and the digest stays the content's own, not the version's tail",
         )
 
-        # 4. an interface the host's table cannot hold is refused before it lands
+        # 4. what a declaration CONTRIBUTES is the one thing a record must say
+        #    (D3 step ④): naming none of `service`/`launch`/`entry` names no process
+        #    and no module a client could run, so it is refused before it lands —
+        #    and the retired `interface` word beside it is not a contribution
         try:
             components.accept(
                 artifact,
@@ -321,9 +353,10 @@ def main() -> int:
                     "digest": components.digest_of(blob2),
                 },
             )
-            check(False, "a manifest with an unknown interface is refused")
+            check(False, "a manifest naming no contribution is refused")
         except ValueError as err:
-            check("interface" in str(err), "a manifest with an unknown interface is refused")
+            check("names none of" in str(err), "a manifest naming no contribution is refused")
+        check(components.installed_version("clutch-memory") != "2.0.0", "and a refused record landed nothing")
 
         # 5. spool: a body is streamed to scratch space, and its name's suffixes
         #    survive (the install layer tells an archive from an executable by them)
@@ -350,7 +383,6 @@ def main() -> int:
             {
                 "name": modules.MEMORY,
                 "version": digest_ws[:16],
-                "interface": catalog.CLI,
                 "digest": digest_ws,
                 "artifact": tar.name,
             },
@@ -380,13 +412,14 @@ def main() -> int:
         foreign = Path(root) / "foreign-src"
         foreign.mkdir()
         (foreign / components.MANIFEST).write_text(
-            json.dumps({"name": "clutch-a", "version": "1.0.0", "interface": "cli"}), encoding="utf-8"
+            json.dumps({"name": "clutch-a", "version": "1.0.0", "launch": {"binary": "clutch-a"}}),
+            encoding="utf-8",
         )
         foreign_tar = Path(root) / "foreign.tar.gz"
         with tarfile.open(foreign_tar, "w:gz") as tf:
             tf.add(foreign / components.MANIFEST, arcname=components.MANIFEST)
         try:
-            components.install(foreign_tar, {"name": "clutch-b", "version": "1.0.0", "interface": "cli"})
+            components.install(foreign_tar, {"name": "clutch-b", "version": "1.0.0", "launch": {"binary": "clutch-b"}})
             check(False, "an artifact declaring a DIFFERENT component is refused")
         except ValueError as err:
             check("declares itself" in str(err), "an artifact declaring a different component is refused")
@@ -572,7 +605,14 @@ def main() -> int:
         for ver in ("1.0.0", "2.0.0"):
             (hand / ver).mkdir(parents=True)
             (hand / ver / components.MANIFEST).write_text(
-                json.dumps({"name": "clutch-handmade", "version": ver, "interface": "cli", "digest": ver * 8}),
+                json.dumps(
+                    {
+                        "name": "clutch-handmade",
+                        "version": ver,
+                        "launch": {"binary": "clutch-handmade"},
+                        "digest": ver * 8,
+                    }
+                ),
                 encoding="utf-8",
             )
         components.reindex()
@@ -637,7 +677,7 @@ def main() -> int:
         workspace_mod = catalog.table()[modules.WORKSPACE]
         discovery_env = workspace_mod.service.discovery_env
         check(
-            bool(discovery_env) and workspace_mod.interface == catalog.DAEMON,
+            bool(discovery_env) and workspace_mod.resident,
             "the fixture is a daemon component with a repointable discovery directory",
         )
         os.environ[discovery_env] = str(Path(root) / "discovery")
@@ -656,7 +696,12 @@ def main() -> int:
                 "and it really is stopped and forgotten before any byte would go",
             )
 
-            st, body_json = _post_artifact(base, modules.WORKSPACE, blob, digest=digest, interface="daemon")
+            # the request says what it contributes: a `service` (so the install
+            # STAYS), and the discovery directory must be named with it — a
+            # `service` block replaces the earlier one whole (named means override)
+            st, body_json = _post_artifact(
+                base, modules.WORKSPACE, blob, digest=digest, service={"discovery_env": discovery_env}
+            )
             check(
                 st == 200 and json.loads(body_json)["status"] == "installed",
                 "a daemon component installs through the same endpoint as a one-process one",

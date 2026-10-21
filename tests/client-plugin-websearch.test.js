@@ -10,8 +10,10 @@
 //     the entry once per call;
 //   * ui/plugin-server.js holds the ONE door the target's channel has;
 //   * ui/plugin-server.js#declarations() is what travels — the assertion that
-//     matters most, because a field that leaks here (an `entry`, a `location`)
-//     would describe this machine's files to another one.
+//     matters most, because a field that leaks here (a `location`, a `digest`)
+//     would describe this machine's files to another one. `entry` DOES travel,
+//     and only because it is what says whose statements these are (D3 step ④):
+//     a path inside the component, not a place on this machine.
 //
 // The search stub is a real loopback socket and the legs are pointed at it with
 // the `CLUTCH_*_URL` seams (a fork has no monkeypatch seam); the submodule's own
@@ -135,7 +137,7 @@ async function main() {
   const host = pluginHost.createPluginHost({ root: ROOT });
   const record = host.install({ manifest: MANIFEST, artifact: PLUGIN, version: MANIFEST.version });
   check(record.name === NAME, "the plugin installs into the client's own root");
-  check(record.interface === "plugin", "as a plugin");
+  check(!("interface" in record), "…and the table records no kind: it is bookkeeping (name, version, digest), not a classification");
   // A checkout install has no digest to measure, so the version is the one the
   // component declares; the digest-suffixed form arrives with an artifact file.
   check(record.version === MANIFEST.version, "under the version it declares");
@@ -146,9 +148,9 @@ async function main() {
   check(declared.length === 1, "one declaration to push");
   const out = declared[0] || {};
   check(out.name === NAME && out.version === record.version, "named, with the installed version");
-  check(out.interface === "plugin" && out.runs_on === "other", "in the two words that say whose process it is");
+  check(out.entry === MANIFEST.entry, "with the `entry` that says whose statements these are, and no kind word beside it");
   check(out.subject === "network", "and what its subject is");
-  check(!("entry" in out) && !("location" in out) && !("digest" in out), "no byte about this machine travels");
+  check(!("location" in out) && !("digest" in out) && !("interface" in out), "no byte about this machine travels — and no invented kind");
   const tools = out.tools || [];
   check(
     tools.map((tool) => tool.name).join(",") === "web_search,web_fetch",

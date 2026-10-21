@@ -92,6 +92,28 @@ function plugPlace(item) {
   return "";
 }
 
+// The same place said in a sentence, where the sentence has to read even when the
+// page does not know it yet: a market row is drawn from the index alone (opening
+// the page is one read in ui/components.js `marketEntries`), and its release's
+// declaration — the only thing that says whose machine it is — arrives when
+// something is installed from it. Naming that is honest; inventing a machine is
+// not.
+function plugPlaceName(item) {
+  const place = typeof item === "string" ? item : item && item.place;
+  if (place === "client") return "this client";
+  if (place === "session") return "this session";
+  return "the machine its declaration names";
+}
+
+// A row whose declaration has not been read YET, which is the ordinary state of
+// everything the market offers and no domain holds. It is not a refusal: the
+// install reads the declaration and derives the place before a byte is built
+// (ui/components-view.js `specFor`), so the button stays live and the refusal, if
+// there is one, is the declaration's own sentence.
+function plugPlaceUnread(item) {
+  return Boolean(item) && item.read === false && !item.problem;
+}
+
 // Whether the place a row names can be reached BY THIS BUILD right now, as a
 // sentence, or null when it can. This is the whole of what used to be a machine
 // selector: a plugin is held by the app process itself (always here, or this
@@ -490,7 +512,7 @@ function plugItemChips(item) {
 function plugItemDesc(item) {
   const held = item.held;
   const entry = item.entry;
-  const where = plugPlace(entry || held);
+  const where = plugPlace(held || entry);
   if (held && held.disabled) return `held on ${where}, but not driven: its tools are not offered here`;
   if (held && entry) {
     return plugItemUpdate(item)
@@ -501,7 +523,7 @@ function plugItemDesc(item) {
   // a declaration that names no place (or names a pair that cannot exist) is
   // refused before any byte is built, and its own sentence is the row's line
   if (entry && entry.problem) return entry.problem;
-  if (entry && plugPlaceUnknown(entry.place)) {
+  if (entry && !plugPlaceUnread(entry) && plugPlaceUnknown(entry.place)) {
     // the place was not read, cannot be reached, or answered without its list:
     // "unknown" is a fact, not an empty list — and it is the one thing that
     // explains a dead Install beside us
@@ -524,7 +546,6 @@ function plugItemMeta(item) {
     meta.push("held " + (held.version || "at an unnamed version"));
     if (held.digest) meta.push("digest " + String(held.digest).slice(0, 16));
     if (held.disabled) meta.push("stopped");
-    if (held.interface) meta.push(held.interface);
     // what the record IS, when it predates versions: the number above is a digest,
     // and the reinstall beside this row is what turns it into a release
     if (plugHeldLegacy(held) && entry && entry.version) {
@@ -537,17 +558,18 @@ function plugItemMeta(item) {
     // names. It is not a choice and not a field — it is what the row IS
     const place = plugPlace(entry);
     if (place) meta.push("goes to " + place);
+    else if (plugPlaceUnread(entry)) meta.push("its place is its declaration's, read when something is installed from it");
     if (entry.problem) meta.push("refused: " + entry.problem);
     if (!held) {
       // a place that could not be read, or one this build cannot reach, is why the
       // Install beside this row is dead — the tooltip says it in full
-      const refuse = plugPlaceUnknown(entry.place);
+      const refuse = plugPlaceUnread(entry) ? "" : plugPlaceUnknown(entry.place);
       if (refuse) meta.push(refuse);
     }
     // a row is offered by the market, or by a checkout beside the host repo (a
     // contributor's edit) — the page says which, because the bytes differ
     const from = entry.origin === "checkout" ? "from this checkout" : "from the market";
-    meta.push(`offered ${entry.version || "at an unnamed version"} (${from}${entry.interface ? ", " + entry.interface : ""})`);
+    meta.push(`offered ${entry.version || "at an unnamed version"} (${from})`);
     if (entry.published && entry.published.version) {
       // a checkout this client can archive, with the release under it: the release
       // is what a machine that already holds the checkout can still receive
@@ -639,7 +661,7 @@ function plugMenu(items) {
 // only drawn.
 function plugMoreButton(item, menu) {
   const name = item.name;
-  const where = plugPlace(item.held || item.entry);
+  const where = plugPlaceName(item.held || item.entry);
   const btn = document.createElement("button");
   btn.className = "plug-more";
   btn.type = "button";
@@ -1195,7 +1217,7 @@ function plugInstallButton(entry) {
   const same = Boolean(held) && heldRelease === offered;
   const newer = Boolean(held) && !same;
   const busy = plugState.busy && plugState.busy.name === entry.name;
-  const where = plugPlace(entry);
+  const where = plugPlaceName(entry);
   const btn = document.createElement("button");
   btn.className = "plug-install";
   btn.type = "button";
@@ -1204,7 +1226,9 @@ function plugInstallButton(entry) {
   // place (or names a pair that cannot exist) is refused by the view before any
   // byte is built, and a place this build cannot reach is a sentence rather than a
   // button that would fail after the click
-  const refuse = entry.problem || plugPlaceReady(entry.place);
+  // a declaration the page has not read is not a refusal (plugPlaceUnread): the
+  // install reads it first, and its sentence arrives in the result line instead
+  const refuse = entry.problem || (plugPlaceUnread(entry) ? "" : plugPlaceReady(entry.place));
   if (refuse) {
     btn.disabled = true;
     btn.title = refuse;
@@ -1241,7 +1265,7 @@ function plugInstallButton(entry) {
 // as a release, and the app process lays them down). The stage names the place it
 // belongs to, because that is the only sentence the two shapes do not share.
 function plugStageLine(busy) {
-  const where = plugPlace(busy) || "…";
+  const where = plugPlaceName(busy);
   if (busy.verb === "remove") return `removing ${busy.name}${busy.version ? " " + busy.version : ""} from ${where}…`;
   // the switch is the one write with no bytes to build or send: it has one stage
   // and one place, and the sentence says which way it is going
@@ -1549,10 +1573,10 @@ async function plugMirrorRemove(url) {
 async function plugInstall(entry) {
   const api = window.clutchComponents;
   if (!api || plugState.busy || entry.problem) return; // no place, no write
-  if (plugPlaceReady(entry.place)) return; // and no unreachable one either
-  const where = plugPlace(entry);
+  if (!plugPlaceUnread(entry) && plugPlaceReady(entry.place)) return; // and no unreachable one either
+  const where = plugPlaceName(entry);
   const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
-  const read = plugPlaceUnknown(entry.place);
+  const read = plugPlaceUnread(entry) ? "" : plugPlaceUnknown(entry.place);
   const knows = read ? ` Whether ${where} already holds it could not be read.` : "";
   const again = held ? ` It already holds ${held.version}; installing rewrites that same version.` : "";
   const go = await askConfirm({
@@ -1578,7 +1602,9 @@ async function plugInstall(entry) {
     res = { ok: false, name: entry.name, error: (e && e.message) || String(e) };
   }
   plugState.busy = null;
-  plugState.result = plugInstallResult(entry, res, where);
+  // the answer names the place the bytes actually landed on: an install that read
+  // an unread declaration can say more than the row it was asked from
+  plugState.result = plugInstallResult(entry, res, res && res.place ? plugPlace({ place: res.place }) : where);
   renderPlugins();
   // an inventory just changed: read it back. The market is cached
   // (ui/components-view.js MARKET_TTL_MS), so this is one local HTTP call, not a

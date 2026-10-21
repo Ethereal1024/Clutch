@@ -275,6 +275,57 @@ CLI 那种语句不属于任何工作区。`launch_prefix()` 对带服务的声�
 是 0.1.57 重打包的事：推子模块、切 v0.1.1 发布、bump gitlink、更新 `market/entries.json`。
 在那之前，父仓库这一版自己跑得通（测试读工作树），而市场里发的仍是 0.1.0 的旧插件。
 
+### D3 落地④：删掉种类词，"谁跑这句话"由声明贡献了什么推出
+
+**删掉的是一整层词汇**：`catalog.Component.interface` / `runs_on`、`INTERFACES` 词表、
+`components.REQUIRED_FIELDS` 里的 `interface`、登记表与 `inventory()` 里的 `interface`、客户端
+`parseManifest` 与 `ui/plugin-host.js` 的 `INTERFACE`、`plugin-server.declarations` 送出去的
+`interface` / `runs_on`。**没有任何东西替代它们**：声明本身已经说了。
+
+**推导只有三步**（`catalog.Component.runs_here` / `client_side` / `component_diagnostics`，
+客户端同形的 `destinationOf`）：
+
+| 声明里有 | 结论 |
+| --- | --- |
+| `service`（哪怕写的是 `{}`） | 进程**留下**，在这台机器上（daemon） |
+| 只有 `launch` | 一调用一个进程，也在这台机器上（cli） |
+| 两者都没有，点名了 `entry` | 这里**没有进程**，所以这句话是**客户端**的 |
+
+`service` + `launch` 并存是**正常**的：留下也是被 `launch` 拉起来的。矛盾只剩两种，各有
+一句人话，都 fatal：**`entry` 与任一"在这里跑"并存**（一份声明同时说两个落点），**三者都没有**
+（没有任何东西能跑这句话）。安装门（`components.install`）与 `component_diagnostics` 说的是
+同一句话——一份装下去也没有东西可驱动的声明，在字节落地之前就被拒。
+
+**为什么删**：`interface` 把"进程在谁的机器上"和"语句怎么执行"挤进一个词（补注），而
+`runs_on` 只是把同一个事实抄第二遍。第二份真相会漂移，`plugin` + `runs_on: "self"` 那种
+"能看见、装不了"就是漂移的症状——现在这个症状在语法上不存在了。
+
+**旧字怎么办**（都不做迁移，D1）：
+
+- **宿主读旧清单**：`interface` / `runs_on` 读完当没看见，落点只看三个贡献词；随包的五份
+  清单这次**一个字都没改**，所以旧宿主读它们仍然读得通（清单迁移搭 0.1.57 重打包的车）。
+- **`_LEGACY_SERVICE_KEYS` 保留**：发现坐标的旧拼法（顶层 `discovery_env`/`app_dir`/`prefix`）
+  仍然折进 `service`——那是 0.1.57 之前发布的清单的事实，不是种类词。**客户端不折**：它只问
+  `service` / `launch` / `entry` 有没有出现，没有就别猜。
+- **`scripts/market_index.py` 照旧抄 `interface` / `runs_on`**：索引 `schema: 2` 里那两个词是
+  **显示副本**，不是判据，`ui/market.snapshot.json` 只能在 0.1.57 重打包（各模块发行清单改口）
+  之后重生成——离线环境里不许跑 `--check`，会红得没有意义。
+- **测试里的旧字样是故意的**：`tests/bridge-server.test.js`、`tests/market.test.js`、
+  `tests/net-fetch.test.js` 用的是 v0.1.56 的真实字节（证明客户端不看这两个词）；宿主响应、
+  清单与库存的 fixture 里则一个都不留。
+
+**客户端那个问题的形状也一起变了**：`destinationOf` 回答 `{place, read, error}`，因为
+"够不着"（今天拨不过去）和"没读到"（声明还没取回来）是两件事——`read: false` + `error: ""`
+是市场行的常态，`place: null` + `error: ""` 是"不知道"，两者都不是拒绝。市场列表因此
+**一次读都不多**：行上没有声明，落脚点在 `specFor` / `componentSpecs` 取回声明之后才知道
+（`tests/market.test.js` 钉的就是"打开页面是一次读"）。
+
+**守它的测试**：`tests/catalog_test.py`（三种贡献、两条矛盾、legacy 折法）、
+`tests/components_api_test.py`（安装门）、`tests/channel_test.py` / `tests/rendezvous_test.py`
+（推送与"这台机器上没有"）、`tests/components.test.js` / `tests/components-view.test.js`
+（两个落点、三个词的回答、未读行）、`tests/plugin-host.test.js`（三条拒绝句）、
+`tests/client-plugin-websearch.test.js`（装 → 推 → `/call` → 删，真 fork）。
+
 ---
 
 ## D4 说明与指令属于技能层，组件声明里没有 prompt

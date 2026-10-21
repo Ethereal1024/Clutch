@@ -16,7 +16,7 @@ Component install (the install layer's receiving half — a component always
 belongs to the machine its server runs on, so this process is who a client
 installs ONTO, whether it is this desktop or a device behind a tunnel):
 
-    GET    /api/components          -> {components: [{name, version, interface, digest}]}
+    GET    /api/components          -> {components: [{name, version, digest, disabled}]}
     GET    /api/components/versions -> ?name= -> one record per installed version
     POST   /api/components/install  -> take one artifact; the manifest rides in the
                                        X-Clutch-Component header (base64 of its

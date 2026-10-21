@@ -30,7 +30,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 | --- | --- | --- |
 | dev 检出 | 仓库根旁的兄弟目录 `<name>/component.json` | 开发路径：改了就生效，重启宿主即可，无需安装 |
 | 已安装工件 | `<components 根>/<name>/<version>/component.json` | 安装层落地的记录：工件自带声明 + 安装事实（version/digest）合并而成 |
-| 已装登记表 | `<components 根>/registry.json` | 这台机器**持有**什么的唯一名册：每 `(name, version)` 一条，带 `interface` / `digest` / `location` / `disabled`。表里有就是有——目录躺在根下而表里没有登记的，不算这台机器的组件；`disabled` 只住在这里（磁盘上没有它的形状，见第八节末） |
+| 已装登记表 | `<components 根>/registry.json` | 这台机器**持有**什么的唯一名册：每 `(name, version)` 一条，带 `digest` / `location` / `disabled`。表里有就是有——目录躺在根下而表里没有登记的，不算这台机器的组件；`disabled` 只住在这里（磁盘上没有它的形状，见第八节末） |
 | 用户注册 | `~/.clutch/components/catalog.d/*.json` | 圈外逃生门：代码在别处（任意目录、本地构建的二进制），一份 JSON 即注册 |
 
 目录可分别用环境变量重指：安装根 `CLUTCH_COMPONENTS_DIR`，注册目录
@@ -46,8 +46,6 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 {
   "schema": 1,                        // 必填；不是 1 即整条被拒
   "name": "clutch-skills",            // 必填：组件身份
-  "interface": "cli",                 // 怎么被调用（第三节）
-  "runs_on": "self",                  // 谁跑它：self = 会话那台，other = 这台客户端
   "version": "0.3.1",                 // 这份发行版自报的版本
   "declaration": { "asset": "component.json", "sha256": "<64 hex>" },
   "artifacts": {                      // 平台标签 -> 工件；键 "any" 兜底
@@ -58,12 +56,12 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 }
 ```
 
-- **`runs_on` 必须在发行清单里再说一遍，不只是写在 `component.json` 里**：打包版客户端手上
-  没有 checkout 可问，`parseManifest()` 只从这份清单取这个词，页面再靠 `interface` +
-  `runs_on` 推出装到哪台机器（第八节 `destinationOf`）。少写一次就按 `"self"` 兜底，于是
-  `interface: "plugin"` 的组件在市场上"能看见、装不了"——报错原文是
-  `its declaration has to say runs_on: "other", and this one says "self"`。
-  `clutch-ssh-workspace/scripts/release-manifest.py` 因此把缺 `runs_on` 的插件清单当硬错误。
+- **形状只写在声明里，发行清单不转述**：客户端先按 `declaration` 取回那份 `component.json`
+  （验摘要），再问它"这条语句在哪台机器上"（第三节）——发行清单里没有 `interface` /
+  `runs_on` 这两个词的位置，也不靠它们决定装到哪台机器。**0.1.56 及更早的发行清单仍然写着
+  它们**：读进来、当作没看见，落点只看声明里有没有 `service` / `launch` / `entry`。
+  `clutch-ssh-workspace/scripts/release-manifest.py` 里那条 `runs_on` 硬错误是旧发布工具的
+  遗留，随 0.1.57 那次重打包一起改（D3 落地④）。
 
 - **资产相对清单**：`asset` 是清单**旁边**的名字（文件名或相对路径），清单自己的
   地址给出基准——模块因此不必知道自己的绝对 URL，一份清单放进本地目录同样能用
@@ -71,8 +69,9 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 - **摘要即信任**：`sha256` 必须是 64 位十六进制；缺失或形状不对的条目**整条拒绝**，
   不猜、也不"尽力而为"。字节由**要运行它的那台机器**自己取回、自己量（第八节
   「字节怎么到」），先验字节再落地；量的是目标机，不是转手的客户端。
-- **`interface: "plugin"` 的发行版装到客户端，不是目标机**：同一份清单、同一道摘要门，
-  只是"要运行它的那台机器"变成了**用户正坐着的那台**——`~/.clutch/client/components`
+- **没有进程在这里的发行版装到客户端，不是目标机**（声明里既无 `service` 也无 `launch`、
+  只点名 `entry`）：同一份清单、同一道摘要门，只是"要运行它的那台机器"变成了**用户
+  正坐着的那台**——`~/.clutch/client/components`
   （`ui/plugin-host.js`，`CLUTCH_CLIENT_COMPONENTS_DIR` 可重指；目录、tar/zip、单文件三种
   工件形状与第八节同一套判断）。字节因此一次都不过隧道，过隧道的只有那句声明（第三节
   plugin）。**页面上两个域都通**（C7）：客户端域直呼 `ui/plugin-host.js`，会话域仍走那台
@@ -91,13 +90,16 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
   装过的每一版客户端、每一台机器都读它。文档一行一个模块：`id`（`owner/name`）、`name`、
   `manifest`（该模块 release 里那份 `clutch-component.json` 的**钉死版本**地址
   `/download/v<version>/…`，永不 `releases/latest`）、`version`、`summary`、`tags`、
-  `homepage`、`license`，以及生成出来的 `manifest_sha256`、`interface`、`runs_on`。一行是
+  `homepage`、`license`，以及生成出来的 `manifest_sha256`、`interface`、`runs_on`——后两个是
+  **给旧客户端看的显示副本**，不是判据：声明已经不这样说，索引照抄各模块发行清单里的旧字，
+  0.1.57 重打包之前不删（D3 落地④）。一行是
   **指针**：字节仍由各模块自己的 release 发，索引只说"去哪读、读到的该是哪一份"。两道钉子
   都在，且都不在索引这边松口：先按行的 `manifest_sha256` 验清单，再由清单自己的
   `declaration.sha256` 验工件。
 - **索引是生成物，人只维护一栏**：`market/entries.json` 里是 5 行"人该决定的东西"（地址、
   版本、一句话简介、标签、主页、许可），`python3 scripts/market_index.py --write` 逐行取回
-  被钉住的那份清单、量摘要、抄出 `interface` / `runs_on`，写成 `ui/market.snapshot.json`。
+  被钉住的那份清单、量摘要、抄出 `interface` / `runs_on`（同上：显示副本），写成
+`ui/market.snapshot.json`。
   市场没变时输出**逐字节相同**（文档里没有时间戳），所以"变了没有"就是一次 diff。CI 在这些
   文件被推上来时重跑 `--check`（快照必须等于今天 entries 生成的东西：推了一行却没重生成就
   红），再把这份快照发成固定 tag `market` 的 `index.json`
@@ -178,9 +180,7 @@ contributes 模型）。宿主管的只有策略（权限词汇、undo 记录、
 {
   "name": "clutch-hello",            // 必填，唯一身份：安装目录名、检出目录名、表键，一个字符串
   "version": "0.1.0",                // 必填；安装版可携带内容摘要（0.2.0+<hex>）
-  "interface": "cli",                // 必填："daemon" | "cli" | "plugin"（怎么被调用，见下节）
-  "runs_on": "self",                 // 进程跑在谁的机器上："self"（默认）| "other"（进程在**调用它的那个客户端**：plugin 必填 other，没有通道时 fail-closed，绝不本地代跑）
-  "entry": "",                       // plugin 专用：入口模块（相对组件目录），一份导出 run(argv) 的 CommonJS 文件
+  "entry": "",                       // 没有进程在这台机器上时必填：入口模块（相对组件目录），一份导出 run(argv) 的 CommonJS 文件——声明里出现它，这句话就是**客户端**的
   "subject": "workspace-fs",         // 服务谁的资源（见下），决定语句能否为某工作区运行
   "launch": {                        // 宿主如何**启动**一个进程（工件的形状，不是接口）
     "argv": ["{py}", "{script}"],    // argv 词模板；{py} 解释器、{dir} 组件目录、{name} 组件名、{script} 入口文件
@@ -224,17 +224,19 @@ cli：`--envelope` 信封输出）。argv 词逐一交给 Popen，**没有 shell
 
 `service` 的**存在**（哪怕写的是 `{}`）就是那句话："这个进程起一次就留下，并且发布语句
 要用的 `{port} {token} {pid}`"。没有这一块，`launch` 就只能当每条语句的前缀用——那是一次
-调用一个进程。宿主不读种类词来分辨这两件事（D3）。三个字段都只是**坐标**：记录本身是
+调用一个进程。宿主不读种类词来分辨这两件事（D3）：它读的是声明**贡献了什么**，三个字段
+就是全部答案（第三节）。三个字段都只是**坐标**：记录本身是
 `{"version":1,"workspace":…,"port":…,"token":…,"pid":…,"started":…}`（第三节），文件名是
 `<prefix><sha256(normcase(工作区根))[:32]>.json`。这三个键写在清单顶层是同一份声明的**旧
 拼法**：0.1.57 之前发布的清单仍然被这样读入、折进 `service`，所以旧组件不必先改清单才能
 被新宿主驱动；反过来不成立——旧宿主读新清单会丢掉发现坐标，因此清单迁移搭 0.1.57 那次
 组件重打包的车，不抢先。
 
-## 三、三种接口
+## 三、三种形态：谁跑这条语句，声明自己说
 
-**daemon**：每个工作区一个常驻进程，loopback HTTP。宿主按发现记录（`service` 的 `app_dir` 下
-`<prefix><digest>.json`，`discovery_env` 可重指）找到它，没有就按 `launch` 拉起。
+**留下（daemon）：声明里有 `service`**。每个工作区一个常驻进程，loopback HTTP。宿主按发现记
+录（`service` 的 `app_dir` 下 `<prefix><digest>.json`，`discovery_env` 可重指）找到它，没有就
+按 `launch` 拉起。
 组件的 `command` 是**整条**语句（loopback 调用即接口），典型形状：
 
 ```
@@ -255,23 +257,23 @@ curl -sS --noproxy 127.0.0.1 -H 'Content-Type: application/json' -H 'X-Clutch-To
 宿主只对自己拉起的子进程发 SIGTERM，捡到的 daemon 不归它管（留给它自己的 idle 计时器）；
 daemon 退出时按 pid 匹配才删记录，所以被顶替的 daemon 删不掉继任者的记录。
 
-**cli**：一次调用一个进程。宿主按 `launch` 渲染出**前缀**（检出 = `{py} {script}`；
-安装版若有 `binary` 或与组件同名的可执行文件，前缀就是它本身），组件的 `command`
-只是可执行文件之后的旗标——同一份声明同时驱动检出与安装版：
+**一调用一个进程（cli）：有 `launch`，没有 `service`**。宿主按 `launch` 渲染出**前缀**
+（检出 = `{py} {script}`；安装版若有 `binary` 或与组件同名的可执行文件，前缀就是它本身），
+组件的 `command` 只是可执行文件之后的旗标——同一份声明同时驱动检出与安装版：
 
 ```
 "command": "--envelope save --title {title} --content {content}"
 ```
 
-**plugin**：前面两种都跑在**持有组件的那台机器**上，这一种跑在**调用它的那个客户端**
-上（`interface: "plugin"` + `runs_on: "other"`）。它解决的是前两种解决不了的那类主体：
+**客户端（plugin）：两者都没有，声明点名 `entry`**。前面两种都跑在**持有组件的那台机器**
+上，这一种跑在**调用它的那个客户端**上。它解决的是前两种解决不了的那类主体：
 搜索、剪贴板、客户端自己机器上的东西——**字节在这边、密钥在这边、出口在这边**，只有一
 句"我声明了什么工具"需要过隧道。
 
-所以它没有 `launch`：工具集来自组件目录里那份 `component.json` 的 `tools`，每条工具带一句
-**自己的** `command`——那就是这条语句，宿主不改写、不填事实，只把模型的参数原样附在它后面
-（见第五节"语句在哪台机器上渲染"）。声明里多一个 `entry`（相对组件目录，像 `launch.entry` 一样
-是路径、不是语句），指向那份 CommonJS 模块，它导出一个 `run(argv)`：
+所以它没有 `service`、也没有 `launch`：工具集来自组件目录里那份 `component.json` 的 `tools`，
+每条工具带一句**自己的** `command`——那就是这条语句，宿主不改写、不填事实，只把模型的参数原样
+附在它后面（见第五节"语句在哪台机器上渲染"）。声明里多一个 `entry`（相对组件目录，像
+`launch.entry` 一样是路径、不是语句），指向那份 CommonJS 模块，它导出一个 `run(argv)`：
 
 ```js
 // entry 指向的文件；argv 是这条语句渲染出来的词：
@@ -297,24 +299,30 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 `tests/channel_test.py` 把那**随包发出去的** `component.json` 钉在 `channel._plugin_of` 上
 ——声明的形状因此不是测试里编的。
 
-**一台机器，一个答案（C7）**：三种 interface 各自只有一个落脚点，规则写在
-`ui/components.js#destinationOf` 里，页面上没有任何旋钮参与——`plugin` + `runs_on: "other"`
-是**这台客户端**；`cli` / `daemon` + `runs_on: "self"` 是**会话命令跑的那台机器**。`runs_on`
-缺省即 `self`、`interface` 缺省即 `daemon`，与 `agent/tools/catalog.py` 的默认一致，所以早于
-这个字段的清单落点不变。任何别的配对——`plugin` + `self`、`cli`/`daemon` + `other`、或者一个
-不认识的 interface——都是**自相矛盾**：不装、不猜，只说那句话，于是也没有"第三个选项"可给。
+**一台机器，一个答案（C7）**：落脚点只有一个，规则写在 `ui/components.js#destinationOf` 里，
+页面上没有任何旋钮参与——声明里有 `service`（哪怕写的是 `{}`）或 `launch`，这条语句就在
+**会话命令跑的那台机器**上；两者都没有、只点名 `entry`，它就是**这台客户端**的。
+`service` 与 `launch` 并存不是矛盾：常驻进程也是被 `launch` 拉起来的（上面 daemon 那一节）。
+矛盾只有两种，两种都不装、不猜、只说那句话，于是也没有"第三个选项"可给：
+
+- **既没有进程也没有 `entry`**：没有任何东西能跑这条语句，声明不完整；
+- **`entry` 与 `service`/`launch` 并存**：一份声明同时说"在那边跑"和"在这边跑"，两个答案
+  不是一个答案。
+
 自动装（`ensureComponents`）同用这一条：不是会话那台的声明，它一个字节都不碰。
 
 **"够不着"与"没读到"是两件事**：前者是那个落脚点今天拨不过去（会话那台没有 supervisor URL、
 这台壳没有客户端插件域），控制项因此关掉；后者是那个落脚点自己的清单没回来（宿主仍然要裁定，
-装也许还是对的），控制项照旧可用，行上只说"未知"并把原因写出来。把这两种情形合成一种，就会
-在"清单读失败"时对着一个活得好好的宿主说"我不能装"。
+装也许还是对的），控制项照旧可用，行上只说"未知"并把原因写出来。`destinationOf` 的回答因此
+是三个词 `{place, read, error}`：`read: false` + `error: ""` 就是"声明还没读"（市场行的
+常态，不能因此说"我不能装"）；`place: null` + `error: ""` 是"不知道"，也不是拒绝。把这两种
+情形合成一种，就会在"清单读失败"时对着一个活得好好的宿主说"我不能装"。
 
 客户端怎么把它接上会话，是**声明 + 反向通道**，不是把字节送过去：
 
 ```
 客户端  ──① POST /api/channel──▶  [会话里的 agent.server]
-        { port, token, components:[{name, version, interface:"plugin", runs_on:"other", tools}] }
+        { port, token, components:[{name, version, entry:"index.js", tools}] }
         ◀── ②（只是记忆：这张表活在这个会话进程里，重启即空）
 
 [会话里的 agent.server] ──③ POST http://127.0.0.1:<port>/call──▶  客户端的监听（带令牌）
@@ -327,15 +335,16 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 
 要点，每一条都对应一处 fail-closed：
 
-- **通道是"在这台机器上没有"的另一种说法**。`runs_on: "other"` 的声明若没有通道，
-  `rendezvous.unavailable_reason` 说的是"this host has no channel to that client"，**绝不**
-  本地代跑（`runs_on` 不是提示，是断言）。声明的字节因此永远不进这台机器——进不来，也
+- **通道是"在这台机器上没有"的另一种说法**。一句只在客户端上跑的声明（没有 `service`、没有
+  `launch`，只有 `entry`）若没有通道，`rendezvous.unavailable_reason` 说的是"this host has no
+  channel to that client"，**绝不**本地代跑（声明不是提示，是断言）。声明的字节因此永远不进这台机器——进不来，也
   没有地方可跑。
 - **推送是整集**：一次 `POST` 就是这张表的全部，`DELETE` 是"我没有插件"（于是拒绝变成一
   句关于状态的话，而不是一次拨到空处的等待）。没有"改一个"的动词，因为两张表对不上时
   "以谁为准"没有答案。
-- **推送里没有字节，但有那句话**：`name` / `version` / `interface` / `runs_on` / `tools`，没有
-  `entry`、`digest`、`launch`、`location`。字节在哪台机器上是那台机器的私事
+- **推送里没有字节，但有那句话**：`name` / `version` / `entry` / `tools`，没有 `digest`、
+  `launch`、`location`。`entry` 是一个路径、不是语句（像 `launch.entry`），说清"客户端拿哪个
+  文件跑这句话"；字节在哪台机器上是那台机器的私事
   （PLUGIN_PLAN.md 零之四.1 的同一条界线）。`tools` 里带 `command` 不是泄露：那句话本来就是
   客户端自己声明、自己执行的，宿主只是把它送回来——**宿主不能自带语句**，这才是边界。
 - **转发是先决条件**：端口是远侧 sshd 分配的一个 loopback 端口，一行反向转发把它送回客
@@ -397,13 +406,13 @@ Python 版**故意不同**的那几处（块级换行、不做 TLS 指纹、cove
 参数同名的声明**在接线时被拒绝**（`catalog.component_diagnostics` 报一条 fatal），而不是
 静默吞掉模型给的值。
 
-**语句在哪台机器上渲染，由 `runs_on` 一句话决定**（`statement.Statement.run`）：
+**语句在哪台机器上渲染，由声明贡献了什么决定**（`statement.Statement.run`）：
 
-- `runs_on: "self"` —— 宿主渲染上面那张表，得到一条**命令行**，交给 transport（shell / 服务
-  的 loopback 调用）。
-- `runs_on: "other"` —— 宿主**不渲染**：模板逐字走 `/call` 送到客户端，客户端渲染成 **argv
-  词**再 fork（`ui/plugin-host.js#renderArgv`）。语法是同一张表，落点不同：没有 shell，所以
-  没有引号那一层。
+- **有进程在这里**（`service` 或 `launch`）—— 宿主渲染上面那张表，得到一条**命令行**，交给
+  transport（shell / 服务的 loopback 调用）。
+- **没有进程、只有 `entry`** —— 宿主**不渲染**：模板逐字走 `/call` 送到客户端，客户端渲染成
+  **argv 词**再 fork（`ui/plugin-host.js#renderArgv`）。语法是同一张表，落点不同：没有 shell，
+  所以没有引号那一层。
 
 客户端那份渲染器的规则，一条不多：
 
@@ -459,8 +468,9 @@ token：`skills`（技能库目录表）——它正是宿主过去自己扫 `*/
 
 四条纪律：
 
-- **只有 `cli` 组件可以发布**。daemon 的语句是说给"某个工作区的那个服务"的，而宿主
-  事实不属于任何工作区；这样的声明在 `catalog.component_diagnostics` 里是 fatal。
+- **只有一调用一个进程的组件可以发布**（有 `launch`、没有 `service`）。留下（`service`）的语句
+  是说给"某个工作区的那个服务"的，而宿主事实不属于任何工作区；客户端自己的语句在那边跑，而
+  事实是在这里答的。这两种声明在 `catalog.component_diagnostics` 里都是 fatal。
 - **一个 token 只许一个发布者**。两个组件都声明 `skills` 时谁也答不上来，宿主点名这
   两个名字（`A and B both publish it`）而不是替模型挑一个库——挑一个就是两份真相。
 - **答不出来就 fail-closed，但绝不静默**：事实读作"无值"，需要它的 `gate` 关掉、花掉
@@ -510,8 +520,8 @@ token：`skills`（技能库目录表）——它正是宿主过去自己扫 `*/
 3. **catalog.d**——用户注册目录里的 `*.json`（按文件名排序），最后的发言权。
 
 同名组件按**字段级 refine** 合并：后来者**没点名的字段照旧、点名的字段覆盖**。所以
-一份只带安装事实的薄 manifest（name/version/interface/digest/artifact）会骑在检出
-声明之上——interface 换成安装版的，工具与 launch 原样保留；第三方组件没有前置声明，
+一份只带安装事实的薄 manifest（name/version/digest/artifact）会骑在检出声明之上——
+安装事实覆盖安装事实，工具、`launch`、`service`、`entry` 原样保留；第三方组件没有前置声明，
 就整体进入。
 
 **不可用的组件不提供工具，也没有替身**：`registry.build_tools` 对缺席组件贡献零
@@ -541,7 +551,7 @@ schema（提示词片段同理，`registry._drivable` 是同一道筛选），�
 POST   /api/components/install
   X-Clutch-Component: <base64(UTF-8 JSON)>   声明 + 安装事实（发布态可带 `artifact_url`）
   body: <工件字节流>  |  空 body + manifest 的 `artifact_url`（目标机自己取）
-GET    /api/components                        该机器已装清单（name/version/interface/digest/disabled）
+GET    /api/components                        该机器已装清单（name/version/digest/disabled）
 GET    /api/components/versions?name=<name>    这一个组件的每一版，新→旧，resolved 标出会跑的那一版
 DELETE /api/components/<name>[?version=]       让这个组件（或它的某一版）离开这台机器
 POST   /api/components/<name>/disable          停用：这台机器不再驱动它（字节一律不动）
@@ -704,7 +714,6 @@ PLUGIN_PLAN.md 零之四.3），位只能住在机器上；反过来说，住在
 ```json
 {
   "name": "clutch-hello",
-  "interface": "cli",
   "subject": "network",
   "directory": "/home/me/work/hello",
   "launch": { "argv": ["{py}", "{script}"], "entry": "tool.py" },

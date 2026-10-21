@@ -273,7 +273,7 @@ async function main() {
   check(dev.specs.every((s) => s.checkout && s.declaration && s.declaration.name === s.name), "and each one declared itself, in its own manifest");
 
   // 4. the artifact a client would send for a checked-out component
-  const spec = await components.artifactFor({ name: "clutch-memory", interface: "cli" }, { checkout: true });
+  const spec = await components.artifactFor({ name: "clutch-memory" }, { checkout: true });
   const haveBash = spawnSync("bash", ["-c", "command -v tar"], { stdio: "pipe" }).status === 0;
   if (!spec || !haveBash) {
     console.log("SKIP: no checkout to archive (or no bash + tar on this host)");
@@ -400,8 +400,8 @@ async function main() {
     JSON.stringify({
       schema: 1,
       name: "clutch-memory",
-      interface: "cli",
       version: "0.1.0",
+      launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
       declaration: { asset: "component.json", sha256: declDigest },
       artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: artDigest } },
     })
@@ -423,9 +423,6 @@ async function main() {
     // the default direction, pinned from the client side: a release is handed over
     // as the URL its bytes are at plus the digest that pins them, and this machine
     // keeps no copy at all
-    // what this client's own cache holds before anything is asked of it: the
-    // check below is about what an install adds to it
-    const cacheBefore = fs.existsSync(components.CACHE) ? fs.readdirSync(components.CACHE).sort() : [];
     const handed = await components.artifactFor(
       { ...(await components.readManifest(source)), checkout: false },
       { checkout: false }
@@ -448,14 +445,14 @@ async function main() {
     check(pinned.installed.includes("clutch-memory"), "and it is the release that lands, not the checkout beside the repo");
     // Only the DECLARATION comes through this client (a few hundred bytes, pinned
     // like everything else); the artifact itself is tens of megabytes and the
-    // target machine fetches it. So exactly one cache file is new, and it is the
-    // declaration — an artifact download here would show up as a second entry.
-    const fetchedJustNow = (fs.existsSync(components.CACHE) ? fs.readdirSync(components.CACHE).sort() : []).filter(
-      (f) => !cacheBefore.includes(f)
-    );
+    // target machine fetches it. Both files are content-addressed in the cache, so
+    // the claim is about THIS release's bytes and survives a cache an earlier run
+    // filled: the declaration is there, the artifact never was.
+    const cached = fs.existsSync(components.CACHE) ? fs.readdirSync(components.CACHE) : [];
     check(
-      fetchedJustNow.length === 1 && fetchedJustNow[0] === `clutch-memory-${declDigest.slice(0, 16)}-component.json`,
-      `installing it fetched the declaration and nothing else: the artifact never came through this client (${fetchedJustNow.join(", ")})`
+      cached.includes(`clutch-memory-${declDigest.slice(0, 16)}-component.json`) &&
+        !cached.includes(`clutch-memory-${artDigest.slice(0, 16)}-clutch-memory-any.tar.gz`),
+      `installing it fetched the declaration and nothing else: the artifact never came through this client`
     );
     const published = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
     check(
@@ -477,7 +474,7 @@ async function main() {
     // artifact that nothing pins.
     let refused = "";
     try {
-      await components.artifactFor({ name: "clutch-nothing", interface: "cli", artifacts: { any: "x.tar.gz" } });
+      await components.artifactFor({ name: "clutch-nothing", artifacts: { any: "x.tar.gz" } });
     } catch (e) {
       refused = (e && e.message) || "";
     }
@@ -492,8 +489,8 @@ async function main() {
       JSON.stringify({
         schema: 1,
         name: "clutch-memory",
-        interface: "cli",
         version: "0.1.0",
+        launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
         artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: "0".repeat(64) } },
       })
     );
@@ -659,8 +656,8 @@ async function main() {
       JSON.stringify({
         schema: 1,
         name: "clutch-mirror",
-        interface: "cli",
         version: "0.2.0",
+        launch: { argv: ["{py}", "{script}"], entry: "mirror.py" },
         declaration: { asset: "component.json", sha256: declPin },
         artifacts: { any: { asset: "clutch-mirror-any.tar.gz", sha256: artPin } },
       })
@@ -728,8 +725,8 @@ async function main() {
       JSON.stringify({
         schema: 1,
         name: "clutch-mirror",
-        interface: "cli",
         version: "0.2.0",
+        launch: { argv: ["{py}", "{script}"], entry: "mirror.py" },
         declaration: { asset: "component.json", sha256: declPin },
         artifacts: { any: { asset: "clutch-mirror-any.tar.gz", sha256: "a".repeat(64) } },
       })
