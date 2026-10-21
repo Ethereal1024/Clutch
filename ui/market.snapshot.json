@@ -4,32 +4,28 @@
     {
       "id": "Ethereal1024/clutch-workspace",
       "name": "clutch-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.1.1/clutch-component.json",
+      "version": "0.1.1",
       "summary": "read, grep, write and edit files in the project the session works in",
       "tags": [
         "workspace"
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-workspace",
       "license": "MIT",
-      "manifest_sha256": "654c353e0aaa2a20db4d6ce606426d194a5606d3eb45409824670c4003ea7294",
-      "interface": "daemon",
-      "runs_on": "self"
+      "manifest_sha256": "08d4e8e1a44be86001fcf7f31f04d5ba5e76dfea2dedfdc4703ba06e53721b66"
     },
     {
       "id": "Ethereal1024/clutch-memory",
       "name": "clutch-memory",
-      "manifest": "https://github.com/Ethereal1024/clutch-memory/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-memory/releases/download/v0.1.1/clutch-component.json",
+      "version": "0.1.1",
       "summary": "what the project remembers between sessions, written down where a later session reads it",
       "tags": [
         "memory"
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-memory",
       "license": "MIT",
-      "manifest_sha256": "ce1420fcd3ae88e6c0f2ada3e7e6ac1ff4c9a4aea817a438828af3462c8b2c19",
-      "interface": "cli",
-      "runs_on": "self"
+      "manifest_sha256": "b3ecea33b71edfe3ae708ac8769dd4d17fb1dd5dec029c656909254b2c130672"
     },
     {
       "id": "Ethereal1024/clutch-websearch",
@@ -43,30 +39,26 @@
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-websearch",
       "license": "MIT",
-      "manifest_sha256": "52d79800d23354b541c3774014399e99d7346c65df671d41dc8c0a35ce2717cb",
-      "interface": "cli",
-      "runs_on": "self"
+      "manifest_sha256": "52d79800d23354b541c3774014399e99d7346c65df671d41dc8c0a35ce2717cb"
     },
     {
       "id": "Ethereal1024/clutch-skills",
       "name": "clutch-skills",
-      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.1/clutch-component.json",
-      "version": "0.1.1",
+      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.2/clutch-component.json",
+      "version": "0.1.2",
       "summary": "the skill library: the instructions a workflow is run by",
       "tags": [
         "skills"
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-skills",
       "license": "MIT",
-      "manifest_sha256": "5394563732abd69813ac71d86206979a1c38eef2602f51d5e619956ea7c40c42",
-      "interface": "cli",
-      "runs_on": "self"
+      "manifest_sha256": "cafed0bb41ea7731181313baad775560cf45477ec828269bd1fddc0086321fa4"
     },
     {
       "id": "Ethereal1024/clutch-ssh-workspace",
       "name": "clutch-ssh-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-ssh-workspace/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-ssh-workspace/releases/download/v0.1.1/clutch-component.json",
+      "version": "0.1.1",
       "summary": "the same workspace files, on the machine at the other side of an SSH tunnel",
       "tags": [
         "workspace",
@@ -74,9 +66,7 @@
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-ssh-workspace",
       "license": "MIT",
-      "manifest_sha256": "da57b4c03b34cd4801d2c48d40b62b4db824f61ac81212748926c716b9920645",
-      "interface": "plugin",
-      "runs_on": "other"
+      "manifest_sha256": "a3a0b8379d33e237ae56f7cedb716d843eae12a2d55b7e92ada016aaa9bc2a4c"
     }
   ]
 }

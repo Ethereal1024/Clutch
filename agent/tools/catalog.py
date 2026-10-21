@@ -131,9 +131,10 @@ from . import components, hostconfig, modules
 # `launch` when it declares one); a `launch` alone = a process this host starts per
 # call; NEITHER = no process here at all, so the statement is the CLIENT's and the
 # declaration names the `entry` module it runs (tools/channel.py). The old words
-# `interface` and `runs_on` are ignored when a manifest still carries them
-# (released manifests do, until the 0.1.57 repack) and refused when a declaration
-# tries to have it both ways (component_diagnostics).
+# `interface` and `runs_on` are IGNORED when a manifest still carries them — a
+# machine may hold a release published before this host stopped reading them — and
+# a declaration that names a process here AND an `entry` is refused rather than
+# half-read (component_diagnostics).
 
 # Whose resources a component serves — which decides whether a statement may run
 # for a given workspace at all (registry.module_blocked_reason).
@@ -675,9 +676,9 @@ def _service_of(data: Mapping[str, Any]) -> Service | None:
 
     `service: {}` is a declaration too — the three fields have defaults, so the
     presence of the KEY decides, never its truthiness. The same three keys used to
-    ride the top level of a manifest, and are still read from there, so a component
-    published before this host learned the word drives exactly as it did; that fold
-    goes away with the interface word it was written beside.
+    ride the top level of a manifest, and are still read from there: a release
+    published before this host learned the word is still on someone's machine, and
+    it keeps driving exactly as it did.
     """
     raw = data.get("service")
     if not isinstance(raw, Mapping):

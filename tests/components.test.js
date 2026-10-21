@@ -393,6 +393,10 @@ async function main() {
   fs.writeFileSync(path.join(pubSrc, "RELEASE"), "the published artifact, not the checkout\n");
   buildTar(pubSrc, path.join(pub, "clutch-memory-any.tar.gz"));
   fs.copyFileSync(path.join(pubSrc, "component.json"), path.join(pub, "component.json")); // the declaration asset, beside the artifact
+  // the release's own version, read from the declaration this release ships
+  // rather than spelled here: the modules bump it, and an install is recorded
+  // under the DECLARATION's version (the manifest above is the outer envelope)
+  const releaseVersion = JSON.parse(fs.readFileSync(path.join(pub, "component.json"), "utf8")).version;
   const artDigest = sha256(path.join(pub, "clutch-memory-any.tar.gz"));
   const declDigest = sha256(path.join(pub, "component.json"));
   const manifestPath = path.join(pub, "clutch-component.json");
@@ -401,7 +405,7 @@ async function main() {
     JSON.stringify({
       schema: 1,
       name: "clutch-memory",
-      version: "0.1.0",
+      version: releaseVersion,
       launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
       declaration: { asset: "component.json", sha256: declDigest },
       artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: artDigest } },
@@ -437,7 +441,7 @@ async function main() {
       "carrying the digest the release pinned and the file's own name (a host reads the artifact's shape from its suffix)"
     );
     check(
-      handed.version === `0.1.0+${artDigest.slice(0, 16)}`,
+      handed.version === `${releaseVersion}+${artDigest.slice(0, 16)}`,
       "and the version it would be recorded under: the release's own, with the content digest appended"
     );
 
@@ -457,13 +461,13 @@ async function main() {
     );
     const published = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
     check(
-      published.length === 1 && published[0] === `0.1.0+${artDigest.slice(0, 16)}`,
+      published.length === 1 && published[0] === `${releaseVersion}+${artDigest.slice(0, 16)}`,
       "the landed directory is the release's own version + the digest its manifest pinned"
     );
     check(fs.existsSync(path.join(hostRoot, "clutch-memory", published[0], "RELEASE")), "the host holds the published bytes");
     const listed = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
     check(
-      listed && listed.version === `0.1.0+${artDigest.slice(0, 16)}` && listed.digest === artDigest,
+      listed && listed.version === `${releaseVersion}+${artDigest.slice(0, 16)}` && listed.digest === artDigest,
       "and the host hands that version back, so a page can name what this machine holds"
     );
 
@@ -836,7 +840,7 @@ async function main() {
   {
     const versions = await components.hostVersions(base, "clutch-memory");
     check(versions.length === 1 && versions[0].resolved === true, "the host lists the versions it holds for one component, and which one it would run");
-    check(versions[0].version === `0.1.0+${artDigest.slice(0, 16)}`, "and it is the version this client installed, digest and all");
+    check(versions[0].version === `${releaseVersion}+${artDigest.slice(0, 16)}`, "and it is the version this client installed, digest and all");
 
     let badName = "";
     try {
@@ -853,7 +857,7 @@ async function main() {
     check(off.status === "disabled" && off.disabled === true, "the host answers the switch with the bit it now holds");
     const stopped = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
     check(Boolean(stopped) && stopped.disabled === true, "a stopped component is still HELD: it stays listed, marked, with its bytes");
-    check(stopped.version === `0.1.0+${artDigest.slice(0, 16)}`, "and it still names the version that is there");
+    check(stopped.version === `${releaseVersion}+${artDigest.slice(0, 16)}`, "and it still names the version that is there");
     check(fs.existsSync(path.join(hostRoot, "clutch-memory")), "because nothing was deleted");
     check((await components.hostVersions(base, "clutch-memory")).length === 1, "the finer list still holds its version too");
 

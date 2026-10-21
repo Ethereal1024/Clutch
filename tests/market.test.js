@@ -84,8 +84,8 @@ async function main() {
     "and carries the tags a page filters by"
   );
   check(
-    snapshot.entries.every((e) => ["daemon", "cli", "plugin"].includes(e.interface) && ["", "self", "other"].includes(e.runs_on)),
-    "interface and runs_on are drawn from the rows too — previews only: the install path re-reads and pin-checks the real manifest"
+    snapshot.entries.every((e) => !("interface" in e) && !("runs_on" in e)),
+    "and no kind word: where a component runs is its declaration's answer (`service` / `launch` / `entry`), so the index repeats none of it"
   );
 
   // ---- 2. the curation file and the shipped copy say the same thing ------
@@ -166,7 +166,7 @@ async function main() {
   {
     const dir = tmp("clutch-market-doc-");
     const manifest = path.join(dir, "clutch-sample.json");
-    fs.writeFileSync(manifest, JSON.stringify({ schema: 1, name: "clutch-sample", interface: "cli", version: "0.1.0", artifacts: {} }));
+    fs.writeFileSync(manifest, JSON.stringify({ schema: 1, name: "clutch-sample", version: "0.1.0", artifacts: {} }));
     const sha = require("crypto").createHash("sha256").update(fs.readFileSync(manifest)).digest("hex");
     const good = { id: "acme/clutch-sample", name: "clutch-sample", manifest, manifest_sha256: sha, version: "0.1.0" };
     const doc = (entries) => {

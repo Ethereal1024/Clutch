@@ -4,8 +4,8 @@
     {
       "id": "Ethereal1024/clutch-workspace",
       "name": "clutch-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-workspace/releases/download/v0.1.1/clutch-component.json",
+      "version": "0.1.1",
       "summary": "read, grep, write and edit files in the project the session works in",
       "tags": ["workspace"],
       "homepage": "https://github.com/Ethereal1024/clutch-workspace",
@@ -14,8 +14,8 @@
     {
       "id": "Ethereal1024/clutch-memory",
       "name": "clutch-memory",
-      "manifest": "https://github.com/Ethereal1024/clutch-memory/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-memory/releases/download/v0.1.1/clutch-component.json",
+      "version": "0.1.1",
       "summary": "what the project remembers between sessions, written down where a later session reads it",
       "tags": ["memory"],
       "homepage": "https://github.com/Ethereal1024/clutch-memory",
@@ -34,8 +34,8 @@
     {
       "id": "Ethereal1024/clutch-skills",
       "name": "clutch-skills",
-      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.1/clutch-component.json",
-      "version": "0.1.1",
+      "manifest": "https://github.com/Ethereal1024/clutch-skills/releases/download/v0.1.2/clutch-component.json",
+      "version": "0.1.2",
       "summary": "the skill library: the instructions a workflow is run by",
       "tags": ["skills"],
       "homepage": "https://github.com/Ethereal1024/clutch-skills",
@@ -44,8 +44,8 @@
     {
       "id": "Ethereal1024/clutch-ssh-workspace",
       "name": "clutch-ssh-workspace",
-      "manifest": "https://github.com/Ethereal1024/clutch-ssh-workspace/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-ssh-workspace/releases/download/v0.1.1/clutch-component.json",
+      "version": "0.1.1",
       "summary": "the same workspace files, on the machine at the other side of an SSH tunnel",
       "tags": ["workspace", "ssh"],
       "homepage": "https://github.com/Ethereal1024/clutch-ssh-workspace",

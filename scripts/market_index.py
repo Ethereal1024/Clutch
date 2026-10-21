@@ -199,19 +199,8 @@ def read_manifest(entry: dict) -> dict:
         sha = pin.get("sha256") if isinstance(pin, dict) else ""
         if not isinstance(sha, str) or not SHA_RE.match(sha):
             raise Problem(f"{entry['id']}: {url} pins no sha256 for its {platform} artifact")
-    interface = manifest.get("interface", "")
-    runs_on = manifest.get("runs_on", "")
-    if interface not in ("daemon", "cli", "plugin"):
-        raise Problem(f"{entry['id']}: {url} declares interface {interface!r}, which no host can place")
-    if runs_on not in ("", "self", "other"):
-        raise Problem(f"{entry['id']}: {url} declares runs_on {runs_on!r}")
     return {
         "manifest_sha256": hashlib.sha256(body).hexdigest(),
-        # Display previews, copied so the page can draw a row without reading
-        # every module's manifest. NOT decisions: the install path re-reads the
-        # manifest and the declaration is what puts a component somewhere.
-        "interface": interface,
-        "runs_on": runs_on or "self",
     }
 
 
