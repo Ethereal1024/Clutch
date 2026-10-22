@@ -27,7 +27,11 @@ cd "$ROOT"
   --add-data "agent/transport_defaults.json:agent/" \
   scripts/server_entry.py
 
+# the supervisor carries the VERSION it was cut from: /api/health names it, and an
+# upgraded app retires a predecessor that answers with another build instead of
+# reusing it forever (agent/build.py, ui/server-bootstrap.js ensureSupervisor)
 "$ROOT/.venv/bin/python" -m PyInstaller --noconfirm --onefile --name agent-supervisor \
+  --add-data "VERSION:." \
   scripts/supervisor_entry.py
 
 mkdir -p "$(dirname "$OUT")"

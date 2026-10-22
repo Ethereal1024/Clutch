@@ -26,19 +26,50 @@ const HEARTBEAT_STALE_MS = 300000; // must match agent/procmgr/supervise.py STAL
 
 async function supervisorProbe(base) {
   // "up" = supervisor shape, "foreign" = another server on the port, "down" = nothing listening
+  return (await supervisorIdentity(base)).state;
+}
+
+// ---- who answers on the port, not just whether something does ----
+// A fixed machine-wide port plus a supervisor that outlives the app is an
+// upgrade trap: the NEXT build's app finds the PREVIOUS build's supervisor still
+// serving 8890 (its sessions postpone the idle-exit forever) and reuses it, so
+// every host-side call — component install, the installed-version table — keeps
+// running the code the update just replaced. The app looks upgraded and behaves
+// like the release before it, with nothing on screen to say why. Hence /api/health
+// answers with the build and the pid (agent/build.py) and the desktop can tell
+// "mine" from "my predecessor": this reads that answer, and ensureSupervisor
+// retires what is not its own.
+//
+// `version` is "" for a host too old to name itself (0.1.57 and earlier) — that
+// is a mismatch, not a match: an unnamed host is exactly the one an upgrade left
+// behind. `pid` is null the same way, and the retirement then falls back to
+// asking it to exit (see server-bootstrap.js).
+async function supervisorIdentity(base) {
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
     try {
       const r = await fetch(`${base}/api/health`, { signal: ctl.signal });
-      if (!r.ok) return "foreign";
-      const body = await r.text();
-      return body.includes('"status"') ? "up" : "foreign";
+      if (!r.ok) return { state: "foreign", version: "", pid: null };
+      let body = null;
+      try {
+        body = await r.json();
+      } catch {
+        return { state: "foreign", version: "", pid: null };
+      }
+      // the supervisor's own word for "this is a Clutch supervisor" — a session
+      // child answers /api/health too, with in_flight and no status
+      if (!body || body.status !== "ok") return { state: "foreign", version: "", pid: null };
+      return {
+        state: "up",
+        version: typeof body.version === "string" ? body.version.trim() : "",
+        pid: Number.isInteger(body.pid) ? body.pid : null,
+      };
     } finally {
       clearTimeout(t);
     }
   } catch {
-    return "down";
+    return { state: "down", version: "", pid: null };
   }
 }
 
@@ -185,6 +216,7 @@ function supervisorShutdown(base) {
 
 module.exports = {
   supervisorProbe,
+  supervisorIdentity,
   supervisorSessionStart,
   supervisorSessionStop,
   supervisorSessionHeartbeat,

@@ -73,6 +73,16 @@ def main() -> int:
 
     st, body = http_get(f"{base}/api/health")
     check(st == 200 and '"ok"' in body, "supervisor health ok")
+    # the answer names the build and the pid that owns this port: that is what lets
+    # an upgraded app RETIRE a predecessor holding the fixed port instead of reusing
+    # it forever, which is how an upgrade used to leave the old host code running
+    # (agent/build.py, ui/server-bootstrap.js ensureSupervisor)
+    health = json.loads(body)
+    check(
+        health.get("version") == (ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+        "health names the build this supervisor was cut from",
+    )
+    check(health.get("pid") == os.getpid(), "health names the pid that owns the port")
 
     st, body = http_post(f"{base}/api/session/start")
     check(st == 200, "session start accepted")

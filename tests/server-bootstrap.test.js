@@ -4,6 +4,7 @@
 // last window closes -> supervisor idle-exits.
 // Run: node tests/server-bootstrap.test.js
 const assert = require("assert");
+const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -64,8 +65,16 @@ async function waitFor(what, pred, timeoutMs) {
 }
 
 const windows = [];
+let predecessor = null; // the fake old-build supervisor of the upgrade check
 
 async function cleanup() {
+  if (predecessor && predecessor.exitCode === null && predecessor.signalCode === null) {
+    try {
+      predecessor.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
   for (const w of windows) {
     try {
       w.stop();
@@ -157,6 +166,45 @@ async function main() {
   assert(await supervisorUp(), "and it answers after the wake");
   assert(await ensureSupervisor(), "a second wake on a running supervisor is a probe, not a spawn");
   await waitFor("supervisor idle-exits after the wake", async () => !(await supervisorUp()), 20000);
+
+  // ---- the upgrade trap: a PREVIOUS build's supervisor holding this port ----
+  // The old host outlives the app (its sessions postpone the idle-exit), so the
+  // new app used to reuse it and every host-side call kept running the code the
+  // update had just replaced — "I upgraded and it is still broken". The fake names
+  // another build and its own pid, exactly like a real predecessor; ensureSupervisor
+  // must end it and put THIS build on the port.
+  const { supervisorIdentity } = require("../ui/supervisor-client");
+  const ownVersion = fs.readFileSync(path.join(__dirname, "..", "VERSION"), "utf8").trim();
+  predecessor = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const http = require("http");
+       const s = http.createServer((q, r) => {
+         if (q.url === "/api/health") {
+           r.writeHead(200, { "Content-Type": "application/json" });
+           r.end(JSON.stringify({ status: "ok", version: "0.0.0-predecessor", pid: process.pid }));
+           return;
+         }
+         r.writeHead(404, { "Content-Type": "application/json" }).end("{}");
+       });
+       s.listen(Number(process.env.PORT), "127.0.0.1", () => console.log("ready"));`,
+    ],
+    { env: { ...process.env, PORT: String(SUPERVISOR_PORT) }, stdio: ["ignore", "pipe", "inherit"] }
+  );
+  await waitFor("the predecessor takes the port", async () => supervisorUp(), 15000);
+  const seen = await supervisorIdentity(`http://127.0.0.1:${SUPERVISOR_PORT}`);
+  assert.strictEqual(seen.state, "up", "the predecessor answers like a supervisor");
+  assert.strictEqual(seen.version, "0.0.0-predecessor", "and names a build that is not this app's");
+  assert(await fresh().ensureSupervisor(), "ensureSupervisor retires it and takes the port");
+  const taken = await supervisorIdentity(`http://127.0.0.1:${SUPERVISOR_PORT}`);
+  assert.strictEqual(taken.state, "up", "a supervisor answers after the predecessor is gone");
+  assert.strictEqual(taken.version, ownVersion, "and it is THIS build's supervisor");
+  assert(taken.pid && taken.pid !== process.pid, "the replacement is its own process");
+  await waitFor("the predecessor process is gone", async () => predecessor.exitCode !== null || predecessor.signalCode !== null, 12000);
+  assert(await supervisorUp(), "the port is held by a live supervisor, not by silence");
+  await post(`http://127.0.0.1:${SUPERVISOR_PORT}/api/shutdown`, {});
+  await waitFor("supervisor idle-exits after the upgrade check", async () => !(await supervisorUp()), 20000);
 
   console.log("all passed (machine supervisor + per-window sessions)");
 }

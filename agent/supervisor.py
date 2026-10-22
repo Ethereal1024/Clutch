@@ -79,6 +79,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import urlopen
 
+from agent.build import version as build_version
 from agent.procmgr import kill
 from agent.procmgr.stdio import SafeStdStream, log, make_stdout_nonblocking
 from agent.procmgr.supervise import (
@@ -361,7 +362,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path, query = self._route()
         if path == "/api/health":
-            self._json({"status": "ok"})
+            # the build and the pid are what lets a client tell "my supervisor"
+            # from the predecessor an upgrade left holding this port (see
+            # agent/build.py): it retires that one by pid instead of reusing it
+            self._json({"status": "ok", "version": build_version(), "pid": os.getpid()})
         elif path == "/api/components":
             # the version gate, host-side: what this machine already runs
             self._json({"components": components.inventory()})
