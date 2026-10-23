@@ -123,7 +123,7 @@ $("#fs-list").addEventListener("pointercancel", () => {
 // picker that is already open re-lists the moment the host announces one
 // (backend-lifecycle.js, backend:base-changed), and no base at all means no
 // listing to draw.
-async function loadDir(path, remember = true) {
+async function loadDir(path, remember = true, refetched = false) {
   const listEl = $("#fs-list");
   const token = ++fsListToken; // latest listing request: a stale answer must not paint
   if (!API_BASE) {
@@ -133,6 +133,22 @@ async function loadDir(path, remember = true) {
     // list a place where a backend appears rather than a place that lists one)
     listEl.innerHTML = "";
     hidePickerBody();
+    // On the phone there IS no local base to fall back to (N4): "no base" here is
+    // the picker's own ask having come back empty, and a host that has a session
+    // since then announces it over backend:base-changed. Ask once, the same way
+    // openFsBrowser does, so a claim that landed between the two is not a picker
+    // that stays folded for ever.
+    if (!refetched) {
+      const before = API_BASE;
+      try {
+        await switchBackendResolved();
+      } catch (e) {
+        /* nothing to ask: stay folded, which is the honest answer */
+      }
+      if (token === fsListToken && API_BASE && API_BASE !== before) {
+        return loadDir(path, remember, true);
+      }
+    }
     return;
   }
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
@@ -183,6 +199,29 @@ async function loadDir(path, remember = true) {
       localStorage.removeItem("clutch_fs_last_dir");
       loadDir("");
       return;
+    }
+    // A request that never landed (no .status: a refused port, an aborted wait) is
+    // not a base that answered "no" — it is a base that is not there any more. The
+    // far session usually is: a hop that came back, or a claim that landed after
+    // this page resolved its URL, has moved the session's forward while this window
+    // still holds the old one. Printing "cannot reach the backend at <dead port>"
+    // then told the user their API was broken while the engine was serving it —
+    // the reported "connected, the API answers, yet the app says it cannot fetch the
+    // API". So ask the host for THIS window's session once (the same ask
+    // openFsBrowser makes, and the one backend:base-changed would make had the page
+    // been listening when it was announced) and retry the listing only if the base
+    // actually moved: a host that hands the same URL back is the honest banner below.
+    if (!e.status && !refetched && API_BASE) {
+      const before = API_BASE;
+      let moved = false;
+      try {
+        moved = await switchBackendResolved();
+      } catch (err) {
+        moved = false;
+      }
+      if (token === fsListToken && moved && API_BASE && API_BASE !== before) {
+        return loadDir(path, remember, true);
+      }
     }
     // the base answers nothing: there is no listing to draw, so the body folds
     // and the reason goes on the conn bar. Reaching the local machine, or another

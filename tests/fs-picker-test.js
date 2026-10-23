@@ -735,6 +735,47 @@ async function main() {
   check(fsBody.classList.contains("collapsed") && doorOn(),
     "a listing that fails folds the body and hands the bar its door back: nothing browsed, nothing in flight");
 
+  // A listing that never LANDED is not a base that answered "no" — it is a base that
+  // is not there any more, while the far session usually is (a hop that came back, a
+  // claim that landed after this page resolved its URL). Painting "cannot reach the
+  // backend at <dead port>" then told the user their API was broken while the engine
+  // was serving it. So: one ask of the host, and only a base that MOVED earns a retry.
+  const realSbr = global.switchBackendResolved;
+  let asked = 0;
+  global.switchBackendResolved = async () => {
+    asked += 1;
+    global.API_BASE = "http://127.0.0.1:31002"; // this window's session, as the host now has it
+    return true;
+  };
+  hidePickerBody();
+  connStatus.textContent = "";
+  global.API_BASE = "http://127.0.0.1:31001"; // the forward the page resolved, now dead
+  const movedListing = loadDir("");
+  listings.shift().reject(new Error("Failed to fetch")); // no .status: it never landed
+  await flush(); // the ask, then the retry it earned
+  const retryAsk = listings.shift();
+  check(asked === 1 && !!retryAsk,
+    "a listing that never landed asks the host for this window's session once, and retries against what it names");
+  answer(retryAsk, "/home/me");
+  await movedListing;
+  check(!fsBody.classList.contains("collapsed") && !/Cannot reach backend/.test(connStatus.textContent),
+    "and the retry's listing is the picker's truth: the body unfolds, no dead-base banner is painted");
+
+  // The other half: a host that hands the SAME url back has nothing newer to offer,
+  // and a second ask would be a poll. That is the one case the banner is honest about.
+  global.switchBackendResolved = async () => {
+    asked += 1;
+    return true; // the same base: nothing moved
+  };
+  hidePickerBody();
+  const stuckListing = loadDir("");
+  listings.shift().reject(new Error("Failed to fetch"));
+  await stuckListing;
+  check(asked === 2 && listings.length === 0 && fsBody.classList.contains("collapsed") &&
+    /Cannot reach backend at http:\/\/127\.0\.0\.1:31002/.test(connStatus.textContent),
+  "a host that hands the same URL back is not a retry: the fold and the banner stay, once");
+  global.switchBackendResolved = realSbr;
+
   // and closing the picker ends the wait on its own: there is no body left to unfold
   hidePickerBody();
   const leftOpen = loadDir("");
