@@ -443,7 +443,31 @@ async function connLostAttempt() {
 async function connLostRecover() {
   const remote = connLostRemoteIntent();
   if (remote && !(await connLostTunnelUp())) return connLostRedial(remote);
-  return connLostAskHost();
+  if (!remote) return connLostAskHost();
+  // A hop that reports itself up is NOT the same thing as a host that can hand a
+  // session back, and the gap between the two is a dead end (reported: the dialog
+  // retried for ever while the same host connected in seconds from the welcome
+  // page). `active` is only "an ssh client object still exists"
+  // (ui/tunnel-lifecycle.js status), so a far session that died behind a client
+  // that has not noticed leaves the hop looking alive while every door stands
+  // down: the host can only re-BIND the claim this window parked, never replace
+  // it (ui/host-core.js claimWindowBackend answers null at a parked claim and at
+  // a "doubt"), and no ladder will dial over a hop that claims to be up
+  // (ui/tunnel-ladder.js attempt). The welcome page has no such claim — the exit
+  // released it — which is why the user's own Connect there is the one thing that
+  // always worked.
+  //
+  // So the door is tried first, exactly as before: a live hop may still re-claim
+  // the session behind it, and that is cheaper than a new one. But an answer of
+  // "not back" while a remote is still this window's own is no longer the end of
+  // the attempt: it escalates to the SAME host by name (connLostRedial — the
+  // picker's connect, so the user re-enters nothing and no other host is ever
+  // substituted). That is the one call that can replace the hop the parked claim
+  // is stuck behind; it is only ever made after the host's own door has failed,
+  // and the far-side session outlives the hop, so the reconnect re-binds it
+  // rather than starting a second one over its work.
+  if (await connLostAskHost()) return true; // a session answered: the dialog is down
+  return connLostRedial(remote);
 }
 
 // the host's own session for this window, if it holds or can claim one

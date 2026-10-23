@@ -459,6 +459,36 @@ async function main() {
   check((await connLostRecover()) === true && calls.join(",") === "intent,askHost",
   "with nothing to re-attempt by name, the host is asked (its heal, a re-claim, a local session)");
 
+  // The reported dead end: the hop still reports itself up (an ssh client that has
+  // not noticed the far session died), so no ladder will dial, and the host can
+  // only RE-BIND the claim this window parked — it answers "no session" for ever.
+  // The dialog looped "Not back yet" while the same host connected in seconds from
+  // the welcome page, whose dial does not ask that claim at all.
+  intent = { host: "box.example", user: "dev", port: "2222" };
+  tunnelUp = true;
+  global.connLostAskHost = async () => {
+    calls.push("askHost");
+    return false; // the host has no session to hand back (parked / doubt)
+  };
+  calls.length = 0;
+  redialOk = true;
+  check((await connLostRecover()) === true &&
+    calls.join(",") === "intent,tunnelUp,askHost,redial",
+  "a hop that claims to be up but yields no session escalates to the same host by name");
+  calls.length = 0;
+  redialOk = false;
+  check((await connLostRecover()) === false &&
+    calls.join(",") === "intent,tunnelUp,askHost,redial",
+  "and a redial that fails is the attempt's honest answer — not a silent loop");
+  check(intent.host === "box.example" && store.get("clutch_ssh_connected") === "1",
+  "the escalation stays on that host: no other host, no cleared intent");
+  global.connLostAskHost = async () => {
+    calls.push("askHost");
+    return true;
+  };
+  tunnelUp = false; // back to a dead hop for the try-counted section below
+  redialOk = true;
+
   // ---- 7. one door: the host this window was on, however many tries it takes ----
   // (a try-counted branch used to clear the standing intent on the desktop and
   // take the host's own local session: the user was moved to another machine
