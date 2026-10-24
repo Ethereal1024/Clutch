@@ -143,6 +143,16 @@
           <dt>Backend</dt>
           <dd id="about-backend" class="about-mono">…</dd>
         </dl>
+        <!-- The update control (ui/js/update-panel.js): one button, and the line
+             under it says what that button is doing or what it found. The label is
+             written by the script, not read from here — "Check for updates" is only
+             the state a page with no answer yet is in, and the script repaints both
+             halves from ONE object so they cannot disagree. The line is announced
+             as it changes (`role="status"`), the way #notice and #plug-note are. -->
+        <div class="about-update">
+          <button id="about-update-btn" type="button">Check for updates</button>
+          <p id="about-update-note" class="about-update-note" role="status" aria-live="polite"></p>
+        </div>
         <p class="about-note muted">Quote the first line in a report: it names the
           client, and the rows under it name what that client was running against.</p>
       </div>
@@ -480,6 +490,7 @@
   <script src="js/diagram-viewer.js"></script>
   <script src="js/render-events.js"></script>
   <script src="js/settings.js"></script>
+  <script src="js/update-panel.js"></script>
   <script src="js/conn-store.js"></script>
   <script src="js/components-panel.js"></script>
   <script src="js/backend-lifecycle.js"></script>

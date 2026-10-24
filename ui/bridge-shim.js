@@ -124,6 +124,13 @@
     onProgress: (cb) => subscribe("components:progress", cb),
   });
 
+  expose("clutchUpdate", {
+    check: (current) => call("clutchUpdate", "check", [current]),
+    download: () => call("clutchUpdate", "download"),
+    install: (file) => call("clutchUpdate", "install", [file]),
+    onProgress: (cb) => subscribe("update:progress", cb),
+  });
+
   expose("clutchTunnel", {
     connect: (cfg) => call("clutchTunnel", "connect", [cfg]),
     status: () => call("clutchTunnel", "status"),

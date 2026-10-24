@@ -44,6 +44,22 @@ contextBridge.exposeInMainWorld("clutchComponents", {
   },
 });
 
+// the About pane's update button. `check` takes the version the page is showing
+// (ui/version.js) rather than letting the shell decide: the answer has to be about
+// the number on screen. `download` streams its progress on its own channel
+// (`update:progress`), because a download takes minutes and a spinner that is
+// really a dead button gets pressed again.
+contextBridge.exposeInMainWorld("clutchUpdate", {
+  check: (current) => ipcRenderer.invoke("update:check", current),
+  download: () => ipcRenderer.invoke("update:download"),
+  install: (file) => ipcRenderer.invoke("update:install", file),
+  onProgress: (cb) => {
+    const wrap = (_e, stage) => cb(stage);
+    ipcRenderer.on("update:progress", wrap);
+    return () => ipcRenderer.removeListener("update:progress", wrap);
+  },
+});
+
 contextBridge.exposeInMainWorld("clutchTunnel", {
   connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
   status: () => ipcRenderer.invoke("tunnel:status"),

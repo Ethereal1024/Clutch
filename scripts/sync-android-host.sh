@@ -25,7 +25,13 @@ UI_ASSETS=$ASSETS/ui
 # components.js requires mirrors.js — which reads components.mirrors.json from
 # __dirname, so the phone falls back through the same mirrors the desktop does
 # (without the list it hands the far side nothing to retry through).
-UI_NODE="components-view.js components.js components.mirrors.json market.snapshot.json exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json"
+#
+# update-core.js + update-service.js are the About pane's updater: the check and
+# the download run HERE (the phone has no network API of its own in the WebView),
+# the install does not — the page hands the path to the Kotlin shell instead. The
+# desktop-only installer (ui/update-install.js) is deliberately NOT copied: it
+# requires Electron-free nothing, but nothing on this side could run it either.
+UI_NODE="components-view.js components.js components.mirrors.json market.snapshot.json exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json update-core.js update-service.js"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"

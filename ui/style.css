@@ -1438,6 +1438,32 @@ mjx-container[display="true"] {
   overflow-wrap: anywhere; /* an address has no spaces to break at */
 }
 .about-note { margin: 0; font-size: var(--fs-sm); line-height: 1.5; max-width: 46ch; }
+/* the update control: the button and the one line that says what it is doing, in
+   ONE block. The line belongs to the button (it is that press's answer, not another
+   fact about the build), so it is indented with it and cannot drift up into the
+   definition list above. `align-items: flex-start` keeps the button at its own
+   width: stretched across the modal it would read as a section rather than as the
+   one thing to press. */
+.about-update {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin: 0 0 var(--s4);
+}
+/* reserved height for the status line: the pane is a fixed-length box between two
+   tab switches (see SETTINGS_HEIGHT_MS in ui/js/settings.js), so an empty line that
+   collapses and re-expands on every press would move the button out from under the
+   pointer that just pressed it */
+.about-update-note {
+  margin: 0;
+  min-height: 1.5em;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 46ch;
+}
+.about-update-note.error { color: var(--danger); }
 
 /* the mirror row: a CLIENT setting — where the sources below are READ from — which
    is why it is drawn above the machine they are for. It is `flex: none` like the

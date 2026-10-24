@@ -76,6 +76,7 @@ async function main() {
       clutchSettings: globalThis.clutchSettings,
       clutchComponents: globalThis.clutchComponents,
       clutchTunnel: globalThis.clutchTunnel,
+      clutchUpdate: globalThis.clutchUpdate,
     }),
     arityOf(exposed),
     "shim surface == preload surface (names + arities)"

@@ -34,6 +34,10 @@ const {
 } = useUI("settings-mirror.js");
 const { createComponentsView } = useUI("components-view.js");
 const { createTunnelLadder } = useUI("tunnel-ladder.js");
+// the About pane's update button: the same check/download the desktop runs, over
+// the same release — only the install step differs (the page's WebView shell owns
+// it here; this process cannot start an Intent)
+const { createUpdateService } = useUI("update-service.js");
 
 // No base placeholder exists. The desktop's 127.0.0.1:8890 is the supervisor's
 // LIFECYCLE port (it answers /api/session/*, never a window API), and this host
@@ -96,6 +100,28 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     supervisorBase: () => null, // N4: no local supervisor on Android
     tunnelStatus: () => tunnel.tunnelStatus(),
     windowKind: (w) => hostCore.backendKind(w.id),
+    log,
+  });
+
+  // The About pane's update button: the same check and download the desktop shell
+  // runs (ui/update-service.js), over the same release, with one honest difference
+  // — this process cannot start an Intent, so it cannot install what it fetched.
+  // The page hands the downloaded path to its own WebView shell instead
+  // (window.clutchShell.installApk, android/.../UpdateInstaller.kt), which is the
+  // half of the update that lives on the Kotlin side. The bridge verb says so
+  // rather than pretending a phone app can replace itself.
+  const updates = createUpdateService({
+    platform: "android",
+    arch: process.arch, // nodejs-mobile reports the ABI it was built for: arm64-v8a -> "arm64"
+    mobile: true,
+    // HOME is filesDir (N2), so this is filesDir/updates: the ONE directory
+    // res/xml/file_paths.xml publishes through the FileProvider, and the only one
+    // UpdateInstaller will accept a path from
+    updatesDir: path.join(os.homedir(), "updates"),
+    install: () => ({
+      ok: false,
+      error: "the phone's shell installs an APK — the page calls window.clutchShell.installApk for that",
+    }),
     log,
   });
 
@@ -246,6 +272,20 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       mirrors: async () => componentsView.mirrors(),
       addMirror: async (url) => componentsView.addMirror(String(url || "")),
       removeMirror: async (url) => componentsView.removeMirror(String(url || "")),
+    },
+    // the About pane's update button, one for one with the desktop's `update:*`
+    // ipcMain handlers. The version compared against comes from the PAGE: its
+    // stamp (ui/version.js) is the number its About row is showing, and nothing on
+    // this side knows it (the engine's package carries no version of its own).
+    clutchUpdate: {
+      check: async (current) => updates.check({ current: String(current || "") }),
+      download: async () =>
+        updates.download({
+          // the bridge fans this out over its SSE stream, which ui/bridge-shim.js
+          // turns back into the "update:progress" channel the page subscribed to
+          onProgress: (stage) => window.send("update:progress", stage),
+        }),
+      install: async (file) => updates.install(String(file || "")),
     },
   };
 

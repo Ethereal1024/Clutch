@@ -8,6 +8,10 @@ const { createHostCore } = require("./host-core");
 const { createComponentsView } = require("./components-view");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings, getSshSecret } = require("./settings-mirror");
 const { createTunnelLadder } = require("./tunnel-ladder");
+// the About pane's update button: the check/download half (shared with the
+// Android host) and the desktop installer that replaces this build
+const { createUpdateService } = require("./update-service");
+const { createDesktopInstaller, macBundle } = require("./update-install");
 // the client's plugin path: the /call listener, the reverse row it answers on, and
 // the push that tells a session what this client runs (ui/plugin-link.js)
 const pluginLink = require("./plugin-link");
@@ -330,6 +334,43 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("components:mirror-remove", async (_e, url) =>
       componentsView.removeMirror(String(url || ""))
     );
+
+    // The update button on the About pane. One service for the whole app, because
+    // the CHECK and the DOWNLOAD have to describe the same release — a release
+    // published between the two would otherwise install a file the page never
+    // named. The version being compared against is the PAGE's stamp
+    // (ui/version.js): that is the number the About row is showing, and a check
+    // against a different one would let the pane and the button disagree. It
+    // travels with the call rather than being read here for exactly that reason,
+    // and app.getVersion() only stands in for a window that has no stamp.
+    const installer = createDesktopInstaller({
+      // <bundle>.app, from the executable this process is running (a `npm start`
+      // checkout has none, and the dmg path then says it cannot replace anything)
+      appBundle: macBundle(app.getPath("exe")),
+      quit: () => app.quit(),
+      log: tunnelLog,
+    });
+    const updates = createUpdateService({
+      // the one directory the service will hand to the installer; userData is this
+      // app's own, and it survives the quit that installing causes
+      updatesDir: path.join(app.getPath("userData"), "updates"),
+      install: (file, info) => installer.install(file, info),
+      log: tunnelLog,
+    });
+
+    ipcMain.handle("update:check", async (_e, current) =>
+      updates.check({ current: String(current || "") || app.getVersion() })
+    );
+    ipcMain.handle("update:download", async (e) =>
+      updates.download({
+        // one stage at a time to the window that pressed the button; a window that
+        // closed mid-download is a page that stopped caring, not an error
+        onProgress: (stage) => {
+          if (!e.sender.isDestroyed()) e.sender.send("update:progress", stage);
+        },
+      })
+    );
+    ipcMain.handle("update:install", async (_e, file) => updates.install(String(file || "")));
 
     ipcMain.handle("tunnel:connect", async (e, cfg) =>
       // every connect goes through the ladder: the user's own dial owns the wire,

@@ -32,6 +32,14 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- In-app updates (the About pane's button). The engine downloads the release
+         APK into filesDir/updates and the page hands it to Android's package
+         installer through UpdateInstaller. Declaring this is necessary but NOT
+         sufficient: from API 26 "install unknown apps" is a per-app grant the user
+         gives in Settings, and UpdateInstaller opens exactly that screen on the
+         first attempt (its needsPermission answer is what the page words). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- The launcher icon. Two shapes for two platform eras, both generated from
          the desktop's ▣ by scripts/make-icon.py so phone and desktop cannot
          drift: mipmap-anydpi-v26/ic_launcher.xml is the adaptive icon API 26+
@@ -76,5 +84,22 @@
             android:name=".TunnelService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
+
+        <!-- The FileProvider a downloaded APK is handed to the system installer
+             through: Android refuses a file:// Uri across apps, so the file is
+             published as content://${applicationId}.updates/updates/<name>, read
+             only for the length of the install Intent (UpdateInstaller adds
+             FLAG_GRANT_READ_URI_PERMISSION). res/xml/file_paths.xml names exactly
+             the directory the engine downloads into, and UpdateInstaller refuses
+             anything outside it — the list and the check cannot drift apart. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

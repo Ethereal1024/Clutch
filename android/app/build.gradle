@@ -83,4 +83,10 @@ android {
 dependencies {
     // WebViewAssetLoader (https origin for the assets-loaded render layer)
     implementation 'androidx.webkit:webkit:1.11.0'
+    // FileProvider: the About pane's update button hands the downloaded APK to the
+    // system installer as a content:// Uri (UpdateInstaller.kt). webkit already
+    // depends on androidx.core transitively, but relying on another library's
+    // dependency for a class this app calls directly is how a version bump becomes
+    // a build error in a file nobody was looking at.
+    implementation 'androidx.core:core:1.13.1'
 }

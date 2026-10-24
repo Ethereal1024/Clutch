@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What the update FileProvider may publish, and nothing else.
+
+  Android refuses a file:// Uri handed to another app, so a downloaded APK reaches
+  the system installer as content://io.clutch.mobile.updates/updates/<name>. The
+  engine downloads into filesDir/updates (android/host/android-host.js: HOME is
+  filesDir), which is the one directory named here — a path outside it is refused
+  by UpdateInstaller as well, so the provider's list and the installer's check
+  agree by construction rather than by two lists kept in sync.
+
+  files-path is relative to Context.getFilesDir(); NOT external-files-path and NOT
+  cache, because the download outlives the app process (the user presses Install
+  after a restart if the download was interrupted by one).
+-->
+<paths>
+    <files-path name="updates" path="updates/" />
+</paths>

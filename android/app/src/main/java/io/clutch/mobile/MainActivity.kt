@@ -107,6 +107,12 @@ class MainActivity : Activity() {
                 return true
             }
         }
+        // The page's one door to the platform: installing the APK it downloaded
+        // (ui/js/update-panel.js -> window.clutchShell.installApk). Registered
+        // before the first load, because the interface belongs to the WebView, not
+        // to the page — and with a name the page can test for, so a build without
+        // it says "updates are not available here" instead of calling nothing.
+        webView.addJavascriptInterface(UpdateInstaller(this), "clutchShell")
         loadWhenBridgeReady()
     }
 
