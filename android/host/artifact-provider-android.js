@@ -43,6 +43,14 @@ function useUI(name) {
 // names a tag — an index published for THIS APK's tag has to keep matching the copy
 // already on disk, mirror or not.
 const { mirrorPrefix, mirrored } = useUI("net-fetch.js");
+// The ladder BEHIND that one setting (ui/mirrors.js): the accelerators this build
+// ships plus whatever the user added, tried in turn when a read fails for a reason
+// that is about reaching the release rather than about the release's answer. The
+// component supply line already falls back through it (ui/components-view.js); the
+// one thing this app downloads that is BIGGER than a settings file did not, which
+// is the phone that could not fetch the 4 MB tar over a link where github.com does
+// not answer.
+const mirrors = useUI("mirrors.js");
 // The mirror decision is written to the tunnel log (report: "downloads and uploads
 // to the server still need a VPN — the domestic mirror never took effect"). "the
 // mirror was not set" and "the mirror was set and this is what it fetched" are two
@@ -66,6 +74,16 @@ function fetchUrl(url) {
     );
   }
   return mirrored(url, prefix);
+}
+
+// What a read says when the release's own URL could not be reached AND the
+// mirrors did not answer either: the failure that started it, where else this
+// device tried, and the last thing one of them said. Both ends keep the host's
+// own words — the phone's log is the only place this is ever read.
+function coveredFailure(first, tried, last) {
+  const n = tried.length;
+  const where = `${n} mirror${n === 1 ? "" : "s"} (${tried.join(", ")})`;
+  return `${first} — and not through ${where} either: the last one said ${last}`;
 }
 
 function defaultIndexUrl() {
@@ -166,7 +184,100 @@ function indexKey(target) {
   return `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}-py${target.pyver}`;
 }
 
-function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchIndex = fetchJson, fetch = fetchBuf } = {}) {
+function createAndroidArtifactProvider({
+  indexUrl = defaultIndexUrl(),
+  fetchIndex = fetchJson,
+  fetch = fetchBuf,
+  // which mirrors a failed read falls back through: null is this machine's own
+  // (ui/mirrors.js), an ARRAY is exactly that list (a test's stand-in accelerator),
+  // and false is "no fallback at all" (a packager pointing a build at one host)
+  mirrorList = null,
+} = {}) {
+  // Where one release file is read from, in the order it is read: the URL this
+  // DEVICE already has (source_mirror applied by fetchUrl) and then the ladder.
+  // An accelerator rewrites a github.com release URL; a LAN index or a test
+  // server is nobody's to rewrite, so those get the one place, and while
+  // source_mirror is set mirrors.fallbackFor itself returns nothing (that knob
+  // already moved every read).
+  function placesFor(url) {
+    const places = [{ prefix: "", url }];
+    if (mirrorList === false) return places;
+    if (!Array.isArray(mirrorList)) {
+      let host = "";
+      try {
+        host = new URL(url).host;
+      } catch (e) {
+        return places;
+      }
+      if (host !== "github.com") return places;
+    }
+    for (const prefix of mirrors.fallbackFor(url, Array.isArray(mirrorList) ? mirrorList : null)) {
+      const moved = mirrored(url, prefix);
+      if (moved !== url) places.push({ prefix, url: moved });
+    }
+    return places;
+  }
+
+  // The catalogue, read through the release host and then through the ladder when
+  // the failure was about REACHING it: an index a phone cannot download is a
+  // connect that never happens, and a few KB is what an accelerator carries best.
+  // A 404 or a body that is not JSON is an ANSWER (a mirror serves the same path
+  // and would say the same), so the ladder stops there.
+  async function readIndexThroughMirrors(url) {
+    const places = placesFor(url);
+    let first = "";
+    const tried = [];
+    for (let i = 0; i < places.length; i++) {
+      try {
+        const index = await fetchIndex(places[i].url);
+        if (places[i].prefix) tunnelLog(`[artifact] index came through ${places[i].prefix}`);
+        return index;
+      } catch (e) {
+        const reason = (e && e.message) || String(e);
+        if (i === 0) first = reason;
+        else tried.push(places[i].prefix);
+        if (i === places.length - 1 || !mirrors.looksLikeNetwork(reason)) {
+          throw tried.length ? new Error(coveredFailure(first, tried, reason)) : e;
+        }
+        tunnelLog(`[artifact] index fetch failed (${reason}); trying ${places[i + 1].prefix}`);
+      }
+    }
+    throw new Error(first || "the pylibs index produced no answer");
+  }
+
+  // The tar, read the same way — with one addition that is the whole reason this
+  // is safe: every answer is weighed against the index's own sha256 BEFORE it
+  // counts, so a prefix that serves other bytes is refused rather than installed
+  // (the same pin ui/components.js accept() reads). A mismatch is a fact about
+  // the bytes, not about the path, so the ladder stops on it.
+  async function readTarThroughMirrors(url, entry) {
+    const places = placesFor(url);
+    let first = "";
+    const tried = [];
+    for (let i = 0; i < places.length; i++) {
+      try {
+        const buf = await fetch(places[i].url, 0, TAR_TIMEOUT_MS);
+        const got = sha256(buf);
+        if (got !== entry.sha256) {
+          throw new Error(
+            `pylibs artifact ${entry.file} failed sha256: expected ${entry.sha256}, got ${got}`
+          );
+        }
+        if (places[i].prefix) tunnelLog(`[artifact] tar came through ${places[i].prefix}`);
+        return buf;
+      } catch (e) {
+        const reason = (e && e.message) || String(e);
+        if (i === 0) first = reason;
+        else tried.push(places[i].prefix);
+        if (i === places.length - 1 || !mirrors.looksLikeNetwork(reason)) {
+          throw tried.length ? new Error(coveredFailure(first, tried, reason)) : e;
+        }
+        tunnelLog(`[artifact] tar fetch failed (${reason}); trying ${places[i + 1].prefix}`);
+      }
+    }
+    throw new Error(first || "the pylibs tar produced no answer");
+  }
+
   // The release catalogue for THIS index URL: freshly fetched when the release
   // host answers, otherwise the copy already cached for this URL — the same
   // release, because the URL carries the tag. `held` is the caller's test of
@@ -176,7 +287,7 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
   // surfaces — an unreachable release must never be dressed up as a catalogue.
   async function loadIndex(held) {
     try {
-      const index = await fetchIndex(fetchUrl(indexUrl));
+      const index = await readIndexThroughMirrors(fetchUrl(indexUrl));
       writeCachedIndex(indexUrl, index);
       return index;
     } catch (e) {
@@ -265,7 +376,7 @@ function createAndroidArtifactProvider({ indexUrl = defaultIndexUrl(), fetchInde
       const tarUrl = fetchUrl(indexUrl.replace(/[^/]*$/, "") + entry.file);
       let buf;
       try {
-        buf = await fetch(tarUrl, 0, TAR_TIMEOUT_MS);
+        buf = await readTarThroughMirrors(tarUrl, entry);
       } catch (e) {
         // the URL this DEVICE tried, mirror and all: "it needed a VPN" is answered
         // by reading which host was actually asked (see fetchUrl)

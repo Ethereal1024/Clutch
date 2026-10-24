@@ -29,6 +29,20 @@ const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
 const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
 
+// How long a dial that was reset before the handshake waits before its one more
+// ask. Short on purpose: the reset is either a moment that has already passed (a
+// rate limiter's answer, an sshd restarting) or something no wait will fix.
+const DIAL_RETRY_MS = 900;
+
+// How many dials have begun in this process. An attempt compares its own number
+// with this one when it fails: a bigger number means somebody started a NEWER
+// connection while this one was still connecting, and that is the difference
+// between "the host reset us" and "a newer attempt took the wire from under us".
+// The shared tunnel state cannot answer it — a newer attempt nulls the client it
+// is replacing before it installs its own, so the loser would find an empty state
+// and read its own replacement as a teardown.
+let dialSeq = 0;
+
 function defaultKey() {
   for (const name of ["id_ed25519", "id_ecdsa", "id_rsa"]) {
     const p = path.join(os.homedir(), ".ssh", name);
@@ -41,8 +55,49 @@ function defaultKey() {
   return undefined;
 }
 
-function friendlyError(e) {
+// A dial the wire reset before ssh2 ever reported a session. Nothing was
+// authenticated and nothing was asked of the far side, so this is a fact about
+// the PATH to the host (or the host's door), not about the credential — which is
+// what makes it worth one more ask and what the message has to say out loud.
+// Field report: "connecting to other hosts immediately says connection failed:
+// read ECONNRESET" — a peer or a middlebox sending RST at the TCP connect (a
+// firewall, a fail2ban ban's tail, sshd at MaxStartups, a VPN or proxy rule that
+// will not carry the port), and every one of those looks exactly like this.
+function resetBeforeHandshake(e) {
+  const code = String((e && (e.code || e.errno)) || "");
+  if (/^(ECONNRESET|ECONNABORTED|EPIPE)$/.test(code)) return true;
+  return /read ECONNRESET|ECONNABORTED|socket hang up|Connection lost before handshake/i.test(
+    String((e && e.message) || e || "")
+  );
+}
+
+// `target` is the host this attempt was FOR, and `tries` how many times the dial
+// was asked (a reset before the handshake is asked twice): a failure the user
+// reports has to name the host it happened on, because the same sentence arriving
+// for "other hosts" is the only way to tell a banned address from a broken path.
+function friendlyError(e, target, tries, answered) {
   const m = String((e && e.message) || e);
+  const at = target ? `${target.host}:${target.port}` : "the SSH host";
+  const port = (target && target.port) || 22;
+  const asked = tries > 1 ? ` (asked ${tries} times)` : "";
+  if (resetBeforeHandshake(e)) {
+    // The same socket words are two different jobs, and the debug stream already
+    // knows which: sshd's banner is the first thing it sends, so if one arrived
+    // the far side DID answer and the cut came during key exchange (its own load,
+    // or something that inspects the traffic), while no banner at all means the
+    // reset came from the path. One is "ask the host", the other is "look at the
+    // network" — and a verdict that cannot say which sends the user at both.
+    const evidence = answered
+      ? "sshd answered with its banner and the reset came after it, during key exchange"
+      : "no byte of sshd's own banner arrived, so the reset came from the path, not from sshd";
+    return (
+      `${at} reset the TCP connection before the SSH handshake${asked} (${m}) — ${evidence}; ` +
+      "nothing was authenticated, so the credential is not the problem: a firewall or " +
+      `login ban, sshd at its connection limit, or a VPN/proxy in the way. Retry in a ` +
+      `moment; if only port ${port} fails, and only from this network, ask the host for ` +
+      "another SSH port (many carriers and offices reset port 22)."
+    );
+  }
   if (m.includes("All configured authentication methods failed")) {
     return "authentication failed (wrong password or no matching SSH key)";
   }
@@ -53,10 +108,10 @@ function friendlyError(e) {
     return "authentication failed (the SSH key needs its passphrase)";
   }
   if (m.includes("Timed out while waiting for handshake")) {
-    return "SSH handshake timed out";
+    return `SSH handshake timed out (${at})`;
   }
-  if (m.includes("ECONNREFUSED") || m.includes("ENETUNREACH")) {
-    return "cannot reach the SSH host";
+  if (m.includes("ECONNREFUSED") || m.includes("ENETUNREACH") || m.includes("EHOSTUNREACH")) {
+    return `cannot reach the SSH host ${at} (nothing is listening there, or the route is blocked)`;
   }
   if (m.includes("Unable to exec")) {
     return "remote shell failed to run a command — the connection dropped or the device's SSH channel limit was hit";
@@ -115,6 +170,16 @@ async function connectTunnel({ host, user, port, password }, progress) {
   // The client THIS attempt installed, held outside the try so the failure path
   // can tell whether it is still the dial that owns the wire (see the catch).
   let dialling = null;
+  // how many times the dial was asked (outside the try for the same reason: the
+  // verdict says "asked twice" when a reset earned the one more ask)
+  let tries = 0;
+  // whether sshd ever spoke on the CURRENT dial: its ident is the first thing it
+  // sends (RFC 4253 §4.2), and ssh2 reports the reset as its own socket error
+  // and nothing else, so this is the only witness there is to where the cut
+  // happened. Reset per dial: "asked twice" must still name which ask answered.
+  let banner = false;
+  // this attempt's place in the queue of attempts (see dialSeq)
+  const myDial = ++dialSeq;
   try {
     const localPort = await freePort();
     state.llmProxyPort = await startLlmProxy();
@@ -144,7 +209,10 @@ async function connectTunnel({ host, user, port, password }, progress) {
       keepaliveInterval: 15000,
       keepaliveCountMax: 3,
       agent: process.env.SSH_AUTH_SOCK,
-      debug: (m) => tunnelLog("ssh2: " + m),
+      debug: (m) => {
+        if (/Remote ident:/.test(m)) banner = true;
+        tunnelLog("ssh2: " + m);
+      },
     };
     // the same value covers both password auth and an encrypted-key passphrase
     if (secret) {
@@ -154,20 +222,59 @@ async function connectTunnel({ host, user, port, password }, progress) {
     const key = defaultKey();
     if (key) opts.privateKey = key;
 
-    let client;
+    let client = null;
+    const dialOnce = () =>
+      new Promise((resolve, reject) => {
+        const c = new Client();
+        tries += 1;
+        banner = false; // this ask's own answer, not the previous one's
+        client = c;
+        dialling = c;
+        state.sshClient = c;
+        // the host this client is for: installed with the client, so the reuse gate
+        // reads the two facts together (a client with no target is not reused)
+        state.target = target;
+        c.on("ready", resolve);
+        c.on("error", reject);
+        c.on("keyboard-interactive", (_n, _i, _l, _p, finish) => finish(secret ? [secret] : []));
+        c.connect(opts);
+      });
     if (progress) progress("auth");
-    await new Promise((resolve, reject) => {
-      client = new Client();
-      dialling = client;
-      state.sshClient = client;
-      // the host this client is for: installed with the client, so the reuse gate
-      // reads the two facts together (a client with no target is not reused)
-      state.target = target;
-      client.on("ready", resolve);
-      client.on("error", reject);
-      client.on("keyboard-interactive", (_n, _i, _l, _p, finish) => finish(secret ? [secret] : []));
-      client.connect(opts);
-    });
+    try {
+      await dialOnce();
+    } catch (e) {
+      // Who owns the wire now decides everything: a client that is not this
+      // attempt's is a NEWER dial (a second window, the picker's retry, the
+      // outage redial on the other side of the move) that reset this one on its
+      // way in — or no client at all, a teardown (the user's Disconnect, another
+      // request's move to a different host) that stopped the tunnel under it.
+      // Either way the reset was not the far side talking, so this attempt must
+      // not ask again: that would be a third client over a wire somebody else is
+      // using. It stops, and the verdict says whose reset it was — the raw socket
+      // words ("read ECONNRESET") belong to that, not to a host that refused us.
+      if (dialSeq !== myDial || state.sshClient !== dialling) {
+        const lost = new Error((e && e.message) || String(e));
+        lost.superseded = true;
+        lost.supersededBy = dialSeq !== myDial ? "newer" : "stopped";
+        throw lost;
+      }
+      if (!resetBeforeHandshake(e) || tries > 1) throw e;
+      // One more ask, and only for a reset before the handshake: an RST at the
+      // TCP connect is a rate limit, a ban finally expiring, a middlebox or an
+      // sshd that has just been restarted — none of which is the far side's
+      // verdict on this credential, and all of which usually clear in a second.
+      // It is deliberately NOT retried once a session was up: a wrong secret on a
+      // timer is how an address earns the ban it is complaining about (the same
+      // rule ui/tunnel-ladder.js states for its backoff).
+      tunnelLog(
+        `[connect] ${host}:${target.port} reset the connection before the handshake (${(e && e.message) || e}); ` +
+          `${banner ? "sshd's banner had already arrived" : "no banner from sshd"}; asking once more`
+      );
+      if (state.sshClient === dialling) state.sshClient = null; // a dead dial owns nothing
+      dialling = null;
+      await new Promise((r) => setTimeout(r, DIAL_RETRY_MS));
+      await dialOnce();
+    }
     tunnelLog("[phase] ssh ready");
     // the secret that authenticated is what the next connect reuses
     if (password) saveSshSecret(host, user, port, password);
@@ -277,7 +384,14 @@ async function connectTunnel({ host, user, port, password }, progress) {
     return await establishForwardAndHealth(localPort, client);
   } catch (e) {
     const raw = (e && e.message) || String(e);
-    const friendly = friendlyError(e);
+    // "this attempt was replaced, not refused": its own socket error is the
+    // reset another dial (or a teardown) caused, so reporting those words would
+    // put a host's name next to a failure the host had nothing to do with
+    const friendly = e && e.superseded
+      ? e.supersededBy === "stopped"
+        ? `the tunnel was stopped while this attempt was still connecting (${raw})`
+        : `a newer connection attempt took the tunnel over while this one was still connecting; this one was stopped (${raw})`
+      : friendlyError(e, target, tries || 1, banner);
     tunnelLog(`[error] connect failed: ${raw} -> ${friendly}`);
     // a cached secret that no longer authenticates is worse than none: drop it
     // so this path prompts again (and a typed one can take its place)

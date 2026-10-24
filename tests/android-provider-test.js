@@ -420,6 +420,78 @@ async function main() {
     await mirror.close();
   }
 
+  // 11. the ladder BEHIND that setting (ui/mirrors.js). One device setting is a
+  // decision the user has to make on the very network where they cannot look up
+  // an accelerator to type into it, and the tar is 30 MB over mobile data: a
+  // release host that never answers must cost one read, not the connect. Only a
+  // NETWORK-class failure moves on — a 404 or wrong bytes are the release's
+  // ANSWER, and a mirror serving the same path would say the same thing.
+  const ladderTar = Buffer.from([0x1f, 0x8b, 0x07, 0x45]);
+  const ladderHash16 = sha256(ladderTar).slice(0, 16);
+  const ladderFile = `agent-pylibs-linux-armv7l-musl-py3.11-${ladderHash16}.tar.gz`;
+  const ladder = await serveMirror(
+    { "linux-armv7l-musl-py3.11": { file: ladderFile, sha256: sha256(ladderTar), version: ladderHash16 } },
+    new Map([[ladderFile, ladderTar]])
+  );
+  // nothing listens on the discard port: a release host refused at once
+  const DEAD_INDEX = "http://127.0.0.1:9/pylibs-index.json";
+  const ladderTarget = { os: "linux", arch: "armv7l", libc: "musl", pyver: "3.11" };
+  const laddered = createAndroidArtifactProvider({ indexUrl: DEAD_INDEX, mirrorList: [ladder.base] });
+  assert.strictEqual(
+    await laddered.resolvePyLibsVersion(ladderTarget),
+    ladderHash16,
+    "the catalogue comes through the ladder when the release host cannot be reached"
+  );
+  const byLadder = await laddered.ensurePyLibsTar(ladderTarget);
+  assert(fs.readFileSync(byLadder.path).equals(ladderTar), "…and so does the tar, sha256-verified as always");
+  assert(ladder.seen.some((u) => u.endsWith("pylibs-index.json")), "the index was asked of the mirror");
+  assert.strictEqual(
+    ladder.seen.filter((u) => u.endsWith(".tar.gz")).length,
+    1,
+    "the tar was fetched exactly once, through the mirror"
+  );
+
+  // a 404 is an answer about the release, not about the path
+  const seenBefore = ladder.seen.length;
+  await assert.rejects(
+    () =>
+      createAndroidArtifactProvider({
+        indexUrl: srv.url + "?tag=v0.0.1",
+        mirrorList: [ladder.base],
+      }).resolvePyLibsVersion(ladderTarget),
+    /404/,
+    "a 404 stays the release's verdict"
+  );
+  assert.strictEqual(ladder.seen.length, seenBefore, "…and the ladder is not spent on it");
+
+  // a prefix that serves other bytes is refused by the catalogue's own sha256,
+  // and the mismatch ends the ladder: it is a fact about the bytes, not the path
+  const wrong = Buffer.from([0x1f, 0x8b, 0x07, 0x46]);
+  const wrongHash16 = sha256(wrong).slice(0, 16);
+  const wrongFile = `agent-pylibs-linux-armv7l-glibc-py3.11-${wrongHash16}.tar.gz`;
+  const liar = await serveMirror(
+    { "linux-armv7l-glibc-py3.11": { file: wrongFile, sha256: wrongHash16, version: wrongHash16 } },
+    new Map([[wrongFile, ladderTar]]) // the entry's hash names bytes these are not
+  );
+  await assert.rejects(
+    () =>
+      createAndroidArtifactProvider({ indexUrl: DEAD_INDEX, mirrorList: [liar.base] }).ensurePyLibsTar({
+        os: "linux",
+        arch: "armv7l",
+        libc: "glibc",
+        pyver: "3.11",
+      }),
+    /failed sha256/,
+    "a mirror's bytes are weighed against the catalogue's sha256"
+  );
+  assert.strictEqual(
+    liar.seen.filter((u) => u.endsWith(".tar.gz")).length,
+    1,
+    "and a mismatch does not send the ladder round again"
+  );
+  await liar.close();
+  await ladder.close();
+
   await srv.close();
   fs.rmSync(HOME, { recursive: true, force: true });
   os.homedir = realHomedir;
