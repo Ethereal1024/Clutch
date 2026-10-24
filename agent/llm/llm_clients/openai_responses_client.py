@@ -153,7 +153,9 @@ class OpenaiResponsesLlmClient(BaseOpenaiClient):
         """Issue the request eagerly and hand back events + the kill switch
         (see OpenaiLlmClient._open for why eager matters)."""
         resp = self.client.responses.create(**kwargs)
-        return Attempt(events=self._events(resp), close=resp.close)
+        # tracked for the same reason as the chat client (BaseOpenaiClient.repoint)
+        self._track(resp)
+        return Attempt(events=self._events(resp), close=lambda: self._release(resp))
 
     def _events(self, resp) -> Iterator[dict[str, Any]]:
         """Translate one typed event feed into events, ending with exactly one finish."""

@@ -66,7 +66,11 @@ class OpenaiLlmClient(BaseOpenaiClient):
         The openai Stream's own close() is the connection closer the guard uses
         to break a read that is already blocked."""
         resp = self.client.chat.completions.create(**kwargs, stream=True)
-        return Attempt(events=self._events(resp), close=resp.close)
+        # track it before translating anything: a re-point that lands between
+        # these two lines would otherwise leave this read unreachable (see
+        # BaseOpenaiClient.repoint)
+        self._track(resp)
+        return Attempt(events=self._events(resp), close=lambda: self._release(resp))
 
     def _events(self, resp) -> Iterator[dict[str, Any]]:
         """Translate one response stream into events, ending with exactly one finish."""

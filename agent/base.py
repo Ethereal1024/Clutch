@@ -129,6 +129,11 @@ class RunState:
         self.project: Project | None = None
         self.workspace: Workspace | None = None
         self.api_key: str | None = None
+        # The LLM client of the run in flight (None between runs). It is held here
+        # — not only inside the Agent — because the endpoint it talks to belongs
+        # to the CLIENT that claimed this session, and that client can move it
+        # while the run is going (POST /api/llm/base, see api/settings).
+        self.llm: LlmClient | None = None
         self.gate: PermissionGate | None = None
         # trust mode (agent/core/permission.py TRUST_COUNTDOWN_S): the window's
         # armed flag, mirrored here by POST /api/permission/trust so the
@@ -234,13 +239,19 @@ class RunState:
         ProjectLock.release(prev.lock)
         prev.lock = None
 
-    def start(self, task: str, workspace: Workspace, cancel: threading.Event) -> bool:
+    def start(
+        self, task: str, workspace: Workspace, cancel: threading.Event, llm: LlmClient | None = None
+    ) -> bool:
         with self.lock:
             if self.busy:
                 return False
             self.busy = True
             self.cancel = cancel
             self.workspace = workspace
+            # claimed under the same lock as `busy`: a re-point reads this to
+            # decide whether there is a live client to move, and a window where
+            # busy is True and llm is not yet set would be one it cannot reach
+            self.llm = llm
         return True
 
     def finish(self) -> None:
@@ -248,6 +259,10 @@ class RunState:
         with self.lock:
             self.busy = False
             self.run_project = None
+            # the run is over: the next one builds its own client from the config
+            # a re-point already updated, so holding this one would only make
+            # "is there a live client?" answer yes when nothing is running
+            self.llm = None
 
 
 class BaseServer(ABC):
@@ -315,7 +330,7 @@ class BaseServer(ABC):
         workspace.protect(project.path)
         llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
         cancel = cancel or threading.Event()
-        if not self.state.start(task, workspace, cancel):
+        if not self.state.start(task, workspace, cancel, llm=llm):
             return None
         gate = PermissionGate(
             evaluator=PermissionEvaluator(),

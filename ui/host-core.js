@@ -35,6 +35,10 @@ function createHostCore(deps) {
   const {
     supervisorBase,
     remoteLlmBase,
+    // where this client serves the far side's model RIGHT NOW ({base_url, model})
+    // or null when it serves nothing — the re-point target a session's heartbeat
+    // carries (see llmTarget below and ui/tunnel-core.js servedLlmBase)
+    remoteLlmTarget = () => null,
     remoteLlmModel = () => "",
     remoteLlmKnobs = () => ({}),
     tunnelStatus,
@@ -59,6 +63,19 @@ function createHostCore(deps) {
       return (await awaitModelPath()) || "unknown";
     } catch (e) {
       return "unknown (" + ((e && e.message) || e) + ")";
+    }
+  }
+
+  // Where this client serves the far side's model right now, as a re-point target
+  // for a session whose LLM endpoint was frozen at spawn — or null when it serves
+  // nothing. Read on every beat (the far side's port moves with every hop), and
+  // never throws: a beat whose target cannot be named is a plain liveness beat,
+  // which must keep working while the network is misbehaving.
+  function llmTarget() {
+    try {
+      return remoteLlmTarget() || null;
+    } catch (e) {
+      return null;
     }
   }
 
@@ -151,7 +168,16 @@ function createHostCore(deps) {
 
   async function registerTunnelBackend(wc, supBase, res) {
     const fwd = await openSessionForward(res.port);
-    const hb = sessions.startSupervisorHeartbeat(supBase, res.sessionId, tunnelClaimOnFail(wc, supBase, res.sessionId));
+    const hb = sessions.startSupervisorHeartbeat(
+      supBase,
+      res.sessionId,
+      tunnelClaimOnFail(wc, supBase, res.sessionId),
+      // where this client serves the model right now: the session's endpoint
+      // follows it when a hop lands the far-side forward on another port (a
+      // session's --base-url was frozen at spawn and the run inside it outlives
+      // every hop, so a frozen base is a run that can never recover)
+      llmTarget
+    );
     const wb = tunnelClaim(supBase, res.sessionId, res.port, fwd, hb);
     windowBackends.set(wc.id, wb);
     return wb.url;
@@ -182,7 +208,7 @@ function createHostCore(deps) {
     // the supervisor is the authority on "is the session still there", and the
     // beat doubles as the re-claim: it re-arms the window contract the reaper
     // judges staleness by
-    const alive = await sessions.supervisorSessionHeartbeat(supBase, existing.sessionId);
+    const alive = await sessions.supervisorSessionHeartbeat(supBase, existing.sessionId, llmTarget);
     if (alive == null) return { verdict: "doubt" }; // unreachable is not gone
     if (!alive) return { verdict: "gone" };
     let fwd;
@@ -194,7 +220,12 @@ function createHostCore(deps) {
       // this hop's failing, not the session's — keep the claim and try again
       return { verdict: "doubt" };
     }
-    const hb = sessions.startSupervisorHeartbeat(supBase, existing.sessionId, tunnelClaimOnFail(wc, supBase, existing.sessionId));
+    const hb = sessions.startSupervisorHeartbeat(
+      supBase,
+      existing.sessionId,
+      tunnelClaimOnFail(wc, supBase, existing.sessionId),
+      llmTarget
+    );
     const wb = tunnelClaim(supBase, existing.sessionId, existing.sessionPort, fwd, hb);
     if (windowBackends.get(wc.id) !== existing) {
       // superseded while we worked (a newer claim, or the window closed):

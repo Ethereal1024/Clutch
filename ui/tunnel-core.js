@@ -169,6 +169,20 @@ function remoteLlmBase() {
   return `http://127.0.0.1:${remoteLlmPort()}/v1`;
 }
 
+// The base this client is actually SERVING on the far side right now, or null
+// when it is serving nothing.
+//
+// "listening" is the only state in which the remembered port names a listener a
+// far-side session can reach. While an install is in flight (a new hop:
+// "installing") the remembered port belongs to the hop that died with it, and a
+// path that never landed ("unavailable") names a port nobody serves — pointing a
+// LIVE session at either is strictly worse than leaving it where it is, so a
+// heartbeat that asks this gets null and the beat stays a plain liveness beat.
+// The session claim asks the same question before spawn (host-core, awaitModelPath).
+function servedLlmBase() {
+  return state.modelPath === "listening" ? remoteLlmBase() : null;
+}
+
 function tunnelLog(...args) {
   try {
     const dir = path.dirname(LOG_FILE);
@@ -214,6 +228,7 @@ module.exports = {
   channelFor,
   remoteLlmPort,
   remoteLlmBase,
+  servedLlmBase,
   state,
   tunnelLog,
 };

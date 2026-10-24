@@ -10,7 +10,7 @@
 // contract — ui/main.js, ui/exec-bridge.js (a lazy require, which is what keeps
 // its cycle with this file from closing) and android/host/android-host.js.
 
-const { tunnelLog, remoteLlmBase } = require("./tunnel-core");
+const { tunnelLog, remoteLlmBase, servedLlmBase } = require("./tunnel-core");
 const { remoteExec, uploadFileViaExec } = require("./tunnel-remote");
 const { chooseStrategy } = require("./tunnel-bootstrap");
 const { connectTunnel, startModelPath, awaitModelPath } = require("./tunnel-connect");
@@ -28,6 +28,10 @@ module.exports = {
   remoteExec,
   tunnelLog,
   remoteLlmBase,
+  // the base this client is SERVING right now (null when it serves nothing): what
+  // a session's heartbeat carries so its LLM endpoint can follow the model path
+  // when a hop lands it on another port (ui/supervisor-client.js beatBody)
+  servedLlmBase,
   // the far side's model path, installed beside the connect and awaited by the
   // session claim (host-core) rather than by the connect itself
   awaitModelPath,

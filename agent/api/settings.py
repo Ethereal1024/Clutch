@@ -1,4 +1,8 @@
-"""GET/POST /api/settings and GET /api/host: the persisted knobs and host facts.
+"""GET/POST /api/settings, POST /api/llm/base, GET /api/host.
+
+The persisted knobs, the one knob that is deliberately NOT persisted (the
+endpoint a claiming client re-points a live session to — see _llm_base_post),
+and the host facts.
 
 The store itself stays in agent/server.py on purpose: it is the module-level seam
 tests/server_test.py patches by name, and agent/tools/hostconfig.py documents its
@@ -69,6 +73,75 @@ class SettingsMixin:
                 saved.pop(field, None)  # empty = clear the knob
         self._server_module().save_settings(saved)
         self._json({"status": "ok"})
+
+    def _llm_base_post(self) -> None:
+        """Re-point the LLM endpoint of THIS process, in memory, right now.
+
+        The counterpart of the spawn-time ``--base-url``/``--model`` flags
+        (agent/supervisor.py start_session). A remote session's LLM endpoint is
+        the CLAIMING CLIENT's own proxy at the far end of an SSH reverse forward,
+        and that path can move under a live session: a hop that dies without a
+        FIN leaves the far sshd holding the old listener, so the next reverse
+        forward lands on a different port. The session — and the run inside it —
+        outlives every hop (STALE_S is 300s), and a process whose endpoint was
+        frozen at spawn can only retry into a port nobody serves: that is the
+        field's "the session is fine, the network is fine, the agent still says
+        it cannot reach the API".
+
+        So the endpoint is mutable state. The supervisor forwards the claiming
+        client's current base here on its heartbeat, this swaps the live client's
+        SDK client in place (BaseOpenaiClient.repoint, which also breaks the
+        reads still parked on the old path) and updates the config the NEXT run
+        assembles from.
+
+        Deliberately NOT persisted: this is the client's wire, not this machine's
+        settings. ``~/.clutch/settings.json`` belongs to the host (its own
+        sessions read it), and a phone's dynamic loopback port is not a setting
+        there — /api/settings is the endpoint for the knobs a user actually owns
+        and expects to find again after a restart."""
+        body = self._read_body()
+        if body is None:
+            return self._json({"error": "bad json body"}, status=400)
+        base_url = (body.get("base_url") or "").strip()
+        model = (body.get("model") or "").strip()
+        if not base_url:
+            return self._json({"error": "base_url is required"}, status=400)
+        if not base_url.startswith(("http://", "https://")):
+            # the openai SDK would take any string and fail per request with a
+            # message about an unsupported protocol: refuse it here, once, with
+            # the reason the caller can act on
+            return self._json({"error": "base_url must be an http(s) URL"}, status=400)
+        with self._state.lock:
+            moved = base_url != self._cfg.base_url or (bool(model) and model != self._cfg.model)
+            self._cfg.base_url = base_url
+            if model:
+                self._cfg.model = model
+            live = self._state.llm
+            current_model = self._cfg.model
+        repointed = False
+        if live is not None:
+            repoint = getattr(live, "repoint", None)
+            if repoint is not None:
+                try:
+                    repointed = bool(repoint(base_url, model or None))
+                except Exception as err:  # noqa: BLE001 -- an answer, not a crash
+                    # a re-point that blows up must not look like a dead session:
+                    # the caller (the supervisor, on a heartbeat) retries on the
+                    # next beat, and the answer says what happened
+                    return self._json({"error": f"repoint failed: {err}"}, status=500)
+        self._json(
+            {
+                "status": "ok",
+                "base_url": base_url,
+                "model": current_model,
+                # whether the base actually MOVED for a client that is running
+                # (False = already there, or no run in flight: the next run
+                # assembles from the config updated above)
+                "repointed": repointed,
+                "live": live is not None,
+                "changed": moved,
+            }
+        )
 
     def _settings_get(self) -> None:
         """Current LLM endpoint config for the settings modal (no credentials)."""

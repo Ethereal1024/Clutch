@@ -844,6 +844,136 @@ def main() -> int:
     # 5. responses protocol: the same contract over a different wire format
     _check_responses_protocol()
 
+    # 6. re-point: a remote session's endpoint is mutable state. The supervisor
+    #    spawns the session on a --base-url that points at the phone's own proxy
+    #    at the end of an SSH reverse forward; a hop that dies without a FIN
+    #    leaves the far sshd on the old listener, so the next forward lands on a
+    #    different port and the endpoint the session was born on is a path
+    #    nobody serves any more. BaseOpenaiClient.repoint swings the live client
+    #    onto the new endpoint and CLOSES the read already parked down the dead
+    #    one — without that close the redial could not happen before the read
+    #    budget (240s) ran out, which is exactly the "stuck after reconnecting"
+    #    half of the incident.
+    client, comps = _client(3, [_BlockedStream])
+    new_comps = _FakeCompletions([_ok_stream])
+    client._connect = lambda base_url: SimpleNamespace(chat=SimpleNamespace(completions=new_comps))
+    result: dict = {}
+
+    def _drive_repoint() -> None:
+        result["events"], result["error"] = _collect(client.stream([{"role": "user", "content": "hi"}]))
+
+    driver = threading.Thread(target=_drive_repoint, daemon=True)
+    driver.start()
+    parked_by = time.monotonic() + 5
+    while not client._live and time.monotonic() < parked_by:  # wait for the read to park
+        time.sleep(0.005)
+    check(comps.calls == 1 and len(client._live) == 1,
+          "the in-flight response is registered, so a re-point has a lever on it")
+    blocked = next(iter(client._live.values()))
+    started = time.monotonic()
+    moved = client.repoint("http://newhost:8892/v1", "new-model")
+    driver.join(10)
+    elapsed = time.monotonic() - started
+    check(moved is True, "a re-point to another endpoint reports the move")
+    check(blocked.closed is True, "the read parked on the old endpoint is closed, not waited out")
+    check(client.base_url == "http://newhost:8892/v1" and client.model == "new-model",
+          "the client now names the new endpoint and its model")
+    check(result.get("error") is None, "the run survives the move")
+    check([e["type"] for e in result.get("events", [])] == ["retry", "text", "finish"],
+          "the broken attempt is announced, then the redial streams the same turn")
+    check([e["delta"] for e in result.get("events", []) if e["type"] == "text"] == ["hi"],
+          "the redial's turn came down the NEW endpoint")
+    check(comps.calls == 1 and new_comps.calls == 1,
+          "one request per endpoint: the dead one is never used again")
+    check(elapsed < 5, f"the move broke the parked read in seconds, not the 240s budget (took {elapsed:.2f}s)")
+    check(client.repoint("http://newhost:8892/v1", "new-model") is False,
+          "a re-point to the endpoint already in use is a no-op")
+    check(client.repoint("   ") is False, "an empty endpoint is not a move")
+    check(client.repoint("http://newhost:8892/v1", "third-model") is True and client.model == "third-model",
+          "a model-only change still moves the target")
+
+    # the responses wire has the same lever: the body it parks in is tracked and
+    # the move closes it, because both protocols share one transport layer
+    client, fake = _responses_client(3, [_BlockedStream])
+    next_fake = _FakeResponses([_full_turn_events])
+    client._connect = lambda base_url: SimpleNamespace(responses=next_fake)
+    result = {}
+    driver = threading.Thread(target=_drive_repoint, daemon=True)
+    driver.start()
+    parked_by = time.monotonic() + 5
+    while not client._live and time.monotonic() < parked_by:  # wait for the read to park
+        time.sleep(0.005)
+    check(fake.calls == 1 and len(client._live) == 1,
+          "the responses client tracks its in-flight body too")
+    parked = next(iter(client._live.values()))
+    check(client.repoint("http://newhost:8892/v1") is True and parked.closed is True,
+          "a re-point closes a parked responses body the same way")
+    driver.join(10)
+    check(result.get("error") is None and next_fake.calls == 1,
+          "the responses run redials down the NEW endpoint")
+    check([e["type"] for e in result.get("events", [])][-1:] == ["finish"],
+          "and the moved run still ends with its finish event")
+
+    # a read that never even got its response HEAD is registered NOWHERE (the
+    # SDK's create() is still blocked, so no stream exists to close) — and that
+    # is exactly the shape a dead hop leaves behind: a listener that accepts and
+    # then says nothing. Only the socket can be broken there, which is why
+    # repoint shuts down every socket the old endpoint opened. Measured before
+    # it did: the read cost its whole budget (30s here, 240s in the field).
+    import socket as _socket
+
+    hang = _socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen(5)
+    accepted: list = []
+
+    def _accept_and_say_nothing() -> None:
+        conn, _ = hang.accept()
+        accepted.append(conn)  # held open, never answered: headers never arrive
+
+    threading.Thread(target=_accept_and_say_nothing, daemon=True).start()
+    try:
+        client = OpenaiLlmClient(
+            api_key="sk-test",
+            base_url=f"http://127.0.0.1:{hang.getsockname()[1]}/v1",
+            model="m",
+            read_timeout=30.0,
+            max_retries=2,  # one redial, which is what the assertion below is about
+        )
+        result = {}
+        driver = threading.Thread(target=_drive_repoint, daemon=True)
+        driver.start()
+        head_by = time.monotonic() + 5
+        while not accepted and time.monotonic() < head_by:
+            time.sleep(0.005)
+        check(bool(accepted), "the request reached the endpoint and parked before its response head")
+        check(client._live == {}, "a header-less read is in no registry: nothing to close, only a socket")
+        started = time.monotonic()
+        client.repoint("http://127.0.0.1:9/v1")
+        driver.join(20)
+        elapsed = time.monotonic() - started
+        check(
+            elapsed < 5,
+            f"the re-point broke the header-less read in seconds, not its 30s budget (took {elapsed:.2f}s)",
+        )
+        check(
+            [e["type"] for e in result.get("events", [])][:1] == ["retry"],
+            "the abandoned attempt is a retryable transport failure, so the run redials",
+        )
+        check(result.get("error") is not None, "with the new endpoint dead too, the run ends on a transport error")
+    finally:
+        hang.close()
+
+    # the real construction site, not a fake: the swap has to rebuild through
+    # _connect (the per-URL proxy decision lives there) and let the old client go
+    rebuilt = OpenaiLlmClient(api_key="sk-test", base_url="http://127.0.0.1:8892/v1", model="m")
+    old_sdk = rebuilt.client
+    check(rebuilt.repoint("http://127.0.0.1:9099/v1") is True, "a built client takes a new endpoint")
+    check(str(rebuilt.client.base_url).rstrip("/") == "http://127.0.0.1:9099/v1",
+          "the rebuilt SDK client speaks to the new base URL")
+    check(rebuilt.client.is_closed() is False and old_sdk.is_closed() is True,
+          "the old SDK client is closed (its sockets with it) and the new one is open")
+
     print("\nall passed")
     return 0
 

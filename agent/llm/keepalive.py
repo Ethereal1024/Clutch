@@ -32,12 +32,27 @@ HTTPTransport._pool, httpcore's ConnectionPool._network_backend) and therefore
 raises instead of quietly reverting to the 240s budget when they move;
 tests/llm_keepalive_test.py section 4 pins the proxied case. Delete the wrapper
 the day httpcore forwards socket_options on its own.
+
+The same hook answers the other half of a dead route: a read that is already
+parked has to be BROKEN, not waited out, when the client re-points a live
+session at another endpoint (agent/llm/llm_clients/openai_base.py repoint). The
+socket is the only handle on that read, and closing a response is not enough:
+httpcore's SyncStream.close() is a bare sock.close(), and the kernel keeps a
+recv() that is already blocked inside another thread exactly where it was — the
+read returns when its BUDGET expires, not when the client gave up on the path
+(measured: a 8s read budget still took the full 8s after the response was
+closed). shutdown(SHUT_RDWR) does wake it (recv returns 0 at once), so the
+backend keeps every stream it ever opened and `interrupt()` shuts them down.
+Reaching reads that never got a response head — a hop that accepts and then
+says nothing, where the SDK has not even handed back a stream yet — is the
+reason this lives at the socket rather than in the response registry.
 """
 
 from __future__ import annotations
 
 import functools
 import socket
+import weakref
 from collections.abc import Iterable
 from typing import Any
 
@@ -112,10 +127,24 @@ class KeepaliveBackend:
     normally), so nothing about the connection changes except the options the
     socket is born with. httpcore only ever calls connect_tcp,
     connect_unix_socket and sleep on it.
+
+    It also REMEMBERS the streams it hands out (weakly: a pooled connection that
+    is dropped takes its stream with it), because a stream's socket is the only
+    thing that can break a read parked on it — see interrupt().
     """
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
+        self._streams: weakref.WeakSet = weakref.WeakSet()
+
+    def _kept(self, stream: Any) -> Any:
+        """Record one live stream; anything that cannot be weakly referenced is
+        simply not interruptible, which must never cost the connection itself."""
+        try:
+            self._streams.add(stream)
+        except TypeError:  # pragma: no cover -- a backend returning C objects
+            pass
+        return stream
 
     def connect_tcp(
         self,
@@ -125,31 +154,68 @@ class KeepaliveBackend:
         local_address: str | None = None,
         socket_options: Iterable[tuple] | None = None,
     ) -> Any:
-        return self._inner.connect_tcp(
-            host,
-            port,
-            timeout=timeout,
-            local_address=local_address,
-            socket_options=_merged(socket_options),
+        return self._kept(
+            self._inner.connect_tcp(
+                host,
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=_merged(socket_options),
+            )
         )
 
     def connect_unix_socket(
         self, path: str, timeout: float | None = None, socket_options: Iterable[tuple] | None = None
     ) -> Any:
-        return self._inner.connect_unix_socket(path, timeout=timeout, socket_options=_merged(socket_options))
+        return self._kept(
+            self._inner.connect_unix_socket(path, timeout=timeout, socket_options=_merged(socket_options))
+        )
 
     def sleep(self, seconds: float) -> None:
         self._inner.sleep(seconds)
 
+    def interrupt(self) -> int:
+        """Break every read still parked on a socket this backend opened.
 
-def install(client: Any) -> None:
+        ``shutdown`` rather than ``close`` on purpose: close() is what httpcore
+        itself does, and a recv() already blocked in another thread survives it
+        (the fd is only released once that thread lets go), so the read would
+        still cost its whole budget. shutdown() wakes it now. The close is left
+        to the owner of the response — closing an fd out from under a thread
+        that is about to return from recv() is how one gets a descriptor reused
+        by somebody else.
+
+        Returns how many sockets were interrupted, which is all a caller can
+        know: what the parked reader does next is its own business (it raises a
+        transport error, exactly as if the peer had gone away).
+        """
+        count = 0
+        for stream in list(self._streams):
+            try:
+                sock = stream.get_extra_info("socket")
+            except Exception:  # noqa: BLE001 -- an ended stream has nothing to break
+                continue
+            if not isinstance(sock, socket.socket):
+                continue
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+                count += 1
+            except OSError:
+                # already shut / never connected: nothing to wake
+                pass
+        return count
+
+
+def install(client: Any) -> KeepaliveBackend:
     """Put KeepaliveBackend in front of every socket this httpx client opens.
 
-    Raising here is deliberate: the two private names it reaches for are an
+    Raises here is deliberate: the two private names it reaches for are an
     implementation detail of the installed httpx, and losing the watchdog
     quietly is the exact failure mode this module exists to remove — a route
     change would go back to holding a read for the full llm_read_timeout with no
     signal anywhere. tests/llm_keepalive_test.py fails on the same change.
+
+    Returns the wrapper, which is the caller's handle on ``interrupt()``.
     """
     pool = getattr(getattr(client, "_transport", None), "_pool", None)
     if pool is None:
@@ -158,4 +224,5 @@ def install(client: Any) -> None:
     if inner is None:
         raise RuntimeError("keepalive: the httpcore pool exposes no network backend to wrap")
     if not isinstance(inner, KeepaliveBackend):
-        pool._network_backend = KeepaliveBackend(inner)
+        inner = pool._network_backend = KeepaliveBackend(inner)
+    return inner

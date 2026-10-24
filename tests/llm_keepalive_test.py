@@ -20,8 +20,10 @@ suite pins three things that a "looks wired up" diff can still get wrong:
      a proxied connection's socket only gets the options from our backend
      wrapper (the module docstring of llm/keepalive.py names the library's
      line), so this section asserts rather than reports
+  5. interrupt(): the socket-level lever a re-point uses to break a read that is
+     already parked (closing the response does not wake it — measured here)
 
-Sections 3 and 4 talk to 127.0.0.1 only — no internet, no key, no quota.
+Sections 3, 4 and 5 talk to 127.0.0.1 only — no internet, no key, no quota.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import json
 import os
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from agent.config import Config
@@ -347,11 +350,74 @@ def _check_proxied_socket() -> None:
         srv.server_close()
 
 
+def _check_interrupt() -> None:
+    """Section 5: interrupt() — breaking a read that is already parked.
+
+    The measured fact this section exists for: closing a response does NOT wake a
+    recv() blocked in another thread. httpcore's SyncStream.close() is a bare
+    sock.close(), and the kernel keeps the blocked read until its budget expires
+    (240s per attempt in the field, which is why a re-point that only closed
+    responses still left the run stuck). shutdown() does wake it, and a socket is
+    the only handle on a read whose response head never arrived — so the backend
+    keeps every stream it opened and interrupt() shuts their sockets down.
+    """
+    print("\n[5] a read parked on an abandoned socket")
+    hang = socket.socket()
+    hang.bind(("127.0.0.1", 0))
+    hang.listen(5)
+    parked: list = []
+
+    def _accept_and_say_nothing() -> None:
+        conn, _ = hang.accept()
+        parked.append(conn)  # held open, never answered: the head never arrives
+
+    threading.Thread(target=_accept_and_say_nothing, daemon=True).start()
+    client = OpenaiLlmClient(
+        api_key="test",
+        base_url=f"http://127.0.0.1:{hang.getsockname()[1]}/v1",
+        model="m",
+        read_timeout=30.0,
+    )
+    outcome: list[str] = []
+
+    def _request() -> None:
+        try:
+            client.client.chat.completions.create(
+                model="m", messages=[{"role": "user", "content": "hi"}], stream=True
+            )
+            outcome.append("answered")
+        except BaseException as err:  # noqa: BLE001 -- waking up IS the assertion
+            outcome.append(type(err).__name__)
+
+    request = threading.Thread(target=_request, daemon=True)
+    request.start()
+    deadline = time.monotonic() + 5
+    while not parked and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(bool(parked), "the request reached the server and parked before its response head")
+    hook = keepalive.install(client.client._client)
+    check(
+        isinstance(hook, keepalive.KeepaliveBackend),
+        "install() hands back the wrapper — the re-point's only lever on a parked read",
+    )
+    check(hook.interrupt() >= 1, "interrupt() shuts down the socket this endpoint is riding")
+    request.join(5)
+    check(not request.is_alive(), "the parked read woke at once, not after its 30s budget")
+    check(
+        bool(outcome) and outcome[0] != "answered",
+        f"the abandoned request failed as a transport error ({outcome})",
+    )
+    check(hook.interrupt() == 0, "interrupting again finds nothing left to break")
+    client.client.close()
+    hang.close()
+
+
 def main() -> int:
     _check_options_shape()
     _check_wrapper()
     _check_live_socket()
     _check_proxied_socket()
+    _check_interrupt()
     print("\nall passed")
     return 0
 

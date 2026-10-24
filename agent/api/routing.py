@@ -73,6 +73,10 @@ class RoutingMixin:
             self._stop()
         elif parsed.path == "/api/settings":
             self._settings_post()
+        elif parsed.path == "/api/llm/base":
+            # the endpoint a claiming client re-points a LIVE session to when its
+            # own model path moved (agent/api/settings._llm_base_post)
+            self._llm_base_post()
         elif parsed.path == "/api/permission/respond":
             self._permission_respond()
         elif parsed.path == "/api/permission/trust":

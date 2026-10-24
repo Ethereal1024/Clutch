@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 from io import StringIO
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.procmgr.stdio import log
@@ -64,6 +65,60 @@ def start_supervisor(**kwargs) -> tuple[Supervisor, int, threading.Thread]:
     t.start()
     threading.Thread(target=sup.reap_loop, daemon=True).start()
     return sup, srv.server_address[1], t
+
+
+class _MockLlm:
+    """A chat-completions endpoint that really answers.
+
+    Section 17 needs one: the witness that a run's ENDPOINT moved has to be a
+    request landing somewhere, not a config value that says it did. HTTP/1.0 on
+    purpose — the SSE body is bounded by content-length here, and a reply that
+    ends with [DONE] is exactly what the SDK's stream reader expects.
+    """
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def do_POST(self):  # noqa: N802 -- http.server's own spelling
+                raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+                try:
+                    body = json.loads(raw or b"{}")
+                except ValueError:
+                    body = {}
+                outer.seen.append({"path": self.path, "model": body.get("model")})
+                model = body.get("model") or "mock"
+                head = {
+                    "id": "chatcmpl-mock",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": model,
+                }
+                text = {**head, "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]}
+                stop = {**head, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+                payload = f"data: {json.dumps(text)}\n\ndata: {json.dumps(stop)}\n\ndata: [DONE]\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload.encode())
+
+            def log_message(self, *_args):  # keep the test's own output readable
+                pass
+
+        self._srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self._srv.server_address[1]}"
+
+    def close(self) -> None:
+        self._srv.shutdown()
+        self._srv.server_close()
 
 
 def main() -> int:
@@ -786,6 +841,136 @@ def main() -> int:
             sup16b.shutdown_all()
     finally:
         hang16b.close()
+
+    # ---- 17. a session's LLM endpoint follows its client (heartbeat re-point) ----
+    # THE incident, end to end. A remote session is spawned on a base_url that is
+    # the claiming client's own proxy at the end of an SSH reverse forward; a hop
+    # dies without a FIN, so the next forward lands on another port and the port
+    # the session was born on serves nobody. The session outlives every hop
+    # (STALE_S) and a run inside it outlives both, so the ONLY thing that can save
+    # that run is the endpoint moving IN PLACE: the beat carries where the client
+    # serves the model NOW, the supervisor forwards it, the child swaps its live
+    # client and breaks the read parked on the dead path, and the redial lands on
+    # the new endpoint — all while the session and the run stay exactly where they
+    # are. Without it the run redials into the old port forever and the user reads
+    # "Cannot reach the API endpoint" while their network is fine.
+    import socket as _socket
+
+    mock17 = _MockLlm()
+    hang17 = _socket.socket()
+    hang17.bind(("127.0.0.1", 0))
+    hang17.listen(5)  # connect completes; no response ever comes (the dead hop)
+    hang17.settimeout(25.0)
+    old_base17 = f"http://127.0.0.1:{hang17.getsockname()[1]}/v1"
+    parked17: list = []
+
+    def _accept_old_path() -> None:
+        try:
+            conn, _ = hang17.accept()  # the witness that the run is parked on the old path
+        except OSError:
+            return
+        parked17.append(conn)  # held open, never answered: a read with no budget left
+
+    threading.Thread(target=_accept_old_path, daemon=True).start()
+    try:
+        sup17, port17, _ = start_supervisor()
+        base17 = f"http://127.0.0.1:{port17}"
+        new_base17 = f"{mock17.base}/v1"
+        try:
+            st, body = http_post(
+                f"{base17}/api/session/start", {"base_url": old_base17, "model": "hang-model"}
+            )
+            d17 = json.loads(body)
+            sid17, child17 = d17["session_id"], f"http://127.0.0.1:{d17['port']}"
+            with tempfile.TemporaryDirectory() as hop_dir:
+                st, body = http_post(f"{child17}/api/project/new", {"dir": hop_dir, "name": "hop"})
+                clc17 = json.loads(body)["project"]
+                st, _ = http_post(f"{child17}/api/run", {"task": "hold the line", "project": clc17})
+                check(st == 200, "a run is in flight against the endpoint the hop left behind")
+                check(
+                    wait_until(lambda: bool(parked17), 25.0, "the run's request reaches the old path"),
+                    "the in-flight run is parked in a read on the port nobody serves any more",
+                )
+
+                # the client's re-bind beat: it serves the model on a DIFFERENT port now
+                st, body = http_post(
+                    f"{base17}/api/session/heartbeat",
+                    {"session_id": sid17, "base_url": new_base17, "model": "live-model"},
+                )
+                beat = json.loads(body)
+                check(
+                    st == 200 and beat.get("status") == "ok",
+                    "the beat's own liveness answer is untouched by the re-point",
+                )
+                check(
+                    beat.get("repoint", {}).get("status") == "repointed"
+                    and beat["repoint"].get("base_url") == new_base17,
+                    "the beat carries the client's current base and the session MOVED to it",
+                )
+                st, body = http_get(f"{child17}/api/settings")
+                check(
+                    json.loads(body).get("base_url") == new_base17,
+                    "the child's config names the new endpoint (the next run assembles from it)",
+                )
+                check(
+                    wait_until(lambda: bool(mock17.seen), 25.0, "the moved run reaches the new endpoint"),
+                    "the parked read was broken and the redial landed on the NEW endpoint",
+                )
+                check(
+                    mock17.seen[0]["path"] == "/v1/chat/completions",
+                    "the redial is a real chat-completions request, not a liveness probe",
+                )
+
+                # steady state: a beat whose target is already current costs no child call
+                st, body = http_post(
+                    f"{base17}/api/session/heartbeat",
+                    {"session_id": sid17, "base_url": new_base17, "model": "live-model"},
+                )
+                check(
+                    json.loads(body).get("repoint", {}).get("status") == "current",
+                    "a beat whose base is already current answers 'current'",
+                )
+                # a beat that serves nothing is a PURE liveness beat: absent is not
+                # "move to ''" — a client between model paths would otherwise point
+                # its session at a port with no listener
+                st, body = http_post(f"{base17}/api/session/heartbeat", {"session_id": sid17})
+                check(
+                    st == 200 and "repoint" not in json.loads(body),
+                    "a beat that serves nothing does not touch the endpoint (absent != empty)",
+                )
+                st, body = http_post(
+                    f"{base17}/api/session/heartbeat",
+                    {"session_id": sid17, "base_url": "  ", "model": "live-model"},
+                )
+                check("repoint" not in json.loads(body), "a blank base is the same as none")
+
+                # a target the child REFUSES is data on a beat that still succeeds:
+                # a bad re-point must never be able to make a live session look dead
+                st, body = http_post(
+                    f"{base17}/api/session/heartbeat", {"session_id": sid17, "base_url": "ftp://nope/v1"}
+                )
+                beat = json.loads(body)
+                check(
+                    st == 200 and beat.get("status") == "ok" and beat.get("repoint", {}).get("status") == "failed",
+                    "a refused re-point is reported as data: the beat still answers 'ok'",
+                )
+                st, body = http_get(f"{child17}/api/settings")
+                check(
+                    json.loads(body).get("base_url") == new_base17,
+                    "a refused base never becomes the running config",
+                )
+                st, body = http_post(
+                    f"{base17}/api/session/heartbeat", {"session_id": sid17, "base_url": new_base17}
+                )
+                check(
+                    json.loads(body).get("repoint", {}).get("status") == "current",
+                    "the record still points where the last GOOD re-point left it",
+                )
+        finally:
+            sup17.shutdown_all()
+    finally:
+        hang17.close()
+        mock17.close()
 
     print("\nSUPERVISOR TESTS PASSED")
     return 0

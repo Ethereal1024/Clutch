@@ -59,6 +59,13 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
   const hostCore = createHostCore({
     supervisorBase: () => null, // N4: no local supervisor on Android
     remoteLlmBase: () => tunnel.remoteLlmBase(),
+    // the same re-point target the desktop shell hands host-core: a session's
+    // --base-url is frozen at spawn, so where this device serves the model has to
+    // ride the heartbeat or a hop that moves the reverse forward strands the run
+    remoteLlmTarget: () => {
+      const base = tunnel.servedLlmBase();
+      return base ? { base_url: base, model: readSettings().model || "" } : null;
+    },
     // same reason as ui/main.js: the remote session cannot read this device's settings
     remoteLlmModel: () => readSettings().model || "",
     remoteLlmKnobs: () => {

@@ -57,6 +57,14 @@ const remoteLlmKnobs = () => {
 const hostCore = createHostCore({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
   remoteLlmBase: () => tunnel.remoteLlmBase(),
+  // what a session's heartbeat carries so its LLM endpoint can FOLLOW the model
+  // path when a hop lands the reverse forward on another port: only a path that
+  // is actually listening is a target (tunnel-core servedLlmBase), because a
+  // port nobody serves is exactly the failure this is here to end
+  remoteLlmTarget: () => {
+    const base = tunnel.servedLlmBase();
+    return base ? { base_url: base, model: remoteLlmModel() } : null;
+  },
   remoteLlmModel,
   remoteLlmKnobs,
   tunnelStatus: () => tunnel.tunnelStatus(),

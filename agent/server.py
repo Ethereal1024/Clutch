@@ -5,6 +5,9 @@ Endpoints (all JSON except SSE/NDJSON):
   POST /api/project/open   {path} -> load a .clc project (NDJSON stream)
   POST /api/run            {task} -> start run on the active project (409 if busy)
   POST /api/stop           cancel the running agent
+  POST /api/llm/base       {base_url, model} re-point the LIVE run's LLM endpoint
+                           in memory (the claiming client's model path moved; not
+                           persisted — see api/settings._llm_base_post)
   GET  /api/events         SSE: replay active project history, then live events
   GET  /api/workspace/tree   file tree under the project's working directory
   GET  /api/workspace/checkpoints  log offsets a whole-task rollback can undo

@@ -470,8 +470,12 @@ async function installReverseForward(client, chan, opts = {}) {
     return false;
   }
   // a channel granted a port earlier is re-bound on THAT port first: the far side's
-  // sessions are already pointed at it and cannot be re-pointed. A channel with no
-  // contract port has nothing to prefer and goes straight to the far side's pick.
+  // sessions are already pointed at it, so the same port costs every live session
+  // nothing. (A session CAN now be re-pointed — its heartbeat carries whatever base
+  // this client serves, ui/supervisor-client.js beatBody — but that is the recovery
+  // path for a port we could not get back, not something to spend on every hop.) A
+  // channel with no contract port has nothing to prefer and goes straight to the
+  // far side's pick.
   const preferred = chan.remote() || chan.preferred;
   if (preferred != null) {
     const first = await bindReverseForwardWithLadder(client, preferred, opts);
