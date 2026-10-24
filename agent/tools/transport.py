@@ -128,14 +128,113 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass  # already dead
 
 
+# ---- a child's bytes -> the text the model reads -----------------------------
+
+_fallback_encodings: tuple[str, ...] | None = None
+
+
+def _norm_codec(name: str) -> str:
+    """One spelling for "is this the same codec?": utf-8 / UTF8 / 'utf_8' are."""
+    return name.lower().replace("-", "").replace("_", "").replace(" ", "")
+
+
+def _code_page_encodings() -> tuple[str, ...]:
+    """The code pages a Windows child writes in, best first (computed once).
+
+    Only Windows has a second spelling to try: cmd.exe's builtins (dir, type,
+    echo) and most console programs write the OEM code page, tools that hand
+    their text to a pipe write the ANSI one — on a Chinese box both are 936
+    (GBK). On POSIX the answer is always UTF-8, so nothing else is tried there:
+    latin-1 "succeeds" on any byte sequence and would silently mangle them.
+    """
+    global _fallback_encodings
+    if _fallback_encodings is None:
+        found: list[str] = []
+        if os.name == "nt":
+            try:
+                import ctypes  # noqa: PLC0415 -- Windows-only, imported lazily
+
+                kernel32 = ctypes.windll.kernel32
+                # 65001 IS UTF-8 (already tried) and UTF-16/32 never reaches a
+                # pipe as the raw bytes we read here
+                for cp in (kernel32.GetOEMCP(), kernel32.GetACP()):
+                    cp = int(cp)
+                    if cp and cp not in (65001, 1200, 1201, 12000, 12001):
+                        name = f"cp{cp}"
+                        if all(_norm_codec(name) != _norm_codec(e) for e in found):
+                            found.append(name)
+            except Exception:  # noqa: BLE001 -- no ctypes/kernel32: keep locale
+                pass
+            try:
+                import locale  # noqa: PLC0415
+
+                name = locale.getpreferredencoding(False)
+                if name and _norm_codec(name) not in ("utf8", "cp65001"):
+                    if all(_norm_codec(name) != _norm_codec(e) for e in found):
+                        found.append(name)
+            except Exception:  # noqa: BLE001 -- best effort only
+                pass
+        _fallback_encodings = tuple(found)
+    return _fallback_encodings
+
+
+def _split_lines(data: bytes) -> list[bytes]:
+    """Lines split on LF only, terminator kept.
+
+    LF (with the CR before it) is how a command terminates a line. The other
+    break points ``bytes.splitlines()`` uses (\\v, \\f, \\x1c-\\x1e) are bytes
+    a writer can mean as TEXT, and cutting there would let one fragment decide
+    another's encoding. No split point can fall inside a multi-byte character:
+    every lead and continuation byte is >= 0x80.
+    """
+    pieces = data.split(b"\n")
+    lines = [piece + b"\n" for piece in pieces[:-1]]
+    if pieces[-1]:
+        lines.append(pieces[-1])
+    return lines
+
+
+def _decode_line(raw: bytes) -> str:
+    for encoding in ("utf-8", *_code_page_encodings()):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def decode_output(data: bytes) -> str:
+    """A command's raw output as the text the model reads.
+
+    UTF-8 is tried first and whole: Git Bash/MSYS tools, the agent's own
+    children and everything modern write it. But on a Chinese Windows box
+    cmd.exe's builtins and console programs write GBK (code page 936), and
+    decoding those bytes as UTF-8 replaced every Chinese character with U+FFFD
+    — the mojibake the model used to get for any output containing Chinese. So:
+    the whole buffer as UTF-8, then as the host's code pages, then line by line,
+    because one command can mix writers (a Windows exe's GBK line after a Git
+    Bash tool's UTF-8 one).
+    """
+    if not data:
+        return ""
+    for encoding in ("utf-8", *_code_page_encodings()):
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return "".join(_decode_line(line) for line in _split_lines(data))
+
+
 class LocalTransport(Transport):
     """Run commands via subprocess in a fixed cwd (the workspace root).
 
     The shell comes from local_shell(): a POSIX host's /bin/sh via shell=True;
     on Windows a detected Git Bash via `bash -c <cmd>` (the agent speaks POSIX)
     or, absent any bash, cmd.exe via shell=True — see localshell's module
-    docstring. Text mode is pinned to utf-8/replace: a Chinese Windows box
-    would otherwise decode command output as GBK and hand the model mojibake.
+    docstring. Output bytes go through decode_output(): UTF-8 when they are
+    UTF-8, the host's code page (GBK on a Chinese Windows box) when they are
+    not — a plain utf-8/replace decode is what turned every Chinese line of
+    `dir` output into U+FFFD.
     """
 
     def __init__(self, cwd: str) -> None:
@@ -196,8 +295,8 @@ class LocalTransport(Transport):
             )
         return CommandResult(
             code,
-            b"".join(out).decode("utf-8", errors="replace"),
-            b"".join(err).decode("utf-8", errors="replace"),
+            decode_output(b"".join(out)),
+            decode_output(b"".join(err)),
         )
 
 
