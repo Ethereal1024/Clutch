@@ -234,6 +234,47 @@ function setFsConnectError(msg, statusEl, door) {
   hidePickerBody(); // and the verdict owns the folded bar, Retry/Cancel included
 }
 
+// Did a hop for EXACTLY this host land while this attempt was being reset by it?
+//
+// A connect is not alone on the wire: the engine's own redial ladder
+// (ui/tunnel-ladder.js) and a second window dial the same host, and whichever
+// dial loses is reset by the one that won. The loser's words are the socket's —
+// "read ECONNRESET" — and shown as "connection failed" they say the opposite of
+// what happened: the user IS on the host they asked for. So a failed attempt
+// asks the shell which host its hop is for before it believes itself:
+//
+//   * a live hop for this host, with its url up → the connect succeeded, by the
+//     other attempt; report it as the success it is;
+//   * anything else on the wire → not ours, and not a success;
+//   * nothing at all → a plain failure, answered at once (the common case: a
+//     connect that genuinely could not get through must not spend seconds
+//     pretending somebody else might arrive — that is a slower lie).
+//
+// The wait is only for the case in between: a hop for this host still bootstrapping
+// (active, no url yet), which is the winner this attempt lost to, a few seconds
+// behind its dial.
+async function hopLandedFor(host, user, port, budgetMs = 5000) {
+  const st = window.clutchTunnel && window.clutchTunnel.status;
+  if (typeof st !== "function") return false;
+  const wantPort = Number(port) || 22;
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    let s = null;
+    try {
+      s = await st();
+    } catch (e) {
+      return false; // an unanswerable question is not a live hop
+    }
+    const t = s && s.target;
+    const mine =
+      t && t.host === String(host) && t.user === String(user) && (Number(t.port) || 22) === wantPort;
+    if (s && mine && s.active && s.url) return true;
+    if (!s || !mine || !s.active) return false;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
 async function handleSshConnect(host, user, port, statusEl) {
   // same door as connConnect, reached from the picker's New-connection popup, the
   // bar's Retry and the outage redial (js/conn-lost.js): every one of them is an
@@ -270,6 +311,12 @@ async function handleSshConnect(host, user, port, statusEl) {
       }
       res = await window.clutchTunnel.connect({ host, user, port: Number(port), password: pw });
     }
+    // The loser of a race is not a failed connect (see hopLandedFor): a concurrent
+    // attempt can reset this one and then come up, and the hop the user asked for
+    // is up. Read that as the success it is, not as the socket's words — the field
+    // report behind this is a user told "connection failed: read ECONNRESET" about
+    // a tunnel that was already carrying their file list.
+    if (!res.ok && (await hopLandedFor(host, user, port))) res = { ok: true, url: null };
     if (res.ok) {
       upsertConn(host, user, port);
       localStorage.setItem("clutch_ssh_connected", "1");

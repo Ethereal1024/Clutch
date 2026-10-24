@@ -132,6 +132,13 @@ function tunnelStatus() {
   return {
     active: Boolean(state.sshClient),
     url: state.currentUrl,
+    // WHICH host the live hop is for. Without it the page can only ask "is
+    // anything up?", and a hop to another host answering that question is how a
+    // window ends up ticked as connected over somebody else's file system (see
+    // tunnel-connect's reuse gate). It is also what lets a connect that lost the
+    // wire to a concurrent attempt tell "that attempt landed for ME" from
+    // "something else is up".
+    target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
     // Where the far side's model path got to: "listening" is the only value that
     // means a session may be pointed at remoteLlmBase(); "unavailable" says the
     // far side would not (or would not answer) forward, and a session started
