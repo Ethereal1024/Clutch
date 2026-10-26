@@ -1,9 +1,6 @@
 [submodule "clutch-workspace"]
 	path = clutch-workspace
 	url = https://github.com/Ethereal1024/clutch-workspace.git
-[submodule "clutch-memory"]
-	path = clutch-memory
-	url = https://github.com/Ethereal1024/clutch-memory.git
 [submodule "clutch-websearch"]
 	path = clutch-websearch
 	url = https://github.com/Ethereal1024/clutch-websearch.git

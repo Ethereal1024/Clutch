@@ -1,7 +1,7 @@
 """Where the standalone tool modules live, and which interpreter runs them.
 
 Each decoupled tool component has its own repository (clutch-workspace /
-clutch-memory / clutch-websearch / clutch-skills), checked out next to the host
+clutch-websearch / clutch-skills), checked out next to the host
 repo in the dev layout. The host never imports them, and — since the host ships
 no built-in component — the RUNTIME never names them either:
 a component is discovered through its own manifest (tools/catalog.py), and these
@@ -33,11 +33,10 @@ from pathlib import Path
 
 from . import components
 
-# The four components this repo develops, in one place so a rename is one edit —
+# The components this repo develops, in one place so a rename is one edit —
 # a list for the consumers that may point (tests, config's default, the UI's ship
 # list), never a host-side registration of them.
 WORKSPACE = "clutch-workspace"
-MEMORY = "clutch-memory"
 WEBSEARCH = "clutch-websearch"
 SKILLS = "clutch-skills"
 

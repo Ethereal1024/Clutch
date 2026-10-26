@@ -13,9 +13,6 @@ Endpoints (all JSON except SSE/NDJSON):
   GET  /api/workspace/checkpoints  log offsets a whole-task rollback can undo
   POST /api/workspace/rollback {offset} undo every file change from that task on
   GET  /api/fs/list           server-side directory browser (one level)
-  GET  /api/clc?lo&hi         byte range of the active .clc -> {size, b64}
-  POST /api/clc/append {line} append one line -> {offset, size}
-  POST /api/clc/patch {offset, b64}  in-place byte patch (never grows the file)
   POST /api/channel {port, token, components}  the client's plugin declarations
   GET  /api/channel        what this session holds (never the token)
   DELETE /api/channel      forget them (the client went away)
@@ -389,8 +386,8 @@ def build(
     srv.app = app
     # Publish the port the socket ACTUALLY got. With --port 0 — how the
     # supervisor spawns every session child — the OS picks it, and the host facts
-    # a component's statement renders from (host.port_url, i.e.
-    # clutch-memory's --endpoint) have to name the port that is listening. Left
+    # a component's statement renders from (host.port_url, a component's
+    # --endpoint) have to name the port that is listening. Left
     # at 0, a component is pointed at http://127.0.0.1:0 and its first read dies
     # with "Connection refused": the tool is in the model's surface but can never
     # reach this process.

@@ -30,8 +30,7 @@ that carries it, and the envelope its output becomes:
 
 `--live` then drives the same definitions through the real modules instead of the
 stub: the workspace daemon over loopback HTTP, clutch-skills' CLI (which lazily
-spawns its own daemon), clutch-memory against a REAL agent server (its .clc
-content service) and clutch-websearch over the network. The live section is
+spawns its own daemon) and clutch-websearch over the network. The live section is
 opt-in because it needs checkouts, a POSIX shell, curl and network.
 
 Isolation: every daemon lives in a temp workspace and every discovery directory
@@ -47,17 +46,14 @@ import signal
 import socket
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 from agent.config import Config
-from agent.memory import MemoryStore
 from agent.tools import catalog, components, modules, rendezvous, statement
 from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import CommandResult, Transport, TransportError
 from agent.tools.workspace import LocalWorkspace
-from tests.testsupport import check, http_post, shell_words, wait_gone
+from tests.testsupport import check, shell_words, wait_gone
 
 # the daemon coordinates a stub statement is rendered with: a port nothing
 # listens on (the stub never dials it) and a token the line must carry
@@ -148,9 +144,6 @@ TABLE = {
     "web_search": modules.WEBSEARCH,
     "web_fetch": modules.WEBSEARCH,
     "load_skill": modules.SKILLS,
-    "save_memory": modules.MEMORY,
-    "load_memory": modules.MEMORY,
-    "search_memory": modules.MEMORY,
 }
 
 
@@ -177,7 +170,7 @@ def check_table(reg: ToolRegistry, cfg: Config) -> None:
         modules.repo_root = lambda: Path(empty)
         os.environ[components.ROOT_ENV] = empty
         try:
-            bare = ToolRegistry(build_tools(Config(), memories=MemoryStore(str(Path(empty) / "x.clc"))))
+            bare = ToolRegistry(build_tools(Config()))
         finally:
             modules.repo_root = real_root
             if previous is None:
@@ -255,7 +248,6 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # dir; here it is whatever this machine has, and either spelling drives the
     # same declaration.
     declared = catalog.table()
-    memory = shell_words(statement.launch_prefix(declared[modules.MEMORY]))
     search = shell_words(statement.launch_prefix(declared[modules.WEBSEARCH]))
     skills = shell_words(statement.launch_prefix(declared[modules.SKILLS]))
     # The `[--root {root}]` group this declaration once carried is gone, together
@@ -264,19 +256,7 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # bundled library. There is no pinned variant to check: the host kept no way
     # to name a root, which is the point.
 
-    # clutch-memory: the .clc content service is THIS process, so the line names
-    # the endpoint the server publishes on loopback
-    base = f"http://127.0.0.1:{cfg.port}"
     cases = [
-        (
-            "save_memory",
-            {"title": "a fact", "content": HOSTILE},
-            [*memory, "--endpoint", base, "--envelope", "save", "--title", "a fact", "--content", HOSTILE],
-        ),
-        ("load_memory", {"name": "a fact"}, [*memory, "--endpoint", base, "--envelope", "load", "--title", "a fact"]),
-        ("search_memory", {"query": "fact"}, [*memory, "--endpoint", base, "--envelope", "search", "--query", "fact"]),
-        # an optional group is dropped WHOLE: an empty query is a flag-less search
-        ("search_memory", {}, [*memory, "--endpoint", base, "--envelope", "search"]),
         # clutch-websearch: the host's default fills the group, so it stays
         (
             "web_search",
@@ -347,16 +327,14 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
     )
 
     # a CLI module's {content, code} envelope (choice a): code != 0 is a refusal
-    r, _ = _call(reg, ws, cfg, "search_memory", {"query": "x"}, CommandResult(1, _envelope("ERROR: boom", 1), ""))
+    r, _ = _call(reg, ws, cfg, "web_search", {"query": "x"}, CommandResult(1, _envelope("ERROR: boom", 1), ""))
     check(r.error and r.content == "ERROR: boom", "a CLI refusal ({content, code:1}) is error-as-data")
     r, _ = _call(
         reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(1, _envelope("ERROR: unknown skill: 'x'", 1), "")
     )
     check(r.error and "unknown skill" in r.content, "the skills CLI's refusal reaches the model verbatim")
-    r, _ = _call(
-        reg, ws, cfg, "save_memory", {"title": "t", "content": "c"}, CommandResult(0, _envelope("OK: saved"), "")
-    )
-    check(not r.error and r.content == "OK: saved", "a CLI success ({content, code:0}) is a plain result")
+    r, _ = _call(reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(0, _envelope("OK: shown"), ""))
+    check(not r.error and r.content == "OK: shown", "a CLI success ({content, code:0}) is a plain result")
 
     # a service bug cannot hide behind an optimistic envelope
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(3, json.dumps({"content": "ok?"}), ""))
@@ -424,9 +402,9 @@ def check_guards(reg: ToolRegistry, cfg: Config) -> None:
 
 def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
     # a missing required argument is error-as-data, and no command is rendered
-    r, stub = _call(reg, ws, cfg, "load_memory", {}, CommandResult(0, "x", ""))
+    r, stub = _call(reg, ws, cfg, "web_fetch", {}, CommandResult(0, "x", ""))
     check(
-        r.error and "name" in r.content and stub.calls == [],
+        r.error and "url" in r.content and stub.calls == [],
         "a missing argument fails closed, before any line",
     )
     r, stub = _call(reg, ws, cfg, "web_search", {}, CommandResult(0, "x", ""))
@@ -583,45 +561,6 @@ def live_skills(cfg: Config) -> None:
         os.environ.pop("CLUTCH_SKILLS_DISCOVERY_DIR", None)
 
 
-def live_memory() -> None:
-    """clutch-memory against a REAL agent server: the module writes the .clc
-    through the server's generic content endpoints, and the host's own reader
-    sees what it wrote."""
-    from agent.project import open_project_lazy
-    from agent.server import Broadcaster, RunState, build
-
-    port = _free_port()
-    cfg = Config(port=port)
-    state = RunState()
-    srv = build(cfg, Broadcaster(), state)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    time.sleep(0.3)
-    try:
-        with tempfile.TemporaryDirectory(prefix="clutch-inst-mem-") as tmp:
-            st, body = http_post(f"http://127.0.0.1:{port}/api/project/new", {"dir": tmp, "name": "live"})
-            check(st == 200, "live: the test server created a project")
-            clc = Path(json.loads(body)["project"])
-            ws = LocalWorkspace(tmp)
-            reg = ToolRegistry(build_tools(cfg, memories=state.project.memories))
-
-            r = reg.execute(ws, cfg, "save_memory", {"title": "live fact", "content": "a durable 中文 fact"})
-            check(not r.error and "live fact" in r.content, "live: save_memory writes through the real server")
-            r = reg.execute(ws, cfg, "load_memory", {"name": "live fact"})
-            check(not r.error and "a durable 中文 fact" in r.content, "live: load_memory reads it back")
-            r = reg.execute(ws, cfg, "search_memory", {"query": "durable"})
-            check(not r.error and "live fact" in r.content, "live: search_memory finds it by content")
-            r = reg.execute(ws, cfg, "load_memory", {"name": "nope"})
-            check(r.error and "nope" in r.content, "live: an unknown title is a refusal, not a crash")
-
-            # the host's own reader sees the module's write: the file format IS
-            # the shared contract (the in-process store is the stale one)
-            reopened = open_project_lazy(clc)
-            check(reopened.memories.get("live fact") is not None, "live: the host reads the memory the module wrote")
-    finally:
-        srv.shutdown()
-        srv.server_close()
-
-
 def live_web() -> None:
     """clutch-websearch over the network."""
     cfg = Config()
@@ -647,10 +586,6 @@ def live(cfg: Config) -> None:
         live_skills(cfg)
     else:
         print("SKIP: live skills module unavailable")
-    if rendezvous.available(modules.MEMORY):
-        live_memory()
-    else:
-        print("SKIP: live memory module unavailable")
     if rendezvous.available(modules.WEBSEARCH):
         live_web()
     else:
@@ -661,9 +596,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     cfg = Config()
     with tempfile.TemporaryDirectory() as tmp:
-        # a real (empty) store, so the memory tools exist and their host face is
-        # the actual closure; the store's file is never touched offline
-        reg = ToolRegistry(build_tools(cfg, memories=MemoryStore(str(Path(tmp) / "offline.clc"))))
+        # no project log: the host's own log readers are gated on one, so this is
+        # exactly the surface of a session that opened nothing (run_command only)
+        reg = ToolRegistry(build_tools(cfg))
         ws = LocalWorkspace(tmp)
         check_table(reg, cfg)
         check_daemon_lines(reg, ws, cfg)

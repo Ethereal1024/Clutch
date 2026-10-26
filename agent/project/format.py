@@ -1,19 +1,24 @@
-"""The .clc byte format: the header layout, its fixed-width lines, the event region.
+"""The .clc byte format: the header layout, its fixed-width line, the event region.
 
 A .clc is byte-addressed, not line-addressed. The header is `HEADER_PREFIX` /
-name / model / cpr_start / memory index / `SEPARATOR`, and its last two lines are
-FIXED-WIDTH — `cpr_start=0000000000` (the window start, relative to the event
-region) and the memory index — so their absolute offsets are the same in every
-file and a compaction updates the window start with ONE in-place write
-(_make_write_at) instead of rewriting the file.
+name / model / cpr_start / `SEPARATOR`, and the cpr_start line is FIXED-WIDTH —
+`cpr_start=0000000000` (the window start, relative to the event region) — so its
+absolute offset is the same in every file and a compaction updates the window
+start with ONE in-place write (_make_write_at) instead of rewriting the file.
 
 Everything here either builds those lines (_header_text, _write_header,
-_cpr_line_offset, _index_line_offset) or finds things by byte offset in a header
-read that never touches the rest of the file: the index line, the cpr_start line,
-the event region's first durable line, and — for a legacy file with no cpr_start —
-the newest compaction line (_last_compaction_rel: the boundary the migration
-script writes into the header, and the one name agent/core/lazy.py imports from
-the package).
+_cpr_line_offset) or finds things by byte offset in a header read that never
+touches the rest of the file: the cpr_start line, the event region's first
+durable line, and — for a legacy file with no cpr_start — the newest compaction
+line (_last_compaction_rel: the boundary the migration script writes into the
+header, and the one name agent/core/lazy.py imports from the package).
+
+A .clc written by an older build carries one more fixed-width header line, the
+`memory_index=` ring of byte offsets into its `[memories]` section. Nothing
+writes it any more (the log itself is the memory: tools/recall.py reads it), but
+the line is still read over without complaint — every locator here matches on a
+prefix, so a legacy header opens exactly like a new one, and the retired index
+is simply ignored.
 
 No open, no lock, no memory store: the lifecycle that uses all of this is
 __init__.py.
@@ -26,7 +31,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..events import DURABLE_TYPES
-from ..memory import SECTION, empty_index_line
 
 HEADER_PREFIX = "# clutch project v1"
 SEPARATOR = "---"
@@ -49,11 +53,15 @@ def _event_region_start(head: bytes) -> int:
     """Absolute byte offset of the event region start in a header read: the
     first durable event line (the raw task in a never-compacted file), or —
     for a header-only file — the byte position right after the separator where
-    the first event will land."""
+    the first event will land.
+
+    Every other line of a header read is passed over: a legacy `memory_index=`
+    line, a `[memories]` marker (it is JSON's opposite, so it never parses), and
+    the separator itself."""
     pos = 0
     for seg in head.split(b"\n"):
         stripped = seg.strip()
-        if not stripped or stripped.startswith(SEPARATOR.encode()) or stripped.startswith(SECTION.encode()):
+        if not stripped or stripped.startswith(SEPARATOR.encode()):
             pos += len(seg) + 1
             continue
         try:
@@ -69,17 +77,6 @@ def _event_region_start(head: bytes) -> int:
     if sep >= 0:
         return sep + len(SEPARATOR) + 1
     return pos
-
-
-def _find_index_line(head: bytes) -> int | None:
-    """Absolute byte offset of the header's memory index line in a header read
-    (None = legacy .clc without one)."""
-    pos = 0
-    for seg in head.split(b"\n"):
-        if seg.startswith(b"memory_index="):
-            return pos
-        pos += len(seg) + 1
-    return None
 
 
 def _find_cpr_line(head: bytes) -> int | None:
@@ -155,14 +152,11 @@ def _parse_meta_lines(lines: list[str]) -> ProjectMeta:
     return meta
 
 
-def _header_text(meta: ProjectMeta, index_line: str | None = None, cpr_start: int = 0) -> str:
+def _header_text(meta: ProjectMeta, cpr_start: int = 0) -> str:
     """Header for a NEW .clc: meta lines + the fixed-width cpr_start line
-    (window start; 0 = everything) + the fixed-width memory index line (empty
-    by default) + the event-region separator. Both index lines are always
-    present at a fixed width, so their absolute offsets are stable for the
-    file's lifetime (the event region's relative offsets never shift)."""
-    if index_line is None:
-        index_line = empty_index_line()
+    (window start; 0 = everything) + the event-region separator. The cpr_start
+    line is always present at a fixed width, so its absolute offset is stable
+    for the file's lifetime (the event region's relative offsets never shift)."""
     return (
         "\n".join(
             [
@@ -170,7 +164,6 @@ def _header_text(meta: ProjectMeta, index_line: str | None = None, cpr_start: in
                 f"name: {meta.name}",
                 f"model: {meta.model or ''}",
                 f"{_CPR_START_PREFIX}{cpr_start:0{_CPR_START_FIELD_W}d}",
-                index_line,
                 SEPARATOR,
             ]
         )
@@ -188,17 +181,11 @@ def _cpr_line_offset(meta: ProjectMeta) -> int:
     )
 
 
-def _index_line_offset(meta: ProjectMeta) -> int:
-    """Absolute byte offset of the memory index line in a freshly created .clc
-    (header layout: prefix / name / model / cpr_start / index / separator)."""
-    return _cpr_line_offset(meta) + _CPR_START_LINE_BYTES
-
-
 def _write_header(path: Path, meta: ProjectMeta) -> None:
-    # newline="\n": the header is BYTE-addressed (the fixed-width cpr_start /
-    # index lines are located by offset). Windows text mode would write \r\n and
-    # push every modeled offset one byte short per line, so an in-place
-    # cpr_start/index update would overwrite the wrong bytes.
+    # newline="\n": the header is BYTE-addressed (the fixed-width cpr_start
+    # line is located by offset). Windows text mode would write \r\n and push
+    # every modeled offset one byte short per line, so an in-place cpr_start
+    # update would overwrite the wrong bytes.
     path.write_text(_header_text(meta), encoding="utf-8", newline="\n")
 
 

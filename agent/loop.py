@@ -63,7 +63,6 @@ class Agent:
         sink: EventSink | None = None,
         cancel: threading.Event | None = None,
         gate: PermissionGate | None = None,
-        memories: Any | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -76,8 +75,6 @@ class Agent:
         self.gate = gate
         # compaction lives in the Compactor (it summarizes with this same client)
         self.compactor = Compactor(config, self.log, llm, sink=self.sink, cancel=self.cancel)
-        # durable project-memory store, if any
-        self.memories = memories
 
     def _emit(self, event: Event) -> Event:
         """Append one event and hand it back.
@@ -219,7 +216,6 @@ class Agent:
                     self.log,
                     self.config,
                     task,
-                    memories=self.memories,
                     workspace=self.workspace,
                     components=components,
                 )

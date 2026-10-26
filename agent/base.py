@@ -146,11 +146,6 @@ class RunState:
         self.backend_mode: str = "local"  # "local" | "ssh"
         self.bridge_url: str | None = None
         self.remote_root: str | None = None  # initial browse root on the remote
-        # serializes .clc appends/in-place writes from the /api/clc* endpoints:
-        # the size-then-append offset handoff and the event log's
-        # note_bytes_written bookkeeping both need writes to be race-free.
-        # Host housekeeping — invisible to the endpoint contract.
-        self.clc_lock = threading.Lock()
 
     def build_workspace(self, root: str) -> Workspace:
         """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
@@ -300,11 +295,15 @@ class BaseServer(ABC):
         and a local session must not be handed a plugin that reads a DIFFERENT
         machine's files under the local `read_file` name. `state.workspace` is
         the run's workspace by the time this is asked (start_task claims the slot
-        first); before any run it is None, which offers everything."""
+        first); before any run it is None, which offers everything.
+
+        The project's log goes with them too, and it is the same object in both
+        places: `build_tools` needs it to answer the `project` gate, and the
+        registry needs it to hand the log readers the file they read. No path
+        travels — the readers can only read the log this run is logged in."""
         cfg = config or self.config
-        return ToolRegistry(
-            build_tools(cfg, memories=project.memories if project else None, workspace=self.state.workspace)
-        )
+        log = project.log if project else None
+        return ToolRegistry(build_tools(cfg, log=log, workspace=self.state.workspace), log=log)
 
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:
@@ -355,5 +354,4 @@ class BaseServer(ABC):
             sink=self.broadcaster.publish,
             cancel=cancel,
             gate=gate,
-            memories=project.memories,
         )

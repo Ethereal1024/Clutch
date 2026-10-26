@@ -12,16 +12,6 @@
       "license": "MIT"
     },
     {
-      "id": "Ethereal1024/clutch-memory",
-      "name": "clutch-memory",
-      "manifest": "https://github.com/Ethereal1024/clutch-memory/releases/download/v0.1.1/clutch-component.json",
-      "version": "0.1.1",
-      "summary": "what the project remembers between sessions, written down where a later session reads it",
-      "tags": ["memory"],
-      "homepage": "https://github.com/Ethereal1024/clutch-memory",
-      "license": "MIT"
-    },
-    {
       "id": "Ethereal1024/clutch-websearch",
       "name": "clutch-websearch",
       "manifest": "https://github.com/Ethereal1024/clutch-websearch/releases/download/v0.1.0/clutch-component.json",

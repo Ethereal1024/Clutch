@@ -148,7 +148,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     check(max(0, log.cpr_start()) == book["comp_off"],
           "older == the on-disk bytes before the window (cpr_start)")
     check(project.meta.name == "lazy-test", "meta parsed from the header range read")
-    check(project.memories is not None and not project.memories.items(), "empty MemoryStore attached")
+    check(not hasattr(project, "memories"), "the handle carries no memory store (its log IS the memory)")
 
     # ---- 2. read_page: pure disk paging, resident untouched ----------------
     page = log.read_page(0, book["comp_off"])
@@ -163,7 +163,15 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     full = _load_full(path)
     msgs_base = derive_messages(full, config, "task")
     msgs_lazy = derive_messages(log, config, "task")
-    check(msgs_base == msgs_lazy, "derive_messages(lazy log) == derive_messages(full log)")
+    check(msgs_base[1:] == msgs_lazy[1:], "derive_messages(lazy log) == derive_messages(full log)")
+    # the system prompt of a REAL project log ends with the recall anchor (the
+    # file to search); the in-memory cross-check log has no path, so no anchor
+    check(
+        msgs_lazy[0]["content"].startswith(msgs_base[0]["content"])
+        and "This project's memory is its own log" in msgs_lazy[0]["content"]
+        and "This project's memory is its own log" not in msgs_base[0]["content"],
+        "the lazy prompt is the full one plus the log anchor",
+    )
     check(msgs_lazy[-1] == {"role": "assistant", "content": "recent 109"},
           "lazy context ends with the newest window event")
     check(
@@ -405,8 +413,8 @@ def _load_full(path: Path) -> LazyEventLog:
             if stripped == "---":
                 in_events = True
             continue
-        if stripped == "[memories]":
-            break
+        if stripped == "[memories]" or stripped.startswith("memory_index="):
+            continue  # a section an older build wrote: not an event (parse_durable skips it)
         if not stripped:
             continue
         try:

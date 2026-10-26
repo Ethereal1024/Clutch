@@ -547,8 +547,8 @@ def check_ui_protocol() -> None:
     # chip) and no label, its arguments one click away, its result shown whole
     bare = catalog.Tool(name="bare", description="", parameters={})
     check(catalog.ui_of(bare) == catalog.DEFAULTS, "a tool with no ui block is rendered from the defaults alone")
-    if modules.MEMORY in catalog.table():
-        plain = catalog.ui_of(_spec(modules.MEMORY, "save_memory"))
+    if modules.WEBSEARCH in catalog.table():
+        plain = catalog.ui_of(_spec(modules.WEBSEARCH, "web_search"))
         check(
             plain["chip"] == "name" and plain["summary"] == "" and plain["preview"] == "args",
             "the plain row is the tool's own name, no label, its arguments streamed",
@@ -604,9 +604,13 @@ def check_declared_access() -> None:
         (modules.WORKSPACE, "grep", "sweep"),
         (modules.WORKSPACE, "write_file", "write"),
         (modules.WORKSPACE, "edit_file", "write"),
-        (modules.MEMORY, "load_memory", "read"),
     ):
         check(_spec(component, tool).access == access, f"{tool} declares the {access} policy")
+    if modules.WEBSEARCH in catalog.table():
+        check(
+            _spec(modules.WEBSEARCH, "web_search").access == "",
+            "a tool that declares no access is left with none (no fence, no prompt)",
+        )
 
     declared = {spec.access for mod in catalog.table().values() for spec in mod.tools}
     check(

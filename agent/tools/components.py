@@ -1,7 +1,7 @@
 """Installed components: where a host finds the code a statement needs.
 
-A component is a standalone artifact (clutch-workspace, clutch-memory,
-clutch-websearch, clutch-skills) that a host installs FOR ITSELF, on ITS OWN
+A component is a standalone artifact (clutch-workspace, clutch-websearch,
+clutch-skills) that a host installs FOR ITSELF, on ITS OWN
 machine — the desktop process, or a remote server the client bootstrapped behind
 an SSH tunnel. rendezvous.py owns what a component's declaration MEANS (where its
 statement runs, whose files it serves); this module owns where its artifact lands

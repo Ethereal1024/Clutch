@@ -111,28 +111,28 @@ def _install_probe() -> None:
 
             cli = Path(host_root) / "cli-artifact"
             cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            memdir = components.install(
-                cli, {"name": modules.MEMORY, "version": "1.0.0", "launch": {"binary": modules.MEMORY}}
+            clidir = components.install(
+                cli, {"name": modules.WEBSEARCH, "version": "1.0.0", "launch": {"binary": modules.WEBSEARCH}}
             )
-            resolved_cli = rendezvous.resolve(modules.MEMORY)
+            resolved_cli = rendezvous.resolve(modules.WEBSEARCH)
             check(
                 resolved_cli is not None and resolved_cli.installed and not resolved_cli.template,
                 "an installed CLI onefile supersedes the checkout template",
             )
             check(
-                resolved_cli is not None and resolved_cli.argv == (str(memdir / modules.MEMORY),),
+                resolved_cli is not None and resolved_cli.argv == (str(clidir / modules.WEBSEARCH),),
                 "a CLI onefile is driven by its own executable, not {py} {script}",
             )
-            check(rendezvous.available(modules.MEMORY), "so an installed CLI component IS the implementation")
+            check(rendezvous.available(modules.WEBSEARCH), "so an installed CLI component IS the implementation")
             check(
-                components.verify(memdir, name=modules.WORKSPACE) != "",
+                components.verify(clidir, name=modules.WORKSPACE) != "",
                 "a manifest that is not the component this host asked for is refused before use",
             )
-            stray = components.component_root(modules.MEMORY) / "0.0.0-garbage"
+            stray = components.component_root(modules.WEBSEARCH) / "0.0.0-garbage"
             stray.mkdir(parents=True)
-            (stray / modules.MEMORY).write_text("", encoding="utf-8")
+            (stray / modules.WEBSEARCH).write_text("", encoding="utf-8")
             check(
-                components.installed(modules.MEMORY) == memdir,
+                components.installed(modules.WEBSEARCH) == clidir,
                 "a version directory without a manifest is not an install",
             )
         finally:
@@ -173,33 +173,37 @@ def _disabled_probe() -> None:
         previous = os.environ.get(components.ROOT_ENV)
         os.environ[components.ROOT_ENV] = host_root
         try:
-            stopped = f"{modules.MEMORY} is disabled on this host (its tools are off; the bytes stay)"
+            stopped = f"{modules.WEBSEARCH} is disabled on this host (its tools are off; the bytes stay)"
             artifact = Path(host_root) / "cli-artifact"
             artifact.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             payload = components.install(
-                artifact, {"name": modules.MEMORY, "version": "1.0.0", "launch": {"binary": modules.MEMORY}}
+                artifact, {"name": modules.WEBSEARCH, "version": "1.0.0", "launch": {"binary": modules.WEBSEARCH}}
             )
-            digest = components.installed_digest(modules.MEMORY)
-            check("disabled" not in rendezvous.unavailable_reason(modules.MEMORY), "nothing is stopped to begin with")
-
-            verdict = components.set_disabled(modules.MEMORY)
+            digest = components.installed_digest(modules.WEBSEARCH)
             check(
-                verdict == {"status": "disabled", "name": modules.MEMORY, "disabled": True},
+                "disabled" not in rendezvous.unavailable_reason(modules.WEBSEARCH),
+                "nothing is stopped to begin with",
+            )
+
+            verdict = components.set_disabled(modules.WEBSEARCH)
+            check(
+                verdict == {"status": "disabled", "name": modules.WEBSEARCH, "disabled": True},
                 "stopping a component is a verdict, not an assumption that it worked",
             )
             check(
-                rendezvous.unavailable_reason(modules.MEMORY) == stopped and not rendezvous.available(modules.MEMORY),
+                rendezvous.unavailable_reason(modules.WEBSEARCH) == stopped
+                and not rendezvous.available(modules.WEBSEARCH),
                 "a stopped component's tools are gone, and the sentence says why",
             )
             check(
-                (payload / modules.MEMORY).is_file() and components.installed_digest(modules.MEMORY) == digest,
+                (payload / modules.WEBSEARCH).is_file() and components.installed_digest(modules.WEBSEARCH) == digest,
                 "and not one byte of it moved: stopping is not a removal",
             )
             check(
-                [record for record in components.inventory() if record["name"] == modules.MEMORY]
+                [record for record in components.inventory() if record["name"] == modules.WEBSEARCH]
                 == [
                     {
-                        "name": modules.MEMORY,
+                        "name": modules.WEBSEARCH,
                         "version": "1.0.0",
                         "digest": digest,
                         "disabled": True,
@@ -208,14 +212,14 @@ def _disabled_probe() -> None:
                 "it is still HELD — listed, marked stopped, its payload and digest intact",
             )
 
-            back = components.set_disabled(modules.MEMORY, False)
+            back = components.set_disabled(modules.WEBSEARCH, False)
             check(
-                back == {"status": "enabled", "name": modules.MEMORY, "disabled": False},
+                back == {"status": "enabled", "name": modules.WEBSEARCH, "disabled": False},
                 "and driving it again is the same verb the other way: a stopped component is not a lost one",
             )
             check(
-                "disabled" not in rendezvous.unavailable_reason(modules.MEMORY)
-                and components.installed_digest(modules.MEMORY) == digest,
+                "disabled" not in rendezvous.unavailable_reason(modules.WEBSEARCH)
+                and components.installed_digest(modules.WEBSEARCH) == digest,
                 "with its tools back and its bytes still the same ones",
             )
 
@@ -278,7 +282,7 @@ def main() -> int:
     #     makes a statement legal for a given workspace at all
     #     (registry.module_blocked_reason).
     check(rendezvous.serves_workspace_fs(modules.WORKSPACE), "the workspace component serves the workspace filesystem")
-    for other in (modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
+    for other in (modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
     # the OTHER half of the same axis: a component that reaches ANOTHER machine's
@@ -287,7 +291,7 @@ def main() -> int:
     # the check below no longer claims that axis is unused.
     ssh_workspace = "clutch-ssh-workspace"
     check(rendezvous.serves_foreign_fs(ssh_workspace), "the ssh plugin serves a foreign filesystem")
-    for other in (modules.WORKSPACE, modules.MEMORY, modules.WEBSEARCH, modules.SKILLS):
+    for other in (modules.WORKSPACE, modules.WEBSEARCH, modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_foreign_fs(other), f"{other} is not a foreign filesystem")
     check(not rendezvous.serves_foreign_fs("clutch-nope"), "an unknown component serves nothing there either")
     elsewhere = [mod.name for mod in catalog.table().values() if mod.client_side]
@@ -306,8 +310,8 @@ def main() -> int:
     #     checkout's own shape is asked of the checkout DIRECTORY rather than of
     #     whatever resolve() prefers on this machine — a dev box with the module
     #     installed would otherwise be asserting the install's shape here.
-    mem = catalog.table()[modules.MEMORY]
-    checkout_dir = modules.module_dir(modules.MEMORY)
+    mem = catalog.table()[modules.WEBSEARCH]
+    checkout_dir = modules.module_dir(modules.WEBSEARCH)
     if checkout_dir.is_dir():  # the memory checkout may be absent on a bare host
         rendered = rendezvous.render_launch(mem, checkout_dir, components.read_manifest(checkout_dir))
         check(rendered is not None and rendered[1], "the dev checkout is a template launch, not an install")
@@ -315,10 +319,13 @@ def main() -> int:
             rendered[0] == (modules.python_exe(), str(checkout_dir / "memory.py")),
             "the CLI template is the interpreter plus the checkout's entry point",
         )
-    checkout = rendezvous.resolve(modules.MEMORY)
+    checkout = rendezvous.resolve(modules.WEBSEARCH)
     if checkout is not None:  # absent on a host that has neither an install nor the checkout
         check(checkout.installed or checkout.template, "a resolved CLI is an install or a template, never neither")
-        check(rendezvous.unavailable_reason(modules.MEMORY) == "", "a checked-out CLI with an interpreter is available")
+        check(
+            rendezvous.unavailable_reason(modules.WEBSEARCH) == "",
+            "a checked-out CLI with an interpreter is available",
+        )
     _install_probe()
     _disabled_probe()
 

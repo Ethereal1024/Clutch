@@ -69,8 +69,8 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     """
     # NB: a key here must never be one of a tool's own argument names — the
     # renderer fills {name} from the CALL's arguments, and a host var of the
-    # same name would silently overwrite the model's value (clutch-memory's
-    # `--title {name}` is exactly that).
+    # same name would silently overwrite the model's value (a component whose
+    # statement takes `{name}` as the model's own argument is exactly that).
     facts = {
         "host.port_url": lambda: f"http://127.0.0.1:{config.port}",
     }

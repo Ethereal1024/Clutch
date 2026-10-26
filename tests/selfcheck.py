@@ -350,100 +350,79 @@ def check_project_file(config: Config) -> None:
         r = reg.execute(ws, config, "read_file", {"path": "."})
         check(proj.path.name not in r.content, "read_file on a directory hides .clc")
 
-    # 10b. project memory: memories persist to the .clc and survive reopen
+    # 10b. the project log's own readers: grep_memory / read_memory. They are
+    #      HOST tools, not a component (tools/host.py says why): the bytes they
+    #      read are the ones this process appends to and the workspace protects,
+    #      so the file is never an argument the model passes — the registry hands
+    #      every call the session's own log.
     with tempfile.TemporaryDirectory() as ptmp:
         proj = create_project(Path(ptmp) / "mem", "mem")
-        check(proj.memories is not None, "create_project attaches a MemoryStore")
-        proj.memories.save("user prefers dark theme", "the user likes dark mode")
-        proj.memories.save("stack is flask", "the backend uses Flask + SQLite")
-        raw = proj.path.read_text(encoding="utf-8")
-        check("[memories]" in raw, "memories section written to the .clc")
-        check("dark theme" in raw and "flask" in raw, "memory lines persisted as JSONL")
-
-        reloaded = open_project_lazy(proj.path)
+        check(not hasattr(proj, "memories"), "a project carries no memory store: its log IS the memory")
+        proj.log.append(UserMessageEvent(content="the backend uses Flask + SQLite"))
+        proj.log.append(AssistantMessageEvent(content="noted: the user prefers a dark theme"))
+        ws = LocalWorkspace(ptmp)
+        reg = ToolRegistry(build_tools(config, log=proj.log), log=proj.log)
         check(
-            reloaded.memories.get("stack is flask") is not None,
-            "memories loaded back on reopen",
+            {"grep_memory", "read_memory"} <= set(reg.names()),
+            "a project session is offered both log readers",
         )
-        check(len(reloaded.memories.search("flask")) == 1, "memory search matches content")
-
-        # memory tools (registered when a MemoryStore is provided). The model's
-        # call is one terminal command: the memory module's CLI on the APP host
-        # (its subject is the project file), pointed at the .clc content
-        # endpoint this process publishes. Its bytes are pinned here; that the
-        # module ANSWERS (a hit, or the "no such memory" verdict) is pinned by
-        # clutch-memory's own suite and driven live by tests/tools_inst_test.
-        ws = LocalWorkspace(str(ptmp))
-        mreg = ToolRegistry(build_tools(config, memories=reloaded.memories))
-        ready = statement.prepare(modules.MEMORY, ws, config)
-        mvars = ready.vars
-        check(mvars.get("base") == f"http://127.0.0.1:{config.port}", "the memory CLI is pointed at this process")
-        # ...and that has to be the port the socket really got. A session child is
-        # spawned with --port 0 (agent/supervisor.py), so a config left at 0 would
-        # point the module at http://127.0.0.1:0 — the tool would be in the model's
-        # surface and refuse every call with "Connection refused".
-        from agent.base import RunState
-        from agent.server import Broadcaster, build
-
-        zero = Config()
-        zero.port = 0
-        probe = build(zero, Broadcaster(), RunState())
-        try:
-            bound = probe.server_address[1]
-            check(bound > 0 and zero.port == bound, "a --port 0 bind publishes the port the OS chose")
-            check(
-                statement.prepare(modules.MEMORY, ws, zero).vars["base"] == f"http://127.0.0.1:{bound}",
-                "the memory endpoint names the BOUND port, never 0",
-            )
-        finally:
-            probe.server_close()
-        for name, sample, carried in (
-            ("save_memory", {"title": "new fact", "content": "keep it"}, "keep it"),
-            ("load_memory", {"name": "stack is flask"}, "stack is flask"),
-            ("search_memory", {"query": "theme"}, "theme"),
-        ):
-            tool = mreg.tool(name)
-            assert tool is not None and tool.inst is not None  # the registry always carries one
-            line = ready.line(tool.inst, sample)
-            check("memory.py" in line and "--envelope" in line, f"{name} renders the memory CLI")
-            check("--endpoint" in line and str(config.port) in line, f"{name} names the .clc endpoint")
-            check(carried in line, f"{name} carries the model's argument verbatim")
-        # without a store there are no memory tools
         check(
-            "save_memory" not in ToolRegistry(build_tools(config)).names(),
-            "no memory tools without a MemoryStore",
+            reg.tool("grep_memory").needs_log and reg.access("grep_memory") == "",
+            "the readers take the log from the registry, and are not path-guarded (they have no path)",
         )
 
-    # 10c. fixed-width header memory index (in-place update, offsets stable)
-    from agent.memory import _MEMORY_INDEX_PREFIX, parse_index_line
+        r = reg.execute(ws, config, "grep_memory", {"pattern": "Flask"})
+        check(
+            "line 1: [user_message " in r.content and "Flask + SQLite" in r.content,
+            "grep_memory names the line its hit sits on",
+        )
+        r = reg.execute(ws, config, "grep_memory", {"pattern": ".", "include": "note"})
+        check("no line matches" in r.content, "include narrows the scan by event type")
+        r = reg.execute(ws, config, "grep_memory", {"pattern": "("})
+        check(r.error and "not a valid regular expression" in r.content, "a bad pattern is refused, not raised")
 
+        r = reg.execute(ws, config, "read_memory", {})
+        check("lines 1-2 of 2" in r.content, "read_memory with no offset pages the TAIL")
+        check("Flask" in r.content and "dark theme" in r.content, "the page carries each line's text")
+        r = reg.execute(ws, config, "read_memory", {"offset": 99})
+        check(
+            r.error and "past the end" in r.content and "2 lines" in r.content,
+            "an offset past the end is refused, with the line count",
+        )
+
+        # The log is the SESSION's, never the model's: an argument named "log" is
+        # overwritten by the registry (Tool.needs_log), so a reader cannot be
+        # pointed at a file of the model's choosing.
+        decoy = create_project(Path(ptmp) / "decoy", "decoy")
+        decoy.log.append(UserMessageEvent(content="decoy content"))
+        r = reg.execute(ws, config, "read_memory", {"log": decoy.log})
+        check(
+            "mem.clc" in r.content and "decoy" not in r.content,
+            "a call reads the session's log even when the model names another",
+        )
+
+        # no project, no readers (the `project` gate) and no prompt anchor
+        bare = ToolRegistry(build_tools(config), log=None)
+        check(
+            "grep_memory" not in bare.names() and "read_memory" not in bare.names(),
+            "no project log, no log readers",
+        )
+        blank = derive_messages(LazyEventLog.in_memory(), config, "t")[0]["content"]
+        check(
+            "This project's memory is its own log" not in blank,
+            "no project log, no recall anchor in the system prompt",
+        )
+        anchor = derive_messages(proj.log, config, "t")[0]["content"]
+        check(
+            "This project's memory is its own log: mem.clc" in anchor,
+            "a project session's prompt names the log to search (and its size)",
+        )
+
+    # 10c. a .clc an older build wrote still opens exactly like a new one: the
+    #      header lines that build added (a memory_index ring, a [memories]
+    #      section) are read over, and the notes inside it are as durable as any
+    #      turn — the readers show them. No open rewrites a file it did not write.
     with tempfile.TemporaryDirectory() as ptmp:
-        proj = create_project(Path(ptmp) / "ring", "ring")
-        for i in range(12):
-            proj.memories.save(f"fact {i}", f"content {i}")
-        idx = [line for line in proj.path.read_text(encoding="utf-8").split("\n")
-               if line.startswith(_MEMORY_INDEX_PREFIX)][0]
-        check(len(idx.encode()) == 189, "index line fixed width 189 bytes")
-        parsed = parse_index_line(idx)
-        check(parsed is not None and parsed[0] == 10 and parsed[1] == 2, "ring full: count=10 head=2 after 12 saves")
-        reopened = open_project_lazy(proj.path)
-        items = reopened.memories.items()
-        check(
-            len(items) == 10 and "fact 0" not in items and "fact 11" in items,
-            "FIFO: oldest evicted, newest kept on reopen",
-        )
-        off_before = reopened.memories._index_offset
-        reopened.memories.save("fact 12", "c12")
-        reopened.memories.save("fact 13", "c13")
-        reopened2 = open_project_lazy(proj.path)
-        items2 = reopened2.memories.items()
-        check(
-            len(items2) == 10 and "fact 3" not in items2 and "fact 13" in items2,
-            "saves after reopen keep the FIFO ring",
-        )
-        check(reopened2.memories._index_offset == off_before, "index line never moves (absolute offset stable)")
-
-        # legacy file without an index: open never migrates, file untouched
         legacy = Path(ptmp) / "legacy.clc"
         evs = [UserMessageEvent(content="task")]
         for i in range(1, 60):
@@ -453,7 +432,7 @@ def check_project_file(config: Config) -> None:
             evs.append(AssistantMessageEvent(content=f"r{i}"))
         legacy.write_text(
             "\n".join(
-                ["# clutch project v1", "name: legacy", "model: fake-model", "---"]
+                ["# clutch project v1", "name: legacy", "model: fake-model", "memory_index=0000000000,ZZ", "---"]
                 + [event_to_json(e) for e in evs]
                 + ["[memories]", '{"title": "m1", "content": "one", "updated": 0}']
                 + [event_to_json(AssistantMessageEvent(content=f"after{i}")) for i in range(70, 75)]
@@ -464,33 +443,25 @@ def check_project_file(config: Config) -> None:
         )
         legacy_before = legacy.read_bytes()
         mig = open_project_lazy(legacy)
-        check(mig.memories.get("m1") is not None, "legacy file memories load via section scan")
-        check(legacy.read_bytes() == legacy_before, "writable open never rewrites a legacy file")
-        # legacy file: open derives the compaction boundary from the newest line
+        check(legacy.read_bytes() == legacy_before, "a writable open never rewrites a legacy file")
         check(mig.log.cpr_start() > 0, "legacy file with a compaction derives its window boundary")
         check(
             all(e.type != "user_message" or i == 0 for i, e in enumerate(mig.events())),
             "legacy window materializes only from the last compaction onward",
         )
-        mig.memories.save("m2", "two")
-        check(open_project_lazy(legacy).memories.get("m2") is not None, "post-open save persists (scan fallback)")
-
-        # corrupt index: fall back to the section scan, file untouched
-        corrupt = Path(ptmp) / "corrupt.clc"
-        cproj = create_project(corrupt, "c")
-        cproj.memories.save("a", "A")
-        cproj.memories.save("b", "B")
-        corrupt.write_text(
-            cproj.path.read_text(encoding="utf-8").replace(_MEMORY_INDEX_PREFIX, _MEMORY_INDEX_PREFIX + "ZZ", 1),
-            encoding="utf-8",
-            newline="\n",  # .clc is BYTE-addressed (offsets), never CRLF
+        lreg = ToolRegistry(build_tools(config, log=mig.log), log=mig.log)
+        lws = LocalWorkspace(ptmp)
+        r = lreg.execute(lws, config, "grep_memory", {"pattern": "m1"})
+        check(
+            "[note] [Note] m1: one" in r.content and r.content.startswith("legacy.clc:"),
+            "a legacy memory line reads as a note of the log",
         )
-        corrupt_before = corrupt.read_bytes()
-        creopened = open_project_lazy(corrupt)
-        check(len(creopened.memories.items()) == 2, "corrupt index falls back to the section scan (no memory loss)")
-        check(corrupt.read_bytes() == corrupt_before, "corrupt index not rewritten by the open")
+        r = lreg.execute(lws, config, "grep_memory", {"pattern": "task"})
+        check("line 1:" in r.content, "line numbering starts at the first EVENT (the header is not the log)")
+        r = lreg.execute(lws, config, "read_memory", {})
+        check("after74" in r.content, "read_memory pages the newest lines of a legacy file")
 
-        # read-only open of a legacy file: legacy scan loads, file untouched
+        # read-only open: same reader, and the file is still untouched
         ro = Path(ptmp) / "ro.clc"
         ro.write_text(
             "# clutch project v1\nname: ro\nmodel: m\n---\n"
@@ -501,8 +472,11 @@ def check_project_file(config: Config) -> None:
         )
         before = ro.read_bytes()
         roproj = open_project_lazy(ro, read_only=True)
-        check(roproj.memories.get("ro1") is not None, "read_only: legacy scan loads memories")
-        check(ro.read_bytes() == before, "read_only: file untouched (no migration)")
+        r = ToolRegistry(build_tools(config, log=roproj.log), log=roproj.log).execute(
+            lws, config, "grep_memory", {"pattern": "readonly"}
+        )
+        check("[note] [Note] ro1: readonly" in r.content, "read_only: the log readers still see the legacy note")
+        check(ro.read_bytes() == before, "read_only: file untouched")
 
 
 def check_windowed_clc(config: Config) -> None:
@@ -557,9 +531,17 @@ def check_windowed_clc(config: Config) -> None:
         full = LazyEventLog.in_memory()
         for ev in parse_durable(p.read_text(encoding="utf-8")):
             full.append(ev)
+        lazy_msgs = derive_messages(log, config, "task")
+        full_msgs = derive_messages(full, config, "task")
+        check(lazy_msgs[1:] == full_msgs[1:], "lazy derive == full derive (middle paged separately)")
+        # the system prompt differs in exactly one way: a REAL project log gets the
+        # recall anchor naming the file, and the in-memory scratch log (no path)
+        # gets none — a prompt must not promise a reader with nothing behind it.
         check(
-            derive_messages(log, config, "task") == derive_messages(full, config, "task"),
-            "lazy derive == full derive (middle paged separately)",
+            lazy_msgs[0]["content"].startswith(full_msgs[0]["content"])
+            and "big.clc" in lazy_msgs[0]["content"]
+            and "big.clc" not in full_msgs[0]["content"],
+            "the lazy prompt is the full one plus the log anchor",
         )
         check(
             not any(
@@ -589,7 +571,7 @@ def check_windowed_clc(config: Config) -> None:
         check(len(up.log.items()) == 1 + 20,
               "legacy window materializes only the compaction + the recent tail")
         check(
-            derive_messages(up.log, config, "task") == derive_messages(full, config, "task"),
+            derive_messages(up.log, config, "task")[1:] == derive_messages(full, config, "task")[1:],
             "legacy derive == full derive",
         )
         check(
@@ -598,8 +580,10 @@ def check_windowed_clc(config: Config) -> None:
         )
 
 
-def check_lazy_open_memories(config: Config) -> None:
-    # 12. lazy open handles a [memories] section (parse_durable skips memory lines)
+def check_lazy_open_legacy_notes(config: Config) -> None:
+    # 12. a [memories] section an older build wrote is not an obstacle: the open
+    #     skips it (it is not an event), never rewrites it, and the log readers
+    #     still show the note — the fact it carries outlives the section.
     with tempfile.TemporaryDirectory() as ptmp:
         from agent.project import open_project_lazy
 
@@ -626,13 +610,8 @@ def check_lazy_open_memories(config: Config) -> None:
 
         proj = open_project_lazy(p, workspace=None)
         check(
-            proj.memories is not None and len(proj.memories.items()) == 1,
-            "lazy open preserves the memory instead of crashing",
-        )
-        check(
-            proj.memories.get("a durable fact") is not None
-            and proj.memories.get("a durable fact").content == "the detail",
-            "memory content survives lazy open",
+            len(proj.events()) == 1 + 1 + 10,  # the compaction, the recent tail, the event after the section
+            "the [memories] section is not an event (nothing parses a note as a turn)",
         )
         check(
             any(
@@ -641,6 +620,16 @@ def check_lazy_open_memories(config: Config) -> None:
             ),
             "events after the memory section still load",
         )
+        reg = ToolRegistry(build_tools(config, log=proj.log), log=proj.log)
+        ws = LocalWorkspace(ptmp)
+        r = reg.execute(ws, config, "grep_memory", {"pattern": "durable fact"})
+        hit = next((ln for ln in r.content.splitlines() if ln.startswith("line ")), "")
+        check("[note] [Note] a durable fact: the detail" in hit, "the legacy note is a line of the log")
+        # the grep -> read contract: a line number grep named is an offset read takes
+        lineno = hit.split(":")[0].split()[1]
+        r = reg.execute(ws, config, "read_memory", {"offset": int(lineno), "limit": 1})
+        check("lines %s-%s of" % (lineno, lineno) in r.content and "the detail" in r.content,
+              "read_memory opens the exact line grep_memory named")
 
 
 def main() -> None:
@@ -1061,7 +1050,7 @@ def main() -> None:
 
     check_windowed_clc(config)
 
-    check_lazy_open_memories(config)
+    check_lazy_open_legacy_notes(config)
 
     # 13. LLM endpoint configurability: one flat settings surface + legacy migration
     from agent.config import flatten_settings

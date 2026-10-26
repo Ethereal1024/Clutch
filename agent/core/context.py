@@ -12,6 +12,7 @@ the only budget guard, matching opencode / Claude Code):
 
 from __future__ import annotations
 
+import posixpath
 from typing import TYPE_CHECKING, Any
 
 from ..config import Config
@@ -27,6 +28,17 @@ from .lazy import LazyEventLog
 
 if TYPE_CHECKING:  # type hints only: core must not import tools at runtime
     from ..tools.workspace import Workspace
+
+
+def _size(n: int) -> str:
+    """How big the log is, in the units a model reads at a glance.
+
+    Spelled here, in core, rather than taken from a formatting helper in the
+    tools layer: core must not import tools (the TYPE_CHECKING note above), and
+    this is the only number the prompt needs."""
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    return f"{max(1, n // 1024)} KB"
 
 
 def _recent_working_files(tail_events: list[Any], cap: int = 6) -> list[str]:
@@ -128,18 +140,21 @@ def derive_messages(
     log: LazyEventLog,
     config: Config,
     task: str,
-    memories: Any | None = None,
     workspace: Workspace | None = None,
     components: str = "",
 ) -> list[dict[str, Any]]:
     """Derive model messages from the event log, applying the compaction head.
 
-    memories contributes a resident title list to the system prompt; workspace
-    contributes the local-environment hint (which shell run_command speaks on
-    this host); components contributes the fragments the installed components
-    carry about their own tools (registry.prompt_section), so no tool name in
-    this module's prompt can drift from what is actually installed. Tool output
-    is not folded here; it accumulates until compaction.
+    `log` is the session's own project log, and it contributes the anchor at the
+    end of the system prompt: which file this project's memory lives in and how
+    big it is (recall.md), so the model knows there IS an older log to search and
+    where. The anchor comes from the log itself rather than from a second store,
+    because the log is the whole of it — the turns the model wrote are the facts a
+    later session reads. workspace contributes the local-environment hint (which
+    shell run_command speaks on this host); components contributes the fragments
+    the installed components carry about their own tools (registry.prompt_section),
+    so no tool name in this module's prompt can drift from what is actually
+    installed. Tool output is not folded here; it accumulates until compaction.
     """
     full_events = log.events()
     # index 0 may be the current run's task, which task.md re-injects. But in a
@@ -195,19 +210,16 @@ def derive_messages(
             system += "\n\n" + render("env_windows_bash.md")
         elif sh.name == "cmd":
             system += "\n\n" + render("env_windows_cmd.md")
-    if memories is not None:
-        items = memories.items()
-        if items:
-            # complete title list up front; search stays as content-recall fallback
-            titles = [m.title for m in sorted(items.values(), key=lambda m: -m.updated)]
-            system += (
-                "\n\nProject memories from earlier sessions (complete set, newest first) — "
-                "load one by its exact title for its content; only search the contents "
-                "when no listed title matches:\n" + "\n".join(f"- {t}" for t in titles)
-            )
-        else:
-            # empty store stated explicitly, so the model skips probing
-            system += "\n\nProject memories from earlier sessions: none stored yet."
+    if log.path:
+        # The project's memory, stated last (where the resident title list used to
+        # be): this project's whole log is one file, the model only holds the part
+        # since the last compaction, and two host tools read the rest of it. Only a
+        # real project file gets this: the in-memory scratch log a test or a
+        # project-less session uses has no path, and a prompt must not promise a
+        # reader with nothing behind it.
+        system += "\n\n" + render(
+            "recall.md", name=posixpath.basename(str(log.path)), size=_size(log.file_bytes())
+        )
 
     return (
         [

@@ -337,8 +337,8 @@ function mergeDeclaration(staging, wire) {
 //            in. The FACT vocabulary is this file's and it is one word long, so
 //            an argument called `dir` cannot hijack it — and every other name,
 //            `{name}` included, is the model's argument and must never be
-//            silently answered by this host (clutch-memory's tool takes an
-//            argument called `name`).
+//            silently answered by this host (a tool may take an argument
+//            called `name`).
 //   [ ... ]  an optional group: dropped whole, brackets and all, when one of the
 //            placeholders inside has no value. `[[` / `]]` are a literal bracket.
 //

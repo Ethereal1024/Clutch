@@ -54,7 +54,7 @@ async function main() {
   // ---- 1. the document this build ships ---------------------------------
   const snapshot = readJSON(SNAPSHOT);
   check(snapshot.schema === 2, "the shipped snapshot is index schema 2");
-  check(Array.isArray(snapshot.entries) && snapshot.entries.length >= 5, `and it lists the modules this project publishes (${snapshot.entries.length})`);
+  check(Array.isArray(snapshot.entries) && snapshot.entries.length >= 4, `and it lists the modules this project publishes (${snapshot.entries.length})`);
   check(!("generated" in snapshot) && !("updated" in snapshot), "with no timestamp in it: an unchanged market is byte-identical, so --check is a real staleness gate");
 
   const ids = snapshot.entries.map((e) => e.id);

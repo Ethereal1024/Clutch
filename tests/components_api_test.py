@@ -179,7 +179,7 @@ def main() -> int:
     try:
         # 1. nothing installed, so nothing to report and nothing current
         check(components.inventory() == [], "a fresh host has no components installed")
-        check(not components.current("clutch-memory", "1.0.0", "0" * 64), "nothing is current before an install")
+        check(not components.current("clutch-websearch", "1.0.0", "0" * 64), "nothing is current before an install")
 
         # 2. the wire contract, minus HTTP: claims are checked against the bytes
         blob = b"#!/bin/sh\nexit 0\n"
@@ -189,7 +189,7 @@ def main() -> int:
         try:
             components.accept(
                 artifact,
-                {"name": "clutch-memory", "version": "1.0.0", "launch": {"binary": "clutch-memory"}},
+                {"name": "clutch-websearch", "version": "1.0.0", "launch": {"binary": "clutch-websearch"}},
             )
             check(False, "an install with no declared digest is refused")
         except ValueError as err:
@@ -198,36 +198,36 @@ def main() -> int:
             components.accept(
                 artifact,
                 {
-                    "name": "clutch-memory",
+                    "name": "clutch-websearch",
                     "version": "1.0.0",
-                    "launch": {"binary": "clutch-memory"},
+                    "launch": {"binary": "clutch-websearch"},
                     "digest": "0" * 64,
                 },
             )
             check(False, "bytes that do not match the declared digest are refused")
         except ValueError as err:
             check("hashes to" in str(err), "bytes that do not match the declared digest are refused")
-        check(components.installed("clutch-memory") is None, "a refused install landed nothing")
+        check(components.installed("clutch-websearch") is None, "a refused install landed nothing")
 
         first = components.accept(
             artifact,
             {
-                "name": "clutch-memory",
+                "name": "clutch-websearch",
                 "version": "1.0.0",
-                "launch": {"binary": "clutch-memory"},
+                "launch": {"binary": "clutch-websearch"},
                 "digest": digest,
             },
         )
         check(first["status"] == "installed", "an artifact whose digest matches is installed")
-        check(components.installed_version("clutch-memory") == "1.0.0", "the host resolves the installed version")
-        check(components.current("clutch-memory", "1.0.0", digest), "and it is current for that digest")
-        check(not components.current("clutch-memory", "1.0.0", "0" * 64), "a different digest is not current")
+        check(components.installed_version("clutch-websearch") == "1.0.0", "the host resolves the installed version")
+        check(components.current("clutch-websearch", "1.0.0", digest), "and it is current for that digest")
+        check(not components.current("clutch-websearch", "1.0.0", "0" * 64), "a different digest is not current")
         again = components.accept(
             artifact,
             {
-                "name": "clutch-memory",
+                "name": "clutch-websearch",
                 "version": "1.0.0",
-                "launch": {"binary": "clutch-memory"},
+                "launch": {"binary": "clutch-websearch"},
                 "digest": digest,
             },
         )
@@ -240,24 +240,24 @@ def main() -> int:
         second = components.accept(
             artifact,
             {
-                "name": "clutch-memory",
+                "name": "clutch-websearch",
                 "version": "1.0.0",
-                "launch": {"binary": "clutch-memory"},
+                "launch": {"binary": "clutch-websearch"},
                 "digest": components.digest_of(blob2),
             },
         )
         check(second["status"] == "installed", "the same version with different bytes is replaced")
         check(
-            components.installed_digest("clutch-memory") == components.digest_of(blob2),
+            components.installed_digest("clutch-websearch") == components.digest_of(blob2),
             "the digest follows the bytes",
         )
         check(
-            (Path(second["path"]) / "clutch-memory").read_bytes() == blob2,
+            (Path(second["path"]) / "clutch-websearch").read_bytes() == blob2,
             "a single-file artifact lands named after its component",
         )
         check(components.inventory() == [
             {
-                "name": "clutch-memory",
+                "name": "clutch-websearch",
                 "version": "1.0.0",
                 "digest": components.digest_of(blob2),
                 "disabled": False,
@@ -274,14 +274,14 @@ def main() -> int:
         )
         entry = table["components"][0]
         check(
-            entry["name"] == "clutch-memory"
+            entry["name"] == "clutch-websearch"
             and entry["version"] == "1.0.0"
             and entry[components.DISABLED_FIELD] is False
-            and entry[components.LOCATION_FIELD] == "clutch-memory/1.0.0",
+            and entry[components.LOCATION_FIELD] == "clutch-websearch/1.0.0",
             "the entry names the component, its version, whether it is driven, and its payload's place",
         )
         check(
-            _entries_of(components.entries()) == [("clutch-memory", "1.0.0")],
+            _entries_of(components.entries()) == [("clutch-websearch", "1.0.0")],
             "and entries() answers straight out of it",
         )
         # the table is the truth: a directory nobody recorded is NOT an install,
@@ -297,7 +297,7 @@ def main() -> int:
             "a component directory nobody recorded is not an install: the table is what says so",
         )
         check(
-            _entries_of(components.reindex()) == [("clutch-memory", "1.0.0"), ("clutch-planted", "1.0.0")],
+            _entries_of(components.reindex()) == [("clutch-planted", "1.0.0"), ("clutch-websearch", "1.0.0")],
             "reindex() is the deliberate way back to the disk, and it finds both",
         )
         check(
@@ -318,24 +318,25 @@ def main() -> int:
         third = components.accept(
             composite_artifact,
             {
-                "name": "clutch-memory",
+                "name": "clutch-websearch",
                 "version": composite,
-                "launch": {"binary": "clutch-memory"},
+                "launch": {"binary": "clutch-websearch"},
                 "digest": components.digest_of(blob3),
             },
         )
         check(third["status"] == "installed", "a version carrying its own content digest installs")
-        check(components.installed_version("clutch-memory") == composite, "and the host resolves it by that version")
+        check(components.installed_version("clutch-websearch") == composite, "and the host resolves it by that version")
         check(
-            components.component_root("clutch-memory").joinpath(composite).is_dir(),
+            components.component_root("clutch-websearch").joinpath(composite).is_dir(),
             "the version is a legal directory name, whatever rides after the +",
         )
         check(
-            sorted(d.name for d in components.component_root("clutch-memory").iterdir() if d.is_dir()) == [composite],
+            sorted(d.name for d in components.component_root("clutch-websearch").iterdir() if d.is_dir())
+            == [composite],
             "one machine, one version: installing it replaced the bare-digest directory",
         )
         check(
-            components.installed_digest("clutch-memory") == components.digest_of(blob3),
+            components.installed_digest("clutch-websearch") == components.digest_of(blob3),
             "and the digest stays the content's own, not the version's tail",
         )
 
@@ -347,7 +348,7 @@ def main() -> int:
             components.accept(
                 artifact,
                 {
-                    "name": "clutch-memory",
+                    "name": "clutch-websearch",
                     "version": "2.0.0",
                     "interface": "telepathy",
                     "digest": components.digest_of(blob2),
@@ -356,7 +357,7 @@ def main() -> int:
             check(False, "a manifest naming no contribution is refused")
         except ValueError as err:
             check("names none of" in str(err), "a manifest naming no contribution is refused")
-        check(components.installed_version("clutch-memory") != "2.0.0", "and a refused record landed nothing")
+        check(components.installed_version("clutch-websearch") != "2.0.0", "and a refused record landed nothing")
 
         # 5. spool: a body is streamed to scratch space, and its name's suffixes
         #    survive (the install layer tells an archive from an executable by them)
@@ -376,25 +377,25 @@ def main() -> int:
         # 6. a checkout, archived: the shape a client sends when it has no
         #    prebuilt onefile. Landing it must make the host RUN it — the whole
         #    point of a landing dir is that resolution finds it there.
-        tar = _tar_checkout(modules.MEMORY, Path(root))
+        tar = _tar_checkout(modules.WEBSEARCH, Path(root))
         digest_ws = components.digest(tar)
         result = components.accept(
             tar,
             {
-                "name": modules.MEMORY,
+                "name": modules.WEBSEARCH,
                 "version": digest_ws[:16],
                 "digest": digest_ws,
                 "artifact": tar.name,
             },
         )
         check(result["status"] == "installed", "an archived checkout installs too")
-        resolved = rendezvous.resolve(modules.MEMORY)
+        resolved = rendezvous.resolve(modules.WEBSEARCH)
         check(
             resolved is not None and resolved.installed and resolved.directory == Path(result["path"]),
             "the host resolves the component to the installed artifact, not to a checkout",
         )
         check(
-            resolved.argv == (modules.python_exe(), str(resolved.directory / "memory.py")),
+            resolved.argv == (modules.python_exe(), str(resolved.directory / "websearch.py")),
             "and the launch template reads the entry point out of the install",
         )
         # the checkout archives its own component.json, so the landed record is
@@ -402,7 +403,7 @@ def main() -> int:
         # a host that never saw the checkout still receives a whole component
         declared = components.read_manifest(Path(result["path"]))
         check(
-            declared is not None and "save_memory" in {t.get("name") for t in declared.get("tools", [])},
+            declared is not None and "web_search" in {t.get("name") for t in declared.get("tools", [])},
             "a declaring archive lands whole: the artifact's own manifest is the record",
         )
         check(
@@ -434,7 +435,7 @@ def main() -> int:
         st, body_json = http_get(f"{base}/api/components")
         listed = json.loads(body_json)["components"]
         check(
-            st == 200 and {c["name"] for c in listed} == {modules.MEMORY},
+            st == 200 and {c["name"] for c in listed} == {modules.WEBSEARCH},
             "GET /api/components lists the host's installs",
         )
         check(
@@ -442,26 +443,26 @@ def main() -> int:
             "every listed component carries the digest the client's gate compares",
         )
 
-        st, body_json = _post_artifact(base, "clutch-memory", blob, digest=digest)
+        st, body_json = _post_artifact(base, "clutch-websearch", blob, digest=digest)
         check(
             st == 200 and json.loads(body_json)["status"] == "installed",
             "an upload is taken and answered with a verdict",
         )
-        st, body_json = _post_artifact(base, "clutch-memory", blob, digest=digest)
+        st, body_json = _post_artifact(base, "clutch-websearch", blob, digest=digest)
         check(st == 200 and json.loads(body_json)["status"] == "current", "re-uploading what is installed is a no-op")
         check(
-            [d.name for d in components.component_root(modules.MEMORY).iterdir()] == [digest[:16]],
+            [d.name for d in components.component_root(modules.WEBSEARCH).iterdir()] == [digest[:16]],
             "one component, one version: the replaced install is dropped, not piled up",
         )
         st, body_json = _post_artifact(
-            base, "clutch-websearch", blob2, digest=components.digest_of(blob2), artifact="clutch-websearch"
+            base, "clutch-echo", blob2, digest=components.digest_of(blob2), artifact="clutch-echo"
         )
         check(st == 200 and json.loads(body_json)["status"] == "installed", "a second component installs the same way")
         check(
-            components.installed_version("clutch-websearch") == components.digest_of(blob2)[:16],
+            components.installed_version("clutch-echo") == components.digest_of(blob2)[:16],
             "the version is the client's",
         )
-        st, body_json = _post_artifact(base, "clutch-websearch", blob2, digest=components.digest_of(blob2))
+        st, body_json = _post_artifact(base, "clutch-echo", blob2, digest=components.digest_of(blob2))
         check(st == 200 and json.loads(body_json)["status"] == "current", "the second upload is gated out")
 
         st, body_json = _post_artifact(base, "clutch-skills", blob2, digest="0" * 64)
@@ -484,7 +485,7 @@ def main() -> int:
         check(list(scratch.iterdir()) == [], "no spooled body is left behind")
         listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
         check(
-            {c["name"] for c in listed} == {modules.MEMORY, modules.WEBSEARCH},
+            {c["name"] for c in listed} == {modules.WEBSEARCH, "clutch-echo"},
             "the inventory grew by each install and by neither refusal",
         )
 
@@ -747,7 +748,7 @@ def main() -> int:
             os.environ.pop(discovery_env, None)
 
         # 8c. the same two verbs over HTTP, for a component with no daemon at all
-        st, body_json = http_get(f"{base}/api/components/versions?name={modules.MEMORY}")
+        st, body_json = http_get(f"{base}/api/components/versions?name={modules.WEBSEARCH}")
         payload = json.loads(body_json)
         check(
             st == 200 and bool(payload["versions"]) and payload["versions"][0]["resolved"],
@@ -765,21 +766,22 @@ def main() -> int:
             "asking for versions without naming a component is refused",
         )
 
-        st, body_json = _delete(f"{base}/api/components/{modules.WEBSEARCH}?version=9.9.9")
+        st, body_json = _delete(f"{base}/api/components/clutch-echo?version=9.9.9")
         check(
             st == 400 and "is not installed on this host" in json.loads(body_json)["error"],
             "removing a version this host does not hold is refused",
         )
-        st, body_json = _delete(f"{base}/api/components/{modules.WEBSEARCH}")
+        st, body_json = _delete(f"{base}/api/components/clutch-echo")
         check(
             st == 200
-            and json.loads(body_json) == {"status": "removed", "name": modules.WEBSEARCH, "removed": [components.digest_of(blob2)[:16]]},
+            and json.loads(body_json)
+            == {"status": "removed", "name": "clutch-echo", "removed": [components.digest_of(blob2)[:16]]},
             "DELETE takes the component whole and answers which versions went",
         )
-        check(components.installed(modules.WEBSEARCH) is None, "and the host no longer resolves it")
+        check(components.installed("clutch-echo") is None, "and the host no longer resolves it")
         listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
-        check({c["name"] for c in listed} == {modules.MEMORY}, "the inventory shrank by exactly that component")
-        st, body_json = _delete(f"{base}/api/components/{modules.WEBSEARCH}")
+        check({c["name"] for c in listed} == {modules.WEBSEARCH}, "the inventory shrank by exactly that component")
+        st, body_json = _delete(f"{base}/api/components/clutch-echo")
         check(st == 200 and json.loads(body_json)["status"] == "absent", "removing it again is absent, not an error")
         st, _body = _delete(f"{base}/api/components/")
         check(st == 404, "a removal that names no component is not found")
@@ -789,32 +791,32 @@ def main() -> int:
         #     THAT machine" is a fact about the machine that owns the component,
         #     so the bit lives in the same table its installs are recorded in,
         #     and a page reads it back out of GET /api/components.
-        installed_dir = components.installed(modules.MEMORY)
-        check(installed_dir is not None, "clutch-memory is installed for this host before the switch")
-        st, body_json = _post_verb(f"{base}/api/components/{modules.MEMORY}/disable")
+        installed_dir = components.installed(modules.WEBSEARCH)
+        check(installed_dir is not None, "clutch-websearch is installed for this host before the switch")
+        st, body_json = _post_verb(f"{base}/api/components/{modules.WEBSEARCH}/disable")
         check(
             st == 200
-            and json.loads(body_json) == {"status": "disabled", "name": modules.MEMORY, "disabled": True},
+            and json.loads(body_json) == {"status": "disabled", "name": modules.WEBSEARCH, "disabled": True},
             "disabling a component is a verdict, in the machine's own words",
         )
         listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
         check(
-            [c["disabled"] for c in listed if c["name"] == modules.MEMORY] == [True],
+            [c["disabled"] for c in listed if c["name"] == modules.WEBSEARCH] == [True],
             "a stopped component stays listed, and the listing says which one is stopped",
         )
         check(
-            (installed_dir / modules.MEMORY).read_bytes() == blob,
+            (installed_dir / modules.WEBSEARCH).read_bytes() == blob,
             "with its bytes exactly where they were: the switch is not a removal",
         )
-        check(not rendezvous.available(modules.MEMORY), "and this host stops offering its tools while it is stopped")
-        st, body_json = _post_verb(f"{base}/api/components/{modules.MEMORY}/enable")
+        check(not rendezvous.available(modules.WEBSEARCH), "and this host stops offering its tools while it is stopped")
+        st, body_json = _post_verb(f"{base}/api/components/{modules.WEBSEARCH}/enable")
         check(
             st == 200
-            and json.loads(body_json) == {"status": "enabled", "name": modules.MEMORY, "disabled": False},
+            and json.loads(body_json) == {"status": "enabled", "name": modules.WEBSEARCH, "disabled": False},
             "starting it again is the same verb the other way — nothing here is irreversible",
         )
         check(
-            rendezvous.available(modules.MEMORY) and (installed_dir / modules.MEMORY).read_bytes() == blob,
+            rendezvous.available(modules.WEBSEARCH) and (installed_dir / modules.WEBSEARCH).read_bytes() == blob,
             "with its tools back and its bytes still the same ones",
         )
 

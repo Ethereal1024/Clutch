@@ -1037,41 +1037,40 @@ def _chat_mode_toolset() -> tuple[Config, LazyEventLog]:
     return chat_cfg, log
 
 
-def _project_memory_prompt(chat_cfg: Config, log: LazyEventLog) -> None:
+def _project_log_prompt(chat_cfg: Config) -> None:
     from agent.core import context as _context
+    from agent.project import create_project
 
-    # 15d. project memory: titles listed; base prompt carries save guidance
-    from agent.memory import MemoryStore
-
+    # 15d. the project log is the project's memory: what the system prompt says
+    # about it is derived from the log itself (which file, how big), and the two
+    # readers of it are host tools that ride along in BOTH modes — reading a log
+    # is read-only in either, and chat is exactly when an earlier session is the
+    # only place an answer exists.
     with tempfile.TemporaryDirectory() as tmp:
-        mem_path = str(Path(tmp) / "p.clc")
-        store = MemoryStore(mem_path)
-        store.save("user prefers utf-8", "always write files as utf-8")
-        store.save("branch naming", "use feature/ prefix")
-        msgs_mem = _context.derive_messages(log, chat_cfg, "t", memories=store)
-        sys_mem = msgs_mem[0]["content"]
+        proj = create_project(Path(tmp) / "p", "p")
+        proj.log.append(UserMessageEvent(content="we agreed: utf-8 everywhere"))
+        sys_mem = _context.derive_messages(proj.log, chat_cfg, "t")[0]["content"]
         check(
-            "Project memories from earlier sessions" in sys_mem,
-            "stored titles are listed under the active recall prompt",
+            "This project's memory is its own log: p.clc" in sys_mem,
+            "the system prompt names the file this project's memory lives in",
         )
-        check("user prefers utf-8" in sys_mem and "branch naming" in sys_mem, "all stored titles are listed")
+        check("grep_memory" in sys_mem and "read_memory" in sys_mem, "and both readers that search it")
         check(
-            "Record a durable fact whenever you learn one" in sys_mem,
-            "the base prompt carries the save stance (the component's fragment names the tool)",
+            "This project's memory is its own log"
+            not in _context.derive_messages(LazyEventLog.in_memory(), chat_cfg, "t")[0]["content"],
+            "a session with no log is promised no reader",
         )
-        msgs_empty = _context.derive_messages(log, chat_cfg, "t", memories=MemoryStore(mem_path))
+
+        chat_tools = {t.name: t for t in build_tools(chat_cfg, log=proj.log)}
         check(
-            "Project memories from earlier sessions: none stored yet" in msgs_empty[0]["content"],
-            "empty store states no memories so the model skips the probing search",
+            "grep_memory" in chat_tools and "read_memory" in chat_tools,
+            "chat mode is offered the log readers too",
         )
-        check(
-            "user prefers utf-8" not in msgs_empty[0]["content"],
-            "no titles when the store is empty",
-        )
-        check(
-            "Record a durable fact whenever you learn one" in msgs_empty[0]["content"],
-            "the save stance is present even without stored memories",
-        )
+        check("CHAT MODE" in chat_tools["grep_memory"].description, "a chat session reads the chat prose")
+        work_tools = {t.name: t for t in build_tools(Config(mode="work"), log=proj.log)}
+        check("CHAT MODE" not in work_tools["grep_memory"].description, "a work session reads the work prose")
+        bare = {t.name for t in build_tools(chat_cfg)}
+        check("grep_memory" not in bare and "read_memory" not in bare, "no log, no readers to declare")
 
 
 def _chat_run_command(chat_cfg: Config) -> None:
@@ -1330,8 +1329,8 @@ def main() -> int:
     _compaction_summary_mid_drop()
     _resumed_session()
     _tool_call_argument_streaming(config)
-    chat_cfg, chat_log = _chat_mode_toolset()
-    _project_memory_prompt(chat_cfg, chat_log)
+    chat_cfg, _ = _chat_mode_toolset()
+    _project_log_prompt(chat_cfg)
     _chat_run_command(chat_cfg)
     _chat_write_tools_unreachable(chat_cfg)
     _classify_command()

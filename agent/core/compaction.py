@@ -29,12 +29,18 @@ from ..events import (
     CompactionDeltaEvent,
     CompactionEvent,
     Event,
+    ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
+    event_text,
 )
 from ..llm.client import LlmClient
 from ..prompts import render
 from .lazy import LazyEventLog
+
+# The events a summarizer reads: the conversation itself. A compaction line is
+# the head it already carries and a final is a run's verdict, not something said.
+_TRANSCRIPT = (UserMessageEvent, AssistantMessageEvent, ToolCallEvent, ToolResultEvent)
 
 
 class Compactor:
@@ -117,25 +123,19 @@ class Compactor:
 
         There is no length cap and nothing is elided; what tells the summarizer
         this is someone else's session is the prompt's framing (see
-        prompts/compaction.md). The only cut is per event: one tool result is
+        prompts/compaction.md). The projection itself is events.event_text —
+        the same one a session's own reader shows the model (tools/recall.py),
+        so what the summary is made of and what a later session can look up are
+        one rendering of one log. The only cut is per event: one tool result is
         trimmed, so a single huge read cannot drown the rest of the window.
         """
         lines = []
         for ev in events:
-            if isinstance(ev, UserMessageEvent):
-                lines.append(f"[User]: {ev.content}")
-            elif isinstance(ev, AssistantMessageEvent):
-                if ev.content:
-                    lines.append(f"[Assistant]: {ev.content}")
-                if ev.reasoning:
-                    lines.append(f"[Assistant reasoning]: {ev.reasoning}")
-                for tc in ev.tool_calls:
-                    lines.append(f"[Assistant tool call]: {tc['name']}({tc['arguments']})")
-            elif isinstance(ev, ToolResultEvent):
-                out = ev.content
-                if len(out) > 500:
-                    out = out[:500] + "\n[truncated]"
-                lines.append(f"[Tool result]: {out}")
+            if not isinstance(ev, _TRANSCRIPT):
+                continue  # a final/compaction line is not part of the conversation
+            text = event_text(ev, limit=500 if isinstance(ev, ToolResultEvent) else None)
+            if text:
+                lines.append(text)
         return "\n".join(lines)
 
     def _summarize(self, history: str, previous: str) -> tuple[str, int]:

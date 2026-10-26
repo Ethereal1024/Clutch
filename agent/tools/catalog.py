@@ -16,9 +16,10 @@ a tool this catalog does not describe does not exist for the model, and a
 component that is absent takes its tools with it and nothing else (see
 registry.build_tools). A host with nothing installed can chat and nothing more.
 
-One declaration is not a component's, and it is declared rather than assumed:
-`run_command`, the single bootstrap exception, whose declaration lives in
-tools/host.py in this very vocabulary and whose name no component may publish
+A few declarations are not a component's, and they are declared rather than
+assumed: `run_command` (the single bootstrap exception) and the two readers of
+the project's own log, `grep_memory` / `read_memory`. They live in tools/host.py
+in this very vocabulary, and no component may publish their names
 (HOST_TOOL_NAMES below).
 
 Zero built-ins, three sources
@@ -224,7 +225,7 @@ FACILITIES: tuple[str, ...] = ("python", "posix-shell", "curl")
 # already means something by is not a component's to redefine (see
 # component_diagnostics). The declarations behind the names live in
 # agent/tools/host.py; registry._check_vocabulary keeps the two lists equal.
-HOST_TOOL_NAMES: tuple[str, ...] = ("run_command",)
+HOST_TOOL_NAMES: tuple[str, ...] = ("run_command", "grep_memory", "read_memory")
 # facts: the host facts a component may PUBLISH, because only its own code can
 # compute them. `vars` is the other direction (what a component consumes from the
 # host); a `facts` key is a host fact a component ANSWERS — a component declares
@@ -480,8 +481,9 @@ class Tool:
     per-file undo the UI offers (the module keeps its own stack; this is the
     host's); `snapshot_arg` names the argument that holds that path (default:
     `access_arg`, else "path"). `modes` are the agent modes the tool is offered
-    in. `gate` names a host-side condition that must hold — "project" (a project
-    memory store is open) or "skills" (the skills library has something to load)
+    in. `gate` names a host-side condition that must hold — "project" (this
+    session has a project log to read) or "skills" (the skills library has
+    something to load)
     — and a shut gate means the tool is simply not offered
     (registry._gate_ok).
     """

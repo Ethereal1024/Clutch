@@ -270,11 +270,19 @@ async function main() {
   //    checkout's OWN component.json — nothing here holds a roster of them.
   const dev = await components.componentSpecs({ index: emptyIndex });
   check(dev.errors.length === 0, `a pass with an empty market has nothing to report (${JSON.stringify(dev.errors)})`);
-  check(dev.specs.length >= 4, `every checkout beside the host repo is a component this client knows (${dev.specs.length})`);
+  // every checkout that DECLARES itself is one of the specs: an uninitialized
+  // submodule (an empty directory) declares nothing and is simply not there
+  const checkouts = fs
+    .readdirSync(ROOT)
+    .filter((d) => d.startsWith("clutch-") && fs.existsSync(path.join(ROOT, d, "component.json")));
+  check(
+    dev.specs.length === checkouts.length,
+    `every checkout beside the host repo is a component this client knows (${dev.specs.length}/${checkouts.length})`
+  );
   check(dev.specs.every((s) => s.checkout && s.declaration && s.declaration.name === s.name), "and each one declared itself, in its own manifest");
 
   // 4. the artifact a client would send for a checked-out component
-  const spec = await components.artifactFor({ name: "clutch-memory" }, { checkout: true });
+  const spec = await components.artifactFor({ name: "clutch-websearch" }, { checkout: true });
   const haveBash = spawnSync("bash", ["-c", "command -v tar"], { stdio: "pipe" }).status === 0;
   if (!spec || !haveBash) {
     console.log("SKIP: no checkout to archive (or no bash + tar on this host)");
@@ -291,9 +299,9 @@ async function main() {
   //     that shape already (agent/tools/components.py _VERSION_RE); what is new
   //     is that the client sends it.
   if (haveBash) {
-    const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-memory", "component.json"), "utf8")).version;
+    const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-websearch", "component.json"), "utf8")).version;
     const versioned = await components.artifactFor(
-      (await components.componentSpecs({ index: emptyIndex })).specs.find((s) => s.name === "clutch-memory"),
+      (await components.componentSpecs({ index: emptyIndex })).specs.find((s) => s.name === "clutch-websearch"),
       { checkout: true }
     );
     check(
@@ -308,13 +316,13 @@ async function main() {
   // 5. the install pass: upload what the host lacks, land it, gate it next time
   const res = await components.ensureComponents(base, { index: emptyIndex, progress: null });
   check(res.errors.length === 0, `every component installs (${JSON.stringify(res.errors)})`);
-  check(res.installed.includes("clutch-memory"), "a missing component is uploaded");
+  check(res.installed.includes("clutch-websearch"), "a missing component is uploaded");
   check(res.current.length === 0 && res.deferred.length === 0, "nothing is skipped on a fresh host");
-  const landed = components.CACHE && path.join(hostRoot, "clutch-memory");
+  const landed = components.CACHE && path.join(hostRoot, "clutch-websearch");
   const versions = fs.existsSync(landed) ? fs.readdirSync(landed) : [];
   check(versions.length === 1, "one component, one version in the host's landing directory");
   check(
-    fs.existsSync(path.join(landed, versions[0], "memory.py")),
+    fs.existsSync(path.join(landed, versions[0], "websearch.py")),
     "the archived checkout unpacks with its entry point at the component's root"
   );
   check(fs.existsSync(path.join(landed, versions[0], "component.json")), "and the declaration rode with the bytes");
@@ -325,7 +333,7 @@ async function main() {
     after.every((c) => c.digest && versions.length),
     "each landed component carries the digest the gate compares"
   );
-  const held = after.find((c) => c.name === "clutch-memory");
+  const held = after.find((c) => c.name === "clutch-websearch");
   check(
     held && held.version.endsWith("+" + held.digest.slice(0, 16)),
     "and it lists a version a page can read: the component's own, with the content digest appended"
@@ -334,7 +342,7 @@ async function main() {
   // 6. the gate: the second pass sends nothing (the point of a content hash)
   const again = await components.ensureComponents(base, { index: emptyIndex });
   check(again.installed.length === 0, "the second pass uploads nothing");
-  check(again.current.includes("clutch-memory"), "what the host already holds is reported current");
+  check(again.current.includes("clutch-websearch"), "what the host already holds is reported current");
   check(again.errors.length === 0, "and the pass is clean");
 
   // 6b. an OLD RECORD is replaced by the next pass, never kept beside the new
@@ -347,27 +355,27 @@ async function main() {
   {
     const tablePath = path.join(hostRoot, "registry.json");
     const table = JSON.parse(fs.readFileSync(tablePath, "utf8"));
-    const record = table.components.find((c) => c.name === "clutch-memory");
+    const record = table.components.find((c) => c.name === "clutch-websearch");
     const legacy = String(record.digest).slice(0, 16);
-    const oldShape = path.join(hostRoot, "clutch-memory", legacy);
+    const oldShape = path.join(hostRoot, "clutch-websearch", legacy);
     fs.renameSync(path.join(hostRoot, record.location), oldShape);
     const manifestPath = path.join(oldShape, "component.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     manifest.version = legacy;
     fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
     record.version = legacy;
-    record.location = "clutch-memory/" + legacy;
+    record.location = "clutch-websearch/" + legacy;
     fs.writeFileSync(tablePath, JSON.stringify(table, null, 2) + "\n", "utf8");
 
-    const old = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    const old = (await components.hostInventory(base)).find((c) => c.name === "clutch-websearch");
     check(old && old.version === legacy, "an old install reads as the digest alone, which is the shape being retired");
 
     const unify = await components.ensureComponents(base, { index: emptyIndex });
-    check(unify.installed.includes("clutch-memory"), "so the next pass reinstalls it rather than calling it current");
-    check(!unify.current.includes("clutch-memory"), "and that component is not reported current while its record is in the old shape");
-    const dirs = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
+    check(unify.installed.includes("clutch-websearch"), "so the next pass reinstalls it rather than calling it current");
+    check(!unify.current.includes("clutch-websearch"), "and that component is not reported current while its record is in the old shape");
+    const dirs = fs.readdirSync(path.join(hostRoot, "clutch-websearch"));
     check(dirs.length === 1 && !dirs.includes(legacy), "the digest-named directory is gone: one shape, not two");
-    const unified = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    const unified = (await components.hostInventory(base)).find((c) => c.name === "clutch-websearch");
     check(
       unified && unified.version.endsWith("+" + unified.digest.slice(0, 16)),
       "and the record names the release again, with the bytes under it"
@@ -385,30 +393,30 @@ async function main() {
   //    bytes are a DELIBERATELY different artifact than the checkout (one extra
   //    file), so the install is a fetch and not a cache hit.
   const pub = tmp("clutch-components-pub-");
-  const pubSrc = path.join(pub, "clutch-memory");
+  const pubSrc = path.join(pub, "clutch-websearch");
   fs.mkdirSync(pubSrc);
-  for (const f of ["memory.py", "pyproject.toml", "component.json"]) {
-    fs.copyFileSync(path.join(ROOT, "clutch-memory", f), path.join(pubSrc, f));
+  for (const f of ["websearch.py", "pyproject.toml", "component.json"]) {
+    fs.copyFileSync(path.join(ROOT, "clutch-websearch", f), path.join(pubSrc, f));
   }
   fs.writeFileSync(path.join(pubSrc, "RELEASE"), "the published artifact, not the checkout\n");
-  buildTar(pubSrc, path.join(pub, "clutch-memory-any.tar.gz"));
+  buildTar(pubSrc, path.join(pub, "clutch-websearch-any.tar.gz"));
   fs.copyFileSync(path.join(pubSrc, "component.json"), path.join(pub, "component.json")); // the declaration asset, beside the artifact
   // the release's own version, read from the declaration this release ships
   // rather than spelled here: the modules bump it, and an install is recorded
   // under the DECLARATION's version (the manifest above is the outer envelope)
   const releaseVersion = JSON.parse(fs.readFileSync(path.join(pub, "component.json"), "utf8")).version;
-  const artDigest = sha256(path.join(pub, "clutch-memory-any.tar.gz"));
+  const artDigest = sha256(path.join(pub, "clutch-websearch-any.tar.gz"));
   const declDigest = sha256(path.join(pub, "component.json"));
   const manifestPath = path.join(pub, "clutch-component.json");
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
       schema: 1,
-      name: "clutch-memory",
+      name: "clutch-websearch",
       version: releaseVersion,
-      launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
+      launch: { argv: ["{py}", "{script}"], entry: "websearch.py" },
       declaration: { asset: "component.json", sha256: declDigest },
-      artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: artDigest } },
+      artifacts: { any: { asset: "clutch-websearch-any.tar.gz", sha256: artDigest } },
     })
   );
   const pubServer = await serve(pub);
@@ -417,9 +425,9 @@ async function main() {
   const releaseIndex = indexOf(tmp("clutch-components-release-index-"), [rowFor(manifestPath, source)]);
   try {
     const manifest = await components.readManifest(source);
-    check(manifest.name === "clutch-memory" && manifest.artifacts.any.sha256 === artDigest, "a published manifest names its artifact and its digest");
-    check((await components.readManifest(manifestPath)).name === "clutch-memory", "the same manifest works from disk: a source is a URL or a path");
-    const merged = (await components.componentSpecs({ index: releaseIndex })).specs.find((s) => s.name === "clutch-memory");
+    check(manifest.name === "clutch-websearch" && manifest.artifacts.any.sha256 === artDigest, "a published manifest names its artifact and its digest");
+    check((await components.readManifest(manifestPath)).name === "clutch-websearch", "the same manifest works from disk: a source is a URL or a path");
+    const merged = (await components.componentSpecs({ index: releaseIndex })).specs.find((s) => s.name === "clutch-websearch");
     check(
       Boolean(merged && merged.checkout && merged.published && merged.published.artifacts.any.sha256 === artDigest),
       "a checkout outranks the release it came from, but keeps the release reachable under it"
@@ -433,11 +441,11 @@ async function main() {
       { checkout: false }
     );
     check(
-      !handed.path && handed.url === `${pubServer.base}/clutch-memory-any.tar.gz`,
+      !handed.path && handed.url === `${pubServer.base}/clutch-websearch-any.tar.gz`,
       "a published release is handed over as a URL: nothing is downloaded here"
     );
     check(
-      handed.digest === artDigest && handed.artifact === "clutch-memory-any.tar.gz",
+      handed.digest === artDigest && handed.artifact === "clutch-websearch-any.tar.gz",
       "carrying the digest the release pinned and the file's own name (a host reads the artifact's shape from its suffix)"
     );
     check(
@@ -447,7 +455,7 @@ async function main() {
 
     const pinned = await components.ensureComponents(base, { checkout: false, index: releaseIndex, progress: null });
     check(pinned.errors.length === 0, `a published artifact installs (${JSON.stringify(pinned.errors)})`);
-    check(pinned.installed.includes("clutch-memory"), "and it is the release that lands, not the checkout beside the repo");
+    check(pinned.installed.includes("clutch-websearch"), "and it is the release that lands, not the checkout beside the repo");
     // Only the DECLARATION comes through this client (a few hundred bytes, pinned
     // like everything else); the artifact itself is tens of megabytes and the
     // target machine fetches it. Both files are content-addressed in the cache, so
@@ -455,24 +463,24 @@ async function main() {
     // filled: the declaration is there, the artifact never was.
     const cached = fs.existsSync(components.CACHE) ? fs.readdirSync(components.CACHE) : [];
     check(
-      cached.includes(`clutch-memory-${declDigest.slice(0, 16)}-component.json`) &&
-        !cached.includes(`clutch-memory-${artDigest.slice(0, 16)}-clutch-memory-any.tar.gz`),
+      cached.includes(`clutch-websearch-${declDigest.slice(0, 16)}-component.json`) &&
+        !cached.includes(`clutch-websearch-${artDigest.slice(0, 16)}-clutch-websearch-any.tar.gz`),
       `installing it fetched the declaration and nothing else: the artifact never came through this client`
     );
-    const published = fs.readdirSync(path.join(hostRoot, "clutch-memory"));
+    const published = fs.readdirSync(path.join(hostRoot, "clutch-websearch"));
     check(
       published.length === 1 && published[0] === `${releaseVersion}+${artDigest.slice(0, 16)}`,
       "the landed directory is the release's own version + the digest its manifest pinned"
     );
-    check(fs.existsSync(path.join(hostRoot, "clutch-memory", published[0], "RELEASE")), "the host holds the published bytes");
-    const listed = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    check(fs.existsSync(path.join(hostRoot, "clutch-websearch", published[0], "RELEASE")), "the host holds the published bytes");
+    const listed = (await components.hostInventory(base)).find((c) => c.name === "clutch-websearch");
     check(
       listed && listed.version === `${releaseVersion}+${artDigest.slice(0, 16)}` && listed.digest === artDigest,
       "and the host hands that version back, so a page can name what this machine holds"
     );
 
     const repinned = await components.ensureComponents(base, { checkout: false, index: releaseIndex });
-    check(repinned.installed.length === 0 && repinned.current.includes("clutch-memory"), "a second pass against the same pin uploads nothing");
+    check(repinned.installed.length === 0 && repinned.current.includes("clutch-websearch"), "a second pass against the same pin uploads nothing");
 
     // a manifest that pins nothing is refused rather than trusted: the pin is the
     // only thing that makes a fetch safe, and this client will not hand over an
@@ -493,10 +501,10 @@ async function main() {
       path.join(pub, "lying.json"),
       JSON.stringify({
         schema: 1,
-        name: "clutch-memory",
+        name: "clutch-websearch",
         version: "0.1.0",
-        launch: { argv: ["{py}", "{script}"], entry: "memory.py" },
-        artifacts: { any: { asset: "clutch-memory-any.tar.gz", sha256: "0".repeat(64) } },
+        launch: { argv: ["{py}", "{script}"], entry: "websearch.py" },
+        artifacts: { any: { asset: "clutch-websearch-any.tar.gz", sha256: "0".repeat(64) } },
       })
     );
     // the row pins the MANIFEST's own bytes (so the manifest reads), and the
@@ -543,7 +551,7 @@ async function main() {
     try {
       const manifest = await components.readManifest(`${flaky.base}/clutch-component.json`);
       check(
-        manifest.name === "clutch-memory" && flaky.hits() === 3,
+        manifest.name === "clutch-websearch" && flaky.hits() === 3,
         `a connection that died twice is asked a third time, and the manifest is read (${flaky.hits()} asks)`
       );
     } finally {
@@ -640,12 +648,12 @@ async function main() {
     const rel = tmp("clutch-components-mirror-");
     const inside = path.join(rel, "clutch-mirror");
     fs.mkdirSync(inside);
-    for (const f of ["memory.py", "pyproject.toml"]) {
-      fs.copyFileSync(path.join(ROOT, "clutch-memory", f), path.join(inside, f));
+    for (const f of ["websearch.py", "pyproject.toml"]) {
+      fs.copyFileSync(path.join(ROOT, "clutch-websearch", f), path.join(inside, f));
     }
     // the declaration travels WITH the bytes, and one naming another component is a
     // refusal rather than a merge: this one names exactly what it is
-    const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-memory", "component.json"), "utf8"));
+    const own = JSON.parse(fs.readFileSync(path.join(ROOT, "clutch-websearch", "component.json"), "utf8"));
     fs.writeFileSync(
       path.join(inside, "component.json"),
       JSON.stringify({ ...own, name: "clutch-mirror", version: "0.2.0" }, null, 2)
@@ -838,7 +846,7 @@ async function main() {
   //    for a request already true (twice: switching a component this host does not
   //    hold, and removing one it no longer does), and the switch's own bit.
   {
-    const versions = await components.hostVersions(base, "clutch-memory");
+    const versions = await components.hostVersions(base, "clutch-websearch");
     check(versions.length === 1 && versions[0].resolved === true, "the host lists the versions it holds for one component, and which one it would run");
     check(versions[0].version === `${releaseVersion}+${artDigest.slice(0, 16)}`, "and it is the version this client installed, digest and all");
 
@@ -853,17 +861,17 @@ async function main() {
     // the switch: the third verb, and the only one that moves no bytes. What it
     // must NOT do is what is checked first — the component stays held, stays
     // listed and keeps its version, and only the bit changes.
-    const off = await components.hostSetDisabled(base, "clutch-memory", true);
+    const off = await components.hostSetDisabled(base, "clutch-websearch", true);
     check(off.status === "disabled" && off.disabled === true, "the host answers the switch with the bit it now holds");
-    const stopped = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    const stopped = (await components.hostInventory(base)).find((c) => c.name === "clutch-websearch");
     check(Boolean(stopped) && stopped.disabled === true, "a stopped component is still HELD: it stays listed, marked, with its bytes");
     check(stopped.version === `${releaseVersion}+${artDigest.slice(0, 16)}`, "and it still names the version that is there");
-    check(fs.existsSync(path.join(hostRoot, "clutch-memory")), "because nothing was deleted");
-    check((await components.hostVersions(base, "clutch-memory")).length === 1, "the finer list still holds its version too");
+    check(fs.existsSync(path.join(hostRoot, "clutch-websearch")), "because nothing was deleted");
+    check((await components.hostVersions(base, "clutch-websearch")).length === 1, "the finer list still holds its version too");
 
-    const on = await components.hostSetDisabled(base, "clutch-memory", false);
+    const on = await components.hostSetDisabled(base, "clutch-websearch", false);
     check(on.status === "enabled" && on.disabled === false, "and the other direction answers with the other bit");
-    const driving = (await components.hostInventory(base)).find((c) => c.name === "clutch-memory");
+    const driving = (await components.hostInventory(base)).find((c) => c.name === "clutch-websearch");
     check(driving.disabled === false, "so this machine offers its tools again");
 
     const notHeld = await components.hostSetDisabled(base, "clutch-nothing", true);
@@ -877,15 +885,15 @@ async function main() {
     }
     check(/bad component name/.test(badSwitch), "and a name that could never be an install is refused before anything is written");
 
-    const removed = await components.hostRemove(base, "clutch-memory", "");
+    const removed = await components.hostRemove(base, "clutch-websearch", "");
     check(removed.status === "removed" && removed.removed.length === 1, "a removal answers with the versions that went");
-    check(!fs.existsSync(path.join(hostRoot, "clutch-memory")), "and the bytes are gone from the machine");
+    check(!fs.existsSync(path.join(hostRoot, "clutch-websearch")), "and the bytes are gone from the machine");
     const left = await components.hostInventory(base);
-    check(!left.some((c) => c.name === "clutch-memory"), "and it is gone from what the host lists as held");
+    check(!left.some((c) => c.name === "clutch-websearch"), "and it is gone from what the host lists as held");
 
-    const again = await components.hostRemove(base, "clutch-memory", "");
+    const again = await components.hostRemove(base, "clutch-websearch", "");
     check(again.status === "absent", "removing what is already gone answers 'absent' rather than failing");
-    check((await components.hostVersions(base, "clutch-memory")).length === 0, "and the host names no version of it any more");
+    check((await components.hostVersions(base, "clutch-websearch")).length === 0, "and the host names no version of it any more");
   }
 
   // 12. cleanup: this run's supervisor goes away (its root is a temp dir)

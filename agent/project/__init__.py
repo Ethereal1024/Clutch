@@ -16,8 +16,8 @@ after is one JSON event per line.
 This package is the module's public face as well as its lifecycle: creating and
 opening a .clc, and the lock that makes the window which opened it the only
 writer. What the file's BYTES are — the header layout, the fixed-width
-cpr_start/memory-index lines at their stable offsets, the event region's
-boundary — lives in format.py, and every name the host calls is re-exported here:
+cpr_start line at its stable offset, the event region's boundary — lives in
+format.py, and every name the host calls is re-exported here:
 `project.<name>` is the handle the rest of the host uses (agent/core/lazy.py
 imports `_last_compaction_rel` from here, late).
 """
@@ -30,16 +30,13 @@ from typing import Callable
 
 from ..core.lazy import LazyEventLog, _make_reader
 from ..core.project_lock import LockHandle, ProjectLock, ProjectOpenConflict
-from ..memory import SECTION, MemoryStore, parse_index_line
 from .format import (
     _CPR_START_LINE_W,
     ProjectMeta,
     _cpr_line_offset,
     _event_region_start,
     _find_cpr_line,
-    _find_index_line,
     _header_text,
-    _index_line_offset,
     _last_compaction_rel,
     _make_write_at,
     _parse_cpr_start,
@@ -54,7 +51,6 @@ class Project:
     path: Path
     meta: ProjectMeta = field(default_factory=ProjectMeta)
     log: LazyEventLog = field(default_factory=LazyEventLog.in_memory)
-    memories: MemoryStore | None = None
     read_only: bool = False
     # the write lock held on this .clc (None for read-only opens): the window
     # that opened the project for write is the only writer until it exits
@@ -118,7 +114,6 @@ def _create_project_locked(path: Path, name: str, model: str, workspace, lock: L
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_header(path, meta)
-    index_off = _index_line_offset(meta)
     # every project opens as a lazy log (one code path for every file size):
     # a fresh file's event region is empty and starts right after the separator
     read, total = _make_reader(path, workspace)
@@ -133,8 +128,7 @@ def _create_project_locked(path: Path, name: str, model: str, workspace, lock: L
         cpr_line_off=_cpr_line_offset(meta),
         write_at=_make_write_at(path, workspace),
     )
-    memories = MemoryStore(str(path), writer=writer, index_offset=index_off, workspace=workspace, log=log)
-    return Project(path=path, meta=meta, log=log, memories=memories, lock=lock)
+    return Project(path=path, meta=meta, log=log, lock=lock)
 
 
 def open_project_lazy(path: Path, on_progress=None, workspace=None, read_only: bool = False) -> Project:
@@ -187,8 +181,7 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
     read = raw_read
     if on_progress is not None:
         read = _wrap_progress(raw_read, total, on_progress)
-    # one reader covers memories + header + log (nothing below rewrites the file)
-    memories = _load_memories(path, read, total, writer, workspace)
+    # one reader covers the header + the log (nothing below rewrites the file)
     # the header lives at the very start of the file: a tiny range read
     head = read(0, min(total, 1 << 16))
     meta = _parse_meta_lines(head.decode("utf-8", "replace").splitlines())
@@ -210,49 +203,11 @@ def _open_project_lazy_locked(path, on_progress, workspace, read_only, lock) -> 
         cpr_line_off=cpr_line_off or 0,
         write_at=None if read_only else _make_write_at(path, workspace),
     )
-    # the MemoryStore appends memory lines to the same file; count those bytes
-    # into the log so event offsets and the persisted window boundary stay exact
-    memories._log = log
     if on_progress is not None:
         on_progress(total, total)
         # runtime paging reads must not fire the open-progress callbacks
         log._read = raw_read
-    return Project(path=path, meta=meta, log=log, memories=memories, read_only=read_only, lock=lock)
-
-
-def _load_memories(path, read, total, writer, workspace) -> MemoryStore:
-    """Build the MemoryStore for an open: read the header index line and
-    range-read exactly the indexed memory lines when present (O(1) in the file
-    size — the distance from the first memory to the tail no longer matters);
-    the [memories] section scan as the no-index / corrupt-index fallback. No
-    runtime migration: legacy .clc files are converted by the migration script,
-    so a file without an index line stays as-is (memories still load via scan)."""
-    from ..memory import _MEMORY_INDEX_LINE_W
-
-    head = read(0, min(total, 1 << 16))
-    index_off = _find_index_line(head)
-    if index_off is not None:
-        parsed = parse_index_line(_read_line_at(read, index_off, total, _MEMORY_INDEX_LINE_W))
-        if parsed is not None:
-            count, h, offs = parsed
-            return MemoryStore.from_index(str(path), read, total, writer, index_off, count, h, offs, workspace)
-    # no usable index: fall back to scanning the [memories] section
-    mem_off = _find_memories_section(read, total)
-    if mem_off is not None:
-        mem_text = read(mem_off, total).decode("utf-8", "replace")
-        return MemoryStore.parse(mem_text.splitlines(), str(path), writer=writer, workspace=workspace)
-    return MemoryStore(str(path), writer=writer, workspace=workspace)
-
-
-def _find_memories_section(read, total) -> int | None:
-    """Absolute offset of the [memories] section marker, or None. Forward scan
-    of the raw bytes — the section sits after the event region, and the marker
-    never appears inside an event line (JSON escapes it). Only reached for
-    read-only opens of legacy files whose memory index is absent."""
-    if total <= 0:
-        return None
-    i = read(0, total).find(SECTION.encode())
-    return i if i >= 0 else None
+    return Project(path=path, meta=meta, log=log, read_only=read_only, lock=lock)
 
 
 __all__ = [

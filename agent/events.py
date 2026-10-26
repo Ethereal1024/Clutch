@@ -222,3 +222,45 @@ def event_from_dict(data: dict[str, str]) -> Event:
 
 # Only final/durable events persist to .clc; streaming deltas never touch disk
 DURABLE_TYPES = {"user_message", "assistant_message", "tool_call", "tool_result", "final", "compaction"}
+
+
+def event_text(ev: Event, limit: int | None = None) -> str:
+    """One durable event as the text a READER of the log sees.
+
+    The one projection both readers of a stored session share: the compaction
+    transcript (core/compaction.py, whose summarizer reads the window as text)
+    and the project-log reader the model drives (`grep_memory` / `read_memory`,
+    tools/recall.py). A line of the .clc is rendered as ITSELF here — the tool
+    calls an assistant turn made are their own `tool_call` records, so they are
+    not repeated inside the assistant_message that precedes them.
+
+    ``limit`` caps one event's BODY (a tool result of a thousand lines, a whole
+    file read) and says so where the cut happened; the marker is part of the
+    text, never a silent trim. Empty events render "" and the caller decides
+    whether an empty line is worth showing.
+    """
+    if isinstance(ev, UserMessageEvent):
+        return f"[User]: {_clip(ev.content, limit)}"
+    if isinstance(ev, AssistantMessageEvent):
+        parts = []
+        if ev.content:
+            parts.append(f"[Assistant]: {_clip(ev.content, limit)}")
+        if ev.reasoning:
+            parts.append(f"[Assistant reasoning]: {_clip(ev.reasoning, limit)}")
+        return "\n".join(parts)
+    if isinstance(ev, ToolCallEvent):
+        return f"[Assistant tool call]: {_clip(f'{ev.name}({ev.arguments})', limit)}"
+    if isinstance(ev, ToolResultEvent):
+        return f"[Tool result]: {_clip(ev.content, limit)}"
+    if isinstance(ev, CompactionEvent):
+        return f"[Compaction summary]: {_clip(ev.summary, limit)}"
+    if isinstance(ev, FinalEvent):
+        return f"[Final]: {_clip(ev.summary or ev.status, limit)}"
+    return ""
+
+
+def _clip(text: str, limit: int | None) -> str:
+    """``text``, cut at ``limit`` characters with a marker when it was cut."""
+    if limit is None or len(text) <= limit:
+        return text
+    return text[:limit] + "\n[truncated]"

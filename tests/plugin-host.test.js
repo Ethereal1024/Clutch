@@ -456,7 +456,7 @@ async function main() {
       "argv: {dir} is the client's own fact (where the component is installed)");
     check(
       JSON.stringify(render("tool {name}", { name: "deep" }, { dir: "/opt/c" })) === JSON.stringify(["tool", "deep"]),
-      "argv: every other name is the MODEL's argument, never a client fact ({name} is clutch-memory's argument)"
+      "argv: every other name is the MODEL's argument, never a client fact ({name} is the tool's own argument)"
     );
     check(JSON.stringify(render("tool a [--limit {limit}]", { a: "x" })) === JSON.stringify(["tool", "a"]),
       "argv: an optional group with a missing placeholder is dropped whole, flag and brackets included");

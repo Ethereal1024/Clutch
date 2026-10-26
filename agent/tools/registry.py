@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import Config
-from ..memory import MemoryStore
+from ..core.lazy import LazyEventLog
 from ..prompts import render
 from . import catalog, host, rendezvous, statement
 from .answers import (
@@ -150,6 +150,12 @@ class Tool:
     registry asking its signature (which read a plain `**kwargs` host tool as
     uncancelable). A component's statement is always cancelable — its transport
     carries the event — so the flag is about the host's own tool only.
+
+    `needs_log` marks the host tool that reads the session's own project log
+    (tools/recall.py). Its subject is the file the host holds open, so the log is
+    handed to it HERE — from the registry, never from the model's arguments: a
+    reader whose file came from the call would be a reader the call could point
+    anywhere.
     """
 
     name: str
@@ -159,6 +165,7 @@ class Tool:
     module: str | None = None  # which component serves the statement
     host: ToolImpl | None = None  # the host's own tool (no component behind it)
     cancelable: bool = False  # Stop reaches this call (a host tool that declares it)
+    needs_log: bool = False  # the host tool reads the session's project log
     access: str = ""  # the policy its declaration put it under ("" = unguarded)
     access_arg: str = ""  # the argument that policy judges
     guard: GuardImpl | None = None  # host policy the component does not make
@@ -189,6 +196,7 @@ def _wire(
     *,
     owner: str,
     implementation: host.HostImpl | None = None,
+    needs_log: bool = False,
 ) -> Tool:
     """One declaration -> the tool the model sees and the host runs.
 
@@ -206,6 +214,11 @@ def _wire(
     bootstrap exception (tools/host.py) — and `implementation` is what a
     declaration has only when the host made it: a component's statement IS its
     implementation, so it brings none and is carried out by its statement.
+
+    `needs_log` is the host's own, like `implementation`: a host tool that reads
+    the session's project log declares it, and the registry hands the log in on
+    every call (no component can declare it, because no component can read the
+    file the call is logged in).
     """
     access = ACCESS.get(spec.access)
     access_arg = spec.access_arg or (access.arg if access else "")
@@ -217,6 +230,7 @@ def _wire(
         module=owner if implementation is None else None,
         host=implementation,
         cancelable=implementation is not None,
+        needs_log=needs_log,
         access=spec.access,
         access_arg=access_arg,
         guard=access.guard if access else None,
@@ -227,7 +241,7 @@ def _wire(
     )
 
 
-def _bootstrap(config: Config) -> list[Tool]:
+def _bootstrap(config: Config, log: LazyEventLog | None = None) -> list[Tool]:
     """The host's OWN declarations (tools/host.py), wired like any other.
 
     The one exception to "the declaration belongs to a component", and it is a
@@ -240,14 +254,29 @@ def _bootstrap(config: Config) -> list[Tool]:
     A word the host itself cannot honor is a host bug, so it is LOUD here (an
     assert) rather than dropped the way a component's unreadable declaration is
     (that is what _drivable's refusals are for): there is nothing for the model
-    to fall back on if the host's own declaration is wrong."""
+    to fall back on if the host's own declaration is wrong.
+
+    Its `gate` is honored like any other, though: the log readers are offered
+    exactly when there is a project log to read (`log` is None with no project
+    open), and a session with none should not be handed a reader that could only
+    answer "no log"."""
     out: list[Tool] = []
     for declared in host.declarations(config):
         spec = catalog.tool_of(declared.declaration)
         assert spec is not None, f"the host's own declaration is not a tool: {declared.declaration!r}"
         fatal = [d.message for d in catalog.tool_diagnostics(host.NAME, spec) if d.fatal]
         assert not fatal, f"the host's own {declared.name} declaration is invalid: {'; '.join(fatal)}"
-        out.append(_wire(spec, config, owner=host.NAME, implementation=declared.implementation))
+        if not _gate_ok(spec.gate, config, log):
+            continue
+        out.append(
+            _wire(
+                spec,
+                config,
+                owner=host.NAME,
+                implementation=declared.implementation,
+                needs_log=declared.needs_log,
+            )
+        )
     return out
 
 
@@ -281,7 +310,9 @@ def _serves_this_workspace(component: catalog.Component, workspace: Workspace | 
 
 
 def build_tools(
-    config: Config, memories: MemoryStore | None = None, workspace: Workspace | None = None
+    config: Config,
+    log: LazyEventLog | None = None,
+    workspace: Workspace | None = None,
 ) -> list[Tool]:
     """Every tool this host can offer right now, in one pass over the catalog.
 
@@ -306,15 +337,17 @@ def build_tools(
     `workspace` is the session's root, when there is one: it decides which
     machine each component may be offered for (`_serves_this_workspace`). It is
     a filter on the surface, not a second implementation — a call still asks
-    `module_blocked_reason` before it runs."""
-    tools: list[Tool] = _bootstrap(config)
+    `module_blocked_reason` before it runs. `log` is the session's own project
+    log: the one condition behind the `project` gate (`gates.gate_project`), and
+    the reader the host's own log tools are handed on every call."""
+    tools: list[Tool] = _bootstrap(config, log)
     for component in _drivable():
         if not _serves_this_workspace(component, workspace):
             continue
         for spec in component.tools:
             if config.mode not in spec.modes:
                 continue
-            if not _gate_ok(spec.gate, config, memories):
+            if not _gate_ok(spec.gate, config, log):
                 continue
             tools.append(_wire(spec, config, owner=component.name))
     return tools
@@ -366,8 +399,12 @@ def _previous_content(workspace: Workspace, args: dict[str, Any], arg: str) -> t
 
 
 class ToolRegistry:
-    def __init__(self, tools: list[Tool]) -> None:
+    def __init__(self, tools: list[Tool], log: LazyEventLog | None = None) -> None:
         self._tools = {t.name: t for t in tools}
+        # The session's own project log, for the host tool that reads it
+        # (Tool.needs_log): the file is not an argument the model passes, it is
+        # the log this run is logged in.
+        self._log = log
         # Stop reaches a call the wiring says it reaches (Tool.cancelable).
         # run_command declares it; a component statement always has it, because
         # its transport carries the event. Asking a signature instead would read
@@ -488,9 +525,12 @@ class ToolRegistry:
         if tool.inst is None:
             if tool.host is None:  # unreachable: build_tools never wires one
                 return Envelope(f"ERROR: tool {tool.name} has no implementation", error=True)
+            # The log is not an argument (Tool.needs_log): it is handed in from
+            # the registry, and it wins over a "log" key the model invented.
+            given = {**args, **({"log": self._log} if tool.needs_log else {})}
             if self._cancelable.get(tool.name):
-                return tool.host(workspace, config, cancel=cancel, **args)
-            return tool.host(workspace, config, **args)
+                return tool.host(workspace, config, cancel=cancel, **given)
+            return tool.host(workspace, config, **given)
         blocked = module_blocked_reason(workspace, tool.module)
         if blocked:
             return Envelope(f"ERROR: {blocked}", error=True)

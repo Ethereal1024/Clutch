@@ -44,13 +44,6 @@ Tool conventions:
 - Interactive commands (bare python, vi, vim, less) are blocked. Run with `python3 file.py`.
 - Tool calls in one response execute in order; wait for the result before the next step.
 
-Project memory persists durable facts across sessions (stored per-project). The
-titles at the end of this prompt are the complete set for this project: read any
-that relate to your task, and search the contents only when no listed title
-matches. Record a durable fact whenever you learn one — a user preference, a
-project convention, a key decision, a constraint — and the memory component's
-section below names the tools that do it.
-
 Mermaid output rules (the UI renders mermaid with mermaid 10.9.1; some
 constructs that look fine silently break its parser):
 - Never nest a double quote inside a node/edge label: `A["x[\"id\"]"]` AND

@@ -33,7 +33,11 @@ from ..tools.workspace import LocalWorkspace, Workspace
 from .persist import append_jsonl
 
 _SEPARATOR = "---"  # the .clc header separator (project/format.py: SEPARATOR)
-_SECTION = "[memories]"  # the memory.py section marker written to every .clc
+# The marker the project-memory store used to write above its lines. Nothing
+# writes it any more (the log IS the memory), but a .clc written by an older
+# build still carries it, and a memory line that parsed as JSON would otherwise
+# be read as an event. The reader shows those lines as notes (tools/recall.py).
+_SECTION = "[memories]"
 
 
 def parse_durable(text: str) -> list[Event]:
@@ -227,10 +231,34 @@ class LazyEventLog:
             self._write_at(self._cpr_line_off, f"cpr_start={off:010d}".encode("ascii"))
         self._cpr_start = off
 
-    def note_bytes_written(self, n: int) -> None:
-        """Count bytes the MemoryStore appended to the same file (memory lines
-        are not events, so the log's own bookkeeping would undercount the size)."""
-        self._file_bytes += n
+    def event_start(self) -> int:
+        """Absolute file offset where the event region starts — the byte just
+        past the header's separator line.
+
+        A whole-file reader (tools/recall.py) starts here: the header is the
+        host's bookkeeping (name, model, ``cpr_start``), not the log, and it is
+        one fixed-width line the reader would otherwise have to re-parse."""
+        return self._base
+
+    def file_bytes(self) -> int:
+        """Total size of the file on disk — the whole log, not just the window.
+
+        The window is what the MODEL may see; a reader that walks the log the
+        user actually keeps (tools/recall.py) needs the byte total to bound its
+        own ranges, and it must be the same number the reader trusts."""
+        return self._file_bytes
+
+    def read_raw(self, lo: int, hi: int) -> bytes:
+        """Pure disk read of [lo, hi) of the WHOLE file — header included.
+
+        The window is not involved: nothing here materializes events, touches
+        ``cpr_start`` or touches the resident log, so a scan of a 30 MB log costs
+        the bytes it reads and nothing else. ``lo``/``hi`` are absolute file
+        offsets, and the read goes through the same reader the open used (a
+        local fd seek, or one byte-range exec on a remote host)."""
+        lo = max(0, lo)
+        hi = min(hi, self._file_bytes)
+        return self._read(lo, hi) if lo < hi else b""
 
     # ------------------------------------------------- history paging (decoupled)
 

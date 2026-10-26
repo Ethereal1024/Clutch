@@ -9,7 +9,6 @@ real task through /api/run, collects SSE events, and checks the workspace tree a
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import os
@@ -424,11 +423,9 @@ def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     levents.append(CompactionEvent(summary="old work summarized"))
     for i in range(501, 531):
         levents.append(AssistantMessageEvent(content=f"recent {i}"))
-    from agent.memory import empty_index_line
-
     lazy_lines = [
         "# clutch project v1", "name: lazybig", "model: fake-model",
-        f"cpr_start={comp_off:010d}", empty_index_line(), "---",
+        f"cpr_start={comp_off:010d}", "---",
     ]
     for ev in levents:
         lazy_lines.append(event_to_json(ev))
@@ -496,80 +493,6 @@ def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     h3 = json.loads(body)
     check(h3.get("events") == [] and h3.get("older") == 0, "history before the task is empty")
     return lclc, comp_off
-
-
-def _clc_read_and_append(base_url, lclc) -> dict:
-    # 3f. /api/clc*: byte-level .clc service for decoupled tool modules —
-    # exact bytes back (b64), append hands back the write offset, patch is
-    # strictly in place, and the event log's size bookkeeping stays exact.
-    disk0 = os.path.getsize(lclc)
-    st, body = http_get(f"{base_url}/api/clc?lo=0&hi=16")
-    c = json.loads(body)
-    check(st == 200 and c.get("size") == disk0, "clc read reports the file size")
-    check(base64.b64decode(c["b64"]) == b"# clutch project", "clc read returns exact bytes")
-    st, body = http_get(f"{base_url}/api/clc?lo=0&hi=0")
-    check(json.loads(body)["b64"] == "", "empty range is an empty payload")
-    st, body = http_get(f"{base_url}/api/clc?lo=5&hi=3")
-    check(st == 400, "clc read rejects lo > hi")
-    st, body = http_get(f"{base_url}/api/clc?lo=99999999&hi=99999999")
-    check(st == 200 and json.loads(body)["b64"] == "", "clc read clamps out-of-range hi")
-
-    mem_line = '{"title": "tone", "content": "be terse", "updated": 1234.5}'
-    st, body = http_post(f"{base_url}/api/clc/append", {"line": mem_line})
-    a = json.loads(body)
-    check(st == 200 and a.get("offset") == disk0, "append returns the pre-append size as offset")
-    check(a.get("size") == disk0 + len(mem_line) + 1, "append size counts the newline")
-    st, body = http_get(f"{base_url}/api/clc?lo={a['offset']}&hi={a['size']}")
-    check(
-        base64.b64decode(json.loads(body)["b64"]) == (mem_line + "\n").encode(),
-        "append lands at the returned offset",
-    )
-    st, body = http_post(f"{base_url}/api/clc/append", {"line": "two\nlines"})
-    check(st == 400, "append rejects embedded newlines")
-    return a
-
-
-def _clc_patch_memory_index(base_url, lclc, state, a) -> None:
-    # the module's real flow: patch the header's fixed-width memory index in
-    # place to point at the appended line (never growing the file)
-    from agent.memory import index_line_from_offsets, parse_index_line, ring_add, ring_items
-
-    st, body = http_get(f"{base_url}/api/clc?lo=0&hi={min(a['size'], 4096)}")
-    head_raw = base64.b64decode(json.loads(body)["b64"])
-    idx_off, idx_ln = 0, b""
-    for ln in head_raw.split(b"\n"):
-        if ln.startswith(b"memory_index="):
-            idx_ln = ln
-            break
-        idx_off += len(ln) + 1
-    check(bool(idx_ln), "clc read exposes the header memory_index line")
-    count, hdr_head, offsets = parse_index_line(idx_ln.decode())
-    check(count == 0, "fresh project index is empty")
-    count, hdr_head = ring_add(count, hdr_head, offsets, a["offset"])
-    new_ln = index_line_from_offsets(ring_items(count, hdr_head, offsets)).encode("ascii")
-    check(len(new_ln) == len(idx_ln), "rebuilt index line keeps the fixed width")
-    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": idx_off, "b64": base64.b64encode(new_ln).decode()})
-    check(st == 200 and json.loads(body).get("size") == a["size"], "patch keeps the file size")
-    st, body = http_get(f"{base_url}/api/clc?lo=0&hi={min(a['size'], 4096)}")
-    again = parse_index_line(base64.b64decode(json.loads(body)["b64"])[idx_off:].split(b"\n", 1)[0].decode())
-    check(again is not None and a["offset"] in again[2], "patched index points at the appended line")
-    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": a["size"], "b64": base64.b64encode(b"x").decode()})
-    check(st == 400, "patch refuses to grow the file")
-    st, body = http_post(
-        f"{base_url}/api/clc/patch", {"offset": a["size"] - 1, "b64": base64.b64encode(b"xy").decode()}
-    )
-    check(st == 400, "patch refuses an overwrite past EOF")
-    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": -1, "b64": ""})
-    check(st == 400, "patch rejects a negative offset")
-    st, body = http_post(f"{base_url}/api/clc/patch", {"offset": 0, "b64": "!!not-b64!!"})
-    check(st == 400, "patch rejects invalid base64")
-
-    # note_bytes_written kept the lazy log's window math exact: its byte
-    # total still equals the on-disk size after the endpoint appends
-    check(
-        state.project.log._file_bytes == os.path.getsize(lclc),
-        "endpoint appends are bookkept into the event log",
-    )
 
 
 def _clc_sse_replay(base_url, clc, comp_off) -> None:
@@ -1904,8 +1827,6 @@ def _run_server_test() -> int:
         _sse_adopts_the_window_project(base_url, clc, proj_dir, state)
         _rollback_endpoint(base_url, state)
         lclc, comp_off = _lazy_open_and_history(base_url, sdir)
-        appended = _clc_read_and_append(base_url, lclc)
-        _clc_patch_memory_index(base_url, lclc, state, appended)
         _clc_sse_replay(base_url, clc, comp_off)
         _sse_since_offset(base_url, lclc, clc, comp_off)
         _broadcaster_bounded(broadcaster)

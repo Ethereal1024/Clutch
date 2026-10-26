@@ -15,5 +15,5 @@ def load(name: str) -> str:
     return (_DIR / name).read_text(encoding="utf-8")
 
 
-def render(name: str, **kw: object) -> str:
-    return Template(load(name)).safe_substitute(**kw)
+def render(template: str, **kw: object) -> str:
+    return Template(load(template)).safe_substitute(**kw)

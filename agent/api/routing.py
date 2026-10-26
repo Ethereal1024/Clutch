@@ -50,8 +50,6 @@ class RoutingMixin:
             self._workspace_checkpoints()
         elif path == "/api/fs/list":
             self._fs_list()
-        elif path == "/api/clc":
-            self._clc_read()
         elif path == "/api/settings":
             self._settings_get()
         elif path == "/api/host":
@@ -87,10 +85,6 @@ class RoutingMixin:
             self._workspace_rollback()
         elif parsed.path == "/api/backend":
             self._backend()
-        elif parsed.path == "/api/clc/append":
-            self._clc_append()
-        elif parsed.path == "/api/clc/patch":
-            self._clc_patch()
         elif parsed.path == "/api/channel":
             self._channel_post()
         else:

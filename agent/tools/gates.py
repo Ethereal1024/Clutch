@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..config import Config
-from ..memory import MemoryStore
+from ..core.lazy import LazyEventLog
 from . import catalog, filesystem, host
 from .answers import _entries
 from .envelope import Envelope
@@ -85,12 +85,17 @@ ACCESS: dict[str, Access] = {
 WATCHED_ACCESS: frozenset[str] = frozenset({"read", "write"})
 
 
-def gate_project(config: Config, memories: MemoryStore | None) -> bool:
-    """`project`: a memory store is open for the workspace being served."""
-    return memories is not None
+def gate_project(config: Config, log: LazyEventLog | None) -> bool:
+    """`project`: this session has a project log to read.
+
+    The log IS the project (one .clc per project, byte-addressed): a session with
+    no project open has no file behind it — the in-memory scratch log has no path
+    — and the tools this gate shuts are the ones that could only answer "there is
+    nothing to read yet"."""
+    return log is not None and bool(str(log.path))
 
 
-def gate_skills(config: Config, memories: MemoryStore | None) -> bool:
+def gate_skills(config: Config, log: LazyEventLog | None) -> bool:
     """`skills`: the library the `skills` fact publishes has something in it.
 
     Nothing to load: an enum over an empty library is a schema that offers the
@@ -104,13 +109,13 @@ def gate_skills(config: Config, memories: MemoryStore | None) -> bool:
 # host's document calls it (catalog.GATE_IMPLS lists the ones that exist —
 # _check_vocabulary keeps the two lists equal — and "" / "always" are structural,
 # no condition at all, so they are not here).
-_GATE_IMPLS: dict[str, Callable[[Config, MemoryStore | None], bool]] = {
+_GATE_IMPLS: dict[str, Callable[[Config, LazyEventLog | None], bool]] = {
     "project": gate_project,
     "skills": gate_skills,
 }
 
 
-def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
+def _gate_ok(gate: str, config: Config, log: LazyEventLog | None) -> bool:
     """Whether a tool's declared host-side condition holds at all (see
     catalog.Tool.gate). A tool whose gate is shut is not offered — it is not
     offered-with-an-error, because the model would only learn to stop trying.
@@ -123,7 +128,7 @@ def _gate_ok(gate: str, config: Config, memories: MemoryStore | None) -> bool:
     if gate in ("", "always"):
         return True
     impl = _GATE_IMPLS.get(catalog.GATE_WORDS.get(gate, ""))
-    return bool(impl(config, memories)) if impl else False
+    return bool(impl(config, log)) if impl else False
 
 
 def _check_vocabulary() -> None:
