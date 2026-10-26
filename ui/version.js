@@ -11,4 +11,4 @@
 // In the source tree it is kept EQUAL to VERSION by tests/about-version-test.js;
 // the desktop deb reads ui/package.json, which the release commit keeps equal to
 // VERSION too. So all three — VERSION, ui/package.json, this — are one number.
-window.CLUTCH_VERSION = "0.1.63";
+window.CLUTCH_VERSION = "0.1.64";
