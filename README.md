@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="ui/build/icon.png" width="96" height="96" alt="Clutch 图标">
+  <img src="ui/build/icon.png" width="96" height="96" alt="Clutch icon">
 </p>
 
 <p align="center">
@@ -9,177 +9,217 @@
   <a href="https://github.com/Ethereal1024/Clutch/blob/master/pyproject.toml"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white"></a>
 </p>
 
+<p align="center">
+  <a href="README.md">English</a> | <a href="README.zh.md">简体中文</a>
+</p>
+
 # Clutch
 
-Clutch 是一个本地运行的编程智能体（coding agent）。用户提交任务描述后，Clutch 调用
-大语言模型，在指定的工作目录中读取与修改文件、执行命令，直至模型结束任务或满足终止
-条件。
+Clutch is a coding agent that runs locally. Given a task description, it calls a
+large language model to read and modify files and to run commands in a specified
+working directory. The task ends when the model finishes it or a termination
+condition is met.
 
-Clutch 提供桌面应用与 Android 应用，并支持通过 SSH 在远端主机上工作。模型通过兼容
-OpenAI 的接口接入，可使用任何提供该接口的服务，API 密钥由用户自行提供。
+Clutch is available as a desktop application and as an Android application, and it
+can work on a remote host over SSH. Models are reached through an
+OpenAI-compatible interface, so any service that provides that interface can be
+used. The API key is supplied by the user.
 
-## 功能
+## Features
 
-- **任务执行**：模型在多轮循环中调用工具；模型不再调用工具时任务结束，最大轮数与重复
-  调用检测用于终止无效循环。
-- **文件与命令工具**：读取、检索、写入与编辑文件，执行命令。命令在工作目录内运行，受
-  超时与输出长度限制。
-- **网络检索**：网页搜索与正文抓取。内置无需密钥的搜索后端，也可配置 Tavily 或自建
-  SearXNG。
-- **项目记忆**：跨会话保存、读取与检索项目相关的事实。
-- **技能**：技能按需加载，未加载的技能只占用提示中的一行描述。
-- **会话文件**：一个会话对应一个文件，重新打开即恢复完整对话。
-- **权限确认**：删除文件、写入工作目录之外等操作需要人工确认。
-- **远程工作区**：通过 SSH 连接远端主机，在远端读写文件与执行命令。
-- **组件化扩展**：文件、记忆、检索、技能与远程工作区以独立组件提供，可按需安装。
+- **Task execution**: the model calls tools over multiple turns. A task ends when the
+  model stops calling tools; a maximum turn count and repeated-call detection stop
+  unproductive loops.
+- **File and command tools**: read, search, write, and edit files, and run commands.
+  Commands run inside the working directory and are subject to timeouts and output
+  length limits.
+- **Web retrieval**: web search and page text extraction. Clutch includes a search
+  backend that needs no API key; Tavily or a self-hosted SearXNG instance can be
+  configured instead.
+- **Project memory**: save, load, and search project facts across sessions.
+- **Skills**: skills are loaded on demand; a skill that is not loaded occupies one
+  line of description in the prompt.
+- **Session files**: one session is one file; reopening the file restores the full
+  conversation.
+- **Permission prompts**: deleting files or writing outside the working directory
+  requires approval.
+- **Remote workspaces**: connect to a remote host over SSH and read, write, and run
+  commands there.
+- **Components**: file, memory, retrieval, skill, and remote-workspace capabilities
+  are provided as independent components that can be installed as needed.
 
-## 支持的平台
+## Supported platforms
 
-| 版本 | 支持环境 |
+| Build | Requirements |
 | --- | --- |
-| 桌面应用 | Linux x86_64（deb 安装包）、macOS Apple Silicon（dmg 磁盘映像）、Windows x86_64（exe 安装程序）。安装包自带运行时，不需要 Python 与 Node.js。 |
-| Android 应用 | Android 7.0 及以上，arm64-v8a 或 x86_64。 |
-| 从源码运行 | Python 3.10 及以上、Node.js、uv。 |
+| Desktop | Linux x86_64 (deb package), macOS Apple Silicon (dmg image), Windows x86_64 (exe installer). The installers bundle their runtime and need neither Python nor Node.js. |
+| Android | Android 7.0 or later, arm64-v8a or x86_64. |
+| From source | Python 3.10 or later, Node.js, uv. |
 
-## 安装
+## Installation
 
-### 桌面应用
+### Desktop
 
-从 [GitHub Releases](https://github.com/Ethereal1024/Clutch/releases/latest) 下载对应
-平台的安装包。
+Download the installer for the target platform from
+[GitHub Releases](https://github.com/Ethereal1024/Clutch/releases/latest).
 
-Linux：
+Linux:
 
 ```bash
-sudo dpkg -i clutch-ui_<版本>_amd64.deb
+sudo dpkg -i clutch-ui_<version>_amd64.deb
 ```
 
-macOS（Apple Silicon）：下载 `Clutch-<版本>-arm64.dmg`，打开后将 `Clutch.app` 拖入
-`/Applications`。安装包未做代码签名，首次启动会被 Gatekeeper 阻止。“已损坏，无法打开”
-的提示由隔离标记与缺少签名共同导致，文件本身并未损坏。清除隔离标记后即可打开：
+macOS (Apple Silicon): download `Clutch-<version>-arm64.dmg`, open it, and drag
+`Clutch.app` into `/Applications`. The package is not code-signed, so Gatekeeper
+blocks the first launch. The "is damaged and can't be opened" message results from
+the quarantine flag together with the missing signature; the file itself is intact.
+Clear the quarantine flag to open the application:
 
 ```bash
 xattr -cr /Applications/Clutch.app
 ```
 
-若清除标记后仍无法打开，对应用重新签名：
+If the application still does not open, re-sign it:
 
 ```bash
 codesign --force --deep --sign - /Applications/Clutch.app
 ```
 
-Windows：运行 `Clutch.Setup.<版本>.exe`。安装包未做代码签名，SmartScreen 首次运行时会
-提示“Windows 已保护你的电脑”，依次选择“更多信息”与“仍要运行”。
+Windows: run `Clutch.Setup.<version>.exe`. The package is not code-signed, so
+SmartScreen warns on the first run; choose "More info" and then "Run anyway".
 
-### Android 应用
+### Android
 
-从 Releases 下载 `clutch-android-<版本>.apk`（Android 安装包）并手动安装。安装前需要在
-系统中允许该来源安装应用。
+Download `clutch-android-<version>.apk` from Releases and install it manually. The
+system must allow installation from this source first.
 
-### 从源码运行
+### From source
 
 ```bash
 git clone https://github.com/Ethereal1024/Clutch.git
 cd Clutch
 pip install uv
-uv sync                  # 后端依赖
-cd ui && npm install     # 前端依赖
-npm start                # 启动应用，后端会话按需拉起
+uv sync                  # backend dependencies
+cd ui && npm install     # frontend dependencies
+npm start                # start the application; backend sessions start on demand
 ```
 
-## 配置
+## Configuration
 
-模型、接口地址与 API 密钥在应用的设置中配置，也可通过环境变量提供：
+Set the model, the endpoint, and the API key in the application settings, or provide
+them through environment variables:
 
-| 环境变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `CLUTCH_API_KEY` | 模型服务的密钥 |
-| `CLUTCH_BASE_URL` | 模型服务接口地址 |
-| `CLUTCH_MODEL` | 模型名称 |
+| `CLUTCH_API_KEY` | API key for the model service |
+| `CLUTCH_BASE_URL` | Endpoint of the model service |
+| `CLUTCH_MODEL` | Model name |
 
-默认使用 Chat Completions 接口；若服务同时提供 Responses 接口，可在设置中切换。
+The default interface is Chat Completions. If the service also provides a Responses
+interface, switch to it in the settings.
 
-联网检索的默认后端无需配置，可选后端由以下环境变量启用：
+The default web search backend needs no configuration. Optional backends are enabled
+by these environment variables:
 
-| 环境变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `CLUTCH_TAVILY_API_KEY` | 使用 Tavily 搜索后端 |
-| `CLUTCH_SEARXNG_URL` | 使用自建 SearXNG 实例 |
+| `CLUTCH_TAVILY_API_KEY` | Use the Tavily search backend |
+| `CLUTCH_SEARXNG_URL` | Use a self-hosted SearXNG instance |
 
-## 使用
+## Usage
 
-1. 启动应用，在欢迎页新建或打开一个会话文件，扩展名为 `.clc`。
-2. 会话的工作目录是该文件所在的目录；重新打开文件即恢复该会话的完整对话。
-3. 在输入框中提交任务描述。模型调用工具的过程与结果实时显示在界面中。
-4. 出现权限确认请求时，选择允许或拒绝。被拒绝的操作不执行，模型会收到对应的错误信息。
-5. 在设置的 Plugins 页面安装、更新或卸载组件。
+1. Start the application and create or open a session file on the welcome page.
+   Session files use the `.clc` extension.
+2. The working directory of a session is the directory that contains its file.
+   Reopening the file restores the full conversation of that session.
+3. Submit a task description in the input box. Tool calls and their results appear in
+   the interface as they happen.
+4. When a permission request appears, allow or deny it. A denied operation does not
+   run, and the model receives the corresponding error message.
+5. Install, update, or remove components on the Plugins page in the settings.
 
-## 架构
+## Architecture
 
-Clutch 分为界面层与后端。界面层负责交互与事件显示，后端负责模型调用、工具执行与会话
-状态；二者通过 HTTP 接口与服务端事件推送通信。每个窗口对应一个独立的后端会话，窗口
-关闭时该会话结束。
+Clutch has two layers: an interface and a backend. The interface handles interaction
+and event display; the backend handles model calls, tool execution, and session state.
+The two communicate over HTTP endpoints and server-sent events. Each window
+corresponds to one backend session, and closing the window ends that session.
 
 ```mermaid
 flowchart LR
-    UI["Clutch 界面"] -- "HTTP 与事件推送" --> API["后端会话"]
-    API -- "工具调用" --> LLM["大语言模型"]
-    API -- "读写文件 / 执行命令" --> WS["工作目录"]
+    UI["Clutch UI"] -- "HTTP and events" --> API["Backend session"]
+    API -- "Tool calls" --> LLM["Large language model"]
+    API -- "File and command access" --> WS["Working directory"]
 ```
 
-使用远程工作区时，后端运行在远端主机，界面与后端之间的连接经 SSH 隧道建立。模型请求由
-本地客户端转发，因此远端主机不需要配置密钥。
+With a remote workspace, the backend runs on the remote host, and the interface
+reaches it over an SSH tunnel. Model requests are forwarded by the local client, so
+the remote host needs no API key.
 
 ```mermaid
 flowchart LR
-    subgraph local["本地客户端"]
-        UI["Clutch 界面"]
-        PXY["模型请求转发"]
+    subgraph local["Local client"]
+        UI["Clutch UI"]
+        PXY["Model request forwarding"]
     end
-    subgraph remote["远端主机"]
-        SUP["会话管理"]
-        AG["后端会话"]
+    subgraph remote["Remote host"]
+        SUP["Session manager"]
+        AG["Backend session"]
     end
-    UI -- "SSH 隧道" --> SUP
-    SUP -. "启动与回收" .-> AG
-    AG -- "工具调用" --> PXY
-    PXY -- "HTTPS" --> LLM["大语言模型"]
-    AG -- "读写 / 执行" --> WS["远端工作目录"]
+    UI -- "SSH tunnel" --> SUP
+    SUP -. "start and reclaim" .-> AG
+    AG -- "Tool calls" --> PXY
+    PXY -- "HTTPS" --> LLM["Large language model"]
+    AG -- "File and command access" --> WS["Remote working directory"]
 ```
 
-设计要点：
+Design decisions:
 
-- 会话状态由事件记录生成：对话历史与界面显示来自同一份事件序列。
-- 工具的执行结果与错误信息一并返回模型，供其调整后续操作。
-- 工具的名称、参数、执行方式与界面显示由组件声明，客户端不内置工具的具体实现。
-- 权限由规则表判定：工作目录内的常规操作默认允许，删除文件与超出工作目录的写入需要
-  确认。
+- Session state derives from an event log: conversation history and the interface are
+  generated from the same event sequence.
+- Tool results and error messages are returned to the model, which uses them to adjust
+  its next steps.
+- Tool names, arguments, execution methods, and their display in the interface are
+  declared by components; the client contains no tool implementation of its own.
+- Permissions are decided by a rule table: routine operations inside the working
+  directory are allowed by default, while file deletion and writes outside the
+  working directory require approval.
 
-## 组件
+## Components
 
-文件操作、项目记忆、网络检索、技能库与远程工作区以独立组件的形式提供，不随主程序打包。
-组件安装在运行后端的那台机器上，因此在本地使用与在远程工作区使用时需要分别安装。设置
-的 Plugins 页面列出可用组件、安装状态与来源。
+File operations, project memory, web retrieval, the skill library, and remote
+workspaces are provided as independent components and are not bundled with the main
+program. Components are installed on the machine that runs the backend, so local use
+and remote-workspace use require separate installations. The Plugins page in the
+settings lists the available components, their installation state, and their sources.
 
-组件来源默认为应用内置的来源列表，每条来源指向该组件自身的发布包。用户可以追加自定义
-来源，也可以把本地目录中的组件注册到清单中。卸载组件后，对应工具从工具列表中移除，其余
-功能不受影响；未安装任何组件时，Clutch 仅提供对话能力。
+Component sources default to the source list built into the application, and each
+source points to the release of that component. Users can add custom sources, or
+register a component stored in a local directory. Removing a component removes
+its tools from the tool list and leaves the remaining functionality unaffected. With
+no component installed, Clutch provides conversation only.
 
-如需通过镜像下载组件，设置环境变量 `CLUTCH_SOURCE_MIRROR`。镜像仅提供文件传输，组件的
-完整性仍按各组件发布包中的摘要校验。
+To download components through a mirror, set the `CLUTCH_SOURCE_MIRROR` environment
+variable. The mirror only carries files; component integrity is still verified against
+the digests in each component's own release.
 
-## 安全
+## Security
 
-- 命令在工作目录内执行，受超时与输出长度限制。
-- 文件路径受工作目录约束，越界访问需要人工确认。
-- 网页抓取会校验目标地址，拒绝内网地址与指向内网的重定向。
-- API 密钥保存在应用本地配置或环境变量中，不写入仓库。
+- Commands run inside the working directory and are subject to timeouts and output
+  length limits.
+- File paths are confined to the working directory; access outside it requires
+  approval.
+- Web fetching validates the target address and rejects private addresses and
+  redirects to them.
+- API keys are stored in local application settings or environment variables and are
+  never written to the repository.
 
-## 参与贡献
+## Contributing
 
-缺陷报告与功能建议请提交到 [GitHub Issues](https://github.com/Ethereal1024/Clutch/issues)。
-提交代码变更前，请确认相关测试通过。
+Submit defect reports and feature requests in
+[GitHub Issues](https://github.com/Ethereal1024/Clutch/issues). Before submitting code
+changes, confirm that the relevant tests pass.
 
-## 许可证
+## License
 
-本项目使用 MIT 许可证，详见 [LICENSE](LICENSE)。
+Clutch is released under the MIT License. See [LICENSE](LICENSE).
