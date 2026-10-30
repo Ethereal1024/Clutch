@@ -484,24 +484,34 @@ select option { background-color: var(--bg2); color: var(--text); }
    that sliver, so an unbreakable user@host:port spilled sideways and turned the list
    into a horizontal scrollbar while the ✓ it ended with wrapped (device report). So
    the popup GROWS to its widest option: min-width keeps the short case flush with the
-   button, the cap keeps it inside the dialog it was opened from, and beyond the cap it
-   is the LABEL that gives way (…) — the popup itself never scrolls sideways. */
+   button, the cap keeps it inside the window, and beyond the cap it is the LABEL that
+   gives way (…) — the popup itself never scrolls sideways.
+
+   It is also not drawn inside that box at all: it is attached to <body> and positioned
+   `fixed` by js/settings.js from the trigger's own rect. Inside the settings modal the
+   picker lives in a `.modal-pane` that scrolls inside a `.modal-box` with
+   `overflow: hidden`, so a list painted as a descendant was cut off at the pane's edge
+   — what survived was a sliver with a scrollbar of its own, and that slit was the only
+   place a profile could be read or picked (device report). Hence: no `top`/`left` of its
+   own (the script sets them, with the `min-width` the button owns and the `max-height`
+   the free viewport space allows, flipping it upward when there is no room below), and
+   a `z-index` above the dialog it was opened FROM. */
 .cselect-pop {
-  position: absolute;
-  top: calc(100% + 4px);
+  position: fixed;
+  top: 0;
   left: 0;
-  min-width: 100%;
   width: max-content;
   max-width: min(460px, 80vw);
-  z-index: 20;
+  z-index: 130; /* above .modal (100): the list is opened from inside a dialog */
   background: var(--bg2);
   border: 1px solid var(--border);
   max-height: 240px;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain; /* a flick through the list never scrolls the page under it */
   display: none;
 }
-.cselect.open .cselect-pop { display: block; animation: cselect-in var(--quick) var(--arrival); }
+.cselect-pop.open { display: block; animation: cselect-in var(--quick) var(--arrival); }
 @keyframes cselect-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .cselect-opt {
   display: flex;
@@ -520,7 +530,11 @@ select option { background-color: var(--bg2); color: var(--text); }
 .fs-conn-row .cselect { flex: 1; }
 .modal-box > .cselect .cselect-btn { font-family: var(--font-display); font-size: 14px; padding: 8px var(--row-gutter); }
 .modal-box > .cselect { margin-bottom: var(--s4); }
-.modal-box > .cselect .cselect-opt { font-family: var(--font-display); }
+/* a picker that is a modal's own field is set in the display face too. Its popup is
+   on <body> now (it has to escape the pane's clipping), so it cannot inherit that
+   from the box it was opened in: js/settings.js marks it `cselect-pop-field` when its
+   trigger is a direct child of a modal box. */
+.cselect-pop-field .cselect-opt { font-family: var(--font-display); }
 
 main { display: flex; flex: 1; min-height: 0; }
 
@@ -1714,7 +1728,7 @@ mjx-container[display="true"] {
   background: var(--bg2);
   border: 1px solid var(--border);
   /* the popup is a menu, so it arrives the way the picker's own popup arrives
-     (`.cselect.open .cselect-pop`): a display change cannot be transitioned, and
+     (`.cselect-pop.open`): a display change cannot be transitioned, and
      a panel that simply appears reads as a glitch next to one that slides in.
      Opening UPWARD plays the same motion mirrored: `fadeSlideUp` is the same
      keyframe with the offset on the other side of zero. */

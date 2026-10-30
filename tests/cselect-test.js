@@ -34,6 +34,23 @@ function node(tag) {
     listeners: {},
     focused: false,
     _text: "",
+    // the popup is placed by js out of the trigger's own rect, so the stub needs the
+    // numbers a browser would hand back: inline styles, the border box, the content
+    // height it is capped to, and where the button is on the screen
+    style: {},
+    offsetWidth: 0,
+    scrollHeight: 0,
+    rect: { top: 100, left: 12, width: 100, height: 32 }, // on screen, as a clicked button is
+    getBoundingClientRect() {
+      const r = n.rect;
+      return {
+        top: r.top, left: r.left, width: r.width, height: r.height,
+        right: r.left + r.width, bottom: r.top + r.height,
+      };
+    },
+    get parentNode() {
+      return n.parent || null;
+    },
     appendChild(ch) {
       n.children.push(ch);
       ch.parent = n;
@@ -99,6 +116,7 @@ const one = (n, c) => {
 
 const doc = {
   listeners: {},
+  body: node("body"),
   createElement: (t) => node(t),
   addEventListener(ev, fn) {
     (doc.listeners[ev] || (doc.listeners[ev] = [])).push(fn);
@@ -108,6 +126,20 @@ const doc = {
   },
 };
 global.document = doc;
+
+// the widget places its popup against the VIEWPORT, so the stub carries one
+const win = {
+  innerWidth: 1024,
+  innerHeight: 768,
+  listeners: {},
+  addEventListener(ev, fn) {
+    (win.listeners[ev] || (win.listeners[ev] = [])).push(fn);
+  },
+  fire(ev, arg) {
+    for (const fn of win.listeners[ev] || []) fn(arg || {});
+  },
+};
+global.window = win;
 
 const APP = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(APP);
@@ -137,7 +169,7 @@ function main() {
   sel.appendChild(opt(LONG, "✓")); // the host this window is on
   sel.appendChild(opt("me@box.example.com:22")); // and one it is not
   const btn = one(root, "cselect-btn");
-  const pop = one(root, "cselect-pop");
+  const pop = one(doc.body, "cselect-pop"); // attached to <body>, not to the picker
 
   // ---- 1) the ROW: the label is the name, the mark is a node beside it ----
   check(pop.children.length === 2, `one row per option (got ${pop.children.length})`);
@@ -225,7 +257,83 @@ function main() {
   doc.fire("keydown", { key: "Escape" });
   check(!root.classList.contains("open"), "and Escape closes it");
 
-  // ---- 7) the source: the widget draws two nodes, and its callers mark, never glue ----
+  // ---- 7) the list is NOT drawn inside the picker — and where it lands ----
+  //
+  // Device report: on the settings modal's Model page the picker sits in a scrolling
+  // `.modal-pane` inside a `.modal-box` with `overflow: hidden`. A list drawn as a
+  // descendant was cut off at the pane's edge, so the only place a profile could be
+  // read or chosen was a sliver with a scrollbar of its own. The list is attached to
+  // <body> and measured against the viewport from the button's own rect instead.
+  check(kids(root, "cselect-pop").length === 0 && kids(doc.body, "cselect-pop").length === 1,
+    "the popup is attached to <body>, not to the picker's row: no clipping ancestor stands between it and the screen");
+
+  const popOnBody = kids(doc.body, "cselect-pop")[0];
+  check(popOnBody === pop, "and it is the one the widget renders the options into");
+
+  win.innerWidth = 390; // a phone's CSS-px column
+  win.innerHeight = 800;
+  btn.rect = { top: 100, left: 12, width: 366, height: 32 };
+  pop.scrollHeight = 600; // more entries than any band of a phone can hold
+  pop.offsetWidth = 366;
+  btn.fire("click");
+  check(root.classList.contains("open") && has(pop, "open"),
+    "opening marks both the button and the list it now owns outside the picker's row");
+  check(pop.style.top !== "auto" && parseFloat(pop.style.top) > 0 && pop.style.bottom === "auto",
+    "with room under the button the list hangs BELOW it, from the button's own rect");
+  check(parseFloat(pop.style.top) === 136, `4px under the button (got ${pop.style.top})`);
+  check(parseFloat(pop.style.maxHeight) === 240,
+    `and is capped at the list's own height, not at the pane's (got ${pop.style.maxHeight})`);
+  check(pop.style.minWidth === "366px",
+    "at least as wide as the button, so the short case still sits flush with it");
+  check(parseFloat(pop.style.left) === 12, "flush with the button's left edge");
+
+  // the same list at the bottom of a short screen: there is no band under it at all
+  win.innerHeight = 400;
+  btn.rect = { top: 300, left: 12, width: 366, height: 32 };
+  doc.fire("scroll");
+  check(has(pop, "open") && pop.style.top === "auto" && parseFloat(pop.style.bottom) === 104,
+    `a button low on the screen opens the list UPWARD (got bottom ${pop.style.bottom}, top ${JSON.stringify(pop.style.top)})`);
+  check(parseFloat(pop.style.maxHeight) >= 72 && parseFloat(pop.style.maxHeight) <= 240,
+    "and the height it is given is the room the viewport actually has, never a sliver");
+
+  // a button near the right edge: the grown list is pulled back inside the window
+  win.innerWidth = 390;
+  btn.rect = { top: 150, left: 300, width: 366, height: 32 };
+  win.fire("resize");
+  check(has(pop, "open") && parseFloat(pop.style.left) + 366 <= 390 - 8 + 0.001,
+    `the list never hangs over the viewport's edge (got left ${pop.style.left})`);
+  check(parseFloat(pop.style.maxHeight) === 400 - 182 - 4 - 8,
+    `there it takes the free band under the button (got ${pop.style.maxHeight})`);
+
+  // the trigger scrolls out of the pane: the list goes with it instead of floating over nothing
+  btn.rect = { top: 900, left: 12, width: 366, height: 32 };
+  doc.fire("scroll");
+  check(!has(pop, "open") && !root.classList.contains("open"),
+    "a trigger scrolled out of sight takes the list away");
+  // and one that is off the screen to begin with never opens at all: an open list
+  // drawn past the viewport's edge would sit there until the next press closed it
+  btn.fire("click");
+  check(!has(pop, "open") && !root.classList.contains("open"),
+    "and a button that is not on the screen opens nothing: what may open is what may stay open");
+
+  // and a press on a row is a press INSIDE the picker even though the row is on <body>
+  btn.rect = { top: 40, left: 12, width: 366, height: 32 };
+  btn.fire("click");
+  doc.fire("click", { target: pop.children[0] });
+  check(root.classList.contains("open"),
+    "a press on one of the list's own rows does not count as a click elsewhere");
+
+  // a scroll of the LIST is its own scrollbar moving, not the page under it
+  const capped = pop.style.maxHeight;
+  btn.rect = { top: 100, left: 12, width: 366, height: 32 };
+  doc.fire("scroll", { target: pop });
+  check(pop.style.maxHeight === capped && has(pop, "open"),
+    "a scroll inside the list does not re-place it (that would re-cap its height mid-drag)");
+  doc.fire("scroll", { target: node("div") }); // a real scroll under it: the pane
+  check(parseFloat(pop.style.top) === 136,
+    `a scroll under the button moves the list with it (got top ${pop.style.top})`);
+
+  // ---- 8) the source: the widget draws two nodes, and its callers mark, never glue ----
   const body = fnBody("customSelect");
   check(/label\.textContent = opt\.text;/.test(body) && !/textContent\s*=[^;\n]*✓/.test(body),
     "the widget writes the option's NAME into the label and nothing else");
@@ -245,7 +353,7 @@ function main() {
     !/textContent\s*=[^;\n]*✓/.test(fnBody("renderLlmProfiles"));
   check(profOpt, "and so does the profile list: neither caller glues a tick into a name");
 
-  // ---- 8) the stylesheet: the label gives way, the mark never does, the popup grows ----
+  // ---- 9) the stylesheet: the label gives way, the mark never does, the popup grows ----
   const rule = (css, selector) => {
     const at = css.indexOf(selector + " {");
     if (at < 0) return "";
@@ -265,10 +373,24 @@ function main() {
     "the mark is flex: none: it can never be the thing that shrinks, nor wrap onto a second line");
   check(/min-width:\s*0/.test(valueCss) && /text-overflow:\s*ellipsis/.test(valueCss),
     "and the closed control's value truncates the same way, next to the same mark column");
-  check(/width:\s*max-content/.test(popCss) && /min-width:\s*100%/.test(popCss),
-    "the popup grows to its widest option while the short case stays flush with the button");
+  check(/width:\s*max-content/.test(popCss) && !/min-width:\s*100%/.test(popCss),
+    "the popup grows to its widest option, and takes its min-width from the button (js), not from the viewport it now floats over");
   check(/overflow-x:\s*hidden/.test(popCss) && /max-width:\s*min\(460px,\s*80vw\)/.test(popCss),
     "and it never scrolls sideways: beyond its cap it is the label that gives way");
+  // the list is out of the picker's row, so it must not be positioned by it — and it
+  // must paint above the dialog it was opened from
+  const modalZ = parseInt((/z-index:\s*(\d+)/.exec(rule(CSS, ".modal")) || [])[1], 10);
+  const popZ = parseInt((/z-index:\s*(\d+)/.exec(popCss) || [])[1], 10);
+  check(/position:\s*fixed/.test(popCss) && !/position:\s*absolute/.test(popCss),
+    "the popup is fixed to the viewport: no scrolling or clipping ancestor can cut it off");
+  check(Number.isFinite(modalZ) && Number.isFinite(popZ) && popZ > modalZ,
+    `and it paints above the dialog it belongs to (list ${popZ} > modal ${modalZ})`);
+  check(/overscroll-behavior:\s*contain/.test(popCss),
+    "a flick through the list scrolls the list, not the page under it");
+  check(rule(CSS, ".cselect-pop.open") !== "" && !/\.cselect\.open \.cselect-pop/.test(CSS),
+    "it is shown by its OWN .open class — it is no longer a descendant of .cselect, so a descendant selector would never match");
+  check(rule(CSS, ".cselect-pop-field .cselect-opt") !== "",
+    "a modal field's list keeps the display face: the popup carries that fact as a class, since it left the box it was opened in");
   check(rule(MOBILE, ".fs-conn-row .cselect") !== "" &&
     /flex:\s*1 0 100%/.test(rule(MOBILE, ".fs-conn-row .cselect")) &&
     /flex-wrap:\s*wrap/.test(rule(MOBILE, ".fs-conn-row")),

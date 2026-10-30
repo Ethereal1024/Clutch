@@ -61,11 +61,79 @@ function customSelect(root) {
   pop.className = "cselect-pop";
   root.classList.add("cselect");
   root.appendChild(btn);
-  root.appendChild(pop);
+  // The list is NOT a child of the picker. On the settings modal's Model page the
+  // picker sits in a `.modal-pane` that scrolls inside a `.modal-box` with
+  // `overflow: hidden`, so a list drawn as a descendant was CUT OFF at the pane's
+  // edge: the popup survived as a sliver with a scrollbar of its own, and that slit
+  // was the only place a profile could be read or chosen (device report). Attached
+  // to <body> and positioned `fixed`, it is outside every clipping ancestor at once;
+  // its height comes from the free viewport space, it opens UPWARD when the button
+  // sits low, and it is clamped inside the viewport sideways.
+  document.body.appendChild(pop);
+  // a picker that is a modal's own FIELD is set in the display face (style.css
+  // `.cselect-pop-field`); on <body> it can no longer inherit that from the box it
+  // was opened in, so the fact travels with it as a class
+  if (root.parentNode && root.parentNode.classList &&
+      root.parentNode.classList.contains("modal-box")) pop.classList.add("cselect-pop-field");
+
+  // geometry: the gap the list hangs by, the distance it keeps from the viewport's
+  // edges, and the height past which a list of options reads as a page
+  const GAP = 4, EDGE = 8, MAX_H = 240, MIN_H = 72, MIN_W = 120, MAX_W = 460;
 
   const opts = []; // {value, text, mark}
   let selected = null;
   const listeners = [];
+
+  const isOpen = () => root.classList.contains("open");
+  // A button that is not on the screen has nothing to hang a list from. Opening one
+  // there would leave a list marked open but drawn off the viewport, waiting for the
+  // next press to be read as an "outside" click; `follow` takes a list away on the
+  // same test, so what MAY open and what may STAY open are one condition.
+  const onScreen = (r) => r.bottom > 0 && r.top < window.innerHeight;
+
+  // Where the list goes, measured from the BUTTON it belongs to — never from the box
+  // it was opened in (that box is what used to clip it).
+  function place() {
+    const r = btn.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const room = Math.max(MIN_W, vw - 2 * EDGE);
+    // as wide as its widest option (`width: max-content` in the sheet), as narrow as
+    // the button, and never wider than the viewport has room for
+    pop.style.maxWidth = Math.min(MAX_W, room) + "px";
+    pop.style.minWidth = Math.min(r.width, room) + "px";
+    pop.style.maxHeight = "none"; // measure the list whole before capping it
+    const want = Math.min(pop.scrollHeight || 0, MAX_H);
+    const below = vh - r.bottom - GAP - EDGE; // the free band under the button...
+    const above = r.top - GAP - EDGE; // ...and over it
+    const up = want > below && above > below; // no room under it: open UPWARD
+    pop.style.maxHeight = Math.max(MIN_H, Math.min(MAX_H, up ? above : below)) + "px";
+    // sideways: flush with the button, pulled back inside the viewport if the button
+    // (or the list, grown to its widest option) would hang over its edge
+    const w = pop.offsetWidth || r.width;
+    pop.style.left = Math.min(Math.max(EDGE, r.left), Math.max(EDGE, vw - EDGE - w)) + "px";
+    if (up) {
+      pop.style.top = "auto"; // said out loud: the sheet's own `top: 0` would otherwise
+      pop.style.bottom = vh - r.top + GAP + "px"; // stretch the list from the viewport's top edge
+    } else {
+      pop.style.top = r.bottom + GAP + "px";
+      pop.style.bottom = "auto";
+    }
+  }
+
+  function open() {
+    if (isOpen() || root.classList.contains("disabled")) return;
+    if (!onScreen(btn.getBoundingClientRect())) return; // nothing to hang it from
+    root.classList.add("open");
+    pop.classList.add("open");
+    pop.style.visibility = "hidden"; // placed first, then shown: no frame in the wrong spot
+    place();
+    pop.style.visibility = "";
+  }
+
+  function close() {
+    root.classList.remove("open");
+    pop.classList.remove("open");
+  }
 
   function render() {
     const o = opts.find((x) => x.value === selected);
@@ -89,26 +157,43 @@ function customSelect(root) {
         const changed = opt.value !== selected;
         selected = opt.value;
         render();
-        root.classList.remove("open");
+        close();
         if (changed) for (const fn of listeners) fn();
       });
       pop.appendChild(row);
     }
+    if (isOpen()) place(); // the list's height is its content's: re-measure it where it is
   }
 
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     // an empty picker is DISABLED, and a disabled control does not open: the
     // button is a real <button>, so only the class marks it (report #3)
-    if (root.classList.contains("disabled")) return;
-    root.classList.toggle("open");
+    if (isOpen()) close();
+    else open();
   });
   document.addEventListener("click", (e) => {
-    if (!root.contains(e.target)) root.classList.remove("open");
+    // the list lives on <body> now: a press on one of its rows is a press INSIDE
+    // the picker, however far from `root` that node is
+    if (!root.contains(e.target) && !pop.contains(e.target)) close();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") root.classList.remove("open");
+    if (e.key === "Escape") close();
   });
+  // The list hangs from the button's rect, so it travels with it: a scroll anywhere
+  // beneath it (the settings pane is one) moves it, a resize re-measures it, and a
+  // button scrolled out of sight takes it away instead of leaving a list floating
+  // over nothing. A scroll INSIDE the list is its own scrollbar moving, not the page
+  // moving under it — re-placing then would cap the height again mid-drag.
+  function follow(e) {
+    if (!isOpen()) return;
+    if (e && e.target && pop.contains(e.target)) return;
+    const r = btn.getBoundingClientRect();
+    if (onScreen(r)) place();
+    else close();
+  }
+  window.addEventListener("resize", follow);
+  document.addEventListener("scroll", follow, true);
 
   return {
     set innerHTML(_v) { opts.length = 0; selected = null; render(); }, // only ever cleared

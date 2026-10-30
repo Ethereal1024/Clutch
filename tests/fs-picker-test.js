@@ -857,9 +857,10 @@ async function main() {
   // a disabled custom picker must not open: the button is a real <button>, so only
   // the class marks it (the profile picker sets disabled and still opened)
   const select = fnBody("customSelect");
-  check(/if \(root\.classList\.contains\("disabled"\)\) return;/.test(select) &&
-    select.indexOf('classList.contains("disabled")') < select.indexOf('root.classList.toggle("open")'),
-    "customSelect refuses to open while it is disabled");
+  const openFn = select.slice(select.indexOf("function open()"), select.indexOf("function close()"));
+  check(/root\.classList\.contains\("disabled"\)\) return;/.test(openFn) &&
+    openFn.indexOf('contains("disabled")') < openFn.indexOf('pop.classList.add("open")'),
+    "customSelect refuses to open while it is disabled — and the guard stands before the list is shown");
 
   // ---- 10) the markup and the CSS the report is about ----
   const connBar = HTML.slice(HTML.indexOf('<div class="fs-conn">'), HTML.indexOf('<div id="fs-body">'));

@@ -576,6 +576,24 @@ github.com 的网络里，组件市场与远端 pylibs 安装都应能走通。
 
 **待验（真机）**：展开/收起 `process` 块有过渡（约 200–420ms，随内容高度走），中途反点点能从中途接上而不是重放；系统开了"移除动画"时直接落位。点 "load earlier records"：**同一帧**看到环与 `loading N…`；大页时先出现 `rendering earlier records…` 再插进来；一直点不会发出第二个请求；到历史尽头 pill 消失；网络失败时回到 offer 且下面有一行 `Failed to load earlier records: …`（这两种视觉在本机**没法**验：这台机器上 Electron 缺 `libatk-1.0.so.0`、没有 chromium 也没有 xvfb，只能靠上面的顺序测试与代码推理，真机是验收口）。
 
+## 模型页的下拉列表被窗口裁掉（报告："下拉列表展开后被放在窗口里面，只能在很窄的一条里拖滚动条"）
+
+**报告**：设置 → **Model**，点开 "Saved profiles" 的下拉列表，展开的列表不是浮在弹窗上面，而是被装进窗口里——只剩很窄的一条能拖滚动条，选项既看不清也点不准。
+
+**根因**：这个自绘下拉（`ui/js/settings.js` 的 `customSelect()`，`.cselect-btn` + `.cselect-pop`）把列表画在**自己的行里**：`.cselect { position: relative }`、`.cselect-pop { position: absolute }`。Model 页的 picker 在 `.modal-pane` 里（`overflow-y: auto`），而 pane 又在 `#settings-modal .modal-box` 里（`overflow: hidden`、高度 `min(78vh, 720px)`、手机上是 `calc(100vh - 96px)`）。绝对定位的后代**是会被祖先的 overflow 裁掉的**，于是列表被裁在 pane 的底边：露出来的那一条自己带 `max-height: 240px` 的滚动条，剩下的（尤其是按钮靠下的时候）整个在视野外。桌面窗口高、pane 长，所以只有在手机上（以及把窗口缩矮时）看得见。
+
+**修法**：列表不再住在 picker 里，而是**挂到 `<body>` 上、按按钮自己的 rect 用 `position: fixed` 摆位**（`customSelect()` 的 `place()` / `open()` / `close()`）：
+
+1. **不受任何祖先裁切**：`document.body.appendChild(pop)` 一次完成；`.cselect-pop` 改成 `position: fixed`，`z-index: 130`（在 `.modal` 的 100 之上——列表是从**弹窗内部**打开的），并加 `overscroll-behavior: contain`，在列表里甩动不会带着页面滚。
+2. **尺寸来自视口，不来自弹窗**：宽度 `min-width` 取按钮宽度（列表"长到最宽的那条选项"这一条没变，只是 `min-width: 100%` 会因为 fixed 相对视口而变成"整个视口宽"，所以改由 js 给）；高度先量整份内容，再按按钮**下方**的空余封顶；下方放不下、上方更宽裕时**向上浮**（`top: auto` + `bottom` 显式写出来，否则样式表里的 `top: 0` 会把它从上边拉满）；水平方向夹在视口内。
+3. **跟着按钮走**：`document` 的捕获阶段 `scroll` 与 `window` 的 `resize` 重新摆位；按钮自己被滚出可见区时**收起**而不是留在原地；列表**自己**的滚动条被排除在外（那是手指在列表里拖，不是页面在动，重摆会把高度在拖动中途重新封顶）。能不能打开用的是**同一个判据**（`onScreen(r)`：`r.bottom > 0 && r.top < innerHeight`）——按钮整个在屏外时 `open()` 直接不打开，不留一个"标记为展开、画在视口外、下一次点击才被当成点在外面"的幽灵列表。
+4. **关得掉**：点外面（现在是 `!root.contains() && !pop.contains()`——行已经不在 `root` 里了）、Escape、再点一次按钮、选中一行，四条路都走同一个 `close()`。
+5. **样式跟着走**：`.cselect-pop.open` 取代 `.cselect.open .cselect-pop`（后者已经匹配不到）；原来靠 `.modal-box > .cselect .cselect-opt` 继承的等宽/展示字体，改成 picker 构造时按"自己的父节点是不是 `.modal-box`"给列表打 `cselect-pop-field` 类——它已经离开了那个盒子，祖先选择器够不着它。
+
+**回归**：`node tests/cselect-test.js` 加了第 7 节：列表的父节点是 `<body>` 而不是 picker；按钮在 390×800 的屏上靠上时列表挂在下方 4px、宽至少等于按钮、高度封在 240；同样 390 宽、按钮贴底（`top: 300`）时改从上方浮出、`bottom` 由视口算出；按钮贴右边时列表被拉回视口内、高度取按钮下方那条带；按钮被滚出屏幕时列表收起、且本来就在屏外的按钮连打开都不打开（同一个 `onScreen()` 判据）；点列表自己的一行不算"点在外面"；列表内滚动不重摆、页面滚动会重摆。样式表那几条钉子也换了：`position: fixed`（且不再有 absolute）、`z-index` 高于 `.modal`、`overscroll-behavior: contain`、`.cselect-pop.open` 而**没有**遗留的 `.cselect.open .cselect-pop`、`.cselect-pop-field` 存在。`node tests/fs-picker-test.js` 里"disabled 不许打开"那条钉子跟着挪到 `open()` 的守卫上（现在守卫在打开之前，而不是在按钮的监听里）。
+
+**本机已验（真 Chromium，不是推理）**：补上 `libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libcairo2 libgbm1 libgtk-3-0 libpango-1.0-0 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2` 与 `xvfb` 之后，用仓库自带的 Electron（`xvfb-run -a ui/node_modules/.bin/electron --no-sandbox <harness>`）把真实的 `customSelect()` 注进一个带 `.modal / .modal-box / .modal-pane` 的页面，按手机尺寸跑过（390×700，视口 390×673）：列表父节点 `BODY`、`position: fixed`、`z-index: 130`；按钮 y≈323–355、弹窗底边 486、pane 底边 411，而列表 rect 是 `top 355 / bottom 595`——**弹窗底边以下 109px 仍能命中**（`elementFromPoint` 落在一个 `.cselect-opt` 上），旧实现那里只剩 56px 的一条；pane 再滚 60px，列表跟着走 60px（`top 352 → 292`）；窗口压到 900×330（视口 303）而按钮仍在屏上时，列表从上方浮出、高度 138px（= 上方那条带的空余，既不是 240 也不是 pane 的 59px）；把窗口压到按钮跑出视口，列表在 `resize` 里自己收起。真机上还剩触摸手感与转屏——见「真机待验清单」第 18 条。
+
 ## M2：pylibs 供给线（代码+CI+测试完成，真远端验收待设备环节）
 
 完整 SSH 路径的最后一块拼图：手机上**没有** pip/bash，pylibs tar 改为 CI 预构建、
@@ -717,6 +735,13 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     `dev build`，也不是源码树里可能更新的号）；下面两行分别是 `Android <N> · Android WebView ·
     Chromium <M>` 与后端地址（未连接时是 `not connected`，连上后是那条会话的地址）。切换标签时
     弹窗高度随之变化但仍是滑过去、不是跳过去；About 页可以反复进出，号码不会变成空行。
+18. 下拉列表浮在弹窗**上面**而不是里面（报告"模型页的下拉列表被放在窗口里，只能在很窄的一条里拖滚动条"）：
+    设置 → **Model**，按 "Saved profiles" 右侧箭头——列表从按钮下方**浮出**并盖住/越出弹窗边框
+    （按钮贴着屏幕下沿时从**上方**浮出），宽度至少与按钮同宽、高度到屏幕边为止，**没有第二根
+    细滚动条**、也不被弹窗或页签面板切断；在列表里上下拖动时手机本身不跟着滚；把弹窗内容滚到底、
+    转屏或弹软键盘，列表跟着按钮走，按钮滚出可见区时列表自己收起；选中一行后按钮显示 profile 名
+    与 ✓、列表消失。同一个控件在「Open project」的主机列表、profile 编辑器的 reasoning effort /
+    API protocol 上表现一致（见「模型页的下拉列表被窗口裁掉」一节）。
 
 ## 与初版方案的偏差（均已定案）
 
