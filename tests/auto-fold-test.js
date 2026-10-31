@@ -30,8 +30,11 @@ function makeNode(tag) {
     attrs: {},
     textContent: "",
     parent: null,
+    nodeType: 1,
     _fragment: false,
   };
+  // the real DOM names the parent link parentNode; the stub keeps it in `parent`
+  Object.defineProperty(n, "parentNode", { get: () => n.parent });
   Object.defineProperty(n, "className", {
     get: () => [...classes].join(" "),
     set: (v) => {
@@ -97,6 +100,7 @@ function pane(rows) {
 // ---- the real file, against the stub ----
 let collapseCalls = 0;
 let toggleCalls = 0;
+let scrollCalls = 0;
 const streamNode = makeNode("div");
 streamNode.classList.add("loading"); // the page starts on the project-open path
 
@@ -104,6 +108,8 @@ const ctx = {
   console,
   pageSink: null,
   paging: false, // the pager's flag (js/project.js loadOlder); false: nobody is paging
+  busy: false, // the view's own "a run is in flight" (js/stream-view.js setStatus)
+  catchUp: false, // a reconnect replaying the log over the pane (js/stream-view.js)
   eventsEl: null,
   stream: streamNode,
   document: {
@@ -134,6 +140,11 @@ const ctx = {
     return wasHidden;
   },
   reducedMotion: () => false,
+  // a live row moving into the block re-pins a latched view (js/stream-view.js
+  // autoScroll). The stub has no scroll box; the count is what a test can see.
+  autoScroll: () => {
+    scrollCalls++;
+  },
   // the pinned head's repaint (js/stream-text.js paintStuck): a rAF, and this stub
   // has no frames
   queueStuck: () => {},
@@ -681,6 +692,269 @@ check(folds9h().length === 1 && folds9h()[0] === f9h && f9h.dataset.turnOpen ===
       p.children[p.children.length - 2] === a9h && p.children[p.children.length - 1] === d9h,
       "and the answer that closes the turn closes that one block, directly above itself");
 
+// ---- 10) the turn still running: foldable WHILE it runs, and the ring that says
+// so on a block the reader folded ----
+// The block is made by the run's first process row, and the rows go into it as they
+// arrive. Prose and the reader's own message stay in the pane, in the order they
+// were written: the ending's merge (mergeOpenFold) appends what stood outside the
+// block in file order, so a step put in front of the text it came after could never
+// be put back where it was.
+ctx.busy = true;
+const u10 = row("event user", "run the suite");
+const t10 = row("event tool_group", "bash … pytest");
+p = pane([u10]);
+ctx.eventsEl = p;
+p.appendChild(t10);
+ctx.foldLiveRow(t10);
+const live10 = foldOf(p);
+check(p.children.length === 2 && p.children[0] === u10 && p.children[1] === live10 &&
+      bodyOf(live10).children.length === 1 && bodyOf(live10).children[0] === t10,
+      "a run in flight folds as it draws: the block is made by its first process row and that row "
+      + "goes in, so the reader can put the process away in the middle of a task, not only at its end");
+check(live10.dataset.turnLive === "1" && live10.dataset.turnOpen === "1" &&
+      live10.children[1].classList.contains("open") &&
+      live10.children[0].attrs["aria-expanded"] === "true" &&
+      live10.attrs["aria-busy"] === "true",
+      "it lands OPEN and marked: `turnOpen` is what the ending's merge looks for — unmarked, the "
+      + "rest of the turn would fold into a SECOND block above the message that carried it on");
+check(live10.children[0].children.length === 3 &&
+      live10.children[0].children[2].className === "turn-fold-spin" &&
+      live10.children[0].children[2].attrs["aria-hidden"] === "true",
+      "the head carries the mark of a run still filling it in — a span after the label, not a word "
+      + "(ui/style.css draws it, and only on the closed state of a live block)");
+
+const r10 = row("event tool_result", "12 passed");
+p.appendChild(r10);
+ctx.foldLiveRow(r10);
+check(bodyOf(live10).children.length === 2 && bodyOf(live10).children[1] === r10 &&
+      live10.children[0].children[1].textContent === "process · 2 steps",
+      "every row the run draws after it joins the same block, in the order it was drawn, and the "
+      + "head's count follows");
+check(scrollCalls === 2,
+      "each row that moved into the block re-pins the tail through autoScroll: the head took room "
+      + "above it, and the append that drew the row scrolled before the head existed — a reader "
+      + "watching the run would otherwise see the tail sit one head short of the edge until the "
+      + "next row lands. It is the view's own latch (js/stream-view.js), so a reader who scrolled "
+      + "up is not moved");
+
+const x10 = row("event text", "the suite is green");
+p.appendChild(x10);
+ctx.foldLiveRow(x10);
+check(p.children[p.children.length - 1] === x10 && bodyOf(live10).children.length === 2,
+      "the run's prose is not process: it stays in the pane, under the block");
+
+const t10b = row("event tool_group", "read_file …");
+p.appendChild(t10b);
+ctx.foldLiveRow(t10b);
+check(p.children[p.children.length - 1] === t10b && bodyOf(live10).children.length === 2,
+      "and a step that follows the prose stays where it was drawn: what is inside the block has to "
+      + "stay in file order, or the ending's merge would append the text after the step it preceded");
+
+live10.children[0].onclick(); // the reader folds the live block
+check(live10.children[0].attrs["aria-expanded"] === "false" &&
+      live10.children[1].classList.contains("hidden") &&
+      live10.dataset.turnLive === "1",
+      "the reader can fold it mid-run: it closes and keeps saying the run is going — the ring hangs "
+      + "off `data-turn-live` with the closed `aria-expanded`, so no word has to say it");
+live10.children[0].onclick(); // ...and open it again, at will
+check(live10.children[0].attrs["aria-expanded"] === "true" &&
+      live10.children[1].classList.contains("open") &&
+      live10.dataset.turnLive === "1",
+      "and open it again: the state is the reader's to set for as long as the run lasts");
+
+const a10 = row("event text", "done: the fixture path was wrong");
+p.appendChild(a10);
+ctx.foldLiveRow(a10);
+const d10 = row("completion", "completed");
+p.appendChild(d10);
+ctx.autoFoldTurn();
+check(foldOf(p) === live10 && p.children[p.children.length - 1] === d10 &&
+      p.children[p.children.length - 2] === a10 &&
+      bodyOf(live10).children.length === 4 &&
+      bodyOf(live10).children[2] === x10 && bodyOf(live10).children[3] === t10b &&
+      live10.dataset.turnLive === undefined && live10.dataset.turnOpen === undefined &&
+      live10.attrs["aria-busy"] === "false",
+      "the ending takes in what stood outside the block, in file order, directly above the answer: "
+      + "one block, one turn — and the mark of the run in flight is gone, because it is over");
+
+// 10b) a block nobody touched closes with the ending, the way the ending's own fold
+// would land, and it animates there: the reader watched those rows arrive
+ctx.busy = true;
+const u10b = row("event user", "explain the failure");
+const t10b2 = row("event tool_group", "read_file …");
+p = pane([u10b]);
+ctx.eventsEl = p;
+p.appendChild(t10b2);
+ctx.foldLiveRow(t10b2);
+const live10b = foldOf(p);
+const a10b = row("event text", "the fixture path");
+const d10b = row("completion", "completed");
+p.appendChild(a10b);
+ctx.foldLiveRow(a10b);
+p.appendChild(d10b);
+ctx.busy = false;
+collapseCalls = 0;
+ctx.autoFoldTurn();
+check(foldOf(p) === live10b && live10b.children[1].classList.contains("hidden") &&
+      !live10b.children[1].classList.contains("open") &&
+      live10b.children[0].attrs["aria-expanded"] === "false" && collapseCalls === 1,
+      "a block the reader never touched closes with the ending and ANIMATES there — the state the "
+      + "fold the ending would have made lands in, saying what it counted");
+
+// 10c) the states where rows still arrive but nothing is running: a block made in any
+// of them would fold a transcript the reader is watching arrive from the log
+ctx.busy = true;
+setLoading(true);
+const t10c = row("event tool_group", "x");
+p = pane([t10c]);
+ctx.eventsEl = p;
+ctx.foldLiveRow(t10c);
+check(foldOf(p) === undefined, "the project-open reconstruction is not folded as it renders");
+setLoading(false);
+ctx.catchUp = true;
+const t10c2 = row("event tool_group", "y");
+p = pane([t10c2]);
+ctx.eventsEl = p;
+ctx.foldLiveRow(t10c2);
+check(foldOf(p) === undefined, "nor is a reconnect's catch-up block: those rows are history");
+ctx.catchUp = false;
+ctx.busy = false;
+const t10c3 = row("event tool_group", "z");
+p = pane([t10c3]);
+ctx.eventsEl = p;
+ctx.foldLiveRow(t10c3);
+check(foldOf(p) === undefined && p.children[0] === t10c3,
+      "and nothing folds when no run is in flight: a replayed transcript stays as the log wrote it");
+// a straggler: the run's own `final` lands before the view's status does, so a row
+// can still arrive with `busy` true behind a divider that really ended its turn
+const d10c = row("completion", "completed");
+const t10c4 = row("event tool_group", "late");
+p = pane([row("event user", "a task"), d10c, t10c4]);
+ctx.eventsEl = p;
+ctx.foldLiveRow(t10c4);
+check(foldOf(p) === undefined && p.children[2] === t10c4,
+      "a row behind a divider that ENDED its turn folds over nothing: the turn is over, and a block "
+      + "made there would hang off a divider the next ending has already closed");
+ctx.busy = false;
+
+// 10d) a turn a dropped session left with one open block: the run that carries the
+// turn on adds to THAT block, and the reader's own next message is a hard boundary
+ctx.busy = true;
+const u10d = row("event user", "the task");
+const t10d = row("event tool_group", "bash …");
+p = pane([u10d, t10d]);
+ctx.eventsEl = p;
+ctx.foldLiveRow(t10d);
+const live10d = foldOf(p);
+ctx.busy = false;
+ctx.clearRunLive(); // the session goes away mid-run (clutch:turn-interrupted)
+check(live10d.dataset.turnLive === undefined && live10d.dataset.turnOpen === "1" &&
+      live10d.attrs["aria-busy"] === "false",
+      "a dropped session takes the ring with it and leaves the block where it is, still the turn's "
+      + "own: no ending is coming to this window, and nothing is being filled in any more");
+ctx.busy = true;
+const w10d = row("event tool_group", "bash …");
+p.appendChild(w10d);
+ctx.foldLiveRow(w10d);
+check(foldOf(p) === live10d && bodyOf(live10d).children.length === 2 &&
+      bodyOf(live10d).children[1] === w10d,
+      "the run that carries the turn on adds to the SAME block: an ending's merge would have done "
+      + "no different, and a second block would end up one fold inside another");
+const u10d2 = row("event user", "a different task");
+const t10d2 = row("event tool_group", "read_file …");
+p.appendChild(u10d2);
+ctx.foldLiveRow(u10d2);
+p.appendChild(t10d2);
+ctx.foldLiveRow(t10d2);
+check(foldOf(p) === live10d && p.children.length === 4 &&
+      bodyOf(live10d).children.length === 2 && p.children[3] === t10d2,
+      "the reader's own next message is a hard boundary: the block above it is the previous turn's, "
+      + "and nothing the new task draws may go into it — the ending's merge decides, with the "
+      + "ending in hand");
+
+// 10e) the same turn drawn live and replayed: ONE shape at the end. The live block is
+// not a new arrangement of the transcript, it is the ending's fold built early.
+function liveRun(rows) {
+  const paneEl = pane([rows[0]]);
+  ctx.eventsEl = paneEl;
+  ctx.busy = true;
+  for (const r of rows.slice(1)) {
+    paneEl.appendChild(r);
+    if (!r.matches(".completion")) ctx.foldLiveRow(r);
+  }
+  ctx.busy = false;
+  ctx.autoFoldTurn();
+  return paneEl;
+}
+const replayRun = (rows) => {
+  const paneEl = pane(rows);
+  ctx.eventsEl = paneEl;
+  ctx.busy = false;
+  ctx.autoFoldTurn();
+  return paneEl;
+};
+// what the reader ends up looking at: the pane's rows in order, and inside a block,
+// the rows it holds in order
+const shapeOf = (paneEl) => paneEl.children.map((c) => {
+  if (!c.matches(".turn-fold")) return c.textContent || c.className;
+  return "fold[" + bodyOf(c).children.map((x) => x.textContent || x.className).join(" / ") +
+    "]=" + c.children[0].children[1].textContent;
+}).join(" | ");
+const records10 = () => [
+  row("event user", "task"),
+  row("event thinking", "where is the fixture …"),
+  row("event tool_group", "bash …"),
+  row("event text", "half way"),
+  row("event tool_group", "read_file …"),
+  row("event text", "done"),
+  row("completion", "completed"),
+];
+check(shapeOf(liveRun(records10())) === shapeOf(replayRun(records10())),
+      "a turn the reader watched stream and the same turn replayed from the log end in ONE shape — "
+      + "same rows in the pane, same rows in the block, same order, same count (" +
+      JSON.stringify(shapeOf(replayRun(records10()))) + ")");
+const interrupted10 = () => [
+  row("event user", "task"),
+  row("event tool_group", "bash …"),
+  row("event thinking", "hmm"),
+  row("completion", "error"),
+  row("completion-note", "run failed: connection reset"),
+];
+check(shapeOf(liveRun(interrupted10())) === shapeOf(replayRun(interrupted10())),
+      "and so does a turn that stopped without an answer — the rows the run drew stay in the block "
+      + "and the reason it stopped stays under the divider");
+
+// 10f) the observer the page installs: the pane's own child list, elements only
+let observed10 = null;
+ctx.MutationObserver = function (cb) {
+  this.observe = (target, opts) => { observed10 = { cb, target, opts }; };
+};
+ctx.busy = true;
+const u10f = row("event user", "task");
+const t10f = row("event tool_group", "bash …");
+p = pane([u10f]);
+ctx.eventsEl = p;
+ctx.watchLiveRows();
+check(observed10 && observed10.target === p && observed10.opts.childList === true &&
+      !observed10.opts.subtree,
+      "the pane's own child list is what is watched, not the whole subtree: a body or a tool group's "
+      + "list filling in is not a row of the transcript");
+p.appendChild(t10f);
+const t10f2 = row("event tool_result", "…");
+observed10.cb([
+  { target: row("div"), addedNodes: [t10f] }, // a record from deeper in: not a pane row
+  { target: p, addedNodes: [{ nodeType: 3 }] }, // a text node: has no class list to read
+  { target: p, addedNodes: [t10f] },
+]);
+check(foldOf(p) !== undefined && bodyOf(foldOf(p)).children[0] === t10f,
+      "a row the pane gains is folded as it arrives, and a record from anywhere else is ignored");
+p.appendChild(t10f2);
+observed10.cb([{ target: p, addedNodes: [t10f2] }]);
+check(bodyOf(foldOf(p)).children.length === 2 && bodyOf(foldOf(p)).children[1] === t10f2,
+      "and the next one joins the same block, through the same door");
+delete ctx.MutationObserver;
+ctx.busy = false;
+
 // ---- 8) the wiring the page has to carry ----
 const uiDir = path.join(__dirname, "..", "ui");
 const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
@@ -753,6 +1027,22 @@ check(/\.turn-fold \.fold:not\(\.open\) \.fold-body > \* \{\s*animation: none/.t
       "not open — and only there: opening it is when they arrive");
 check(/\[aria-expanded="true"\] \.turn-fold-caret\s*\{[^}]*transform:\s*rotate\(90deg\)/.test(css),
       "the caret is turned by the head's own aria-expanded, not by a second glyph");
+check(/\.turn-fold-spin\s*\{[^}]*display:\s*none[^}]*width:\s*10px;\s*height:\s*10px[^}]*border:\s*2px solid var\(--border\)[^}]*border-top-color:\s*var\(--accent\)/.test(cssBare) &&
+      /\.turn-fold\[data-turn-live="1"\] \.turn-fold-head\[aria-expanded="false"\] \.turn-fold-spin\s*\{\s*display:\s*block;\s*animation:\s*older-spin \.7s linear infinite;/.test(cssBare) &&
+      !/\.turn-fold[^{]*:has\(/.test(cssBare),
+      "the run in flight is drawn by a RING in a folded head, and by the same ring the older-records "
+      + "pill spins (10px, --border with an --accent top, one 700ms turn): this sheet has one "
+      + "loading language and a second glyph would read as a second state. No `:has()` — the phone "
+      + "renders this page in the system WebView, whose version belongs to the device");
+check(/\.turn-fold\[data-turn-live="1"\][^{]*\[aria-expanded="false"\]/.test(cssBare),
+      "and only for the CLOSED state of a live block: an open one has its rows arriving, which is "
+      + "the same fact without a glyph, and a finished one has no reason to look busy");
+check(/foldRegion\(eventsEl, turnEnd\);[\s\S]{0,220}settleRunBlocks\(\)/.test(selfSrc),
+      "the ending settles the block the run was drawing into after it has taken the turn's rows: "
+      + "the ring goes, and a block the reader never touched closes where it stands");
+check(/if \(eventsEl\) watchLiveRows\(\);/.test(selfSrc),
+      "and the pane's own child list is watched from the moment the page is open — the append sites "
+      + "are in files this one loads after, so none of them may name the fold");
 check(/\.turn-fold-caret\s*\{[^}]*transition:\s*transform var\(--move\)/.test(css),
       "the caret's turn runs at the fold's own --move, not on the CSS default");
 check(!/fold-inner::after/.test(css),
@@ -767,9 +1057,11 @@ check(/if \(busy\) sseRunAtRisk = true;[\s\S]{0,600}dispatchEvent\(new CustomEve
       "dropping a dead session announces that the run in flight has no ending coming — where " +
       "sseRunAtRisk is set, so the same fact is stated once — and the fold of that turn happens " +
       "here, on the pane whose shape is known");
-check(/addEventListener\("clutch:turn-interrupted", \(\) => foldOpenTurn\(\)\)/.test(selfSrc),
+check(/addEventListener\("clutch:turn-interrupted", \(\) => \{\s*clearRunLive\(\);\s*foldOpenTurn\(\);\s*\}\)/.test(selfSrc),
       "and auto-fold listens for it, for the same load-order reason the prepend is announced: " +
-      "js/backend-lifecycle.js loads before this file and may not name it");
+      "js/backend-lifecycle.js loads before this file and may not name it. The liveness goes " +
+      "first — a block the run was still filling in is not being filled in any more, so the ring " +
+      "in its head stops before the block is folded");
 check(/addEventListener\("clutch:page-prepended", \(\) => foldClosedRegions\(eventsEl\)\)/.test(selfSrc),
       "and the file that knows how to fold listens for it — it loads after the pager, so the " +
       "pager may not name it (load order is the contract)");

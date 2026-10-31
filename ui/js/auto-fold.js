@@ -10,6 +10,11 @@
 // in this pane already uses (js/stream-text.js wrapFold), so opening it is the
 // animation the reader knows.
 //
+// A turn is foldable WHILE it is still running, too: the block is built the first
+// time a run draws a process row, the rows go into it as they arrive, and a reader
+// who folds it mid-run gets a ring in its head saying the run has not finished
+// (the "the turn still drawing into the pane" section below, foldLiveRow and after).
+//
 // Not every turn ends with an answer. A session released mid-run, a run the window
 // saw fail: the transcript stops where it stood, and what the window has drawn so
 // far is the process of a turn whose end it cannot see. Those rows fold too — at
@@ -102,6 +107,95 @@ function openFoldAt(kids, from, to) {
   return -1;
 }
 
+// The block itself: the head the reader presses, the fold it opens, and the rows
+// that go inside it — in the place `ref` held, which is the first row of the middle.
+// One builder because there are two moments that make a block out of the same parts:
+// a turn's ending (foldRegion), and a run still drawing rows into the pane
+// (openRunBlock), and the second one has to leave exactly the shape the first one
+// would have made or the ending's merge would re-order what the reader watched.
+//
+// The wrapper takes the first folded row's place FIRST (insertBefore needs a
+// reference node still in `root`), and the rows then move in behind it: the rows
+// above the middle (the task, or the prose a live block was opened under) stay where
+// they are, and everything the turn goes on to draw stays below the block.
+function buildFold(root, ref, rows) {
+  const wrap = document.createElement("div");
+  wrap.className = "turn-fold";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "turn-fold-head";
+  head.setAttribute("aria-expanded", "false");
+  const caret = document.createElement("span");
+  caret.className = "turn-fold-caret";
+  // one glyph for both states: the quarter turn that makes it point down is
+  // `transform: rotate(90deg)` under `[aria-expanded="true"]` (ui/style.css), so
+  // the caret keeps its advance width and the label never shifts under the
+  // reader's finger — a glyph SWAP cannot be transitioned, and this one moves
+  // with the fold it opens. The state it is drawn from is the attribute below,
+  // which is also what a screen reader reads. The glyph itself is the icon face's
+  // FILLED triangle rather than the `▸` the other fold toggles in this pane use:
+  // that one is drawn 3x4px at 12px and this caret is the only control a whole
+  // block of the transcript hangs off (ui/style.css has the sizes).
+  caret.textContent = "▶";
+  const label = document.createElement("span");
+  label.textContent = foldLabel(rows.length);
+  // The mark of a run that is still going, drawn where the label runs out. No
+  // text: a block the reader folded while the session is running has to be able to
+  // tell them it is still filling in, and the count beside it says how much is in
+  // there, not that more is on the way (ui/style.css draws it, and only for the
+  // closed state of a live block).
+  const spin = document.createElement("span");
+  spin.className = "turn-fold-spin";
+  spin.setAttribute("aria-hidden", "true");
+  head.appendChild(caret);
+  head.appendChild(label);
+  head.appendChild(spin);
+
+  // the fold starts OPEN and is closed by the caller: the rows are in their final
+  // place for the one synchronous pass either way, so the open state is never
+  // painted, and the close is the animation the reader sees (.fold is 0fr in CSS;
+  // .open is 1fr — see ui/style.css and js/stream-text.js)
+  const fold = document.createElement("div");
+  fold.className = "fold open";
+  const inner = document.createElement("div");
+  inner.className = "fold-inner";
+  // The rows sit one level deeper than the clip: `.fold-inner` clips, and
+  // `.fold-body` is what the close SLIDES (up by its own height, js/stream-text.js
+  // foldAnim) so the last row stays glued to the shrinking box's bottom edge instead
+  // of being sliced off at the crop line — the rows leave under the hanging head.
+  // It is the only thing that can move there: a transform on the box would carry the
+  // clip window with it and leave a gap where the rows were.
+  const body = document.createElement("div");
+  body.className = "fold-body";
+  inner.appendChild(body);
+  fold.appendChild(inner);
+  wrap.appendChild(head);
+  wrap.appendChild(fold);
+
+  root.insertBefore(wrap, ref);
+  const frag = document.createDocumentFragment();
+  for (const el of rows) frag.appendChild(el); // moves each row out of the pane
+  body.appendChild(frag);
+  // where the fold keeps what a later page, or a run that is still going, needs to
+  // add to: the rows it holds (absorbIntoRegion prepends to them, a live row appends
+  // to them), the count in its head, and the two parts a state is set on
+  wrap._body = body;
+  wrap._label = label;
+  wrap._head = head;
+  wrap._fold = fold;
+  head.onclick = () => {
+    // toggleFold answers with where the fold is GOING, not with the class list it
+    // is passing through: mid-flight a second click reverses the move instead of
+    // re-running it, and the caret/attribute follow the answer either way.
+    const open = toggleFold(fold);
+    head.setAttribute("aria-expanded", open ? "true" : "false");
+    // the reader has now said what this block should look like, and a run that
+    // ends later does not get to overrule them (settleRunBlocks)
+    wrap._touched = true;
+  };
+  return wrap;
+}
+
 // Fold this turn's middle, folding the one region of `root` that ends at
 // `turnEnd`: the index, in root's children, of the divider that closed the turn.
 // `root` is the pane for a live or replayed `final`, and the pane again for the
@@ -192,69 +286,9 @@ function foldRegion(root, turnEnd) {
 
   opener.dataset.turnFolded = "1"; // before the move: the rows are about to leave
 
-  const wrap = document.createElement("div");
-  wrap.className = "turn-fold";
-  const head = document.createElement("button");
-  head.type = "button";
-  head.className = "turn-fold-head";
-  head.setAttribute("aria-expanded", "false");
-  const caret = document.createElement("span");
-  caret.className = "turn-fold-caret";
-  // one glyph for both states: the quarter turn that makes it point down is
-  // `transform: rotate(90deg)` under `[aria-expanded="true"]` (ui/style.css), so
-  // the caret keeps its advance width and the label never shifts under the
-  // reader's finger — a glyph SWAP cannot be transitioned, and this one moves
-  // with the fold it opens. The state it is drawn from is the attribute below,
-  // which is also what a screen reader reads. The glyph itself is the icon face's
-  // FILLED triangle rather than the `▸` the other fold toggles in this pane use:
-  // that one is drawn 3x4px at 12px and this caret is the only control a whole
-  // block of the transcript hangs off (ui/style.css has the sizes).
-  caret.textContent = "▶";
-  const label = document.createElement("span");
-  label.textContent = foldLabel(mid.length);
-  head.appendChild(caret);
-  head.appendChild(label);
-
-  // the fold starts OPEN and is closed just below: the rows are in their final
-  // place for the one synchronous pass either way, so the open state is never
-  // painted, and the close is the animation the reader sees (.fold is 0fr in CSS;
-  // .open is 1fr — see ui/style.css and js/stream-text.js)
-  const fold = document.createElement("div");
-  fold.className = "fold open";
-  const inner = document.createElement("div");
-  inner.className = "fold-inner";
-  // The rows sit one level deeper than the clip: `.fold-inner` clips, and
-  // `.fold-body` is what the close SLIDES (up by its own height, js/stream-text.js
-  // foldAnim) so the last row stays glued to the shrinking box's bottom edge instead
-  // of being sliced off at the crop line — the rows leave under the hanging head.
-  // It is the only thing that can move there: a transform on the box would carry the
-  // clip window with it and leave a gap where the rows were.
-  const body = document.createElement("div");
-  body.className = "fold-body";
-  inner.appendChild(body);
-  fold.appendChild(inner);
-  wrap.appendChild(head);
-  wrap.appendChild(fold);
-
-  // the wrapper takes the first folded row's place FIRST (insertBefore needs a
-  // reference node still in `root`), and the rows then move in behind it: the
-  // task row stays above the fold, the closing answer and the completion divider
-  // stay below it
-  root.insertBefore(wrap, mid[0]);
-  const frag = document.createDocumentFragment();
-  for (const el of mid) frag.appendChild(el); // moves each row out of the pane
-  body.appendChild(frag);
-  // where the fold keeps the two things a later page needs to add to: the rows it
-  // holds (absorbIntoRegion prepends to them) and the count in its head
-  wrap._body = body;
-  wrap._label = label;
-  head.onclick = () => {
-    // toggleFold answers with where the fold is GOING, not with the class list it
-    // is passing through: mid-flight a second click reverses the move instead of
-    // re-running it, and the caret/attribute follow the answer either way.
-    const open = toggleFold(fold);
-    head.setAttribute("aria-expanded", open ? "true" : "false");
-  };
+  const wrap = buildFold(root, mid[0], mid);
+  const head = wrap._head;
+  const fold = wrap._fold;
 
   // Collapse it. Live runs animate the close (the reader watched those rows
   // arrive); a replayed turn gets the end state at once — a project open must not
@@ -397,6 +431,9 @@ function autoFoldTurn() {
     if (kids[i].matches(".completion")) { turnEnd = i; break; }
   }
   foldRegion(eventsEl, turnEnd);
+  // and the block a run was drawing into stops saying it is still filling in, and
+  // closes if the reader never had an opinion about it
+  settleRunBlocks();
 }
 
 // Fold the turn that is still IN FLIGHT, and leave it open.
@@ -424,6 +461,218 @@ function foldOpenTurn() {
   // the turn ends at the pane's end: there is no divider to fold up to, and
   // foldRegion reads that as what it is — a turn with no ending yet
   foldRegion(eventsEl, kids.length);
+}
+
+/* ── the turn still drawing into the pane: foldable WHILE it runs ──────────────
+   A finished turn folds when its ending lands; a run that is still working used to
+   leave every row expanded until then, so the one moment the reader most wants the
+   process out of the way — a long task, a small screen, an answer they are waiting
+   for — was the one moment there was nothing to fold. So the block is built the
+   first time the run draws a process row, and the rows go into it as they arrive:
+   the reader can open and close the live block at will, and what is inside it is
+   already where the ending's fold would put it.
+
+   A folded block also has to say that it is still filling in. The reader folded it
+   themselves and nothing else in the transcript announces the run; so the closed
+   state of a LIVE block carries a ring in its head (ui/style.css,
+   `.turn-fold-spin`), the same ring the older-records pill spins while it waits.
+   No word for it: the count beside it already changes as rows land, and a label
+   that said "running" would be one more thing to read on a row whose whole job is
+   to be one line. The marks are the DOM's, not the reader's: `data-turn-live` is
+   what the sheet draws the ring from, and it goes away with the run
+   (settleRunBlocks, and clearRunLive when a dropped session takes the ending with
+   it).
+
+   Nothing here invents a fold where the ending's own would differ: the block is
+   anchored over the run's first process rows — the place the ending's fold takes —
+   and it only ever absorbs rows that stand after it with no prose between, so the
+   body stays in file order when the ending appends the rows that stood outside it
+   (mergeOpenFold). */
+
+// Is a run drawing into this pane right now? `busy` is the view's own answer
+// (js/stream-view.js setStatus: running, or waiting on a permission), and the rest
+// are the states where rows still arrive but nothing is running: the catch-up block
+// a reconnect replays (those rows are history, and folding them one at a time would
+// fold a turn the reader is watching arrive), the project-open reconstruction, and
+// the history pager, whose rows render into an off-DOM sink in any case.
+function runInFlight() {
+  return !!busy && !catchUp && !paging && !pageSink && !stream.classList.contains("loading");
+}
+
+// A row the RUN drew as process, as opposed to the ends of the turn — its task and
+// the prose it answers with — which stay in plain sight. A `.live` row is the run
+// talking ABOUT itself (the "reconnecting" chip, the compaction in progress), not a
+// step of it: that is news, and it stays visible where it was put.
+function runProcessRow(el) {
+  if (!el.matches(".event")) return false;
+  if (el.matches(".event.user") || el.matches(".event.text") || el.matches(".live")) return false;
+  return true;
+}
+
+// A row that has to stay in plain sight between the block and the row arriving
+// after it. Three of them:
+//  - the reader's own message: a hard boundary. The block above it belongs to the
+//    turn before, and nothing their next task draws may go into it (the ending's
+//    merge is what decides otherwise, with the ending in hand).
+//  - the prose the run has already answered with: the body has to stay in FILE
+//    order. Rows absorbed later are appended in order (mergeOpenFold), so a step
+//    put in front of the text it came after could never be put back where it was.
+//  - an ending: the run that drew it is over, and the rows after it belong to
+//    whatever the ending's own fold makes of them.
+function runBoundaryRow(el) {
+  return el.matches(".event.user") || el.matches(".event.text") || el.matches(".completion");
+}
+
+// One row the pane just gained: put it in the turn's block, or make the block here
+// if this is the run's first process row. Called from the observer below, not from
+// the append sites — the pane is appended to in a dozen places (js/stream-events.js
+// addEvent, the coalesced text and thinking renderers, tool groups,
+// js/render-events.js), and this file loads AFTER all of them, so none of them may
+// name it (the app's classic-script load order: tests/ui-load-order-test.js). An
+// observer sees every one of those appends, and it runs in the microtask before the
+// frame is painted: a row is never painted in the pane and then watched jumping
+// into the block.
+function foldLiveRow(el) {
+  if (!eventsEl || !el || !runInFlight()) return;
+  if (el.parentNode !== eventsEl) return; // already in a block, or in the pager's sink
+  if (!runProcessRow(el)) return;
+  const wrap = openRunBlock(el);
+  if (!wrap) return; // a boundary stands before it, or this turn has its block
+  takeIntoBlock(wrap, el);
+  // Moving the row into the block changed where the pane's bottom is by the room a
+  // head takes, and the append that drew this row already scrolled: the reader
+  // watching the run would see the tail sit one head short of the edge until the
+  // next row lands. autoScroll is the file's own latch (js/stream-view.js): a
+  // reader who scrolled up is not moved, and one at the tail is put back on it.
+  autoScroll();
+}
+
+// The block this row belongs in, made when this is the run's first process row.
+// Null means "leave the row in the pane": it stands on the far side of something
+// that stays visible (runBoundaryRow), or this turn's block already exists.
+function openRunBlock(el) {
+  const kids = Array.from(eventsEl.children);
+  const at = kids.indexOf(el);
+  if (at < 0) return null;
+  // A row that stands after a divider which really ENDED its turn belongs to no run
+  // in flight: the run's own `final` lands before the view's own status does, so a
+  // straggler can arrive with `busy` still true, and a block made over it would hang
+  // off a divider the next ending has already closed. It is left in the pane. An
+  // interruption closed nothing, so its divider is not one of these.
+  for (let i = at - 1; i >= 0; i--) {
+    if (!kids[i].matches(".completion")) continue;
+    if (turnEnded(kids[i].textContent)) return null;
+    break;
+  }
+  // The turn this run belongs to: the span an ending will reach back through
+  // (turnSpan). A turn an interrupted session left with one open block therefore
+  // keeps that block — the rows that carry the turn on go into it, which is what
+  // mergeOpenFold does with them at the ending anyway.
+  const span = turnSpan(kids, kids.length);
+  const openAt = openFoldAt(kids, span, kids.length);
+  if (openAt >= 0) {
+    for (let i = openAt + 1; i < at; i++) if (runBoundaryRow(kids[i])) return null;
+    markLive(kids[openAt]);
+    return kids[openAt];
+  }
+  // At most one block per turn. One that is here already, open or closed, is this
+  // turn's: a fold an ending has just made, or the one the rows of this run are
+  // being drawn outside of. A second block would end up nested inside the first
+  // when the ending merges them (foldRegion folds the region it finds).
+  for (let i = span; i < kids.length; i++) {
+    if (kids[i].matches(".turn-fold")) return null;
+  }
+  // The block goes over the process rows this run has drawn so far — the place the
+  // ending's fold would take. Whatever stands above them (the task, or prose the run
+  // started by saying) keeps its own row, and the ending's merge takes everything
+  // that stood between the block and the answer, in file order.
+  let from = at;
+  while (from > span && runProcessRow(kids[from - 1])) from--;
+  const wrap = buildFold(eventsEl, kids[from], kids.slice(from, at + 1));
+  markLive(wrap);
+  return wrap;
+}
+
+// This block is the turn in flight: it takes the rows the run is still drawing, and
+// while it is folded its head says so with the ring. It is marked OPEN because the
+// turn has not ended — an ending still has to add its rows to THIS block
+// (mergeOpenFold) instead of building a second one above the continuation — and a
+// fresh block lands open, because a reader watching a run has no reason to see it
+// hide itself; a block the reader has folded keeps the state they put it in.
+function markLive(wrap) {
+  if (wrap.dataset.turnLive === "1") return;
+  wrap.dataset.turnLive = "1";
+  wrap.dataset.turnOpen = "1";
+  wrap.setAttribute("aria-busy", "true"); // what a screen reader hears instead of the ring
+  if (!wrap._fold || !wrap._fold.classList.contains("open")) return;
+  wrap._head.setAttribute("aria-expanded", "true");
+}
+
+// The row joins the block at the body's end, which is the order the rows were drawn
+// in — the same place and the same order the ending's merge appends the rows that
+// stood outside it, so the body reads in file order whichever way a row got in.
+function takeIntoBlock(wrap, el) {
+  wrap._body.appendChild(el); // a move: the row leaves the pane
+  if (wrap._label) wrap._label.textContent = foldLabel(wrap._body.children.length);
+  queueStuck(); // the block grew: whether its head pins has changed
+}
+
+// Every block in the pane a run is still filling in.
+function liveBlocks() {
+  if (!eventsEl) return [];
+  return Array.from(eventsEl.children).filter((el) =>
+    el.matches(".turn-fold") && el.dataset.turnLive === "1");
+}
+
+// The run is over: the block stops saying it is still filling in and — if the reader
+// never touched it — closes where it stands, which is the state the fold the ending
+// makes lands in (foldRegion collapses the block it builds).
+//
+// A block the reader toggled is left as they left it. They said what they want to
+// see while the rows were still arriving, and the ending is not news to a block they
+// have been reading for the whole run.
+function settleRunBlocks() {
+  for (const wrap of liveBlocks()) {
+    delete wrap.dataset.turnLive;
+    wrap.setAttribute("aria-busy", "false");
+    if (wrap._touched) continue;
+    const fold = wrap._fold;
+    if (!fold || fold.classList.contains("hidden")) continue; // already closed
+    if (foldsLandClosed()) {
+      fold.classList.remove("open");
+      fold.classList.add("hidden");
+    } else {
+      foldCollapse(fold);
+    }
+    if (wrap._head) wrap._head.setAttribute("aria-expanded", "false");
+  }
+}
+
+// The liveness alone goes when the session the run lived in is gone: no ending is
+// coming to this window, so nothing is still filling the block in — but the block
+// itself stays exactly where it is, open or closed, because the reader may still be
+// reading it, and the rest of the turn adds to it (foldOpenTurn, mergeOpenFold).
+function clearRunLive() {
+  for (const wrap of liveBlocks()) {
+    delete wrap.dataset.turnLive;
+    wrap.setAttribute("aria-busy", "false");
+  }
+}
+
+// The pane's own child list, watched while the page is open. `subtree` is
+// deliberately off: a record whose target is deeper than the pane is a body or a
+// tool group's list filling in, not a row of the transcript.
+function watchLiveRows() {
+  if (!eventsEl || typeof MutationObserver === "undefined") return;
+  const mo = new MutationObserver((records) => {
+    for (const rec of records) {
+      if (rec.target !== eventsEl) continue;
+      for (const node of rec.addedNodes) {
+        if (node && node.nodeType === 1) foldLiveRow(node);
+      }
+    }
+  });
+  mo.observe(eventsEl, { childList: true });
 }
 
 // Every region of `root` that is closed already, in one pass: the pane after the
@@ -461,5 +710,14 @@ function foldsLandClosed() {
 if (eventsEl) eventsEl.addEventListener("clutch:page-prepended", () => foldClosedRegions(eventsEl));
 // The same door, for the same reason: js/backend-lifecycle.js drops a dead session
 // and loads before this file, so it announces that the run's session is gone and
-// the fold of the turn it was running happens here (foldOpenTurn).
-if (eventsEl) eventsEl.addEventListener("clutch:turn-interrupted", () => foldOpenTurn());
+// the fold of the turn it was running happens here (foldOpenTurn). Liveness goes
+// first: a block the run was still filling in is not being filled in any more, and
+// the ring in its head has to stop turning before the block is folded.
+if (eventsEl) eventsEl.addEventListener("clutch:turn-interrupted", () => {
+  clearRunLive();
+  foldOpenTurn();
+});
+// Every row the pane gains, from the moment the page is open: a run that is in
+// flight is folded as it draws (foldLiveRow). The observer, not the append sites —
+// see the note above foldLiveRow.
+if (eventsEl) watchLiveRows();

@@ -1130,6 +1130,35 @@ mjx-container[display="true"] {
   transform: rotate(90deg);
   transition: transform var(--move) var(--arrival), color var(--quick);
 }
+/* The run is still going and its block is folded: the head has to say so, and with a
+   mark rather than a word — the count beside it already says how much is in there,
+   and neither "process" nor a count can say "more of this is coming". A ring: the
+   same one `.older-spinner` draws (10px, --border with an --accent top, one 700ms
+   turn), because this sheet has exactly one loading language and a second glyph
+   would read as a second state. It sits after the label, in the run of the rule the
+   ::after starts from, so it belongs to the row's text rather than to the trailing
+   line.
+   Drawn for the CLOSED state of a live block only, and by attribute rather than a
+   class of its own: an open block has its rows arriving — the same fact without a
+   glyph — and a finished one has no reason to look busy, because js/auto-fold.js
+   clears `data-turn-live` with the run (settleRunBlocks, clearRunLive). No `:has()`
+   here on purpose: the phone renders this page in the system WebView, whose version
+   belongs to the device.
+   Under `prefers-reduced-motion` the sheet stops every animation, so the ring is
+   drawn still — an accent arc on a grey ring, which is a spinner at rest — and the
+   count beside it is the part that keeps moving. */
+.turn-fold-spin {
+  display: none;
+  flex: none;
+  width: 10px; height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+}
+.turn-fold[data-turn-live="1"] .turn-fold-head[aria-expanded="false"] .turn-fold-spin {
+  display: block;
+  animation: older-spin .7s linear infinite;
+}
 /* The rows are MOVED into the fold, and a move re-inserts them: inside a fold that
    is NOT open every row of a long task would replay its arrival animation while
    the box collapses around it. Scoped to the closed state on purpose — a fold
