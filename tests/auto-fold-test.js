@@ -440,11 +440,253 @@ ctx.foldClosedRegions(pH);
 check(pH.children.filter((c) => c.matches(".turn-fold")).length === 1 && pH.children[1] === taskG,
       "rows that arrive above the head leave the fold where it is, and never fold it");
 
+// ---- 9) the interrupted turn: the report. A session released mid-run writes its
+// own ending — `error` — and nothing after it is a new task: the user's next
+// message carries the SAME turn on. So the fold the interruption makes is left
+// OPEN, and the ending the turn finally lands on joins it: one block, hanging off
+// the instruction the turn started with and sitting directly above the answer,
+// with the message that continued it inside rather than anchoring a second block.
+//
+// 9a) the interruption folds, and says it is unfinished
+const p9 = row("completion", "completed"); // the turn before this one
+const t9 = row("event user", "fix the failing test");
+const w9 = row("event tool_group", "read_file …");
+const e9 = row("completion", "error");
+const n9 = row("completion-note", "the session running this task went away while it was in flight — nothing is running now");
+p = pane([p9, t9, w9, e9, n9]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn();
+const f9 = foldOf(p);
+check(f9 !== undefined && p.children.length === 5 && p.children[1] === t9 &&
+      p.children[2] === f9 && p.children[3] === e9 && p.children[4] === n9,
+      "a run lost mid-flight folds what it drew, under the instruction that started it; the " +
+      "divider it stopped on and its reason stay in plain sight");
+check(f9 !== undefined && f9.dataset.turnOpen === "1",
+      "the fold is marked OPEN: the turn it belongs to has no answer yet");
+
+// 9b) the user carries the turn on
+const u9 = row("event user", "carry on, the fixture path is wrong");
+const w9b = row("event tool_group", "grep …");
+const a9 = row("event text", "Fixed: the fixture path was wrong.");
+const d9 = row("completion", "completed");
+for (const el of [u9, w9b, a9, d9]) p.appendChild(el);
+ctx.autoFoldTurn();
+const f9b = foldOf(p);
+const folds9 = p.children.filter((c) => c.matches(".turn-fold"));
+check(folds9.length === 1 && f9b === f9,
+      "the message that carries the turn on starts no turn of its own: the pane still has ONE fold");
+check(p.children.length === 5 && p.children[0] === p9 && p.children[1] === t9 &&
+      p.children[2] === f9 && p.children[3] === a9 && p.children[4] === d9,
+      "…and that fold now starts at the ORIGINAL instruction and ends directly above the " +
+      "answer, which the completed divider follows");
+check(bodyOf(f9).children.length === 5 &&
+      bodyOf(f9).children[0] === w9 &&
+      bodyOf(f9).children[1] === e9 &&
+      bodyOf(f9).children[2] === n9 &&
+      bodyOf(f9).children[3] === u9 &&
+      bodyOf(f9).children[4] === w9b,
+      "the ending it stopped on, the message that continued it and the steps either drew are " +
+      "all the same middle now, in file order");
+check(u9.parent !== p && t9.dataset.turnFolded === "1" && u9.dataset.turnFolded === undefined,
+      "the continuation row is inside the fold; the fold is still marked on the original " +
+      "instruction, never on the row that continued it");
+check(f9 !== undefined && f9.dataset.turnOpen === undefined && d9.dataset.turnFolded === "1",
+      "the answered turn FINISHES the fold and marks its divider, so it can be neither " +
+      "merged again nor folded twice");
+check(f9 !== undefined && f9.children[0].children[1].textContent === "process · 5 steps",
+      "the head counts everything it hides now (" +
+      JSON.stringify(f9.children[0].children[1].textContent) + ")");
+
+const shape9 = p.children.slice();
+const body9 = bodyOf(f9).children.slice();
+ctx.autoFoldTurn();
+check(p.children.length === shape9.length && p.children.every((c, i) => c === shape9[i]) &&
+      bodyOf(f9).children.length === body9.length &&
+      bodyOf(f9).children.every((c, i) => c === body9[i]),
+      "a replayed final for the finished turn changes nothing");
+
+// 9c) a replay of the same records lands on the same shape, closed
+const rp = pane([]);
+ctx.eventsEl = rp;
+streamNode.classList.add("loading");
+const rT = row("event user", "fix the failing test");
+const rW = row("event tool_group", "read_file …");
+const rE = row("completion", "error");
+const rN = row("completion-note", "…");
+for (const el of [rT, rW, rE, rN]) rp.appendChild(el);
+ctx.autoFoldTurn(); // the error final, folded the way a reopened project folds it
+const rU = row("event user", "carry on, the fixture path is wrong");
+const rWb = row("event tool_group", "grep …");
+const rA = row("event text", "Fixed: the fixture path was wrong.");
+const rD = row("completion", "completed");
+for (const el of [rU, rWb, rA, rD]) rp.appendChild(el);
+ctx.autoFoldTurn();
+streamNode.classList.remove("loading");
+const rf9 = foldOf(rp);
+check(rp.children.length === 4 && rp.children[0] === rT && rp.children[1] === rf9 &&
+      rp.children[2] === rA && rp.children[3] === rD &&
+      bodyOf(rf9).children.length === 5 && bodyOf(rf9).children[1] === rE &&
+      bodyOf(rf9).children[3] === rU,
+      "a reopened project replays the same records into the same one fold — the turn is not " +
+      "split at the release ending just because the window that saw it was closed");
+
+// 9d) the user's own Stop is NOT an interruption: what they stopped is over, and
+// the next message is a new task with a fold of its own
+const t9d = row("event user", "stop that");
+const w9d = row("event tool_group", "bash …");
+const x9d = row("completion", "aborted");
+p = pane([t9d, w9d, x9d]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn();
+const f9d = foldOf(p);
+check(f9d !== undefined && f9d.dataset.turnOpen === undefined,
+      "an aborted turn folds and is FINISHED: the user ended it themselves");
+const u9d = row("event user", "something else entirely");
+const w9d2 = row("event tool_group", "read_file …");
+const a9d = row("event text", "here you go");
+const d9d = row("completion", "completed");
+for (const el of [u9d, w9d2, a9d, d9d]) p.appendChild(el);
+ctx.autoFoldTurn();
+const folds9d = p.children.filter((c) => c.matches(".turn-fold"));
+check(folds9d.length === 2 && p.children[0] === t9d && p.children[1] === f9d &&
+      p.children[2] === x9d && p.children[3] === u9d && p.children[4] === folds9d[1] &&
+      p.children[5] === a9d && p.children[6] === d9d,
+      "the message after an aborted turn opens a NEW turn: two folds, the second hanging off " +
+      "the new task, and nothing merged across the Stop");
+
+// 9e) the session is gone and nothing has answered yet: the fold is made on the
+// spot (js/backend-lifecycle.js announces it), and no ending is invented for it
+const t9e = row("event user", "run the suite");
+const w9e = row("event tool_group", "bash …");
+const th9e = row("event thinking", "the suite needs a database …");
+const part9e = row("event text", "Running the suite: 41 pa");
+p = pane([t9e, w9e, th9e, part9e]);
+ctx.eventsEl = p;
+ctx.foldOpenTurn();
+const f9e = foldOf(p);
+check(f9e !== undefined && p.children.length === 3 && p.children[0] === t9e &&
+      p.children[1] === f9e && p.children[2] === part9e,
+      "the turn in flight folds where the session went away, and the prose it had reached " +
+      "stays in plain sight — the reader is not left with the whole disconnected stretch open");
+check(f9e !== undefined && f9e.dataset.turnOpen === "1" &&
+      p.children.filter((c) => c.matches(".completion")).length === 0,
+      "the fold is open and NO ending is invented: the departing session writes that record " +
+      "and this window folds it in when it arrives (or never, if no session answers again)");
+ctx.foldOpenTurn(); // a second detector for the same outage
+check(p.children.length === 3 && foldOf(p) === f9e,
+      "announcing the loss twice does not fold the fold");
+
+const u9e = row("event user", "try again");
+const w9e2 = row("event tool_group", "bash …");
+const a9e = row("event text", "Suite green: 41 passed.");
+const d9e = row("completion", "completed");
+for (const el of [u9e, w9e2, a9e, d9e]) p.appendChild(el);
+ctx.autoFoldTurn();
+const f9e2 = foldOf(p);
+check(f9e2 === f9e && p.children.length === 4 && p.children[1] === f9e &&
+      p.children[2] === a9e && p.children[3] === d9e,
+      "the turn that finally completes is the SAME fold, ended directly above its answer");
+check(f9e2 !== undefined && bodyOf(f9e).children.length === 5 &&
+      bodyOf(f9e).children[0] === w9e &&
+      bodyOf(f9e).children[2] === part9e &&
+      bodyOf(f9e).children[3] === u9e &&
+      bodyOf(f9e).children[4] === w9e2,
+      "and the prose it stopped on is process now, inside the block, where it belongs");
+
+// 9f) interrupted again while the turn is being carried on: still one fold, still
+// open, and the ending that stopped it stays visible until an answer replaces it
+const t9f = row("event user", "one more time");
+const w9f = row("event tool_group", "bash …");
+const x9f = row("completion", "error");
+const n9f = row("completion-note", "run failed: connection reset");
+p = pane([t9f, w9f, x9f, n9f]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn();
+const f9f = foldOf(p);
+const u9f = row("event user", "…and again");
+const w9f2 = row("event tool_group", "bash …");
+const x9f2 = row("completion", "error");
+const n9f2 = row("completion-note", "run failed: connection reset");
+for (const el of [u9f, w9f2, x9f2, n9f2]) p.appendChild(el);
+ctx.autoFoldTurn();
+check(p.children.filter((c) => c.matches(".turn-fold")).length === 1 && foldOf(p) === f9f &&
+      p.children[2] === x9f2 && p.children[3] === n9f2 &&
+      bodyOf(f9f).children.length === 5 &&
+      bodyOf(f9f).children[1] === x9f &&
+      bodyOf(f9f).children[2] === n9f &&
+      bodyOf(f9f).children[4] === w9f2,
+      "a second interruption is the same turn: the fold takes in the first ending, the message " +
+      "that carried it on and the steps above the second, and stays open on the ending that " +
+      "stopped it — which the reader can still see");
+const a9f = row("event text", "done, finally");
+const d9f = row("completion", "completed");
+for (const el of [a9f, d9f]) p.appendChild(el);
+ctx.autoFoldTurn();
+check(foldOf(p) === f9f && p.children[2] === a9f && p.children[3] === d9f &&
+      f9f.dataset.turnOpen === undefined,
+      "and the answer that eventually lands closes it: one turn, one fold, whatever it took");
+
+// 9g) an interrupted stretch with nothing in it: the instruction, the ending, and
+// the message that carried the turn on. There is no fold to grow, so the fold is
+// made from the original instruction — never from the continuation row
+const t9g = row("event user", "the task");
+const x9g = row("completion", "error");
+const n9g = row("completion-note", "the session … went away");
+const u9g = row("event user", "carry on");
+const w9g = row("event tool_group", "bash …");
+const a9g = row("event text", "done");
+const d9g = row("completion", "completed");
+p = pane([t9g, x9g, n9g, u9g, w9g, a9g, d9g]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn();
+const f9g = foldOf(p);
+check(p.children.length === 4 && p.children[0] === t9g && p.children[1] === f9g &&
+      p.children[2] === a9g && p.children[3] === d9g &&
+      p.children.filter((c) => c.matches(".turn-fold")).length === 1,
+      "the fold is anchored on the instruction even when the interrupted stretch held nothing: " +
+      "the continuation row cannot be what a block hangs off");
+check(f9g !== undefined && bodyOf(f9g).children.length === 4 &&
+      bodyOf(f9g).children[0] === x9g &&
+      bodyOf(f9g).children[1] === n9g &&
+      bodyOf(f9g).children[2] === u9g &&
+      bodyOf(f9g).children[3] === w9g,
+      "and the old ending, its reason, the continuation and its step are the middle it took in");
+
+// 9h) a page of history whose own stretch was interrupted, above a live turn that
+// is then interrupted too: the pane never holds two open blocks. The drop joins
+// the block the page left open — the same turn, seen in two halves — instead of
+// hanging a second one off the continuation
+const t9h = row("event user", "an old task");
+const w9h = row("event tool_group", "bash …");
+const x9h = row("completion", "error");
+const n9h = row("completion-note", "the session … went away");
+const t9h2 = row("event user", "the task that died");
+const w9h2 = row("event tool_group", "bash …");
+p = pane([t9h, w9h, x9h, n9h, t9h2, w9h2]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn(); // the paged-in ending folds its stretch, and leaves it open
+const f9h = foldOf(p);
+ctx.foldOpenTurn(); // ...and then the live turn's session goes away too
+const folds9h = () => p.children.filter((c) => c.matches(".turn-fold"));
+check(folds9h().length === 1 && folds9h()[0] === f9h && f9h.dataset.turnOpen === "1",
+      "two interrupted stretches in one pane are ONE open block, not two: an open block is " +
+      "always the newest, because every ending reaches back through the interruptions above it");
+const u9h = row("event user", "carry on");
+const w9h3 = row("event tool_group", "bash …");
+const a9h = row("event text", "done");
+const d9h = row("completion", "completed");
+for (const el of [u9h, w9h3, a9h, d9h]) p.appendChild(el);
+ctx.autoFoldTurn();
+check(folds9h().length === 1 && folds9h()[0] === f9h && f9h.dataset.turnOpen === undefined &&
+      p.children[p.children.length - 2] === a9h && p.children[p.children.length - 1] === d9h,
+      "and the answer that closes the turn closes that one block, directly above itself");
+
 // ---- 8) the wiring the page has to carry ----
 const uiDir = path.join(__dirname, "..", "ui");
 const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
 const events = fs.readFileSync(path.join(uiDir, "js", "stream-events.js"), "utf8");
 const project = fs.readFileSync(path.join(uiDir, "js", "project.js"), "utf8");
+const lifecycle = fs.readFileSync(path.join(uiDir, "js", "backend-lifecycle.js"), "utf8");
 const css = fs.readFileSync(path.join(uiDir, "style.css"), "utf8");
 // the same sheet with its comments cut: this sheet's prose QUOTES the declarations
 // it replaced ("deliberately NOT `position: relative` any more"), and a structural
@@ -521,6 +763,13 @@ check(!/fold-inner::after/.test(css),
 check(/eventsEl\.dispatchEvent\(new CustomEvent\("clutch:page-prepended"\)\)/.test(project),
       "the history pager announces the prepend: the page it just brought in can close a turn " +
       "the sink was refused the fold of");
+check(/if \(busy\) sseRunAtRisk = true;[\s\S]{0,600}dispatchEvent\(new CustomEvent\("clutch:turn-interrupted"\)\)/.test(lifecycle),
+      "dropping a dead session announces that the run in flight has no ending coming — where " +
+      "sseRunAtRisk is set, so the same fact is stated once — and the fold of that turn happens " +
+      "here, on the pane whose shape is known");
+check(/addEventListener\("clutch:turn-interrupted", \(\) => foldOpenTurn\(\)\)/.test(selfSrc),
+      "and auto-fold listens for it, for the same load-order reason the prepend is announced: " +
+      "js/backend-lifecycle.js loads before this file and may not name it");
 check(/addEventListener\("clutch:page-prepended", \(\) => foldClosedRegions\(eventsEl\)\)/.test(selfSrc),
       "and the file that knows how to fold listens for it — it loads after the pager, so the " +
       "pager may not name it (load order is the contract)");

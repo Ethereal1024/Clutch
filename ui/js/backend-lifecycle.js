@@ -175,6 +175,14 @@ function dropStaleBackend() {
   // the session this window's run lived in is what just went away: same story as
   // a base move, and it must not end in a silent idle either
   if (busy) sseRunAtRisk = true;
+  // The rows that run had drawn are the process of a turn no ending is coming to
+  // in THIS window: fold them now, open, instead of leaving the whole
+  // disconnected stretch expanded until some later run ends (js/auto-fold.js
+  // foldOpenTurn). Announced by name because that file loads after this one — and
+  // announced, not invented: the ending itself is the departing session's to write
+  // (agent/server.py record_release), and the fold takes it in when a session
+  // serves it.
+  if (busy && eventsEl) eventsEl.dispatchEvent(new CustomEvent("clutch:turn-interrupted"));
   API_BASE = null;
   sessionStorage.removeItem("clutch_api_url");
   reconnectSSE(); // closes the dead stream; connectSSE bails on a null base

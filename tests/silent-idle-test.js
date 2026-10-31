@@ -127,6 +127,9 @@ global.setStatus = (s) => {
   global.busy = s === "running" || s === "waiting";
 };
 global.document = { createElement: (tag) => fakeEl(tag) };
+// the events a window announces on the pane itself (js/backend-lifecycle.js
+// announces the lost run so js/auto-fold.js can fold the turn it was in)
+const dispatched = [];
 global.eventsEl = {
   set innerHTML(v) {
     if (v === "") rendered.length = 0;
@@ -135,6 +138,7 @@ global.eventsEl = {
     return "";
   },
   appendChild: (el) => rendered.push(el),
+  dispatchEvent: (ev) => dispatched.push(ev && ev.type),
 };
 global.pageSink = null;
 // the view: a real element's two scroll fields and nothing else
@@ -316,6 +320,11 @@ setStatus("running");
 dropStaleBackend(); // the forwarded port died with the tunnel
 check(global.API_BASE === null, "the dead base is dropped");
 check(global.sseRunAtRisk === true, "and the run that lived on it is recorded");
+// the rows that run drew are the process of a turn no ending is coming to in this
+// window: the fold of them happens where the pane is known (js/auto-fold.js), so
+// the drop says so on the pane rather than reaching into a file that loads later
+check(dispatched.filter((t) => t === "clutch:turn-interrupted").length === 1,
+  "and the turn it was in is announced, once, for folding");
 statusFrame("idle"); // the session re-claimed after the reconnect
 addEvent({ type: "replayed", count: 0 });
 const phone = completion();
@@ -326,6 +335,8 @@ check(phone && /nothing is running now/.test(phone.note),
 setStatus("idle");
 check(switchBackend("http://127.0.0.1:8890") === false && global.sseRunAtRisk === false,
   "a refused base is not a move (no false alarm either)");
+check(dispatched.filter((t) => t === "clutch:turn-interrupted").length === 1,
+  "and a window with nothing in flight announces no interrupted turn");
 
 check(notices.length === 0, "and not one toast was raised anywhere in this journey");
 

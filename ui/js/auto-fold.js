@@ -10,6 +10,19 @@
 // in this pane already uses (js/stream-text.js wrapFold), so opening it is the
 // animation the reader knows.
 //
+// Not every turn ends with an answer. A session released mid-run, a run the window
+// saw fail: the transcript stops where it stood, and what the window has drawn so
+// far is the process of a turn whose end it cannot see. Those rows fold too — at
+// the moment the session goes away (foldOpenTurn), not when some later run
+// finally ends, which was the report against a window left with the whole
+// disconnected stretch expanded — and the fold is left OPEN: the user's next
+// message does not start a new task, it carries the SAME turn on, so everything
+// between the interruption and the answer the turn finally lands on joins that
+// fold, and the block ends up hanging off the original instruction and sitting
+// directly above the answer, exactly like a turn that was never interrupted. The
+// statuses that end a turn are `completed` and `aborted` (the user's own Stop);
+// every other ending is an interruption (turnEnded, turnSpan, mergeOpenFold).
+//
 // A turn only folds while it is in the pane. Two other ways its rows reach the
 // reader are covered here as well: a replayed project — the same `final` events,
 // replayed into the same pane — and a page of older records paged in above the
@@ -32,6 +45,63 @@ function foldLabel(n) {
   return `process · ${n} ${n === 1 ? "step" : "steps"}`;
 }
 
+// Did this ending finish the turn? `completed` is the answer the task landed on,
+// and `aborted` is the user's own Stop — what they stopped is over, and the next
+// message is a new task. Everything else ends a turn nobody asked to end: the
+// error a released session writes for a run in flight (agent/server.py
+// record_release), a run the window saw fail. Those turns are INTERRUPTED, and
+// the next run carries the same one on (turnSpan, mergeOpenFold) instead of
+// opening a new one.
+function turnEnded(status) {
+  const s = String(status || "").trim();
+  return s === "completed" || s === "aborted";
+}
+
+// Where the turn that ends at `turnEnd` really begins: its own region, widened
+// back over every interruption divider above it. A divider only ends a turn when
+// it says so (turnEnded); an interruption closed nothing, so the region below it
+// is the rest of the turn above, and folding it as its own would anchor the block
+// on the message that carried the turn on rather than on the instruction that
+// started it — the reported shape: the interrupted stretch left expanded above a
+// fold that hung off the continuation.
+//
+// Each step lands on the index just after the divider above the one it stepped
+// over, so the invariant "the span starts after a divider, or at the pane's first
+// row" holds and the walk always terminates.
+function turnSpan(kids, turnEnd) {
+  let span = 0;
+  for (let i = turnEnd - 1; i >= 0; i--) {
+    if (kids[i].matches(".completion")) { span = i + 1; break; }
+  }
+  while (span > 0) {
+    const above = kids[span - 1];
+    if (!above.matches(".completion") || turnEnded(above.textContent)) break;
+    let from = 0;
+    for (let i = span - 2; i >= 0; i--) {
+      if (kids[i].matches(".completion")) { from = i + 1; break; }
+    }
+    span = from;
+  }
+  return span;
+}
+
+// The fold an interrupted turn was left in, among the rows of its span: the one
+// a later ending adds its rows to (mergeOpenFold). Open folds only — a finished
+// fold in the same rows is a turn of its own that a page of history has already
+// completed, and absorbIntoRegion is what takes new rows for that one.
+//
+// There is at most ONE open fold in a pane, and it is the newest: every ending
+// reaches back through the interruptions above it (turnSpan) and closes the open
+// fold it finds (mergeOpenFold), so an interrupted block cannot outlive the next
+// ending of any kind, and a second one cannot be made beside it. That is why the
+// first open fold is also the right one.
+function openFoldAt(kids, from, to) {
+  for (let i = from; i < to; i++) {
+    if (kids[i].matches(".turn-fold") && kids[i].dataset.turnOpen === "1") return i;
+  }
+  return -1;
+}
+
 // Fold this turn's middle, folding the one region of `root` that ends at
 // `turnEnd`: the index, in root's children, of the divider that closed the turn.
 // `root` is the pane for a live or replayed `final`, and the pane again for the
@@ -47,9 +117,21 @@ function foldLabel(n) {
 // notice, and anchoring on it would leave the turn unfolded.
 function foldRegion(root, turnEnd) {
   const kids = Array.from(root.children);
-  let turnStart = 0;
-  for (let i = turnEnd - 1; i >= 0; i--) {
-    if (kids[i].matches(".completion")) { turnStart = i + 1; break; }
+  // the ending this region closes on: a divider, except for a turn that is still
+  // in flight (foldOpenTurn folds one that has no ending yet)
+  const divider = kids[turnEnd] && kids[turnEnd].matches(".completion") ? kids[turnEnd] : null;
+  // The turn this region belongs to, which is not always "everything since the
+  // divider above it": an interruption closed nothing, so the region a later
+  // ending closes can span several of them (turnSpan).
+  const span = turnSpan(kids, turnEnd);
+  // The fold this turn ALREADY has and an interruption left open: this ending is
+  // the rest of that turn, not a new task's (mergeOpenFold). It is looked for by
+  // the fold's own mark rather than by the divider's, because an interrupted fold
+  // has no ending of its own — its divider is one of the rows it took in.
+  const openAt = openFoldAt(kids, span, turnEnd);
+  if (openAt >= 0) {
+    mergeOpenFold(root, openAt, turnEnd, divider);
+    return;
   }
   // What "this region is folded" is recorded on is the DIVIDER, not the head. The
   // divider is the one node in the region a fold never moves, so its mark survives
@@ -60,13 +142,12 @@ function foldRegion(root, turnEnd) {
   // second one AROUND it: a fold inside a fold, its inner head buried in a
   // `display: none` subtree, its step count counting the inner fold as one step
   // (ui-fix.clc, the second press of "load earlier records").
-  const divider = kids[turnEnd] && kids[turnEnd].matches(".completion") ? kids[turnEnd] : null;
   if (divider && divider.dataset.turnFolded === "1") {
-    absorbIntoRegion(root, turnStart); // the rows a page just brought still belong in it
+    absorbIntoRegion(root, span); // the rows a page just brought still belong in it
     return;
   }
   let start = -1;
-  for (let i = turnStart; i < turnEnd; i++) {
+  for (let i = span; i < turnEnd; i++) {
     if (kids[i].matches(".event.user")) { start = i; break; }
   }
   // No task row in the region means one thing only: the pane starts INSIDE this
@@ -87,8 +168,8 @@ function foldRegion(root, turnEnd) {
   // middle of the transcript with no task row is a shape this file does not
   // recognize, and guessing on one is what this early return is for.
   if (start < 0) {
-    if (turnStart !== 0) return;
-    start = turnStart;
+    if (span !== 0) return;
+    start = span;
   }
   const opener = kids[start];
   // folded already: a second `final` for the same turn (a reconnect replays one)
@@ -189,11 +270,69 @@ function foldRegion(root, turnEnd) {
   // function): a page that completes this turn is then a page that ADDS to the
   // fold, not one that folds it again.
   if (divider) divider.dataset.turnFolded = "1";
+  // ...and if that ending was an interruption (or there is none yet: the turn is
+  // still in flight), the fold is left OPEN. The mark is what the next ending
+  // looks for: unmarked, the fold below would be treated as a finished turn of its
+  // own and the rows that carry the turn on would fold into a SECOND block hanging
+  // off the message that continued it. Marked, they join this one (mergeOpenFold).
+  if (!turnEnded(divider ? divider.textContent : "")) wrap.dataset.turnOpen = "1";
   // The block is a row of the pane now, and where its head sits against the pane's
   // top edge is a state nothing else has announced: with the block already scrolled
   // past (a long turn folding under a reader who is inside it) the head pins on this
   // frame, not on the next scroll event (js/stream-text.js paintStuck).
   queueStuck();
+}
+
+// The rest of an interrupted turn, after a fold has already been made for its
+// beginning: the ending the turn stopped on, the message the user carried it on
+// with, and every step either of them drew go into that fold's body — and the
+// fold is re-seated where the turn's visible tail begins, directly above the
+// answer the turn finally landed on (or above the ending when it stopped without
+// one, so the reason a run is not going on stays readable).
+//
+// What the reader ends up with is one block, hanging off the instruction that
+// started the task rather than off the message that continued it, with the two
+// ends of the turn — that instruction and the answer — in plain sight around it,
+// which is the shape of a turn that was never interrupted at all.
+//
+// Nothing here invents an ending: the divider that just landed is the log's own,
+// so a session that comes back and states how the run ended, and a run that fails
+// without the window noticing, are both just the next ending of the same turn.
+function mergeOpenFold(root, foldAt, turnEnd, divider) {
+  const kids = Array.from(root.children);
+  const wrap = kids[foldAt];
+  const rest = kids.slice(foldAt + 1, turnEnd);
+  // the tail that stays in plain sight: the turn's closing prose if there is any
+  // — the answer, which the completed divider follows. With no prose at all the
+  // whole stretch is process (the ending that stopped it is the divider this call
+  // was made for, and it and its reason are outside `rest` by construction).
+  let end = rest.length;
+  for (let i = rest.length - 1; i >= 0; i--) {
+    if (rest[i].matches(".event.text")) { end = i; break; }
+  }
+  const add = rest.slice(0, end);
+  if (add.length) {
+    // file order: the body gains these rows at its END (absorbIntoRegion is the
+    // one that prepends, for rows that arrive above the fold)
+    const frag = document.createDocumentFragment();
+    for (const el of add) frag.appendChild(el);
+    wrap._body.appendChild(frag);
+    if (wrap._label) wrap._label.textContent = foldLabel(wrap._body.children.length);
+  }
+  // the fold ends where the turn's middle ends: the answer (or the ending that
+  // stopped it) is the row directly under the block now — and the head it hangs
+  // on never moved, so the block still starts at the original instruction
+  const tail = rest[end] || null;
+  if (tail) root.insertBefore(wrap, tail);
+  // The ending this ending closes is the log's own record either way; the mark
+  // that says "this turn is folded" goes on it, exactly as foldRegion puts it
+  // there, so a page of history and a replayed final still add to this fold
+  // instead of building a second one.
+  if (divider) divider.dataset.turnFolded = "1";
+  // finished only on an answer or on the user's own Stop: another interruption
+  // leaves the fold open for the run that carries on from it
+  if (turnEnded(divider ? divider.textContent : "")) delete wrap.dataset.turnOpen;
+  queueStuck(); // the block moved: recompute whether its head pins
 }
 
 // A folded region can still gain rows — above itself, one page at a time. A page
@@ -260,6 +399,33 @@ function autoFoldTurn() {
   foldRegion(eventsEl, turnEnd);
 }
 
+// Fold the turn that is still IN FLIGHT, and leave it open.
+//
+// Called when the session the run lived in is gone (js/backend-lifecycle.js
+// dropStaleBackend announces it as clutch:turn-interrupted): no ending is coming
+// to the window that drew these rows, and leaving them expanded until some later
+// run finally ends meant the disconnected stretch of a turn never folded at all —
+// the report. So the rows the window did receive fold now, and the fold says
+// "this is process" and nothing more.
+//
+// The ending is deliberately NOT invented here. The departing session writes its
+// own (agent/server.py record_release) and the window reads it from the log when a
+// session answers again; a window that invented one would show two, and it would
+// be guessing at the one fact it cannot see. What the open fold buys is that
+// whenever that ending does arrive — or the user simply carries the turn on with
+// another message — it joins this fold instead of starting a second turn
+// (mergeOpenFold).
+function foldOpenTurn() {
+  if (pageSink) return;
+  if (!eventsEl) return;
+  const kids = Array.from(eventsEl.children);
+  // nothing in flight: the pane already ends on a divider
+  if (!kids.length || kids[kids.length - 1].matches(".completion")) return;
+  // the turn ends at the pane's end: there is no divider to fold up to, and
+  // foldRegion reads that as what it is — a turn with no ending yet
+  foldRegion(eventsEl, kids.length);
+}
+
 // Every region of `root` that is closed already, in one pass: the pane after the
 // history pager has prepended a page into it. That page can carry the end of a
 // turn this window opened in the middle of — cpr_start is the newest compaction
@@ -293,3 +459,7 @@ function foldsLandClosed() {
 // (tests/ui-load-order-test.js pins that). So loadOlder announces the prepend by
 // name and the folding happens here, where the pane's shape is known.
 if (eventsEl) eventsEl.addEventListener("clutch:page-prepended", () => foldClosedRegions(eventsEl));
+// The same door, for the same reason: js/backend-lifecycle.js drops a dead session
+// and loads before this file, so it announces that the run's session is gone and
+// the fold of the turn it was running happens here (foldOpenTurn).
+if (eventsEl) eventsEl.addEventListener("clutch:turn-interrupted", () => foldOpenTurn());
