@@ -509,18 +509,20 @@ function runProcessRow(el) {
   return true;
 }
 
-// A row that has to stay in plain sight between the block and the row arriving
-// after it. Three of them:
-//  - the reader's own message: a hard boundary. The block above it belongs to the
-//    turn before, and nothing their next task draws may go into it (the ending's
-//    merge is what decides otherwise, with the ending in hand).
-//  - the prose the run has already answered with: the body has to stay in FILE
-//    order. Rows absorbed later are appended in order (mergeOpenFold), so a step
-//    put in front of the text it came after could never be put back where it was.
-//  - an ending: the run that drew it is over, and the rows after it belong to
-//    whatever the ending's own fold makes of them.
-function runBoundaryRow(el) {
-  return el.matches(".event.user") || el.matches(".event.text") || el.matches(".completion");
+// A row that has to stay in plain sight between the block and the row arriving after
+// it — the one boundary the live path refuses to cross. It is prose: the body has to
+// stay in FILE order, and rows absorbed later are only ever APPENDED (mergeOpenFold),
+// so a step put in front of the text it came after could never be put back where it
+// was. Everything else between an open block and the arriving row is the same turn's
+// middle and goes in (absorbMiddle) — the divider an interruption stopped on, its
+// note, the reader's own message that carried the turn on — because the ending appends
+// exactly those into this body anyway.
+//
+// A divider that ENDED its turn is not read here but in openRunBlock, which can tell
+// the difference between the ending this run drew and the `completed` line of the turn
+// before it (a new task stands under one of those, always).
+function holdsTheLine(el) {
+  return el.matches(".event.text");
 }
 
 // One row the pane just gained: put it in the turn's block, or make the block here
@@ -537,7 +539,7 @@ function foldLiveRow(el) {
   if (el.parentNode !== eventsEl) return; // already in a block, or in the pager's sink
   if (!runProcessRow(el)) return;
   const wrap = openRunBlock(el);
-  if (!wrap) return; // a boundary stands before it, or this turn has its block
+  if (!wrap) return; // prose stands before it, or this turn has its block
   takeIntoBlock(wrap, el);
   // Moving the row into the block changed where the pane's bottom is by the room a
   // head takes, and the append that drew this row already scrolled: the reader
@@ -548,8 +550,8 @@ function foldLiveRow(el) {
 }
 
 // The block this row belongs in, made when this is the run's first process row.
-// Null means "leave the row in the pane": it stands on the far side of something
-// that stays visible (runBoundaryRow), or this turn's block already exists.
+// Null means "leave the row in the pane": it stands behind prose (holdsTheLine), or
+// this turn's block already exists.
 function openRunBlock(el) {
   const kids = Array.from(eventsEl.children);
   const at = kids.indexOf(el);
@@ -559,7 +561,16 @@ function openRunBlock(el) {
   // straggler can arrive with `busy` still true, and a block made over it would hang
   // off a divider the next ending has already closed. It is left in the pane. An
   // interruption closed nothing, so its divider is not one of these.
+  //
+  // The walk stops at the row's own TASK: a `.event.user` between the divider and the
+  // row is the message this run was started from, so every divider above it closed a
+  // turn that is already over. That is what a new task looks like — which is why every
+  // turn but the pane's first has a `completed` divider somewhere above it, and why
+  // reading the nearest one as "this row belongs to no run" left the whole transcript
+  // unfoldable while it streamed: no head was ever made. Only a divider the row stands
+  // directly under, with its own task above that, can say the row is a straggler.
   for (let i = at - 1; i >= 0; i--) {
+    if (kids[i].matches(".event.user")) break;
     if (!kids[i].matches(".completion")) continue;
     if (turnEnded(kids[i].textContent)) return null;
     break;
@@ -571,9 +582,25 @@ function openRunBlock(el) {
   const span = turnSpan(kids, kids.length);
   const openAt = openFoldAt(kids, span, kids.length);
   if (openAt >= 0) {
-    for (let i = openAt + 1; i < at; i++) if (runBoundaryRow(kids[i])) return null;
-    markLive(kids[openAt]);
-    return kids[openAt];
+    const wrap = kids[openAt];
+    const middle = kids.slice(openAt + 1, at);
+    // prose is where this stops: mergeOpenFold only ever APPENDS, so a step put in
+    // front of the text it came after could never be put back where it was
+    for (const row of middle) if (holdsTheLine(row)) return null;
+    // The rows between the block and this one are the turn's MIDDLE too — the divider
+    // an interruption stopped on, its note, the message the reader carried the turn on
+    // with — and the ending appends exactly these into the body (mergeOpenFold). Taking
+    // them in now, in file order, is what makes a turn watched live the same shape as
+    // the same turn replayed; left in the pane, the body would receive them AFTER the
+    // steps that followed them, and a replayed turn would read in a different order
+    // from the one the reader watched arrive.
+    const reader = absorbMiddle(wrap, middle);
+    markLive(wrap);
+    // …and when one of them was the reader's own message the block opens: what they
+    // just wrote is not something this file hides on its own initiative, and the head
+    // that says where it went is now right there to fold it again.
+    if (reader) openBlock(wrap);
+    return wrap;
   }
   // At most one block per turn. One that is here already, open or closed, is this
   // turn's: a fold an ending has just made, or the one the rows of this run are
@@ -589,16 +616,60 @@ function openRunBlock(el) {
   let from = at;
   while (from > span && runProcessRow(kids[from - 1])) from--;
   const wrap = buildFold(eventsEl, kids[from], kids.slice(from, at + 1));
+  // A run's steps are process, and the reader wants that middle out of the way BY
+  // DEFAULT while it streams — that is the whole point of folding a long task on a
+  // phone. So the block lands folded: the head says how many steps are in there, the
+  // ring says more are still coming, and one press opens it. No animation: the block
+  // was never painted open, so there is no move for the reader to follow.
+  closeBlock(wrap);
   markLive(wrap);
   return wrap;
 }
 
+// Take the rows standing between an open block and the row arriving now into the
+// block's body, in file order — the order the ending's merge appends them in, which is
+// why a live turn and a replayed one land on one shape. `.live` rows are skipped: the
+// run talking about itself (a reconnect chip, a compaction in progress) is news, and it
+// stays where it was put. Answers whether the READER's own message was among them.
+function absorbMiddle(wrap, rows) {
+  let reader = false;
+  for (const el of rows) {
+    if (!el || el.parentNode !== eventsEl) continue; // already in a block
+    if (el.matches(".live")) continue;
+    wrap._body.appendChild(el); // a move: the row leaves the pane
+    if (el.matches(".event.user")) reader = true;
+  }
+  if (wrap._label) wrap._label.textContent = foldLabel(wrap._body.children.length);
+  queueStuck(); // the block grew: whether its head pins has changed
+  return reader;
+}
+
+// The two states a block is put in from here, without the animation a reader's own
+// press plays: both are end states of a decision this file made, not a move the reader
+// is following.
+function closeBlock(wrap) {
+  if (!wrap._fold) return;
+  wrap._fold.classList.remove("open");
+  wrap._fold.classList.add("hidden");
+  if (wrap._head) wrap._head.setAttribute("aria-expanded", "false");
+}
+
+function openBlock(wrap) {
+  if (!wrap._fold) return;
+  wrap._fold.classList.remove("hidden");
+  wrap._fold.classList.add("open");
+  if (wrap._head) wrap._head.setAttribute("aria-expanded", "true");
+}
+
+
 // This block is the turn in flight: it takes the rows the run is still drawing, and
 // while it is folded its head says so with the ring. It is marked OPEN because the
 // turn has not ended — an ending still has to add its rows to THIS block
-// (mergeOpenFold) instead of building a second one above the continuation — and a
-// fresh block lands open, because a reader watching a run has no reason to see it
-// hide itself; a block the reader has folded keeps the state they put it in.
+// (mergeOpenFold) instead of building a second one above the continuation. The STATE
+// of the fold is the reader's: a block this file makes lands folded, a block they
+// opened stays open, and the state a block was left in by an interrupted session is
+// theirs no longer once the run is going again (openBlock, when their own message
+// carries the turn on).
 function markLive(wrap) {
   if (wrap.dataset.turnLive === "1") return;
   wrap.dataset.turnLive = "1";

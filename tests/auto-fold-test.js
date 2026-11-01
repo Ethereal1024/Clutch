@@ -712,11 +712,15 @@ check(p.children.length === 2 && p.children[0] === u10 && p.children[1] === live
       "a run in flight folds as it draws: the block is made by its first process row and that row "
       + "goes in, so the reader can put the process away in the middle of a task, not only at its end");
 check(live10.dataset.turnLive === "1" && live10.dataset.turnOpen === "1" &&
-      live10.children[1].classList.contains("open") &&
-      live10.children[0].attrs["aria-expanded"] === "true" &&
+      live10.children[1].classList.contains("hidden") &&
+      !live10.children[1].classList.contains("open") &&
+      live10.children[0].attrs["aria-expanded"] === "false" &&
       live10.attrs["aria-busy"] === "true",
-      "it lands OPEN and marked: `turnOpen` is what the ending's merge looks for — unmarked, the "
-      + "rest of the turn would fold into a SECOND block above the message that carried it on");
+      "it lands FOLDED and marked: a run's steps are process, and putting that middle out of the way "
+      + "BY DEFAULT while it streams is the whole point of folding a long task on a phone — the head "
+      + "says how many steps are in there, the ring says more are coming, one press opens it. "
+      + "`turnOpen` is still what the ending's merge looks for — unmarked, the rest of the turn would "
+      + "fold into a SECOND block above the message that carried it on");
 check(live10.children[0].children.length === 3 &&
       live10.children[0].children[2].className === "turn-fold-spin" &&
       live10.children[0].children[2].attrs["aria-hidden"] === "true",
@@ -750,17 +754,19 @@ check(p.children[p.children.length - 1] === t10b && bodyOf(live10).children.leng
       "and a step that follows the prose stays where it was drawn: what is inside the block has to "
       + "stay in file order, or the ending's merge would append the text after the step it preceded");
 
-live10.children[0].onclick(); // the reader folds the live block
-check(live10.children[0].attrs["aria-expanded"] === "false" &&
-      live10.children[1].classList.contains("hidden") &&
-      live10.dataset.turnLive === "1",
-      "the reader can fold it mid-run: it closes and keeps saying the run is going — the ring hangs "
-      + "off `data-turn-live` with the closed `aria-expanded`, so no word has to say it");
-live10.children[0].onclick(); // ...and open it again, at will
+live10.children[0].onclick(); // the reader opens the live block
 check(live10.children[0].attrs["aria-expanded"] === "true" &&
       live10.children[1].classList.contains("open") &&
       live10.dataset.turnLive === "1",
-      "and open it again: the state is the reader's to set for as long as the run lasts");
+      "the reader can open it mid-run: one press on the head shows the process of a task that is "
+      + "still working, and the block keeps saying the run is going");
+live10.children[0].onclick(); // ...and fold it again, at will
+check(live10.children[0].attrs["aria-expanded"] === "false" &&
+      live10.children[1].classList.contains("hidden") &&
+      live10.dataset.turnLive === "1",
+      "and fold it again: the state is the reader's to set for as long as the run lasts, and a "
+      + "block they closed keeps saying the run is going — the ring hangs off `data-turn-live` with "
+      + "the closed `aria-expanded`, so no word has to say it");
 
 const a10 = row("event text", "done: the fixture path was wrong");
 p.appendChild(a10);
@@ -777,8 +783,9 @@ check(foldOf(p) === live10 && p.children[p.children.length - 1] === d10 &&
       "the ending takes in what stood outside the block, in file order, directly above the answer: "
       + "one block, one turn — and the mark of the run in flight is gone, because it is over");
 
-// 10b) a block nobody touched closes with the ending, the way the ending's own fold
-// would land, and it animates there: the reader watched those rows arrive
+// 10b) a block nobody touched is closed where it landed, and the ending adds nothing
+// to that state: it was folded while it was still filling in, so there is no move
+// left to animate — the reader watched the head and the ring, not an open fold
 ctx.busy = true;
 const u10b = row("event user", "explain the failure");
 const t10b2 = row("event tool_group", "read_file …");
@@ -797,9 +804,12 @@ collapseCalls = 0;
 ctx.autoFoldTurn();
 check(foldOf(p) === live10b && live10b.children[1].classList.contains("hidden") &&
       !live10b.children[1].classList.contains("open") &&
-      live10b.children[0].attrs["aria-expanded"] === "false" && collapseCalls === 1,
-      "a block the reader never touched closes with the ending and ANIMATES there — the state the "
-      + "fold the ending would have made lands in, saying what it counted");
+      live10b.children[0].attrs["aria-expanded"] === "false" &&
+      live10b.children[0].children[1].textContent === "process · 1 step" &&
+      collapseCalls === 0,
+      "a block the reader never touched is still closed when the ending lands, and the ending does "
+      + "not animate a fold that was never painted open — one block, saying what it counted, in the "
+      + "same state the fold the ending would have made lands in");
 
 // 10c) the states where rows still arrive but nothing is running: a block made in any
 // of them would fold a transcript the reader is watching arrive from the log
@@ -866,11 +876,90 @@ p.appendChild(u10d2);
 ctx.foldLiveRow(u10d2);
 p.appendChild(t10d2);
 ctx.foldLiveRow(t10d2);
-check(foldOf(p) === live10d && p.children.length === 4 &&
-      bodyOf(live10d).children.length === 2 && p.children[3] === t10d2,
-      "the reader's own next message is a hard boundary: the block above it is the previous turn's, "
-      + "and nothing the new task draws may go into it — the ending's merge decides, with the "
-      + "ending in hand");
+check(foldOf(p) === live10d && p.children.length === 2 &&
+      bodyOf(live10d).children.length === 4 &&
+      bodyOf(live10d).children[2] === u10d2 && bodyOf(live10d).children[3] === t10d2 &&
+      live10d.children[1].classList.contains("open") &&
+      live10d.children[0].attrs["aria-expanded"] === "true" &&
+      live10d.dataset.turnLive === "1",
+      "the rows between the block and the new one are the SAME turn's middle, and they go in in file "
+      + "order — the divider an interruption stopped on, its note, the message that carried the turn "
+      + "on (absorbMiddle). At the ending mergeOpenFold appends exactly those, so a turn watched live "
+      + "and the same turn replayed end in one shape; left outside, the body would receive them after "
+      + "the steps that followed them. And one of them being the reader's OWN message opens the "
+      + "block: what they just wrote is not hidden by this file's own initiative, and the head that "
+      + "says where it went is right there to fold it again");
+
+// 10g) the two shapes the report was about, both WHILE THE RUN IS STILL GOING: a task
+// that starts in a pane which already holds a finished turn, and a run that carries an
+// interrupted turn on. Both used to fold nothing until the ending landed — the stream
+// had no head above it to press, which is the "there is no process button" report.
+//
+// A) a new task after a finished turn. Every turn but the pane's first has the
+// previous turn's divider above its task row, and reading the NEAREST divider above an
+// arriving row as "this row is a straggler" refused the fold for the whole run. Only a
+// divider the row stands DIRECTLY under, with its own task above that, can say that.
+ctx.busy = false;
+const u10g = row("event user", "the first task");
+const t10g = row("event tool_group", "bash …");
+const a10g = row("event text", "done");
+const d10g = row("completion", "completed");
+p = pane([u10g, t10g, a10g, d10g]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn(); // the turn before it: folded, and its divider left where it was
+const done10g = foldOf(p);
+ctx.busy = true;
+const u10g2 = row("event user", "a second task");
+const t10g2 = row("event tool_group", "bash … pytest");
+p.appendChild(u10g2);
+ctx.foldLiveRow(u10g2); // the task row is not process: it stays in the pane
+p.appendChild(t10g2);
+ctx.foldLiveRow(t10g2);
+const folds10g = () => p.children.filter((c) => c.matches(".turn-fold"));
+check(folds10g().length === 2 && folds10g()[0] === done10g &&
+      p.children[p.children.length - 1] === folds10g()[1] &&
+      p.children[p.children.length - 2] === u10g2 &&
+      bodyOf(folds10g()[1]).children.length === 1 &&
+      bodyOf(folds10g()[1]).children[0] === t10g2 &&
+      folds10g()[1].dataset.turnLive === "1" &&
+      folds10g()[1].children[1].classList.contains("hidden"),
+      "a task that starts under a finished turn folds while it runs: the `completed` divider "
+      + "above its task row is not the ending of THIS turn, so the run gets a head — folded, "
+      + "counting one step, marked live — instead of a whole transcript that cannot be folded "
+      + "until the answer lands");
+
+// B) the run that carries an interrupted turn on. The divider the interruption stopped
+// on stands between the block and the rows arriving now; a `.completion` used to be a
+// hard boundary here, so those rows stayed in the pane until the ending merged them.
+ctx.busy = true;
+const u10h = row("event user", "the task that dies");
+const t10h = row("event tool_group", "bash …");
+p = pane([u10h, t10h]);
+ctx.eventsEl = p;
+ctx.foldLiveRow(t10h); // the run in flight, before the session goes away
+const live10h = foldOf(p);
+ctx.busy = false;
+const x10h = row("completion", "error");
+const n10h = row("completion-note", "the session … went away");
+p.appendChild(x10h);
+p.appendChild(n10h);
+ctx.foldOpenTurn(); // clutch:turn-interrupted: the block keeps the turn, it is not locked
+const t10h2 = row("event tool_group", "bash … again");
+const r10h = row("event tool_result", "ok");
+ctx.busy = true;
+p.appendChild(t10h2);
+ctx.foldLiveRow(t10h2);
+p.appendChild(r10h);
+ctx.foldLiveRow(r10h);
+check(foldOf(p) === live10h && p.children.length === 2 &&
+      bodyOf(live10h).children.length === 5 &&
+      bodyOf(live10h).children[1] === x10h && bodyOf(live10h).children[2] === n10h &&
+      bodyOf(live10h).children[3] === t10h2 && bodyOf(live10h).children[4] === r10h &&
+      live10h.dataset.turnLive === "1" && live10h.dataset.turnOpen === "1",
+      "and a continuation folds while it runs: the interruption's own divider and its note are the "
+      + "same turn's middle, so they join the block in file order and the rows the run goes on to "
+      + "draw land in it — the ending's merge does no different later, and no second block is made "
+      + "above the continuation");
 
 // 10e) the same turn drawn live and replayed: ONE shape at the end. The live block is
 // not a new arrangement of the transcript, it is the ending's fold built early.
@@ -923,6 +1012,48 @@ const interrupted10 = () => [
 check(shapeOf(liveRun(interrupted10())) === shapeOf(replayRun(interrupted10())),
       "and so does a turn that stopped without an answer — the rows the run drew stay in the block "
       + "and the reason it stopped stays under the divider");
+
+// the turn the window watched DIE and then carry on, drawn live the way it happens: the
+// block is made while the run is going, the session goes away (clutch:turn-interrupted,
+// so the block is folded up to what arrived), and the run that continues the turn draws
+// into it. The ending reaches back over the interruption (mergeOpenFold) either way, so
+// both paths have to land on one shape.
+const continuation10 = () => [
+  row("event user", "task"),
+  row("event tool_group", "bash …"),
+  row("completion", "error"),
+  row("completion-note", "the session … went away"),
+  row("event user", "carry on"),
+  row("event tool_group", "bash … again"),
+  row("event text", "done"),
+  row("completion", "completed"),
+];
+function liveContinuation() {
+  const all = continuation10();
+  const paneEl = pane([all[0]]);
+  ctx.eventsEl = paneEl;
+  ctx.busy = true;
+  for (const r of all.slice(1, 4)) { // the rows of the run that died
+    paneEl.appendChild(r);
+    ctx.foldLiveRow(r);
+  }
+  ctx.busy = false;
+  ctx.clearRunLive();
+  ctx.foldOpenTurn();
+  ctx.busy = true;
+  for (const r of all.slice(4)) { // the message that carried it on, and the rest
+    paneEl.appendChild(r);
+    if (!r.matches(".completion")) ctx.foldLiveRow(r);
+  }
+  ctx.busy = false;
+  ctx.autoFoldTurn();
+  return paneEl;
+}
+check(shapeOf(liveContinuation()) === shapeOf(replayRun(continuation10())),
+      "a turn the window watched die and carry on reads like the same turn replayed — one block off "
+      + "the original instruction, holding the interruption, its reason, the message that carried it "
+      + "on and every step either of them drew, in file order (" +
+      JSON.stringify(shapeOf(replayRun(continuation10()))) + ")");
 
 // 10f) the observer the page installs: the pane's own child list, elements only
 let observed10 = null;
