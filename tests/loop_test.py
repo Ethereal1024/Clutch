@@ -15,6 +15,7 @@ from agent.config import Config
 from agent.core.compaction import Compactor
 from agent.core.lazy import LazyEventLog
 from agent.events import (
+    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
     FinalEvent,
@@ -688,16 +689,59 @@ def _compaction_overflow() -> None:
             ],
             fallback=_resp(content="fallback"),
         )
-        agent = Agent(llm=fake, registry=ToolRegistry(build_tools(cfg)), workspace=sb, config=cfg)
+        live: list[object] = []
+        agent = Agent(
+            llm=fake,
+            registry=ToolRegistry(build_tools(cfg)),
+            workspace=sb,
+            config=cfg,
+            sink=live.append,
+        )
         result = agent.run("t")
         check(result == "final answer", "run completes after compaction")
         comps = [e for e in agent.log.events() if isinstance(e, CompactionEvent)]
         check(len(comps) == 1, "context overflow triggered one compaction")
         check(comps[0].summary == "SUMMARY", "compaction summary recorded")
+        # The record reaches a live window through the ONE path that writes and
+        # broadcasts (Agent._emit), not through a compaction-only side door: the
+        # live view and the log are the same record at the same offset, which is
+        # what retires the "compressing context" block (stream-events.js, durable
+        # branch). Before this, compact() appended the record and told nobody.
+        announced = [e for e in live if e.type == "compaction"]
+        check(len(announced) == 1, "the compaction record is announced to the live window")
+        check(announced[0] is comps[0], "the announced record is the logged record")
+        check(getattr(announced[0], "log_offset", None) is not None,
+              "the live record carries the offset the log stamped")
+        # the invariant behind every live/replay difference: what a window is
+        # handed IS the log, position for position — never a second copy, never
+        # an event the log does not have
+        logged = {id(ev): off for off, ev in agent.log.items()}
+        durable = [e for e in live if e.type in DURABLE_TYPES]
+        check(bool(durable), "the run streamed durable records to the live window")
+        check(
+            all(getattr(e, "log_offset", None) == logged.get(id(e)) for e in durable),
+            "every durable event on the wire is the logged record at its own offset",
+        )
+
+
+def _emit_into(log: Any, sink: list[object]) -> Any:
+    """The emit contract in a test, without a broadcaster: append (which stamps
+    the record's own log offset) and hand the same object to the sink. A
+    Compactor may only record through this one call — see compaction.py."""
+
+    def emit(ev: Any) -> Any:
+        log.append(ev)
+        sink.append(ev)
+        return ev
+
+    return emit
 
 
 def _compaction_progress() -> None:
-    # 13b. compaction progress: delta events stream; done=True closes on failure
+    # 13b. compaction progress: deltas stream, and the durable record IS the
+    # thing that ends the live block — not a done frame. A transient UI object
+    # is retired by the record that supersedes it; done=True is only for the
+    # paths where no record will ever exist (failure, cancellation).
     with tempfile.TemporaryDirectory() as tmp:
         log13 = LazyEventLog.in_memory()
         log13.append(UserMessageEvent(content="original task"))
@@ -712,16 +756,31 @@ def _compaction_progress() -> None:
             Config(llm_context_window_bytes=1000),
             log13,
             fake13,
-            sink=progress.append,
+            emit=_emit_into(log13, progress),
         )
-        check(comp13.compact() is True, "compaction with progress sink succeeds")
+        check(comp13.compact() is True, "compaction through emit succeeds")
         deltas = [e for e in progress if e.type == "compaction_delta"]
         check(len(deltas) >= 4, "progress events stream during compaction")
         check(deltas[0].chars == 0 and not deltas[0].done, "a start marker broadcasts first")
         check(deltas[-1].chars == 600, "final progress carries the total summary chars")
         check(not any(e.done for e in deltas), "no done marker on success")
 
-        # failed summary: the live block must close
+        # the announcement: the record goes out through the same call the loop
+        # uses, carrying the offset the log stamped, and it is the LAST thing
+        # said — so a live window retires the block at the same position a
+        # replay would put the row (ui/js/stream-events.js, durable branch)
+        records = [e for e in progress if e.type == "compaction"]
+        check(len(records) == 1, "a successful compaction announces its record")
+        check(progress[-1] is records[0], "the record is announced after the last delta")
+        check(records[0] is log13.events()[-1], "the announced record is the logged one")
+        check(
+            getattr(records[0], "log_offset", None) == log13.items()[-1][0],
+            "the record carries its own log offset, so a reconnect cannot repaint it",
+        )
+        check(log13.cpr_start() == log13.items()[-1][0],
+              "the window slid to the announced record's own offset")
+
+        # failed summary: no record will ever exist, so the live block closes itself
         class BoomLlm:
             def stream(self, messages, tools=None, cancel=None):
                 yield {"type": "text", "delta": "partial"}
@@ -736,13 +795,15 @@ def _compaction_progress() -> None:
             Config(llm_context_window_bytes=1000),
             log13b,
             BoomLlm(),
-            sink=failed.append,
+            emit=_emit_into(log13b, failed),
         )
         check(comp13b.compact() is False, "failed summary call returns False")
         check(
             any(e.type == "compaction_delta" and e.done for e in failed),
             "done marker closes the live block on failure",
         )
+        check(not any(e.type == "compaction" for e in failed),
+              "a failed compaction announces no record")
 
 
 def _compaction_window_reaches_summarizer() -> tuple[Any, Any, dict[str, int]]:
@@ -767,7 +828,7 @@ def _compaction_window_reaches_summarizer() -> tuple[Any, Any, dict[str, int]]:
             yield {"type": "text", "delta": "S" * 60}
             yield {"type": "finish", "reason": "stop"}
 
-    comp13d = Compactor(Config(llm_context_window_bytes=200_000), log13d, CaptureLlm())
+    comp13d = Compactor(Config(llm_context_window_bytes=200_000), log13d, CaptureLlm(), emit=log13d.append)
     check(comp13d.compact() is True, "compaction with a multi-MB head succeeds")
     check(
         "[... earlier transcript elided ...]" not in prompt_text["t"],
@@ -790,7 +851,9 @@ def _compaction_prompt_has_no_input_budget(big_log: Any, CaptureLlm: Any, prompt
     # prompt, and that prompt is the whole transcript — nothing binds it.
     sizes: dict[int, int] = {}
     for window in (200_000, 5_000_000):
-        comp = Compactor(Config(llm_context_window_bytes=window), big_log(), CaptureLlm())
+        log = big_log()
+        comp = Compactor(Config(llm_context_window_bytes=window), log, CaptureLlm(),
+                         emit=log.append)
         check(comp.compact() is True, f"compaction succeeds at window={window}")
         sizes[window] = prompt_len["n"]
     check(
@@ -817,7 +880,7 @@ def _compaction_second_window() -> dict[str, str]:
             yield {"type": "text", "delta": "S" * 60}
             yield {"type": "finish", "reason": "stop"}
 
-    comp13f = Compactor(Config(llm_context_window_bytes=200_000), log13f, CaptureLlm2())
+    comp13f = Compactor(Config(llm_context_window_bytes=200_000), log13f, CaptureLlm2(), emit=log13f.append)
     check(comp13f.compact() is True, "first compaction succeeds")
     check(log13f.window_bytes() < 200_000, "window collapsed to just the new summary line after compaction")
     marker = "new work 0 "
@@ -865,7 +928,8 @@ def _compaction_cancel() -> None:
             yield {"type": "text", "delta": "more"}
             yield {"type": "finish", "reason": "stop"}
 
-    comp13e = Compactor(Config(llm_context_window_bytes=200_000), log13e, SlowLlm(), cancel=cancel)
+    comp13e = Compactor(Config(llm_context_window_bytes=200_000), log13e, SlowLlm(),
+                        emit=log13e.append, cancel=cancel)
     check(comp13e.compact() is False, "cancel mid-summary aborts compaction")
     check(len(calls) == 1, "summary stream interrupted once, not completed")
 
@@ -912,7 +976,7 @@ def _compaction_summary_transport_drop() -> None:
         Config(llm_context_window_bytes=1000),
         log13g,
         ReconnectingSummaryLlm(),
-        sink=notes.append,
+        emit=_emit_into(log13g, notes),
     )
     check(comp13g.compact() is True, "compaction survives a pre-token retry")
     deltas13g = [e for e in notes if e.type == "compaction_delta"]
@@ -954,7 +1018,7 @@ def _compaction_summary_mid_drop() -> None:
         Config(llm_context_window_bytes=1000),
         log13h,
         MidStreamSummaryLlm(),
-        sink=notes13h.append,
+        emit=_emit_into(log13h, notes13h),
     )
     check(comp13h.compact() is True, "compaction survives a mid-summary drop")
     comps13h = [e for e in log13h.events() if isinstance(e, CompactionEvent)]

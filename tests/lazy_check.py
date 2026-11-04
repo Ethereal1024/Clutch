@@ -282,7 +282,9 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             "window materializes only from the last compaction onward (history not re-summarized)",
         )
         check(
-            not Compactor(Config(llm_context_window_bytes=200_000), proj2.log, FakeLlm()).should_compact(),
+            not Compactor(
+                Config(llm_context_window_bytes=200_000), proj2.log, FakeLlm(), emit=proj2.log.append
+            ).should_compact(),
             "no spurious compaction on a legacy file with an existing summary",
         )
 
@@ -432,7 +434,9 @@ def _make_reader(path: Path):
 
 
 def _make_compactor(log):
-    return Compactor(Config(llm_context_window_bytes=200_000), log, FakeLlm())
+    # no broadcasters in a test: emit is still the one writer (append stamps the
+    # record's log offset, which compact() slides the window to)
+    return Compactor(Config(llm_context_window_bytes=200_000), log, FakeLlm(), emit=log.append)
 
 
 if __name__ == "__main__":

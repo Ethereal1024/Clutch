@@ -830,6 +830,50 @@ jsdom 复现脚本在**真 DOM** 里各跑一遍：新任务下块存在且持�
 
 **待验（真机）**：见下面清单第 21 条。
 
+## `compressing context` 那张卡永远钉在块下面（报告："压缩完了它还挂着，重连也不消失"）
+
+**报告**：一轮跑到一半触发了上下文压缩，`compressing context` 出现、字数往上走；压缩**成功**之后
+它不退场，一直停在 `process · N steps` 那块折叠块**下面**，后面 agent 的话就排在这张卡底下。
+重连、重开项目、点 Stop 再发一条都不清，只有整个页面重开才消失——而重开之后同一个位置是一条
+`context compressed`。也就是说：**回放里有记录，活视图里没有**。
+
+**根因**：不是 UI 忘了收，是**压缩记录从来没有上线过**。写 durable 记录的地方有两个，只有一个会广播：
+
+1. `Agent._emit`（`agent/loop.py:79`）——append（日志顺手给记录盖上它自己的字节偏移）→
+   `broadcaster.publish`。所有 `user_message` / `assistant_message` / `tool_result` / `final` 都走它。
+2. `Compactor.compact()` 成功路径（`agent/core/compaction.py`）——直接
+   `self.log.append(CompactionEvent(...))` 然后 `return True`。它手里那个 `sink` 只能发
+   `compaction_delta`（瞬时进度），压根没有 append 能力。
+
+于是 UI 收到的是「开卡 + 进度」，永远收不到**取代**它的那条 `compaction` 记录。而 UI 侧本来只有
+两个合法的退场口（`ui/js/stream-events.js`）：`compaction_delta{done:true}`（只有失败/取消时才发）
+和 durable `compaction`（成功时的记录）。成功的压缩一条都不发，卡片就没有任何东西能取代它；`.live`
+行又被 auto-fold 的各处过滤排除在外（不参与折叠），所以它既不会被吸收、也不会被折掉——**永久钉住**。
+失败路径全都会发 `done=true`，恰恰是「它们没有记录可依赖」的反证。
+
+**修法**：删掉第二个写入口，而不是给卡片补一条清理路径。`Compactor` 不再拿 `log`(可写) + `sink`
+(只发进度)，改为拿 `emit`——就是 `Agent._emit` 本身。`compact()` 成功时
+`self.emit(CompactionEvent(summary=summary))`：一次调用里 append（盖偏移）+ 广播，和 loop 里每一条
+durable 事件走的是同一条路；窗口滑动直接用它的返回值 `log_offset`（`run()` 里拿 user_message 的
+偏移开 checkpoint 用的是同一个机制），不再回读 `log.items()[-1][0]`。**UI 一行没改。**
+
+失败/取消仍然发 `done=true`，那不是兜底：瞬时 UI 对象的终结只有两种合法方式——**被记录取代**，或者
+（根本没有记录时）**自己的终止帧**。成功路径属于前者，二者互斥且穷尽。
+
+**取舍**：`compaction_delta` 保持瞬时（不入日志、不回放），`compaction` 保持一条、带自己的偏移。
+于是「活视图收到的东西 = 日志里的那一条、同一个位置」成了不变量，重连时 `streamHighOffset` 水位线
+能认出它，不会把同一条记录画第二遍（往 `compact()` 里塞一句 `self.sink(ev)` 的补法做不到这点：
+那样发出去的事件没有 `log_offset`，重连就会重复一行）。
+
+**回归**：`tests/loop_test.py` 13 补上真正缺的那半条——一次真跑（`Agent` + `sink`）里，成功的压缩
+必须把 `CompactionEvent` 送到 sink，且**就是**日志里的那一条、带着自己的 `log_offset`；并且线上
+**每一条** durable 事件都必须是日志里的同一对象、同一偏移（这是「活视图与回放同形」的可执行版本）。
+13b 钉住成功路径没有 `done` 帧、失败路径有 `done` 帧且**没有**压缩记录。`node tests/auto-fold-test.js`
+7c 早就钉住了回放形态（窗口第一行就是 `context compressed`），现在活视图落到同一个形态上。
+`tests/lazy_check.py`、`tests/selfcheck.py`、`tests/server_test.py` 全绿。
+
+**待验（真机）**：见下面清单第 22 条。
+
 
 
 完整 SSH 路径的最后一块拼图：手机上**没有** pip/bash，pylibs tar 改为 CI 预构建、
@@ -999,6 +1043,12 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     `completed` 在最下面；重启 App 重开同一个项目，形态**逐块相同**（不是摊着的一段加一个块）。
     只有一句话、中间没有步骤的那种轮次，仍然只有一块（见「模型中途说一句话，后面整段又折不起来」
     一节）。
+22. 压缩成功后那张卡**当场换成记录**（报告"compressing context 一直挂着，重连也不消失"）：把上下文
+    塞到超窗（长任务 + 几次大文件读取），看到 `compressing context — rolling earlier turns into a
+    summary…` 与 `… N chars streamed`；压缩成功的那一刻它**变成**一条 `context compressed`，且留在
+    **原位置**（不是钉在块下面不动的卡），后面 agent 的话排在这条记录之后。此时停掉隧道（或锁屏到
+    连接掉线）再让它重连：同一条记录**不重复出现**、卡不复活；重启 App 重开同一个项目，那条
+    `context compressed` 还在同一个位置（见「`compressing context` 那张卡永远钉在块下面」一节）。
 
 ## 与初版方案的偏差（均已定案）
 

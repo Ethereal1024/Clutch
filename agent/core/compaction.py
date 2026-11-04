@@ -53,27 +53,36 @@ class Compactor:
         config: Config,
         log: LazyEventLog,
         llm: LlmClient,
-        sink: Callable[[object], None] | None = None,
+        emit: Callable[[Event], Event],
         cancel: threading.Event | None = None,
     ) -> None:
         self.config = config
+        # the log is READ here (the window, its bytes, the previous summary) and
+        # its header carries the window slide; compaction never appends a record
+        # itself — that is emit's job, below
         self.log = log
         self.llm = llm
-        # progress sink: the UI gets compaction_delta events instead of looking frozen
-        self.sink = sink
+        # The ONE way a record is both written and announced (Agent._emit): it
+        # appends, which stamps the record's own log offset, and broadcasts the
+        # same object. Compaction must not write to the log directly — a record
+        # nobody is told about cannot replace the live block it supersedes, and
+        # the live view then shows a block the log has no record of. Transient
+        # progress rides the same call (append is a no-op for a delta), exactly
+        # as the loop's own text/thinking deltas do.
+        self.emit = emit
         # stop flag: compaction is synchronous, so it checks cancel itself
         self.cancel = cancel
 
     def _report_progress(self, chars: int, done: bool = False, note: str = "") -> None:
-        """Broadcast in-flight compaction progress; never fatal. A ``note``
-        overrides the live paragraph (e.g. the summary stream dropped and is
-        being retried) so the UI never shows a frozen block."""
-        if not self.sink:
-            return
-        try:
-            self.sink(CompactionDeltaEvent(chars=chars, done=done, note=note))
-        except Exception:  # noqa: BLE001 -- subscriber failure is non-fatal
-            pass
+        """Announce in-flight compaction progress. A ``note`` overrides the live
+        paragraph (e.g. the summary stream dropped and is being retried) so the
+        UI never shows a frozen block.
+
+        ``done`` is the terminal of a transient that has NO record to be
+        superseded by: compaction failed or was cancelled, so nothing will ever
+        replace the live block and it must close itself. A successful compaction
+        ends the block with its record instead (see compact())."""
+        self.emit(CompactionDeltaEvent(chars=chars, done=done, note=note))
 
     def should_compact(self) -> bool:
         """True when the current window fills the model window: pure byte
@@ -100,9 +109,12 @@ class Compactor:
             if not summary:
                 self._report_progress(chars, done=True)
                 return False
-            self.log.append(CompactionEvent(summary=summary))
+            # the record itself supersedes the live block: appended AND announced
+            # through the same call the loop uses, so the live view and a replay
+            # see one row at one offset — the block cannot outlive what replaced it
+            rec = self.emit(CompactionEvent(summary=summary))
             # slide the window to the new summary line's start (header write)
-            self.log.set_cpr_start(self.log.items()[-1][0])
+            self.log.set_cpr_start(int(getattr(rec, "log_offset", 0) or 0))
             return True
         except Exception as e:  # noqa: BLE001 -- compaction must never kill the run
             # a Stop that landed mid-summary reads as a quiet bail, not a failure

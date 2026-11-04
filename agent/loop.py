@@ -73,8 +73,10 @@ class Agent:
         self.sink = sink
         self.cancel = cancel
         self.gate = gate
-        # compaction lives in the Compactor (it summarizes with this same client)
-        self.compactor = Compactor(config, self.log, llm, sink=self.sink, cancel=self.cancel)
+        # compaction lives in the Compactor (it summarizes with this same client);
+        # it is handed _emit, not the bare sink, so its record is appended and
+        # broadcast by the one path every other durable event takes
+        self.compactor = Compactor(config, self.log, llm, emit=self._emit, cancel=self.cancel)
 
     def _emit(self, event: Event) -> Event:
         """Append one event and hand it back.
