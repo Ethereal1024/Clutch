@@ -59,7 +59,7 @@ from .api.settings import SettingsMixin
 from .api.workspace import WorkspaceMixin
 from .base import BaseServer, Broadcaster, RunState
 from .config import API_PROTOCOLS, REASONING_EFFORT_LEVELS, Config, flatten_settings
-from .events import FinalEvent
+from .events import FinalEvent, StateUpdateEvent
 from .project import Project
 from .tools.workspace import Workspace
 
@@ -239,11 +239,35 @@ def unattended_lock_watchdog(
         while True:
             time.sleep(poll_s)
             project = state.project
-            if project is None or project.read_only or project.lock is None:
+            if project is None:
                 watched, unattended_since = None, None
                 continue
             if project.path != watched:
                 watched, unattended_since = project.path, None
+            if project.read_only:
+                # The mirror of the release below, and the cure for the GHOST
+                # read-only: a window that fell back to read-only (a conflict
+                # with a session that was already dying, an adoption during the
+                # 30s grace) is still WATCHING, and the other holder is gone by
+                # now — so take the claim back. Read-only is a fallback, not a
+                # mode (ui/js/project.js only offers it on a 409); leaving it
+                # latched is what made a free .clc stay "read-only" to the
+                # window and to every run it sent.
+                #
+                # Nobody watching changes nothing: with no editor there is no
+                # claim to take, and the first reconnect asks again.
+                if broadcaster.count(str(project.path)) > 0 and state.reclaim_write_claim():
+                    # the window's badge follows the host: the claim is state
+                    # only this process knows, so it has to be said out loud
+                    broadcaster.publish(
+                        StateUpdateEvent(key="project_read_only", value=False),
+                        project=str(project.path),
+                    )
+                unattended_since = None
+                continue
+            if project.lock is None:
+                watched, unattended_since = None, None
+                continue
             if broadcaster.count(str(project.path)) > 0:
                 unattended_since = None
                 continue

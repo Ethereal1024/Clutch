@@ -83,6 +83,11 @@ class RunMixin:
             except (OSError, ValueError) as e:
                 return self._json({"error": f"cannot open project: {e}"}, status=500)
             self._state.set_project(project, workspace=ws)
+            # the window may still be wearing the read-only badge from the
+            # conflict that made it fall back; the claim is this session's
+            # again, so say so (the same frame the watchdog publishes when it
+            # takes the claim back on its own)
+            self._broadcaster.publish(StateUpdateEvent(key="project_read_only", value=False))
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
             # publish the permission request to the UI; with no SSE subscriber

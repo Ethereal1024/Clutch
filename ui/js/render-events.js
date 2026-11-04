@@ -31,6 +31,19 @@ function appendCompletion(status, summary) {
   }
 }
 
+// The host's write-claim changes are announced on the document, never called:
+// js/project.js (which owns #readonly-badge) loads after this file. A test
+// harness may model the DOM without dispatchEvent/CustomEvent; then there is
+// no badge to update and the announcement is skipped.
+function announceProjectReadOnly(readOnly) {
+  if (typeof document === "undefined" || typeof document.dispatchEvent !== "function") return;
+  const detail = { readOnly: !!readOnly };
+  const ev = typeof CustomEvent === "function"
+    ? new CustomEvent("clutch:project-read-only", { detail })
+    : { type: "clutch:project-read-only", detail };
+  document.dispatchEvent(ev);
+}
+
 function renderEvent(ev) {
   const wrap = document.createElement("div");
   const body = document.createElement("div");
@@ -60,6 +73,13 @@ function renderEvent(ev) {
       return buildResultBlock(ui, call.name || "", call.args || {}, ev);
     }
     case "state_update": {
+      // The write claim is HOST state, like the run state: every connect's
+      // status frame carries it, and a live change (the watchdog took the
+      // claim back once the other window was gone) arrives as its own frame.
+      // Announced, not called — js/project.js owns the badge and loads after
+      // this file (tests/ui-load-order-test.js).
+      if (typeof ev.read_only === "boolean") announceProjectReadOnly(ev.read_only);
+      if (ev.key === "project_read_only") announceProjectReadOnly(!!ev.value);
       if (ev.key === "execution_status" && ev.value) {
         // The first frame of every connect is the host's own status. If this
         // window was busy when its session was replaced (see sseRunAtRisk), that

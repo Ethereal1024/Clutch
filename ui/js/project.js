@@ -185,14 +185,30 @@ async function loadOlder() {
 // which only worked while the whole renderer was one file.
 $("#older-pill").addEventListener("click", loadOlder);
 
+// read-only badge: visible only while the active project is read-only
+function showReadOnlyBadge(readOnly) {
+  const badge = document.getElementById("readonly-badge");
+  if (badge) badge.classList.toggle("hidden", !readOnly);
+}
+
+// The host owns the claim, so it also owns the badge. A (re)connect re-asks for
+// a project this window once had to open read-only, and the session's watchdog
+// takes the claim back as soon as the other holder is gone; both announce it
+// (js/render-events.js). Clearing the badge from that is the whole point: the
+// ghost read-only was this state outliving the lock, and only this file's
+// open-time meta used to be allowed to clear it.
+document.addEventListener("clutch:project-read-only", (ev) => {
+  const d = (ev && ev.detail) || {};
+  if (d.project && currentProject && d.project !== currentProject) return;
+  showReadOnlyBadge(!!d.readOnly);
+});
+
 function setProjectInfo(info) {
   currentProject = info.project || "";
   els.projectLabel.textContent = info.name || "";
   els.projectLabel.title = currentProject;
   if (info.workdir) els.workspace.textContent = info.workdir;
-  // read-only badge: visible only while the active project is read-only
-  const badge = document.getElementById("readonly-badge");
-  if (badge) badge.classList.toggle("hidden", !info.read_only);
+  showReadOnlyBadge(!!info.read_only);
   setStatus("idle");
 }
 

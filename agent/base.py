@@ -19,7 +19,7 @@ from typing import Any
 
 from .config import Config
 from .core.permission import PermissionEvaluator, PermissionGate
-from .core.project_lock import LockHandle, ProjectLock
+from .core.project_lock import LockHandle, ProjectLock, ProjectOpenConflict
 from .llm import LlmClient, create_llm_client
 from .loop import Agent
 from .project import Project, open_project_lazy
@@ -86,9 +86,21 @@ class Broadcaster:
         with self._lock:
             self._subs.pop(q, None)
 
-    def publish(self, event: Any) -> None:
+    def publish(self, event: Any, project: str | None = None) -> None:
+        """Fan one event out to the subscribers, optionally to one project.
+
+        ``project`` narrows the fan-out to the streams that watch that .clc (plus
+        the unfiltered ones): a host-made announcement about the ACTIVE project
+        must not reach a window watching a different one, or that window paints
+        a state that was never about its file. Durable events keep the default
+        (everyone), because their admissibility is the run_project filter in
+        agent/api/events.py _sse.
+        """
         with self._lock:
-            subs = list(self._subs)
+            subs = [
+                q for q, watched in self._subs.items()
+                if project is None or watched is None or watched == project
+            ]
         for q in subs:
             try:
                 q.put_nowait(event)
@@ -219,6 +231,48 @@ class RunState:
             self.project = fresh
             self.workspace = ws
             self._retire_lock(project)
+        return True
+
+    def reclaim_write_claim(self) -> bool:
+        """Open the ACTIVE project FOR WRITE again, once its lock is free.
+
+        The exact mirror of release_write_claim, and the missing half of the
+        same invariant. Read-only is only ever the FALLBACK for a conflict
+        (ui/js/project.js says so when it offers it), never a mode the user
+        chose: the moment the window that held the .clc is gone — it quit, its
+        client died, its tunnel was torn down, its session was reaped — the
+        window still looking at the file must be able to become its writer
+        again, without re-opening the project (that would repaint its whole
+        transcript) and without first sending a task.
+
+        Until this existed, read_only was a one-way latch: a window that fell
+        back once kept the badge (and the session kept refusing to append) long
+        after the kernel said the file was free. That is the reported "ghost
+        read-only", and it is why freeing the lock was not enough.
+
+        Never while busy (the run's claim has to stand) and never over another
+        holder (the kernel still refuses). Returns True when the claim is now
+        this window's.
+        """
+        with self.lock:
+            if self.busy:
+                return False
+            project, ws = self.project, self.workspace
+        if project is None or not project.read_only or project.lock is not None:
+            return False
+        try:
+            fresh = open_project_lazy(project.path, workspace=ws)
+        except (ProjectOpenConflict, OSError, ValueError):
+            return False
+        with self.lock:
+            if self.project is not project:
+                # a window (or a run) replaced the project while this one was
+                # being opened: the claim it just took belongs to nobody.
+                ProjectLock.release(fresh.lock)
+                fresh.lock = None
+                return False
+            self.project = fresh
+            self.workspace = ws
         return True
 
     def _retire_lock(self, prev: Project | None, keep: LockHandle | None = None) -> None:

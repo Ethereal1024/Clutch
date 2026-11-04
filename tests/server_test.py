@@ -1141,6 +1141,63 @@ def _write_lock_one_writer(base_url, clc, clc2, state) -> None:
     check(state.project is not None and not state.project.read_only, "reopen is writable again")
 
 
+def _read_only_self_heals_on_reconnect(base_url, clc, proj_dir, state, broadcaster) -> None:
+    # ---- 3f-ter. a reconnect re-asks for the write claim, and says so ----
+    # The ghost had two halves. The session's project stayed read-only (above),
+    # AND every reconnect was handed that project as-is while the status frame
+    # said nothing about the claim — so the window's badge could outlive the
+    # conflict by hours, with no frame ever able to clear it. A reconnect (an
+    # EventSource retry, a phone back from the background, a tunnel healer) is
+    # the one moment a returning window is definitely there, so it is where the
+    # claim is re-asked, and the status frame is where the answer travels.
+    import agent.server as server_mod
+    from agent.core.project_lock import _local_lock_path
+
+    st, body = http_post(f"{base_url}/api/project/new", {"dir": str(proj_dir), "name": "self-heal"})
+    check(st == 200, "scratch project created for the reconnect check")
+    heal = Path(json.loads(body)["project"])
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+    check(st == 200, "demo reopened (the scratch project hands its lock back)")
+
+    def first_status_frame(url: str) -> dict | None:
+        with contextlib.closing(urllib.request.urlopen(url, timeout=15)) as r:
+            for raw in r:
+                line = raw.decode().strip()
+                if not line.startswith("data: "):
+                    continue
+                ev = json.loads(line[6:])
+                if ev.get("type") == "state_update" and ev.get("key") == "execution_status":
+                    return ev
+        return None
+
+    subscribers_before = broadcaster.count()
+    keepalive_saved = server_mod.SSE_KEEPALIVE_SEC
+    server_mod.SSE_KEEPALIVE_SEC = 0.2  # reap these probes (see _connecting_stream_status)
+    try:
+        with _lock_held_elsewhere(str(heal), _local_lock_path(str(heal))):
+            st, _ = http_post(f"{base_url}/api/project/open", {"path": str(heal), "read_only": True})
+            check(st == 200 and state.project.read_only, "the window falls back to read-only")
+            frame = first_status_frame(f"{base_url}/api/events?replay=0&project={quote(str(heal))}")
+            check(frame is not None and frame.get("read_only") is True,
+                  "the connecting stream says this project is read-only")
+        # the conflicting window is gone; the same window reconnects
+        frame = first_status_frame(f"{base_url}/api/events?replay=0&project={quote(str(heal))}")
+        check(frame is not None and frame.get("read_only") is False,
+              "after the holder is gone, the reconnect reports a writable project")
+        check(state.project is not None and not state.project.read_only,
+              "and the session's project is its writer again (no task sent)")
+        check(state.project.lock is not None, "holding the write lock again")
+
+        st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
+        check(st == 200, "demo reopened for the following section")
+        deadline = time.time() + 10
+        while broadcaster.count() > subscribers_before and time.time() < deadline:
+            time.sleep(0.05)
+        check(broadcaster.count() <= subscribers_before, "the reconnect probes hang up cleanly")
+    finally:
+        server_mod.SSE_KEEPALIVE_SEC = keepalive_saved
+
+
 def _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir) -> None:
     from agent.core.project_lock import ProjectLock, _local_lock_path
 
@@ -1308,6 +1365,67 @@ def _dying_holder_frees_the_lock() -> None:
                 _kill_tree(holder)
 
 
+def _read_only_reclaim_is_not_a_latch() -> None:
+    # ---- 3f-ter. read-only is a FALLBACK, not a life sentence ----
+    # The ghost read-only the user reported on 0.1.67: the conflicting window
+    # was long gone and the kernel said the .clc was free, yet this session
+    # still called itself read-only. Every lock-leak fix up to here was about
+    # handing the claim BACK (release_write_claim, the watchdog); nothing ever
+    # asked for it AGAIN without a task, so read_only was a one-way latch.
+    # reclaim_write_claim is the missing half, and these are its three laws:
+    # it never runs over a live run, never over a live holder, and it succeeds
+    # the moment the kernel says the file is free.
+    from agent.core.project_lock import ProjectLock, _local_lock_path
+    from agent.project import create_project
+    from agent.server import RunState
+    from agent.tools.workspace import LocalWorkspace
+
+    with tempfile.TemporaryDirectory() as wdir:
+        root = Path(wdir)
+        ws = LocalWorkspace(str(root))
+        state = RunState()
+        state.set_project(create_project(root / "heal", "heal", workspace=ws), workspace=ws)
+        key = str(state.project.path)
+
+        def lock_held() -> bool:
+            """Whether a SECOND independent claim is still refused — the
+            kernel's answer, not the session's bookkeeping."""
+            h = ProjectLock._acquire_local(key)
+            if h is None:
+                return True
+            ProjectLock.release(h)
+            return False
+
+        check(lock_held(), "the window starts as the project's writer")
+        check(state.reclaim_write_claim() is False,
+              "a writable project has nothing to reclaim (it is left alone)")
+        check(state.release_write_claim() is True, "the claim is handed back (the read-only fallback)")
+        check(state.project.read_only and not lock_held(),
+              "the project is read-only and the .clc is free")
+
+        # a run in flight is a writer: the fallback must not flip under it
+        state.busy = True
+        check(state.reclaim_write_claim() is False, "a busy session never swaps its project")
+        check(state.project.read_only and state.project.lock is None,
+              "the fallback stands while the run is in flight")
+        state.busy = False
+
+        # someone else still holds it: the kernel's refusal is the answer
+        with _lock_held_elsewhere(key, _local_lock_path(key)):
+            check(state.reclaim_write_claim() is False,
+                  "reclaim refuses while another window holds the .clc")
+            check(state.project.read_only and state.project.lock is None,
+                  "and leaves the fallback exactly as it found it")
+
+        # holder gone: the very next ask succeeds — no run, no reopen, no task
+        check(state.reclaim_write_claim() is True, "the free .clc is this window's again")
+        check(not state.project.read_only and state.project.lock is not None,
+              "the project is writable and holds the write lock")
+        check(lock_held(), "and the kernel agrees the .clc is claimed")
+        check(state.reclaim_write_claim() is False, "reclaiming an already-writable project is a no-op")
+        check(state.release_write_claim() is True, "the probe leaves no claim behind")
+
+
 def _unattended_lock_watchdog() -> None:
     # ---- 3h. a .clc's write lock never outlives its audience ----
     # The flock only dies with the PROCESS, so a window that is GONE — the app
@@ -1397,6 +1515,40 @@ def _unattended_lock_watchdog() -> None:
             time.sleep(0.05)
         check(state.project.read_only, "nobody watching: the watchdog hands the lock back")
         check(not claimed(), "and the .clc is free again for any other window")
+
+        # -- the MIRROR: a window that comes back gets the free claim back
+        # This is the ghost's exact shape: the project is read-only, the
+        # kernel says the .clc is free, and a window is looking at it. Left
+        # alone, that state used to last until the window sent a task — the
+        # badge (and the run refusal) outliving the lock by hours. A watching
+        # window is the one fact that says "an editor is here", so the very
+        # next tick re-asks for the claim and says the answer on the wire:
+        # the badge follows the host, not the last conflict the window saw.
+        from queue import Empty
+
+        q2 = broadcaster.subscribe(key)
+        try:
+            announced: list[object] = []
+            deadline = time.time() + 10
+            while time.time() < deadline and state.project.read_only:
+                time.sleep(0.05)
+            while not announced and time.time() < deadline:
+                try:
+                    announced.append(q2.get_nowait())
+                except Empty:
+                    time.sleep(0.05)
+            check(not state.project.read_only, "a watching window takes a free claim back")
+            check(claimed(), "and the kernel agrees the .clc is claimed again")
+            check(
+                any(
+                    getattr(ev, "key", None) == "project_read_only"
+                    and getattr(ev, "value", None) is False
+                    for ev in announced
+                ),
+                "the reclaimed claim is announced so the window drops its badge",
+            )
+        finally:
+            broadcaster.unsubscribe(q2)
 
         # -- an orphaned RUN: the session goes, the claim cannot
         # The incident's shape: the window died without POST /api/session/stop,
@@ -1837,9 +1989,11 @@ def _run_server_test() -> int:
         _live_frame_shape(base_url, clc, state, broadcaster)
         clc2 = _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster)
         _write_lock_one_writer(base_url, clc, clc2, state)
+        _read_only_self_heals_on_reconnect(base_url, clc, proj_dir, state, broadcaster)
         _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir)
         _remote_workspace_locks_locally()
         _dying_holder_frees_the_lock()
+        _read_only_reclaim_is_not_a_latch()
         _unattended_lock_watchdog()
         _session_release_is_recorded()
         if not _start_real_run(base_url, state):

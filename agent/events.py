@@ -121,7 +121,14 @@ class StateUpdateEvent(Event):
 
     type: str = "state_update"
     key: str = "execution_status"
-    value: str = ""
+    value: str | bool = ""
+    # Set on the status frame of a connect (and on a live claim change): whether
+    # the project this stream watches is open for WRITE in this session. None
+    # means "no claim to report" (the frame is about another window's project,
+    # or there is no project at all), so the window leaves its badge alone.
+    # A reconnect used to carry no answer to this at all, which left a window
+    # that once fell back to read-only wearing that badge forever.
+    read_only: bool | None = None
 
 
 @dataclass
