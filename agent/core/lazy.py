@@ -285,7 +285,7 @@ class LazyEventLog:
         of a turn about every time. What a split turn costs is not bytes, it is the
         renderer: the pane has to fold a region it never saw the head of, and when a
         later page finally brings that turn's task row the fold has to be reconciled
-        (ui/js/auto-fold.js absorbIntoRegion). Starting a page on a task row makes
+        (ui/js/auto-fold.js foldSegmentRows). Starting a page on a task row makes
         "a page of history" and "whole turns" the same unit.
 
         Returns ``lo`` unchanged when the window already opens on a task row, and

@@ -594,15 +594,24 @@ const d9e = row("completion", "completed");
 for (const el of [u9e, w9e2, a9e, d9e]) p.appendChild(el);
 ctx.autoFoldTurn();
 const f9e2 = foldOf(p);
-check(f9e2 === f9e && p.children.length === 4 && p.children[1] === f9e &&
-      p.children[2] === a9e && p.children[3] === d9e,
-      "the turn that finally completes is the SAME fold, ended directly above its answer");
-check(f9e2 !== undefined && bodyOf(f9e).children.length === 5 &&
+const folds9e = p.children.filter((c) => c.matches(".turn-fold"));
+check(f9e2 === f9e && folds9e.length === 2 && p.children.length === 6 &&
+      p.children[0] === t9e && p.children[1] === f9e && p.children[2] === part9e &&
+      p.children[3] === folds9e[1] && p.children[4] === a9e && p.children[5] === d9e,
+      "the turn that finally completes keeps the SAME fold, and what the run drew after the prose " +
+      "it stopped on folds into a block of its own — the prose splits the turn, so the block above " +
+      "it stays where it was and the answer is still the row under the last block");
+check(f9e2 !== undefined && bodyOf(f9e).children.length === 2 &&
       bodyOf(f9e).children[0] === w9e &&
-      bodyOf(f9e).children[2] === part9e &&
-      bodyOf(f9e).children[3] === u9e &&
-      bodyOf(f9e).children[4] === w9e2,
-      "and the prose it stopped on is process now, inside the block, where it belongs");
+      bodyOf(f9e).children[1] === th9e,
+      "and the prose itself stays in plain sight: what it held is the rows the run drew BEFORE it, " +
+      "in file order, and nothing is appended after the text it came after");
+check(bodyOf(folds9e[1]).children.length === 2 &&
+      bodyOf(folds9e[1]).children[0] === u9e &&
+      bodyOf(folds9e[1]).children[1] === w9e2 &&
+      folds9e[1].children[0].children[1].textContent === "process · 2 steps",
+      "…the message that carried the turn on and the step it drew fold together under that prose, " +
+      "counting themselves, directly above the answer");
 
 // 9f) interrupted again while the turn is being carried on: still one fold, still
 // open, and the ending that stopped it stays visible until an answer replaces it
@@ -744,29 +753,39 @@ check(scrollCalls === 2,
 const x10 = row("event text", "the suite is green");
 p.appendChild(x10);
 ctx.foldLiveRow(x10);
-check(p.children[p.children.length - 1] === x10 && bodyOf(live10).children.length === 2,
-      "the run's prose is not process: it stays in the pane, under the block");
+check(p.children[p.children.length - 1] === x10 && bodyOf(live10).children.length === 2 &&
+      live10.dataset.turnLive === undefined && live10.attrs["aria-busy"] === "false",
+      "the run's prose is not process: it stays in the pane, under the block — and it SETTLES that " +
+      "block exactly as the ending would, because the stretch of process it was counting is drawn " +
+      "up to the run's own words: the ring stops");
 
 const t10b = row("event tool_group", "read_file …");
 p.appendChild(t10b);
 ctx.foldLiveRow(t10b);
-check(p.children[p.children.length - 1] === t10b && bodyOf(live10).children.length === 2,
-      "and a step that follows the prose stays where it was drawn: what is inside the block has to "
-      + "stay in file order, or the ending's merge would append the text after the step it preceded");
+const seg10b = p.children[3];
+check(p.children.length === 4 && p.children[0] === u10 && p.children[1] === live10 &&
+      p.children[2] === x10 && p.children[3] === seg10b &&
+      seg10b.matches(".turn-fold") && bodyOf(seg10b).children.length === 1 &&
+      bodyOf(seg10b).children[0] === t10b &&
+      seg10b.children[0].children[1].textContent === "process · 1 step" &&
+      seg10b.dataset.turnOpen === "1" && live10.dataset.turnOpen === undefined,
+      "and a step that follows the prose folds on its own: a second block, under the prose, holding " +
+      "only the rows drawn after it — the segment is what a block is, so the rows on either side of " +
+      "the run's own words never share one body (which is the only way both stay in file order)");
 
-live10.children[0].onclick(); // the reader opens the live block
-check(live10.children[0].attrs["aria-expanded"] === "true" &&
-      live10.children[1].classList.contains("open") &&
-      live10.dataset.turnLive === "1",
-      "the reader can open it mid-run: one press on the head shows the process of a task that is "
-      + "still working, and the block keeps saying the run is going");
-live10.children[0].onclick(); // ...and fold it again, at will
-check(live10.children[0].attrs["aria-expanded"] === "false" &&
-      live10.children[1].classList.contains("hidden") &&
-      live10.dataset.turnLive === "1",
-      "and fold it again: the state is the reader's to set for as long as the run lasts, and a "
-      + "block they closed keeps saying the run is going — the ring hangs off `data-turn-live` with "
-      + "the closed `aria-expanded`, so no word has to say it");
+seg10b.children[0].onclick(); // the reader opens the live block
+check(seg10b.children[0].attrs["aria-expanded"] === "true" &&
+      seg10b.children[1].classList.contains("open") &&
+      seg10b.dataset.turnLive === "1",
+      "the reader can open it mid-run: one press on the head shows the process of a task that is " +
+      "still working, and the block keeps saying the run is going");
+seg10b.children[0].onclick(); // ...and fold it again, at will
+check(seg10b.children[0].attrs["aria-expanded"] === "false" &&
+      seg10b.children[1].classList.contains("hidden") &&
+      seg10b.dataset.turnLive === "1",
+      "and fold it again: the state is the reader's to set for as long as the run lasts, and a " +
+      "block they closed keeps saying the run is going — the ring hangs off `data-turn-live` with " +
+      "the closed `aria-expanded`, so no word has to say it");
 
 const a10 = row("event text", "done: the fixture path was wrong");
 p.appendChild(a10);
@@ -774,14 +793,19 @@ ctx.foldLiveRow(a10);
 const d10 = row("completion", "completed");
 p.appendChild(d10);
 ctx.autoFoldTurn();
-check(foldOf(p) === live10 && p.children[p.children.length - 1] === d10 &&
-      p.children[p.children.length - 2] === a10 &&
-      bodyOf(live10).children.length === 4 &&
-      bodyOf(live10).children[2] === x10 && bodyOf(live10).children[3] === t10b &&
-      live10.dataset.turnLive === undefined && live10.dataset.turnOpen === undefined &&
-      live10.attrs["aria-busy"] === "false",
-      "the ending takes in what stood outside the block, in file order, directly above the answer: "
-      + "one block, one turn — and the mark of the run in flight is gone, because it is over");
+check(foldOf(p) === live10 && p.children.length === 6 &&
+      p.children[0] === u10 && p.children[1] === live10 && p.children[2] === x10 &&
+      p.children[3] === seg10b && p.children[4] === a10 && p.children[5] === d10,
+      "the ending folds each stretch of process where it stands, under the prose that ends it: two " +
+      "blocks and the prose between them, in the order the run drew them, directly above the answer");
+check(bodyOf(live10).children.length === 2 && bodyOf(live10).children[0] === t10 &&
+      bodyOf(live10).children[1] === r10 &&
+      bodyOf(seg10b).children.length === 1 && bodyOf(seg10b).children[0] === t10b &&
+      live10.dataset.turnLive === undefined && seg10b.dataset.turnLive === undefined &&
+      live10.dataset.turnOpen === undefined && seg10b.dataset.turnOpen === undefined &&
+      live10.attrs["aria-busy"] === "false" && seg10b.attrs["aria-busy"] === "false",
+      "one body each, nothing moved across the prose, and every mark of a run in flight is gone " +
+      "because it is over");
 
 // 10b) a block nobody touched is closed where it landed, and the ending adds nothing
 // to that state: it was folded while it was still filling in, so there is no move
@@ -884,7 +908,7 @@ check(foldOf(p) === live10d && p.children.length === 2 &&
       live10d.dataset.turnLive === "1",
       "the rows between the block and the new one are the SAME turn's middle, and they go in in file "
       + "order — the divider an interruption stopped on, its note, the message that carried the turn "
-      + "on (absorbMiddle). At the ending mergeOpenFold appends exactly those, so a turn watched live "
+      + "on (absorbInto). At the ending mergeOpenFold appends exactly those, so a turn watched live "
       + "and the same turn replayed end in one shape; left outside, the body would receive them after "
       + "the steps that followed them. And one of them being the reader's OWN message opens the "
       + "block: what they just wrote is not hidden by this file's own initiative, and the head that "
@@ -1002,6 +1026,52 @@ check(shapeOf(liveRun(records10())) === shapeOf(replayRun(records10())),
       "a turn the reader watched stream and the same turn replayed from the log end in ONE shape — "
       + "same rows in the pane, same rows in the block, same order, same count (" +
       JSON.stringify(shapeOf(replayRun(records10()))) + ")");
+// and that one shape is the turn's process cut at the prose the run spoke: the answer
+// and the prose are rows of the pane, each stretch between them is a block
+check(shapeOf(replayRun(records10())) ===
+      "task | fold[where is the fixture … / bash …]=process · 2 steps | half way | " +
+      "fold[read_file …]=process · 1 step | done | completed",
+      "…and the shape is the prose's: a block for the process above it, a block for the process " +
+      "below it, and the run's own words in between, in plain sight (" +
+      JSON.stringify(shapeOf(replayRun(records10()))) + ")");
+// The tail AFTER the last prose folds too: nothing says the turn is over until its
+// ending does, and a run that keeps drawing steps after its last paragraph is the
+// case the reader most wants folded while it works.
+const tailAfterProse = () => [
+  row("event user", "task"),
+  row("event tool_group", "bash …"),
+  row("event text", "half way"),
+  row("event tool_group", "grep …"),
+  row("event text", "done"),
+  row("event tool_group", "git push …"),
+  row("completion", "completed"),
+];
+check(shapeOf(liveRun(tailAfterProse())) === shapeOf(replayRun(tailAfterProse())) &&
+      shapeOf(replayRun(tailAfterProse())) ===
+      "task | fold[bash …]=process · 1 step | half way | fold[grep …]=process · 1 step | " +
+      "done | fold[git push …]=process · 1 step | completed",
+      "a step the run draws after it has spoken still folds, and each stretch keeps to its own " +
+      "block: the prose above it is a boundary, not the end of the turn (" +
+      JSON.stringify(shapeOf(replayRun(tailAfterProse()))) + ")");
+// A reader's own message inside the turn (a turn carried on, a notice the run
+// emitted) is not prose: it belongs to the segment, and the block it folds into opens
+// — what the reader just wrote is not something this file hides on its own initiative.
+const proseThenMessage = () => [
+  row("event user", "task"),
+  row("event tool_group", "bash …"),
+  row("event text", "half way"),
+  row("event user", "carry on"),
+  row("event tool_group", "grep …"),
+  row("event text", "done"),
+  row("completion", "completed"),
+];
+check(shapeOf(liveRun(proseThenMessage())) === shapeOf(replayRun(proseThenMessage())) &&
+      shapeOf(replayRun(proseThenMessage())) ===
+      "task | fold[bash …]=process · 1 step | half way | " +
+      "fold[carry on / grep …]=process · 2 steps | done | completed",
+      "…and a user row the run drew is inside the segment, not a boundary: it folds with the steps " +
+      "around it, under the prose the reader was reading (" +
+      JSON.stringify(shapeOf(replayRun(proseThenMessage()))) + ")");
 const interrupted10 = () => [
   row("event user", "task"),
   row("event tool_group", "bash …"),

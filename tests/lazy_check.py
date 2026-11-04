@@ -344,7 +344,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     # the window's START back to the turn's own task row (aligned_start), which makes
     # "a page of history" and "whole turns" the same unit — the renderer then never
     # folds a region whose head it has not seen, and never has to reconcile that fold
-    # when a later page brings the head (ui/js/auto-fold.js absorbIntoRegion).
+    # when a later page brings the head (ui/js/auto-fold.js foldSegmentRows).
     with tempfile.TemporaryDirectory() as d:
         p9 = Path(d) / "align.clc"
         evs = [UserMessageEvent(content="task one")]

@@ -461,7 +461,7 @@ def _lazy_open_and_history(base_url, sdir) -> tuple[Path, int]:
     # align=turn: a page is whole turns, not a byte window that cuts one (the UI
     # asks for 1 MiB; the median finished turn is ~278 KB, so an unaligned cut lands
     # mid-turn about every time, and the pane then folds a region whose head it has
-    # never seen — ui/js/auto-fold.js absorbIntoRegion is what reconciles that later)
+    # never seen — ui/js/auto-fold.js foldSegmentRows is what reconciles that later)
     loffs = []
     pos = 0
     for ev in levents[:450]:
