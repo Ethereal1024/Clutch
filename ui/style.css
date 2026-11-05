@@ -1772,6 +1772,11 @@ mjx-container[display="true"] {
    row's own row-gap is what spaces it from them. */
 .plug-versions-box { flex: 1 1 100%; margin: 0 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
 .plug-caution { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
+/* what the automatic pass at connect did to this machine: a name it let go of is
+   not a row any more, so this is the only place a removal is stated on the page.
+   It sits with the list, not above it, and speaks only when there is something
+   to say (ui/js/components-panel.js `plugPassLine`). */
+.plug-pass { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* the name is the row's loudest mark, and it has to read that way against the
    sentence under it and the two grey lines below both: VS Code's `.name` is the
    one semibold thing in an extension row (media/extension.css). It carries no

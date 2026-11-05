@@ -195,19 +195,20 @@ Design decisions:
 ## Components
 
 File operations, web retrieval, the skill library, and remote workspaces are provided
-as independent components and are not bundled with the main program. Components are
-installed on the machine that runs the backend, so local use and remote-workspace use
-require separate installations. The Plugins page in the settings lists the available
-components, their installation state, and their sources.
+as independent components and are not bundled with the main program. Where a component
+is held — this client, or the machine the session's commands run on — is decided by the
+component's own declaration, so local use and remote-workspace use can require separate
+installations. The Plugins page in the settings lists the available components, their
+installation state, and their sources.
 
-The available components come from the market index built into the application. Each
-row names a component's release manifest and pins that manifest's digest. The manifest
-in turn pins the artifact for each platform, and the target machine downloads the
-component files itself and checks them against those digests. The application reads
-the index from the remote document, then the local cache, then the snapshot shipped
-with the installation. Removing a component removes its tools from the tool list and
-leaves the remaining functionality unaffected. With no component installed, Clutch
-still provides conversation, command execution, and project record search.
+The available components come from the market index the release publishes. Each row
+names a component's release manifest and pins that manifest's digest. The manifest in
+turn pins the artifact for each platform, and the target machine downloads the component
+files itself and checks them against those digests. The application reads that index
+once; if it cannot be read, the page says why and offers a retry rather than drawing a
+remembered copy. Removing a component removes its tools from the tool list and leaves
+the remaining functionality unaffected. With no component installed, Clutch still
+provides conversation, command execution, and project record search.
 
 To download components through a mirror, fill in Source mirror on the Plugins page, or
 set the `CLUTCH_SOURCE_MIRROR` environment variable. The mirror only changes the

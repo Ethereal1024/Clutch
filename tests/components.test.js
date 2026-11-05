@@ -259,8 +259,8 @@ async function main() {
   const indexDir = tmp("clutch-components-index-");
   const emptyIndex = indexOf(indexDir, []);
   const empty = await components.readIndex({ index: emptyIndex });
-  check(empty.entries.length === 0 && empty.origin === "given", "a caller that names its own index gets exactly that index");
-  check(empty.errors.length === 0 && empty.note === "", "and a readable index holding no rows is not a failure");
+  check(empty.entries.length === 0, "a caller that names its own index gets exactly that index");
+  check(empty.errors.length === 0, "and a readable index holding no rows is not a failure");
 
   // 2. a fresh host holds nothing
   const before = await components.hostInventory(base);
@@ -380,6 +380,132 @@ async function main() {
       unified && unified.version.endsWith("+" + unified.digest.slice(0, 16)),
       "and the record names the release again, with the bytes under it"
     );
+  }
+
+  // 6c. the pass runs BOTH ways: a component this machine holds while the roster
+  //    asks it for nothing is LET GO, and the log names it (ui/components.js
+  //    `retireComponents`). Two ways to be retired, and one way to be LEFT ALONE
+  //    — the second is what makes a deletion safe to do from an automatic pass
+  //    (invariant I4: one implementation, one home).
+  if (haveBash) {
+    const retiredDir = tmp("clutch-components-retired-");
+    const retiredSrc = path.join(retiredDir, "clutch-retired");
+    fs.mkdirSync(retiredSrc);
+    fs.writeFileSync(path.join(retiredSrc, "retired.py"), "print('retired')\n");
+    const retiredSession = {
+      name: "clutch-retired",
+      version: "0.1.0",
+      launch: { argv: ["{py}", "{script}"], entry: "retired.py" },
+    };
+    fs.writeFileSync(path.join(retiredSrc, "component.json"), JSON.stringify(retiredSession));
+    const retiredTar = buildTar(retiredSrc, path.join(retiredDir, "clutch-retired-any.tar.gz"));
+    // installed by hand, the way a machine that ran an earlier release holds it:
+    // no roster of this client mentions this name
+    const hold = () =>
+      components.upload(
+        base,
+        { name: "clutch-retired", version: "0.1.0", path: retiredTar, digest: sha256(retiredTar), declaration: retiredSession },
+        components.REQUEST_TIMEOUT_MS
+      );
+    const holds = async (name) => (await components.hostInventory(base)).some((c) => c.name === name);
+
+    // the release that MOVES the name to the client: a declaration with an `entry`
+    // module and no process — the shape a frontend component has
+    const moved = path.join(retiredDir, "moved");
+    fs.mkdirSync(moved);
+    fs.writeFileSync(
+      path.join(moved, "component.json"),
+      JSON.stringify({ name: "clutch-retired", version: "0.2.0", entry: "retired.mjs" })
+    );
+    fs.writeFileSync(
+      path.join(moved, "clutch-component.json"),
+      JSON.stringify({
+        schema: 1,
+        name: "clutch-retired",
+        version: "0.2.0",
+        declaration: { asset: "component.json", sha256: sha256(path.join(moved, "component.json")) },
+      })
+    );
+    const movedServer = await serve(moved);
+    const movedIndex = indexOf(tmp("clutch-components-moved-index-"), [
+      rowFor(path.join(moved, "clutch-component.json"), `${movedServer.base}/clutch-component.json`),
+    ]);
+    try {
+      await hold();
+      check(await holds("clutch-retired"), "a machine that installed a component in an earlier life still holds it");
+      const said = [];
+      const movedPass = await components.ensureComponents(base, {
+        checkout: false,
+        index: movedIndex,
+        progress: (m) => said.push(m),
+      });
+      check(
+        movedPass.retired.length === 1 && movedPass.retired[0].name === "clutch-retired",
+        `a name the market moved to the client is let go from the session machine (${JSON.stringify(movedPass.retired)})`
+      );
+      check(
+        /belongs to the client/.test(String(movedPass.retired[0].reason)),
+        "and the reason says which of the two it was, in the market's own terms"
+      );
+      check(!(await holds("clutch-retired")), "the bytes are gone from that machine, not merely unlisted");
+      check(!fs.existsSync(path.join(hostRoot, "clutch-retired")), "the landing directory went with the record");
+      check(
+        said.some((m) => /^clutch-retired 0\.1\.0 let go: /.test(m)),
+        `and the pass SAID what it removed, by name and version (${JSON.stringify(said)})`
+      );
+      check(movedPass.errors.length === 0, `a removal that landed is not an error (${JSON.stringify(movedPass.errors)})`);
+
+      // (b) a name NOTHING in the roster mentions: dropped by the market, and this
+      //     client has no checkout of it either
+      await hold();
+      const gone = await components.ensureComponents(base, { index: emptyIndex });
+      check(
+        gone.retired.some((x) => x.name === "clutch-retired" && /no longer lists/.test(String(x.reason))),
+        `a name the market has dropped is let go too (${JSON.stringify(gone.retired)})`
+      );
+      check(!(await holds("clutch-retired")), "and it is no longer on that machine");
+
+      // (c) a row whose manifest pins NO declaration: no place to read, which is
+      //     not a verdict — nothing is deleted on a missing answer
+      await hold();
+      const blank = path.join(retiredDir, "blank");
+      fs.mkdirSync(blank);
+      fs.writeFileSync(
+        path.join(blank, "clutch-component.json"),
+        JSON.stringify({ schema: 1, name: "clutch-retired", version: "0.2.0" })
+      );
+      const blankServer = await serve(blank);
+      try {
+        const blankIndex = indexOf(tmp("clutch-components-blank-index-"), [
+          rowFor(path.join(blank, "clutch-component.json"), `${blankServer.base}/clutch-component.json`),
+        ]);
+        const kept = await components.ensureComponents(base, { checkout: false, index: blankIndex });
+        check(kept.retired.length === 0, "a declaration that names no place is not a verdict to delete by");
+        check(await holds("clutch-retired"), "so the component stays exactly where it is");
+        check(kept.skipped.includes("clutch-retired"), "and the install loop still reports it as not this machine's");
+
+        // (d) a roster that did not arrive is not a roster: a row that cannot be
+        //     read leaves everything in place
+        const brokenIndex = indexOf(tmp("clutch-components-broken-index-"), [
+          {
+            id: "test/clutch-retired",
+            name: "clutch-retired",
+            manifest: `${blankServer.base}/absent.json`,
+            manifest_sha256: "0".repeat(64),
+          },
+        ]);
+        const failed = await components.ensureComponents(base, { checkout: false, index: brokenIndex });
+        check(failed.errors.length === 1, `a row that could not be read is reported (${JSON.stringify(failed.errors)})`);
+        check(failed.retired.length === 0, "and NOTHING is removed on a roster that did not arrive");
+        check(await holds("clutch-retired"), "the component is still there: a failed read deletes nothing");
+      } finally {
+        blankServer.server.close();
+      }
+      // what the pass deliberately left, the test takes away
+      await components.hostRemove(base, "clutch-retired", "");
+    } finally {
+      movedServer.server.close();
+    }
   }
 
   // 7. a host that cannot be reached is reported, never thrown: the pass runs

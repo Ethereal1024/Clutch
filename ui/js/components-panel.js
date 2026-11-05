@@ -62,7 +62,11 @@ const plugState = {
   clientError: null, // why that domain cannot be aimed at (or why it would not open)
   clientHeldError: null, // why its own list did not arrive
   held: [], // the rows BOTH places hold, each tagged with its own `place`
-  market: null, // {entries, errors, unreachable, origin, note}
+  // what the last automatic pass over the session machine did — the names it let
+  // go of and the ones it could not ({at, installed, retired, deferred, errors}),
+  // or null when no pass has run against the machine this window is about
+  pass: null,
+  market: null, // {entries, errors, unreachable}
   marketError: null, // why the market read itself failed
   pending: 0, // in-flight reads: the note line is derived from them
   mirrors: null, // [{url, source}] — the list a failed fetch is retried through, or null while unread
@@ -95,14 +99,14 @@ function plugPlace(item) {
 // The same place said in a sentence, where the sentence has to read even when the
 // page does not know it yet: a market row is drawn from the index alone (opening
 // the page is one read in ui/components.js `marketEntries`), and its release's
-// declaration — the only thing that says whose machine it is — arrives when
-// something is installed from it. Naming that is honest; inventing a machine is
+// declaration — the only thing that says which place it is — arrives when
+// something is installed from it. Naming that is honest; inventing a place is
 // not.
 function plugPlaceName(item) {
   const place = typeof item === "string" ? item : item && item.place;
   if (place === "client") return "this client";
   if (place === "session") return "this session";
-  return "the machine its declaration names";
+  return "the place its declaration names";
 }
 
 // A row whose declaration has not been read YET, which is the ordinary state of
@@ -117,10 +121,10 @@ function plugPlaceUnread(item) {
 // Whether the place a row names can be reached BY THIS BUILD right now, as a
 // sentence, or null when it can. This is the whole of what used to be a machine
 // selector: a plugin is held by the app process itself (always here, or this
-// shell has no plugin domain at all), and a cli/daemon is held by the machine the
-// session runs its commands on — out of reach exactly when that domain did not
-// answer, because a degraded session runs its tools over an exec bridge, and an
-// exec bridge is not a component channel.
+// shell has no plugin domain at all), and a component with a process is held
+// where the session runs its commands — out of reach exactly when that domain did
+// not answer, because a degraded session runs its tools over an exec bridge, and
+// an exec bridge is not a component channel.
 function plugPlaceReady(place) {
   if (place === "client") {
     return plugState.client
@@ -797,6 +801,36 @@ function plugReadProblem() {
   );
 }
 
+// What the automatic pass over the session machine's components did, in one
+// line, and only when it did something worth saying: a name it let go of (a
+// removal is otherwise invisible — it is a DELETE, not a row) and a name it
+// could not. The pass is not awaited by the connect and it keeps no state of its
+// own, so this is the one place its answer reaches a person; nothing is invented
+// when no pass has run against the machine this window is about (`pass` is null).
+function plugPassLine() {
+  const pass = plugState.pass;
+  if (!pass) return null;
+  const retired = Array.isArray(pass.retired) ? pass.retired : [];
+  const errors = Array.isArray(pass.errors) ? pass.errors : [];
+  if (!retired.length && !errors.length) return null;
+  const at = pass.at ? new Date(pass.at).toTimeString().slice(0, 8) : "";
+  const parts = [];
+  if (retired.length) {
+    const names = retired
+      .map((r) => `${r.name}${r.version ? " " + r.version : ""} (${r.reason})`)
+      .join("; ");
+    parts.push(`let go of ${retired.length === 1 ? "" : retired.length + " names: "}${names}`);
+  }
+  if (errors.length) {
+    const why = errors.map((e) => `${e.name || "the pass"} (${e.reason})`).join("; ");
+    parts.push(`could not let go of ${why}`);
+  }
+  const el = document.createElement("p");
+  el.className = "plug-pass";
+  el.textContent = `the components pass ${at ? "at " + at : "run at the last connect"} ${parts.join(", and ")}`;
+  return el;
+}
+
 // The one list. It is not titled with a machine, because there is no single
 // machine this window acts on: some of what it holds belongs to this client and
 // some to the session machine, and WHICH is which is a fact of each row
@@ -810,11 +844,6 @@ function plugList() {
   else meta.push("reading");
   if (plugState.market) meta.push(`${plugState.market.entries.length} known`);
   else if (plugState.marketError) meta.push("market unreadable");
-  // WHICH index answered: the remote one is the ordinary case and needs no
-  // words; a cached or shipped copy is not the current market, and a page that
-  // showed it as if it were would be saying something it does not know
-  const origin = plugState.market && plugState.market.origin;
-  if (origin && origin !== "remote") meta.push(`index ${origin}`);
   // a filtered list says so: the count behind the title is about both places,
   // this one about what is on screen
   if (shown.length !== items.length) meta.push(`${shown.length} shown`);
@@ -824,6 +853,10 @@ function plugList() {
     shown.map(plugItemRow),
     plugEmptyText(items.length, shown.length)
   );
+  // what the pass at connect did to this machine, when it did anything: a name it
+  // let go of is drawn here because it is not a row any more
+  const pass = plugPassLine();
+  if (pass) sec.appendChild(pass);
   if (plugState.market && plugState.market.entries.length) {
     const caution = document.createElement("p");
     caution.className = "plug-caution";
@@ -837,17 +870,6 @@ function plugList() {
     const el = document.createElement("p");
     el.className = "plug-source-error";
     el.textContent = reason;
-    sec.appendChild(el);
-  }
-  // ...and when the list is not the current market, the view says why in one
-  // sentence (the remote index did not answer just now, so this is the copy this
-  // machine cached, or the one this build ships). A list should say which list it
-  // is — that sentence is the difference between "nothing new" and "I could not
-  // ask".
-  if (plugState.market && plugState.market.note) {
-    const el = document.createElement("p");
-    el.className = "plug-source-hint";
-    el.textContent = plugState.market.note;
     sec.appendChild(el);
   }
   // ...and when the failure is the network rather than an answer (the view says
@@ -1698,6 +1720,7 @@ function plugRead({ force = false } = {}) {
       plugState.clientError = r.clientError || null;
       plugState.clientHeldError = r.clientInventoryError || null;
       plugState.held = Array.isArray(r.held) ? r.held : [];
+      plugState.pass = r.pass || null;
       plugState.read = true;
     })
     .catch((e) => {

@@ -44,6 +44,18 @@ class RoutingMixin:
             )
         elif path == "/api/history":
             self._history()
+        elif path == "/api/log":
+            # the byte-addressed log the host's loop drives (P2): the resident
+            # window, plus the head of the open turn, plus the window's size
+            self._log_get()
+        elif path == "/api/declarations":
+            # the data the HOST derives the tool surface from (P3-1): the
+            # declaration files verbatim plus what only this machine knows
+            self._decls_get()
+        elif path == "/api/session":
+            # the facts a host loop turn is assembled from (P1-4): mode, shell,
+            # components prose, context window budget, and the project memory anchor
+            self._session_get()
         elif path == "/api/workspace/tree":
             self._workspace_tree()
         elif path == "/api/workspace/checkpoints":
@@ -67,6 +79,18 @@ class RoutingMixin:
             self._project_open()
         elif parsed.path == "/api/run":
             self._run()
+        elif parsed.path == "/api/log":
+            # one durable line, appended where the .clc lives: the host produced
+            # the event, the execution layer stays the only writer of the file
+            self._log_append()
+        elif parsed.path == "/api/log/window":
+            self._log_window()
+        elif parsed.path == "/api/exec":
+            # ONE tool call on this machine, permission judged here (P3/D3)
+            self._exec()
+        elif parsed.path == "/api/exec/cancel":
+            # the same call's interrupt: Stop must reach a process still running
+            self._exec_cancel()
         elif parsed.path == "/api/stop":
             self._stop()
         elif parsed.path == "/api/settings":

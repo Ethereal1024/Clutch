@@ -127,7 +127,7 @@ check(/return \(await hostCore\.ensureWindowBackend\(window\)\) \|\| null;/.test
   "it returns this window's real session URL, or null");
 check(!/DEFAULT_API_BASE/.test(MAIN),
   "the desktop shell has no placeholder base either");
-check(/return \(await hostCore\.ensureWindowBackend\(e\.sender\)\) \|\| null;/.test(MAIN),
+check(/const base = \(await hostCore\.ensureWindowBackend\(e\.sender\)\) \|\| null;/.test(MAIN),
   "it returns this window's real session URL, or null");
 
 // behavioral: the REAL handler, with a tunnel that is down and one that is up
@@ -210,7 +210,13 @@ async function main() {
   check(/sseSuspend/.test(APP) && /clean === SUPERVISOR_BASE/.test(fnBody("switchBackend")),
     "and refuses it in the one place a base is adopted");
 
-  const at = APP.indexOf("window.clutchTunnel.onEnd");
+  // The tunnel-end handler no longer lives in app.js: it moved to
+  // js/backend-lifecycle.js. Page order puts js/components-panel.js first, and it
+  // registers an `onEnd` of its own about a different fact (the plugin pane), so
+  // anchoring on the first `onEnd` in the concatenation sliced the wrong handler.
+  // Anchor on the call THIS handler owns instead.
+  const owns = APP.indexOf('connectionLost("lost the remote connection")');
+  const at = APP.lastIndexOf("window.clutchTunnel.onEnd", owns);
   const afterEnd = APP.indexOf("// the main process re-established", at);
   check(at > 0, "the tunnel-end handler exists");
   const onEnd = APP.slice(at, afterEnd > at ? afterEnd : at + 1200);

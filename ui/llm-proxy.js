@@ -199,4 +199,4 @@ function stopLlmProxy() {
   }
 }
 
-module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, isLlmPath, getUpstream, getApiKey };
+module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, isLlmPath, getUpstream, getApiKey, getAgent };

@@ -316,3 +316,49 @@ class LazyEventLog:
             end = start
             step *= 2
         return lo
+
+    # ------------------------------------------------------- the open turn head
+
+    def turn_start(self) -> int:
+        """The offset that OPENS the turn still in progress: the first durable
+        record after the newest ``final`` at or before the window start, or 0
+        when the open turn is the file's first.
+
+        Compaction happens DURING a turn, and it slides ``cpr_start`` past the
+        line that opened that turn — its ``user_message``, the one thing that
+        states what is being asked. The model window is therefore not enough for
+        a reader that RESUMES the turn (the host's loop re-reads the log every
+        step and answers the task from that head; agent/loop.py held the task in
+        a variable instead, which is the state TODO.md I6 forbids). /api/log
+        hands the window PLUS this head, and the fold answers ``task`` from it.
+
+        The walk goes back only to that boundary — never to the whole history —
+        and it reads in doubling byte chunks, so the common case (the turn
+        started after the newest compaction) costs nothing at all: the answer is
+        already resident.
+        """
+        items = list(zip(self._offsets, self._events, strict=True))
+        for i in range(len(items) - 1, -1, -1):
+            if items[i][1].type == "final":
+                # the turn opens right after that final — or there is no open
+                # turn at all, in which case the final's own offset is the end
+                return items[i + 1][0] if i + 1 < len(items) else items[i][0]
+        # nothing resident: the head is behind the window start
+        end = self._cpr_start
+        after = None  # first record after the chunk already walked, if any
+        step = 64 * 1024
+        while end > 0:
+            start = max(0, end - step)
+            chunk = self.read_page(start, end)  # a mid-line cut is dropped by the parser
+            for i in range(len(chunk) - 1, -1, -1):
+                if chunk[i][1].type == "final":
+                    if i + 1 < len(chunk):
+                        return chunk[i + 1][0]
+                    return after if after is not None else chunk[i][0]
+            if chunk:
+                after = chunk[0][0]
+            end = start
+            step *= 2
+        # no final anywhere before the window: this turn opens the file
+        return after if after is not None else 0
+

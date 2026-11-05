@@ -18,26 +18,33 @@ UI_ASSETS=$ASSETS/ui
 
 # the pure-Node subset the host resolves via useUI(): the modules it names plus
 # their own ui/-relative requires (the tunnel is six files over one state
-# object), plus the shared transport defaults and the market index snapshot
-# (components.js reads market.snapshot.json from __dirname; without it an offline
-# phone hands the far side nothing to install). components-view.js is the plugin page's backend
+# object), plus the shared transport defaults. components-view.js is the plugin page's backend
 # (android-host.js names it); it requires components.js, right beside it, and
 # components.js requires mirrors.js — which reads components.mirrors.json from
 # __dirname, so the phone falls back through the same mirrors the desktop does
-# (without the list it hands the far side nothing to retry through).
+# (without the list it hands the far side nothing to retry through). There is no
+# shipped market index on board: ui/market.snapshot.json is the artifact
+# scripts/market_index.py publishes, not a runtime copy, so the phone reads the
+# index once from the release host (or the one mirror prefix) like every other
+# window does.
 #
 # update-core.js + update-service.js are the About pane's updater: the check and
 # the download run HERE (the phone has no network API of its own in the WebView),
 # the install does not — the page hands the path to the Kotlin shell instead. The
 # desktop-only installer (ui/update-install.js) is deliberately NOT copied: it
 # requires Electron-free nothing, but nothing on this side could run it either.
-UI_NODE="components-view.js components.js components.mirrors.json market.snapshot.json exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json update-core.js update-service.js"
+UI_NODE="compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js prompt.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json update-core.js update-service.js"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"
 mkdir -p "$NODEJS_PROJECT/ui"
 cp android/host/*.js android/host/package.json "$NODEJS_PROJECT/"
 for f in $UI_NODE; do cp "ui/$f" "$NODEJS_PROJECT/ui/"; done
+# the loop's prompt templates, beside prompt.js which resolves them from its own
+# directory (P1-3): the host half is the owner of the wording now, so the phone
+# must ship exactly the files the desktop does — agent/prompts/ is the Python
+# half's copy only until P4 deletes it
+cp -r ui/prompts "$NODEJS_PROJECT/ui/"
 (cd "$NODEJS_PROJECT" && npm install --omit=dev --no-audit --no-fund)
 
 # 2. assets/ui = exactly what ui/index.html pulls (styles/scripts/vendor)

@@ -147,6 +147,15 @@ class RunState:
         # while the run is going (POST /api/llm/base, see api/settings).
         self.llm: LlmClient | None = None
         self.gate: PermissionGate | None = None
+        # Gates whose prompts are still answerable. `gate` above is the RUN's own
+        # gate (a run is one slot); the exec endpoint (api/exec.py) serves one
+        # call per request — several may be in flight for one turn, and a prompt
+        # whose gate were only the last one assigned could be neither answered
+        # (api/events._permission_respond) nor resolved by Stop (api/run._stop).
+        self.gates: list[PermissionGate] = []
+        # tool_call_id -> the call's interrupt event, so POST /api/exec/cancel
+        # reaches the command tree that is still running on this machine
+        self.exec_cancels: dict[str, threading.Event] = {}
         # trust mode (agent/core/permission.py TRUST_COUNTDOWN_S): the window's
         # armed flag, mirrored here by POST /api/permission/trust so the
         # countdown can run on THIS side. The page's own clock is a frozen
@@ -164,6 +173,17 @@ class RunState:
         if self.backend_mode == "ssh" and self.bridge_url:
             return RemoteWorkspace(root, self.bridge_url)
         return LocalWorkspace(root)
+
+    def live_gates(self) -> list[PermissionGate]:
+        """Every gate a permission prompt could still be waiting on.
+
+        The run's own gate first (one run slot), then the exec endpoint's live
+        ones (one per call). Answering a prompt and Stop both read this: an ask
+        nobody can reach is a run that never ends, and a tool call that waits for
+        an answer that cannot be typed is the same failure one layer down.
+        """
+        with self.lock:
+            return [g for g in [self.gate, *self.gates] if g is not None]
 
     def set_backend(self, mode: str, bridge_url: str | None = None, remote_root: str | None = None) -> None:
         """Switch the SSH-degradation backend (mode: "local" | "ssh"). A mode

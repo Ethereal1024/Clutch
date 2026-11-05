@@ -4,12 +4,17 @@
     <!-- Loopback HTTP + SSH outbound = INTERNET. N5 (M3): the tunnel/engine
          live in a foreground service so Android does not freeze the process
          the moment the activity is backgrounded (targetSdk 34 kills cached
-         processes aggressively). dataSync is the closest declared type to
-         "long-lived SSH tunnel"; POST_NOTIFICATIONS is what makes that
-         service's mandatory notification visible on API 33+. -->
+         processes aggressively). specialUse is the declared type: the service
+         runs the agent's turn (model stream + SSH tunnel) for as long as the
+         turn is open, which dataSync's 6h-per-24h budget cannot express (D6).
+         dataSync stays in the type mask for the pre-34 branch in
+         TunnelService.startForegroundCompat — a platform branch, not a second
+         policy. POST_NOTIFICATIONS is what makes that service's mandatory
+         notification visible on API 33+. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- M4: the screen-off half of the same report. A foreground service keeps
@@ -79,11 +84,18 @@
         </activity>
 
         <!-- N5: holds NodeEngine alive across activity teardown. Not exported:
-             only this app may drive the engine. -->
+             only this app may drive the engine. specialUse (D6) because the
+             service keeps a turn in flight — model stream and SSH tunnel — and
+             reports its subtype to the platform rather than pretending to be a
+             file sync with a 6h budget. -->
         <service
             android:name=".TunnelService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false" />
+            android:foregroundServiceType="dataSync|specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="coding agent turn in flight: model stream and ssh tunnel must outlive a locked screen" />
+        </service>
 
         <!-- The FileProvider a downloaded APK is handed to the system installer
              through: Android refuses a file:// Uri across apps, so the file is

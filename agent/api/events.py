@@ -58,12 +58,16 @@ class EventsMixin:
             return self._json({"error": "bad json body"}, status=400)
         request_id = (body.get("request_id") or "").strip()
         allow = bool(body.get("allow"))
-        gate = self._state.gate
-        if gate is None or not request_id:
+        gates = self._state.live_gates()
+        if not gates or not request_id:
             return self._json({"error": "no pending permission request"}, status=400)
-        if not gate.resolve(request_id, allow):
-            return self._json({"error": "request not found or already resolved"}, status=404)
-        self._json({"status": "ok"})
+        # a run's gate and each in-flight tool call's gate (api/exec.py) answer
+        # the same POST: the page does not know which half asked, and the prompt
+        # it is looking at was published under this request_id by exactly one
+        for gate in gates:
+            if gate.resolve(request_id, allow):
+                return self._json({"status": "ok"})
+        self._json({"error": "request not found or already resolved"}, status=404)
 
     def _permission_trust(self) -> None:
         """Arm/disarm the far-side trust countdown: {armed: bool}.

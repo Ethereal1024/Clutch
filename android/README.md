@@ -66,13 +66,16 @@ Gradle 8.7，AGP 8.5.2 的最低版本），所以 `cd android && ./gradlew :app
    Release）+ `.github/workflows/android-debug.yml`（手动触发，可选输入
    `pylibs_index_url`，默认最新 Release 的索引；产物只进 workflow artifact，
    不碰 Release——快迭代用，不污染供给线）。
-3. **N5 前台服务**：新增 `TunnelService`（`foregroundServiceType="dataSync"`，
+3. **N5 前台服务**：新增 `TunnelService`（`foregroundServiceType="dataSync|specialUse"`；
+   API 34+ 按 D6 用 `specialUse`——前台服务保的是“一轮在飞的 turn”，
+   `dataSync` 的 6h/24h 预算表达不了它；34 以下才用 `dataSync`，那是平台分支不是降级。
    manifest 同时声明 `FOREGROUND_SERVICE`/`FOREGROUND_SERVICE_DATA_SYNC`/
-   `POST_NOTIFICATIONS`）——targetSdk 34 会冻结后台进程，隧道/引擎必须有前台
-   才能活过 Activity 销毁。通知渠道 `tunnel`、`IMPORTANCE_MIN`（静默常驻）、
-   `START_STICKY`（被杀拉起 → `NodeEngine.ensureStarted` 幂等重启引擎）。
+   `FOREGROUND_SERVICE_SPECIAL_USE`/`POST_NOTIFICATIONS`，并给
+   `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` 写明用途）——targetSdk 34 会冻结后台进程，
+   隧道/引擎必须有前台才能活过 Activity 销毁。通知渠道 `tunnel`、`IMPORTANCE_MIN`
+   （静默常驻）、`START_STICKY`（被杀拉起 → `NodeEngine.ensureStarted` 幂等重启引擎）。
    MainActivity `onCreate` 即 `startForegroundService`，API 33+ 请求通知权限
-   （拒绝只影响通知可见性，不影响服务）。
+   （拒绝只影响通知可见性，不影响服务）。这条策略由 `tests/android-fgs.test.js` 守。
 4. **N7 窄屏**：`ui/mobile.css`（≤640px 生效；桌面因 media 属性天然 no-op）——
    顶栏换行、`#right` 工作区面板从 320px 侧栏改为 40vh 底部堆叠、弹窗限宽、
    欢迎卡自适应。只动宽度/内边距/排布，不动配色字体。

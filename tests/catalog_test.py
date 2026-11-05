@@ -1147,19 +1147,25 @@ def check_registration() -> None:
             "and the component behind the contradiction contributes nothing",
         )
 
-        # the retired words are IGNORED, not read: a released manifest still
-        # carrying `interface`/`runs_on` drives exactly as one without them (the
-        # words are retired with the 0.1.57 repack)
+        # the retired words are REFUSED, not read: `interface`/`runs_on` say what
+        # a contribution already says, and this host keeps one reading of a
+        # declaration (invariant I3 — no second path, not even for an old release)
         legacy = _third_party("clutch-legacy", tool="say_legacy", directory=str(code))
         legacy.update({"interface": "cli", "runs_on": "self"})
         _write_registration(legacy)
         check(
-            "say_legacy" in [t.name for t in build_tools(Config())],
-            "a manifest still carrying `interface`/`runs_on` drives by what it declares",
+            "say_legacy" not in [t.name for t in build_tools(Config())],
+            "a manifest still carrying `interface`/`runs_on` contributes nothing",
+        )
+        named = [d.message for d in catalog.diagnostics() if d.component == "clutch-legacy"]
+        check(
+            any("still declares `interface`" in message for message in named)
+            and any("still declares `runs_on`" in message for message in named),
+            "and the refusal names BOTH retired words back, instead of ignoring them",
         )
         check(
-            not [d for d in catalog.diagnostics() if d.component == "clutch-legacy"],
-            "and the retired words raise nothing: they are not part of the declaration any more",
+            all(d.fatal for d in catalog.diagnostics() if d.component == "clutch-legacy"),
+            "the refusal is fatal: there is no half-read of a declaration this host cannot place",
         )
 
 

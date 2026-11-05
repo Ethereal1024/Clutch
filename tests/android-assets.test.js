@@ -111,6 +111,16 @@ function main() {
   // without its child would fail on the phone at the first call and nowhere else.
   check(!list.includes("plugin-host.js") || list.includes("plugin-child.js"),
     "a shipped plugin-host.js ships its forked runtime too");
+  // prompt.js resolves its templates from its OWN directory at runtime (the same
+  // directory this script copies it into), so shipping the module without the
+  // templates is a host that dies on its first prompt with ENOENT — the phone
+  // boots, binds the bridge, and fails only when it has something to say.
+  if (list.includes("prompt.js")) {
+    const src = fs.readFileSync(SYNC, "utf8");
+    check(/cp -r ui\/prompts "\$NODEJS_PROJECT\/ui\/"/.test(src),
+      "prompt.js ships with the templates it reads from its own directory");
+    check(fs.existsSync(path.join(UI_DIR, "prompts")), "ui/prompts exists to be copied");
+  }
 
   // 4. the copy must LOAD on the phone: no shipped module reaches for Electron
   //    at load time (the whole reason the subset is hand-written — the renderer's

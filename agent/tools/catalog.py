@@ -130,12 +130,16 @@ from . import components, hostconfig, modules
 # already says what it CONTRIBUTES, and that is the answer. A `service`
 # block = a process that stays and publishes what a statement names (started by
 # `launch` when it declares one); a `launch` alone = a process this host starts per
-# call; NEITHER = no process here at all, so the statement is the CLIENT's and the
-# declaration names the `entry` module it runs (tools/channel.py). The old words
-# `interface` and `runs_on` are IGNORED when a manifest still carries them — a
-# machine may hold a release published before this host stopped reading them — and
-# a declaration that names a process here AND an `entry` is refused rather than
-# half-read (component_diagnostics).
+# call; NEITHER = no process here at all, so the component contributes only what it
+# carries (prompt, facts, data) and any statement it declares is the CLIENT's
+# (tools/channel.py). A declaration that names a process here AND an `entry` is
+# refused rather than half-read (component_diagnostics).
+#
+# There is one reading of a declaration and it does not depend on when the release
+# was published. The old words `interface` and `runs_on` said the same thing a
+# contribution already says, and this host does not keep a second way of saying it:
+# a manifest that still carries one is REFUSED by name (RETIRED_WORDS,
+# component_diagnostics), not read for whichever half this host can guess at.
 
 # Whose resources a component serves — which decides whether a statement may run
 # for a given workspace at all (registry.module_blocked_reason).
@@ -310,22 +314,38 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
     (tools/facts.py). And what the declaration CONTRIBUTES, which every other word
     is now derived from: a `service` is a process that STAYS, a
     `launch` alone is one this host starts per call, and `entry` is the CLIENT's own
-    module — so `entry` beside either is a declaration speaking two languages, and
-    neither of the first two with no `entry` is a component nothing could run. A
-    client-side component's tools MUST carry a `command`: that template is the
-    statement the client itself runs, sent to it verbatim (tools/statement.py,
-    tools/channel.py) — a tool without one is a tool nothing could carry out.
+    module — so `entry` beside either is a declaration speaking two languages. A
+    contribution of neither process nor `entry` is LEGAL: the component has no
+    process and contributes only what it carries (prompt, facts, data), because a
+    component is not required to be a tool (invariant I5). A client-side component's
+    tools MUST carry a `command`: that template is the statement the client itself
+    runs, sent to it verbatim (tools/statement.py, tools/channel.py) — a tool
+    without one is a tool nothing could carry out.
     """
     out = [
         Diagnostic(component.name, "", f"unknown facility in requires: {f!r} (host knows {_known(FACILITIES)})")
         for f in component.requires
         if f not in FACILITIES
     ]
-    # The third axis is now a DERIVATION, not a word: a declaration
+    # The place a statement runs is now a DERIVATION, not a word: a declaration
     # says what it contributes and the host reads the rest out of that. `entry` is
     # the client's own module, so naming it beside a process here is one
     # declaration speaking two languages — refused rather than half-read, because
     # either reading would run a statement on a machine the author did not mean.
+    # A contribution of NEITHER process nor `entry` is not an error: the component
+    # then has no process on this machine and is not the client's to run either —
+    # it contributes what it carries (prompt, facts, data), and a component is not
+    # required to be a tool (invariant I5).
+    for word in component.retired:
+        out.append(
+            Diagnostic(
+                component.name,
+                "",
+                f"a component still declares `{word}`, a word this host no longer reads: where a statement "
+                f"runs is derived from what the declaration CONTRIBUTES (`service`/`launch` = a process on "
+                f"this host, `entry` = the client's own module), so drop the word and declare the contribution",
+            )
+        )
     if component.entry and component.runs_here:
         which = "`service`" if component.resident else "`launch`"
         out.append(
@@ -334,15 +354,6 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                 "",
                 f"a component declares `entry` and {which}: `entry` is the module the CLIENT runs for a "
                 f"component with no process here, and {which} starts one on this host",
-            )
-        )
-    elif not component.runs_here and not component.entry:
-        out.append(
-            Diagnostic(
-                component.name,
-                "",
-                "a component declares neither `service` nor `launch`, so it has no process here and its "
-                "statements are the client's: name the `entry` module that client runs",
             )
         )
     for token in component.facts:
@@ -582,6 +593,9 @@ class Component:
     """
 
     name: str
+    # Retired declaration words this manifest still carries (RETIRED_WORDS). Kept
+    # only so the refusal can name them back: nothing reads them for meaning.
+    retired: tuple[str, ...] = ()
     subject: str = WORKSPACE_FS
     launch: Launch = Launch()
     # Presence = "this process stays and publishes what a statement names"; the
@@ -620,6 +634,13 @@ class Component:
         """No process here at all: nothing but the declaration crossed, so the
         statement is the client's to render and run (tools/statement.py Client)."""
         return not self.runs_here
+
+
+# The words a declaration used to name its place with, before place became a
+# derivation from what the component CONTRIBUTES. Nothing reads them; a manifest
+# that still carries one is refused (component_diagnostics) instead of being read
+# by a rule kept alive for old releases — one declaration, one reading.
+RETIRED_WORDS: tuple[str, ...] = ("interface", "runs_on")
 
 
 # --------------------------------------------- host facts a schema may ask for -
@@ -721,6 +742,7 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
     raw_facts = data.get("facts") if isinstance(data.get("facts"), Mapping) else {}
     return Component(
         name=name,
+        retired=tuple(word for word in RETIRED_WORDS if word in data),
         subject=str(data.get("subject", WORKSPACE_FS)),
         launch=Launch(
             argv=tuple(str(w) for w in launch.get("argv", ()) or ()),
@@ -953,6 +975,10 @@ def _refine(known: Component, declared: Component, data: Mapping[str, Any]) -> C
     adding a field to Component meant remembering this function too.
     """
     named = {f: getattr(declared, f) for f in _named(data, _COMPONENT_FIELDS) if f != "name"}
+    # A retired word is a fact about the SOURCE it was written in, so it accumulates
+    # across the merge instead of being overridden: a checkout that still spells
+    # `interface` stays refused even after an installed manifest refines it.
+    named["retired"] = tuple(dict.fromkeys(known.retired + declared.retired))
     if "service" not in named and any(key in data for key in _LEGACY_SERVICE_KEYS):
         # The old spelling names the same block one key at a time, and that is still
         # a declaration of a service: read it whole, not as three unrelated fields.

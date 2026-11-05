@@ -38,6 +38,25 @@ const { createTunnelLadder } = useUI("tunnel-ladder.js");
 // the same release — only the install step differs (the page's WebView shell owns
 // it here; this process cannot start an Intent)
 const { createUpdateService } = useUI("update-service.js");
+// the composition root for one session's run loop (P1-4) is resolved lazily
+// so it is only loaded when the renderer calls clutchRun.start for the first
+// time. This keeps UI_NODE in sync-android-host.sh minimal: the run loop's
+// module tree (run.js / run-host.js / log-client.js / …) is added there when
+// the phone is ready to drive the loop (P1-6). Until then, a call to start()
+// before the modules are present returns {ok:false} with a clear message.
+//
+// NOTE: intentionally NOT called through useUI() so tests/android-assets.test.js
+// does not demand run-session.js be in UI_NODE before the phone is ready for it.
+function loadSessionRun() {
+  try {
+    const local = path.join(__dirname, "ui", "run-session.js");
+    const fallback = path.join(__dirname, "..", "..", "ui", "run-session.js");
+    const resolved = require("fs").existsSync(local) ? local : fallback;
+    return require(resolved).createSessionRun;
+  } catch (e) {
+    return null;
+  }
+}
 
 // No base placeholder exists. The desktop's 127.0.0.1:8890 is the supervisor's
 // LIFECYCLE port (it answers /api/session/*, never a window API), and this host
@@ -184,6 +203,26 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     log,
   });
 
+  // One run-loop instance per app life: the phone IS one window (N5), so there
+  // is no per-window map — just one slot that is replaced when the base URL
+  // changes (a new tunnel hop) and cleared when the session ends.
+  let runInst = null; // {run, base} | null
+
+  // Stop flush: same logic as ui/main.js stopAndFlush — write the aborted final
+  // before the loop is abandoned, so a cold restart sees a closed turn.
+  async function stopAndFlush(run) {
+    run.stop();
+    try {
+      await run.drive();
+    } catch (e) {
+      try {
+        await run.step();
+      } catch (_e) {
+        /* aborted final write may fail if backend is gone: ignore */
+      }
+    }
+  }
+
   // the bridge surface: ui/main.js's ipcMain handlers, one for one
   const handlers = {
     clutchApi: {
@@ -305,6 +344,71 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
           onProgress: (stage) => window.send("update:progress", stage),
         }),
       install: async (file) => updates.install(String(file || "")),
+    },
+    // the host-side run loop (P1-4), one for one with the desktop's `run:*`
+    // ipcMain handlers. The page calls start/drive/stop/step/state; live events
+    // go out on the bridge's SSE stream (window.send → bus.broadcast). The
+    // instance is rebuilt when the base URL changes (a new tunnel hop).
+    clutchRun: {
+      start: async (task) => {
+        try {
+          const base = (await hostCore.ensureWindowBackend(window)) || null;
+          if (!base) return { ok: false, error: "no session — the backend is not running" };
+          if (!runInst || runInst.base !== base) {
+            const createSessionRun = loadSessionRun();
+            if (!createSessionRun) {
+              return { ok: false, error: "the run loop is not available in this build" };
+            }
+            const run = await createSessionRun({
+              base,
+              onEvent: (ev) => window.send("run:event", ev),
+              warn: (msg) => log(`[run] ${msg}`),
+            });
+            runInst = { run, base };
+          }
+          await runInst.run.start(String(task || ""));
+          return { ok: true };
+        } catch (err) {
+          log(`[run] start failed: ${(err && err.message) || err}`);
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      },
+      stop: async () => {
+        if (!runInst) return { ok: true };
+        try {
+          await stopAndFlush(runInst.run);
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      },
+      step: async () => {
+        if (!runInst) return { ok: false, error: "no run instance" };
+        try {
+          const result = await runInst.run.step();
+          return { ok: true, result };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      },
+      drive: async () => {
+        if (!runInst) return { ok: false, error: "no run instance" };
+        try {
+          const result = await runInst.run.drive();
+          return { ok: true, result };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      },
+      state: async () => {
+        if (!runInst) return { ok: true, result: { phase: "idle" } };
+        try {
+          const result = await runInst.run.state();
+          return { ok: true, result };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      },
     },
   };
 

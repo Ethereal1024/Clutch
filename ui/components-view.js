@@ -51,10 +51,10 @@ const MARKET_TTL_MS = 5 * 60_000;
 
 // A read that LOST the index is the exception to that: keeping a failure for five
 // minutes is how a moment of bad network becomes "this page is broken" — every
-// re-open draws the same error without asking again. So a read that fell back to
-// the cached or shipped copy is fresh only for a moment; the next look is the
-// next ask. (The rows that did answer are kept in the meantime — a list from the
-// snapshot is still a market.)
+// re-open draws the same error without asking again. So a read that failed is
+// fresh only for a moment; the next look is the next ask. (Nothing stands in for
+// the market in the meantime: the list is empty, the reasons are drawn, and the
+// page's own reload button is the retry.)
 const MARKET_ERROR_TTL_MS = 30_000;
 
 const NO_CLIENT =
@@ -70,6 +70,12 @@ function createComponentsView(deps) {
     log = () => {},
     lib = defaultLib,
     mirrorStore = defaultMirrors,
+    // The last automatic components pass this host ran, or null: one object
+    // `{at, base, installed, retired, deferred, errors}` (ui/tunnel-connect.js
+    // keeps it, the connect's own pass fills it). Asked per read, because the
+    // pass is not awaited by the connect and a window opened afterwards is
+    // exactly the window that has to hear about it.
+    componentsPass = () => null,
     now = Date.now,
   } = deps;
 
@@ -194,6 +200,9 @@ function createComponentsView(deps) {
       client: false,
       clientError: null,
       clientInventoryError: null,
+      // what the automatic pass did, when it was about the machine this window
+      // is about: the names it let go of, and the ones it could not
+      pass: null,
     };
     const problem = trouble(t);
     if (problem) {
@@ -222,6 +231,17 @@ function createComponentsView(deps) {
         out.clientInventoryError = (e && e.message) || String(e);
       }
     }
+    // The automatic pass belongs to the machine it ran against, so a window
+    // looking at another machine does not inherit its report: a pass about the
+    // far side of a tunnel is not news about this one. A window with no target
+    // yet (no session claimed) is not owed it either.
+    let pass = null;
+    try {
+      pass = componentsPass() || null;
+    } catch (e) {
+      log(`[components] the last pass is unreadable: ${(e && e.message) || e}`);
+    }
+    out.pass = pass && pass.base && pass.base === t.base ? pass : null;
     return out;
   }
 
@@ -278,17 +298,9 @@ function createComponentsView(deps) {
       // is the answer to it. An answer that said no is not that question.
       errors: known.errors.map((e) => e.reason),
       unreachable: known.errors.some((e) => e.unreachable),
-      // WHICH index answered — remote, this machine's cache, or the copy this
-      // build ships — and, when it was not the remote one, why (the page draws
-      // that reason as a hint; a list should say which list it is)
-      origin: known.origin || "",
-      note: known.note || "",
     };
     market = { at: now(), value, specs: known.specs };
-    log(
-      `[components] market read: ${value.entries.length} known (index: ${value.origin || "none"}), ` +
-        `${value.errors.length} reason(s)`
-    );
+    log(`[components] market read: ${value.entries.length} known, ${value.errors.length} reason(s)`);
     return market;
   }
 
@@ -311,7 +323,7 @@ function createComponentsView(deps) {
     } catch (e) {
       // marketEntries reports as data; this only catches something broken
       // underneath it, and still answers with a shape the page can draw
-      const value = { entries: [], errors: [(e && e.message) || String(e)], unreachable: false, origin: "", note: "" };
+      const value = { entries: [], errors: [(e && e.message) || String(e)], unreachable: false };
       market = { at: now(), value, specs: [] };
       return value;
     }

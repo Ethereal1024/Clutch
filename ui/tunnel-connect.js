@@ -829,7 +829,15 @@ async function establishForwardAndHealth(localPort, client) {
   state.currentUrl = "http://127.0.0.1:" + localPort;
   state.wasDisconnected = false;
   startHealing();
-  installComponents(state.currentUrl);
+  // the pass is not awaited (see ui/tunnel-bootstrap.js), so its answer is kept
+  // on the tunnel's state instead of on a promise nobody holds: the plugin tab
+  // reads it from there whenever it is opened, including in a window that did
+  // not exist when the pass ran. Captured before the assignment below, so the
+  // record names the machine the pass was actually about.
+  const passBase = state.currentUrl;
+  installComponents(passBase, (pass) => {
+    state.componentsPass = { ...pass, base: passBase };
+  });
   return { ok: true, url: state.currentUrl };
 }
 

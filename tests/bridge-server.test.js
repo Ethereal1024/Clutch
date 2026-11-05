@@ -102,10 +102,12 @@ function fakeTargetSupervisor() {
   const HELD_VERSION = "0.1.0+" + HELD.slice(0, 16);
   const ARTIFACT = `${NAME}.tar.gz`;
   // the release this test publishes, as bytes: a market row pins a manifest by
-  // its digest, so the row the test writes has to pin these exact bytes. It keeps
-  // the `interface` word a v0.1.56 release still says — the client ignores it (the
-  // contribution says who runs a statement), and a released manifest is
-  // not something this repo rewrites under a user.
+  // its digest, so the row the test serves has to pin these exact bytes. It keeps
+  // the `interface` word a v0.1.56 release still says, because a manifest is read
+  // for its name, version and artifacts only — the word is RETIRED (invariant in
+  // agent/tools/catalog.py RETIRED_WORDS) in a DECLARATION, and this fixture's
+  // manifest pins none. A released manifest is not something this repo rewrites
+  // under a user either way.
   const manifest = {
     schema: 1,
     name: NAME,
@@ -126,6 +128,26 @@ function fakeTargetSupervisor() {
     // target machine is the one that would fetch the bytes (this client has none)
     if (req.method === "GET" && req.url === "/clutch-component.json") {
       return send(200, manifest);
+    }
+    // the market index, at the path the real one has, under the mirror prefix this
+    // test sets — so the read the page makes is the real one, pointed at the one
+    // place it can reach. The row names THIS fake's release, at a URL already under
+    // the prefix (which `mirrored` therefore leaves alone).
+    if (req.method === "GET" && req.url.endsWith("/market/index.json")) {
+      return send(200, {
+        schema: 2,
+        entries: [
+          {
+            id: `Ethereal1024/${NAME}`,
+            name: NAME,
+            manifest: `http://${req.headers.host}/clutch-component.json`,
+            manifest_sha256: manifestSha256,
+            version: "0.1.0",
+            summary: "the release this test's target machine publishes",
+            tags: ["test"],
+          },
+        ],
+      });
     }
     if (req.method === "GET" && req.url === "/api/components") {
       return send(200, {
@@ -457,35 +479,18 @@ async function main() {
     const sup = await fakeTargetSupervisor();
     const realFetch = globalThis.fetch;
     // This runner has no internet: the ONE market index this build names is a
-    // github URL, so it is refused — which is exactly the degraded start the
-    // chain exists for. What is left is the last good copy this machine heard,
-    // so the test writes that copy (the shape readIndex caches) with one row for
-    // the release the fake target machine publishes.
+    // github URL. The supported way in is the mirror prefix (ui/net-fetch.js
+    // mirrorPrefix, read per call), so the whole market — the index and the
+    // manifest a row pins — is read from the fake target's own HTTP face and
+    // nowhere else. There is no cached copy behind this and no shipped one: a read
+    // that fails is a report.
+    process.env.CLUTCH_SOURCE_MIRROR = sup.base;
     globalThis.fetch = (url, opts) => {
       const u = String(url);
       if (u.startsWith(sup.base) || u.startsWith(BRIDGE)) return realFetch(url, opts);
       return Promise.reject(new Error("no network in this test"));
     };
     try {
-      const cached = path.join(HOME, ".clutch", "market", "index.json");
-      fs.mkdirSync(path.dirname(cached), { recursive: true });
-      fs.writeFileSync(
-        cached,
-        JSON.stringify({
-          schema: 2,
-          entries: [
-            {
-              id: `Ethereal1024/${sup.name}`,
-              name: sup.name,
-              manifest: sup.manifestUrl,
-              manifest_sha256: sup.manifestSha256,
-              version: "0.1.0",
-              summary: "the release this phone last read about",
-              tags: ["test"],
-            },
-          ],
-        })
-      );
       // the window's session is on the far side of the tunnel: components are
       // installed on the machine that will RUN them, so that is the target
       tunnel.state.status = { active: true, url: sup.base };
@@ -511,11 +516,7 @@ async function main() {
       assert(row, "the row the index lists shows up in the market");
       assert.strictEqual(row.origin, "market", "and it says it is the market's row, not a local checkout");
       assert.strictEqual(row.source, sup.manifestUrl, "the row points where the release is");
-      // the live index was out of reach, so the page must say WHICH copy it drew:
-      // an old list is still a list, but never passed off as this moment's
-      assert.strictEqual(mkt.origin, "cache", "the market says it is this machine's cached copy");
-      assert(/could not be read/.test(mkt.note), "and why the live one is not the one drawn");
-      assert.deepStrictEqual(mkt.errors, [], "nothing else failed: the cached row and its manifest both answered");
+      assert.deepStrictEqual(mkt.errors, [], "nothing failed: the index and the row's manifest both answered");
       assert.strictEqual(sup.state.calls.filter((c) => c.endsWith("/clutch-component.json")).length, 0,
         "and the page did not read the manifest to draw a row — an index is one request");
 
@@ -571,6 +572,7 @@ async function main() {
       assert.strictEqual(bogus.body.error, "no such bridge method: clutchComponents.nope");
     } finally {
       globalThis.fetch = realFetch;
+      delete process.env.CLUTCH_SOURCE_MIRROR;
       tunnel.state.status = { active: true, url: "http://127.0.0.1:8891" };
       await sup.close();
     }

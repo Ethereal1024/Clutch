@@ -205,7 +205,10 @@ const COMPONENTS = [
 // removeMirror). Passed, this page HAS that channel (three reads, and the section
 // under the list); omitted, it is a shell that predates the feature and must draw
 // exactly as it did before — the reason the default is null and not a stub.
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session" } = {}) {
+// `pass` is the fake of what the connect's automatic components pass did
+// (ui/components-view.js `list()` -> `pass`). Omitted, this machine has had no
+// pass yet, which is a different fact from "a pass that did nothing".
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", pass = null } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -256,6 +259,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
         client,
         clientError,
         clientInventoryError: clientHeldError,
+        pass,
       };
     },
     market: async () => {
@@ -1792,6 +1796,85 @@ const CODE = mod ? mod.code : "";
       await settle();
       check(d.mirrorRows().length === 3, "when the read lands, the rows are there");
     }
+  }
+
+  // 39. the pass at connect, as the page tells it: a component the market moved
+  //     off this machine is DELETED there by the connect's own pass
+  //     (ui/components.js `retireComponents`), so it is not a row any more and
+  //     the list alone would read as "it was never here". The line under the
+  //     list is the only place that removal is stated (the log is a file).
+  {
+    const passLines = (p) => walk(p.body()).filter((n) => /(^| )plug-pass( |$)/.test(n.className));
+
+    // a pass that let one name go: the name, the version and the market's reason
+    const one = page({
+      held: [],
+      pass: {
+        at: 1700000000000,
+        installed: 1,
+        deferred: 0,
+        retired: [{ name: "clutch-websearch", version: "0.1.0", reason: "the market's copy belongs to the client", status: "removed" }],
+        errors: [],
+      },
+    });
+    await one.open();
+    check(passLines(one).length === 1, "a pass that let a component go says so, once, under the list");
+    const said = passLines(one)[0].textContent;
+    check(
+      /clutch-websearch/.test(said) && /0\.1\.0/.test(said) && /belongs to the client/.test(said),
+      "naming the component, the version, and the reason in the market's own words"
+    );
+    check(
+      walk(one.body()).every((n) => !/clutch-websearch/.test(n.textContent) || n === passLines(one)[0]),
+      "and it is a sentence, not a row: nothing offers a control for what is gone"
+    );
+    check(one.buttons().every((b) => !/websearch/.test(b.title || "")), "no button behind the removal either");
+
+    // two names, one line — and a name the pass could not take goes in the same
+    // sentence: the page does not get to report half a pass
+    const many = page({
+      pass: {
+        at: 1700000000000,
+        installed: 0,
+        deferred: 2,
+        retired: [
+          { name: "clutch-a", version: "0.1.0", reason: "the market no longer lists it", status: "removed" },
+          { name: "clutch-b", version: "0.2.0", reason: "the market's copy belongs to the client", status: "removed" },
+        ],
+        errors: [{ name: "clutch-c", reason: "it is running: stop it first" }],
+      },
+    });
+    await many.open();
+    check(passLines(many).length === 1, "two removals and a refusal are still one line");
+    const all = passLines(many)[0].textContent;
+    check(
+      /2 names/.test(all) && /clutch-a/.test(all) && /clutch-b/.test(all),
+      "the count comes first when there is more than one, then every name"
+    );
+    check(
+      /could not let go of clutch-c \(it is running: stop it first\)/.test(all),
+      "and a name the host refused is quoted in the host's own words, not dropped"
+    );
+
+    // a pass that did nothing says nothing: an empty report is not news
+    const quiet = page({ pass: { at: 1700000000000, installed: 2, deferred: 0, retired: [], errors: [] } });
+    await quiet.open();
+    check(passLines(quiet).length === 0, "a pass that only installed draws no line: there is nothing a row cannot already say");
+
+    // no pass at all is the same nothing, and for a different reason
+    const fresh = page();
+    await fresh.open();
+    check(passLines(fresh).length === 0, "a machine no pass has run against says nothing about one");
+
+    // and the line is drawn in the list's quieter voice, one rule below the
+    // install caution: both are facts ABOUT the list, not rows in it
+    const sheet = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
+    const rule = sheet.match(/\.plug-pass\s*\{([^}]*)\}/);
+    check(Boolean(rule), "ui/style.css gives the pass line a rule of its own");
+    check(
+      /color: var\(--muted\)/.test(rule[1]) && /font-size: var\(--fs-xs\)/.test(rule[1]),
+      "small and muted: a removal is a fact to read, not a failure to chase"
+    );
   }
 
   summary("components-panel: the plugin tab's writes (destination, confirm text, verdicts, re-read)");

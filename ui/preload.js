@@ -84,3 +84,20 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
     return () => ipcRenderer.removeListener("tunnel:progress", wrap);
   },
 });
+
+// the host-side run loop (P1-4): the renderer is a view only — it calls
+// start/stop/step/drive/state and subscribes to run:event pushes. The loop
+// survives a page reload: the main process owns it, so a closed window does
+// not cancel an in-flight turn (the aborted final is written on close).
+contextBridge.exposeInMainWorld("clutchRun", {
+  start: (task) => ipcRenderer.invoke("run:start", task),
+  stop: () => ipcRenderer.invoke("run:stop"),
+  step: () => ipcRenderer.invoke("run:step"),
+  drive: () => ipcRenderer.invoke("run:drive"),
+  state: () => ipcRenderer.invoke("run:state"),
+  onEvent: (cb) => {
+    const wrap = (_e, ev) => cb(ev);
+    ipcRenderer.on("run:event", wrap);
+    return () => ipcRenderer.removeListener("run:event", wrap);
+  },
+});

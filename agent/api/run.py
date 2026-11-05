@@ -139,10 +139,14 @@ class RunMixin:
     def _stop(self) -> None:
         if self._state.cancel:
             self._state.cancel.set()
-        # a run may be blocked on a permission prompt (gate.require waits): Stop
-        # must unblock it, otherwise the agent stays stuck until the 60s timeout
-        gate = self._state.gate
-        if gate is not None:
+        # a tool call may be blocked on a permission prompt (gate.require waits):
+        # Stop must unblock it, otherwise the call stays stuck until the UI it
+        # published to disappears — and with it the host's turn
+        for gate in self._state.live_gates():
             for rid in list(gate.pending_ids()):
                 gate.resolve(rid, False)
+        # and a command already running under /api/exec polls its own event
+        with self._state.lock:
+            for cancel in self._state.exec_cancels.values():
+                cancel.set()
         self._json({"status": "cancelling"})

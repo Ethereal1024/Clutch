@@ -84,13 +84,6 @@ const REQUIRED_ASSETS = [
   "index.html",
   "app.js",
   "style.css",
-  // The market index this build ships. Read by the main process from
-  // __dirname, i.e. from inside the asar (ui/components.js SNAPSHOT_FILE), as the
-  // last tier of the degradation chain: remote index, this machine's cache, then
-  // this. Dropped from the bundle, an offline cold start on a machine that has
-  // never read the market installs no component at all — no workspace, memory,
-  // websearch or skills fact ever reaches the supervisor.
-  "market.snapshot.json",
   // The mirrors a failed fetch is retried through (ui/mirrors.js BUILTIN_FILE,
   // read from __dirname). Dropped from the bundle, a packaged app silently
   // installs nothing on a machine that cannot reach the release host directly —

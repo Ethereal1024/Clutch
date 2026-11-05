@@ -74,6 +74,7 @@ async function main() {
     arityOf({
       clutchApi: globalThis.clutchApi,
       clutchLocks: globalThis.clutchLocks,
+      clutchRun: globalThis.clutchRun,
       clutchSettings: globalThis.clutchSettings,
       clutchComponents: globalThis.clutchComponents,
       clutchTunnel: globalThis.clutchTunnel,

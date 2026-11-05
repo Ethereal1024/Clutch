@@ -18,8 +18,6 @@ function fakeLib(opts = {}) {
   const {
     specs = [],
     errors = [],
-    origin = "remote",
-    note = "",
     held = [],
     inventoryError = null,
     file = { path: "/tmp/clutch-memory.tar.gz", digest: DIGEST, version: VERSION },
@@ -42,7 +40,7 @@ function fakeLib(opts = {}) {
       // what ui/components.js marketEntries() answers: the checkouts beside this
       // repo, then one row per index entry, and no manifest read
       calls.specReads++;
-      return { specs, errors, origin, note, unreachable: errors.some((e) => e.unreachable) };
+      return { specs, errors, unreachable: errors.some((e) => e.unreachable) };
     },
     hostInventory: async () => {
       calls.inventories++;
@@ -173,6 +171,49 @@ async function main() {
     );
   }
 
+  // ---- 2b. what the automatic pass at connect did, and to which machine ----
+  {
+    // no pass yet: the page draws no line rather than an empty one
+    const none = await view().api.list(EMPTY_WIN);
+    check(none.pass === null, "no pass yet is no report, not an empty one");
+
+    // a pass about THIS machine comes back as the host kept it — the same object,
+    // because the view does not get to summarise a removal a second time
+    const pass = {
+      at: 1700000000000,
+      base: "http://127.0.0.1:8890",
+      installed: 1,
+      retired: [{ name: "clutch-websearch", version: "0.1.0", reason: "the market's copy belongs to the client", status: "removed" }],
+      deferred: 0,
+      errors: [],
+    };
+    const here = await view({ deps: { componentsPass: () => pass } }).api.list(EMPTY_WIN);
+    check(
+      here.pass === pass && here.pass.retired.length === 1,
+      "the pass over this machine is handed to the page verbatim, removal and reason together"
+    );
+
+    // ...and a pass about ANOTHER machine is not this window's news
+    const elsewhere = await view({
+      deps: { componentsPass: () => ({ ...pass, base: "http://127.0.0.1:41000" }) },
+    }).api.list(EMPTY_WIN);
+    check(elsewhere.pass === null, "a pass about another machine is not drawn on this one");
+
+    // a pass that names no machine is not a pass about this one either
+    const nameless = await view({ deps: { componentsPass: () => ({ ...pass, base: "" }) } }).api.list(EMPTY_WIN);
+    check(nameless.pass === null, "a report with no machine behind it is not inherited either");
+
+    // a domain that cannot answer costs the line, not the list
+    const broken = await view({
+      deps: {
+        componentsPass: () => {
+          throw new Error("state unreadable");
+        },
+      },
+    }).api.list(EMPTY_WIN);
+    check(broken.pass === null && broken.error === null, "an unreadable pass leaves the list standing and says nothing it cannot back");
+  }
+
   // ---- 3. the market, and the reason it can be short ----
   {
     const lib = fakeLib({
@@ -181,7 +222,7 @@ async function main() {
     });
     const { api } = view({ lib });
     const m = await api.market();
-    check(m.entries.length === 2 && m.origin === "remote", "every row the index lists is a market entry, and the page knows which index answered");
+    check(m.entries.length === 2, "every row the index lists is a market entry");
     check(
       m.entries[0].origin === "checkout" && m.entries[0].published.version === "0.1.0",
       "a checkout says so, and keeps the release under it (the only thing a machine holding the checkout can receive)"
@@ -715,12 +756,13 @@ async function main() {
   // ---- 13. where a component goes is a FACT of what it contributes, never a
   //          choice. `destinationOf` (ui/components.js) answers it from the one
   //          thing a declaration says: `service` (a process that stays on the
-  //          session machine), `launch` (one process per call there), or neither
-  //          — and then the statement is the CLIENT's and the declaration has to
-  //          name the `entry` module that runs it. This is the one
-  //          place the answer exists in the page, so these are the checks that
-  //          keep it there: a contradiction is a sentence and a byte never
-  //          crosses.
+  //          session machine), `launch` (one process per call there), `entry`
+  //          (a module this client runs), or NEITHER — which is legal: such a
+  //          component has no process at all and contributes only what it carries
+  //          (prompt, facts, data), because a component is not required to be a
+  //          tool (invariant I5). This is the one place the answer exists in the
+  //          page, so these are the checks that keep it there: a contradiction is
+  //          a sentence and a byte never crosses.
   {
     const decl = (name, extra) => ({ name, checkout: true, source: `/repo/${name}`, declaration: { name, version: "0.1.0", ...extra } });
     const pluginSpec = decl("clutch-websearch", { entry: "index.js" });
@@ -734,13 +776,18 @@ async function main() {
       components.destinationOf(perCallSpec).place === components.PLACE_SESSION,
       "a `launch` alone is one process per call, started there: the session machine too"
     );
+    const bareWhere = components.destinationOf(bareSpec);
     check(
-      /declares neither/.test(components.destinationOf(bareSpec).error || ""),
-      "neither a process here nor an `entry`: a component nothing could run, said in words"
+      bareWhere.place === components.PLACE_CLIENT && !bareWhere.error,
+      "neither a process nor an `entry` is LEGAL: no process at all, and this client holds what it contributes"
     );
     check(
       /declares `entry` and `launch`/.test(components.destinationOf(oddSpec).error || ""),
       "`entry` beside a process is one declaration speaking two languages, and is refused"
+    );
+    check(
+      !/declares neither/.test(String(components.destinationOf.toString())),
+      "and the refusal for 'nothing could run' is gone: a component need not be a tool"
     );
     // a row nobody has read yet is NOT a contradiction: the page says so instead
     const unread = components.destinationOf({ name: "clutch-unread", checkout: false, entry: { manifest: "x" } });

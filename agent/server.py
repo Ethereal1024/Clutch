@@ -9,6 +9,22 @@ Endpoints (all JSON except SSE/NDJSON):
                            in memory (the claiming client's model path moved; not
                            persisted — see api/settings._llm_base_post)
   GET  /api/events         SSE: replay active project history, then live events
+  GET  /api/log            the .clc as a byte-addressed log for the host's loop:
+                           {items, windowBytes, cprStart, lastCompaction}
+  POST /api/log {event}    append ONE durable event, answered as persisted
+                           (with the offset the log stamped on it)
+  POST /api/log/window {offset}  slide the model window start (header write)
+  POST /api/exec {name, arguments, tool_call_id}  run ONE tool call here and
+                           answer its envelope {tool_call_id, content,
+                           is_error, diff}; the only permission judge (D3)
+  POST /api/exec/cancel {tool_call_id}  interrupt that call's running command
+  GET  /api/declarations   the declaration files this machine holds, plus the
+                           values only this machine knows (availability, the
+                           named config knobs, backends, published facts, the
+                           ui/access/gate tables, whether a project is open) —
+                           the data the HOST derives the tool surface from
+  GET  /api/session        the facts one turn is asked with: mode, shell,
+                           components prose, context window budget, memory anchor
   GET  /api/workspace/tree   file tree under the project's working directory
   GET  /api/workspace/checkpoints  log offsets a whole-task rollback can undo
   POST /api/workspace/rollback {offset} undo every file change from that task on
@@ -50,10 +66,14 @@ from pathlib import Path
 
 from .api.base import HandlerBase
 from .api.channel import ChannelMixin
+from .api.decls import DeclsMixin
 from .api.events import EventsMixin
+from .api.exec import ExecMixin
+from .api.log import LogMixin
 from .api.project import ProjectMixin
 from .api.routing import RoutingMixin
 from .api.run import RunMixin
+from .api.session import SessionMixin
 from .api.settings import SettingsMixin
 from .api.workspace import WorkspaceMixin
 from .base import BaseServer, Broadcaster, RunState
@@ -228,11 +248,15 @@ class HttpAgentServer(BaseServer):
 class Handler(
     RoutingMixin,
     RunMixin,
+    SessionMixin,
     SettingsMixin,
     ChannelMixin,
     EventsMixin,
     WorkspaceMixin,
     ProjectMixin,
+    LogMixin,
+    ExecMixin,
+    DeclsMixin,
     HandlerBase,
 ):
     """One request's handler, assembled from the concern mixins in agent/api/.

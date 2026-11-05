@@ -47,11 +47,14 @@
 // Code's extensionsGallery.serviceUrl has (one endpoint, every client, every
 // version), minus hosting anybody's bytes.
 //
-// The index is read through a degradation chain, because this app runs on
-// networks where github.com is not a given: the remote document, then the copy
-// this machine cached (~/.clutch/market/index.json), then the copy this build
-// ships (ui/market.snapshot.json, refreshed at release). Whichever answered is
-// reported as `origin` — a page that shows a list should say which list it is.
+// The index is read ONCE. There is no degradation chain: this app runs on
+// networks where github.com is not a given, and the honest answer to "the market
+// cannot be reached" is the reason plus a retry — not a quieter list from another
+// place. A remembered copy would be a second truth this client cannot date, and a
+// copy shipped inside the build is older still: both would let a page say "the
+// market" while showing what the market said some other day (invariant I3).
+// `ui/market.snapshot.json` still exists as the ARTIFACT scripts/market_index.py
+// writes for review, never as something this module reads.
 //
 // Three sources of BYTES, in the order they win:
 //   - a dev checkout beside the host repo: the component's own component.json
@@ -106,8 +109,6 @@ const BUDGET_MS = 300_000; // the whole pass; beyond it the rest is deferred
 // push to `market/**`, tag `market`, asset `index.json`.
 const INDEX_URL = "https://github.com/Ethereal1024/Clutch/releases/download/market/index.json";
 const INDEX_SCHEMA = 2;
-const SNAPSHOT_FILE = path.join(__dirname, "market.snapshot.json"); // shipped, refreshed at release
-const INDEX_CACHE = path.join(os.homedir(), ".clutch", "market", "index.json"); // this machine's last good read
 const MANIFEST_SCHEMA = 1; // a module's own release manifest (unchanged by the index)
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/; // <owner>/<name>
 
@@ -351,95 +352,44 @@ async function readManifest(source, { pin = "" } = {}) {
   return readWithRetry(source, { pin, parse: parseManifest });
 }
 
-// The index document, and the bytes it came in (the cache below is a copy of the
-// bytes, not of this client's reading of them: what is cached has to be what a
-// later client would have fetched).
+// The index document. (Its bytes are not kept anywhere: a remembered copy would
+// be the second read path this build deleted — see readIndex.)
 async function readIndexDoc(source) {
-  let raw = null;
-  const doc = await readWithRetry(source, {
-    parse: (data, where, bytes) => {
-      raw = bytes || null;
-      return parseIndex(data, where);
-    },
-  });
-  return { doc, raw };
-}
-
-// Keep this machine's last good read, so the next start without a network is
-// still a market (origin: "cache"). A cache that cannot be written is not an
-// error: it costs the next cold start a fallback tier, not this read.
-function cacheIndex(raw) {
-  if (!raw) return;
-  try {
-    fs.mkdirSync(path.dirname(INDEX_CACHE), { recursive: true });
-    fs.writeFileSync(INDEX_CACHE, raw);
-  } catch (e) {
-    /* a read-only HOME is a cold start with no cache, not a broken market */
-  }
-}
-
-// Where a document was read from, in the words a page shows. The chain is
-// remote -> this machine's cache -> the copy this build ships, and the ORDER is
-// the point: the network is the current truth, the cache is the last truth this
-// machine heard, and the snapshot is the truth as of the build.
-function originOf(place) {
-  if (place === INDEX_CACHE) return "cache";
-  if (place === SNAPSHOT_FILE) return "snapshot";
-  return "remote";
+  return readWithRetry(source, { parse: parseIndex });
 }
 
 // The market index itself. Never throws: a market that cannot be read is a
-// report with an EMPTY list, and the page says why it is empty.
+// report with an EMPTY list, and the page says why it is empty and offers the
+// retry (ui/components-view.js readMarket). ONE read — no cache, no shipped copy.
 //
 // `index` is the caller's own document — a URL or a path, one shape, one place
 // (a test, a packager pointing a build somewhere else). It is a parameter and
 // nothing else on purpose: no environment variable, no file under HOME, no
-// second way in. A caller that names one gets exactly it and no chain.
+// second way in.
 async function readIndex({ index = null } = {}) {
-  const chain = index
-    ? [{ place: index, origin: "given" }]
-    : [
-        { place: mirrored(INDEX_URL, mirrorPrefix()), origin: "remote" },
-        { place: INDEX_CACHE, origin: "cache" },
-        { place: SNAPSHOT_FILE, origin: "snapshot" },
-      ];
-  const failed = [];
-  for (const step of chain) {
-    try {
-      const { doc, raw } = await readIndexDoc(step.place);
-      if (step.origin === "remote") cacheIndex(raw);
-      const why = failed.length
-        ? `the market index could not be read just now (${failed[0].reason}), so this is ${
-            step.origin === "cache" ? "the copy this machine cached" : "the list this build ships"
-          }`
-        : "";
-      return {
-        entries: doc.entries,
-        origin: step.origin,
-        errors: doc.problems.map((reason) => ({ name: "", reason, unreachable: false })),
-        note: why,
-        // the first failure is about reaching the index: the mirror prefix is the
-        // one thing a page can offer, so a fallback that happened still says so
-        unreachable: failed.some((f) => f.unreachable),
-      };
-    } catch (e) {
-      const kind = e && e.clutchKind;
-      failed.push({
-        place: step.place,
-        reason: (e && e.message) || String(e),
-        unreachable: kind === "unreachable" || kind === "timeout",
-      });
-    }
-  }
-  const first = failed[0] || { place: INDEX_URL, reason: "no index was read" };
-  const more = failed.length > 1 ? ` — and no cached or shipped copy answered either` : "";
-  return {
-    entries: [],
-    origin: "",
-    errors: [{ name: "", reason: `${first.place}: ${first.reason}${more}`, unreachable: Boolean(first.unreachable) }],
-    note: "",
-    unreachable: failed.some((f) => f.unreachable),
+  const place = index || mirrored(INDEX_URL, mirrorPrefix());
+  const unreachable = (e) => {
+    const kind = e && e.clutchKind;
+    return kind === "unreachable" || kind === "timeout";
   };
+  try {
+    const doc = await readIndexDoc(place);
+    return {
+      entries: doc.entries,
+      errors: doc.problems.map((reason) => ({ name: "", reason, unreachable: false })),
+      // a row the index itself refuses is not a network problem; the flag is only
+      // ever about reaching the document (which is what offers a mirror)
+      unreachable: false,
+    };
+  } catch (e) {
+    return {
+      entries: [],
+      errors: [
+        { name: "", reason: `${place}: ${(e && e.message) || String(e)}`, unreachable: unreachable(e) },
+      ],
+      unreachable: unreachable(e),
+    };
+  }
 }
 
 // One module's manifest, from the row that named it — and the three agreements a
@@ -498,8 +448,6 @@ async function marketEntries({ index = null } = {}) {
     specs,
     entries: listed.entries,
     errors: listed.errors,
-    origin: listed.origin,
-    note: listed.note,
     unreachable: listed.unreachable,
   };
 }
@@ -1075,6 +1023,13 @@ function coveredFailure(first, tried, last) {
 // release's place is not known until its declaration arrives with its manifest
 // (componentSpecs / specForName) — unknown is an honest answer, and the install
 // path is where it stops being unknown.
+// The place is DERIVED, never declared: a component says what it CONTRIBUTES and
+// that is the answer (`declaredContribution`). A `service`/`launch` starts a
+// process on the session machine; an `entry` is a module this client runs, so it
+// belongs here. NEITHER is legal and lands here too — such a component has no
+// process at all, it contributes only what it carries (prompt, facts, data), and
+// a component is not required to be a tool (invariant I5). `null` place means the
+// declaration was not read yet OR it contradicts itself, and `error` says which.
 const PLACE_CLIENT = "client";
 const PLACE_SESSION = "session";
 
@@ -1109,23 +1064,80 @@ function destinationOf(spec) {
     };
   }
   if (!starts && !what.entry) {
-    return {
-      place: null,
-      read: true,
-      error:
-        `${name} declares neither \`service\` nor \`launch\`, so it has no process on the session machine, ` +
-        `and its statements are this client's: name the \`entry\` module this client runs`,
-    };
+    // no process anywhere: legal, and not this machine's to start (invariant I5).
+    // It is still this CLIENT's to hold — what it contributes is read where the
+    // loop runs, and the loop is the frontend's (decision D1 in TODO.md).
+    return { place: PLACE_CLIENT, read: true, error: null };
   }
   return { place: starts ? PLACE_SESSION : PLACE_CLIENT, read: true, error: null };
 }
 
-// Make sure `base`'s machine holds every component this client can give it.
+// The reverse of the pass: an install session also LETS GO of what this machine
+// holds when the roster no longer asks it to hold it.
+//
+// The roster is the one the install loop walks — the market's rows plus this
+// checkout tree, each read through its own declaration — so "wanted here" is one
+// fact, answered once by `destinationOf`. A name the machine holds while the
+// roster asks this machine for nothing is a RETIRED component, and there are
+// exactly two ways that can be true:
+//
+//   - the roster names it nowhere: the market dropped it and this client has no
+//     checkout of it (what a retired module leaves behind on a machine that
+//     installed it in an earlier life), or
+//   - the roster names it and its declaration puts it on the CLIENT: one
+//     implementation with two homes is what invariant I4 forbids, so the copy on
+//     the session machine goes (the client's own domain is `ui/plugin-host.js`,
+//     not this endpoint).
+//
+// A declaration that names no place at all (`place: null` — a thinner manifest,
+// or a contradiction) is NOT a verdict to delete by: no answer leaves the
+// component where it is, and the install loop has already reported why it could
+// not be read. Deleting bytes on a missing answer is how a release that drops one
+// field wipes a working install.
+//
+// What this may never do is infer "the market no longer has it" from a read that
+// did not happen: a read that failed somewhere, or came back empty, is not a
+// roster lacking a name — it is no roster — and nothing is removed on it.
+//
+// Each removal is one explicit DELETE, reported through the same `progress` sink
+// as every other step, so the caller's log says exactly which names were let go;
+// nothing is swept up unseen. The machine that holds the bytes decides: a
+// component something is running refuses in its own sentence, which lands in
+// `errors` and leaves it installed.
+async function retireComponents(base, have, known, out, say, deadline) {
+  if (!known.specs.length || known.errors.length) return;
+  const asked = new Map(); // name -> the place the roster asks for (null: no verdict)
+  for (const spec of known.specs) asked.set(spec.name, destinationOf(spec).place);
+  for (const held of have) {
+    if (!held || !held.name) continue;
+    let reason;
+    if (!asked.has(held.name)) reason = "the market no longer lists it";
+    else if (asked.get(held.name) === PLACE_CLIENT) reason = "the market's copy belongs to the client";
+    else continue; // asked for here, or no verdict to delete by
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      out.deferred.push(held.name);
+      continue;
+    }
+    const version = held.version || "";
+    try {
+      const res = await hostRemove(base, held.name, "", Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
+      out.retired.push({ name: held.name, version, reason, status: (res && res.status) || "removed" });
+      say(`${held.name}${version ? " " + version : ""} let go: ${reason}`);
+    } catch (e) {
+      out.errors.push({ name: held.name, reason: (e && e.message) || String(e) });
+      say(`${held.name} could not be let go: ${e && e.message}`);
+    }
+  }
+}
+
+// Make sure `base`'s machine holds every component this client can give it —
+// and holds nothing the roster has moved away from (`retireComponents`).
 // Never throws: the returned summary is what the caller logs, and components
 // that were deferred or refused simply stay absent — the host then offers no
 // tool for them, because it has no implementation of its own to fall back to.
 async function ensureComponents(base, { checkout = true, index = null, progress = null, budgetMs = BUDGET_MS } = {}) {
-  const out = { current: [], installed: [], skipped: [], deferred: [], errors: [] };
+  const out = { current: [], installed: [], skipped: [], deferred: [], retired: [], errors: [] };
   const say = (msg) => {
     if (progress) progress(msg);
   };
@@ -1139,6 +1151,9 @@ async function ensureComponents(base, { checkout = true, index = null, progress 
   const known = await componentSpecs({ index });
   out.errors.push(...known.errors);
   const deadline = Date.now() + budgetMs;
+  // before installing: a machine that holds a retired form of a name must stop
+  // holding it first, or the pass would give one implementation two homes (I4)
+  await retireComponents(base, have, known, out, say, deadline);
   for (const spec of known.specs) {
     // the automatic pass is about ONE machine (the session machine): a component
     // whose declaration puts it on this client is not its business, and sending
@@ -1147,7 +1162,13 @@ async function ensureComponents(base, { checkout = true, index = null, progress 
     const place = destinationOf(spec);
     if (place.place !== PLACE_SESSION) {
       out.skipped.push(spec.name);
-      say(`${spec.name} is not for this machine: ${place.error || "its declaration puts it on the client"}`);
+      // "not this machine's" has two shapes: a declaration that names the client,
+      // and one that names no place at all (place: null — reported as `error` when
+      // the declaration contradicts itself, silent when it simply names none)
+      const why =
+        place.error ||
+        (place.place === PLACE_CLIENT ? "its declaration puts it on the client" : "its declaration names no place this machine holds");
+      say(`${spec.name} is not for this machine: ${why}`);
       continue;
     }
     let file;
@@ -1219,6 +1240,4 @@ module.exports = {
   MANIFEST_TIMEOUT_MS,
   INDEX_URL,
   INDEX_SCHEMA,
-  SNAPSHOT_FILE,
-  INDEX_CACHE,
 };

@@ -20,9 +20,11 @@ import java.io.File
  * N5 (M3): the foreground service that keeps the Node engine — and with it
  * the SSH tunnel and the loopback bridge — alive when the activity is
  * backgrounded or destroyed. targetSdk 34 freezes/caches background
- * processes aggressively; a `dataSync` foreground service is the closest
- * declared fit for a long-lived SSH tunnel (known platform limit: ~6h of
- * dataSync FGS per 24h window — an M4 concern, not a correctness one).
+ * processes aggressively. The declared type is `specialUse` (D6): what this
+ * service keeps alive is an agent turn in flight, not a file sync, and
+ * dataSync's ~6h-per-24h budget would stop a long turn mid-stream. dataSync
+ * remains only for the pre-34 branch in startForegroundCompat below, where
+ * specialUse does not exist yet — a platform branch, not a second policy.
  *
  * Responsibilities are deliberately tiny:
  *   1. paint the mandatory notification (channel "tunnel"),
@@ -184,9 +186,20 @@ class TunnelService : Service() {
             .setOngoing(true)
         val notification = builder.build()
 
-        if (Build.VERSION.SDK_INT >= 29) {
-            // the 3-arg overload exists from API 29 only; the manifest pins
-            // the type, this call states it for the API-34 permission check
+        if (Build.VERSION.SDK_INT >= 34) {
+            // D6: specialUse is the type that matches "a turn is running". The
+            // platform reads the subtype property from the manifest; the call
+            // states the type so the API-34 FGS permission check passes.
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            // pre-34 platforms have no specialUse; dataSync is the type the
+            // manifest has always declared for them (a platform branch, not a
+            // second policy). The 6h budget only exists from 34 on, which is
+            // exactly the branch that no longer uses it.
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIFICATION_ID, notification)

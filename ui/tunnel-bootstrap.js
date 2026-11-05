@@ -545,16 +545,53 @@ function stopServerCmd(strategy, signal = "") {
 // with it — so a failed pass is logged and the far side keeps the surface it has.
 // A dev run ships its own checkout, which is the one artifact this side has and
 // the far side cannot.
-function installComponents(base) {
+//
+// The same pass runs the other way too: a component the far side holds while the
+// market no longer asks it for — retired, or moved to the client — is let go
+// there (ui/components.js `retireComponents`), one DELETE per name and one log
+// line each. It is the same promise as above and not a separate cleaner: the
+// name it hands over and the name it takes back are both the market's answer.
+//
+// `onPass` receives that answer, because the log is a file and a removal is
+// something a user has to be able to SEE: the plugin tab draws the names this
+// pass let go of (ui/js/components-panel.js). No second pass and no second
+// summary — the page reads the one pass and the one log line.
+function installComponents(base, onPass = null) {
+  // The pass's answer goes two places, and they are the same facts: the log line
+  // below (a file, `~/.clutch/tunnel.log`) and the caller's `onPass` — which
+  // keeps it for the plugin tab (ui/tunnel-connect.js → state.componentsPass).
+  // A pass that could not run at all is reported the same way rather than
+  // disappearing: a removal the page cannot see is how "the market moved it"
+  // reads as "it vanished".
+  const report = (pass) => {
+    if (!onPass) return;
+    try {
+      onPass(pass);
+    } catch (e) {
+      tunnelLog("[components] pass report failed: " + ((e && e.message) || e));
+    }
+  };
   Promise.resolve()
     .then(() => components.ensureComponents(base, { progress: (m) => tunnelLog("[components] " + m) }))
-    .then((r) =>
+    .then((r) => {
       tunnelLog(
         `[components] current=${r.current.length} installed=${r.installed.length} ` +
-          `skipped=${r.skipped.length} deferred=${r.deferred.length} errors=${r.errors.length}`
-      )
-    )
-    .catch((e) => tunnelLog("[components] pass failed: " + ((e && e.message) || e)));
+          `skipped=${r.skipped.length} deferred=${r.deferred.length} ` +
+          `retired=${r.retired.map((x) => x.name).join(",") || 0} errors=${r.errors.length}`
+      );
+      report({
+        at: Date.now(),
+        installed: r.installed.length,
+        retired: r.retired,
+        deferred: r.deferred.length,
+        errors: r.errors,
+      });
+    })
+    .catch((e) => {
+      const why = (e && e.message) || e;
+      tunnelLog("[components] pass failed: " + why);
+      report({ at: Date.now(), installed: 0, retired: [], deferred: 0, errors: [{ name: "", reason: why }] });
+    });
 }
 
 module.exports = {

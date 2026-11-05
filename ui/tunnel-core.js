@@ -53,6 +53,13 @@ const state = {
   lastStrategy: null,
   lastHome: null,
   lastProbe: null, // the target's last probe: what a restart has to match
+  // The last components pass this process ran at a connect — what it installed,
+  // what it let go of, and what it could not. The pass is deliberately NOT
+  // awaited by the connect, so this is where its answer waits for a page: the
+  // plugin tab reads it (ui/components-view.js `list`) and says what the pass
+  // did, which is the only place a removal is visible (`tunnelLog` is a file).
+  // One object, one machine: `base` says which one the pass was about.
+  componentsPass: null,
   healTimer: null,
   sessionForwards: new Set(),
   endListeners: new Set(),

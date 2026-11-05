@@ -2,15 +2,16 @@
 //
 // This runner pins the document itself — the shape a curated row has, and the
 // rules that make a row safe (a version-pinned manifest URL, a digest, a name) —
-// plus the three ways the page can get one (the live URL, this machine's last
-// good copy, the snapshot this build ships) and the fact that opening the plugin
-// page is ONE read: drawing a market row never fetches a module's manifest.
+// plus the one way the page gets one (a single read of the index URL, through
+// this machine's mirror prefix if it set one), the fact that a market that cannot
+// be read is a report and not a stand-in, and that opening the plugin page is ONE
+// read: drawing a market row never fetches a module's manifest.
 //
-// Nothing here touches the network: the live index is a github URL, so the chain
-// is driven with a dead mirror prefix and a HOME of its own (tests/market-chain.js,
-// in a child process — the cache path is resolved from HOME at require time).
-// The network half of this contract is scripts/market_index.py --check, which CI
-// runs against the real releases.
+// Nothing here touches the network: the live index is a github URL, so the read is
+// driven with a dead mirror prefix and a HOME of its own (tests/market-chain.js,
+// in a child process — that is how "nothing was written here" is checked). The
+// network half of this contract is scripts/market_index.py --check, which CI runs
+// against the real releases.
 // Run: node tests/market.test.js
 "use strict";
 
@@ -51,9 +52,11 @@ function chain(args, home, env = {}) {
 }
 
 async function main() {
-  // ---- 1. the document this build ships ---------------------------------
+  // ---- 1. the document the release publishes ----------------------------
+  // ui/market.snapshot.json is the ARTIFACT, not a runtime copy: CI publishes it
+  // as the release's market/index.json, and no window reads it from disk.
   const snapshot = readJSON(SNAPSHOT);
-  check(snapshot.schema === 2, "the shipped snapshot is index schema 2");
+  check(snapshot.schema === 2, "the committed index is index schema 2");
   check(Array.isArray(snapshot.entries) && snapshot.entries.length >= 4, `and it lists the modules this project publishes (${snapshot.entries.length})`);
   check(!("generated" in snapshot) && !("updated" in snapshot), "with no timestamp in it: an unchanged market is byte-identical, so --check is a real staleness gate");
 
@@ -88,7 +91,7 @@ async function main() {
     "and no kind word: where a component runs is its declaration's answer (`service` / `launch` / `entry`), so the index repeats none of it"
   );
 
-  // ---- 2. the curation file and the shipped copy say the same thing ------
+  // ---- 2. the curation file and the generated copy say the same thing ------
   // market/entries.json is the only file adding a plugin touches; the snapshot is
   // its generated copy (digests and all — a digest is read from the release, so it
   // lives in the generated file only). Comparing the curated fields here catches
@@ -99,7 +102,7 @@ async function main() {
   const CURATED = ["id", "name", "manifest", "version", "summary", "homepage", "license"];
   check(
     curated.entries.length === snapshot.entries.length,
-    `the curation file and the shipped copy list the same number of rows (${curated.entries.length} / ${snapshot.entries.length})`
+    `the curation file and the generated index list the same number of rows (${curated.entries.length} / ${snapshot.entries.length})`
   );
   check(
     curated.entries.every((e, i) => e.id === snapshot.entries[i].id),
@@ -131,7 +134,7 @@ async function main() {
     };
     try {
       const listed = await components.marketEntries({ index: SNAPSHOT });
-      check(listed.errors.length === 0 && listed.origin === "given", "the snapshot is a readable index, even when it is handed over as a path");
+      check(listed.errors.length === 0, "the committed index is a readable index, even when it is handed over as a path");
       check(fetched === 0, "and drawing every row it lists fetched nothing: an index is the point of the index");
       // every module this project publishes also has a checkout beside this repo,
       // so on a contributor's machine the market rows are the ones WITHOUT one:
@@ -230,64 +233,69 @@ async function main() {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
-  // ---- 5. the chain: live, then last-known, then what this build ships ---
+  // ---- 5. one read, and a failure is a report -----------------------------
   if (process.platform === "win32") {
-    console.log("SKIP: the chain runs in a child process with its own HOME, which win32 does not read");
+    console.log("SKIP: the read runs in a child process with its own HOME, which win32 does not read");
   } else {
     const home = tmp("clutch-market-home-");
-    const cache = path.join(home, ".clutch", "market", "index.json");
-    const DEAD = "http://127.0.0.1:1/m/"; // a mirror that is not there: every read fails at once
+    // a mirror that is not there: every read fails at once, with no network
+    const DEAD = "http://127.0.0.1:1/m/";
+    const stale = path.join(home, ".clutch", "market", "index.json");
     try {
-      // (a) nothing on this machine yet: the copy this build ships is still a market
+      // (a) a market that cannot be read is an EMPTY list and one reason — never a
+      //     remembered or a shipped copy standing in for it
       const cold = chain([], home, { CLUTCH_SOURCE_MIRROR: DEAD });
-      check(cold.fatal === undefined, `a cold start with no network still answers (${cold.fatal || "no throw"})`);
+      check(cold.fatal === undefined, `an unreachable index is a report, not a throw (${cold.fatal || "no throw"})`);
+      check(cold.entries === 0, `and the list it hands the page is empty (${cold.entries} rows)`);
       check(
-        cold.origin === "snapshot" && cold.entries === snapshot.entries.length,
-        `and it lists every module this build shipped a row for (origin ${cold.origin}, ${cold.entries})`
+        cold.errors.length === 1 && /^http:\/\/127\.0\.0\.1:1\/m\//.test(cold.errors[0]),
+        `one reason, naming the place that was read (${cold.errors[0]})`
       );
-      check(/could not be read/.test(cold.note) && /this build ships/.test(cold.note), "saying in words that the live index was out of reach and which copy it drew instead");
       check(cold.unreachable === true, "and that the failure was the network — which is what offers a mirror");
-      check(cold.errors.length === 0, "the snapshot itself is not an error: a remembered market is a market");
-      check(cold.cacheWritten === false, "and a fallback is not cached: a copy this build ships is not a copy this machine heard");
-
-      // (b) last good read: the cache outranks the snapshot, and says so
-      fs.mkdirSync(path.dirname(cache), { recursive: true });
-      const remembered = { schema: 2, entries: [{ ...snapshot.entries[0], summary: "the summary this machine last heard" }] };
-      fs.writeFileSync(cache, JSON.stringify(remembered));
-      const warm = chain([], home, { CLUTCH_SOURCE_MIRROR: DEAD });
-      check(warm.origin === "cache" && warm.entries === 1, `the last good copy on this machine outranks the shipped one (origin ${warm.origin}, ${warm.entries})`);
-      check(/cached/.test(warm.note), "and the page is told it is drawing a remembered market, not this moment's");
-      check(warm.unreachable === true, "the reason it is remembered is still the network");
-
-      // (c) a cache this client cannot read is a tier that failed, not the end
-      fs.writeFileSync(cache, JSON.stringify({ schema: 1, sources: ["https://example.invalid/x.json"] }));
-      const stale = chain([], home, { CLUTCH_SOURCE_MIRROR: DEAD });
       check(
-        stale.origin === "snapshot" && stale.entries === snapshot.entries.length,
-        "a cache from an older shape is skipped, not obeyed: the build's own snapshot still answers"
+        cold.homeFiles.length === 0,
+        `and nothing was written on this machine: no cached copy, no second truth (${cold.homeFiles.join(", ")})`
       );
 
-      // (d) a caller that names an index gets exactly it, and no chain
-      const given = chain([SNAPSHOT], home, { CLUTCH_SOURCE_MIRROR: DEAD });
-      check(given.origin === "given" && given.note === "" && given.entries === snapshot.entries.length, "an index a caller named is taken literally: no fallback, no note, no mirror");
-      check(given.unreachable === false, "and nothing about it is a network problem");
+      // (b) a copy an older build left in the cache path is NOT a tier: the read
+      //     does not look there, so a stale market cannot outlive its source and
+      //     be drawn as today's
+      fs.mkdirSync(path.dirname(stale), { recursive: true });
+      fs.writeFileSync(stale, JSON.stringify({ schema: 2, entries: [{ ...snapshot.entries[0], summary: "a market this machine last heard" }] }));
+      const ignored = chain([], home, { CLUTCH_SOURCE_MIRROR: DEAD });
+      check(ignored.entries === 0 && ignored.errors.length === 1, "with a stale cache file on disk the answer is still the empty list, not that file");
+      check(ignored.homeFiles.length === 1, "and the read neither drew it nor refreshed it");
 
-      // (e) the live read: a proxy that answers in the mirror's place
-      //     (the same shape CLUTCH_SOURCE_MIRROR ships, exercised end to end in
-      //     tests/net-fetch.test.js — here only that a live copy is what wins)
+      // (c) a caller that names an index gets exactly it: one read, no mirror, no
+      //     substitution (the page never does this — a test or a packager does)
+      const given = chain([SNAPSHOT], home, { CLUTCH_SOURCE_MIRROR: DEAD });
+      check(
+        given.entries === snapshot.entries.length && given.errors.length === 0,
+        "an index a caller named is read literally, and every row of it is drawn"
+      );
+      check(given.unreachable === false, "and nothing about a file it was handed is a network problem");
+      check(given.homeFiles.length === 1, "and asking for it wrote nothing either");
+
+      // (d) a live read is read as it stands (the network half of this contract is
+      //     scripts/market_index.py --check, which CI runs against the releases)
       const live = { schema: 2, entries: [{ ...snapshot.entries[0], summary: "the live market" }] };
       const liveDir = tmp("clutch-market-live-");
       const liveFile = path.join(liveDir, "index.json");
       fs.writeFileSync(liveFile, JSON.stringify(live));
       const read = await components.readIndex({ index: liveFile });
-      check(read.origin === "given" && read.entries[0].summary === "the live market", "a live index is read as it stands, and its rows are the ones drawn");
+      check(
+        read.errors.length === 0 && read.entries[0].summary === "the live market",
+        "a live index is read as it stands, and its rows are the ones drawn"
+      );
       fs.rmSync(liveDir, { recursive: true, force: true });
 
-      // (f) the tier order is the code's, not this test's: the shipped snapshot is
-      //     the last step, and it is reachable from a build with nothing else
-      check(path.basename(components.SNAPSHOT_FILE) === "market.snapshot.json", "the shipped tier is the file beside ui/components.js (inside the asar once packaged)");
-      check(fs.existsSync(components.SNAPSHOT_FILE), "and it is actually in the bundle: verify-build-config.js asserts the same file");
-      check(/\/releases\/download\/market\/index\.json$/.test(components.INDEX_URL), "the live tier is one URL at a fixed tag: a new row never needs a new client");
+      // (e) there is no shipped copy to fall back to, and no path to one: the one
+      //     index is a URL at a fixed tag
+      check(
+        components.SNAPSHOT_FILE === undefined,
+        "the build exports no snapshot path: a copy read from __dirname would be the second read this deleted"
+      );
+      check(/\/releases\/download\/market\/index\.json$/.test(components.INDEX_URL), "the index is one URL at a fixed tag: a new row never needs a new client");
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

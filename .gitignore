@@ -43,6 +43,9 @@ docs/
 /scratch_*.log
 /probe.log
 /scripts/stream_probe.py
+# one-off probes against a machine-local build (asar bytes, supervisor heartbeats)
+/asar_ver.py
+/beat_probe.py
 
 # render-bench output (run.py docstring tells you to redirect it here)
 /bench.log

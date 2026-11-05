@@ -23,14 +23,16 @@
 //     small classifier, because being wrong costs one wasted request and being
 //     silent costs the install.
 //
-// The order is the user's list first, then the one this build ships: the same
-// convention the market uses (ui/components.js `readIndex()` — live index, then
-// `~/.clutch/market/index.json`, then `ui/market.snapshot.json`), so a user can
-// put an accelerator of their own in front of the shipped one. The shipped
+// The order is the user's list first, then the one this build ships, so a user
+// can put an accelerator of their own in front of the shipped one. The shipped
 // entries are view-only — they are what a fallback IS, and a build whose list
 // could be emptied from the UI would lose the feature silently. `source_mirror`
 // outranks all of it: it moves every read, manifest included, so while it is set
-// there is nothing left for a per-source fallback to do.
+// there is nothing left for this list to do.
+//
+// (The market is NOT an example of this order: it is one read, and a mirror
+// changes the URL that read is made at — ui/components.js readIndex. A cached or
+// shipped copy of the index was a second, undatable truth and is gone.)
 
 "use strict";
 

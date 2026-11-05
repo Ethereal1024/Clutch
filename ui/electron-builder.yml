@@ -24,9 +24,12 @@ files:
   # the asset survey doc next to the vendored fonts is for the repo, not runtime
   - "!vendor/fonts/README.md"
   # the deleted per-client source list: a stale checkout (or a glob that brought it
-  # back) must not put it back in the bundle. Nothing reads it — the market index
-  # (ui/market.snapshot.json) is what a build ships.
+  # back) must not put it back in the bundle. Nothing reads it — and nothing ships
+  # a copy of the market index either: the market is one read at runtime
+  # (ui/components.js readIndex), and ui/market.snapshot.json is only the
+  # artifact scripts/market_index.py publishes as the release's index.
   - "!components.sources.json"
+  - "!market.snapshot.json"
 
 # Native-dependency rebuild is OFF on purpose — it is what made `npm run dist`
 # depend on the host compiler.

@@ -29,6 +29,9 @@ const {
   exec_max_command_bytes: EXEC_MAX_COMMAND_BYTES,
   exec_chunk_bytes: EXEC_CHUNK_BYTES,
 } = require("./transport_defaults.json");
+// the composition root for one session's run loop (P1-4): fetches the session's
+// declarations + session facts and wires all five ports into createRunHost.
+const { createSessionRun } = require("./run-session");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -184,6 +187,7 @@ const componentsView = createComponentsView({
   tunnelStatus: () => tunnel.tunnelStatus(),
   windowKind: (wc) => hostCore.backendKind(wc.id),
   plugins: () => pluginHost,
+  componentsPass: () => tunnel.state.componentsPass,
   ensureSupervisor,
   log: tunnelLog,
 });
@@ -239,10 +243,44 @@ function createWindow() {
   });
   // release the session as soon as the window closes/crashes so its lock frees
   const winId = win.webContents.id;
-  win.on("closed", () => hostCore.releaseWindowBackend(winId));
-  win.webContents.on("destroyed", () => hostCore.releaseWindowBackend(winId));
+  function releaseWindow() {
+    hostCore.releaseWindowBackend(winId);
+    // stop any in-flight run loop for this window and clear its instance; the
+    // aborted final is written as a best-effort (stopAndFlush does not throw)
+    const inst = runInstances.get(winId);
+    if (inst) {
+      runInstances.delete(winId);
+      stopAndFlush(inst.run).catch(() => {});
+    }
+  }
+  win.on("closed", releaseWindow);
+  win.webContents.on("destroyed", releaseWindow);
   win.loadFile(path.join(__dirname, "index.html"));
   return win;
+}
+
+// One run-loop instance per window: keyed by webContents.id so a second window
+// has its own loop and a window reload replaces the old one cleanly (the old
+// instance's references die when nobody calls into it anymore). The map is
+// populated lazily on the first run:start and cleared when the window closes.
+const runInstances = new Map(); // winId -> {run, base}
+
+// Stop flush: when the caller asks run:stop and then drive() rejects because
+// the loop was stopped, call step() once more so the loop can write the
+// `aborted` final durable line. A missed final leaves the .clc open, and the
+// next cold start would resume a turn that was deliberately cancelled.
+async function stopAndFlush(run) {
+  run.stop();
+  try {
+    await run.drive();
+  } catch (e) {
+    // drive() rejected because stopped — now let the loop write the aborted final
+    try {
+      await run.step();
+    } catch (_e) {
+      /* the aborted final write may itself fail (e.g. backend gone): ignore */
+    }
+  }
 }
 
 // One Electron process per machine: a second `npm start` opens a NEW WINDOW in
@@ -431,6 +469,104 @@ if (!app.requestSingleInstanceLock()) {
       if (!base) return { revoked: false, why: "this window has no session host" };
       return sessions.supervisorLockReclaim(base, String(project || ""));
     });
+
+    // ---- run:* — the host-side run loop (P1-4) --------------------------------
+    //
+    // One createSessionRun instance per window. The renderer calls run:start to
+    // open a turn, run:drive to drive it to completion, run:stop to cancel, and
+    // run:state to read the fold. The page is a view only: it subscribes to
+    // run:event pushes and never owns the loop.
+    //
+    // run:start creates the instance if one does not exist or if the base URL has
+    // changed (a reconnect, a new tunnel hop). Creating is async because
+    // createSessionRun fetches /api/declarations and /api/session first.
+    //
+    // The instance is cleared when the window closes (win.on("closed") below),
+    // which also stops any in-flight drive so the aborted final is written.
+
+    ipcMain.handle("run:start", async (e, task) => {
+      const wc = e.sender;
+      const winId = wc.id;
+      const base = (runInstances.get(winId) || {}).base;
+      // resolve the current session base for this window — null if not claimed
+      let currentBase;
+      try {
+        currentBase = await hostCore.ensureWindowBackend(wc);
+      } catch (err) {
+        tunnelLog(`[run] run:start base lookup failed for window ${winId}: ${err && err.message}`);
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+      if (!currentBase) return { ok: false, error: "no session — the backend is not running" };
+      // rebuild the instance when the base changed (new hop, reconnect) or absent
+      if (!runInstances.has(winId) || base !== currentBase) {
+        try {
+          const run = await createSessionRun({
+            base: currentBase,
+            // live events go straight to the renderer that holds this window
+            onEvent: (ev) => {
+              if (!wc.isDestroyed()) wc.send("run:event", ev);
+            },
+            warn: (msg) => tunnelLog(`[run] window ${winId}: ${msg}`),
+          });
+          runInstances.set(winId, { run, base: currentBase });
+        } catch (err) {
+          tunnelLog(`[run] run:start createSessionRun failed for window ${winId}: ${err && err.message}`);
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      }
+      const { run } = runInstances.get(winId);
+      try {
+        await run.start(String(task || ""));
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    });
+
+    ipcMain.handle("run:stop", async (e) => {
+      const inst = runInstances.get(e.sender.id);
+      if (!inst) return { ok: true }; // nothing running
+      try {
+        await stopAndFlush(inst.run);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    });
+
+    ipcMain.handle("run:step", async (e) => {
+      const inst = runInstances.get(e.sender.id);
+      if (!inst) return { ok: false, error: "no run instance for this window" };
+      try {
+        const result = await inst.run.step();
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    });
+
+    ipcMain.handle("run:drive", async (e) => {
+      const inst = runInstances.get(e.sender.id);
+      if (!inst) return { ok: false, error: "no run instance for this window" };
+      try {
+        const result = await inst.run.drive();
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    });
+
+    ipcMain.handle("run:state", async (e) => {
+      const inst = runInstances.get(e.sender.id);
+      if (!inst) return { ok: true, result: { phase: "idle" } };
+      try {
+        const result = await inst.run.state();
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    });
+
     // tell every renderer the moment a tunnel dies, so it can drop a stale API
     // URL — each one told for ITSELF: `lost` is this window's answer, computed
     // from the windows the hop actually owned. A window on its own local session
