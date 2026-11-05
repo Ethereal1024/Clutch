@@ -229,6 +229,25 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
         }
       },
     },
+    // the project locks the session HOST can see, and the one action a user is
+    // allowed: reclaim a project whose claiming window is PROVEN gone — the same
+    // two verbs as the desktop's `locks:*` handlers (ui/main.js). The base comes
+    // from THIS window's own claim, so a window working through a tunnel asks the
+    // far supervisor, which is the machine that holds the lock. A claim this
+    // device made is unverifiable from over there, so the host reports it instead
+    // of acting; its answer is returned verbatim and the page says what happened.
+    clutchLocks: {
+      list: async () => {
+        const base = hostCore.supervisorBaseFor(window.id);
+        if (!base) return { error: "this window has no session host" };
+        return sessions.supervisorLocks(base);
+      },
+      reclaim: async (project) => {
+        const base = hostCore.supervisorBaseFor(window.id);
+        if (!base) return { revoked: false, why: "this window has no session host" };
+        return sessions.supervisorLockReclaim(base, String(project || ""));
+      },
+    },
     clutchTunnel: {
       // every connect goes through the ladder: the user's own act owns the wire
       // (nothing dials behind it) and a connect that WINS is the standing intent

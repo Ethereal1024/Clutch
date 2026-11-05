@@ -199,6 +199,56 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
   await advance(120_000);
   check(beats === beatsBefore && more === 0, "a stopped heartbeat never beats again");
 
+  // ---- 5) the claim names the LOCAL window's OS process, and only for local ----
+  // That pid is what the host pins (with a start tick) into the session and into
+  // the .clc's owner record, so a lock left by a dead window can be PROVEN
+  // orphaned later (agent/core/lock_reconcile.py) instead of timed out. A remote
+  // claim must send nothing: that pid lives on this client's machine, and a far
+  // host that cannot see it would misread "unknown" as "gone".
+  const { supervisorSessionStart, supervisorLocks, supervisorLockReclaim } = require(
+    path.join(ROOT, "ui", "supervisor-client.js"),
+  );
+  const sent = [];
+  global.fetch = async (url, opts) => {
+    const body = opts && opts.body ? JSON.parse(opts.body) : null;
+    sent.push({ url, body });
+    if (String(url).endsWith("/api/locks")) {
+      return { ok: true, status: 200, json: async () => ({ locks: [{ project: "/tmp/a.clc", state: "orphan" }] }) };
+    }
+    if (String(url).endsWith("/api/locks/reclaim")) {
+      return { ok: true, status: 200, json: async () => ({ project: "/tmp/a.clc", revoked: true, why: "terminated" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ session_id: "s9", port: 31009 }) };
+  };
+
+  await supervisorSessionStart("http://127.0.0.1:8890", undefined, undefined, { claim_pid: 4242 });
+  check(sent.at(-1).body.claim_pid === 4242, "a local claim carries the window's OS process id");
+
+  await supervisorSessionStart("http://127.0.0.1:8891", "http://127.0.0.1:8892/v1", "m", {
+    reasoning_effort: "max",
+  });
+  check(!("claim_pid" in sent.at(-1).body),
+    "a remote claim sends no pid: that process is not on the host's machine");
+
+  await supervisorSessionStart("http://127.0.0.1:8890", undefined, undefined, { claim_pid: 0 });
+  check(!("claim_pid" in sent.at(-1).body), "a bogus pid is dropped rather than sent as a claim");
+
+  // ---- 6) the lock list/reclaim client: data in, verdict out ----
+  const listed = await supervisorLocks("http://127.0.0.1:8890");
+  check(listed.locks.length === 1 && listed.locks[0].state === "orphan",
+    "the host's lock list comes back as data (every state, not just the actionable one)");
+  const verdict = await supervisorLockReclaim("http://127.0.0.1:8890", "/tmp/a.clc");
+  check(verdict.revoked === true && verdict.why === "terminated",
+    "and a reclaim returns the HOST's verdict, not an assumption");
+  check(sent.at(-1).body.project === "/tmp/a.clc", "the reclaim names the project it is about");
+
+  global.fetch = async () => {
+    throw new Error("Failed to fetch");
+  };
+  const unreachable = await supervisorLocks("http://127.0.0.1:8890");
+  check(!!unreachable.error && !unreachable.locks,
+    "a host that cannot be reached yields an error, never an empty lock list that looks like proof");
+
   Date.now = realNow;
   summary("session-heartbeat");
 })();

@@ -60,7 +60,7 @@ function fakeWin(id) {
 // deps factory; each knob is reconfigurable per scenario via .over
 function makeCore({ tunnel = { active: false, url: null }, localSessions = 99, slowLocal = 0, over = {} } = {}) {
   const sessions = fakeSessions();
-  const state = { localStarts: [], localStops: [], logs: [] };
+  const state = { localStarts: [], localStops: [], localClaims: [], logs: [] };
   let lseq = 0;
   const deps = {
     supervisorBase: () => "http://127.0.0.1:8890",
@@ -73,10 +73,11 @@ function makeCore({ tunnel = { active: false, url: null }, localSessions = 99, s
       sessions.calls.forwards.push(port);
       return { localPort: port + 1000, close: () => sessions.calls.forwards.closed = true };
     },
-    startLocalSession: async (onFail) => {
+    startLocalSession: async (onFail, claimPid) => {
       if (localSessions-- <= 0) return { mode: "failed", reason: "no local python" };
       if (slowLocal) await sleep(slowLocal);
       state.localStarts.push(onFail);
+      state.localClaims.push(claimPid);
       return {
         mode: "spawned",
         sessionId: "L" + ++lseq,
@@ -571,6 +572,22 @@ async function main() {
       state.logs.includes("[backend] the far side's model path is unknown (no wire); starting the session anyway"),
       "the error is reported as unknown, not swallowed (" + JSON.stringify(state.logs) + ")",
     );
+  }
+
+  // 23. a LOCAL claim names the window's OS process — the fact the lock
+  //     reconciler later uses to prove a lock's owner is gone. A handle with no
+  //     process id (the Android bridge) claims namelessly instead of inventing
+  //     one: the lock record then says "unclaimed" and the host never acts on it.
+  {
+    const { core, state } = makeCore();
+    const w = fakeWin(23);
+    w.getOSProcessId = () => 4242;
+    assert.ok(await core.ensureWindowBackend(w), "a window with an OS process claims as usual");
+    assert.strictEqual(state.localClaims[0], 4242, "the local session is told WHICH process claimed it");
+
+    const { core: core2, state: state2 } = makeCore();
+    assert.ok(await core2.ensureWindowBackend(fakeWin(24)), "a handle without getOSProcessId still claims");
+    assert.strictEqual(state2.localClaims[0], null, "and claims namelessly (no invented pid)");
   }
 
   console.log("host-core: all checks passed");

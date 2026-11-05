@@ -972,6 +972,130 @@ def main() -> int:
         hang17.close()
         mock17.close()
 
+    # ---- 18. the lock names its WINDOW, and a proven orphan can be reclaimed ----
+    # The accident this replaces: a session outlived the window that claimed it
+    # and kept the .clc locked with no window able to open it. Nothing here is a
+    # timer: the record says which OS process claimed the session, and the
+    # kernel says whether that process still exists.
+    import subprocess as sp
+
+    from agent.core import procstat
+    from agent.core import project_lock as pl
+
+    locktmp = tempfile.mkdtemp(prefix="clutch-lockdir-")
+    old_lockdir = os.environ.get("CLUTCH_LOCK_DIR")
+    os.environ["CLUTCH_LOCK_DIR"] = locktmp  # every child inherits it
+    claimant = sp.Popen(
+        [sys.executable, "-m", "tests.lock_reconcile_test", "--claimant"],
+        cwd=str(ROOT),
+        stdout=sp.PIPE,
+        stderr=sp.DEVNULL,
+        text=True,
+    )
+    claim_start = None
+    sup18, port18, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
+    base18 = f"http://127.0.0.1:{port18}"
+    try:
+        check(claimant.stdout.readline().strip() == "claimant", "the claiming window is up")
+        claim_start = procstat.identity(claimant.pid)["starttime"]
+
+        st, body = http_post(f"{base18}/api/session/start", {"claim_pid": claimant.pid})
+        check(st == 200, "a session claims the window that asked for it")
+        sid18, port_child18 = json.loads(body)["session_id"], json.loads(body)["port"]
+        args18 = sup18.sessions[sid18].proc.args
+        check(
+            "--claim-pid" in args18 and args18[args18.index("--claim-pid") + 1] == str(claimant.pid),
+            "the child is told WHICH window claimed it",
+        )
+        check(
+            args18[args18.index("--claim-start") + 1] == claim_start,
+            "and that window's start tick, so a recycled pid cannot pass for it",
+        )
+        child18 = f"http://127.0.0.1:{port_child18}"
+        with tempfile.TemporaryDirectory() as wdir18:
+            st, body = http_post(f"{child18}/api/project/new", {"dir": wdir18, "name": "claimed"})
+            check(st == 200, "the session creates a project")
+            clc18 = json.loads(body)["project"]
+            record = pl.ProjectLock.owner(clc18)
+            check(record is not None, "the .clc carries the holder's record")
+            check(record.get("claim_pid") == claimant.pid, "the record names the claiming window")
+            check(record.get("claim_start") == claim_start, "and pins it to a start tick")
+            check(record.get("port") == port_child18, "the record names the port a run can be asked about")
+
+            # A silent window is not a dead one. A frozen/throttled window sends
+            # no beat, but its process is still there, and the reaper must ask
+            # the kernel rather than the clock before it kills a live run.
+            rec18 = sup18.sessions[sid18]
+            check(rec18.claim_pid == claimant.pid and rec18.claim_start == claim_start,
+                  "the supervisor remembers which window claimed the child")
+            check(
+                sup18._stale(rec18, time.time() + 10_000) is False,
+                "a silent session whose claiming window is ALIVE is not reaped",
+            )
+            check(
+                rec18.last_beat > time.time() - 5,
+                "the kernel's answer refreshes the beat (normal contract resumes)",
+            )
+
+            st, body = http_get(f"{base18}/api/locks")
+            locks = json.loads(body)["locks"]
+            mine = [lk for lk in locks if lk.get("project") == str(Path(clc18).resolve())]
+            check(len(mine) == 1, "the host reports the lock")
+            check(mine[0]["state"] == "live", "a lock whose window is alive is 'live'")
+            check(mine[0]["claim_state"] == "live", "and the window is what makes it so")
+
+            st, body = http_post(f"{base18}/api/locks/reclaim", {"project": clc18})
+            check(st == 200 and json.loads(body)["revoked"] is False, "a live window's lock is never reclaimed")
+
+            claimant.kill()
+            claimant.wait(timeout=10)
+            ok = wait_until(
+                lambda: any(
+                    lk["state"] == "orphan"
+                    for lk in json.loads(http_get(f"{base18}/api/locks")[1])["locks"]
+                    if lk.get("project") == str(Path(clc18).resolve())
+                ),
+                10.0,
+                "the lock becomes an orphan",
+            )
+            check(ok, "the window is gone: the lock is a PROVEN orphan")
+            check(
+                rec18.claim_pid is not None and procstat.state(rec18.claim_pid, rec18.claim_start) != "live",
+                "the same identity now reads dead to the kernel",
+            )
+            check(
+                sup18._stale(rec18, time.time() + 10_000) is True,
+                "and the same silence becomes stale — the window is truly gone",
+            )
+
+            st, body = http_post(f"{base18}/api/locks/reclaim", {"project": clc18})
+            verdict = json.loads(body)
+            check(st == 200 and verdict["revoked"] is True, f"the user's reclaim frees it ({verdict.get('why')})")
+            ok = wait_until(lambda: pl.ProjectLock.acquire(clc18) is not None, 15.0, "the project opens again")
+            check(ok, "the kernel freed the lock with the session")
+            pl.ProjectLock.release_all()
+
+            # a session that exited is not a session any more: the beat says so
+            # at once (the OS's answer, not a stale in-memory record)
+            ok = wait_until(
+                lambda: http_post(f"{base18}/api/session/heartbeat", {"session_id": sid18})[0] == 404,
+                10.0,
+                "the dead session's beat is refused",
+            )
+            check(ok, "a beat for a session that exited answers 404 (no phantom session)")
+    finally:
+        sup18.shutdown_all()
+        if claimant.poll() is None:
+            claimant.kill()
+            claimant.wait(timeout=10)
+        if old_lockdir is None:
+            os.environ.pop("CLUTCH_LOCK_DIR", None)
+        else:
+            os.environ["CLUTCH_LOCK_DIR"] = old_lockdir
+        import shutil as _shutil
+
+        _shutil.rmtree(locktmp, ignore_errors=True)
+
     print("\nSUPERVISOR TESTS PASSED")
     return 0
 

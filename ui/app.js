@@ -101,7 +101,9 @@ function noBackend() {
 // live here instead of being re-written at every call site. Errors are thrown
 // as `Error` with `.status` (HTTP status, absent for network failures — callers
 // use it to tell "backend said no" from "backend unreachable") and `.code`
-// (server error code, e.g. project_open_conflict). Throws on non-2xx and on a
+// (server error code, e.g. project_open_conflict), plus `owner`/`project` when
+// the server named them (a lock conflict: who holds it, which file it locked).
+// Throws on non-2xx and on a
 // 200 body that carries an error (only /api/fs/list does that).
 async function apiFetch(path, { method = "GET", body, base = API_BASE, timeout = 30000 } = {}) {
   if (!base) throw noBackend();
@@ -126,6 +128,10 @@ async function apiFetch(path, { method = "GET", body, base = API_BASE, timeout =
     const e = new Error(data.error || r.status);
     e.code = data.code || null;
     e.status = r.status;
+    // payload the page acts on rides along: who holds a conflicted project
+    // (owner: pid/host/since/claim_pid) and the exact file the host locked
+    if (data.owner) e.owner = data.owner;
+    if (data.project) e.project = data.project;
     throw e;
   }
   return data;

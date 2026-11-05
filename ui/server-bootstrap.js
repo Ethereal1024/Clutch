@@ -179,12 +179,20 @@ async function ensureSupervisor() {
 }
 
 // ---- local session: this window's session child from the LOCAL supervisor ----
-// onFail fires when the supervisor stops answering (idle-exit or crash)
-async function startLocalSession(onFail = null) {
+// onFail fires when the supervisor stops answering (idle-exit or crash).
+// claimPid is this window's OS process (ui/host-core.js passes it): the local
+// supervisor records it, so a lock left behind by a dead window can be proven
+// orphaned by the kernel instead of guessed by a timer.
+async function startLocalSession(onFail = null, claimPid = null) {
   if (!(await ensureSupervisor())) {
     return { mode: "failed", reason: "could not start the machine supervisor" };
   }
-  const res = await supervisorSessionStart(localBase);
+  const res = await supervisorSessionStart(
+    localBase,
+    undefined,
+    undefined,
+    claimPid ? { claim_pid: claimPid } : {},
+  );
   if (res.error) return { mode: "failed", reason: res.error };
   const hb = startSupervisorHeartbeat(localBase, res.sessionId, onFail);
   console.log(`[server-bootstrap] session ${res.sessionId} on port ${res.port}`);

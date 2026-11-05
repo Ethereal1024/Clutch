@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from ..core.project_lock import ProjectLock, ProjectOpenConflict
+from ..core.project_lock import ProjectLock, ProjectOpenConflict, owner_summary
 from ..events import event_to_json
 from ..project import create_project, open_project_lazy
 
@@ -38,13 +38,16 @@ class ProjectMixin:
                 project = create_project(root / name, name, model=self._cfg.model, workspace=ws)
             else:
                 project = create_project(Path(dirname) / name, name, model=self._cfg.model)
-        except ProjectOpenConflict:
+        except ProjectOpenConflict as e:
             # the file this create would write is another window's project: same
             # answer as an open conflict, so the UI can say what actually happened
-            return self._json(
-                {"error": "project is open in another window", "code": "project_open_conflict"},
-                status=409,
-            )
+            payload: dict = {
+                "error": "project is open in another window",
+                "code": "project_open_conflict",
+            }
+            if e.owner is not None:
+                payload["owner"] = e.owner
+            return self._json(payload, status=409)
         except OSError as e:
             return self._json({"error": f"cannot create project: {e}"}, status=400)
         self._state.set_project(project, workspace=ws)
@@ -90,10 +93,25 @@ class ProjectMixin:
         if not read_only:
             lock = ProjectLock.acquire(str(full))
             if lock is None:
-                return self._json(
-                    {"error": "project is open in another window", "code": "project_open_conflict"},
-                    status=409,
-                )
+                # Say WHO holds it, as far as the holder's own record knows: its
+                # pid, the host it runs on, since when, and the window process
+                # that claimed it. The UI shows this instead of a bare "another
+                # window", and the host's reconciler (GET /api/locks) can free
+                # the project when that window is PROVEN gone. A holder that
+                # wrote no record (an older build) yields no owner — the honest
+                # answer, never a guess.
+                payload: dict = {
+                    "error": "project is open in another window",
+                    "code": "project_open_conflict",
+                    # the exact file that is locked, so the UI can look it up in
+                    # the host's lock list (GET /api/locks) without re-resolving
+                    # a relative path the child resolved for it
+                    "project": str(full),
+                }
+                owner = owner_summary(ProjectLock.owner(str(full)))
+                if owner is not None:
+                    payload["owner"] = owner
+                return self._json(payload, status=409)
         # stream the open as NDJSON so the UI can show real file-parse progress;
         # errors are reported inline as an {"error": ...} line
         self.send_response(200)
@@ -114,7 +132,10 @@ class ProjectMixin:
         except ProjectOpenConflict as e:
             if lock is not None:
                 ProjectLock.release(lock)
-            emit({"error": str(e), "code": e.code})
+            conflict: dict = {"error": str(e), "code": e.code}
+            if e.owner:
+                conflict["owner"] = e.owner
+            emit(conflict)
             return
         except (OSError, ValueError) as e:
             if lock is not None:

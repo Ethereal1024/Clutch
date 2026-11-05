@@ -111,6 +111,29 @@
     ensure: (data) => call("clutchSettings", "ensure", [data]),
   });
 
+  // the project locks the session HOST can see, and the one action a user is
+  // allowed: reclaim a project whose claiming window is PROVEN gone. The host
+  // that holds the lock answers, exactly as on the desktop: this page never
+  // guesses and never frees a live window's project (agent/core/lock_reconcile.py).
+  // A claim made by THIS device is unverifiable from the far side of a tunnel,
+  // so the host reports it rather than acting, and its answer is returned whole.
+  expose("clutchLocks", {
+    list: () => call("clutchLocks", "list"),
+    reclaim: (project) => call("clutchLocks", "reclaim", [project]),
+  });
+
+  // the host-side run loop (P1-4): the page is a view only — it calls
+  // start/stop/step/drive/state and subscribes to run:event pushes. The loop
+  // lives in the host process, so a page reload does not cancel an in-flight turn.
+  expose("clutchRun", {
+    start: (task) => call("clutchRun", "start", [task]),
+    stop: () => call("clutchRun", "stop"),
+    step: () => call("clutchRun", "step"),
+    drive: () => call("clutchRun", "drive"),
+    state: () => call("clutchRun", "state"),
+    onEvent: (cb) => subscribe("run:event", cb),
+  });
+
   expose("clutchComponents", {
     list: () => call("clutchComponents", "list"),
     market: (opts) => call("clutchComponents", "market", [opts]),

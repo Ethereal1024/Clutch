@@ -19,6 +19,11 @@ Endpoints:
                                     (see SessionSupervisor.repoint_session)
     GET  /api/health             -> ok
 
+    GET  /api/locks              -> every .clc write lock this user's temp dir
+                                    knows, classified (held? by whom? alive?)
+    POST /api/locks/reclaim      -> {project}: free a lock whose claiming window
+                                    is PROVEN gone; refuses a live window
+
 Component install (the install layer's receiving half — a component always
 belongs to the machine its server runs on, so this process is who a client
 installs ONTO, whether it is this desktop or a device behind a tunnel):
@@ -88,6 +93,7 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
 from agent.build import version as build_version
+from agent.core import lock_reconcile, procstat
 from agent.procmgr import kill
 from agent.procmgr.stdio import SafeStdStream, log, make_stdout_nonblocking
 from agent.procmgr.supervise import (
@@ -173,6 +179,15 @@ class Session(ManagedProcess):
     llm_base: str | None = None
     llm_model: str | None = None
 
+    # The window that claimed this session, as the kernel knew it at spawn:
+    # (pid, starttime). This is the fact the reaper uses to decide whether the
+    # silence is a frozen window (still a live process) or a dead one — a
+    # heartbeat is a message that a backgrounded window cannot send, a process
+    # in /proc is not. None for a remote claim: that pid lives on the client's
+    # machine and this host can never check it.
+    claim_pid: int | None = None
+    claim_start: str | None = None
+
     @property
     def session_id(self) -> str:
         return self.key
@@ -225,6 +240,7 @@ class SessionSupervisor(ProcessSupervisor):
         model: str | None = None,
         reasoning_effort: str | None = None,
         api_protocol: str | None = None,
+        claim_pid: int | None = None,
     ) -> Session | None:
         """Spawn one agent.server child on a random port, learning the port from
         its stdout banner. None when the child never prints it. base_url/model
@@ -244,6 +260,20 @@ class SessionSupervisor(ProcessSupervisor):
             cmd += ["--reasoning-effort", reasoning_effort]
         if api_protocol:
             cmd += ["--api-protocol", api_protocol]
+        claim_start: str | None = None
+        if claim_pid:
+            # The child records WHICH window claimed it, so this host can later
+            # prove that window is gone instead of waiting out a timer (see
+            # agent/core/lock_reconcile.py). Pin the start tick too: a bare pid
+            # is recycled, a (pid, starttime, boot) identity is not. An identity
+            # that cannot be read is refused here — spawning a session no one can
+            # ever attribute is the orphan this replaces.
+            ident = procstat.identity(claim_pid)
+            if ident is None:
+                log(f"[supervisor] refusing a session for claim pid {claim_pid}: no such process")
+                return None
+            claim_start = ident["starttime"]
+            cmd += ["--claim-pid", str(claim_pid), "--claim-start", claim_start]
         spec = SpawnSpec(
             cmd=cmd,
             cwd=self.cwd,
@@ -257,6 +287,8 @@ class SessionSupervisor(ProcessSupervisor):
         # base costs one comparison and a moved one costs one request
         record.llm_base = base_url
         record.llm_model = model
+        record.claim_pid = claim_pid
+        record.claim_start = claim_start
         log(f"[supervisor] session {record.key} on port {record.port}")
         return record  # a Session: _make_record builds the session shape
 
@@ -390,12 +422,32 @@ class SessionSupervisor(ProcessSupervisor):
         (its run still gets to write its own final, and a re-claim inside the
         window can still re-bind to it), and this is not a try limit on the
         reconnect ladder — the window is the same 300s a backgrounded phone
-        gets."""
+        gets.
+
+        Before any of that, a LOCAL claim is checked against the kernel: the
+        spawning window's pid+starttime (claim_pid/claim_start) still being a
+        live process means the window exists and is merely mute — a frozen or
+        throttled window, not a departed one — so the beat is refreshed and
+        nothing is reaped. A remote claim has no local pid (None) and keeps the
+        plain heartbeat window."""
         if not super()._stale(record, now):
             return False
         if record.detached:
             log(f"[supervisor] session {record.key} was released - reaping after its stale window")
             return True
+        if record.claim_pid and record.claim_start:
+            # The heartbeat is a message; the process is a fact. A window that
+            # is frozen (backgrounded phone, suspended app), throttled, or just
+            # slow sends no beat, but its process is still there — and a run it
+            # started must not die because the message stopped. So before the
+            # silence is treated as death, ask the kernel whether the claiming
+            # window still exists: only its absence is evidence. (This is the
+            # same identity the lock reconciler uses on the lock record, one
+            # layer up: the lock's claimant is the window, the session's is too.)
+            if procstat.state(record.claim_pid, record.claim_start) == "live":
+                log(f"[supervisor] session {record.key} silent but claim pid {record.claim_pid} is alive - not reaping")
+                self.beat(record.key)
+                return False
         if not session_in_flight(record.port):
             return True
         log(f"[supervisor] session {record.key} has a run in flight - not reaping")
@@ -453,6 +505,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/components":
             # the version gate, host-side: what this machine already runs
             self._json({"components": components.inventory()})
+        elif path == "/api/locks":
+            # Every lock this user's temp dir holds, classified by the kernel's
+            # answer plus the holder's own record. Read-only: a scan never takes
+            # a lock it would keep and never signals anything.
+            self._json({"locks": [state.as_dict() for state in lock_reconcile.scan()]})
         elif path == "/api/components/versions":
             name = query.get("name", "")
             if not name:
@@ -547,12 +604,17 @@ class _Handler(BaseHTTPRequestHandler):
         path, _query = self._route()
         if path == "/api/session/start":
             body = self._read_body()
+            claim_pid = body.get("claim_pid")
             sess = sup.start_session(
                 base_url=body.get("base_url") or None,
                 model=body.get("model") or None,
                 # the client LLM knobs ride with the claim, exactly like the model
                 reasoning_effort=body.get("reasoning_effort") or None,
                 api_protocol=body.get("api_protocol") or None,
+                # the OS process of the window claiming this session: the one
+                # fact that lets this host tell "window gone" from "window
+                # silent" later, without a timer (core/lock_reconcile.py)
+                claim_pid=claim_pid if isinstance(claim_pid, int) and claim_pid > 0 else None,
             )
             if sess is None:
                 self._json({"error": "session start failed"}, 500)
@@ -581,6 +643,16 @@ class _Handler(BaseHTTPRequestHandler):
             if ok and base_url:
                 payload["repoint"] = sup.repoint_session(sid, base_url, (body.get("model") or "").strip() or None)
             self._json(payload, 200 if ok else 404)
+        elif path == "/api/locks/reclaim":
+            # The user's own hand on a project the host can PROVE is orphaned.
+            # A live window is refused here, and the verdict says so, so the UI
+            # can report what happened instead of assuming it worked.
+            project = (self._read_body() or {}).get("project")
+            if not project:
+                self._json({"error": "project is required"}, 400)
+                return
+            verdict = lock_reconcile.reclaim(project, log=log)
+            self._json(verdict)
         elif path == "/api/components/install":
             self._install_component()
         elif path.startswith("/api/components/") and path.endswith("/disable"):
@@ -666,15 +738,37 @@ def main() -> int:
     log(f"[clutch-supervisor] http://127.0.0.1:{bound_port}  (session lifecycle API)")
 
     def _on_term(_signum, _frame):
-        log("[supervisor] SIGTERM, shutting sessions down")
-        sup.shutdown_all()
-        sup.exit_event.set()
+        # The log line is a courtesy; ENDING the sessions is the point. So a
+        # dead stdout must never stand between the two: the old order logged
+        # first, a reentrant write raised RuntimeError, and shutdown_all() never
+        # ran — every session (and the project lock it held) survived its host.
+        try:
+            log("[supervisor] SIGTERM, shutting sessions down")
+        except Exception:  # noqa: BLE001 - nothing may keep the sessions alive
+            pass
+        try:
+            sup.shutdown_all()
+        finally:
+            sup.exit_event.set()
         sys.exit(0)
 
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _on_term)
 
     threading.Thread(target=sup.reap_loop, daemon=True).start()
+    # The ONE reconciler for .clc write locks (agent/core/lock_reconcile.py).
+    # This process outlives the windows it serves, which is what it takes to
+    # notice a window that is GONE while its session still holds the project.
+    # Each pass asks the kernel (is the lock held? does the claiming process
+    # still exist?) and, for an orphan, the session itself (is a run in
+    # flight?) — never a clock, because to a clock a frozen phone and a closed
+    # window look the same, and one of them must keep its lock.
+    threading.Thread(
+        target=lock_reconcile.loop,
+        kwargs={"run_state": session_run_state, "log": log, "stop": sup.exit_event},
+        name="clutch-lock-reconcile",
+        daemon=True,
+    ).start()
 
     def _exit_watch() -> None:
         # stop the HTTP server too, or serve_forever keeps the process alive

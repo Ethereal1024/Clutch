@@ -20,8 +20,11 @@
 //                            this claim does — see ui/tunnel-connect.js)
 //   restartRemoteServer() => Promise<bool>                  (reboot an idle-exited remote supervisor)
 //   openSessionForward(port) => Promise<{ localPort, close() }>
-//   startLocalSession(onFail) => Promise<{mode, sessionId, url, stop}> | null
-//                           (spawns the LOCAL supervisor + session; absent on Android)
+//   startLocalSession(onFail, claimPid) => Promise<{mode, sessionId, url, stop}> | null
+//                           (spawns the LOCAL supervisor + session; absent on Android.
+//                            claimPid is this window's OS process, recorded by the
+//                            supervisor so a lock it leaves behind can be proven
+//                            orphaned instead of timed out)
 //   log(...args)          => sink (tunnelLog on desktop)
 //   sessions              => pure supervisor HTTP client (supervisor-client.js;
 //                            injectable so tests can run the machine hermetically)
@@ -340,12 +343,19 @@ function createHostCore(deps) {
         await ensureWindowBackend(wc, true);
       })();
     };
-    s = await startLocalSession(onFail);
+    // The LOCAL session is claimed by an OS process this host can see, so name
+    // it: the supervisor pins (pid, start tick) into the session and into every
+    // .clc that session opens, and that pair is how a lock left by a dead window
+    // is PROVEN orphaned later (agent/core/lock_reconcile.py) instead of guessed
+    // at by a timer. A handle with no OS process id (the Android bridge) claims
+    // namelessly: the record then says "unclaimed" and the host never touches it.
+    const claimPid = typeof wc.getOSProcessId === "function" ? wc.getOSProcessId() : null;
+    s = await startLocalSession(onFail, claimPid);
     if (s.mode === "failed") {
       // a window booting mid-spawn can transiently fail; retry once
       log(`[backend] local session retry: ${s.reason}`);
       await new Promise((r) => setTimeout(r, 600));
-      s = await startLocalSession(onFail); // the retry session heals itself too
+      s = await startLocalSession(onFail, claimPid); // the retry session heals itself too
     }
     if (s.mode === "failed") {
       log(`[backend] local session failed: ${s.reason}`);
@@ -448,6 +458,20 @@ function createHostCore(deps) {
     return wb ? wb.kind : null;
   }
 
+  // The SUPERVISOR that owns this window's session — and therefore the only
+  // process that can speak about locks on the machine the work happens on: a
+  // lock is freed by the host that holds it, never by the client. A tunnel
+  // claim means the far host's supervisor (through the same tunnel base); a
+  // local claim (or no claim yet) means this machine's.
+  function supervisorBaseFor(winId) {
+    const wb = windowBackends.get(winId);
+    if (wb && wb.kind === "tunnel") {
+      const ts = tunnelStatus() || {};
+      return ts.active && ts.url ? ts.url : null;
+    }
+    return supervisorBase ? supervisorBase() : null;
+  }
+
   return {
     ensureWindowBackend,
     releaseWindowBackend,
@@ -457,6 +481,7 @@ function createHostCore(deps) {
     stopAllBackends,
     claimWindowBackend,
     backendKind,
+    supervisorBaseFor,
     backendCount: () => windowBackends.size,
   };
 }

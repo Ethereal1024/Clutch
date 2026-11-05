@@ -197,53 +197,21 @@ class RunState:
             self._retire_lock(prev, keep=project.lock)
             return self.workspace
 
-    def release_write_claim(self) -> bool:
-        """Open the active project READ-ONLY, handing its write lock back.
-
-        The lock arbitrates two windows EDITING one .clc, so a project no window
-        is watching has no editor and must not keep other windows out of the file
-        (agent/server.py's unattended watchdog is the caller). The project stays
-        ACTIVE: whoever comes back keeps its transcript, its tree and its SSE
-        scope, and simply finds that its claim is gone — a run re-opens the
-        project for write anyway (/api/run carries the project), which is the
-        honest place to discover that another window took it.
-
-        A run in flight is a writer that is still there, so this refuses while
-        busy: releasing the lock under a running writer is exactly the two
-        writers the lock exists to prevent. Returns True when the lock was
-        handed back.
-        """
-        with self.lock:
-            if self.busy:
-                return False
-            project, ws = self.project, self.workspace
-        if project is None or project.read_only or project.lock is None:
-            return False
-        try:
-            # read-only first so the file is never unlocked without a project
-            # behind it, then swap: set_project retires the old lock
-            fresh = open_project_lazy(project.path, workspace=ws, read_only=True)
-        except (OSError, ValueError):
-            return False
-        with self.lock:
-            if self.project is not project:  # a window got here first: leave it
-                return False
-            self.project = fresh
-            self.workspace = ws
-            self._retire_lock(project)
-        return True
-
     def reclaim_write_claim(self) -> bool:
         """Open the ACTIVE project FOR WRITE again, once its lock is free.
 
-        The exact mirror of release_write_claim, and the missing half of the
-        same invariant. Read-only is only ever the FALLBACK for a conflict
-        (ui/js/project.js says so when it offers it), never a mode the user
-        chose: the moment the window that held the .clc is gone — it quit, its
-        client died, its tunnel was torn down, its session was reaped — the
-        window still looking at the file must be able to become its writer
-        again, without re-opening the project (that would repaint its whole
-        transcript) and without first sending a task.
+        The other half of the same invariant, and now the only way a read-only
+        window gets its claim back: the release path that watched for silence is
+        gone (a session no longer hands its lock back for being quiet — the
+        host's reconciler ends an orphaned session instead, see
+        agent/core/lock_reconcile.py), so nothing but this may re-take one.
+        Read-only is only ever the FALLBACK for a conflict (ui/js/project.js
+        says so when it offers it), never a mode the user chose: the moment the
+        window that held the .clc is gone — it quit, its client died, its
+        tunnel was torn down, its session was reaped — the window still looking
+        at the file must be able to become its writer again, without re-opening
+        the project (that would repaint its whole transcript) and without first
+        sending a task.
 
         Until this existed, read_only was a one-way latch: a window that fell
         back once kept the badge (and the session kept refusing to append) long

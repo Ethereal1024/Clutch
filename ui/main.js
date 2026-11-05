@@ -5,6 +5,10 @@ const path = require("path");
 const tunnel = require("./ssh-tunnel");
 const { SUPERVISOR_PORT, ensureSupervisor, startLocalSession } = require("./server-bootstrap");
 const { createHostCore } = require("./host-core");
+// the same pure supervisor client host-core uses; the lock panel asks the host
+// that HOLDS a lock (local, or the far side of the tunnel) and never touches a
+// lock file itself
+const sessions = require("./supervisor-client");
 const { createComponentsView } = require("./components-view");
 const { writeSettingsMirror, ensureSettingsMirror, readSettings, getSshSecret } = require("./settings-mirror");
 const { createTunnelLadder } = require("./tunnel-ladder");
@@ -406,6 +410,27 @@ if (!app.requestSingleInstanceLock()) {
       return { ok: true };
     });
 
+    // ---- locks:* — the machine that HOLDS a project lock answers -----------
+    //
+    // A .clc lock is held by a process on the machine the project lives on, so
+    // only that machine's supervisor can see the kernel's answer and only it may
+    // act (agent/core/lock_reconcile.py). The page asks through here, which
+    // picks the supervisor from THIS window's own claim: the far side of a
+    // tunnel when the window works there, this machine otherwise. Nothing here
+    // ever unlinks a lock file, and reclaim refuses every state but a PROVEN
+    // orphan — the host's verdict is returned verbatim so the page can say what
+    // actually happened.
+    ipcMain.handle("locks:list", async (e) => {
+      const base = hostCore.supervisorBaseFor(e.sender.id);
+      if (!base) return { error: "this window has no session host" };
+      return sessions.supervisorLocks(base);
+    });
+
+    ipcMain.handle("locks:reclaim", async (e, project) => {
+      const base = hostCore.supervisorBaseFor(e.sender.id);
+      if (!base) return { revoked: false, why: "this window has no session host" };
+      return sessions.supervisorLockReclaim(base, String(project || ""));
+    });
     // tell every renderer the moment a tunnel dies, so it can drop a stale API
     // URL — each one told for ITSELF: `lost` is this window's answer, computed
     // from the windows the hop actually owned. A window on its own local session

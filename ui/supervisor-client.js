@@ -1,12 +1,17 @@
 // Pure HTTP client for the machine supervisor (agent/supervisor.py): probe,
-// session start/stop, heartbeat, shutdown. No process management and no
+// session start/stop, heartbeat, shutdown, and the lock list/reclaim a window
+// asks its own host about. No process management and no
 // Electron — every call takes an explicit base URL, so the SAME client drives
 // the local supervisor (http://127.0.0.1:SUPERVISOR_PORT) and a remote one
 // reached through the SSH tunnel. Consumed by server-bootstrap.js (desktop
-// spawn path) and host-core.js (the session-claim state machine).
+// spawn path), host-core.js (the session-claim state machine) and ui/main.js
+// (the lock panel).
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 // session/start boots a onefile child: cover the supervisor's start timeout
 const SESSION_START_TIMEOUT_MS = 35_000;
+// a reclaim waits out the host's own grace (REVOKE_GRACE_S = 8s) plus the
+// SIGKILL fallback and the free-check that follows it
+const LOCK_RECLAIM_TIMEOUT_MS = 25_000;
 const HEARTBEAT_INTERVAL_MS = 8000; // << the supervisor's stale window (300s)
 // A beat that fails is not a dead session. The supervisor reaps a session only
 // once STALE_S (300s: a phone that went away with a run in flight must find its
@@ -87,6 +92,13 @@ async function supervisorSessionStart(base, baseUrl, model, knobs = {}) {
   // instead of the levels this client chose (empty = child default)
   if (knobs.reasoning_effort) payload.reasoning_effort = knobs.reasoning_effort;
   if (knobs.api_protocol) payload.api_protocol = knobs.api_protocol;
+  // The LOCAL window that is claiming, as its OS process id. The supervisor pins
+  // it to a start tick and records both in the session and in the .clc's owner
+  // record, which is what lets this host PROVE later that the window is gone
+  // (agent/core/lock_reconcile.py) instead of waiting out a timer. A remote
+  // claim sends nothing: that pid lives on the client's machine and the far host
+  // could never check it — the record then says unverifiable and no more.
+  if (Number.isInteger(knobs.claim_pid) && knobs.claim_pid > 0) payload.claim_pid = knobs.claim_pid;
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), SESSION_START_TIMEOUT_MS);
   try {
@@ -249,6 +261,54 @@ function supervisorShutdown(base) {
   } catch { /* best effort */ }
 }
 
+// The locks a supervisor can see, each classified by the KERNEL on ITS machine:
+// is the lock file still held, is the recorded holder alive, is the window that
+// claimed it alive ("live"/"orphan"/"ghost"/"unclaimed"/"unverifiable"/...).
+// Only a host can answer this — the client's own process table says nothing
+// about a remote session — so the window asks the supervisor that owns its
+// session. Read-only; an odd lock is data, not a failure.
+async function supervisorLocks(base) {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${base}/api/locks`, { signal: ctl.signal });
+      if (!r.ok) return { error: `lock list failed (${r.status})` };
+      const d = await r.json();
+      return { locks: Array.isArray(d.locks) ? d.locks : [] };
+    } finally {
+      clearTimeout(t);
+    }
+  } catch (e) {
+    return { error: `lock list error: ${e && e.message}` };
+  }
+}
+
+// The user's hand on a project the host can PROVE is orphaned. The host refuses
+// a live window and says why; the verdict is returned so the page reports what
+// actually happened instead of assuming it worked.
+async function supervisorLockReclaim(base, project) {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), LOCK_RECLAIM_TIMEOUT_MS);
+    try {
+      const r = await fetch(`${base}/api/locks/reclaim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project }),
+        signal: ctl.signal,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return { revoked: false, why: d.error || `reclaim failed (${r.status})` };
+      return d;
+    } finally {
+      clearTimeout(t);
+    }
+  } catch (e) {
+    return { revoked: false, why: `reclaim error: ${e && e.message}` };
+  }
+}
+
 module.exports = {
   supervisorProbe,
   supervisorIdentity,
@@ -257,4 +317,6 @@ module.exports = {
   supervisorSessionHeartbeat,
   startSupervisorHeartbeat,
   supervisorShutdown,
+  supervisorLocks,
+  supervisorLockReclaim,
 };

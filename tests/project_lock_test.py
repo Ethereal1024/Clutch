@@ -21,6 +21,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from agent.core import procstat
 from agent.core import project_lock as pl
 from tests.testsupport import check
 
@@ -57,6 +58,33 @@ def test_claim_and_self_reuse(tmp: str) -> None:
     check(h2 is not None, "release frees the lock for the next claim")
     pl.ProjectLock.release(h2)
     check(os.path.exists(pl._local_lock_path(key)), "the lock FILE is reused, never deleted")
+    os.unlink(pl._local_lock_path(key))  # tidy this test's own temp lock file
+
+
+def test_owner_record_is_written_annotated_and_erased(tmp: str) -> None:
+    """Beside the kernel lock lives a REPORT: who holds it, on which boot, since
+    when. The kernel stays the arbiter (a record claiming a free lock is
+    overwritten, never obeyed), and the report leaves with the lock — a record
+    left behind would name a holder that no longer holds anything, which is the
+    "stale" state the reconciler has to clean up after a killed holder."""
+    _reset()
+    key = _fresh_key(tmp)
+    me = procstat.identity(os.getpid())
+    h = pl.ProjectLock.acquire(key)
+    check(h is not None, "the claim holds")
+    owner = pl.ProjectLock.owner(key)
+    check(owner is not None, "a held lock carries an owner record")
+    check(owner["pid"] == os.getpid(), "the record names this process")
+    check(owner["starttime"] == me["starttime"], "the record pins the start tick, not a bare pid")
+    check(owner["boot_id"] == me["boot_id"], "the start tick is scoped to this boot")
+    check(owner["project"] == os.path.abspath(key), "the record names the .clc it locks")
+    check(isinstance(owner.get("since"), (int, float)), "the record says since when")
+    check(pl.ProjectLock.inspect(key)["held"], "the kernel agrees the lock is held")
+    pl.ProjectLock.annotate(h, port=19400, claim="window")
+    check(pl.ProjectLock.owner(key)["port"] == 19400, "annotate adds a fact the holder learned later")
+    pl.ProjectLock.release(h)
+    check(pl.ProjectLock.owner(key) is None, "the record leaves with the lock")
+    check(not pl.ProjectLock.inspect(key)["held"], "and the kernel agrees it is free")
     os.unlink(pl._local_lock_path(key))  # tidy this test's own temp lock file
 
 
@@ -132,6 +160,7 @@ if __name__ == "__main__":
     tmp = tempfile.mkdtemp(prefix="clutch-lock-test-")
     try:
         test_claim_and_self_reuse(tmp)
+        test_owner_record_is_written_annotated_and_erased(tmp)
         test_cross_process_refusal_and_crash_release(tmp)
         test_release_all(tmp)
     finally:

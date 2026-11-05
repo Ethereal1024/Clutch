@@ -217,6 +217,55 @@ function hideWelcome() {
   els.run.disabled = busy || !currentProject;
 }
 
+// Who holds a locked project, in the user's words. The host's own record is the
+// only source: it names the holding process, the machine it runs on, and when it
+// took the lock. A holder that wrote no record (an older build) says nothing —
+// the honest answer, never a guess.
+function describeHolder(owner) {
+  if (!owner || typeof owner !== "object") return "";
+  const bits = [];
+  if (Number.isInteger(owner.pid)) bits.push(`process ${owner.pid}`);
+  if (owner.host) bits.push(`on ${owner.host}`);
+  if (typeof owner.since === "number" && owner.since > 0) {
+    bits.push(`since ${new Date(owner.since * 1000).toLocaleString()}`);
+  }
+  return bits.length ? `Held by ${bits.join(" ")}.` : "";
+}
+
+// Is this project's lock a PROVEN orphan? Only the host can answer — the kernel
+// fact about the claiming window belongs to the machine the work runs on — and
+// only "orphan" (holder alive, claiming window gone) may be taken back by a
+// button. Every other state belongs to somebody, and a host that cannot answer
+// is no reason to take anything.
+async function provenOrphan(project) {
+  const api = window.clutchLocks;
+  if (!project || !api || typeof api.list !== "function") return false;
+  try {
+    const res = await api.list();
+    const locks = (res && res.locks) || [];
+    const mine = locks.find((lk) => lk && lk.project === project);
+    return !!(mine && mine.state === "orphan");
+  } catch {
+    return false;
+  }
+}
+
+// Take a proven-orphaned project back: the host stops the dead window's session
+// (the one still holding the flock), and then the open can succeed. The verdict
+// is the host's, so a refusal is reported instead of retried.
+async function reclaimLock(project) {
+  const api = window.clutchLocks;
+  if (!api || typeof api.reclaim !== "function") return false;
+  try {
+    const res = await api.reclaim(project);
+    if (res && res.revoked) return true;
+    notice("The host would not release it: " + ((res && (res.why || res.error)) || "no answer"));
+  } catch (e) {
+    notice("Could not reach the host: " + (e && e.message));
+  }
+  return false;
+}
+
 async function openProject(path, readOnly = false) {
   // a run keeps the write lock on the project it is appending to; say so out
   // loud instead of swallowing the tap
@@ -245,6 +294,10 @@ async function openProject(path, readOnly = false) {
       const err = await r.json().catch(() => ({}));
       const e = new Error(err.error || r.status);
       e.code = err.code || null; // e.g. project_open_conflict (HTTP 409)
+      // who holds it, as far as that holder's record knows, and the exact file
+      // the host locked (so the lock list can be matched without re-resolving)
+      e.owner = err.owner || null;
+      e.project = err.project || null;
       throw e;
     }
     clearStream();
@@ -317,9 +370,31 @@ async function openProject(path, readOnly = false) {
     stream.classList.remove("loading");
     // same project open for write in another window: offer read-only instead of failing
     if (e && e.code === "project_open_conflict") {
+      const held = describeHolder(e.owner);
+      // The one case a user can undo without hunting for a dead process: the
+      // window that claimed this project is PROVEN gone and the session it left
+      // behind is still holding the lock. The host decides (only it can read the
+      // kernel's answer); this page asks and reports, then reopens.
+      if (await provenOrphan(e.project)) {
+        const take = await askConfirm({
+          title: "Take this project back?",
+          text:
+            "The window that held this project is gone, but its session still holds the lock.\n" +
+            (held ? held + "\n" : "") +
+            "Reclaim the project and open it?",
+          ok: "Reclaim",
+          cancel: "Leave it",
+        });
+        if (take && (await reclaimLock(e.project))) {
+          await openProject(path, readOnly);
+          return;
+        }
+        return;
+      }
       const wantReadOnly = await askConfirm({
         title: "Already open elsewhere",
         text:
+          (held ? held + "\n" : "") +
           "This project is already open in another window.\n" +
           "Open it read-only? Read-only mode cannot run tasks.",
         ok: "Open read-only",
@@ -350,7 +425,11 @@ async function createProject(dir, name) {
     refreshTree();
     refreshRollbackAnchors(); // a fresh project has an empty journal; keep the set honest
   } catch (e) {
-    notice("Failed to create project: " + e.message);
+    // a create that hits another window's file is the same conflict as an open:
+    // say who holds it, even though there is nothing to take back here (the
+    // project already exists — this dialog was asking to MAKE one)
+    const held = e && e.code === "project_open_conflict" ? describeHolder(e.owner) : "";
+    notice("Failed to create project: " + e.message + (held ? " — " + held : ""));
   }
 }
 

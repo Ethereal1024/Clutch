@@ -40,7 +40,12 @@ def log(msg: str) -> None:
     """
     try:
         print(f"{_stamp()} {msg}", flush=True)
-    except (OSError, ValueError):  # dead/full stdout: drop the log line
+    except (OSError, ValueError, RuntimeError):
+        # dead/full stdout: drop the log line. RuntimeError is CPython refusing
+        # a REENTRANT write — a signal handler logging while the interrupted
+        # frame was already inside the buffered writer ("reentrant call inside
+        # <_io.BufferedWriter>"), which killed the supervisor's SIGTERM handler
+        # before it could shut a single session down.
         pass
 
 

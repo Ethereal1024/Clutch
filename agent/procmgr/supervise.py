@@ -228,12 +228,23 @@ class ProcessSupervisor:
         return True
 
     def beat(self, key: str | None) -> bool:
-        """Refresh a child's liveness. False when the key is unknown."""
+        """Refresh a child's liveness. False when the key is unknown — or when
+        the child is no longer there.
+
+        "There" is the OS's answer (``proc.poll()``), not this dictionary's: a
+        child that died stays a record until something notices, and a beat that
+        only touched the record would keep a dead session's window believing it
+        has a session (the heartbeat's counterparty is the window, and the window
+        must be told the truth). Polling also REAPS the child, so a session that
+        exited cannot linger as a <defunct> entry for the host's lifetime."""
         if not key:
             return False
         with self._lock:
             record = self.processes.get(key)
             if record is None:
+                return False
+            if record.proc.poll() is not None:
+                del self.processes[key]
                 return False
             record.last_beat = time.time()
         return True
@@ -255,12 +266,29 @@ class ProcessSupervisor:
 
     # ---- reaper: stale children + idle self-exit ----
 
+    def prune_dead(self) -> list[str]:
+        """Forget children that exited on their own, and return their keys.
+
+        A record used to live until a TIMER declared it stale: a child that
+        crashed stayed listed (and, because nothing ever called ``poll()``,
+        stayed a ``<defunct>`` zombie on POSIX) for the whole stale window, and
+        its heartbeat answered "ok" meanwhile — the supervisor insisting on a
+        session that no longer existed. The OS already knows the answer;
+        ``poll()`` reaps the child and says so."""
+        with self._lock:
+            dead = [key for key, record in self.processes.items() if record.proc.poll() is not None]
+            for key in dead:
+                del self.processes[key]
+        return dead
+
     def reap_loop(self) -> None:
         # an unhandled exception here would strand the supervisor and leak
         # children; log and keep going
         while not self.exit_event.is_set():
             try:
                 now = time.time()
+                for key in self.prune_dead():
+                    log(f"[{self.label}] child {key} exited on its own")
                 # judge outside the lock: a tenant's stale rule may put a
                 # question to the child (the session supervisor asks
                 # /api/health), and no blocking probe runs with the lock held

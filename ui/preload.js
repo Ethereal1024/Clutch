@@ -15,6 +15,16 @@ contextBridge.exposeInMainWorld("clutchApi", {
   },
 });
 
+// the project locks the HOST can see (GET /api/locks) and the one action a user
+// is allowed: reclaim a project whose claiming window is PROVEN gone. The host
+// that holds the lock answers — the far side of a tunnel when this window works
+// there, this machine otherwise — so the page never guesses and never frees a
+// live window's project. Both are read/act on a peer, never a local file write.
+contextBridge.exposeInMainWorld("clutchLocks", {
+  list: () => ipcRenderer.invoke("locks:list"),
+  reclaim: (project) => ipcRenderer.invoke("locks:reclaim", project),
+});
+
 contextBridge.exposeInMainWorld("clutchSettings", {
   save: (data) => ipcRenderer.invoke("settings:save", data),
   // rebuild the ~/.clutch/settings.json mirror when it is missing (self-heal)

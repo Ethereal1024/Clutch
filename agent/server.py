@@ -21,10 +21,10 @@ Endpoints (all JSON except SSE/NDJSON):
 A session can also be RELEASED from outside (the last window's exit,
 /api/shutdown, a reap that raced a run's start). A SIGTERM with a run in flight
 is therefore answered with one durable final before this process goes — the
-ending the run could not write for itself. See install_release_handler. The same
-signal is raised at ourselves when a run has no window left to serve and the
-host, by design, would leave it unbounded — see unattended_lock_watchdog and
-UNATTENDED_RUN_GRACE_S.
+ending the run could not write for itself. See install_release_handler. The
+decision to release an orphan — a session whose claiming window is dead — is the
+host's, taken from the kernel's own process identity: see
+agent/core/lock_reconcile.py. This process never guesses it from silence.
 
 CORS is wide open (Access-Control-Allow-Origin: *) so the decoupled UI can live
 on another origin/host. The API key travels in request bodies, not cookies, so a
@@ -47,7 +47,6 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable
 
 from .api.base import HandlerBase
 from .api.channel import ChannelMixin
@@ -59,6 +58,7 @@ from .api.settings import SettingsMixin
 from .api.workspace import WorkspaceMixin
 from .base import BaseServer, Broadcaster, RunState
 from .config import API_PROTOCOLS, REASONING_EFFORT_LEVELS, Config, flatten_settings
+from .core.project_lock import set_context as set_lock_context
 from .events import FinalEvent, StateUpdateEvent
 from .project import Project
 from .tools.workspace import Workspace
@@ -127,8 +127,8 @@ def peer_gone(conn) -> bool:
     succeeding into the kernel buffer (megabytes of keepalives and events,
     observed live) so the stream looks "attached" long after its window is gone.
     That count is what answers "is anyone watching this project?" (the gate's
-    is_attached, and the unattended-lock watchdog below), so a ghost subscriber
-    is not cosmetic: it holds the write lock of a .clc nobody is looking at.
+    is_attached), so a ghost subscriber is not cosmetic: it keeps a quiet stream
+    alive and its session's prompt answerable by nobody.
 
     Readability first, then a non-blocking MSG_PEEK: b"" means the peer's FIN
     has arrived, a byte means the peer sent something (a pipelined request),
@@ -151,199 +151,48 @@ def peer_gone(conn) -> bool:
         return True
 
 
-# How long a project may keep its write lock with no window watching it. The
-# lock arbitrates two windows EDITING one .clc, and a project nobody watches has
-# no editor: the window that opened it is gone (the app quit, the client died,
-# the tunnel will not come back) and the lock left behind is not a claim but a
-# leak — every other window is refused with "already open in another window" for
-# as long as it lasts. That is the state the user reports as "the .clc is locked
-# again", minutes after the window that held it disappeared.
+# How often a WATCHING window asks the kernel for its write claim back. Read-only
+# is only ever the fallback for a conflict (ui/js/project.js offers it on a 409
+# and says so), never a mode the user chose, so the moment the other holder is
+# gone the window still looking at the .clc has to become its writer again —
+# without sending a task and without reopening the project (that would repaint
+# its whole transcript). Until something asked, read_only was a one-way latch:
+# the badge, and every run refused behind it, outlived the lock by hours.
 #
-# Neither zero nor the supervisor's STALE_S (300 s, which must cover a client's
-# whole tunnel-redial ladder): a window is legitimately absent for a moment at a
-# time. This is the same evidence and the same window the permission gate uses to
-# decide a prompt has nobody left to answer it (DETACH_GRACE_S,
-# agent/core/permission.py): a stream gone that long is not a window that comes
-# back to edit. A window that DOES come back re-enters exactly like a run does —
-# its .clc is re-opened for write (/api/run carries the project) — which is also
-# where it learns somebody else took it.
-UNATTENDED_GRACE_S = 30.0
-UNATTENDED_POLL_S = 2.0
-
-# How long a RUN IN FLIGHT may keep a session alive with no window watching it.
-#
-# The write claim stands for as long as a run lasts (see the watchdog: a run is
-# a writer that is still there, and handing the lock back under it is exactly
-# the two writers the lock exists to prevent). That argument holds only while
-# some window can still be watching the run — and an orphan has none. Its window
-# died UNCLEANLY (the app was killed, the client crashed, the tunnel was torn
-# down mid-run) and so never sent POST /api/session/stop, the one thing that
-# sets the record's ``detached`` flag. Without it the supervisor cannot tell that
-# orphan apart from a backgrounded phone whose socket is still open and whose
-# run it must protect, so it defers to the child's own evidence (in_flight) and
-# leaves the session unbounded on purpose (agent/supervisor.py _stale).
-# Observed live: a session held ui-upgrade.clc for four hours after its window
-# vanished, with no window on earth able to see or stop the run.
-#
-# THIS side can tell: the broadcaster's live subscriber count is the same
-# evidence the idle path already uses, and a window that is coming back
-# re-subscribes long before this. 600 s is two STALE_S windows — the host's own
-# horizon for a session whose window said it would not be back
-# (agent/procmgr/supervise.py) — and well past a client's whole tunnel-redial
-# ladder, so a clean and an unclean departure end the same way, within the same
-# hour. The cost is a contract change: a window that stays away longer than this
-# loses its run, exactly as if its session had been released and reaped. A
-# writer nobody can see or stop must not hold the .clc for the host's lifetime;
-# this is the bound that makes that true without touching the supervisor.
-UNATTENDED_RUN_GRACE_S = 600.0
+# Nothing here hands a claim BACK. The ask either wins a lock the kernel says is
+# free or is refused by it, and a session no longer releases its claim for being
+# quiet: the host's reconciler ends an orphaned session instead, from the window's
+# own pid (agent/core/lock_reconcile.py). Two seconds is a poll on the KERNEL,
+# not a guess about a window — what decides is the claim, never elapsed time.
+CLAIM_REASK_POLL_S = 2.0
 
 
-def unattended_lock_watchdog(
-    state: RunState,
-    broadcaster: Broadcaster,
-    release: Callable[[RunState], None],
-    grace_s: float = UNATTENDED_GRACE_S,
-    poll_s: float = UNATTENDED_POLL_S,
-    run_grace_s: float = UNATTENDED_RUN_GRACE_S,
-) -> threading.Thread:
-    """Hand back the active project's write lock once its audience is gone.
+def claim_reask_loop(
+    state: RunState, broadcaster: Broadcaster, poll_s: float = CLAIM_REASK_POLL_S
+) -> None:
+    """Keep a watching window's fallback honest, one kernel question at a time.
 
-    Polls "is a window watching the active project?" (the broadcaster's live
-    subscriber count, now that a half-closed peer stops counting) and, after
-    `grace_s` of continuous silence, re-opens the project READ-ONLY — which
-    releases the flock while leaving the window's transcript, tree and SSE scope
-    intact for whoever comes back (RunState.release_write_claim).
+    Only a project that is read-only, actively open here and WATCHED (at least
+    one live stream on its key) is a candidate: with nobody looking there is no
+    editor to hand the claim to, and the first window that reconnects asks again
+    through its open/replay (agent/api/events.py _project_for_sse).
 
-    A run in flight is NOT an absent window: it is a writer that is still there
-    (the supervisor keeps a session with a run for the same reason), and it
-    appends to this .clc, so its claim stands for as long as it lasts. It does
-    not stop the clock, though: when the run ends with still nobody watching,
-    the lock goes on the next tick instead of waiting out the supervisor's stale
-    window. An orphaned run is the exception the clock is for — a run nobody can
-    see or stop, whose window died without saying so, which the host leaves
-    unbounded by design (agent/supervisor.py _stale). Past `run_grace_s` of
-    silence with a run still in flight the SESSION is ended through `release`,
-    the one action that can free the claim: it cannot be handed back under a
-    live writer without inviting the two-writer race the lock exists to prevent
-    (see UNATTENDED_RUN_GRACE_S, and release_orphaned_session below for what
-    that action is).
-
-    `release` is a parameter rather than a constant so that a test can start
-    this watchdog — a daemon thread that outlives the section that started it —
-    without ever delivering a real release signal to the process running the
-    tests.
+    A grant is announced as `project_read_only: False`: the claim is state only
+    this process knows, so the window's badge cannot follow it any other way.
     """
-    def _loop() -> None:
-        watched: Path | None = None
-        unattended_since: float | None = None
-        while True:
-            time.sleep(poll_s)
-            project = state.project
-            if project is None:
-                watched, unattended_since = None, None
-                continue
-            if project.path != watched:
-                watched, unattended_since = project.path, None
-            if project.read_only:
-                # The mirror of the release below, and the cure for the GHOST
-                # read-only: a window that fell back to read-only (a conflict
-                # with a session that was already dying, an adoption during the
-                # 30s grace) is still WATCHING, and the other holder is gone by
-                # now — so take the claim back. Read-only is a fallback, not a
-                # mode (ui/js/project.js only offers it on a 409); leaving it
-                # latched is what made a free .clc stay "read-only" to the
-                # window and to every run it sent.
-                #
-                # Nobody watching changes nothing: with no editor there is no
-                # claim to take, and the first reconnect asks again.
-                if broadcaster.count(str(project.path)) > 0 and state.reclaim_write_claim():
-                    # the window's badge follows the host: the claim is state
-                    # only this process knows, so it has to be said out loud
-                    broadcaster.publish(
-                        StateUpdateEvent(key="project_read_only", value=False),
-                        project=str(project.path),
-                    )
-                unattended_since = None
-                continue
-            if project.lock is None:
-                watched, unattended_since = None, None
-                continue
-            if broadcaster.count(str(project.path)) > 0:
-                unattended_since = None
-                continue
-            now = time.monotonic()
-            if unattended_since is None:
-                unattended_since = now
-                continue
-            silent_s = now - unattended_since
-            if state.busy:
-                # a writer that writes for nobody: past the run grace this is an
-                # orphan, and only ending the session can give the lock back
-                if silent_s >= run_grace_s:
-                    try:
-                        print(
-                            f"[clutch-server] no window watching {project.path.name}: "
-                            "ending this session (the run in flight has no audience)",
-                            flush=True,
-                        )
-                    except (OSError, ValueError):
-                        # a stdout nobody reads (a closed pipe) must not stop the
-                        # release: the whole point of this branch is that it
-                        # happens, and the .clc records it either way
-                        pass
-                    release(state)
-                    return
-                continue
-            if silent_s >= grace_s:
-                if state.release_write_claim():
-                    print(
-                        f"[clutch-server] no window watching {project.path.name}: "
-                        "released its write lock",
-                        flush=True,
-                    )
-                watched, unattended_since = None, None
-
-    thread = threading.Thread(target=_loop, name="clutch-unattended-lock", daemon=True)
-    thread.start()
-    return thread
-
-
-def release_orphaned_session(state: RunState) -> None:
-    """End this session the way the host's release ladder would.
-
-    A run in flight holds the project's write lock by design, so the lock only
-    comes back when the SESSION ends (UNATTENDED_RUN_GRACE_S says when and why).
-    The host has exactly one way to end a session: SIGTERM to its process group,
-    which this process answers with record_release + exit (the ladder is
-    agent/procmgr/kill.py's signal_soft; the answering side is
-    install_release_handler). Raise that same signal at ourselves and let the
-    installed handler do the work — one release path whether the host found the
-    orphan or the session noticed its own, and the same durable ending for
-    whoever reads the .clc later ("the host released this session while the run
-    was in flight"). Nothing has to stop the run thread: it is a daemon
-    (agent/api/run.py), so it dies with the main thread's exit, and the kernel
-    drops the flock with the process.
-
-    The host's soft step is a GROUP signal (agent/procmgr/kill.py signal_soft),
-    so this one is too — otherwise a run's tool children outlive the session as
-    orphans nobody reaps (in the live incident: sixteen parallel downloads and a
-    dozen sleep-pollers). Only when this process IS the group leader, which is
-    how the supervisor spawns every session (agent/procmgr/supervise.py
-    start_new_session on POSIX): a server started by hand from a shell shares
-    that shell's group and may only signal itself.
-
-    Windows gets the hard-kill flavour, as it does from the ladder: there is no
-    deliverable SIGTERM to answer there (install_release_handler installs no
-    handler on nt), so the .clc tail simply stops — the case
-    ui/js/sse-stream.js's stale-run rule exists for.
-    """
-    try:
-        if os.name == "posix" and os.getpgid(0) == os.getpid():
-            os.killpg(os.getpid(), signal.SIGTERM)
-            return
-    except OSError:  # no group to speak of: fall through to ourselves
-        pass
-    os.kill(os.getpid(), signal.SIGTERM)
+    while True:
+        time.sleep(poll_s)
+        project = state.project
+        if project is None or not project.read_only:
+            continue
+        if broadcaster.count(str(project.path)) == 0:
+            continue
+        if not state.reclaim_write_claim():
+            continue
+        broadcaster.publish(
+            StateUpdateEvent(key="project_read_only", value=False),
+            project=str(project.path),
+        )
 
 
 def _settings_path() -> Path:
@@ -429,8 +278,8 @@ RELEASED_SUMMARY = "the host released this session while the run was in flight"
 
 # The release ending belongs to the PROCESS, and is written at most once. Two
 # sources can signal the same session within a moment of each other: the host's
-# reap ladder, and this session's own orphan watchdog
-# (agent/server.py UNATTENDED_RUN_GRACE_S). A SIGTERM handler runs once per
+# reap ladder, and its lock reconciler ending an orphan's process group
+# (agent/core/lock_reconcile.py). A SIGTERM handler runs once per
 # delivery, so a second signal would append a second final to a .clc whose tail
 # is supposed to hold exactly one ending — the transcript would then end twice,
 # with the same words, and the window could not tell a double release from a
@@ -518,6 +367,24 @@ def main() -> int:
         help="API protocol the claiming client wants: chat | responses (rides with --model)",
     )
     parser.add_argument(
+        "--claim-pid",
+        type=int,
+        default=None,
+        help=(
+            "the window process that claimed this session (the supervisor passes "
+            "its pid). Written into every project lock's owner record, so the host "
+            "can prove the window is gone instead of guessing with a timer"
+        ),
+    )
+    parser.add_argument(
+        "--claim-start",
+        default=None,
+        help=(
+            "that window's /proc start tick: pid + tick + boot is an identity the "
+            "kernel cannot recycle, so a reused pid never passes for the window"
+        ),
+    )
+    parser.add_argument(
         "--base-url",
         default=None,
         help=(
@@ -570,18 +437,36 @@ def main() -> int:
     srv = build(config, broadcaster, state)
     # a session released mid-run still leaves a settled transcript (POSIX)
     install_release_handler(state)
-    # a window that went away must not keep its project's write lock (see the
-    # watchdog's own comment: waiting out the supervisor's stale window instead
-    # leaves the .clc locked for minutes after its window is gone). A run in
-    # flight is the same leak with a harsher escape clause: the supervisor
-    # leaves such a session alive on purpose (it cannot tell an orphan from a
-    # backgrounded phone), so the session ends ITSELF once the run has had no
-    # audience for UNATTENDED_RUN_GRACE_S, through the host's own release path.
-    unattended_lock_watchdog(state, broadcaster, release_orphaned_session)
+    # A window that went away does not keep its project's write lock: the claim
+    # record names the claiming WINDOW process, and the host's reconciler ends a
+    # session whose claimant the kernel reports dead (agent/core/lock_reconcile.py).
+    # Nothing here watches for silence — a heartbeat or subscriber count cannot
+    # tell a closed window from a tunnelled phone, and guessing was the incident.
+
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.
     bound_port = config.port  # build() published what the socket got, not the 0
+    # Name this session in the records its project locks carry: the port it
+    # serves on, and the WINDOW process that claimed it. That record is how the
+    # host tells an orphan (window gone, lock must go) from a frozen phone
+    # (window exists, silence means nothing) without a clock — see
+    # agent/core/lock_reconcile.py. Both facts arrive before any project can be
+    # opened, because opening one is an HTTP request and serving starts below.
+    set_lock_context(
+        port=bound_port,
+        claim="window" if args.claim_pid else None,
+        claim_pid=args.claim_pid,
+        claim_start=args.claim_start,
+    )
+    # a window that fell back to read-only gets its claim back the moment the
+    # kernel says the .clc is free — by ASKING, never by releasing anything
+    threading.Thread(
+        target=claim_reask_loop,
+        args=(state, broadcaster),
+        name="clutch-claim-reask",
+        daemon=True,
+    ).start()
     # resolved LLM endpoint, for diagnosing which endpoint a session targets;
     # the label keeps the line from ever matching the port banner regex
     print(
