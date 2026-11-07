@@ -414,6 +414,7 @@ flowchart TD
 > - **棘轮没有丢，只是换了底座**：`ui/tsconfig.host.json` 里 `strict: false` 带注释写着为什么，以及下一步怎么翻。量过：`strict: true` 是 **1,402** 条错误，`--strict false --noImplicitAny` 是 **1,058** 条（756×TS7006、127×TS7005、54×TS7031、53×TS7018、40×TS7034…）。每一步的顺序写在配置里——先绿，再标类型，最后翻那一行——而不是把闸门一次性调到红着没人跑。
 > - 代价写清楚了：产出是 **tsc 重排过的 `.js`**（4 空格、`if (x) y();` 变块、文件头多一截 `Object.defineProperty(exports,"__esModule",…)`，惰性、无害）。所以**断言“代码怎么写”的测试改读 `.ts` 源**（`tests/durable-types.test.js`、`tests/ssh-tunnel.test.js`、`tests/tunnel-reconnect.test.js`），而**断言“产出与源一致”的测试是新加的** `tests/host-built.test.js`（源↔产出 digest、无缺失/无陈旧/无孤儿产出、恰好 41 个模块、无 ESM `exports.` 残留、无幸存 pragma）。
 > - 其余三块仍是 `.js`，各自转的时候各带自己的构建，**不回到 pragma**：渲染器 `ui/js/*.js`（受 `file://` 不许 module script 的限制，见 D-6）、`android/host/*.js`（手机是 libnode 18，没有类型剥离，只能吃编出来的 `.js`）、`clutch-websearch/plugin/*.js`（tar 里必须已经是 `.js`）。
+>   - **补记（三块都转完了）**：渲染器见本节末的“渲染器也转 TS 之后”那一节，插件见同处的“插件也转 TS 之后”那一节；三块各带自己的构建（渲染器 `ui/build-renderer.js` 用 esbuild，Android host 与插件各是一个 tsc 就地编译的薄壳/自足脚本），没有一块回到 pragma。
 > - **Android host 已转（本轮）**：`android/host/*.js` 4 个模块 / 1,223 行 → `android/host/src/*.ts`，`android/tsconfig.host.json` + `android/build-host.js` 编译**就地**出 `android/host/*.js`。编译、打 banner、比 digest 这三件事没有从 `ui/build-host.js` 抄第二遍，而是抽成 `ui/build-ts.js`，两边各是一个薄壳（`ui/build-host.js`、`android/build-host.js`）——两棵树，一条实现。`ui/build-host.js` 的导出面一个没变（`tests/host-built.test.js` 仍绿），重建后 41 个 `ui/*.js` **逐字节未变**（`git status` 干净），这是"抽公共件没改行为"的证据。
 >   - 目录为什么是 `android/host/src/` 且脚本在上一级 `android/`：sync 脚本拷的是 `cp android/host/*.js`，构建脚本若躺在 `android/host/` 里会跟着进 APK；`src/` 是目录，那条 glob 匹配不到。`tests/android-built.test.js` 把这条钉住（`android/host/*.js` 必须**全部**是产物、sync 里必须有一条 `--check`、`src/` 不许被拷），外加"手机那一半只有 4 个模块"（`index`/`android-host`/`bridge-server`/`artifact-provider-android`）。
 >   - 新加的一处配置依赖：`android/tsconfig.host.json` 的 `typeRoots: ["../ui/node_modules/@types"]`。仓库里只有一份 TypeScript 和一份 `@types/node`（都在 `ui/node_modules`，版本钉死），不为第二棵树再 `npm install` 一次；`ui/build-ts.js` 也从那里 `require.resolve` 编译器。
@@ -487,6 +488,14 @@ flowchart TD
 - **测试：38 个 runner 跟着改，断言的还是同一件事**。`tests/harness.js` 新增 `runnableSnippet()`（剥模块语法 + esbuild 去类型，**故意不加 `format: "iife"`**：IIFE 会把顶层声明藏起来，而 vm 类 runner 要它们在全局上）与 `stateStub()`（在 vm 里跑 `state.ts`，返回声明默认值的 `state` 对象）；`rendererScript()` 建在 `runnableSnippet()` 上。改法只有五种，且都是“换地址不换断言”：切片进 eval/vm 前过 `runnableSnippet`、整模块用 `rendererScript(name)`、`global.<state 字段>` → `global.state.<字段>`、`global.API_BASE` → `global.state.apiBase`、源码扫描的 `^let x = …;` → `^\s*x: …,$`（state）或 `^export let …`（`project.ts`/`sse-stream.ts` 仍自己持有绑定）/ `^export function …`。
 - **验证（本次收尾实测）**：`npm run typecheck` rc=0；`node build-host.js` 41 个模块；`node build-renderer.js` 29 个模块、6,233 行、228,984 字节，`--check` “up to date”；`node ui/verify-build-config.js` OK；**两条 sweep 全绿——`tests/*.test.js` + `tests/*-test.js` = 84/84，Python 24/24**。
 
+**补记（插件也转 TS 之后，2026-02，`ts-rewrite` 分支 + 子模块 `clutch-websearch`）**：`clutch-websearch/plugin/` 那 4 个 `.js`（945 行）也转完了——三块里的最后一块。它比前两块多一道门，因为**这个仓自己发布、自己检出**：
+
+- **源是 `plugin/src/*.ts`**（`http.ts` 传输/围栏/解码、`html.ts` 分词与两种抓取布局、`backends.ts` 搜索链与相关性守卫、`index.ts` ABI），**就地**编译回 `plugin/*.js`：`tsconfig.plugin.json` 放在仓根（根不在 `HEAD:plugin` 那个 tar 里），`rootDir: "plugin/src"` / `outDir: "plugin"`，`module: "commonjs"`（源本来就是 `require` 进、`module.exports` 出，ABI 一行没动）、`moduleDetection: "force"`（这些文件没有 import/export 语法，不加它每个都被读成全局脚本，共享顶层名一律报重声明）、`target/lib ES2022`、`types: ["node"]` + `typeRoots` 两处（本仓 `node_modules` 没有就忽略，`../ui/node_modules` 是 Clutch 里那一份钉死的），`strict: false` 还是同一颗**声明过**的棘轮。类型只以 `export type` 发布（`Settings`/`RequestOptions`/`Fetched`、`SearchResult`/`Token`），tsc 擦掉，产出仍是原来那四个模块。
+- **构建脚本自足，不 import 父仓的 `ui/build-ts.js`**：一棵会单独发布、单独检出的树，一个伸到 `../ui/` 的构建只在 Clutch 里面能用。`scripts/build-plugin.js` 保留同一套三动词（build / `--check` / `--typecheck`）与同一个 banner 格式（`GENERATED FILE` + `source sha256`），但实现是自带的：tsc 依次从本仓 `node_modules`、`../ui/node_modules` 找，两处都没有就直说“要么在 Clutch 里建，要么 `npm i -D typescript @types/node`”。代价是约 200 行重复——在两棵看不到彼此的树里，换的是“能单独构建”。
+- **发布链只加了一处**：`release.yml` 在 `node tests/plugin.test.js` 之后加 `node scripts/build-plugin.js --check`，**这一步不装 tsc**（它只重算源文件 sha256、对照产出 banner 里那个）。于是“改了源忘了重建”在打 tag 时红，而不是把上一版的模块发给客户端。artifact 的形状、manifest、digest 三步一个字没改。
+- **产物形状交给 git，而规则只能写在子目录里**：实测 `git archive HEAD:plugin` **不读**仓根的 `.gitattributes`——先在根里写了 `plugin/src/ export-ignore`，`HEAD:plugin` 那个 tar 里 `src/` 照样在（子树归档看不到上层的属性文件）。所以规则落在新的 `plugin/.gitattributes`：`src/ export-ignore` + `.gitattributes export-ignore`。现在 `git archive HEAD:plugin | tar -t` 恰好是 `backends.js component.json html.js http.js index.js`；整树 `git archive HEAD` 里 `plugin/src`、`tsconfig.plugin.json`、`scripts/`、`.github/`、两份 `.gitattributes` 全不在。**一处事实一个家**：根里只留根自己的（工具链），插件的（源）跟着插件走。
+- **测试**：`tests/plugin.test.js` 加 4 条——构建看得见每个源、每个产出的 digest 等于**当前**源、产出与源一一对应（无孤儿）、`plugin/.gitattributes` 里真有 `src/ export-ignore`——**50 项全绿**。顺手做了反证：往 `http.ts` 尾部加一行 → `--check` rc=1（`http.js is STALE (source a02c3bc1…, output c07c2a6e…)`），同一份树上那 4 条里恰有一条红（`stale (http.ts)`）；删掉重建，`--check` 又 “up to date”。父仓 `tests/client-plugin-websearch.test.js` 仍绿，两条 sweep 仍 **84/84** 与 **24/24**。
+
 ---
 
 ## 12. 本轮 6 问 6 答（已全部关闭，无阻塞项）
@@ -498,7 +507,7 @@ flowchart TD
 | D-3 | Android 的客户端插件域在桌面版之前还是之后？ | **之前** | D11 → P1-6（发布前置） |
 | D-4 | 模型流的中途重试保留吗？ | **按推荐：保留，代价是可见** | D12 → P1-2 |
 | D-5 | `plugin.md` 在哪里？ | **不找了** | D13 → P4-5（已关闭） |
-| D-6 | 类型要不要上 TS / 构建步骤？ | **都不上：JSDoc + `// @ts-check` + `tsc --noEmit`，`.js` 原样** —— **补记（已推翻，见 §11 补记）**：host 半整体 TypeScript，`ui/src/host/*.ts` + `ui/tsconfig.host.json` + `ui/build-host.js` 就地编译，旧的逐文件 pragma 闸门 `ui/tsconfig.check.json` 删除；其余三块（渲染器 / Android host / 插件）转 TS 时各带自己的构建 | D14 → P7-1（已落地）；打包器推迟到 P7-3。渲染器还有一个硬约束没解：页面在 `file://` 下加载，**module script 被拒**，所以要么 esbuild 打成经典 IIFE，要么维持 concat。**补记（渲染器转 TS 之后）**：选了前者——渲染器不再 concat，源是 ESM TypeScript，`ui/build-renderer.js` 用 esbuild 打一个经典 IIFE bundle；`file://` 的 module script 限制因此真的解了，加载顺序也从“文件名解析契约”变成 ESM 的 `import` 图（见 §11 P7-3 补记）|
+| D-6 | 类型要不要上 TS / 构建步骤？ | **都不上：JSDoc + `// @ts-check` + `tsc --noEmit`，`.js` 原样** —— **补记（已推翻，见 §11 补记）**：host 半整体 TypeScript，`ui/src/host/*.ts` + `ui/tsconfig.host.json` + `ui/build-host.js` 就地编译，旧的逐文件 pragma 闸门 `ui/tsconfig.check.json` 删除；其余三块（渲染器 / Android host / 插件）转 TS 时各带自己的构建 | D14 → P7-1（已落地）；打包器推迟到 P7-3。渲染器还有一个硬约束没解：页面在 `file://` 下加载，**module script 被拒**，所以要么 esbuild 打成经典 IIFE，要么维持 concat。**补记（渲染器转 TS 之后）**：选了前者——渲染器不再 concat，源是 ESM TypeScript，`ui/build-renderer.js` 用 esbuild 打一个经典 IIFE bundle；`file://` 的 module script 限制因此真的解了，加载顺序也从“文件名解析契约”变成 ESM 的 `import` 图（见 §11 P7-3 补记）。**补记（插件转完，三块清零）**：最后一块 `clutch-websearch/plugin/*.js` 也转了，四个 tsc 就地编译的模块 + 自带的 `scripts/build-plugin.js`（不需要父仓，因为这个仓单独发布）；三棵树现在各有自己的构建，`strict: false` 三处同一个棘轮（见 §11 插件补记）|
 
 至此没有需要用户再拍板的阻塞项。后续若出现新分叉，写进本表再动手。
 
@@ -537,6 +546,11 @@ python3 -m ruff check agent scripts --output-format concise   # 3 条既有告�
 
 # 渲染器 bundle 与源码逐字节保鲜（不依赖 esbuild，Android 发布 job 也能跑）
 node ui/build-renderer.js --check               # "up to date — 29 modules, 6233 lines"
+
+# 插件（子模块 clutch-websearch）：三个动词一个脚本
+(cd clutch-websearch && node scripts/build-plugin.js --typecheck)  # tsc --noEmit，rc=0
+(cd clutch-websearch && node scripts/build-plugin.js --check)      # 不用 tsc：比 banner 里的源 digest
+(cd clutch-websearch && node tests/plugin.test.js)                 # 50 项，含上面那三条的正面断言
 
 # 两条 JS sweep 全绿：84/84（*.test.js 与 *-test.js）
 for t in tests/*.test.js tests/*-test.js; do node "$t" >/dev/null || echo "FAIL $t"; done
