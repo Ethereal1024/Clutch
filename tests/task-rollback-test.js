@@ -1,6 +1,6 @@
 "use strict";
 
-// The rollback gesture (ui/js/task-rollback.js): a right-click on a desktop, a
+// The rollback gesture (ui/src/renderer/task-rollback.ts): a right-click on a desktop, a
 // long press on a phone, on a SENT USER MESSAGE — and the workspace goes back to
 // what it was before that message was sent, with the message back in the box.
 //
@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, uiModules } = require("./harness.js");
+const { check, summary, uiModules, rendererScript } = require("./harness.js");
 
 // ---- a pane of rows, with the two things the gestures use: closest() and
 // addEventListener (the file registers its handlers at load, on `eventsEl`) ----
@@ -114,7 +114,7 @@ function advance(ms) {
 
 vm.createContext(ctx);
 vm.runInContext(
-  fs.readFileSync(path.join(__dirname, "..", "ui", "js", "task-rollback.js"), "utf8"),
+  rendererScript("task-rollback"),
   ctx
 );
 
@@ -338,13 +338,13 @@ async function main() {
 
   // ---- 12) the wiring the page has to carry ----
   const uiDir = path.join(__dirname, "..", "ui");
-  const events = fs.readFileSync(path.join(uiDir, "js", "stream-events.js"), "utf8");
-  const project = fs.readFileSync(path.join(uiDir, "js", "project.js"), "utf8");
+  const events = fs.readFileSync(path.join(uiDir, "src", "renderer", "stream-events.ts"), "utf8");
+  const project = fs.readFileSync(path.join(uiDir, "src", "renderer", "project.ts"), "utf8");
   const mobile = fs.readFileSync(path.join(uiDir, "mobile.css"), "utf8");
   const order = uiModules().map((m) => m.file);
-  const iTask = order.indexOf("js/task-rollback.js");
+  const iTask = order.indexOf("task-rollback.ts");
   check(iTask >= 0, "the module list carries task-rollback.js, so the bundle the page loads runs it");
-  check(order.indexOf("js/stream-events.js") < iTask && order.indexOf("js/stream-view.js") < iTask,
+  check(order.indexOf("stream-events.ts") < iTask && order.indexOf("stream-view.ts") < iTask,
         "and it sits after the pane and the run state it reads (eventsEl, busy)");
   check(events.indexOf("autoFoldTurn();") !== -1 &&
         /autoFoldTurn\(\);[\s\S]{0,300}refreshRollbackAnchors\(\);/.test(events),

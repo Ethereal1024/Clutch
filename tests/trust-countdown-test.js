@@ -17,7 +17,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet, stateStub } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const src = uiSource(); // the renderer, every module in page load order
@@ -39,10 +39,12 @@ global.localStorage = {
 let nowMs = 1_700_000_000_000;
 Date.now = () => nowMs;
 
-// the trust block mirrors the armed flag to the backend; both names live in
-// app.js (loaded before js/permissions.js), so the stubs are globals too
+// the trust block mirrors the armed flag to the backend; the session address
+// lives in the shared state leaf (ui/src/renderer/state.ts), so the stub is the
+// real leaf, and the fetch is a global the way the app supplies it
 let trustPushes = [];
-global.API_BASE = null; // no session yet: pushTrustArmed() is a no-op
+global.state = stateStub();
+global.state.apiBase = null; // no session yet: pushTrustArmed() is a no-op
 global.apiFetch = async (p, opts) => { trustPushes.push({ path: p, body: opts && opts.body }); return {}; };
 
 // the wake hooks read document.hidden
@@ -100,7 +102,7 @@ global.respondPerm = async (allow) => {
 };
 
 // ---- load the real code (consts + functions share one eval scope) ----
-(0, eval)(region("const TRUST_COUNTDOWN_S", "stopTrustCountdown"));
+(0, eval)(runnableSnippet(region("const TRUST_COUNTDOWN_S", "stopTrustCountdown")));
 
 const openPermSrc = fnBody("openPerm");
 const closePermSrc = fnBody("closePerm");
@@ -207,7 +209,7 @@ const closePermSrc = fnBody("closePerm");
   check(allowBtn.textContent === "Allow", "the stale countdown label is reset");
 
   // ---- 12) arming is MIRRORED to the far side, which owns the countdown ----
-  global.API_BASE = "http://127.0.0.1:8890"; // a session exists now
+  global.state.apiBase = "http://127.0.0.1:8890"; // a session exists now
   trustPushes = [];
   setTrustArmed(false);
   await null;
@@ -218,7 +220,7 @@ const closePermSrc = fnBody("closePerm");
   setTrustArmed(true);
   await null;
   check(trustPushes.length === 2 && trustPushes[1].body.armed === true, "arming pushes the flag to the backend");
-  global.API_BASE = null;
+  global.state.apiBase = null;
   trustPushes = [];
   pushTrustArmed();
   await null;

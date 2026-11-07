@@ -1,4 +1,4 @@
-// M1 engine loop, verified end-to-end on Linux: the REAL ui/bridge-shim.js
+// M1 engine loop, verified end-to-end on Linux: the REAL ui/src/renderer/bridge-shim.ts
 // (loaded the way a WebView page loads it) talks HTTP+SSE to the REAL
 // android/host/bridge-server.js, whose handlers are the REAL android-host.js
 // wiring of the REAL host-core state machine — only the ssh2 tunnel and the
@@ -13,6 +13,7 @@ const path = require("path");
 const http = require("http");
 const net = require("net");
 const Module = require("module");
+const { loadRendererModule } = require("./harness.js");
 const origLoad = Module._load;
 
 // N2 in test form: HOME points at a sandbox before any module reads homedir()
@@ -355,8 +356,7 @@ async function main() {
   // load the shim the way a page would
   globalThis.CLUTCH_BRIDGE_BASE = BRIDGE;
   globalThis.EventSource = TestEventSource;
-  delete require.cache[require.resolve("../ui/bridge-shim")];
-  require("../ui/bridge-shim");
+  loadRendererModule("bridge-shim");
 
   // events first: subscriptions before any trigger
   const got = { base: [], progress: [], ended: [] };

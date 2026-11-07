@@ -1,6 +1,6 @@
 "use strict";
 
-// The composer's conveniences (ui/js/task-input.js): undo, sent-message history,
+// The composer's conveniences (ui/src/renderer/task-input.ts): undo, sent-message history,
 // clear. Written because the box's own undo stack is what the app's writers break
 // — the platform's <textarea> undo dies the moment a script assigns .value, and
 // run() assigns it after every send (js/render-events.js).
@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary } = require("./harness.js");
+const { check, summary, rendererScript } = require("./harness.js");
 
 // ---- the fake box ----
 function makeTextarea() {
@@ -63,7 +63,7 @@ const ctx = {
   console,
 };
 vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "ui", "js", "task-input.js"), "utf8"), ctx);
+vm.runInContext(rendererScript("task-input"), ctx, { filename: "ui/src/renderer/task-input.ts" });
 
 // ---- drivers ----
 // typing: the box's value changed by the user, then the `input` event the page
@@ -213,7 +213,7 @@ check(ev.defaultPrevented && task.value === "something else entirely",
       "Ctrl+Z takes the box back to what the user was composing before the fill");
 
 // ---- 5) the source's own facts: the constants and the listener wiring ----
-const src = fs.readFileSync(path.join(__dirname, "..", "ui", "js", "task-input.js"), "utf8");
+const src = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "task-input.ts"), "utf8");
 check(/TASK_UNDO_BURST_MS\s*=\s*\d{2,4}/.test(src), "the burst window is a real interval, not 0");
 check(/addEventListener\("keydown"/.test(src), "the box's keydown listener is wired by this file");
 check(!/addEventListener\("change"/.test(src), "nothing here depends on a `change` event (textareas do not fire one per edit)");

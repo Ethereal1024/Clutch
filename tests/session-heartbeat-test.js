@@ -57,7 +57,7 @@ check(!/failed = true;/.test(SRC),
 // independent timers decide when to make it, in three different files:
 //
 //   ssh keepalive   tunnel-connect.js  15s x 3  -> the far end of the tunnel is gone
-//   SSE stale       ui/js/sse-stream.js  45s    -> this window's event stream is dead
+//   SSE stale       ui/src/renderer/sse-stream.ts  45s    -> this window's event stream is dead
 //   supervisor reaps                      300s  -> the host takes the session down
 //
 // They must be stair-stepped, not stacked: an inner timer that outlived the
@@ -67,7 +67,7 @@ check(!/failed = true;/.test(SRC),
 // (see the comment at the keepalive above) so a hop that dies is a CLAIM to
 // re-bind, well inside the session's life on the host.
 const TUN = fs.readFileSync(path.join(ROOT, "ui", "tunnel-connect.js"), "utf8");
-const SSE = fs.readFileSync(path.join(ROOT, "ui", "js", "sse-stream.js"), "utf8");
+const SSE = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "sse-stream.ts"), "utf8");
 const SRV = fs.readFileSync(path.join(ROOT, "agent", "server.py"), "utf8");
 
 const kaMs = num(/keepaliveInterval: (\d+),/, TUN, "ssh keepalive interval");

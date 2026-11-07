@@ -41,17 +41,18 @@
 // sees every `const`/`let`/`function` the earlier files declared. It may rely on
 // anything above it in ui/index.html and on nothing below it.
 
-"use strict";
+import { $ } from "./dom";
+import { askConfirm } from "./settings";
 
-const plugBodyEl = $("#plug-body");
-const plugFilterEl = $("#plug-filter");
-const plugNoteEl = $("#plug-note");
-const plugReloadBtn = $("#plug-reload");
-const plugMirrorInput = $("#mirror-input");
-const plugMirrorSaveBtn = $("#mirror-save");
-const plugMirrorNoteEl = $("#mirror-note");
+export const plugBodyEl = $("#plug-body");
+export const plugFilterEl = $("#plug-filter");
+export const plugNoteEl = $("#plug-note");
+export const plugReloadBtn = $("#plug-reload");
+export const plugMirrorInput = $("#mirror-input");
+export const plugMirrorSaveBtn = $("#mirror-save");
+export const plugMirrorNoteEl = $("#mirror-note");
 
-const plugState = {
+export const plugState = {
   // the list has answered once — a place that was never read is not a place that
   // holds nothing, and this is the bit that tells the two apart
   read: false,
@@ -89,7 +90,7 @@ const plugState = {
 // declaration, so it is the same in every session and there is no third value to
 // offer. The page says it only inside a sentence that would otherwise be about
 // nothing ("removed from where?"), never as a heading a user has to read.
-function plugPlace(item) {
+export function plugPlace(item) {
   const place = item && item.place;
   if (place === "client") return "this client";
   if (place === "session") return "this session";
@@ -102,7 +103,7 @@ function plugPlace(item) {
 // declaration — the only thing that says which place it is — arrives when
 // something is installed from it. Naming that is honest; inventing a place is
 // not.
-function plugPlaceName(item) {
+export function plugPlaceName(item) {
   const place = typeof item === "string" ? item : item && item.place;
   if (place === "client") return "this client";
   if (place === "session") return "this session";
@@ -114,7 +115,7 @@ function plugPlaceName(item) {
 // install reads the declaration and derives the place before a byte is built
 // (ui/components-view.js `specFor`), so the button stays live and the refusal, if
 // there is one, is the declaration's own sentence.
-function plugPlaceUnread(item) {
+export function plugPlaceUnread(item) {
   return Boolean(item) && item.read === false && !item.problem;
 }
 
@@ -125,7 +126,7 @@ function plugPlaceUnread(item) {
 // where the session runs its commands — out of reach exactly when that domain did
 // not answer, because a degraded session runs its tools over an exec bridge, and
 // an exec bridge is not a component channel.
-function plugPlaceReady(place) {
+export function plugPlaceReady(place) {
   if (place === "client") {
     return plugState.client
       ? null
@@ -144,7 +145,7 @@ function plugPlaceReady(place) {
 // This is not a refusal: a supervisor that answers writes but not an inventory is
 // a place with an unseen shelf, and the page says which of the two it is instead
 // of killing a write it could make (the host still decides what a name means).
-function plugHeldError(place) {
+export function plugHeldError(place) {
   if (place === "client") return plugState.clientHeldError || null;
   if (place === "session") return plugState.sessionHeldError || null;
   return null;
@@ -153,11 +154,11 @@ function plugHeldError(place) {
 // The one sentence a row needs when its place is unknown: either the place cannot
 // be reached at all, or it answered without its list. Both leave the row unsaid
 // and neither is "not installed".
-function plugPlaceUnknown(place) {
+export function plugPlaceUnknown(place) {
   return plugPlaceReady(place) || plugHeldError(place);
 }
 
-function plugChip(text, cls) {
+export function plugChip(text, cls) {
   const el = document.createElement("span");
   el.className = "plug-chip" + (cls ? " " + cls : "");
   el.textContent = text;
@@ -169,8 +170,8 @@ function plugChip(text, cls) {
 // row and is exposed to nobody on a keyboard or a touch screen, and the facts a row
 // no longer PRINTS (U-10) would then be readable by mouse alone. The id is what
 // `aria-describedby` points at, so every row that has facts gets its own.
-let plugIdSeq = 0; // one id per node an aria attribute has to be able to point at
-function plugFactsNode(text) {
+export let plugIdSeq = 0; // one id per node an aria attribute has to be able to point at
+export function plugFactsNode(text) {
   const el = document.createElement("span");
   el.className = "sr-only";
   el.id = "plug-row-facts-" + ++plugIdSeq;
@@ -181,7 +182,7 @@ function plugFactsNode(text) {
 // Every control under one action carries the row's facts — the menu's items are
 // built before their menu is, so they hang off it and are reached from here. Each
 // of them acts on this one component, and the description says which.
-function plugDescribeTree(el, id) {
+export function plugDescribeTree(el, id) {
   if (!el || typeof el.setAttribute !== "function") return;
   el.setAttribute("aria-describedby", id);
   for (const child of el.children || []) plugDescribeTree(child, id);
@@ -229,7 +230,7 @@ function plugDescribeTree(el, id) {
 // itself (`state.row`), which is how "this place holds it but is not driving
 // it" is said without a second block of text (VS Code: `.disabled` on the row,
 // extensionsList.ts:185-191).
-function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra = null, state = null, title = "", role = "" } = {}) {
+export function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra = null, state = null, title = "", role = "" } = {}) {
   const row = document.createElement("div");
   row.className = "plug-row" + (state && state.row ? " " + state.row : "");
   // a component row is an ITEM of the list (`plugSection` wraps them in the list
@@ -302,7 +303,7 @@ function plugRow(name, { chips = [], desc = "", lines = [], actions = [], extra 
   return row;
 }
 
-function plugSection(title, meta, rows, empty) {
+export function plugSection(title, meta, rows, empty) {
   const sec = document.createElement("div");
   sec.className = "plug-section";
   const head = document.createElement("h4");
@@ -345,7 +346,7 @@ function plugSection(title, meta, rows, empty) {
 // offered is ONE row. The user never lines up two sections to learn whether
 // something is installed, and a row held in one place and offered for the other
 // says both, which is exactly how the declaration is meant to read.
-function plugModel() {
+export function plugModel() {
   const byName = new Map();
   const order = [];
   const slot = (name) => {
@@ -372,7 +373,7 @@ function plugModel() {
 // places hold and what this client knows, not a fact about either: nothing here is
 // asked of the host, and nothing here is written down (a filter that survived a
 // reload would be a second copy of a state the page does not own).
-const PLUG_FILTERS = [
+export const PLUG_FILTERS = [
   ["all", "All"],
   ["installed", "Installed"],
   ["market", "Market"],
@@ -383,7 +384,7 @@ const PLUG_FILTERS = [
 // "held here, and this client carries a DIFFERENT release for it." The release is
 // compared before the `+`, like everywhere else on this page: the build id after
 // it differs per machine, and calling that an update would be wrong.
-function plugItemUpdate(item) {
+export function plugItemUpdate(item) {
   if (!item.held || !item.entry) return false;
   if (plugHeldLegacy(item.held)) return true;
   const offered = String(item.entry.version || "");
@@ -398,7 +399,7 @@ function plugItemUpdate(item) {
 // for is SAYING that, because a bare digest under "held" reads like a version that
 // merely looks odd. Old records are reinstalled rather than kept beside the new
 // shape.
-function plugHeldLegacy(held) {
+export function plugHeldLegacy(held) {
   const version = String((held && held.version) || "");
   return Boolean(version) && !version.includes("+");
 }
@@ -406,7 +407,7 @@ function plugHeldLegacy(held) {
 // Whether one component belongs to one view. Kept apart from the name query
 // below because the chips COUNT by this rule: a chip's number is how much that
 // view holds, not how much of it the box above is currently spelling out.
-function plugItemMatches(item, filter) {
+export function plugItemMatches(item, filter) {
   switch (filter) {
     case "installed":
       return Boolean(item.held);
@@ -421,7 +422,7 @@ function plugItemMatches(item, filter) {
   }
 }
 
-function plugItemShown(item) {
+export function plugItemShown(item) {
   const q = plugState.query.trim().toLowerCase();
   if (q && !String(item.name).toLowerCase().includes(q)) return false;
   return plugItemMatches(item, plugState.filter);
@@ -431,9 +432,9 @@ function plugItemShown(item) {
 // ONCE and only its state is redrawn — rebuilding it on every read would take the
 // caret out of the box while it is being typed in, which is the one thing a
 // filter may never do.
-let plugFilterChips = null;
+export let plugFilterChips = null;
 
-function plugFilterRow() {
+export function plugFilterRow() {
   if (plugFilterChips) return plugFilterChips;
   const box = document.createElement("div");
   box.className = "plug-filter-chips";
@@ -480,7 +481,7 @@ function plugFilterRow() {
   return plugFilterChips;
 }
 
-function plugDrawFilter() {
+export function plugDrawFilter() {
   const items = plugModel();
   for (const [id, btn, count] of plugFilterRow()) {
     const on = id === plugState.filter;
@@ -501,7 +502,7 @@ function plugDrawFilter() {
 // that has no other landing place on this page is "stopped", because "held but not
 // driven" is a state of the ROW, and the row says it in colour, in this chip, and
 // in its own sentence (`plugItemDesc`).
-function plugItemChips(item) {
+export function plugItemChips(item) {
   const chips = [];
   if (item.held && item.held.disabled) chips.push(["stopped", "warn"]);
   return chips;
@@ -513,7 +514,7 @@ function plugItemChips(item) {
 // is the row's only prose because everything else a row could say (digest, source,
 // path, the versions it holds) is either the holding place's own answer in the Versions
 // disclosure or one of the facts below.
-function plugItemDesc(item) {
+export function plugItemDesc(item) {
   const held = item.held;
   const entry = item.entry;
   const where = plugPlace(held || entry);
@@ -542,7 +543,7 @@ function plugItemDesc(item) {
 // already asked, so it may be dense. A version is a claim with a content digest
 // hanging off it (`0.1.0+<hex16>`, ui/components.js installVersion), which is why
 // the release is compared before the `+` everywhere on this page.
-function plugItemMeta(item) {
+export function plugItemMeta(item) {
   const meta = [];
   const held = item.held;
   const entry = item.entry;
@@ -594,7 +595,7 @@ function plugItemMeta(item) {
 // `:1371-1405`) otherwise. Nothing else about the row is expressed by its lead
 // button: a component this client can offer leads with the write that puts it in
 // the place its declaration names, and a row already held there -> the switch.
-function plugItemLead(item) {
+export function plugItemLead(item) {
   if (item.entry && !item.held) return "install";
   if (item.held && item.entry && plugItemUpdate(item)) return "update";
   if (item.held) return "switch";
@@ -607,7 +608,7 @@ function plugItemLead(item) {
 // page cannot be asked about). The lead follows `plugItemLead`; the menu keeps VS
 // Code's own grouping order (ManageExtensionAction: the enable/disable group, then
 // the install-family one, then the removal).
-function plugItemActions(item) {
+export function plugItemActions(item) {
   const lead = plugItemLead(item);
   const actions = [];
   const primary =
@@ -636,7 +637,7 @@ function plugItemActions(item) {
 // it is never the button a row leads with. The comparison is
 // by KIND and not by node: the items are built here, so identity would say
 // "different" about two buttons that are the same control.
-function plugItemMenuItems(item, lead) {
+export function plugItemMenuItems(item, lead) {
   const items = [];
   if (!item.held) return items; // a component neither place holds has nothing else to offer
   if (lead !== "switch") items.push(plugSwitchButton(item.held));
@@ -648,7 +649,7 @@ function plugItemMenuItems(item, lead) {
 // One menu: its items are drawn once and shown by a class, so opening it builds
 // nothing and closing it loses nothing. A redraw takes the class away with the
 // row, which is why this page keeps no copy of "which menu is open".
-function plugMenu(items) {
+export function plugMenu(items) {
   const box = document.createElement("span");
   box.className = "plug-menu";
   // the "…" names this box in `aria-controls`, so it needs an id of its own
@@ -663,7 +664,7 @@ function plugMenu(items) {
 // else, so the button carries the name it means; and because what it opens is
 // drawn once and shown by a class, its expanded state is said out loud rather than
 // only drawn.
-function plugMoreButton(item, menu) {
+export function plugMoreButton(item, menu) {
   const name = item.name;
   const where = plugPlaceName(item.held || item.entry);
   const btn = document.createElement("button");
@@ -677,7 +678,7 @@ function plugMoreButton(item, menu) {
   btn.setAttribute("aria-expanded", String(menu.classList.contains("open")));
   btn.addEventListener("click", (ev) => {
     // the document handler below closes every menu on any click, this one
-    // included: the click on the "…" must not reach it (js/settings.js does the
+    // included: the click on the "…" must not reach it (settings.ts does the
     // same for its dropdowns). What it opens is decided before that, so pressing
     // the "…" of an open menu shuts it instead of re-opening it.
     if (ev && ev.stopPropagation) ev.stopPropagation();
@@ -699,7 +700,7 @@ function plugMoreButton(item, menu) {
 // (extensionsWidgets.ts). Where there is no layout to measure — the panel's own
 // test runner draws into a hand-rolled mini-DOM — the plain downward menu is the
 // answer, because that is the one the CSS gives without help.
-function plugMenuFitsBelow(btn, menu) {
+export function plugMenuFitsBelow(btn, menu) {
   if (typeof btn.getBoundingClientRect !== "function") return true;
   if (typeof plugBodyEl.getBoundingClientRect !== "function") return true;
   const anchor = btn.getBoundingClientRect();
@@ -714,7 +715,7 @@ function plugMenuFitsBelow(btn, menu) {
 // the class IS the state, and a redraw takes it away with the row it belongs to.
 // Guarded because the panel is also driven by a hand-rolled mini-DOM in its own
 // test runner, which has no querySelectorAll.
-function plugCloseMenus() {
+export function plugCloseMenus() {
   if (typeof plugBodyEl.querySelectorAll !== "function") return;
   for (const el of plugBodyEl.querySelectorAll(".plug-menu.open")) {
     el.classList.remove("open");
@@ -734,7 +735,7 @@ document.addEventListener("keydown", (ev) => {
   if (ev && ev.key === "Escape") plugCloseMenus();
 });
 
-function plugItemRow(item) {
+export function plugItemRow(item) {
   return plugRow(item.name, {
     // an item of the one list (plugSection puts the rows in the list itself)
     role: "listitem",
@@ -759,7 +760,7 @@ function plugItemRow(item) {
 //
 // A stopped row is coloured here too: "held, not driven" is a state of the row,
 // not a sentence about it.
-function plugItemState(item) {
+export function plugItemState(item) {
   const row = [];
   if (item.held && item.held.disabled) row.push("stopped");
   if (plugState.busy && plugState.busy.name === item.name) {
@@ -776,7 +777,7 @@ function plugItemState(item) {
 // alike (a failed read is data on this page). And a filter that hides every row
 // is a third thing again — the places do hold components, this view is simply
 // not showing them.
-function plugEmptyText(known, shown) {
+export function plugEmptyText(known, shown) {
   if (!plugState.read && plugState.market === null) {
     const why = plugReadProblem();
     return why ? "could not be read — " + why : "reading…";
@@ -790,7 +791,7 @@ function plugEmptyText(known, shown) {
 // degraded session), then this client plugin domain, then the market. A row that
 // needs the missing half says the same sentence in its own title; this is the one
 // line under the list, so a page WITH rows in it still says what it could not see.
-function plugReadProblem() {
+export function plugReadProblem() {
   return (
     plugState.sessionError ||
     plugState.sessionHeldError ||
@@ -807,7 +808,7 @@ function plugReadProblem() {
 // could not. The pass is not awaited by the connect and it keeps no state of its
 // own, so this is the one place its answer reaches a person; nothing is invented
 // when no pass has run against the machine this window is about (`pass` is null).
-function plugPassLine() {
+export function plugPassLine() {
   const pass = plugState.pass;
   if (!pass) return null;
   const retired = Array.isArray(pass.retired) ? pass.retired : [];
@@ -836,7 +837,7 @@ function plugPassLine() {
 // some to the session machine, and WHICH is which is a fact of each row
 // declaration, not of the page. The counts say how much of the list is held
 // somewhere, and how much of it the market offers.
-function plugList() {
+export function plugList() {
   const items = plugModel();
   const shown = items.filter(plugItemShown);
   const meta = [];
@@ -907,7 +908,7 @@ function plugList() {
 // saying so (ui/mirrors.js `remove` refuses it in those words). The user's own
 // entries are the ones this page writes, and the order they are tried in is the
 // plain one — the user's first, then the build's.
-function plugMirrorRow(entry) {
+export function plugMirrorRow(entry) {
   const own = entry.source === "user";
   const row = plugRow(entry.url, {
     chips: [[own ? "yours" : "shipped"]],
@@ -921,7 +922,7 @@ function plugMirrorRow(entry) {
   return row;
 }
 
-function plugMirrorRemoveButton(url) {
+export function plugMirrorRemoveButton(url) {
   const forced = plugState.mirrorForced;
   const btn = document.createElement("button");
   btn.className = "plug-mirrors-remove";
@@ -939,7 +940,7 @@ function plugMirrorRemoveButton(url) {
 // prefix, added to the user's half of it. The refusal (a value already in either
 // list, a value that is not a prefix) is drawn under the field, in the list's own
 // words — a write this page cannot confirm any other way.
-function plugMirrorForm() {
+export function plugMirrorForm() {
   const wrap = document.createElement("div");
   wrap.className = "plug-mirrors-add";
   const forced = plugState.mirrorForced;
@@ -972,7 +973,7 @@ function plugMirrorForm() {
 
 // The mirror list, as one more section of the same page — directly under the
 // components, because that is what it silently serves.
-function plugMirrors() {
+export function plugMirrors() {
   const list = plugState.mirrors || [];
   const mine = list.filter((m) => m.source === "user").length;
   const meta = plugState.mirrorsError
@@ -1030,7 +1031,7 @@ function plugMirrors() {
 // says the wrong one would send the user after the wrong act: an install carries
 // no verb (it is the default write), and the two directions of the switch differ
 // in what they do, so neither is spelled as the other.
-function plugBusyWord(busy) {
+export function plugBusyWord(busy) {
   if (busy.verb === "remove") return "being removed";
   if (busy.verb === "disable") return "being stopped";
   if (busy.verb === "enable") return "being driven again";
@@ -1043,7 +1044,7 @@ function plugBusyWord(busy) {
 // with no name. Same four verbs, same rule as above — an install carries the
 // default verb, and the two directions of the switch are never spelled as each
 // other — and `fallback` is what a write of that kind is called from that control.
-function plugBusyLabel(busy, fallback) {
+export function plugBusyLabel(busy, fallback) {
   if (busy.verb === "remove") return "Removing…";
   if (busy.verb === "disable") return "Stopping…";
   if (busy.verb === "enable") return "Starting…";
@@ -1056,7 +1057,7 @@ function plugBusyLabel(busy, fallback) {
 // its own label is the undo, so there is no question to ask. What it must still
 // say is what the user cannot see: which of the two places is being switched, and
 // that the bytes are not what moves.
-function plugSwitchButton(held) {
+export function plugSwitchButton(held) {
   const busy = plugState.busy && plugState.busy.name === held.name;
   const stopped = Boolean(held.disabled);
   const btn = document.createElement("button");
@@ -1093,7 +1094,7 @@ function plugSwitchButton(held) {
 // install control — it is dead while the place that holds it cannot be reached
 // (which place would lose the bytes is exactly what must not be guessed) and while
 // any write is in flight, and its title says what it would take off where.
-function plugRemoveButton(held) {
+export function plugRemoveButton(held) {
   const busy = plugState.busy && plugState.busy.name === held.name;
   const btn = document.createElement("button");
   btn.className = "plug-remove";
@@ -1119,7 +1120,7 @@ function plugRemoveButton(held) {
 // dead behind a write in flight (the reload is not either), and what it opens is
 // the place's own answer, kept only as long as the block is open: this page
 // keeps no second copy of a place's truth (frozen decision 3).
-function plugVersionsButton(held) {
+export function plugVersionsButton(held) {
   const open = Boolean(plugState.versions && plugState.versions.name === held.name);
   const reading = plugState.versionsPending === held.name;
   const btn = document.createElement("button");
@@ -1157,7 +1158,7 @@ function plugVersionsButton(held) {
 // re-sorts it, because which version wins is the host's knowledge). Each version
 // is its own row naming ITSELF, so the remove beside it takes exactly that one:
 // taking the whole component is a different act and is drawn on the row above.
-function plugVersionRows(held) {
+export function plugVersionRows(held) {
   const reading = plugState.versionsPending === held.name;
   const state = plugState.versions;
   if (!reading && !(state && state.name === held.name)) return null;
@@ -1203,7 +1204,7 @@ function plugVersionRows(held) {
 // thing it takes: the versions beside it stay. The host still decides what a
 // name and version mean (a version not installed is a refusal, not "absent"),
 // and its verdict is quoted as usual.
-function plugRemoveOneButton(held, record) {
+export function plugRemoveOneButton(held, record) {
   const version = String(record.version || "");
   const busy = plugState.busy && plugState.busy.name === held.name;
   const btn = document.createElement("button");
@@ -1232,7 +1233,7 @@ function plugRemoveOneButton(held, record) {
 // release under a name it DOES hold is an update, and the same release again is a
 // reinstall (the same bytes rewritten). While any write runs every button is dead
 // — one write at a time, and the page can always name which one.
-function plugInstallButton(entry) {
+export function plugInstallButton(entry) {
   const held = plugState.held ? plugState.held.find((h) => h.name === entry.name) : null;
   const offered = String(entry.version || "");
   const heldRelease = held ? String(held.version || "").split("+")[0] : "";
@@ -1286,7 +1287,7 @@ function plugInstallButton(entry) {
 // client install never leaves this machine (its bytes are already here, or arrive
 // as a release, and the app process lays them down). The stage names the place it
 // belongs to, because that is the only sentence the two shapes do not share.
-function plugStageLine(busy) {
+export function plugStageLine(busy) {
   const where = plugPlaceName(busy);
   if (busy.verb === "remove") return `removing ${busy.name}${busy.version ? " " + busy.version : ""} from ${where}…`;
   // the switch is the one write with no bytes to build or send: it has one stage
@@ -1329,7 +1330,7 @@ function plugStageLine(busy) {
 // The host's verdict, in the host's words: it is the side that weights the bytes
 // against the declaration's digest, refuses a schema it cannot read, and decides
 // whether it needed them at all. A refusal here is quoted, not paraphrased.
-function plugInstallResult(entry, res, where) {
+export function plugInstallResult(entry, res, where) {
   if (!res || !res.ok) {
     return { ok: false, name: entry.name, text: `could not install ${entry.name} on ${where} — ${(res && res.error) || "no answer"}` };
   }
@@ -1347,7 +1348,7 @@ function plugInstallResult(entry, res, where) {
 // only one of them is a failure: "removed" names the versions that went,
 // "absent" says there was nothing to take (the request was already true — a
 // problem report here would invent one), and a refusal is quoted.
-function plugRemoveResult(held, res, where) {
+export function plugRemoveResult(held, res, where) {
   if (!res || !res.ok) {
     return { ok: false, name: held.name, text: `could not remove ${held.name} from ${where} — ${(res && res.error) || "no answer"}` };
   }
@@ -1366,7 +1367,7 @@ function plugRemoveResult(held, res, where) {
 // in that place, so there was nothing there to stop or start — which usually
 // means the switch was aimed at a place that does not hold the component at
 // all, and the page has to say so instead of reporting a phantom success.
-function plugSwitchResult(held, res, where) {
+export function plugSwitchResult(held, res, where) {
   if (!res || !res.ok) {
     return { ok: false, name: held.name, text: `could not switch ${held.name} on ${where} — ${(res && res.error) || "no answer"}` };
   }
@@ -1386,7 +1387,7 @@ function plugSwitchResult(held, res, where) {
 
 // Ask, then delete. The question is the same shape as the install's and says the
 // harder thing: these bytes are DELETED, and this page keeps no copy to put back.
-async function plugRemove(held) {
+export async function plugRemove(held) {
   const api = window.clutchComponents;
   if (!api || !api.remove || plugState.busy || plugPlaceReady(held.place)) return;
   const where = plugPlace(held);
@@ -1424,7 +1425,7 @@ async function plugRemove(held) {
 // Ask, then delete ONE version. The question names the version, says the ones
 // beside it stay, and says the thing this page never hides: these bytes are
 // DELETED and nothing here keeps a copy (I5).
-async function plugRemoveVersion(held, record) {
+export async function plugRemoveVersion(held, record) {
   const api = window.clutchComponents;
   if (!api || !api.remove || plugState.busy || plugPlaceReady(held.place)) return;
   const where = plugPlace(held);
@@ -1461,7 +1462,7 @@ async function plugRemoveVersion(held, record) {
 // One component's version list, straight from the machine that holds it. A read
 // supersedes an older read of the same list, and closing the block bumps the
 // sequence: a late answer must never reopen what the user closed.
-function plugReadVersions(name) {
+export function plugReadVersions(name) {
   const api = window.clutchComponents;
   if (!api || !api.versions) return;
   const seq = ++plugState.versionsSeq;
@@ -1484,7 +1485,7 @@ function plugReadVersions(name) {
     });
 }
 
-function plugVersionsToggle(held) {
+export function plugVersionsToggle(held) {
   if (plugState.versionsPending === held.name) return; // that read is already running
   if (plugState.versions && plugState.versions.name === held.name) {
     plugState.versions = null;
@@ -1497,7 +1498,7 @@ function plugVersionsToggle(held) {
 
 // An open version list is about what a machine HOLDS, so after any write that
 // changed that, it is read again rather than trusted as it was.
-function plugRefreshVersions() {
+export function plugRefreshVersions() {
   const name = (plugState.versions && plugState.versions.name) || plugState.versionsPending;
   if (name) plugReadVersions(name);
 }
@@ -1508,7 +1509,7 @@ function plugRefreshVersions() {
 // guess what this one believed. No question is asked — this write destroys
 // nothing, and the control's own label is the way back — but the page still says
 // what it is doing and then quotes the host, including the "absent" answer.
-async function plugSwitch(held) {
+export async function plugSwitch(held) {
   const api = window.clutchComponents;
   if (!api || !api.setDisabled || plugState.busy || plugPlaceReady(held.place)) return;
   const where = plugPlace(held);
@@ -1539,7 +1540,7 @@ async function plugSwitch(held) {
 // to say the same thing, and an entry added by mistake is undone by the Remove
 // on the row it creates. Both answer with the list AS IT NOW IS — the page then
 // draws what was written, not what it hoped it asked for.
-async function plugMirrorAdd() {
+export async function plugMirrorAdd() {
   const api = window.clutchComponents;
   const raw = String(plugState.mirrorDraft || "").trim();
   if (!api || !api.addMirror || plugState.mirrorBusy || !raw) return;
@@ -1566,7 +1567,7 @@ async function plugMirrorAdd() {
   renderPlugins();
 }
 
-async function plugMirrorRemove(url) {
+export async function plugMirrorRemove(url) {
   const api = window.clutchComponents;
   if (!api || !api.removeMirror || plugState.mirrorBusy) return;
   plugState.mirrorBusy = true;
@@ -1592,7 +1593,7 @@ async function plugMirrorRemove(url) {
 // Ask, then write. The question names the place and states the one fact the
 // page must not hide (the write cannot be undone from here), and the answer is
 // either an install that was actually started or nothing at all.
-async function plugInstall(entry) {
+export async function plugInstall(entry) {
   const api = window.clutchComponents;
   if (!api || plugState.busy || entry.problem) return; // no place, no write
   if (!plugPlaceUnread(entry) && plugPlaceReady(entry.place)) return; // and no unreachable one either
@@ -1643,7 +1644,7 @@ async function plugInstall(entry) {
 // the read after it drew the machine as it now is). Either way the page must not
 // go silent about a write it started: the stage, or the host's verdict, falls
 // back here. While the row IS drawn, the note says nothing about the write.
-function plugOrphanLine() {
+export function plugOrphanLine() {
   const shown = new Set(plugModel().filter(plugItemShown).map((i) => i.name));
   if (plugState.busy && !shown.has(plugState.busy.name)) {
     return { text: plugStageLine(plugState.busy), bad: false };
@@ -1654,7 +1655,7 @@ function plugOrphanLine() {
   return null;
 }
 
-function renderPlugins() {
+export function renderPlugins() {
   plugBodyEl.innerHTML = ""; // full redraw: one list, one state object
   // the note is the PAGE's line now, not the log of a write: what a write is doing
   // and what the host answered are drawn on the row they are about (plugItemState),
@@ -1695,7 +1696,7 @@ function renderPlugins() {
 // every read is a network hop that can take its time), and the mirror list is a
 // read of two local files (ui/mirrors.js). A shell with no mirror channel — an
 // older bridge — has two reads, not three with one that never lands.
-function plugRead({ force = false } = {}) {
+export function plugRead({ force = false } = {}) {
   const api = window.clutchComponents;
   if (!api || plugState.pending) return; // no channel, or a read already running
   plugState.sessionError = null;
@@ -1780,7 +1781,7 @@ function plugRead({ force = false } = {}) {
 // The knob is a decision with a network consequence, so it is one deliberate act
 // (the Save button, never the keystroke) and the line under it is the verdict:
 // what the reads are sent through now, or why the value was refused.
-function plugMirrorStored() {
+export function plugMirrorStored() {
   try {
     return localStorage.getItem("clutch_source_mirror") || "";
   } catch (e) {
@@ -1788,7 +1789,7 @@ function plugMirrorStored() {
   }
 }
 
-function plugMirrorNote(text, bad) {
+export function plugMirrorNote(text, bad) {
   if (!plugMirrorNoteEl) return;
   plugMirrorNoteEl.className = "plug-mirror-note" + (bad ? " error" : "");
   plugMirrorNoteEl.textContent = text;
@@ -1797,7 +1798,7 @@ function plugMirrorNote(text, bad) {
 // What the line says when it is NOT the answer to a just-pressed Save: the mirror
 // in force, said as the sentence the reads follow ("read under X" / "read from
 // github.com") rather than as the value's own name for itself.
-function plugMirrorIdleNote() {
+export function plugMirrorIdleNote() {
   const cur = plugMirrorStored();
   plugMirrorNote(
     cur
@@ -1813,7 +1814,7 @@ function plugMirrorIdleNote() {
 // the page would then report a network failure for what is a typo. The host writes
 // first and localStorage second: a copy that outlived a refused write would fill
 // the field with a mirror this window is not actually reading under.
-async function plugMirrorSave() {
+export async function plugMirrorSave() {
   const raw = plugMirrorInput ? plugMirrorInput.value.trim() : "";
   if (raw && !/^https?:\/\//i.test(raw)) {
     plugMirrorNote(
@@ -1868,13 +1869,13 @@ plugReloadBtn.addEventListener("click", () => {
 // the tab is the entry point: opening it is what makes the page go and look
 $("#settings-tab-plugins").addEventListener("click", () => pluginTabShown());
 
-function pluginTabShown() {
+export function pluginTabShown() {
   plugRead();
 }
 
 // Whether the plugins pane is the one on screen: the modal is open and its tab is
-// the one selected (ui/js/settings.js owns both, ui/index.html draws them).
-function plugPaneVisible() {
+// the one selected (ui/src/renderer/settings.ts owns both, ui/index.html draws them).
+export function plugPaneVisible() {
   const pane = $("#settings-pane-plugins");
   const box = $("#settings-modal");
   if (!pane || !box) return false;

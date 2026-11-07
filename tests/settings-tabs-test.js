@@ -6,7 +6,7 @@
 // the part a stylesheet cannot do: the height belongs to no element of its own, and
 // it keeps moving after the tab lands — the plugin pane is filled by a read that
 // answers twice (the machine, then the market), so the list arrives after the
-// switch. ui/js/settings.js therefore drives it by hand, one frame at a time, and
+// switch. ui/src/renderer/settings.ts therefore drives it by hand, one frame at a time, and
 // this runner drives THAT: the real block is sliced out of the page's own settings
 // module and run against a stub document and a fake frame clock, so the claims that
 // are invisible in a passing screenshot can be asked one at a time —
@@ -40,7 +40,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet } = require("./harness.js");
 
 const UI = path.join(__dirname, "..", "ui");
 const css = fs.readFileSync(path.join(UI, "style.css"), "utf8");
@@ -168,7 +168,7 @@ function makePage(opts) {
     cancelAnimationFrame: clock.cancel,
   };
   vm.createContext(ctx);
-  vm.runInContext(REGION, ctx);
+  vm.runInContext(runnableSnippet(REGION), ctx);
 
   return {
     ctx,
@@ -188,7 +188,7 @@ function makePage(opts) {
 // ---- 1. the swap is held at the height the box had ----
 {
   const p = makePage();
-  check(vm.runInContext("typeof showSettingsTab", p.ctx) === "function", "ui/js/settings.js still owns the settings tab switch");
+  check(vm.runInContext("typeof showSettingsTab", p.ctx) === "function", "ui/src/renderer/settings.ts still owns the settings tab switch");
   check(decls(css, "#settings-modal .modal-box").includes("max-height"), "and the box it resizes is the one the sheet limits (max-height)");
   check(p.rect() === 300, "the stub opens on the model pane, a 300px box");
 

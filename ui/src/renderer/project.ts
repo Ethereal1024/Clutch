@@ -3,28 +3,40 @@
 // Clearing the pane for a new project, paging older events back in, and the
 // open/create calls themselves.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch, noBackend } from "./app";
+import { els } from "./els";
+import { $ } from "./dom";
+import { hasMathText, typesetProgressively } from "./markdown";
+import { resumeTurn } from "./render-events";
+import { askConfirm, notice } from "./settings";
+import { reconnectSSE } from "./sse-stream";
+import { state } from "./state";
+import { addEvent } from "./stream-events";
+import { busy, setStatus } from "./stream-view";
+import { eventsEl, stream } from "./els";
+import { refreshRollbackAnchors, resetRollbackAnchors } from "./task-rollback";
+import { refreshTree } from "./workspace-panel";
 
-let currentProject = ""; // path of the active .clc project file
+export let currentProject = ""; // path of the active .clc project file
 
-function clearStream() {
+export function clearStream() {
   eventsEl.innerHTML = ""; // clear session content; the overlay/events wrapper stay mounted
-  lastTextEl = null;
-  lastTextContent = "";
-  thinkingEl = null;
-  thinkingContent = "";
-  if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
-  if (thinkingRenderRaf) { cancelAnimationFrame(thinkingRenderRaf); thinkingRenderRaf = 0; }
-  compactionEl = null;
-  retryNoteEl = null;
-  oldestOffset = null; // fresh project: no loaded events yet
-  streamHighOffset = null; // and no replayed record to dedupe a reconnect against
-  runSettled = false; // a fresh pane holds no run's ending (js/stream-events.js)
+  state.lastTextEl = null;
+  state.lastTextContent = "";
+  state.thinkingEl = null;
+  state.thinkingContent = "";
+  if (state.textRenderRaf) { cancelAnimationFrame(state.textRenderRaf); state.textRenderRaf = 0; }
+  if (state.thinkingRenderRaf) { cancelAnimationFrame(state.thinkingRenderRaf); state.thinkingRenderRaf = 0; }
+  state.compactionEl = null;
+  state.retryNoteEl = null;
+  state.oldestOffset = null; // fresh project: no loaded events yet
+  state.streamHighOffset = null; // and no replayed record to dedupe a reconnect against
+  state.runSettled = false; // a fresh pane holds no run's ending (stream-events.ts)
   resetRollbackAnchors(); // and no journal anchors: they belong to the project that left
   setOlderPill(0);
 }
@@ -32,31 +44,29 @@ function clearStream() {
 // ---- scroll-up paging (lazily-opened projects) ----
 // olderRemaining mirrors the server's on-disk count, so a dropped page
 // never makes the pill lie
-let olderRemaining = 0;
-let oldestOffset = null; // byte offset of the oldest loaded (rendered) non-task event
+export let olderRemaining = 0;
 // byte offset of the NEWEST rendered event: a reconnecting stream replays the
 // window from its start, and everything at or below this is a record this window
-// already painted (addEvent in js/stream-events.js). Reset with the pane.
-let streamHighOffset = null;
-let paging = false;   // one history fetch at a time
+// already painted (addEvent in stream-events.ts). Reset with the pane.
+export let paging = false;   // one history fetch at a time
 // what the pill is waiting on: "" (offering the page), "fetch" (the request is
 // out) or "render" (the reply is here and the pane is taking it). A `history`
 // frame that lands mid-page reads this instead of overwriting the wait.
-let olderBusy = "";
+export let olderBusy = "";
 // when non-null, addEvent appends into this off-DOM sink instead of #events
-let pageSink = null;
+export let pageSink = null;
 
 // The page's size as a person reads it: the pill offers it, and names it again
 // while it is being fetched.
-function olderSizeLabel(bytes) {
+export function olderSizeLabel(bytes) {
   const kb = Math.max(1, Math.ceil(bytes / 1024));
   return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
 }
 
 // The pill's one label, in all three states. It is painted from `olderBusy`, so a
-// reconnecting stream's `history` frame (js/stream-events.js setOlderPill) mid-page
+// reconnecting stream's `history` frame (stream-events.ts setOlderPill) mid-page
 // rewrites the same sentence instead of taking the spinner's place.
-function paintOlderLabel() {
+export function paintOlderLabel() {
   const label = document.getElementById("older-label");
   if (!label) return;
   const size = olderSizeLabel(olderRemaining);
@@ -65,7 +75,7 @@ function paintOlderLabel() {
   else label.textContent = `load earlier records (${size})`;
 }
 
-function setOlderPill(n) {
+export function setOlderPill(n) {
   olderRemaining = Math.max(0, n | 0);
   const pill = document.getElementById("older-pill");
   if (olderRemaining > 0) {
@@ -82,7 +92,7 @@ function setOlderPill(n) {
 // so the wait is spent inside the control that was just pressed: a ring, the number
 // being fetched, and `aria-busy` for assistive tech. Cleared in loadOlder's
 // `finally`, whatever the outcome.
-function setOlderBusy(stage) {
+export function setOlderBusy(stage) {
   olderBusy = stage || "";
   const pill = document.getElementById("older-pill");
   if (!pill) return;
@@ -95,14 +105,14 @@ function setOlderBusy(stage) {
 // One PAINTED frame: the first rAF only promises the browser is about to paint.
 // Used to put the reply's own state on screen before the synchronous prepend takes
 // the main thread — otherwise the label would change and then freeze unseen.
-function nextPaint() {
-  return new Promise((resolve) => {
+export function nextPaint() {
+  return new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   });
 }
 
-async function loadOlder() {
-  if (paging || stream.classList.contains("loading") || !oldestOffset || olderRemaining <= 0) return;
+export async function loadOlder() {
+  if (paging || stream.classList.contains("loading") || !state.oldestOffset || olderRemaining <= 0) return;
   paging = true;
   setOlderBusy("fetch"); // synchronous: this is the frame the tap lands on
   try {
@@ -113,7 +123,7 @@ async function loadOlder() {
     // worth, and `align=turn` has the server walk the page's start back to the task
     // row that opens the turn the budget cut (agent/core/lazy.py aligned_start) —
     // a page then begins where a turn begins, and the pane is handed whole turns.
-    const data = await apiFetch(`/api/history?before=${oldestOffset}&limit=1048576&align=turn`, { timeout: 60000 });
+    const data = await apiFetch(`/api/history?before=${state.oldestOffset}&limit=1048576&align=turn`, { timeout: 60000 });
     const page = data.events || [];
     if (!page.length) { setOlderPill(0); return; }
     // What follows is one synchronous pass (the sink render below, the prepend, the
@@ -127,20 +137,20 @@ async function loadOlder() {
     // then prepend it in one pass; save/restore live-stream state
     const sink = document.createElement("div");
     sink.style.display = "contents"; // transparent wrapper: children lay out in #events
-    const savedLastTextEl = lastTextEl, savedLastTextContent = lastTextContent;
-    const savedThinkingEl = thinkingEl, savedThinkingContent = thinkingContent;
-    const savedToolGroupEl = toolGroupEl;
-    lastTextEl = null; lastTextContent = "";
-    thinkingEl = null; thinkingContent = "";
-    toolGroupEl = null;
+    const savedLastTextEl = state.lastTextEl, savedLastTextContent = state.lastTextContent;
+    const savedThinkingEl = state.thinkingEl, savedThinkingContent = state.thinkingContent;
+    const savedToolGroupEl = state.toolGroupEl;
+    state.lastTextEl = null; state.lastTextContent = "";
+    state.thinkingEl = null; state.thinkingContent = "";
+    state.toolGroupEl = null;
     pageSink = sink;
     try {
       for (const item of page) addEvent(item); // unwrap tracks oldestOffset
     } finally {
       pageSink = null;
-      lastTextEl = savedLastTextEl; lastTextContent = savedLastTextContent;
-      thinkingEl = savedThinkingEl; thinkingContent = savedThinkingContent;
-      toolGroupEl = savedToolGroupEl;
+      state.lastTextEl = savedLastTextEl; state.lastTextContent = savedLastTextContent;
+      state.thinkingEl = savedThinkingEl; state.thinkingContent = savedThinkingContent;
+      state.toolGroupEl = savedToolGroupEl;
     }
     // typeset AFTER insertion: MathJax needs real layout
     const mathBlocks = Array.from(sink.querySelectorAll(".event.text .body, .event.user .body")).filter(hasMathText);
@@ -151,9 +161,9 @@ async function loadOlder() {
     // compaction fired mid-run, so the window's first region is a turn whose task
     // row is older than the window (agent/core/lazy.py cpr_start). Its `final`
     // arrived while the sink was the render target — where folding is refused,
-    // because the pane is about to be handed those rows (js/auto-fold.js) — so it
+    // because the pane is about to be handed those rows (auto-fold.ts) — so it
     // is folded now, on the prepended pane and before anything paints. Announced by
-    // name, not called: js/auto-fold.js loads after this file and a classic script
+    // name, not called: auto-fold.ts loads after this file and a classic script
     // may only name what the files above it declared (tests/ui-load-order-test.js).
     eventsEl.dispatchEvent(new CustomEvent("clutch:page-prepended"));
     if (typeof MathJax !== "undefined" && typeof MathJax.typesetPromise === "function") {
@@ -186,7 +196,7 @@ async function loadOlder() {
 $("#older-pill").addEventListener("click", loadOlder);
 
 // read-only badge: visible only while the active project is read-only
-function showReadOnlyBadge(readOnly) {
+export function showReadOnlyBadge(readOnly) {
   const badge = document.getElementById("readonly-badge");
   if (badge) badge.classList.toggle("hidden", !readOnly);
 }
@@ -194,16 +204,16 @@ function showReadOnlyBadge(readOnly) {
 // The host owns the claim, so it also owns the badge. A (re)connect re-asks for
 // a project this window once had to open read-only, and the session's watchdog
 // takes the claim back as soon as the other holder is gone; both announce it
-// (js/render-events.js). Clearing the badge from that is the whole point: the
+// (render-events.ts). Clearing the badge from that is the whole point: the
 // ghost read-only was this state outliving the lock, and only this file's
 // open-time meta used to be allowed to clear it.
 document.addEventListener("clutch:project-read-only", (ev) => {
-  const d = (ev && ev.detail) || {};
+  const d = ((ev as any) && (ev as any).detail) || {};
   if (d.project && currentProject && d.project !== currentProject) return;
   showReadOnlyBadge(!!d.readOnly);
 });
 
-function setProjectInfo(info) {
+export function setProjectInfo(info) {
   currentProject = info.project || "";
   els.projectLabel.textContent = info.name || "";
   els.projectLabel.title = currentProject;
@@ -212,7 +222,7 @@ function setProjectInfo(info) {
   setStatus("idle");
 }
 
-function hideWelcome() {
+export function hideWelcome() {
   document.getElementById("welcome").classList.add("hidden");
   els.run.disabled = busy || !currentProject;
 }
@@ -221,7 +231,7 @@ function hideWelcome() {
 // only source: it names the holding process, the machine it runs on, and when it
 // took the lock. A holder that wrote no record (an older build) says nothing —
 // the honest answer, never a guess.
-function describeHolder(owner) {
+export function describeHolder(owner) {
   if (!owner || typeof owner !== "object") return "";
   const bits = [];
   if (Number.isInteger(owner.pid)) bits.push(`process ${owner.pid}`);
@@ -237,7 +247,7 @@ function describeHolder(owner) {
 // only "orphan" (holder alive, claiming window gone) may be taken back by a
 // button. Every other state belongs to somebody, and a host that cannot answer
 // is no reason to take anything.
-async function provenOrphan(project) {
+export async function provenOrphan(project) {
   const api = window.clutchLocks;
   if (!project || !api || typeof api.list !== "function") return false;
   try {
@@ -253,7 +263,7 @@ async function provenOrphan(project) {
 // Take a proven-orphaned project back: the host stops the dead window's session
 // (the one still holding the flock), and then the open can succeed. The verdict
 // is the host's, so a refusal is reported instead of retried.
-async function reclaimLock(project) {
+export async function reclaimLock(project) {
   const api = window.clutchLocks;
   if (!api || typeof api.reclaim !== "function") return false;
   try {
@@ -266,7 +276,7 @@ async function reclaimLock(project) {
   return false;
 }
 
-async function openProject(path, readOnly = false) {
+export async function openProject(path, readOnly = false) {
   // a run keeps the write lock on the project it is appending to; say so out
   // loud instead of swallowing the tap
   if (busy) {
@@ -274,8 +284,8 @@ async function openProject(path, readOnly = false) {
     return;
   }
   const prog = document.getElementById("open-progress");
-  const fill = prog.querySelector(".open-progress-fill");
-  const label = prog.querySelector(".open-progress-label");
+  const fill = prog.querySelector(".open-progress-fill") as HTMLElement;
+  const label = prog.querySelector(".open-progress-label") as HTMLElement;
   const setPct = (pct) => {
     fill.style.width = pct + "%";
     label.textContent = Math.round(pct) + "%";
@@ -284,8 +294,8 @@ async function openProject(path, readOnly = false) {
     // NOT apiFetch: this endpoint streams NDJSON (meta/progress/event/done), so
     // the body must stay a stream; only the error unwrap below shares apiFetch's
     // contract (Error with .code/.status)
-    if (!API_BASE) throw noBackend(); // never fetch "null/api/project/open"
-    const r = await fetch(API_BASE + "/api/project/open", {
+    if (!state.apiBase) throw noBackend(); // never fetch "null/api/project/open"
+    const r = await fetch(state.apiBase + "/api/project/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, ...(readOnly ? { read_only: true } : {}) }),
@@ -367,7 +377,7 @@ async function openProject(path, readOnly = false) {
     refreshRollbackAnchors(); // the rows just replayed can be rolled back; ask the journal
     // What was replayed may END with an open turn — a host that died before the
     // final, a phone frozen mid-step. Now that this page is looking at that log,
-    // it is the one that asks the host to continue it (js/render-events.js
+    // it is the one that asks the host to continue it (render-events.ts
     // resumeTurn: one state() question, then drive() if it is open). Not awaited:
     // the open is finished and the turn is the host's to drive.
     resumeTurn();
@@ -413,11 +423,11 @@ async function openProject(path, readOnly = false) {
     }
     notice("Failed to open project: " + e.message);
     // a network "Failed to fetch" usually means the remote session forward died
-    console.error("[openProject] failed:", { api: API_BASE, path, error: e && e.message });
+    console.error("[openProject] failed:", { api: state.apiBase, path, error: e && e.message });
   }
 }
 
-async function createProject(dir, name) {
+export async function createProject(dir, name) {
   if (busy) {
     notice("a run is active — stop it before creating a project");
     return;

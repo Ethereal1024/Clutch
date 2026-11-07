@@ -11,7 +11,7 @@
 //      own size and digest, the progress it reports, and the failures a person will
 //      actually meet (a 404, a dead network, a truncated file, a rewritten one);
 //   3. the desktop installer (ui/update-install.js) and the About pane's state
-//      machine (ui/js/update-panel.js) as DATA and as words. Nothing here spawns a
+//      machine (ui/src/renderer/update-panel.ts) as DATA and as words. Nothing here spawns a
 //      process, opens a dmg, runs dpkg or installs an APK — that half is on the
 //      device, and this runner says so by pinning the exact command that would run
 //      instead of running it.
@@ -25,7 +25,7 @@ const os = require("os");
 const path = require("path");
 const vm = require("vm");
 const crypto = require("crypto");
-const { check, summary, uiModules } = require("./harness.js");
+const { check, summary, uiModules, rendererScript } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const UI = path.join(ROOT, "ui");
@@ -592,11 +592,11 @@ async function section9b() {
 }
 
 // ---- 10. the About pane's state machine ----
-// The real ui/js/update-panel.js, in a context holding exactly what it touches: a
+// The real ui/src/renderer/update-panel.ts, in a context holding exactly what it touches: a
 // document of two elements, the build stamp, and whichever bridges a scenario says
 // this page has. The words are the thing under test — they are what a person acts
 // on.
-const PANEL = read(UI, "js", "update-panel.js");
+const PANEL = rendererScript("update-panel");
 
 function panel(bridges = {}) {
   const els = new Map();
@@ -622,7 +622,7 @@ function panel(bridges = {}) {
   if ("version" in bridges && bridges.version !== null) box.CLUTCH_VERSION = bridges.version;
   if (bridges.update) box.clutchUpdate = bridges.update;
   if (bridges.shell) box.clutchShell = bridges.shell;
-  vm.runInContext(PANEL, box, { filename: "js/update-panel.js" });
+  vm.runInContext(PANEL, box, { filename: "update-panel.ts" });
 
   return {
     box,
@@ -871,10 +871,10 @@ async function section10() {
 
   const order = uiModules().map((m) => m.file);
   check(
-    order.indexOf("js/update-panel.js") > order.indexOf("js/settings.js"),
+    order.indexOf("update-panel.ts") > order.indexOf("settings.ts"),
     "the panel sits after the file that paints the About pane (it reads the same build stamp)"
   );
-  check(order.indexOf("js/update-panel.js") < order.indexOf("js/boot.js"), "and before boot.js, which starts the app");
+  check(order.indexOf("update-panel.ts") < order.indexOf("boot.ts"), "and before boot.js, which starts the app");
 
   const rule = (sel) => {
     const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

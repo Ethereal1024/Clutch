@@ -4,61 +4,62 @@
 // the bottom, the ↓ pill, the run status line, and the live-block handles the
 // streaming renderers append into.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { els, eventsEl, stream } from "./els";
+import { $ } from "./dom";
+import { currentProject } from "./project";
+import { state } from "./state";
+import { foldHoldsScroll, reducedMotion } from "./stream-text";
 
-let busy = false;
-const stream = $("#stream");
-const eventsEl = document.getElementById("events");
-const jumpBottom = $("#jump-bottom");
+export let busy = false;
+export const jumpBottom = $("#jump-bottom");
 
 // how far from the bottom the view counts as "following the stream"
-const JUMP_BOTTOM_GAP = 80;
+export const JUMP_BOTTOM_GAP = 80;
 
-function nearBottom() {
+export function nearBottom() {
   return stream.scrollHeight - stream.scrollTop - stream.clientHeight < JUMP_BOTTOM_GAP;
 }
 
 // ↓ button visibility mirrors the latch; all latch paths report through here
-function setJumpVisible(visible) {
+export function setJumpVisible(visible) {
   jumpBottom.classList.toggle("hidden", !visible);
 }
 
 // Latched tail-follow: reaching the bottom (or ↓) pins the view; only a user's
 // upward scroll breaks the latch (the ↓ button returns to the tail).
-let followTail = true;
-let lastScrollTop = 0;
+export let lastScrollTop = 0;
 
-// A catch-up (the records a (re)connect is owed, ui/js/sse-stream.js `?since=`)
+// A catch-up (the records a (re)connect is owed, ui/src/renderer/sse-stream.ts `?since=`)
 // lands as one block between the server's `history` and `replayed` frames. While
 // it is arriving the view does not follow: painting N records one by one would
 // scroll N times (a phone returning from the background drags a whole window's
 // worth), and it would drag a user who had scrolled up down with it. So the
 // block paints in one pass and the view moves once, at the end — and then only
 // through autoScroll(), which respects the latch. beginCatchUp/endCatchUp are
-// bracket calls (ui/js/stream-events.js), not a counter: the frames nest nowhere.
-let catchUp = false;
+// bracket calls (ui/src/renderer/stream-events.ts), not a counter: the frames nest nowhere.
+export let catchUp = false;
 
-let gliding = false;
-let glideRaf = 0;
+export let gliding = false;
+export let glideRaf = 0;
 
-function beginCatchUp() {
+export function beginCatchUp() {
   catchUp = true;
 }
 
-function endCatchUp() {
+export function endCatchUp() {
   if (!catchUp) return;
   catchUp = false;
   autoScroll(); // once, at the block's end: a latched view lands on the tail
 }
 
-function autoScroll(force) {
+export function autoScroll(force = false) {
   if (stream.classList.contains("loading")) return;
-  // A region fold that is handing the pane's scroll back (js/stream-text.js,
+  // A region fold that is handing the pane's scroll back (stream-text.ts,
   // giveBack) already has the pane where it wants it: re-pinning the tail under it
   // would carry the head it is holding at the top edge off with the shrinking box.
   // The engine loads after this file, so the typeof is only there for a
@@ -69,7 +70,7 @@ function autoScroll(force) {
   if (force) {
     // User-initiated jump (message send, ↓, Cmd/Ctrl+Down): tracked = instant pin,
     // untracked = the one smooth glide that re-latches on arrival.
-    if (followTail) {
+    if (state.followTail) {
       if (glideRaf) { cancelAnimationFrame(glideRaf); glideRaf = 0; }
       gliding = false;
       stream.scrollTop = stream.scrollHeight;
@@ -79,7 +80,7 @@ function autoScroll(force) {
     }
     return;
   }
-  if (followTail) {
+  if (state.followTail) {
     // tracked: instant pin — never during a user jump-glide (untracked ↓)
     if (gliding) return;
     stream.scrollTop = stream.scrollHeight;
@@ -93,14 +94,14 @@ function autoScroll(force) {
 // ---- jump-to-bottom glide (user-initiated only) ----
 // scrollTo glides to the tail captured at call time; a rAF poll detects the
 // landing and re-pins to absorb growth that arrived mid-glide.
-function glideToBottom() {
+export function glideToBottom() {
   if (stream.classList.contains("loading")) return;
   cancelAnimationFrame(glideRaf);
   const target = stream.scrollHeight;
   if (stream.scrollTop >= target - 1) {
     // already at the tail: land straight into the latch
     gliding = false;
-    followTail = true;
+    state.followTail = true;
     setJumpVisible(false);
     return;
   }
@@ -108,7 +109,7 @@ function glideToBottom() {
   if (reducedMotion()) {
     stream.scrollTop = stream.scrollHeight;
     gliding = false;
-    followTail = true;
+    state.followTail = true;
     setJumpVisible(false);
     return;
   }
@@ -118,7 +119,7 @@ function glideToBottom() {
     if (!gliding || Math.abs(stream.scrollTop - target) < 2 || Math.abs(stream.scrollTop - bottom) < 2) {
       gliding = false;
       // landed (or clamped to a new bottom): re-latch
-      followTail = true;
+      state.followTail = true;
       setJumpVisible(false);
       if (!stream.classList.contains("loading")) {
         stream.scrollTop = stream.scrollHeight; // absorb growth that arrived mid-glide
@@ -134,7 +135,7 @@ function glideToBottom() {
 // CONTENT's height (never the viewport) and re-pin while latched.
 if (typeof ResizeObserver !== "undefined") {
   new ResizeObserver(() => {
-    if (followTail && !stream.classList.contains("loading")) autoScroll();
+    if (state.followTail && !stream.classList.contains("loading")) autoScroll();
   }).observe(eventsEl);
 }
 
@@ -148,11 +149,10 @@ document.addEventListener("keydown", (e) => {
     autoScroll(true);
   }
 });
-let prevClientH = stream.clientHeight;
-let prevScrollH = stream.scrollHeight;
+export let prevClientH = stream.clientHeight;
+export let prevScrollH = stream.scrollHeight;
 // ignore latch changes ~120ms after the input box resizes: the clamp scroll
 // event can fire before the shrunken viewport is observable
-let suppressLatchUntil = 0;
 stream.addEventListener("scroll", (e) => {
   // Only the user's own gestures update the latch. Programmatic scrolls fire
   // isTrusted=false and never touch it; a passive clamp (viewport or content
@@ -172,7 +172,7 @@ stream.addEventListener("scroll", (e) => {
   prevClientH = stream.clientHeight;
   const scrollShrank = stream.scrollHeight < prevScrollH;
   prevScrollH = stream.scrollHeight;
-  if (viewportChanged || scrollShrank || performance.now() < suppressLatchUntil) {
+  if (viewportChanged || scrollShrank || performance.now() < state.suppressLatchUntil) {
     lastScrollTop = cur;
     return;
   }
@@ -182,14 +182,14 @@ stream.addEventListener("scroll", (e) => {
   // only a scroll away from the bottom is a user intent to leave the latch
   const up = cur < lastScrollTop && !nearBottom();
   if (up) {
-    followTail = false;
-  } else if (nearBottom()) followTail = true;
+    state.followTail = false;
+  } else if (nearBottom()) state.followTail = true;
   lastScrollTop = cur;
   // the button is visible exactly when NOT latched
-  setJumpVisible(!followTail);
+  setJumpVisible(!state.followTail);
 }, { passive: true });
 
-function setStatus(state) {
+export function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
   els.status.textContent = state || "idle";
   busy = state === "running" || state === "waiting";
@@ -208,19 +208,12 @@ function setStatus(state) {
 }
 
 // tracks the most recent agent text block (created by streaming text_delta)
-let lastTextEl = null;
-let lastTextContent = "";
 // thinking (reasoning) block
-let thinkingEl = null;
-let thinkingContent = "";
-let compactionEl = null; // live "compressing context" block (compaction_delta)
-let retryNoteEl = null; // live "reconnecting…" chip (llm_retry), removed once the stream resumes
 
 // map tool_call_id -> {name, args, ui} so a tool_result knows which tool
 // produced it and how its component said it looks
-const toolCalls = {};
+export const toolCalls = {};
 // the block currently collecting consecutive tool_calls (for merging)
-let toolGroupEl = null;
 // tool_call_id -> owning block: results land next to their own call row
-const toolCallGroups = new Map();
+export const toolCallGroups = new Map();
 

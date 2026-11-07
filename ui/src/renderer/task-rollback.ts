@@ -13,37 +13,42 @@
 // says which offsets have anything recorded, so a row whose task changed nothing
 // is answered without a confirmation that leads nowhere.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch } from "./app";
+import { askConfirm, notice } from "./settings";
+import { busy } from "./stream-view";
+import { eventsEl } from "./els";
+import { fillTaskInput } from "./task-input";
+import { refreshTree } from "./workspace-panel";
 
 // how long a finger must rest on a message before it counts as a long press.
 // The platform's own long-press (selection, the context callout) starts around
 // this time and is suppressed below, so the two do not fight.
-const LONG_PRESS_MS = 500;
+export const LONG_PRESS_MS = 500;
 // a finger that wanders further than this is scrolling, not pressing
-const LONG_PRESS_SLOP_PX = 12;
+export const LONG_PRESS_SLOP_PX = 12;
 // Right-click and long-press can both fire for ONE gesture (Chrome on Android
 // fires `contextmenu` for a long press as well): the second within this window
 // is the same gesture, not a new one.
-const ROLLBACK_GESTURE_DEDUPE_MS = 800;
+export const ROLLBACK_GESTURE_DEDUPE_MS = 800;
 
 // log offsets the server has recorded changes for; null = not asked yet. A row
 // whose offset is missing from the set cannot be rolled back (the task changed
 // no file), which is answered honestly instead of with a question the server
 // would refuse.
-let rollbackAnchors = null;
-let rollbackBusy = false;
-let lastRollbackGestureAt = 0;
+export let rollbackAnchors = null;
+export let rollbackBusy = false;
+export let lastRollbackGestureAt = 0;
 
-function resetRollbackAnchors() {
+export function resetRollbackAnchors() {
   rollbackAnchors = null;
 }
 
-async function refreshRollbackAnchors() {
+export async function refreshRollbackAnchors() {
   try {
     const data = await apiFetch("/api/workspace/checkpoints");
     rollbackAnchors = new Set((data.anchors || []).map(Number));
@@ -56,13 +61,13 @@ async function refreshRollbackAnchors() {
 }
 
 // the message text a row carries: renderEvent stores the task's raw content on
-// the row (js/render-events.js), because the rendered DOM is markdown and cannot
+// the row (render-events.ts), because the rendered DOM is markdown and cannot
 // be turned back into what the user typed.
-function rowTaskText(el) {
+export function rowTaskText(el) {
   return el && typeof el._taskText === "string" ? el._taskText : "";
 }
 
-function openRollbackMenu(el) {
+export function openRollbackMenu(el) {
   const now = performance.now();
   if (now - lastRollbackGestureAt < ROLLBACK_GESTURE_DEDUPE_MS) return;
   lastRollbackGestureAt = now;
@@ -80,7 +85,7 @@ function openRollbackMenu(el) {
   rollbackTo(el, offset);
 }
 
-async function rollbackTo(el, offset) {
+export async function rollbackTo(el, offset) {
   const ok = await askConfirm({
     title: "Roll back to this message",
     text:
@@ -118,17 +123,18 @@ async function rollbackTo(el, offset) {
 // the touch timer below covers the WebViews that never send it.
 
 eventsEl.addEventListener("contextmenu", (e) => {
-  const el = e.target && e.target.closest ? e.target.closest(".event.user") : null;
+  const t = e.target as Element | null;
+  const el = t && t.closest ? t.closest(".event.user") : null;
   if (!el) return;
   e.preventDefault(); // no OS menu: this row's menu is ours
   openRollbackMenu(el);
 });
 
-let pressTimer = 0;
-let pressEl = null;
-let pressFrom = null;
+export let pressTimer = 0;
+export let pressEl = null;
+export let pressFrom = null;
 
-function cancelPress() {
+export function cancelPress() {
   if (pressTimer) clearTimeout(pressTimer);
   pressTimer = 0;
   pressEl = null;
@@ -139,7 +145,8 @@ eventsEl.addEventListener(
   "touchstart",
   (e) => {
     if (e.touches.length !== 1) return cancelPress(); // a pinch is not a press
-    const el = e.target && e.target.closest ? e.target.closest(".event.user") : null;
+    const src = e.target as Element | null;
+    const el = src && src.closest ? src.closest(".event.user") : null;
     if (!el) return;
     const t = e.touches[0];
     cancelPress();

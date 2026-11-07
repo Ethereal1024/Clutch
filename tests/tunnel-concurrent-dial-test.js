@@ -2,7 +2,7 @@
 //
 // The engine's reconnect ladder (ui/tunnel-ladder.js) dials from the process the
 // foreground service protects, and the page's own ladder still dials while the
-// page is visible (ui/js/conn-lost.js) — both start their first attempt one
+// page is visible (ui/src/renderer/conn-lost.ts) — both start their first attempt one
 // backoff step (1000ms) after the same `tunnel:ended`, so a hop that dies with
 // the app in the foreground can be asked for twice at once. connectTunnel has
 // always handled the second arrival by RESETTING the first ("existing tunnel is

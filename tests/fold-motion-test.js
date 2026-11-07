@@ -1,6 +1,6 @@
 "use strict";
 
-// The fold's motion and its state machine (ui/js/stream-text.js): a fold that
+// The fold's motion and its state machine (ui/src/renderer/stream-text.ts): a fold that
 // OPENS arrives on the sheet's --arrival curve and one that CLOSES leaves on
 // --departure, and a click that lands while a fold is still moving reverses it
 // from the frame that is on screen instead of snapping back to the state its
@@ -19,9 +19,9 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, runnableSnippet, stateStub } = require("./harness.js");
 
-const src = fs.readFileSync(path.join(__dirname, "..", "ui", "js", "stream-text.js"), "utf8");
+const src = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "stream-text.ts"), "utf8");
 const { region } = slicer(src);
 const curveOf = (name) => src.match(new RegExp('const ' + name + ' = "([^"]*)";'))[1];
 const msOf = (name) => Number(src.match(new RegExp("const " + name + " = (\\d+);"))[1]);
@@ -100,8 +100,17 @@ function makeFold(classes) {
   return node;
 }
 
+// the shared state leaf, with the tail latch wired to this runner's own flag:
+// the source reads state.followTail, and the scenario below is what moves it
+const state = stateStub();
+Object.defineProperty(state, "followTail", {
+  get: () => followTail,
+  set: (v) => { followTail = v; },
+});
+
 const ctx = {
   console,
+  state,
   window: { matchMedia: () => ({ matches: reduced }), addEventListener: () => {} },
   document: { createElement: (t) => ({ tagName: String(t).toUpperCase(), appendChild() {} }) },
   stream: {
@@ -121,7 +130,7 @@ const ctx = {
   cancelAnimationFrame: (id) => { rafSlots.delete(id); },
 };
 vm.createContext(ctx);
-vm.runInContext(region("const ARRIVE_EASE", "buildThinkingBlock"), ctx);
+vm.runInContext(runnableSnippet(region("const ARRIVE_EASE", "buildThinkingBlock")), ctx);
 
 // one frame of the tail-pinning loop (js/stream-text.js followTailDuring)
 function frame() {

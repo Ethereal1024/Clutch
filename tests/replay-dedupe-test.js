@@ -27,17 +27,18 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const APP = uiSource(); // the renderer, every module in page load order
-const PROJECT = fs.readFileSync(path.join(ROOT, "ui", "js", "project.js"), "utf8");
+const PROJECT = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "project.ts"), "utf8");
+const STATE = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "state.ts"), "utf8");
 const { fnBody } = slicer(APP);
 
 // ---- 1. the watermark is real module state, reset with the pane ----
-check(/^let streamHighOffset = null;/m.test(PROJECT),
+check(/^\s*streamHighOffset: null,$/m.test(STATE) && /^\s*oldestOffset: null,$/m.test(STATE),
   "the watermark is module state beside the other stream state (oldestOffset)");
-check(/streamHighOffset = null;/.test(fnBody("clearStream")),
+check(/state\.streamHighOffset = null;/.test(fnBody("clearStream")),
   "and a fresh project pane forgets it: the next transcript starts empty");
 
 // ---- the wire shape the two paths use ----
@@ -47,10 +48,10 @@ check(/streamHighOffset = null;/.test(fnBody("clearStream")),
 check(/function addEvent\(ev\)/.test(APP) &&
   /ev\.event && typeof ev\.offset === "number"/.test(fnBody("addEvent")),
   "the runner drives the real thing: a record is {offset, event} on the wire");
-check(/^function reconnectSSE\(\)/m.test(APP) &&
+check(/^export function reconnectSSE\(\)/m.test(APP) &&
   /connectSSE\(\)/.test(fnBody("reconnectSSE")),
   "the reconnecting stream is a plain connect: the watermark is read in one place");
-check(/if \(streamHighOffset !== null\) qs\.set\("since"/.test(fnBody("connectSSE")),
+check(/if \(state\.streamHighOffset !== null\) qs\.set\("since"/.test(fnBody("connectSSE")),
   "and it asks for exactly the records after that watermark, or for the window when there are none");
 
 // ---- stub environment ----
@@ -58,6 +59,9 @@ const rendered = [];
 const pill = [];
 const pins = []; // every write autoScroll actually makes to the view's scrollTop
 let pagingSink = null;
+// the shared state leaf (ui/src/renderer/state.ts), at its declared
+// defaults: the two watermarks are fields of it, not globals
+global.state = stateStub();
 global.eventsEl = {
   set innerHTML(v) {
     if (v === "") rendered.length = 0;
@@ -80,8 +84,8 @@ global.stream = {
     pins.push(v);
   },
 };
-global.streamHighOffset = null;
-global.oldestOffset = null;
+global.state.streamHighOffset = null;
+global.state.oldestOffset = null;
 global.olderRemaining = 0;
 global.toolGroupEl = null;
 global.lastTextEl = null;
@@ -139,13 +143,13 @@ const frame = (offset, event) => ({ offset, event });
 
 // ---- 2. the log this window already painted ----
 addEvent(frame(10, { type: "user_message", text: "one" }));
-check(rendered.length === 1 && global.streamHighOffset === 10 && global.oldestOffset === 10,
+check(rendered.length === 1 && global.state.streamHighOffset === 10 && global.state.oldestOffset === 10,
   "a record is rendered, and it sets both marks");
 
 addEvent(frame(22, { type: "user_message", text: "two" }));
-check(rendered.length === 2 && global.streamHighOffset === 22,
+check(rendered.length === 2 && global.state.streamHighOffset === 22,
   "the next record advances the watermark");
-check(global.oldestOffset === 10,
+check(global.state.oldestOffset === 10,
   "while the OLDEST mark stays put: it is what the paging walk asks from");
 
 // the reconnect: the same window is replayed from its start
@@ -154,12 +158,12 @@ addEvent(frame(10, { type: "user_message", text: "one" }));
 addEvent(frame(22, { type: "user_message", text: "two" }));
 check(rendered.length === afterLive,
   "a replayed record at or below the watermark is not painted twice");
-check(global.streamHighOffset === 22, "and the watermark does not move for it");
-check(global.oldestOffset === 10, "nor does the oldest mark");
+check(global.state.streamHighOffset === 22, "and the watermark does not move for it");
+check(global.state.oldestOffset === 10, "nor does the oldest mark");
 
 // the replay continues past what this window has seen: the new tail lands
 addEvent(frame(31, { type: "final", status: "ok", summary: "done" }));
-check(rendered.length === afterLive + 1 && global.streamHighOffset === 31,
+check(rendered.length === afterLive + 1 && global.state.streamHighOffset === 31,
   "and the part of the replay this window had missed is painted");
 
 // a compaction rewrites the log but not the offsets (agent/api/events.py replays
@@ -175,13 +179,13 @@ check(rendered.length === afterLive + 1, "one record, one paint, however often i
 // record painted live never moved it, and the reconnecting stream painted the
 // whole window again.
 addEvent(frame(35, { type: "assistant_message", content: "live" }));
-check(rendered.length === afterLive + 2 && global.streamHighOffset === 35,
+check(rendered.length === afterLive + 2 && global.state.streamHighOffset === 35,
   "a live durable frame is painted and moves the watermark onto its own record");
 
 // a transient delta never reaches the log: no offset, never replayed, and it
 // must not be deduped or move the watermark
 addEvent({ type: "text_delta", text: "hi" });
-check(rendered.length === afterLive + 3 && global.streamHighOffset === 35,
+check(rendered.length === afterLive + 3 && global.state.streamHighOffset === 35,
   "a delta stays a bare frame: painted, and the watermark is left alone");
 
 // the reconnect: the replay re-sends the very record this window painted live
@@ -194,19 +198,19 @@ global.pageSink = { appendChild: (el) => rendered.push(el) };
 addEvent(frame(2, { type: "user_message", text: "older" }));
 check(rendered.length === afterLive + 4,
   "an older page is rendered even though its offset is far below the watermark");
-check(global.streamHighOffset === 35,
+check(global.state.streamHighOffset === 35,
   "and the watermark is untouched by the walk (it must not become the paging head)");
-check(global.oldestOffset === 2, "while the oldest mark follows the walk, as it must");
+check(global.state.oldestOffset === 2, "while the oldest mark follows the walk, as it must");
 global.pageSink = null;
 
 // a page below the watermark does not blind the next live record either
 addEvent(frame(44, { type: "final", status: "ok", summary: "next" }));
-check(rendered.length === afterLive + 5 && global.streamHighOffset === 44,
+check(rendered.length === afterLive + 5 && global.state.streamHighOffset === 44,
   "the next live record is still painted after a page-back");
 
 // ---- 5. a fresh pane starts from scratch ----
 clearStream();
-check(global.streamHighOffset === null && global.oldestOffset === null &&
+check(global.state.streamHighOffset === null && global.state.oldestOffset === null &&
   rendered.length === 0,
   "clearing the pane drops the transcript and both marks");
 addEvent(frame(10, { type: "user_message", text: "reopened" }));
@@ -252,8 +256,8 @@ const beforeResync = rendered.length;
 addEvent(frame(72, { type: "user_message", text: "second transcript" }));
 check(rendered.length === beforeResync + 1, "the served window lands...");
 addEvent({ type: "resync" });
-check(rendered.length === 0 && global.streamHighOffset === null &&
-  global.oldestOffset === null,
+check(rendered.length === 0 && global.state.streamHighOffset === null &&
+  global.state.oldestOffset === null,
   "...and 'resync' starts it over instead of leaving two on one screen");
 
 summary("replay-dedupe");

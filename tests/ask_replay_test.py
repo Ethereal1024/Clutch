@@ -6,7 +6,7 @@ The failure this guards (observed live, more than once): a permission ask is
 published to the broadcaster ONCE. A window that misses that one frame — a
 reload mid-ask, an EventSource between reconnects, a renderer that was still
 reconstructing history when the frame arrived (it used to drop live prompts;
-ui/js/stream-events.js no longer discards a live ask) — never learns the prompt
+ui/src/renderer/stream-events.ts no longer discards a live ask) — never learns the prompt
 exists. No dialog appears, the run sits blocked in gate.require until the user
 presses Stop, and Stop answers every pending ask "denied by user" — a denial
 nobody ever saw a prompt for.
@@ -19,7 +19,7 @@ So an ask is STATE while it waits, not a frame that was sent once:
   answer them — the reload/reconnect recovery;
 * the gate re-announces the ask while it waits (REANNOUNCE_S) — a prompt that
   was dropped without a reconnect still surfaces, and the UI renders the same
-  request_id in place (ui/js/permissions.js) instead of stacking dialogs;
+  request_id in place (ui/src/renderer/permissions.ts) instead of stacking dialogs;
 * and that request_id is unique for the life of the process, never per gate: a
   window remembers the ids it answered for as long as the page lives, so an id
   a second run reused was a prompt it silently swallowed — the second shape of
@@ -181,7 +181,7 @@ def _fresh_gate_ids_never_collide(tmp: str) -> None:
     A gate is built per run (agent/base.py start_task) and its counter started at
     1 inside each one, so EVERY run's first ask used to be "perm-1" — while a
     window remembers the ids it answered for as long as the page lives
-    (ui/js/permissions.js answeredPerm). A reused id is therefore a prompt the
+    (ui/src/renderer/permissions.ts answeredPerm). A reused id is therefore a prompt the
     window swallows silently: no dialog ever appears, gate.require waits (no
     timeout, by design), and the only way out is Stop. Ids unique for the life of
     the process are the fix this pins.

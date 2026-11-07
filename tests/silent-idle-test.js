@@ -27,40 +27,53 @@
 //
 // Run: node tests/silent-idle-test.js
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const fs = require("fs");
+const path = require("path");
+const {
+  check, summary, slicer, uiSource, uiModules, runnableSnippet, stateStub,
+} = require("./harness.js");
 
+const ROOT = path.join(__dirname, "..");
 const APP = uiSource(); // the renderer, every module in page load order
+// the shared state leaf, read as text: these three flags outlive the module that
+// sets them, so they live in one object rather than three private lets
+const STATE = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "state.ts"), "utf8");
 const { fnBody } = slicer(APP);
 
 // ---- the wire contract: a flag that survives from the move to the frame ----
-check(/^let sseRunAtRisk = false;$/m.test(APP),
-  "an in-flight run at risk is real module state (it has to outlive the base)");
-check(/^let sseRunLostPending = false;$/m.test(APP),
+check(/^\s*sseRunAtRisk: false,$/m.test(STATE),
+  "an in-flight run at risk is real shared state (it has to outlive the base)");
+check(/^\s*sseRunLostPending: false,$/m.test(STATE),
   "the question the revealing frame asks outlives the stream that answered it");
-check(/^let runSettled = false;$/m.test(APP),
+check(/^\s*runSettled: false,$/m.test(STATE),
   "and the ledger it is answered against is state of its own");
-check(/if \(busy && clean !== API_BASE\) sseRunAtRisk = true;/.test(fnBody("switchBackend")),
+check(/if \(busy && clean !== state\.apiBase\) state\.sseRunAtRisk = true;/.test(fnBody("switchBackend")),
   "moving the base while a run is in flight records it");
-check(/if \(busy\) sseRunAtRisk = true;/.test(fnBody("dropStaleBackend")),
+check(/if \(busy\) state\.sseRunAtRisk = true;/.test(fnBody("dropStaleBackend")),
   "so does dropping the base under a run (the tunnel-end path)");
-check(/if \(ev\.value === "idle" && sseRunAtRisk\)/.test(fnBody("renderEvent")),
+check(/if \(ev\.value === "idle" && state\.sseRunAtRisk\)/.test(fnBody("renderEvent")),
   "the status frame that reveals the outcome is where it is answered");
-check(/sseRunLostPending = true;/.test(fnBody("renderEvent")),
+check(/state\.sseRunLostPending = true;/.test(fnBody("renderEvent")),
   "with a question, not an answer: the log has not spoken yet");
 check(!/notice\(/.test(fnBody("renderEvent")),
   "and not with a toast that dismisses itself (the phone learned nothing)");
-check(fnBody("renderEvent").split("sseRunAtRisk = false;").length - 1 === 2,
+check(fnBody("renderEvent").split("state.sseRunAtRisk = false;").length - 1 === 2,
   "both outcomes retire the flag (the run is gone, or it was still there)");
-check(/if \(sseRunLostPending\) announceRunLost\(\);/.test(fnBody("addEvent")),
+check(/if \(state\.sseRunLostPending\) announceRunLost\(\);/.test(fnBody("addEvent")),
   "the block's closing frame is where the question is answered");
-check(/if \(runSettled\) return;/.test(fnBody("announceRunLost")),
+check(/if \(state\.runSettled\) return;/.test(fnBody("announceRunLost")),
   "and never over a run the log ended itself");
-check(/runSettled = true;/.test(fnBody("addEvent")) &&
-  /runSettled = false;/.test(fnBody("addEvent")),
+check(/state\.runSettled = true;/.test(fnBody("addEvent")) &&
+  /state\.runSettled = false;/.test(fnBody("addEvent")),
   "one ledger, written only where every record passes (live and replayed)");
-check(/runSettled = false;/.test(fnBody("clearStream")),
+check(/state\.runSettled = false;/.test(fnBody("clearStream")),
   "a cleared pane holds no run's ending");
-check(APP.split("SSE_RUN_LOST").length - 1 === 2,
+// one declaration, and every reader imports it: a second copy of the wording is
+// a copy that can drift from what the phone reads
+const MODULES = uiModules();
+const LOST_DECL = MODULES.filter((m) => /export const SSE_RUN_LOST =/.test(m.code));
+check(LOST_DECL.length === 1 && LOST_DECL[0].file === "sse-stream.ts" &&
+  MODULES.every((m) => !/nothing is running now/.test(m.code) || m === LOST_DECL[0]),
   "the wording has one home: the announcement that states the loss");
 
 // the wording itself, lifted from the renderer's own declaration: what the phone
@@ -100,11 +113,10 @@ function fakeEl(tag) {
 }
 
 global.SUPERVISOR_BASE = "http://127.0.0.1:8890";
-global.API_BASE = null;
+// the window's own mutable state, at the defaults state.ts declares: every field
+// the sliced functions read or write is on ONE object now (state leaves)
+global.state = stateStub();
 global.busy = false;
-global.sseRunAtRisk = false;
-global.sseRunLostPending = false;
-global.runSettled = false;
 global.SSE_RUN_LOST = RUN_LOST; // the renderer's own wording, declared above
 global.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -152,18 +164,7 @@ global.stream = {
     pins.push(v);
   },
 };
-global.streamHighOffset = null;
-global.oldestOffset = null;
 global.olderRemaining = 0;
-global.toolGroupEl = null;
-global.lastTextEl = null;
-global.lastTextContent = "";
-global.thinkingEl = null;
-global.thinkingContent = "";
-global.textRenderRaf = 0;
-global.thinkingRenderRaf = 0;
-global.compactionEl = null;
-global.retryNoteEl = null;
 global.cancelAnimationFrame = () => {};
 global.setOlderPill = () => {};
 global.flushTextRender = () => {};
@@ -171,7 +172,6 @@ global.flushThinkingRender = () => {}; // addEvent finalizes the reasoning block
 global.highlightCode = () => {};
 global.typesetMath = () => {};
 global.catchUp = false;
-global.followTail = true;
 global.gliding = false;
 global.glideRaf = 0;
 global.setJumpVisible = () => {};
@@ -199,7 +199,9 @@ for (const name of [
   "appendCompletion", "renderEvent", "applyStreamEvent", "addEvent",
   "announceRunLost", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll",
 ]) {
-  (0, eval)(fnBody(name));
+  // the sources are TypeScript modules now: the slice has to lose its types
+  // (and its `export` prefix) before it is a legal classic script
+  (0, eval)(runnableSnippet(fnBody(name)));
 }
 
 // the completion divider appendCompletion builds: status text, then the reason
@@ -222,13 +224,13 @@ setStatus("running");
 check(global.busy === true, "a live run has the window running");
 check(switchBackend("http://127.0.0.1:31002") === true,
   "the host re-points this window at a new session");
-check(global.sseRunAtRisk === true,
+check(global.state.sseRunAtRisk === true,
   "the in-flight run is recorded before the new stream speaks");
 
 statusFrame("idle"); // the new session's first frame: it has nothing in flight
 check(statuses[statuses.length - 1] === "idle" && global.busy === false,
   "the frame is still painted: Stop must not pretend a run is behind it");
-check(global.sseRunLostPending === true,
+check(global.state.sseRunLostPending === true,
   "and the loss becomes a question the log is about to answer");
 check(notices.length === 0, "not a toast: one that dismisses itself is not a record");
 addEvent({ type: "history", older: 0 });
@@ -238,19 +240,19 @@ const stated = completion();
 check(stated && stated.status === "error", "the transcript states the run's ending instead");
 check(stated && /nothing is running now/.test(stated.note),
   "with words, in the completion divider the phone keeps");
-check(global.sseRunLostPending === false,
+check(global.state.sseRunLostPending === false,
   "the question is spent: one announcement per lost run");
-check(global.runSettled === true, "and the record it wrote closes the run");
+check(global.state.runSettled === true, "and the record it wrote closes the run");
 statusFrame("idle");
 check(completionCount() === 1, "a later idle frame repeats nothing");
 
 // ---- 2) the departing session wrote the ending itself ----
 clearStream(); // a fresh pane: the new session's log is what this window paints
-check(global.runSettled === false, "a cleared pane holds no run's ending");
+check(global.state.runSettled === false, "a cleared pane holds no run's ending");
 setStatus("running");
 switchBackend("http://127.0.0.1:31003");
 statusFrame("idle");
-check(global.sseRunLostPending === true, "the same question is asked");
+check(global.state.sseRunLostPending === true, "the same question is asked");
 addEvent({ type: "history", older: 0 });
 addEvent(frame(140, {
   type: "final",
@@ -265,7 +267,7 @@ check(/the host released this session/.test(fromLog.note),
   "and the window invents no second one above it");
 check(!/nothing is running now/.test(fromLog.note),
   "the wording stays the departing session's");
-check(global.sseRunLostPending === false && global.runSettled === true,
+check(global.state.sseRunLostPending === false && global.state.runSettled === true,
   "the question is answered by the record, and closes it");
 
 // ---- 3) the run was NOT lost (the stream only reconnected) ----
@@ -273,7 +275,7 @@ clearStream();
 setStatus("running");
 switchBackend("http://127.0.0.1:31004");
 statusFrame("running"); // the host's real state: still in flight
-check(global.sseRunAtRisk === false && global.sseRunLostPending === false,
+check(global.state.sseRunAtRisk === false && global.state.sseRunLostPending === false,
   "a frame that still reports running is not a loss");
 addEvent({ type: "history", older: 0 });
 addEvent({ type: "replayed", count: 0 });
@@ -290,7 +292,7 @@ setStatus("idle");
 switchBackend("http://127.0.0.1:31005");
 statusFrame("idle");
 addEvent({ type: "replayed", count: 0 });
-check(global.sseRunAtRisk === false && global.sseRunLostPending === false &&
+check(global.state.sseRunAtRisk === false && global.state.sseRunLostPending === false &&
   completionCount() === 0,
   "no run in flight, nothing to lose and nothing to announce");
 
@@ -302,14 +304,14 @@ clearStream();
 setStatus("running");
 switchBackend("http://127.0.0.1:31006");
 statusFrame("idle");
-check(global.sseRunLostPending === true, "the question is open with no block behind it");
+check(global.state.sseRunLostPending === true, "the question is open with no block behind it");
 addEvent(frame(400, { type: "user_message", content: "next task" }));
 const rows = rendered.map((el) => el.className);
 check(rows.indexOf("completion") >= 0,
   "a task started on a session that serves no log still states the loss");
 check(rows.indexOf("completion") < rows.indexOf("event user"),
   "and it goes ABOVE the new task, as the record of what came before it");
-check(global.sseRunLostPending === false && global.runSettled === false,
+check(global.state.sseRunLostPending === false && global.state.runSettled === false,
   "the question is closed, and the new task's run is open");
 addEvent({ type: "replayed", count: 0 });
 check(completionCount() === 1, "the block that closes later repeats nothing");
@@ -318,8 +320,8 @@ check(completionCount() === 1, "the block that closes later repeats nothing");
 clearStream();
 setStatus("running");
 dropStaleBackend(); // the forwarded port died with the tunnel
-check(global.API_BASE === null, "the dead base is dropped");
-check(global.sseRunAtRisk === true, "and the run that lived on it is recorded");
+check(global.state.apiBase === null, "the dead base is dropped");
+check(global.state.sseRunAtRisk === true, "and the run that lived on it is recorded");
 // the rows that run drew are the process of a turn no ending is coming to in this
 // window: the fold of them happens where the pane is known (js/auto-fold.js), so
 // the drop says so on the pane rather than reaching into a file that loads later
@@ -333,7 +335,7 @@ check(phone && /nothing is running now/.test(phone.note),
 
 // ---- 7) the sentinel still never becomes a base ----
 setStatus("idle");
-check(switchBackend("http://127.0.0.1:8890") === false && global.sseRunAtRisk === false,
+check(switchBackend("http://127.0.0.1:8890") === false && global.state.sseRunAtRisk === false,
   "a refused base is not a move (no false alarm either)");
 check(dispatched.filter((t) => t === "clutch:turn-interrupted").length === 1,
   "and a window with nothing in flight announces no interrupted turn");

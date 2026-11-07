@@ -4,17 +4,18 @@
 // highlight cache for fenced code, and mermaid for diagrams (its theme is read off
 // the live CSS, never hardcoded).
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { state } from "./state";
+import { autoScroll } from "./stream-view";
 
 // typeset LaTeX; pre/code are skipped so code stays literal
-const MATH_RE = /\$\$[\s\S]*?\$\$|\$[^$\n]*\$/;
+export const MATH_RE = /\$\$[\s\S]*?\$\$|\$[^$\n]*\$/;
 
-function typesetMath(el) {
+export function typesetMath(el) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
   if (!el || !MATH_RE.test(el.textContent)) return;
   // typesetting changes height asynchronously: re-pin the tail when it settles
@@ -22,14 +23,14 @@ function typesetMath(el) {
 }
 
 // gate: only scan when a $…$ pair survives in non-code text
-function hasMathText(el) {
+export function hasMathText(el) {
   const clone = el.cloneNode(true);
   clone.querySelectorAll("pre, code").forEach((n) => n.remove());
   return MATH_RE.test(clone.textContent);
 }
 
 // typeset replayed math block-by-block so the progress bar tracks the work
-async function typesetProgressively(root, onPct) {
+export async function typesetProgressively(root, onPct) {
   if (typeof MathJax === "undefined" || typeof MathJax.typesetPromise !== "function") return;
   const blocks = Array.from(root.querySelectorAll(".event.text .body, .event.user .body")).filter(hasMathText);
   if (!blocks.length) return;
@@ -48,12 +49,12 @@ async function typesetProgressively(root, onPct) {
 // (this is what pegged the renderer and froze the window mid-answer).
 // textContent is invariant under highlighting, so the source string is a
 // stable key; cached fences just get their HTML re-assigned.
-const hlCache = new Map();
-const HL_CACHE_MAX = 64; // bounded LRU (insertion-ordered FIFO is fine here)
-const HL_STREAM_MAX = 16384; // while streaming, fences bigger than this wait for the flush render
-const HL_CACHE_MAX_SRC = 131072; // never cache giants; they re-highlight on flush only
+export const hlCache = new Map();
+export const HL_CACHE_MAX = 64; // bounded LRU (insertion-ordered FIFO is fine here)
+export const HL_STREAM_MAX = 16384; // while streaming, fences bigger than this wait for the flush render
+export const HL_CACHE_MAX_SRC = 131072; // never cache giants; they re-highlight on flush only
 
-function highlightCode(root, streaming = false) {
+export function highlightCode(root, streaming = false) {
   if (typeof hljs === "undefined" || !root) return;
   root.querySelectorAll("pre code").forEach((el) => {
     const src = el.textContent;
@@ -74,12 +75,12 @@ function highlightCode(root, streaming = false) {
   renderMermaid(root, streaming).catch((e) => console.warn("[mermaid]", e));
 }
 
-let mermaidInitialized = false;
+export let mermaidInitialized = false;
 // rendered SVGs cached by source: restore synchronously on streaming re-renders
-const mermaidCache = new Map();
+export const mermaidCache = new Map();
 
 // is this pre the last meaningful child? streaming skips it (fence may be open)
-function isLastElement(pre) {
+export function isLastElement(pre) {
   let n = pre.nextSibling;
   while (n) {
     if (n.nodeType === 1) return false;
@@ -93,7 +94,7 @@ function isLastElement(pre) {
 // palette, --font-display stack) into mermaid's themeVariables. Returns false
 // when initialize() threw — the caller keeps mermaidInitialized set anyway so a
 // broken environment is not retried on every frame.
-function initMermaidTheme() {
+export function initMermaidTheme() {
   try {
     // :root custom properties are handed over verbatim, and --font-display is
     // written with inline /* comments */ and newlines for readability. A
@@ -191,7 +192,7 @@ function initMermaidTheme() {
 
 // render mermaid: skip a last-element block mid-stream (open fence), keep
 // broken source literal (async parse gate)
-async function renderMermaid(root, streaming = false) {
+export async function renderMermaid(root, streaming = false) {
   if (typeof mermaid === "undefined" || !root) return;
   if (!mermaidInitialized) {
     mermaidInitialized = true;
@@ -254,7 +255,7 @@ async function renderMermaid(root, streaming = false) {
         target.textContent = "";
         target.insertAdjacentHTML("beforeend", svg);
         target.dataset.mermaidSrc = src;
-        if (followTail) autoScroll(); // a diagram can be taller than its source
+        if (state.followTail) autoScroll(); // a diagram can be taller than its source
       })
       .catch((e) => {
         // keep the literal source; drop the marker so a corrected source can retry
@@ -268,7 +269,7 @@ async function renderMermaid(root, streaming = false) {
 
 // mark a failed diagram with a small inline notice; the parser message goes
 // into the hover title
-function showMermaidError(pre, detail) {
+export function showMermaidError(pre, detail) {
   if (!pre || !pre.classList) return;
   pre.classList.add("mermaid-failed");
   if (!pre.querySelector(".mermaid-error")) {

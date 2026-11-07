@@ -3,12 +3,10 @@
 // Zoom/pan over a rendered diagram with its own history entry (Android back),
 // plus the language-by-extension table a code panel highlights with.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
-
-"use strict";
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
 // ---- diagram viewer (device report #6) ----------------------------------
 // A flowchart in a phone column is unreadable at fit-width, and even on the PC
@@ -19,25 +17,25 @@
 // click is delegated (diagrams are re-rendered on every stream delta, so a
 // per-diagram listener would be re-attached hundreds of times).
 
-let dvOverlay = null;
-let dvStage = null;
-let dvInner = null;
-let dvZoom = 1;
-let dvX = 0;
-let dvY = 0;
-let dvFitZoom = 1;
-let dvHistoryEntry = false; // this viewer pushed a history entry (Android back)
+export let dvOverlay = null;
+export let dvStage = null;
+export let dvInner = null;
+export let dvZoom = 1;
+export let dvX = 0;
+export let dvY = 0;
+export let dvFitZoom = 1;
+export let dvHistoryEntry = false; // this viewer pushed a history entry (Android back)
 
-const DV_MIN_ZOOM = 0.05;
-const DV_MAX_ZOOM = 16;
-const clampZoom = (z) => Math.max(DV_MIN_ZOOM, Math.min(DV_MAX_ZOOM, z));
+export const DV_MIN_ZOOM = 0.05;
+export const DV_MAX_ZOOM = 16;
+export const clampZoom = (z) => Math.max(DV_MIN_ZOOM, Math.min(DV_MAX_ZOOM, z));
 
-function dvApply() {
+export function dvApply() {
   dvInner.style.transform = "translate(" + dvX + "px," + dvY + "px) scale(" + dvZoom + ")";
 }
 
 // centre the diagram at its natural size in the stage
-function dvFit() {
+export function dvFit() {
   const svg = dvInner.firstElementChild;
   if (!svg || !dvStage) return;
   const w = Number(svg.getAttribute("width")) || svg.clientWidth || 800;
@@ -51,7 +49,7 @@ function dvFit() {
 }
 
 // scale by `factor`, keeping the point (cx,cy) — stage-local pixels — in place
-function dvZoomAt(factor, cx, cy) {
+export function dvZoomAt(factor, cx, cy) {
   const z = clampZoom(dvZoom * factor);
   const k = z / dvZoom;
   dvX = cx - (cx - dvX) * k;
@@ -60,13 +58,13 @@ function dvZoomAt(factor, cx, cy) {
   dvApply();
 }
 
-function dvCenterZoom(z) {
+export function dvCenterZoom(z) {
   if (!dvStage) return;
   const r = dvStage.getBoundingClientRect();
   dvZoomAt(z / dvZoom, r.width / 2, r.height / 2);
 }
 
-function ensureDiagramViewer() {
+export function ensureDiagramViewer() {
   if (dvOverlay) return;
   dvOverlay = document.createElement("div");
   dvOverlay.className = "diagram-viewer";
@@ -180,7 +178,7 @@ function ensureDiagramViewer() {
   });
 }
 
-function openDiagramViewer(source) {
+export function openDiagramViewer(source) {
   const svg = source.querySelector("svg");
   if (!svg) return;
   ensureDiagramViewer();
@@ -213,7 +211,7 @@ function openDiagramViewer(source) {
   }
 }
 
-function closeDiagramViewer() {
+export function closeDiagramViewer() {
   if (!dvOverlay || !dvOverlay.classList.contains("open")) return;
   dvOverlay.classList.remove("open");
   while (dvInner.firstChild) dvInner.removeChild(dvInner.firstChild);
@@ -239,13 +237,13 @@ window.addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("click", (e) => {
-  const t = e.target;
+  const t = e.target as Element;
   const pre = t && t.closest ? t.closest("pre.mermaid-rendered") : null;
   if (pre && pre.querySelector("svg")) openDiagramViewer(pre);
 });
 
 // map a file extension to a highlight.js language id for bare <pre> results
-const CODE_LANGS = {
+export const CODE_LANGS = {
   py: "python", js: "javascript", mjs: "javascript", jsx: "javascript",
   ts: "typescript", tsx: "typescript", html: "xml", htm: "xml", xml: "xml",
   css: "css", scss: "scss", json: "json", md: "markdown", sh: "bash",
@@ -253,7 +251,7 @@ const CODE_LANGS = {
   hpp: "cpp", go: "go", rs: "rust", java: "java", sql: "sql", rb: "ruby",
   php: "php", r: "r", diff: "diff",
 };
-function highlightPreByPath(pre, path) {
+export function highlightPreByPath(pre, path) {
   if (typeof hljs === "undefined") return;
   const ext = String(path || "").split(".").pop().toLowerCase();
   const lang = CODE_LANGS[ext] || "";

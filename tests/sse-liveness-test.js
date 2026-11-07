@@ -14,7 +14,7 @@
 //
 // Run: node tests/sse-liveness-test.js
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
@@ -32,9 +32,12 @@ check(/es\.onerror = \(\) => \{\n    \/\/ the browser reconnects/.test(src),
   "es.onerror is no longer an empty auto-reconnect stub");
 check(/connectionLost\("could not reach the session to stop the task/.test(src),
   "stop() surfaces the failure instead of an empty catch (through the dialog)");
-check(/^let sseLastFrameAt = 0;/m.test(src) && /^let sseErrorsSince = 0;/m.test(src) &&
-  /^let sseDown = false;/m.test(src) && /^let sseWatchdog = null;/m.test(src) &&
-  /^let sseSuspended = false;/m.test(src),
+// `export let`: the bindings are the stream's own module state, exported because
+// the watchdog and the resume path read them from other modules — a per-stream
+// local would reset with every reconnect and lose the gap the resume forgives
+check(/^export let sseLastFrameAt = 0;/m.test(src) && /^export let sseErrorsSince = 0;/m.test(src) &&
+  /^export let sseDown = false;/m.test(src) && /^export let sseWatchdog = null;/m.test(src) &&
+  /^export let sseSuspended = false;/m.test(src),
   "the liveness state is real module state, not a per-stream local");
 
 // ---- stub environment ----
@@ -69,15 +72,18 @@ class FakeEventSource {
   }
 }
 
+// the shared state leaf (ui/src/renderer/state.ts), at its declared defaults:
+// the painted watermark and the live blocks are fields of it, not globals
+global.state = stateStub();
 global.EventSource = FakeEventSource;
 global.setInterval = () => 1; // the watchdog timer is driven by hand below
-global.API_BASE = "http://127.0.0.1:43761";
+global.state.apiBase = "http://127.0.0.1:43761";
 global.currentProject = "/tmp/demo.clc";
 global.es = null;
 global.busy = false;
 // how far this window has painted (js/project.js): a fresh window has nothing
 // to ask for, so the stream serves the resident window
-global.streamHighOffset = null;
+global.state.streamHighOffset = null;
 // the module-level stream state of the renderer: its let-declarations are NOT
 // visible to an indirect eval of one function at a time, so the runner owns
 // the storage here (the block below asserts the source declares it for real)
@@ -100,7 +106,7 @@ global.setStatus = (s) => {
 };
 global.notice = (m) => notices.push(m);
 // the disconnect funnel: this runner drives sse-stream.js, whose only answer to
-// a dead stream is to raise the dialog (ui/js/conn-lost.js). What the dialog
+// a dead stream is to raise the dialog (ui/src/renderer/conn-lost.ts). What the dialog
 // then does is conn-lost-modal-test.js's business.
 global.connectionLost = (reason) => losses.push(reason);
 global.resolveConnectionLost = () => {};
@@ -130,12 +136,12 @@ global.dropOrphanLive = () => {
 };
 global.clearRetryNote = () => {};
 global.cancelAnimationFrame = () => {};
-global.textRenderRaf = 0;
-global.lastTextEl = null;
-global.lastTextContent = "";
-global.thinkingEl = null;
-global.thinkingContent = "";
-global.toolGroupEl = null;
+global.state.textRenderRaf = 0;
+global.state.lastTextEl = null;
+global.state.lastTextContent = "";
+global.state.thinkingEl = null;
+global.state.thinkingContent = "";
+global.state.toolGroupEl = null;
 let fetchImpl = async () => {
   throw new Error("Failed to fetch");
 };
@@ -144,7 +150,7 @@ global.apiFetch = (p, o) => fetchImpl(p, o);
 // The run loop is the HOST's (P1-4): Stop and Run are IPC calls into
 // window.clutchRun, and there is no page-side /api/stop any more. The host's
 // answers arrive in two shapes — ui/preload.js resolves {ok,error} and
-// ui/bridge-shim.js rejects (an unreachable bridge IS a dead channel) — so the
+// ui/src/renderer/bridge-shim.ts rejects (an unreachable bridge IS a dead channel) — so the
 // stub can be either, and hostCall() (loaded below) is what normalises them.
 let hostStop = async () => ({ ok: true });
 const hostStops = { count: 0 };

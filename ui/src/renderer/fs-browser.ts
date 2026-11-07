@@ -3,20 +3,29 @@
 // Walks the backend's filesystem, with a tap-versus-scroll press slop and a path
 // back when the remembered directory is gone.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch } from "./app";
+import { reconciledBackendUrl, switchBackend, switchBackendResolved } from "./backend-lifecycle";
+import { hidePickerBody, setFsListing, showPickerBody } from "./conn-flow";
+import { connStatus, renderConnSelector } from "./conn-store";
+import { $ } from "./dom";
+import { createProject, openProject } from "./project";
+import { closeModal, dismissOnOverlayPress, notice } from "./settings";
+import { state } from "./state";
+import { busy } from "./stream-view";
+import { showHidden } from "./workspace-panel";
 
 // ---- server file browser (unified open/new on the backend's filesystem) ----
-const fsModal = $("#fs-modal");
-let fsMode = "open";
-let fsPath = "";
-let fsParent = null;
+export const fsModal = $("#fs-modal");
+export let fsMode = "open";
+export let fsPath = "";
+export let fsParent = null;
 
-function openFsBrowser(mode) {
+export function openFsBrowser(mode) {
   if (busy) {
     notice("a run is active — stop it before opening another project");
     return;
@@ -56,7 +65,7 @@ function openFsBrowser(mode) {
     });
 }
 
-function closeFsBrowser() {
+export function closeFsBrowser() {
   setFsListing(false); // a closed picker browses nothing: no listing is still wanted
   closeModal(fsModal);
 }
@@ -69,18 +78,18 @@ function closeFsBrowser() {
 // at all, silently (device report: "opening another project on the phone does
 // nothing"). pointerup still fires and still reaches the list, so the tap lands
 // on whatever row is under the finger when it is released.
-const fsRowActions = new WeakMap(); // row element -> its activation (no leak: keyed by the row)
-const TAP_SLOP_PX = 10; // a press that travels farther than this is a scroll, not a tap
-let fsPress = null;
-let fsActivatedRow = null; // row already activated by the pointer path
+export const fsRowActions = new WeakMap(); // row element -> its activation (no leak: keyed by the row)
+export const TAP_SLOP_PX = 10; // a press that travels farther than this is a scroll, not a tap
+export let fsPress = null;
+export let fsActivatedRow = null; // row already activated by the pointer path
 
-function fsTappableRowAt(x, y) {
+export function fsTappableRowAt(x, y) {
   const el = document.elementFromPoint(x, y);
   const row = el && el.closest ? el.closest(".fs-row") : null;
   return row && fsRowActions.has(row) ? row : null;
 }
 
-function fsRow(label, cls, onClick) {
+export function fsRow(label, cls = "", onClick = null) {
   const row = document.createElement("div");
   row.className = "fs-row " + cls;
   row.textContent = label;
@@ -121,12 +130,12 @@ $("#fs-list").addEventListener("pointercancel", () => {
 
 // Draw the directory the backend answered with. The listing FOLLOWS the base: a
 // picker that is already open re-lists the moment the host announces one
-// (backend-lifecycle.js, backend:base-changed), and no base at all means no
+// (backend-lifecycle.ts, backend:base-changed), and no base at all means no
 // listing to draw.
-async function loadDir(path, remember = true, refetched = false) {
+export async function loadDir(path, remember = true, refetched = false) {
   const listEl = $("#fs-list");
-  const token = ++fsListToken; // latest listing request: a stale answer must not paint
-  if (!API_BASE) {
+  const token = ++state.fsListToken; // latest listing request: a stale answer must not paint
+  if (!state.apiBase) {
     // no session, so nothing to browse: the body stays folded and the file list
     // stays empty (report #1 — a status line about the connection was drawn as if
     // it were a directory entry, and "wait for the backend then list" made the
@@ -139,13 +148,13 @@ async function loadDir(path, remember = true, refetched = false) {
     // openFsBrowser does, so a claim that landed between the two is not a picker
     // that stays folded for ever.
     if (!refetched) {
-      const before = API_BASE;
+      const before = state.apiBase;
       try {
         await switchBackendResolved();
       } catch (e) {
         /* nothing to ask: stay folded, which is the honest answer */
       }
-      if (token === fsListToken && API_BASE && API_BASE !== before) {
+      if (token === state.fsListToken && state.apiBase && state.apiBase !== before) {
         return loadDir(path, remember, true);
       }
     }
@@ -153,7 +162,7 @@ async function loadDir(path, remember = true, refetched = false) {
   }
   listEl.innerHTML = '<div class="fs-row plain">loading…</div>';
   // a listing is on its way: the folded body is this wait, not the welcome bar (the
-  // bar's own door reads it — see syncConnConnect in js/conn-flow.js). The wait is
+  // bar's own door reads it — see syncConnConnect in conn-flow.ts). The wait is
   // opened only where something is actually asked for, so it can only end two ways:
   // this listing answering (the finally below, if it is still the latest), or the
   // fold retiring it (hidePickerBody)
@@ -162,7 +171,7 @@ async function loadDir(path, remember = true, refetched = false) {
     const data = await apiFetch(
       "/api/fs/list?path=" + encodeURIComponent(path) + (showHidden ? "&hidden=1" : "")
     );
-    if (token !== fsListToken) return; // superseded while the listing was in flight
+    if (token !== state.fsListToken) return; // superseded while the listing was in flight
     fsPath = data.path;
     fsParent = data.parent;
     // remember the last browsed directory (re-lists pass remember=false)
@@ -192,7 +201,7 @@ async function loadDir(path, remember = true, refetched = false) {
     // picker now
     showPickerBody();
   } catch (e) {
-    if (token !== fsListToken) return;
+    if (token !== state.fsListToken) return;
     // a remembered last directory may be gone: forget it and retry from home once
     const remembered = localStorage.getItem("clutch_fs_last_dir");
     if (remembered && path === remembered) {
@@ -211,15 +220,15 @@ async function loadDir(path, remember = true, refetched = false) {
     // openFsBrowser makes, and the one backend:base-changed would make had the page
     // been listening when it was announced) and retry the listing only if the base
     // actually moved: a host that hands the same URL back is the honest banner below.
-    if (!e.status && !refetched && API_BASE) {
-      const before = API_BASE;
+    if (!e.status && !refetched && state.apiBase) {
+      const before = state.apiBase;
       let moved = false;
       try {
         moved = await switchBackendResolved();
       } catch (err) {
         moved = false;
       }
-      if (token === fsListToken && moved && API_BASE && API_BASE !== before) {
+      if (token === state.fsListToken && moved && state.apiBase && state.apiBase !== before) {
         return loadDir(path, remember, true);
       }
     }
@@ -230,13 +239,13 @@ async function loadDir(path, remember = true, refetched = false) {
     listEl.innerHTML = "";
     hidePickerBody();
     connStatus.textContent =
-      "Cannot reach backend at " + API_BASE + " (" + (e.message || e) + "). Connect again below.";
+      "Cannot reach backend at " + state.apiBase + " (" + (e.message || e) + "). Connect again below.";
   } finally {
     // the wait is over only when THIS listing is still the one the picker is waiting
     // on: a listing superseded by another directory (or retired by a fold, which ends
     // the wait itself) leaves it to whoever took over — clearing it here would call
     // their round-trip over and put the door back mid-listing
-    if (token === fsListToken) setFsListing(false);
+    if (token === state.fsListToken) setFsListing(false);
   }
 }
 

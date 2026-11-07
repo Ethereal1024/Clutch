@@ -3,26 +3,30 @@
 // The narrow-screen panel and its history entry, the show-hidden toggle, and the
 // workspace tree that re-renders on a signature change.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch } from "./app";
+import { els } from "./els";
+import { $ } from "./dom";
+import { fsModal, fsPath, loadDir } from "./fs-browser";
+import { escapeHtml } from "./render-events";
 
 // ---- workspace tree ----
-let lastTreeSig = "";
-let treeRefreshTimer = null;
+export let lastTreeSig = "";
+export let treeRefreshTimer = null;
 
 // dotfiles hidden everywhere until the shared toggle turns them on
-let showHidden = localStorage.getItem("clutch_show_hidden") === "1";
+export let showHidden = localStorage.getItem("clutch_show_hidden") === "1";
 
-function updateHiddenToggles() {
+export function updateHiddenToggles() {
   $("#fs-hidden-toggle").checked = showHidden;
   $("#tree-hidden-toggle").checked = showHidden;
 }
 
-function toggleHidden() {
+export function toggleHidden() {
   showHidden = !showHidden;
   localStorage.setItem("clutch_show_hidden", showHidden ? "1" : "0");
   updateHiddenToggles();
@@ -46,15 +50,15 @@ updateHiddenToggles();
 // #shell-project-actions, so there is exactly one node, one handler and one
 // disabled state per action — and a rotation back to the desktop layout moves
 // the same nodes home.
-const shellBackdrop = $("#shell-backdrop");
-const shellPanel = $("#right");
-const shellActions = $("#shell-project-actions");
-const SHELL_ACTIONS = ["#open-project-btn", "#new-project-btn", "#settings-btn"];
-const NARROW_Q = window.matchMedia("(max-width: 640px)");
+export const shellBackdrop = $("#shell-backdrop");
+export const shellPanel = $("#right");
+export const shellActions = $("#shell-project-actions");
+export const SHELL_ACTIONS = ["#open-project-btn", "#new-project-btn", "#settings-btn"];
+export const NARROW_Q = window.matchMedia("(max-width: 640px)");
 
 // paintShellPanel only moves the classes; setShellPanel also owns the history
 // entry, so the two must not call each other (see the popstate listener).
-function paintShellPanel(open) {
+export function paintShellPanel(open) {
   shellPanel.classList.toggle("drawer-open", open);
   shellBackdrop.classList.toggle("open", open);
 }
@@ -68,9 +72,9 @@ function paintShellPanel(open) {
 // panel owns an entry, and our own history.back() announces itself. Without the
 // second flag a stale pop (tapping ✕ and reopening a frame later) would close
 // the panel the user just reopened.
-let panelHistoryEntry = false; // the open panel owns a history entry
-let consumingEntry = false;    // our own history.back() is in flight
-function setShellPanel(open) {
+export let panelHistoryEntry = false; // the open panel owns a history entry
+export let consumingEntry = false;    // our own history.back() is in flight
+export function setShellPanel(open) {
   const was = shellPanel.classList.contains("drawer-open");
   paintShellPanel(open);
   if (open === was) return;
@@ -91,7 +95,7 @@ function setShellPanel(open) {
     }
   }
 }
-function closeShellPanel() {
+export function closeShellPanel() {
   setShellPanel(false);
 }
 
@@ -116,7 +120,7 @@ shellActions.addEventListener("click", (e) => {
   if (e.target.closest && e.target.closest("button")) closeShellPanel();
 });
 
-function layoutShell() {
+export function layoutShell() {
   const narrow = NARROW_Q.matches;
   for (const sel of SHELL_ACTIONS) {
     const btn = $(sel);
@@ -132,12 +136,12 @@ NARROW_Q.addEventListener("change", layoutShell);
 layoutShell();
 
 // file changes only arrive via tool results: debounced refresh, no polling
-function scheduleTreeRefresh() {
+export function scheduleTreeRefresh() {
   clearTimeout(treeRefreshTimer);
   treeRefreshTimer = setTimeout(refreshTree, 300);
 }
 
-async function refreshTree() {
+export async function refreshTree() {
   try {
     const params = new URLSearchParams();
     if (showHidden) params.set("hidden", "1");
@@ -157,9 +161,9 @@ async function refreshTree() {
   }
 }
 
-const expandedDirs = new Set();
+export const expandedDirs = new Set<string>();
 
-function renderNode(node, depth) {
+export function renderNode(node, depth) {
   const wrap = document.createElement("div");
   wrap.className = "tree-branch";
   const row = document.createElement("div");

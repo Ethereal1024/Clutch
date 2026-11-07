@@ -253,7 +253,7 @@ async function main() {
     // a read that LOST a source is the exception to that five minutes: holding
     // "fetch failed" for five minutes is how a moment of bad network turns into
     // "this page is broken", so it is asked again almost at once — and the page
-    // is told which case it has (the mirror hint in ui/js/components-panel.js
+    // is told which case it has (the mirror hint in ui/src/renderer/components-panel.ts
     // hangs off exactly this bit)
     const failed = fakeLib({
       specs: [CHECKOUT],

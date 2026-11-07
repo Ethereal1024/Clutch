@@ -20,7 +20,7 @@
 //
 // Run: node tests/android-resume-test.js
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
@@ -42,7 +42,7 @@ check(!/sseDegrade|setStatus|notice\(/.test(fnBody("sseResume")),
   "returning from the background announces nothing and resets nothing");
 check(/sseDegrade\(/.test(fnBody("sseWatchdogTick")),
   "and the watchdog still REPORTS a stream that goes silent under a watching page");
-check(/qs\.set\("since", String\(streamHighOffset\)\)/.test(fnBody("connectSSE")),
+check(/qs\.set\("since", String\(state\.streamHighOffset\)\)/.test(fnBody("connectSSE")),
   "every connect says how far this window has read");
 check(!/qs\.set\("replay"/.test(src),
   "and never asks for a blind replay: the offset says it better");
@@ -94,14 +94,17 @@ class FakeEventSource {
   }
 }
 
+// the shared state leaf (ui/src/renderer/state.ts), at its declared
+// defaults: what used to be module-level globals is a field of this object
+global.state = stateStub();
 global.EventSource = FakeEventSource;
 global.setInterval = () => 1; // the watchdog timer is driven by hand below
 global.setTimeout = (fn) => timers.push(fn); // must stay empty: no probe, no timer
 global.clearTimeout = () => {};
-global.API_BASE = "http://127.0.0.1:43761";
+global.state.apiBase = "http://127.0.0.1:43761";
 global.currentProject = "/tmp/demo.clc";
 global.es = null;
-global.streamHighOffset = null;
+global.state.streamHighOffset = null;
 global.busy = false;
 // the module-level stream state of the renderer: its let-declarations are NOT
 // visible to an indirect eval of one function at a time, so the runner owns
@@ -130,12 +133,12 @@ global.refreshTree = () => {};
 global.dropOrphanLive = () => {};
 global.clearRetryNote = () => {};
 global.cancelAnimationFrame = () => {};
-global.textRenderRaf = 0;
-global.lastTextEl = null;
-global.lastTextContent = "";
-global.thinkingEl = null;
-global.thinkingContent = "";
-global.toolGroupEl = null;
+global.state.textRenderRaf = 0;
+global.state.lastTextEl = null;
+global.state.lastTextContent = "";
+global.state.thinkingEl = null;
+global.state.thinkingContent = "";
+global.state.toolGroupEl = null;
 // the watchdog reads the page's own visibility (a hidden page is not a witness)
 global.document = { hidden: false };
 
@@ -184,7 +187,7 @@ check(global.busy === true && statuses[statuses.length - 1] === "running",
   "the cached run state is left to the new stream's own status frame");
 
 // the reconnect is a re-read, not a re-guess: it carries what this window painted
-global.streamHighOffset = 4096;
+global.state.streamHighOffset = 4096;
 reconnects = 0;
 sseSuspend();
 sseResume();

@@ -8,7 +8,7 @@
 // question answerable in the host at all. Both are wiring, so both are pinned
 // here as source facts:
 //
-//   1. the PAGE asks (ui/js/render-events.js resumeTurn): state({mode, project})
+//   1. the PAGE asks (ui/src/renderer/render-events.ts resumeTurn): state({mode, project})
 //      — the same payload run:start takes, so `project` stays the claim the host
 //      checks and never a destination — and drive() only for an open fold.
 //   2. it is asked from the two doors that know a project (js/boot.js, and the
@@ -42,7 +42,7 @@ function handlerBody(src, name) {
 
 // ---- 1. the page's question (js/render-events.js) ----
 {
-  const src = read("ui/js/render-events.js");
+  const src = read("ui/src/renderer/render-events.ts");
   const body = slicer(src).fnBody("resumeTurn");
 
   check(/^async function resumeTurn\(\)/.test(body), "resumeTurn is the page's one entry into a turn it did not open");
@@ -69,13 +69,13 @@ function handlerBody(src, name) {
 
 // ---- 2. the two doors that know a project (boot.js, project.js) ----
 {
-  const boot = read("ui/js/boot.js");
+  const boot = read("ui/src/renderer/boot.ts");
   check(
     count(boot, /resumeTurn\(\)/g) === 1,
     "a boot asks once (a page that already knows a project can continue before the first row)"
   );
 
-  const project = read("ui/js/project.js");
+  const project = read("ui/src/renderer/project.ts");
   check(count(project, /resumeTurn\(\)/g) === 1, "opening a project asks once — and not on create: there is nothing to resume");
   const open = project.slice(project.indexOf("async function openProject("));
   const atReplay = open.indexOf("refreshRollbackAnchors()");
@@ -84,12 +84,14 @@ function handlerBody(src, name) {
 
   // and no third door invented its own: the only callers are these two. The
   // declaring file is stripped first — `function resumeTurn()` is not a call.
-  const uiFiles = fs.readdirSync(path.join(ROOT, "ui", "js")).filter((f) => f.endsWith(".js"));
+  const uiFiles = fs
+    .readdirSync(path.join(ROOT, "ui", "src", "renderer"))
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"));
   const callsResume = (f) =>
-    /resumeTurn\(\)/.test(read("ui/js/" + f).replace(/async\s+function\s+resumeTurn/, "function"));
+    /resumeTurn\(\)/.test(read("ui/src/renderer/" + f).replace(/async\s+function\s+resumeTurn/, "function"));
   const callers = uiFiles.filter(callsResume);
   check(
-    callers.sort().join(",") === "boot.js,project.js",
+    callers.sort().join(",") === "boot.ts,project.ts",
     `exactly two callers, one function (got ${callers.sort().join(",")})`
   );
 }
@@ -128,7 +130,7 @@ function handlerBody(src, name) {
 // ---- 5. the payload crosses both bridges (a dropped one asks with no claim) ----
 {
   const preload = read("ui/preload.js");
-  const shim = read("ui/bridge-shim.js");
+  const shim = read("ui/src/renderer/bridge-shim.ts");
   check(/state: \(payload\) => ipcRenderer\.invoke\("run:state", payload\)/.test(preload), "preload passes the payload to run:state");
   check(/state: \(payload\) => call\("clutchRun", "state", \[payload\]\)/.test(shim), "the phone's shim passes it in the args array");
 }

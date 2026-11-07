@@ -85,7 +85,7 @@ flowchart TD
 | D11 | Android 的客户端插件域排在**桌面版发布之前**（P1-6 是发布的前置条件，不是发布后的活） |
 | D12 | 模型流的 mid-stream 重试**保留**；取代价是“每次重试都必须是 `.clc` 里的一条事实”，不是页面上的 toast |
 | D13 | `plugin.md` 不存在，不再查找；HEAD 就是全部，`agent/prompts/*` 与 `README*` 即为文档全集 |
-| D14 | 类型闸门 = **JSDoc + 每文件一行 `// @ts-check` + `tsc --noEmit`**，就跑在 `.js` 上：零构建步骤、CommonJS 形状不变、`node tests/*.test.js` 一行不改。**不做** `namespace`，**不做** `tsc --module none` 的逐文件产出（那只是把全局改个名字，契约照旧）。打包器（esbuild IIFE）推迟到 P7-3，前置是 P1-6。P4 要删的代码不打类型。详见 §11 **补记（TS 重写之后已作废）**：host 半现在是 `ui/src/host/*.ts` + `ui/tsconfig.host.json` 编译就地出 `ui/*.js`，逐文件 `// @ts-check` 与 `ui/tsconfig.check.json` 都已删除；闸门从“每文件自愿进门”改成“整个 host 树一个配置” |
+| D14 | 类型闸门 = **JSDoc + 每文件一行 `// @ts-check` + `tsc --noEmit`**，就跑在 `.js` 上：零构建步骤、CommonJS 形状不变、`node tests/*.test.js` 一行不改。**不做** `namespace`，**不做** `tsc --module none` 的逐文件产出（那只是把全局改个名字，契约照旧）。打包器（esbuild IIFE）推迟到 P7-3，前置是 P1-6。P4 要删的代码不打类型。详见 §11 **补记（TS 重写之后已作废）**：host 半现在是 `ui/src/host/*.ts` + `ui/tsconfig.host.json` 编译就地出 `ui/*.js`，逐文件 `// @ts-check` 与 `ui/tsconfig.check.json` 都已删除；闸门从“每文件自愿进门”改成“整个 host 树一个配置”。**补记（渲染器转 TS 之后）**：渲染器也整体 TypeScript——`ui/src/renderer/*.ts`（29 个模块）+ `ui/tsconfig.renderer.json`，esbuild 打成 `ui/renderer.js`，`ui/renderer.modules.json` 删除；`npm run typecheck` 现在跑两份配置，见 §11 P7-3 补记 |
 
 **执行顺序**：P0 → P1-1…P1-6（P1-6 = Android 客户端插件域，发布前必需，已落地）→ P2 → P3 → P4 → P6。P5（手机保活）与 P2–P4 无冲突，可随时并行插入，建议越早越好（它只是原生层的两处小改动，但决定了“锁屏不打断”能不能被验证）。
 
@@ -478,6 +478,15 @@ flowchart TD
 **P7 完成判据**：`cd ui && npm run typecheck` rc=0；`ui/*.js` 里被 D14 覆盖的那一栈全部在闸内（今天 15 个文件）；P7-2 的跨语言断言在 `tests/*` 里有一条会红的（已落地：`tests/durable-types.test.js`）；P7-3 落地后 `ui/index.html` 的**渲染器**只剩一个 `<script src>`（三方库与 `version.js` 各自保留，理由见 P7-3），且 `node ui/build-renderer.js --check` 与 `tests/ui-load-order-test.js` 都绿。
 **补记**：那“15 个文件”现在是 **41 个 `.ts` 源**（本节补记），命令还是 `(cd ui && npm run typecheck)`、还是 rc=0，只是它查的不再是 pragma 那一栈，而是整棵 `ui/src/host`。
 
+**补记（渲染器也转 TS 之后，2026-02，`ts-rewrite` 分支）**：上面那一整节“拼接 + `renderer.modules.json` + 顺序即契约”现在**全部作废**——渲染器走了和 host 同一条路，只是打包器终于上场：
+
+- **源是 ESM TypeScript**：25 个页面脚本搬进 `ui/src/renderer/*.ts`（`app.ts`…`workspace-panel.ts`，`ui/js/` 与 `ui/app.js` 已不存在），另加 4 个新的**叶子模块** `dom.ts`（`$`）/ `state.ts`（共享可变状态）/ `els.ts`（`els`、`stream`、`eventsEl`）/ `env.ts`（`IS_ANDROID`、`agentMode`），以及一份 `globals.d.ts` 声明宿主全局。**`ui/renderer.modules.json` 删除**：ESM 的 `import` 图就是清单，`boot.ts` 的 `import "./x"` 顺序就是页面顺序。
+- **构建是 esbuild，不是 concat**：`ui/build-renderer.js` 用 esbuild 打一个 `format: "iife"` 的 bundle（`ui/renderer.js`，**29 个模块、6,233 行、228,984 字节**）；`file://` 拒绝 module script 这条硬约束因此是真的解了，而不是绕开。保鲜仍是两层且不靠人：`--check` 读 banner 里的源文件 sha256（digest `875671b0b035…`，不需要 esbuild、Android 发布 job 也能跑），`tests/ui-load-order-test.js` 在内存里重建后逐字节比对。
+- **加载顺序从“契约”变成“语言保证”**：原来 25 个文件共用一个作用域、靠函数提升和书写顺序互相点名；现在是 ESM，模块初始化顺序由 `import` 图决定。唯一真踩到的坑是**在顶层读别的模块的 `let`**（TDZ：`import` 的绑定在对方模块求值完之前不可读写），所以 `$`、`state`、`els`、`env` 挪进**叶子模块**——没有渲染器 import 的模块 ESM 一定先初始化——`app.ts` 不再拥有任何被顶层读取的值。`API_BASE` 这个全局常量随之消失，成了 `state.apiBase`。
+- **一个 TypeScript**：`ui/node_modules/typescript` 钉 **5.9.3**，esbuild **^0.28.2** 只作 `ui/` 的 devDependency，`@types/node` 只在 `ui/`；`strict: false` 到处一致——它是**声明过、量过**的棘轮，不是疏漏。闸门从一份配置变两份：`npm run typecheck` = `tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.renderer.json --noEmit`，rc=0。
+- **测试：38 个 runner 跟着改，断言的还是同一件事**。`tests/harness.js` 新增 `runnableSnippet()`（剥模块语法 + esbuild 去类型，**故意不加 `format: "iife"`**：IIFE 会把顶层声明藏起来，而 vm 类 runner 要它们在全局上）与 `stateStub()`（在 vm 里跑 `state.ts`，返回声明默认值的 `state` 对象）；`rendererScript()` 建在 `runnableSnippet()` 上。改法只有五种，且都是“换地址不换断言”：切片进 eval/vm 前过 `runnableSnippet`、整模块用 `rendererScript(name)`、`global.<state 字段>` → `global.state.<字段>`、`global.API_BASE` → `global.state.apiBase`、源码扫描的 `^let x = …;` → `^\s*x: …,$`（state）或 `^export let …`（`project.ts`/`sse-stream.ts` 仍自己持有绑定）/ `^export function …`。
+- **验证（本次收尾实测）**：`npm run typecheck` rc=0；`node build-host.js` 41 个模块；`node build-renderer.js` 29 个模块、6,233 行、228,984 字节，`--check` “up to date”；`node ui/verify-build-config.js` OK；**两条 sweep 全绿——`tests/*.test.js` + `tests/*-test.js` = 84/84，Python 24/24**。
+
 ---
 
 ## 12. 本轮 6 问 6 答（已全部关闭，无阻塞项）
@@ -489,7 +498,7 @@ flowchart TD
 | D-3 | Android 的客户端插件域在桌面版之前还是之后？ | **之前** | D11 → P1-6（发布前置） |
 | D-4 | 模型流的中途重试保留吗？ | **按推荐：保留，代价是可见** | D12 → P1-2 |
 | D-5 | `plugin.md` 在哪里？ | **不找了** | D13 → P4-5（已关闭） |
-| D-6 | 类型要不要上 TS / 构建步骤？ | **都不上：JSDoc + `// @ts-check` + `tsc --noEmit`，`.js` 原样** —— **补记（已推翻，见 §11 补记）**：host 半整体 TypeScript，`ui/src/host/*.ts` + `ui/tsconfig.host.json` + `ui/build-host.js` 就地编译，旧的逐文件 pragma 闸门 `ui/tsconfig.check.json` 删除；其余三块（渲染器 / Android host / 插件）转 TS 时各带自己的构建 | D14 → P7-1（已落地）；打包器推迟到 P7-3。渲染器还有一个硬约束没解：页面在 `file://` 下加载，**module script 被拒**，所以要么 esbuild 打成经典 IIFE，要么维持 concat |
+| D-6 | 类型要不要上 TS / 构建步骤？ | **都不上：JSDoc + `// @ts-check` + `tsc --noEmit`，`.js` 原样** —— **补记（已推翻，见 §11 补记）**：host 半整体 TypeScript，`ui/src/host/*.ts` + `ui/tsconfig.host.json` + `ui/build-host.js` 就地编译，旧的逐文件 pragma 闸门 `ui/tsconfig.check.json` 删除；其余三块（渲染器 / Android host / 插件）转 TS 时各带自己的构建 | D14 → P7-1（已落地）；打包器推迟到 P7-3。渲染器还有一个硬约束没解：页面在 `file://` 下加载，**module script 被拒**，所以要么 esbuild 打成经典 IIFE，要么维持 concat。**补记（渲染器转 TS 之后）**：选了前者——渲染器不再 concat，源是 ESM TypeScript，`ui/build-renderer.js` 用 esbuild 打一个经典 IIFE bundle；`file://` 的 module script 限制因此真的解了，加载顺序也从“文件名解析契约”变成 ESM 的 `import` 图（见 §11 P7-3 补记）|
 
 至此没有需要用户再拍板的阻塞项。后续若出现新分叉，写进本表再动手。
 
@@ -522,8 +531,15 @@ node tests/no-local-fallback-test.js            # P0-3/P0-4 之后必须 0 FAIL
 for t in tests/*_test.py; do python3 -m "tests.$(basename "${t%.py}")" >/dev/null || echo "FAIL $t"; done
 python3 -m ruff check agent scripts --output-format concise   # 3 条既有告警（M3 补记），CI 不跑这一步
 
-# 类型闸门：host 半是 TypeScript（ui/tsconfig.host.json，--noEmit），rc=0（D14 补记）
+# 类型闸门：host（ui/tsconfig.host.json）+ 渲染器（ui/tsconfig.renderer.json）各一份配置，
+# 一个 `npm run typecheck` 连跑两遍 --noEmit，rc=0（D14 补记）
 (cd ui && npm run typecheck)
+
+# 渲染器 bundle 与源码逐字节保鲜（不依赖 esbuild，Android 发布 job 也能跑）
+node ui/build-renderer.js --check               # "up to date — 29 modules, 6233 lines"
+
+# 两条 JS sweep 全绿：84/84（*.test.js 与 *-test.js）
+for t in tests/*.test.js tests/*-test.js; do node "$t" >/dev/null || echo "FAIL $t"; done
 
 # 日志端点（P2）：76 条 ok，rc=0；起真 server、开真 .clc
 python3 -m tests.log_api_test

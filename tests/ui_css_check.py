@@ -98,8 +98,8 @@ EASING_PICKS = (
     re.compile(r"easing\s*=\s*open\s*\|\|\s*body\s*\?\s*ARRIVE_EASE\s*:\s*LEAVE_EASE"),
 )
 
-FOLD_JS = UI / "js" / "stream-text.js"
-MODAL_JS = UI / "js" / "settings.js"
+FOLD_JS = UI / "src" / "renderer" / "stream-text.ts"
+MODAL_JS = UI / "src" / "renderer" / "settings.ts"
 
 check, failures = collecting_check()
 
@@ -378,7 +378,7 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
         written = curve.group(1) if curve else f"(no {name})"
         if not token_value or _compact(written) != _compact(token_value):
             out.append(
-                f"ui/js/stream-text.js: {name} = {written!r} is not "
+                f"ui/src/renderer/stream-text.ts: {name} = {written!r} is not "
                 f"ui/style.css's {token} = {token_value!r}"
             )
 
@@ -388,12 +388,12 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
     fold_ms = js_ms(fold_js, "FOLD_MS")
     if move_ms is None or fold_ms != move_ms:
         out.append(
-            f"ui/js/stream-text.js: FOLD_MS = {fold_ms} is not --move "
+            f"ui/src/renderer/stream-text.ts: FOLD_MS = {fold_ms} is not --move "
             f"({declared.get('--move')!r}), which every fold here runs for"
         )
     if not re.search(r"duration:\s*FOLD_MS\s*,", fold_js):
         out.append(
-            "ui/js/stream-text.js: no animation runs for FOLD_MS — the fold's "
+            "ui/src/renderer/stream-text.ts: no animation runs for FOLD_MS — the fold's "
             "duration is not the sheet's --move at all"
         )
 
@@ -408,12 +408,12 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
     fold_size_ms = js_ms(fold_js, "FOLD_SIZE_MS")
     if size_ms is None or fold_size_ms != size_ms:
         out.append(
-            f"ui/js/stream-text.js: FOLD_SIZE_MS = {fold_size_ms} is not --size "
+            f"ui/src/renderer/stream-text.ts: FOLD_SIZE_MS = {fold_size_ms} is not --size "
             f"({declared.get('--size')!r}), the far end of the region fold's ramp"
         )
     if not RAMP_WIRED.search(fold_js):
         out.append(
-            "ui/js/stream-text.js: no animation runs for foldMoveMs(fold) — the "
+            "ui/src/renderer/stream-text.ts: no animation runs for foldMoveMs(fold) — the "
             "region fold's above---move duration is not wired to the distance ramp"
         )
 
@@ -423,7 +423,7 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
     # exist to make visible — and every value above would still match the sheet.
     if not all(pick.search(fold_js) for pick in EASING_PICKS):
         out.append(
-            "ui/js/stream-text.js: no easing picks between ARRIVE_EASE and LEAVE_EASE by "
+            "ui/src/renderer/stream-text.ts: no easing picks between ARRIVE_EASE and LEAVE_EASE by "
             "direction (a diff fold grows into place and shrinks out of it; a region fold "
             "has a body, so it arrives in BOTH directions) — both curves are in the file "
             "and neither one moves anything"
@@ -432,14 +432,14 @@ def motion_drifts(declared: dict[str, str], fold_js: str, settings_js: str) -> l
     for match in JS_DURATION.finditer(fold_js):
         if move_ms is None or int(match.group(1)) != move_ms:
             out.append(
-                f"ui/js/stream-text.js:{_line_of(fold_js, match.start())}: the fold runs "
+                f"ui/src/renderer/stream-text.ts:{_line_of(fold_js, match.start())}: the fold runs "
                 f"{match.group(1)}ms while --move is {declared.get('--move')!r}"
             )
 
     close_ms = js_ms(settings_js, "MODAL_CLOSE_MS")
     if move_ms is None or close_ms != move_ms:
         out.append(
-            f"ui/js/settings.js: MODAL_CLOSE_MS = {close_ms} is not --move "
+            f"ui/src/renderer/settings.ts: MODAL_CLOSE_MS = {close_ms} is not --move "
             f"({declared.get('--move')!r}), which `.modal.closing` runs for"
         )
     return out
@@ -499,7 +499,7 @@ def check_tokens() -> None:
         missing = undeclared_sheet_reads(f"ui/{name}", code, declared)
         check(not missing, f"ui/{name} reads only tokens the sheets declare"
               + (f" — {missing[0]}" if missing else ""))
-    readers = sorted((UI / "js").glob("*.js"))
+    readers = sorted((UI / "src" / "renderer").glob("*.ts"))
     print(f"and the ones js reads out of the cascade ({len(readers)} modules scanned):")
     for path in readers:
         code = code_only(path.read_text(encoding="utf-8"), js=True)
@@ -617,7 +617,7 @@ def check_regression_motion() -> None:
           f"in both directions, and a close timer that is not --move either "
           f"({len(drift)} reported)")
     files = [d.split(":")[0] for d in drift]
-    check(files == ["ui/js/stream-text.js"] * 4 + ["ui/js/settings.js"],
+    check(files == ["ui/src/renderer/stream-text.ts"] * 4 + ["ui/src/renderer/settings.ts"],
           f"each drift names the file it is in ({files})")
     one = motion_drifts(declared, REGRESSION_FOLD_ONE_CURVE_JS,
                         f"const MODAL_CLOSE_MS = {ms_of(declared['--move'])};\n")

@@ -1,6 +1,6 @@
 "use strict";
 
-// The history pager's WAIT, inside the control that starts it (ui/js/project.js
+// The history pager's WAIT, inside the control that starts it (ui/src/renderer/project.ts
 // loadOlder, ui/style.css's `.older-pill.busy`): device report — "load earlier
 // records has a long delay; the moment after the tap looks like nothing happened,
 // a progress bar or a loading animation would help".
@@ -23,9 +23,9 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, slicer } = require("./harness.js");
+const { check, summary, slicer, runnableSnippet, stateStub } = require("./harness.js");
 
-const SRC = fs.readFileSync(path.join(__dirname, "..", "ui", "js", "project.js"), "utf8");
+const SRC = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "project.ts"), "utf8");
 const { region } = slicer(SRC);
 
 // ---- a node with the three things the pill is written through ----
@@ -124,6 +124,9 @@ const ctx = {
   hasMathText: () => false,
   requestAnimationFrame: (cb) => setTimeout(cb, 0),
   setTimeout,
+  // the shared mutable state (ui/src/renderer/state.ts): the pager reads the
+  // pane's watermark from it, and the probe below sets it
+  state: stateStub(),
   lastTextEl: null,
   lastTextContent: "",
   thinkingEl: null,
@@ -137,9 +140,11 @@ vm.createContext(ctx);
 // runner has to set up (the byte offset the pane has loaded) and to read back
 // (the pager's own state) are reached through a probe the slice ends with.
 vm.runInContext(
-  region("let olderRemaining", "loadOlder") +
-  "\nctx_probe = { setOldest: (v) => { oldestOffset = v; }," +
-  " state: () => ({ paging, olderBusy, olderRemaining, oldestOffset }) };", ctx);
+  runnableSnippet(
+    region("let olderRemaining", "loadOlder") +
+    "\nctx_probe = { setOldest: (v) => { state.oldestOffset = v; }," +
+    " paging: () => ({ paging, olderBusy, olderRemaining, oldestOffset: state.oldestOffset }) };"),
+  ctx);
 ctx.ctx_probe.setOldest(4096); // the tail of a project is loaded: there is a page below it
 
 const settle = async () => {

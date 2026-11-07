@@ -332,7 +332,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     # the window's START back to the turn's own task row (aligned_start), which makes
     # "a page of history" and "whole turns" the same unit — the renderer then never
     # folds a region whose head it has not seen, and never has to reconcile that fold
-    # when a later page brings the head (ui/js/auto-fold.js foldSegmentRows).
+    # when a later page brings the head (ui/src/renderer/auto-fold.ts foldSegmentRows).
     with tempfile.TemporaryDirectory() as d:
         p9 = Path(d) / "align.clc"
         evs = [UserMessageEvent(content="task one")]
@@ -355,7 +355,7 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
         check(task1 == 0 and task2 > 0,
               "the alignment fixture's second task row sits at a byte offset of its own")
         # each page after the first begins EXACTLY on a record (`lo` is the oldest
-        # rendered event's offset, ui/js/stream-events.js): re-walking it would hand
+        # rendered event's offset, ui/src/renderer/stream-events.ts): re-walking it would hand
         # the reader the turn BEFORE the one they asked for, on every page
         check(alg.aligned_start(task2) == task2,
               "a window that already starts on a task row stays where it is")

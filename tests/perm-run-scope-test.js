@@ -7,7 +7,7 @@
 // and the run hangs until Stop. What made it: an id is minted per RUN
 // (agent/core/permission.py builds a gate per start_task; hosts before 0.1.31
 // restarted their counter at 1 inside every gate, so "perm-1" named every run's
-// first ask), while ui/js/permissions.js remembered the ids the WINDOW had
+// first ask), while ui/src/renderer/permissions.ts remembered the ids the WINDOW had
 // answered for as long as the page lived. So run 2's first ask carried the id the
 // user had already answered in run 1, openPerm returned on its first line, no
 // dialog was ever drawn, the run stayed blocked in gate.require — which waits
@@ -27,13 +27,16 @@
 //   3. a live ask is never dropped because the pane happens to be "loading",
 //      while the loading guard still drops a replayed status frame.
 
-const { check, summary, slicer, uiModules } = require("./harness.js");
+const { check, summary, slicer, uiModules, rendererScript, stateStub } = require("./harness.js");
 
 const mods = uiModules();
 const src = mods.map((m) => m.code).join("\n");
-const permsSrc = mods.find((m) => m.file === "js/permissions.js").code;
-const streamSrc = mods.find((m) => m.file === "js/stream-events.js").code;
-const renderSrc = mods.find((m) => m.file === "js/render-events.js").code;
+// the module as a classic script (imports dropped, types erased): the source
+// scans below still read the .ts text, this copy is what the vm evaluates
+const permsSrc = rendererScript("permissions");
+const permsText = mods.find((m) => m.file === "permissions.ts").code;
+const streamSrc = mods.find((m) => m.file === "stream-events.ts").code;
+const renderSrc = mods.find((m) => m.file === "render-events.ts").code;
 const slice = slicer(src);
 
 // ---- the page's DOM, reduced to what these paths touch ----
@@ -75,6 +78,7 @@ const el = (sel) => {
 };
 global.$ = (sel) => el(sel);
 global.els = { trust: fakeEl("button"), task: fakeEl("textarea") };
+global.state = stateStub(); // the shared state leaf (permissions.ts reads state.apiBase)
 global.document = { createElement: (tag) => fakeEl(tag), addEventListener: () => {} };
 // ...and the trust block also subscribes on `window` (the platform's resume
 // hooks). On the page window IS the global object; here it is a stub, because
@@ -253,11 +257,11 @@ async function main() {
     "renderEvent routes permission_request to openPerm",
   );
   check(
-    /if \(answeredPerm\.has\(ev\.request_id\)\) return;/.test(permsSrc),
+    /if \(answeredPerm\.has\(ev\.request_id\)\) return;/.test(permsText),
     "openPerm keys its dedupe on the request_id the host minted",
   );
   check(
-    /function forgetAnsweredPerm\(\)/.test(permsSrc) && /answeredPerm\.clear\(\)/.test(permsSrc),
+    /function forgetAnsweredPerm\(\)/.test(permsText) && /answeredPerm\.clear\(\)/.test(permsText),
     "the marks can be forgotten without touching the live-ask dedupe",
   );
   const finalBranch = streamSrc.slice(

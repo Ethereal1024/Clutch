@@ -6,21 +6,30 @@
 // live local session at the remote exec bridge; a remote that goes away is
 // re-attempted (reconciled, re-connected, retried) instead of being replaced by
 // a local backend the phone does not have — and the announcement of that loss,
-// with the one way back from it, belongs to ui/js/conn-lost.js (connectionLost).
+// with the one way back from it, belongs to ui/src/renderer/conn-lost.ts (connectionLost).
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { DEFAULT_BASE, SUPERVISOR_BASE, apiFetch, hostSessionUrl } from "./app";
+import { IS_ANDROID } from "./env";
+import { refreshPicker } from "./conn-flow";
+import { connLostExitPending, connectionLost } from "./conn-lost";
+import { renderConnSelector } from "./conn-store";
+import { fsModal, fsPath, loadDir } from "./fs-browser";
+import { reconnectSSE } from "./sse-stream";
+import { state } from "./state";
+import { busy } from "./stream-view";
+import { eventsEl } from "./els";
 
 // Switch the active backend in place without a full page reload. The
 // supervisor's lifecycle port is refused: it is not a backend, and letting it
 // through (the old "fallback") pointed the whole window at a port that answers
 // no API — a guaranteed "Failed to fetch", and on the phone a port that cannot
 // exist at all. Returns whether the base actually moved.
-function switchBackend(url) {
+export function switchBackend(url) {
   const clean = url ? String(url).replace(/\/+$/, "") : "";
   if (!clean || clean === SUPERVISOR_BASE) {
     console.warn("[backend] refused a non-session base:", url);
@@ -31,25 +40,25 @@ function switchBackend(url) {
   // user connecting elsewhere), so the new session starts with nothing in flight
   // and its status frame will honestly say idle. Remember the run, so that frame
   // cannot slip the badge from running to idle without a word.
-  if (busy && clean !== API_BASE) sseRunAtRisk = true;
-  API_BASE = clean;
+  if (busy && clean !== state.apiBase) state.sseRunAtRisk = true;
+  state.apiBase = clean;
   // sessionStorage, not localStorage: an API URL names THIS window's session, and
   // localStorage is shared by every window in the process (one Electron instance,
   // one profile) — a global key here made one window's base the next window's
   // remembered value. It survives a reload with the page, which is all it is for.
-  sessionStorage.setItem("clutch_api_url", API_BASE);
+  sessionStorage.setItem("clutch_api_url", state.apiBase);
   reconnectSSE();
   return true;
 }
 
 // Ask the host (main process / Android bridge) for THIS window's session URL
-// and adopt it. The ask is app.js hostSessionUrl() and not baseUrl() directly:
+// and adopt it. The ask is app.ts hostSessionUrl() and not baseUrl() directly:
 // that is where the exit's note is read before the ask (a boot after the conn-lost
 // Cancel claims nothing) and where the supervisor sentinel is refused. null means
 // "no session": there is no second route to guess at, so the window stays on
 // "not running" instead of being pointed at a local port that cannot serve it —
 // the host announces a real URL when it has one (backend:base-changed).
-async function switchBackendResolved() {
+export async function switchBackendResolved() {
   if (!switchBackend(await hostSessionUrl())) return false;
   await reapplyDegradeIfNeeded();
   return true;
@@ -57,7 +66,7 @@ async function switchBackendResolved() {
 
 // degrade mode is a per-process setting that dies with the session: re-apply
 // it whenever the session is (re)claimed
-async function reapplyDegradeIfNeeded() {
+export async function reapplyDegradeIfNeeded() {
   const raw = localStorage.getItem("clutch_degrade");
   if (!raw || !window.clutchTunnel) return;
   const s = await window.clutchTunnel.status();
@@ -86,13 +95,13 @@ async function reapplyDegradeIfNeeded() {
 // ---- SSH-tools degradation (host alive but unusable for bootstrap) ----
 // local agent, remote exec bridge; true = degraded, false = tunnel dead
 
-async function tryDegradeToSshTools() {
+export async function tryDegradeToSshTools() {
   if (!window.clutchTunnel) return false;
   const s = await window.clutchTunnel.status();
   // degradable only while the tunnel is alive (a dead tunnel has no bridge)
   if (!s.active || !s.execBridge) return false;
   // resolve the current backend first: the main process may have fallen back
-  // to a fresh local session (the one ask — see app.js hostSessionUrl)
+  // to a fresh local session (the one ask — see app.ts hostSessionUrl)
   const url = await hostSessionUrl();
   if (!url) return "not running";
   try {
@@ -111,7 +120,7 @@ async function tryDegradeToSshTools() {
   return true;
 }
 
-async function resetBackendLocal() {
+export async function resetBackendLocal() {
   // nothing to reset without a resolved base: DEFAULT_BASE is the supervisor
   // sentinel until this machine's own session is claimed, and the supervisor
   // does not serve /api/backend — posting there is a guaranteed "Failed to fetch"
@@ -127,13 +136,13 @@ async function resetBackendLocal() {
 
 // reconcile the stored URL with the tunnel's real state; a live tunnel is
 // authoritative, a dead-tunnel leftover falls back to the local backend
-async function reconciledBackendUrl() {
+export async function reconciledBackendUrl() {
   if (!window.clutchTunnel) return null;
   // The second claim entry, and the one that fires when the tunnel still answers
   // (s.active below asks the host for THIS window's session). Same note, same read-
-  // before-ask as app.js: a boot that follows the exit claims nothing. No teardown is
-  // started here — resolveApiBase runs first in js/boot.js and owns that wait; this
-  // guard only refuses the claim (js/fs-browser.js reaches here without a boot too).
+  // before-ask as app.ts: a boot that follows the exit claims nothing. No teardown is
+  // started here — resolveApiBase runs first in boot.ts and owns that wait; this
+  // guard only refuses the claim (fs-browser.ts reaches here without a boot too).
   if (connLostExitPending()) return null;
   const s = await window.clutchTunnel.status();
   const override = sessionStorage.getItem("clutch_api_url");
@@ -155,7 +164,7 @@ async function reconciledBackendUrl() {
       // (the reported "selected SSH client but 127.0.0.1:8891 + connection
       // error"). Keep the flag: it is the user's standing intent, and the picker
       // preselects exactly that host for the user's own Connect press
-      // (js/conn-store.js) — nothing here dials it behind their back.
+      // (conn-store.ts) — nothing here dials it behind their back.
       return null;
     }
     // stale SSH leftover: fall back to the local backend via the main process
@@ -171,19 +180,19 @@ async function reconciledBackendUrl() {
 // claiming a connection. The standing intent (clutch_ssh_connected) is the
 // caller's to keep. The next real URL arrives via switchBackend /
 // backend:base-changed.
-function dropStaleBackend() {
+export function dropStaleBackend() {
   // the session this window's run lived in is what just went away: same story as
   // a base move, and it must not end in a silent idle either
-  if (busy) sseRunAtRisk = true;
+  if (busy) state.sseRunAtRisk = true;
   // The rows that run had drawn are the process of a turn no ending is coming to
   // in THIS window: fold them now, open, instead of leaving the whole
-  // disconnected stretch expanded until some later run ends (js/auto-fold.js
+  // disconnected stretch expanded until some later run ends (auto-fold.ts
   // foldOpenTurn). Announced by name because that file loads after this one — and
   // announced, not invented: the ending itself is the departing session's to write
   // (agent/server.py record_release), and the fold takes it in when a session
   // serves it.
   if (busy && eventsEl) eventsEl.dispatchEvent(new CustomEvent("clutch:turn-interrupted"));
-  API_BASE = null;
+  state.apiBase = null;
   sessionStorage.removeItem("clutch_api_url");
   reconnectSSE(); // closes the dead stream; connectSSE bails on a null base
 }
@@ -193,7 +202,7 @@ function dropStaleBackend() {
 // point at — N4 — so that "fallback" could only produce "Failed to fetch" while
 // the picker claimed 127.0.0.1:8890, a port that answers no API) nor a toast that
 // dismisses itself: a window that lost its session has no session, and the ONLY
-// door back is the dialog ui/js/conn-lost.js raises — it re-attempts this very
+// door back is the dialog ui/src/renderer/conn-lost.ts raises — it re-attempts this very
 // host, by name, so the user never has to introduce an old host as a new one.
 //
 // But the hop is ONE resource for the whole process while a session belongs to the
@@ -235,7 +244,7 @@ if (window.clutchApi && window.clutchApi.onBaseChanged) {
       // A picker that is already open lists the backend it is pointed at: this
       // announcement IS the session it was waiting for, so the listing follows the
       // base instead of a timer polling for it (the picker opens folded — see
-      // openFsBrowser in js/fs-browser.js — and unfolds on this first listing)
+      // openFsBrowser in fs-browser.ts — and unfolds on this first listing)
       if (!fsModal.classList.contains("hidden")) {
         renderConnSelector();
         loadDir(fsPath, false);

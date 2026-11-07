@@ -8,7 +8,7 @@
 // gate, missing theme keys) — a green mirror said nothing about the real code.
 "use strict";
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
@@ -93,11 +93,11 @@ function makeRoot(sources) {
 // One eval: the module state (mermaidInitialized / mermaidCache) and the
 // functions that close over it must land in the same scope. The two globals the
 // test itself has to poke are re-exported through a handle.
-(0, eval)(region("let mermaidInitialized = false;", "showMermaidError") + `
+(0, eval)(runnableSnippet(region("let mermaidInitialized = false;", "showMermaidError") + `
 globalThis.__mermaid = {
   cache: mermaidCache,
   resetInit: () => { mermaidInitialized = false; },
-};`);
+};`));
 const mermaidCache = globalThis.__mermaid.cache;
 const resetMermaidInit = globalThis.__mermaid.resetInit;
 

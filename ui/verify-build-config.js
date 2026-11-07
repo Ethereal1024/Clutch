@@ -83,11 +83,11 @@ const REQUIRED_ASSETS = [
   "vendor/fonts/clutch-icons.LICENSE.txt",
   "vendor/fonts/clutch-icons.manifest.txt",
   "index.html",
-  // The whole renderer: one script, built from ui/js/** + ui/app.js +
-  // ui/bridge-shim.js (the sources do NOT ship — see electron-builder.yml).
-  // index.html loads exactly this file, so a `files` glob that drops it is a
-  // blank window, not a missing font. version.js is the build stamp, rewritten
-  // by the release scripts and loaded as its own tag.
+  // The whole renderer: one script, bundled from ui/src/renderer/*.ts (the
+  // sources do NOT ship — see electron-builder.yml). index.html loads exactly
+  // this file, so a `files` glob that drops it is a blank window, not a missing
+  // font. version.js is the build stamp, rewritten by the release scripts and
+  // loaded as its own tag.
   "renderer.js",
   "version.js",
   "style.css",
@@ -108,11 +108,9 @@ const EXCLUDED_FILES = [
   "components.sources.json",
   // P7-3: the renderer's sources and its build script. index.html loads the
   // bundle; these are build inputs, and shipping them would be a dead copy.
-  "app.js",
-  "bridge-shim.js",
-  "js/boot.js",
-  "js/stream-view.js",
-  "renderer.modules.json",
+  "src/renderer/boot.ts",
+  "src/renderer/stream-view.ts",
+  "src/renderer/globals.d.ts",
   "build-renderer.js",
   // the host half's sources and its build config: src/host/*.ts is compiled to
   // the ui/*.js that ship (build-host.js emits in place), and nothing at runtime
@@ -122,6 +120,7 @@ const EXCLUDED_FILES = [
   "build-host.js",
   "build-ts.js",
   "tsconfig.host.json",
+  "tsconfig.renderer.json",
 ];
 
 const FILE = { isDirectory: () => false, isFile: () => true };

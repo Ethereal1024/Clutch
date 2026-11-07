@@ -111,16 +111,26 @@ def http_post(url: str, body: dict | None = None) -> tuple[int, str]:
 
 
 def ui_source() -> str:
-    """The renderer's source, in page load order — the Python twin of
+    """The renderer's source, in the order it runs — the Python twin of
     tests/harness.js's uiSource().
 
     The renderer used to be one file (ui/app.js), then a stack of classic scripts
-    that ui/index.html listed in the only order that works. The page now loads one
-    bundle (ui/renderer.js), and the order lives in ui/renderer.modules.json —
-    deliberately the same list the build reads, so a constant that moves between
-    modules keeps working and a module dropped from the list shows up as a missing
-    constant rather than passing silently.
+    that ui/index.html listed in the only order that works. The sources are ES
+    modules now (ui/src/renderer/*.ts) and the page loads one bundle
+    (ui/renderer.js); boot.ts is the entry, and its side-effect imports ARE that
+    old page order. Reading them is what keeps this reader and the page on one
+    list: a constant that moves between modules keeps working and a module
+    dropped from the imports shows up as a missing constant rather than passing
+    silently. state.ts leads — it declares the bindings more than one module
+    writes.
     """
-    root = Path(__file__).resolve().parent.parent / "ui"
-    manifest = json.loads((root / "renderer.modules.json").read_text(encoding="utf-8"))
-    return "\n".join((root / s).read_text(encoding="utf-8") for s in manifest["modules"])
+    src = Path(__file__).resolve().parent.parent / "ui" / "src" / "renderer"
+    boot = (src / "boot.ts").read_text(encoding="utf-8")
+    order = re.findall(r'^import\s+"\./([\w-]+)";$', boot, re.M)
+    if not order:
+        raise AssertionError("boot.ts lists no side-effect imports — the load order is gone")
+    order.append("boot")
+    # the leaves (state.ts, dom.ts) are imported, not sequenced: they lead the text
+    leaves = sorted(p.stem for p in src.glob("*.ts") if not p.name.endswith(".d.ts") and p.stem not in order)
+    return "\n".join((src / (name + ".ts")).read_text(encoding="utf-8")
+                     for name in leaves + order)

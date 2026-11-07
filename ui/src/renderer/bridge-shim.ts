@@ -7,7 +7,7 @@
 //
 // Endpoint resolution (first hit wins):
 //   1. window.CLUTCH_BRIDGE_BASE            — set by the embedding shell
-//   2. ?bridge= on this script's URL        — <script src="bridge-shim.js?bridge=http://127.0.0.1:PORT/">
+//   2. ?bridge= on this script's URL        — <script src="bridge-shim.ts?bridge=http://127.0.0.1:PORT/">
 //   3. default                              — http://127.0.0.1:8899/
 //
 // Wire protocol (implemented by the host's bridge server, e.g. android/host/bridge-server.js):
@@ -31,7 +31,7 @@
   function resolveBase() {
     if (root.CLUTCH_BRIDGE_BASE) return String(root.CLUTCH_BRIDGE_BASE).replace(/\/+$/, "") + "/";
     try {
-      const script = root.document && root.document.currentScript;
+      const script = (root.document && root.document.currentScript) as HTMLScriptElement | null;
       const q = script && script.src && new URL(script.src).searchParams.get("bridge");
       if (q) return String(q).replace(/\/+$/, "") + "/";
     } catch (e) {
@@ -41,7 +41,7 @@
   }
   const base = resolveBase();
 
-  async function call(ns, method, args) {
+  async function call(ns, method, args = []) {
     let r, d;
     try {
       r = await fetch(base + "api/" + ns + "/" + method, {
@@ -165,3 +165,5 @@
     onProgress: (cb) => subscribe("tunnel:progress", cb),
   });
 })();
+
+export {};

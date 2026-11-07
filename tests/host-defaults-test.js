@@ -3,7 +3,7 @@
 // Regression test for the renderer's UI-DEFAULTS precedence. Where a tool's
 // look comes from, oldest first:
 //
-//   the compiled-in constants (UI_DEFAULTS in ui/js/tool-render.js) are the fallback;
+//   the compiled-in constants (UI_DEFAULTS in ui/src/renderer/tool-render.ts) are the fallback;
 //   the HOST's own table (GET /api/host -- the host.json document merged over
 //   those constants server-side) is fetched once at boot and speaks for every
 //   event that carries no `ui` of its own;
@@ -14,7 +14,7 @@
 // globals, so a silent edit that lets a constant outrank the host's table, or a
 // call's block lose to either, fails here.
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet, stateStub } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
@@ -23,10 +23,10 @@ const { fnBody, region } = slicer(src);
 // `uiOfResult` (uiDefaults + UI_DEFAULTS + uiOf + uiOfResult). The two pieces
 // of state it reads are deliberately NOT in the slice: they are supplied as
 // globals, the way the app itself supplies them (loadHostDefaults assigns
-// hostUiDefaults; the call-row machinery owns toolCalls).
-global.hostUiDefaults = null;
+// state.hostUiDefaults; the call-row machinery owns toolCalls).
+global.state = stateStub(); // the shared state leaf, at its declared defaults
 global.toolCalls = {};
-(0, eval)(region("function uiDefaults", "uiOfResult"));
+(0, eval)(runnableSnippet(region("function uiDefaults", "uiOfResult")));
 
 (async () => {
   // ---- 1) nothing fetched: the compiled-in constants are the fallback ----
@@ -35,7 +35,7 @@ global.toolCalls = {};
         "with no host table, uiDefaults() is the compiled-in constants");
 
   // ---- 2) the host's table speaks over the constants ----
-  global.hostUiDefaults = { chip: "none", group: "host" };
+  global.state.hostUiDefaults = { chip: "none", group: "host" };
   const hosted = uiDefaults();
   check(hosted.chip === "none" && hosted.group === "host", "the host's table overrides the constants it names");
   check(hosted.form === "block" && hosted.body === "text", "keys the host does not name keep the constants");
@@ -63,7 +63,7 @@ global.toolCalls = {};
   const boot = fnBody("loadHostDefaults");
   check(/apiFetch\("\/api\/host"\)/.test(boot), "boot fetches the host's table from GET /api/host");
   check(/try \{/.test(boot) && /catch/.test(boot), "a failed or absent endpoint leaves the constants standing");
-  check(/let hostUiDefaults = null;/.test(src), "the host table starts null: the constants stand until it arrives");
+  check(/^\s*hostUiDefaults: null,$/m.test(src), "the host table starts null: the constants stand until it arrives");
   check(/await loadHostDefaults\(\);/.test(src), "boot awaits the host's table before the stream opens");
   check(!/UI_DEFAULTS/.test(fnBody("uiOf") + fnBody("uiOfResult")),
         "the row renderers read uiDefaults(), never the bare constants");

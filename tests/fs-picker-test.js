@@ -51,15 +51,15 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource, uiModules } = require("./harness.js");
+const { check, summary, slicer, uiSource, uiModules, stateStub } = require("./harness.js");
 
 async function main() {
   const APP = uiSource(); // the renderer, every module in page load order
   const { fnBody } = slicer(APP);
   const HTML = fs.readFileSync(path.join(__dirname, "..", "ui", "index.html"), "utf8");
   const CSS = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
-  const CONN_STORE = uiModules().find((m) => m.file === "js/conn-store.js").code;
-  const CONN_FLOW = uiModules().find((m) => m.file === "js/conn-flow.js").code;
+  const CONN_STORE = uiModules().find((m) => m.file === "conn-store.ts").code;
+  const CONN_FLOW = uiModules().find((m) => m.file === "conn-flow.ts").code;
 
   // ---- stub environment (the picker's own nodes, and nothing else) ----
   // Two storages, because the app uses two: the saved hosts and the standing SSH
@@ -68,6 +68,9 @@ async function main() {
   // renderConnSelector comment). The stub keeps them apart so a mix-up is visible
   // here rather than in the second window of a real app.
   const store = new Map();
+  // the shared state leaf (ui/src/renderer/state.ts), at its declared defaults:
+  // the listing token and the session address are fields of it
+  global.state = stateStub();
   global.localStorage = {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
     setItem: (k, v) => store.set(k, String(v)),
@@ -172,7 +175,7 @@ async function main() {
       "#conn-new-progress": connNewProgress,
     })[sel];
   global.document = { createElement: () => ({}) };
-  global.API_BASE = null;
+  global.state.apiBase = null;
   global.IS_ANDROID = true;
   global.connOnValue = "";
   global.connBusy = false;
@@ -217,7 +220,7 @@ async function main() {
   // real one does that the picker reads back — it lets go of the base
   global.dropStaleBackend = () => {
     done.push("dropStaleBackend");
-    global.API_BASE = null;
+    global.state.apiBase = null;
   };
   // the door also spends the exit's note (js/conn-lost.js connLostExitClear) before
   // it validates: that note belongs to its own runner, and this one only needs the
@@ -305,7 +308,7 @@ async function main() {
     "while landing there connects to nothing (nothing dialled, nothing moved)");
 
   // ---- 3) choosing a host in the list IS the connection ----
-  global.API_BASE = "http://127.0.0.1:31001";
+  global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, SESSION);
   renderConnSelector();
   check(connSelect.value === "ssh:me@new.example.com:22",
@@ -325,7 +328,7 @@ async function main() {
     `leaving one remote for another drops the tunnel first (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
     "the standing intent goes before the drop, so the move is not announced as a loss");
-  global.API_BASE = null;
+  global.state.apiBase = null;
 
   // ---- 3c) a move that FAILS leaves no claim behind, and the host it left stays a
   // choice ----
@@ -337,7 +340,7 @@ async function main() {
   // the previous host could not be dialled at all. Both halves are one rule: a move
   // spends what it leaves (connSwitch) and, when it fails, leaves NOTHING of itself
   // — no intent, no base, no ✓, and the host it left is a choice again.
-  global.API_BASE = "http://127.0.0.1:31001";
+  global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, SESSION);
   renderConnSelector();
   check(connOnValue === "ssh:me@new.example.com:22" && connSelect.value === connOnValue,
@@ -351,7 +354,7 @@ async function main() {
     `the move drops the old hop first, dials the new host, and then cleans up after itself (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected") && !store.has("clutch_degrade"),
     "the standing intent is spent by the move and not put back: this window is on nothing");
-  check(global.API_BASE === null,
+  check(global.state.apiBase === null,
     "and the base that named the old host's session is dropped with the hop it rode");
   // what refreshPicker does next (a fold, the chrome, and the store redrawn): the
   // redraw is the half this runner can read
@@ -370,7 +373,7 @@ async function main() {
   // the bar's door: the same clean-up, but the bar's own verdict is the bar's (its
   // error stays on the line, with Retry/Cancel under it) — what connSwitch redraws
   // is the store's half, under that verdict
-  global.API_BASE = "http://127.0.0.1:31001";
+  global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, SESSION);
   renderConnSelector();
   const realRender = renderConnSelector;
@@ -389,14 +392,14 @@ async function main() {
     `and the attempt's verdict is still the bar's line (got ${JSON.stringify(connStatus.textContent)})`);
   check(!connSelect.opts.some((o) => o.mark) && connOnValue === "",
     "with no ✓ and nothing this window is on: the bar offers the host it left as the next move");
-  global.API_BASE = null;
+  global.state.apiBase = null;
 
   // ---- 3b) a session URL in the SHARED storage is not this window's session ----
   // one profile, several windows: the URL of the session one window is on used to sit
   // in localStorage, so the next window read it as its own and the picker claimed
   // "Connected: <the other window's URL>" over a session it never had (⑤). The URL is
   // read from sessionStorage now, so a global copy is inert data here.
-  global.API_BASE = "http://127.0.0.1:31001";
+  global.state.apiBase = "http://127.0.0.1:31001";
   seed(HOSTS, INTENT);
   store.set("clutch_api_url", "http://127.0.0.1:31001"); // what an older build wrote
   renderConnSelector();
@@ -408,7 +411,7 @@ async function main() {
     `the list still opens on the host it was last on, as a choice and nothing more (got ${JSON.stringify(connSelect.value)})`);
   check(session.get("clutch_api_url") === undefined,
     "with the shared copy left where it was: nothing here adopts it, either");
-  global.API_BASE = null;
+  global.state.apiBase = null;
 
   // ---- 4) a list with nothing in it offers nothing to choose, and nothing to dial ----
   seed(null, INTENT);
@@ -452,7 +455,7 @@ async function main() {
   check(done.join(",") === "switchBackendResolved,refreshPicker",
     `Connect on Local adopts this machine's own session (got ${done.join(",")})`);
   check(!store.has("clutch_ssh_connected"), "without inventing a standing SSH intent");
-  global.API_BASE = "http://127.0.0.1:31002";
+  global.state.apiBase = "http://127.0.0.1:31002";
   renderConnSelector();
   check(connectBtn.disabled === true,
     "once the window is on it, there is nowhere left to connect to");
@@ -461,7 +464,7 @@ async function main() {
   await flush();
   check(done.length === 0, `and the press does nothing at all (got ${done.join(",")})`);
   global.IS_ANDROID = true;
-  global.API_BASE = null;
+  global.state.apiBase = null;
 
   // ---- 7) a connect in flight cannot be taken twice ----
   seed(HOSTS, INTENT);
@@ -482,7 +485,7 @@ async function main() {
   // ---- 8) the folded bar's door: the welcome state, never the fold alone ----
   // The state functions are driven for real, against the bar's own nodes seeded as
   // the markup has them.
-  global.fsListToken = 0;
+  global.state.fsListToken = 0;
   global.fsListing = false; // the wait for a listing (a `let` in conn-flow.js, so seeded here)
   global.fsMode = "open";
   for (const name of [
@@ -598,7 +601,7 @@ async function main() {
     "with the attempt's end, either door, settling the bar's door again");
 
   // ---- 8d) the disconnect dialog's door: a reconnect reports to the dialog ----
-  // The dialog (ui/js/conn-lost.js) is the whole UI while it is up, and an attempt it
+  // The dialog (ui/src/renderer/conn-lost.ts) is the whole UI while it is up, and an attempt it
   // starts reports to its own line (#conn-lost-why) and owns its own chrome: the bar
   // and the Reconnect under it, both rendered from the attempt itself. The picker
   // underneath is neither its actor nor its chrome — Retry/Cancel there would be a
@@ -688,7 +691,7 @@ async function main() {
   const answer = (pending, path) =>
     pending.resolve({ path, parent: null, entries: [{ name: "proj", dir: true, path: path + "/proj" }] });
 
-  global.API_BASE = "http://127.0.0.1:31001"; // the session switchBackendResolved settled
+  global.state.apiBase = "http://127.0.0.1:31001"; // the session switchBackendResolved settled
   hidePickerBody(); // the welcome bar the attempt is made from
   check(doorOn(), "the welcome bar's door is up before the attempt");
   setConnBusy(true);
@@ -744,12 +747,12 @@ async function main() {
   let asked = 0;
   global.switchBackendResolved = async () => {
     asked += 1;
-    global.API_BASE = "http://127.0.0.1:31002"; // this window's session, as the host now has it
+    global.state.apiBase = "http://127.0.0.1:31002"; // this window's session, as the host now has it
     return true;
   };
   hidePickerBody();
   connStatus.textContent = "";
-  global.API_BASE = "http://127.0.0.1:31001"; // the forward the page resolved, now dead
+  global.state.apiBase = "http://127.0.0.1:31001"; // the forward the page resolved, now dead
   const movedListing = loadDir("");
   listings.shift().reject(new Error("Failed to fetch")); // no .status: it never landed
   await flush(); // the ask, then the retry it earned
@@ -793,9 +796,9 @@ async function main() {
   check(loadBody8c.indexOf("setFsListing(true)") > loadBody8c.indexOf("loading…") &&
     loadBody8c.indexOf("setFsListing(true)") < loadBody8c.indexOf("await apiFetch"),
     "loadDir opens the wait where it asks, not where it draws: the wait covers the round-trip");
-  check(/finally \{[\s\S]*?if \(token === fsListToken\) setFsListing\(false\);/.test(loadBody8c),
+  check(/finally \{[\s\S]*?if \(token === state\.fsListToken\) setFsListing\(false\);/.test(loadBody8c),
     "and only the listing the picker is still waiting for may end it: a superseded one leaves it to whoever took over");
-  check(/function hidePickerBody\(\) \{\s*fsListToken\+\+;\s*setFsListing\(false\);/.test(fnBody("hidePickerBody")) &&
+  check(/function hidePickerBody\(\) \{\s*state\.fsListToken\+\+;\s*setFsListing\(false\);/.test(fnBody("hidePickerBody")) &&
     /function closeFsBrowser\(\) \{\s*setFsListing\(false\);/.test(fnBody("closeFsBrowser")),
     "the fold retires the wait, and so does closing the picker: the door comes back either way");
 
@@ -814,11 +817,11 @@ async function main() {
     "the unreachable-backend message is not a directory row either");
   check(/connStatus\.textContent\s*=/.test(loadBody),
     "it goes on the conn bar, where the picker's own state belongs");
-  check(/if \(!API_BASE\) \{[\s\S]*?hidePickerBody\(\);/.test(loadBody),
+  check(/if \(!state\.apiBase\) \{[\s\S]*?hidePickerBody\(\);/.test(loadBody),
     "with no session the body is folded before anything is drawn in the list");
-  check(/const token = \+\+fsListToken;/.test(loadBody) && /if \(token !== fsListToken\) return;/.test(loadBody),
+  check(/const token = \+\+state\.fsListToken;/.test(loadBody) && /if \(token !== state\.fsListToken\) return;/.test(loadBody),
     "and a listing that comes back late cannot unfold the body over a newer intent");
-  check(/function hidePickerBody\(\) \{[\s\S]*?fsListToken\+\+;/.test(fnBody("hidePickerBody")),
+  check(/function hidePickerBody\(\) \{[\s\S]*?state\.fsListToken\+\+;/.test(fnBody("hidePickerBody")),
     "folding is what retires a listing still in flight");
   check(/openFsBrowser\(mode\) \{[\s\S]*?hidePickerBody\(\);/.test(fnBody("openFsBrowser")),
     "the picker opens folded: nothing is browsed before a backend answers");

@@ -17,8 +17,8 @@ const path = require("path");
 const { check, summary, slicer, uiModules } = require("./harness");
 
 const ROOT = path.join(__dirname, "..");
-const PROJECT = uiModules().find((m) => m.file === "js/project.js").code;
-const APP = uiModules().find((m) => m.file === "app.js").code;
+const PROJECT = uiModules().find((m) => m.file === "project.ts").code;
+const APP = uiModules().find((m) => m.file === "app.ts").code;
 const { fnBody } = slicer(PROJECT);
 
 // the three helpers, taken out of the page exactly as it ships

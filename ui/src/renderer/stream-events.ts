@@ -4,18 +4,39 @@
 // routes the streaming deltas, and the preview helpers keep a call row honest while
 // its arguments are still arriving.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { autoFoldTurn } from "./auto-fold";
+import { highlightCode, typesetMath } from "./markdown";
+import { closePerm, forgetAnsweredPerm, pendingPerm } from "./permissions";
+import { clearStream, pageSink, setOlderPill } from "./project";
+import { appendCompletion, renderEvent, renderMarkdown } from "./render-events";
+import { SSE_RUN_LOST } from "./sse-stream";
+import { state } from "./state";
+import {
+  appendThinkingRow, buildThinkingBlock, createAgentTextBlock,
+  flushTextRender, flushThinkingRender, scheduleTextRender,
+  scheduleThinkingRender,
+} from "./stream-text";
+import { eventsEl, stream } from "./els";
+import {
+  autoScroll, beginCatchUp, endCatchUp, toolCallGroups, toolCalls,
+} from "./stream-view";
+import { refreshRollbackAnchors } from "./task-rollback";
+import {
+  addToolCallRow, appendResultRow, argsButton, makeToolRowBase, previewText,
+  toolGroupFor, uiOf, uiOfResult,
+} from "./tool-render";
+import { refreshTree } from "./workspace-panel";
 
 // live tool-call previews: callId -> {name, ui, text, row, body, group}; the
 // declaration decides what the row shows while the call is generated
-const streamRows = {};
+export const streamRows = {};
 
-function handleToolCallDelta(ev) {
+export function handleToolCallDelta(ev) {
   let st = streamRows[ev.tool_call_id];
   if (!st) {
     if (!ev.name) return; // the start delta carries the name
@@ -46,7 +67,7 @@ function handleToolCallDelta(ev) {
 }
 
 // remove previews left by an aborted turn (a tool call that streamed but never finished)
-function clearStreamPreviews() {
+export function clearStreamPreviews() {
   for (const id of Object.keys(streamRows)) {
     if (streamRows[id]) streamRows[id].row.remove();
     delete streamRows[id];
@@ -59,18 +80,18 @@ function clearStreamPreviews() {
 // go, or it would sit above the retried answer as a stale copy. The retry
 // notice announces it (discard=true); none of that partial output is durable
 // (stream deltas are never stored), so nothing is lost by dropping it here.
-function discardLivePartial() {
-  if (textRenderRaf) { cancelAnimationFrame(textRenderRaf); textRenderRaf = 0; }
-  if (thinkingRenderRaf) { cancelAnimationFrame(thinkingRenderRaf); thinkingRenderRaf = 0; }
-  if (lastTextEl) { lastTextEl.remove(); lastTextEl = null; }
-  lastTextContent = "";
-  if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
-  thinkingContent = "";
+export function discardLivePartial() {
+  if (state.textRenderRaf) { cancelAnimationFrame(state.textRenderRaf); state.textRenderRaf = 0; }
+  if (state.thinkingRenderRaf) { cancelAnimationFrame(state.thinkingRenderRaf); state.thinkingRenderRaf = 0; }
+  if (state.lastTextEl) { state.lastTextEl.remove(); state.lastTextEl = null; }
+  state.lastTextContent = "";
+  if (state.thinkingEl) { state.thinkingEl.remove(); state.thinkingEl = null; }
+  state.thinkingContent = "";
   clearStreamPreviews();
 }
 
 // The same teardown, asked for by the WINDOW's own socket instead of by a
-// `discard` notice: a reconnect (js/sse-stream.js es.onopen) restarts the
+// `discard` notice: a reconnect (sse-stream.ts es.onopen) restarts the
 // streaming state, and the attempt whose deltas it can no longer receive is as
 // dead to this view as a retried one is — a delta is never stored (agent/events.py
 // keeps finals), so the window cannot continue that block, only abandon it. The
@@ -82,9 +103,9 @@ function discardLivePartial() {
 // screen for good under a run that is no longer thinking, a second live block
 // opening beside it, and the turn's own assistant_message rendering a duplicate
 // of the text under the stale first half.
-function dropOrphanLive() {
+export function dropOrphanLive() {
   discardLivePartial();
-  toolGroupEl = null;
+  state.toolGroupEl = null;
   clearRetryNote(); // a reconnect may have skipped the event that would clear it
 }
 
@@ -92,44 +113,44 @@ function dropOrphanLive() {
 // attempt fails (network drop / read timeout) and the client reconnects with
 // backoff; removed as soon as new tokens arrive, the compaction clears, or the
 // run ends — so the UI never looks frozen.
-function setRetryNote(ev) {
-  if (retryNoteEl) retryNoteEl.remove();
-  retryNoteEl = document.createElement("div");
-  retryNoteEl.className = "event llm-note live";
+export function setRetryNote(ev) {
+  if (state.retryNoteEl) state.retryNoteEl.remove();
+  state.retryNoteEl = document.createElement("div");
+  state.retryNoteEl.className = "event llm-note live";
   const p = document.createElement("p");
   p.className = "body";
   const fallback = `connection lost — retrying (${ev.attempt}/${ev.max_retries || "…"})`;
   p.textContent = "⚠ " + (ev.message || fallback);
-  retryNoteEl.appendChild(p);
-  (pageSink || eventsEl).appendChild(retryNoteEl);
+  state.retryNoteEl.appendChild(p);
+  (pageSink || eventsEl).appendChild(state.retryNoteEl);
   autoScroll();
 }
 
-function clearRetryNote() {
-  if (retryNoteEl) {
-    retryNoteEl.remove();
-    retryNoteEl = null;
+export function clearRetryNote() {
+  if (state.retryNoteEl) {
+    state.retryNoteEl.remove();
+    state.retryNoteEl = null;
   }
 }
 
 // ---- the run-settled ledger, and the one announcement that reads it ----
 //
-// The ledger itself (sseRunLostPending / runSettled, declared in js/sse-stream.js
+// The ledger itself (sseRunLostPending / runSettled, declared in sse-stream.ts
 // beside sseRunAtRisk) is written in exactly one place, because a run has one
 // shape here: a task opens it and a `final` closes it, live or replayed, and both
 // walk addEvent. What the window says about a run it lost is the transcript's
 // business — a run must not end without a record of it, and a toast that
 // dismisses itself leaves none.
-function announceRunLost() {
-  sseRunLostPending = false; // asked once, answered once
-  if (runSettled) return; // the log already ended this run: never a second ending
-  // the shape the local failed run uses (js/render-events.js run): the
+export function announceRunLost() {
+  state.sseRunLostPending = false; // asked once, answered once
+  if (state.runSettled) return; // the log already ended this run: never a second ending
+  // the shape the local failed run uses (render-events.ts run): the
   // completion divider exists for exactly this, and it is durable, re-readable,
   // and impossible to miss on a phone nobody was holding
   addEvent({ type: "final", status: "error", summary: SSE_RUN_LOST });
 }
 
-function addEvent(ev) {
+export function addEvent(ev) {
   // lazy wire shape: {offset, event} carries each durable event's byte offset
   // so the UI can page the earlier records
   let wireOffset = null; // the record's own offset, kept for the row it renders
@@ -143,10 +164,10 @@ function addEvent(ev) {
     // The history paging path (pageSink) walks BACKWARDS through older records
     // on purpose and is exempt: it never moves this watermark.
     if (!pageSink) {
-      if (streamHighOffset !== null && ev.offset <= streamHighOffset) return;
-      streamHighOffset = Math.max(streamHighOffset === null ? 0 : streamHighOffset, ev.offset);
+      if (state.streamHighOffset !== null && ev.offset <= state.streamHighOffset) return;
+      state.streamHighOffset = Math.max(state.streamHighOffset === null ? 0 : state.streamHighOffset, ev.offset);
     }
-    if (ev.offset > 0) oldestOffset = oldestOffset === null ? ev.offset : Math.min(oldestOffset, ev.offset);
+    if (ev.offset > 0) state.oldestOffset = state.oldestOffset === null ? ev.offset : Math.min(state.oldestOffset, ev.offset);
     ev = ev.event;
   }
   // the ledger behind announceRunLost, above: a task opens a run, a final closes
@@ -156,16 +177,16 @@ function addEvent(ev) {
     // (the session never served the window the log that would have answered it):
     // the window has moved on, and the loss belongs ABOVE the new task's row, as
     // the record of what happened to the run before it.
-    if (sseRunLostPending) announceRunLost();
-    runSettled = false;
+    if (state.sseRunLostPending) announceRunLost();
+    state.runSettled = false;
     // a task opens a NEW run: every ask id the run before it handed out is dead
     forgetAnsweredPerm();
   } else if (ev && ev.type === "final") {
-    runSettled = true;
+    state.runSettled = true;
   }
   // reconnect history line: restore the honest on-disk older count. It also
   // OPENS the catch-up block: everything until the `replayed` frame is a record
-  // this window is owed, and the view must not chase each one (js/stream-view.js).
+  // this window is owed, and the view must not chase each one (stream-view.ts).
   if (ev && ev.type === "history") {
     setOlderPill(ev.older || 0);
     beginCatchUp();
@@ -179,16 +200,16 @@ function addEvent(ev) {
     // BEFORE it served that block (agent/api/events.py _project_for_sse), and a
     // session that was replaced under us (a tunnel end, a self-heal, a re-claim)
     // adopts it there. Reading earlier — from onopen — can race that open and
-    // blank the panel (js/sse-stream.js). This is what repaints it after a
+    // blank the panel (sse-stream.ts). This is what repaints it after a
     // reconnect without the user having to send a message.
     refreshTree();
     // The block that just closed is the log's whole answer to the question the
-    // status frame asked (sse-stream.js sseRunLostPending): a final inside it
+    // status frame asked (sse-stream.ts sseRunLostPending): a final inside it
     // ended the run and said so — the departing session writes one when it is
     // released mid-run (agent/server.py record_release) — and its absence is the
     // window's own ending to state. Only the `replayed` frame can tell the two
     // apart, which is why the flag waits for it and never guesses earlier.
-    if (sseRunLostPending) announceRunLost();
+    if (state.sseRunLostPending) announceRunLost();
     return;
   }
   // the offset this window asked to continue from is past the end of the log
@@ -216,14 +237,14 @@ function addEvent(ev) {
   if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
   // events that break a tool group; results follow their own tool_calls
   if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
-    toolGroupEl = null;
+    state.toolGroupEl = null;
   }
   if (applyStreamEvent(ev)) return;
 
   const el = renderEvent(ev);
   if (el) {
     // the record's own byte offset rides on the row: it is what the roll-back
-    // gesture on a task row addresses (js/task-rollback.js), and the server's
+    // gesture on a task row addresses (task-rollback.ts), and the server's
     // journal is keyed by exactly this number
     if (wireOffset !== null && !pageSink) el.dataset.offset = String(wireOffset);
     (pageSink || eventsEl).appendChild(el);
@@ -245,25 +266,25 @@ function addEvent(ev) {
 // fully handled; false means "plain durable render" and addEvent falls through
 // to renderEvent() (user_message, tool_result, state_update, permission_request,
 // step_start — which only resets the stream blocks above — and unknown types).
-function applyStreamEvent(ev) {
+export function applyStreamEvent(ev) {
   if (ev.type === "compaction_delta") {
     // live progress of an in-flight compaction (transient, not stored)
     if (ev.done) {
-      if (compactionEl) { compactionEl.remove(); compactionEl = null; }
+      if (state.compactionEl) { state.compactionEl.remove(); state.compactionEl = null; }
       clearRetryNote();
       return true;
     }
-    if (!compactionEl) {
-      compactionEl = document.createElement("div");
-      compactionEl.className = "event compaction live";
-      compactionEl.innerHTML = '<div class="hdr">compressing context</div>';
+    if (!state.compactionEl) {
+      state.compactionEl = document.createElement("div");
+      state.compactionEl.className = "event compaction live";
+      state.compactionEl.innerHTML = '<div class="hdr">compressing context</div>';
       const p = document.createElement("p");
       p.className = "body muted";
-      compactionEl.appendChild(p);
-      (pageSink || eventsEl).appendChild(compactionEl);
+      state.compactionEl.appendChild(p);
+      (pageSink || eventsEl).appendChild(state.compactionEl);
     }
     // a note (e.g. the summary stream dropped and is retrying) overrides the counter
-    compactionEl.querySelector("p").textContent = ev.note
+    state.compactionEl.querySelector("p").textContent = ev.note
       ? ev.note
       : ev.chars > 0
         ? `summarizing earlier turns… ${ev.chars} chars streamed`
@@ -282,7 +303,7 @@ function applyStreamEvent(ev) {
   }
   if (ev.type === "compaction") {
     // the durable compaction record: replace the live block with the final notice
-    if (compactionEl) { compactionEl.remove(); compactionEl = null; }
+    if (state.compactionEl) { state.compactionEl.remove(); state.compactionEl = null; }
     const el = document.createElement("div");
     el.className = "event compaction";
     el.innerHTML = '<div class="hdr">context compressed</div>';
@@ -298,16 +319,16 @@ function applyStreamEvent(ev) {
     return true;
   }
   if (ev.type === "assistant_message") {
-    toolGroupEl = null;
+    state.toolGroupEl = null;
     // stored sessions render the final message once (no delta stream)
-    if (lastTextEl && lastTextEl.isConnected) {
-      lastTextEl = null;
-      lastTextContent = "";
+    if (state.lastTextEl && state.lastTextEl.isConnected) {
+      state.lastTextEl = null;
+      state.lastTextContent = "";
       return true;
     }
     // thinking renders above the agent text; skip if a live reasoning stream already
     // rendered this turn
-    if (ev.reasoning && !(thinkingEl && thinkingEl.isConnected)) appendThinkingRow(ev.reasoning);
+    if (ev.reasoning && !(state.thinkingEl && state.thinkingEl.isConnected)) appendThinkingRow(ev.reasoning);
     if (ev.content) {
       const wrap = createAgentTextBlock();
       wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
@@ -325,16 +346,16 @@ function applyStreamEvent(ev) {
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
     clearRetryNote(); // a lost stream that never recovered leaves no chip behind
     // fences may have closed since the last delta: one final render pass
-    if (lastTextEl && lastTextEl.isConnected) highlightCode(lastTextEl);
+    if (state.lastTextEl && state.lastTextEl.isConnected) highlightCode(state.lastTextEl);
     // completion divider; for non-completed runs the summary carries the reason
     appendCompletion(ev.status, ev.summary);
     refreshTree(); // a run finished; reflect any new files in the tree
     // the task is over: fold its middle away, leaving the opening task and this
-    // closing record (js/auto-fold.js). The head of the fold re-opens it.
+    // closing record (auto-fold.ts). The head of the fold re-opens it.
     autoFoldTurn();
     // ...and this task's file changes are in the rollback journal now, so re-read
     // the anchors: without this a long-press on the message would be answered
-    // from the set fetched when the project opened (js/task-rollback.js)
+    // from the set fetched when the project opened (task-rollback.ts)
     if (!pageSink) refreshRollbackAnchors();
     return true;
   }
@@ -384,11 +405,11 @@ function applyStreamEvent(ev) {
   // accumulate text and render once per frame (a full re-parse per token is O(n²))
   if (ev.type === "text_delta" && ev.content) {
     clearRetryNote(); // text is flowing again: the reconnect landed
-    if (!lastTextEl) {
-      lastTextEl = createAgentTextBlock();
-      (pageSink || eventsEl).appendChild(lastTextEl);
+    if (!state.lastTextEl) {
+      state.lastTextEl = createAgentTextBlock();
+      (pageSink || eventsEl).appendChild(state.lastTextEl);
     }
-    lastTextContent += ev.content;
+    state.lastTextContent += ev.content;
     scheduleTextRender();
     return true;
   }
@@ -396,16 +417,16 @@ function applyStreamEvent(ev) {
   // streaming reasoning: compact row while streaming, expandable on click
   if (ev.type === "reasoning_delta" && ev.content) {
     clearRetryNote(); // thinking is flowing again: the reconnect landed
-    thinkingContent += ev.content;
-    if (!thinkingEl) {
+    state.thinkingContent += ev.content;
+    if (!state.thinkingEl) {
       const block = buildThinkingBlock("", "");
-      thinkingEl = block.el;
-      (pageSink || eventsEl).appendChild(thinkingEl);
+      state.thinkingEl = block.el;
+      (pageSink || eventsEl).appendChild(state.thinkingEl);
     }
     // NOTHING is written to the DOM here: a delta per token means the label's
     // width, the block's own copy and autoScroll's `scrollHeight` read would each
     // pay a forced layout thousands of times over a long think — the freeze this
-    // shape was reported as. The coalesced render (stream-text.js) does one pass
+    // shape was reported as. The coalesced render (stream-text.ts) does one pass
     // per frame, and flushThinkingRender() fixes the counter on the last one.
     scheduleThinkingRender();
     return true;
@@ -415,10 +436,10 @@ function applyStreamEvent(ev) {
     // a new LLM turn begins: reset the streaming blocks (and any stale chip);
     // nothing to draw itself — step_start falls through to renderEvent (no case,
     // so no node) after the reset
-    lastTextEl = null;
-    lastTextContent = "";
-    thinkingEl = null;
-    thinkingContent = "";
+    state.lastTextEl = null;
+    state.lastTextContent = "";
+    state.thinkingEl = null;
+    state.thinkingContent = "";
     clearRetryNote();
   }
 

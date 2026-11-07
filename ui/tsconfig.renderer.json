@@ -1,0 +1,35 @@
+{
+  // The renderer half: ui/src/renderer/*.ts, bundled by ui/build-renderer.js
+  // (esbuild) into the single classic script ui/renderer.js that the page loads.
+  //
+  // It is ES modules, not scripts: every cross-file name is an explicit
+  // `import`, which is what replaced the old "load order is the contract" — a
+  // file that names something it did not import is now a compile error instead
+  // of a ReferenceError on a page that had already painted half of itself.
+  // `boot.ts` is the entry: its side-effect imports are the old page order, so a
+  // module nobody names still runs, in the position it used to occupy.
+  //
+  // strict:false is the RATCHET, the same one the host half carries and for the
+  // same reason: this is 10k lines converted in one move, and full strict is
+  // ~1,000 errors of implicit `any` on code that never had a type. Everything
+  // that IS typed is checked now (`npm run typecheck` runs this config and the
+  // host's).
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    // no file extensions in the imports (`./app`, not `./app.ts`): esbuild
+    // resolves the .ts, and "bundler" is the resolution mode that agrees with it
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    // there is no per-file output: ui/build-renderer.js emits ONE bundle, and
+    // esbuild — not tsc — is what prints it (tsc would re-print every line)
+    "noEmit": true,
+    "strict": false,
+    // the renderer has no node: no `process`, no `require`, no Buffer
+    "types": [],
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/renderer/*.ts"]
+}

@@ -1,6 +1,6 @@
 "use strict";
 
-// The finished task's fold (ui/js/auto-fold.js): when a run ends, everything
+// The finished task's fold (ui/src/renderer/auto-fold.ts): when a run ends, everything
 // between the task that opened it and the answer it ended on must leave the
 // transcript, behind one row that says how much of it there is — and the reader
 // must be able to open it again.
@@ -17,7 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, uiModules } = require("./harness.js");
+const { check, summary, uiModules, rendererScript } = require("./harness.js");
 
 // ---- a DOM stub with the three things this file touches: classes, children,
 // moves (insertBefore/appendChild, fragments included) and the click handler ----
@@ -150,8 +150,10 @@ const ctx = {
   queueStuck: () => {},
 };
 vm.createContext(ctx);
-const selfSrc = fs.readFileSync(path.join(__dirname, "..", "ui", "js", "auto-fold.js"), "utf8");
-vm.runInContext(selfSrc, ctx);
+// the module as a classic script: imports gone (the stubs above stand in for
+// them) and the TypeScript erased — a vm cannot read either
+const selfSrc = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "auto-fold.ts"), "utf8");
+vm.runInContext(rendererScript("auto-fold"), ctx);
 
 const foldOf = (p) => p.children.find((c) => c.matches(".turn-fold"));
 // the rows inside a fold: wrapper → fold → .fold-inner (the clip) → .fold-body (the
@@ -1158,15 +1160,15 @@ ctx.busy = false;
 
 // ---- 8) the wiring the page has to carry ----
 const uiDir = path.join(__dirname, "..", "ui");
-const events = fs.readFileSync(path.join(uiDir, "js", "stream-events.js"), "utf8");
-const project = fs.readFileSync(path.join(uiDir, "js", "project.js"), "utf8");
-const lifecycle = fs.readFileSync(path.join(uiDir, "js", "backend-lifecycle.js"), "utf8");
+const events = fs.readFileSync(path.join(uiDir, "src", "renderer", "stream-events.ts"), "utf8");
+const project = fs.readFileSync(path.join(uiDir, "src", "renderer", "project.ts"), "utf8");
+const lifecycle = fs.readFileSync(path.join(uiDir, "src", "renderer", "backend-lifecycle.ts"), "utf8");
 const css = fs.readFileSync(path.join(uiDir, "style.css"), "utf8");
 // the same sheet with its comments cut: this sheet's prose QUOTES the declarations
 // it replaced ("deliberately NOT `position: relative` any more"), and a structural
 // pin has to read the declarations, not the argument about them
 const cssBare = css.replace(/\/\*[\s\S]*?\*\//g, "");
-check(uiModules().some((m) => m.file === "js/auto-fold.js"),
+check(uiModules().some((m) => m.file === "auto-fold.ts"),
       "the module list carries auto-fold.js, so the bundle the page loads runs it");
 check(/appendCompletion\(ev\.status, ev\.summary\);[\s\S]{0,400}autoFoldTurn\(\);/.test(events),
       "the run's final folds the turn it just closed (after the divider is placed)");
@@ -1254,13 +1256,13 @@ check(!/fold-inner::after/.test(css),
 check(/eventsEl\.dispatchEvent\(new CustomEvent\("clutch:page-prepended"\)\)/.test(project),
       "the history pager announces the prepend: the page it just brought in can close a turn " +
       "the sink was refused the fold of");
-check(/if \(busy\) sseRunAtRisk = true;[\s\S]{0,600}dispatchEvent\(new CustomEvent\("clutch:turn-interrupted"\)\)/.test(lifecycle),
+check(/if \(busy\) state\.sseRunAtRisk = true;[\s\S]{0,600}dispatchEvent\(new CustomEvent\("clutch:turn-interrupted"\)\)/.test(lifecycle),
       "dropping a dead session announces that the run in flight has no ending coming — where " +
       "sseRunAtRisk is set, so the same fact is stated once — and the fold of that turn happens " +
       "here, on the pane whose shape is known");
 check(/addEventListener\("clutch:turn-interrupted", \(\) => \{\s*clearRunLive\(\);\s*foldOpenTurn\(\);\s*\}\)/.test(selfSrc),
       "and auto-fold listens for it, for the same load-order reason the prepend is announced: " +
-      "js/backend-lifecycle.js loads before this file and may not name it. The liveness goes " +
+      "backend-lifecycle.ts loads before this file and may not name it. The liveness goes " +
       "first — a block the run was still filling in is not being filled in any more, so the ring " +
       "in its head stops before the block is folded");
 check(/addEventListener\("clutch:page-prepended", \(\) => foldClosedRegions\(eventsEl\)\)/.test(selfSrc),

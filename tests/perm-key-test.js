@@ -13,7 +13,7 @@
 // The fix: the prompt opts out of backdrop dismissal (every OTHER modal keeps
 // it) and Enter answers Allow. Enter is handled by a real named function
 // (permKey) so this runner can drive the REAL implementation out of the renderer
-// (ui/js/permissions.js) instead of re-implementing it.
+// (ui/src/renderer/permissions.ts) instead of re-implementing it.
 
 const fs = require("fs");
 const path = require("path");

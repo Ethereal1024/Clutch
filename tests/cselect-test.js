@@ -22,7 +22,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet } = require("./harness.js");
 
 // ---- stub DOM: enough shape for the widget (class names, children, listeners) ----
 function node(tag) {
@@ -143,7 +143,7 @@ global.window = win;
 
 const APP = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(APP);
-(0, eval)(fnBody("customSelect")); // the REAL widget
+(0, eval)(runnableSnippet(fnBody("customSelect"))); // the REAL widget
 
 const CSS = fs.readFileSync(path.join(__dirname, "..", "ui", "style.css"), "utf8");
 const MOBILE = fs.readFileSync(path.join(__dirname, "..", "ui", "mobile.css"), "utf8");

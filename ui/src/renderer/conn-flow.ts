@@ -4,12 +4,26 @@
 // coarse progress stages the tunnel reports over IPC, the password prompt shown
 // only after key auth fails, the new-connection popup, and Retry/Cancel.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { IS_ANDROID } from "./env";
+import {
+  dropStaleBackend, resetBackendLocal, switchBackendResolved,
+  tryDegradeToSshTools,
+} from "./backend-lifecycle";
+import { connLostExitClear, connLostNeedsUser } from "./conn-lost";
+import {
+  connBusy, connNewHost, connNewPort, connNewUser, connOnValue, connSelect,
+  connStatus, connTarget, passInput, passLabel, passModal,
+  renderConnSelector, setConnBusy, updateConnConnect, upsertConn,
+} from "./conn-store";
+import { $ } from "./dom";
+import { fsMode, loadDir } from "./fs-browser";
+import { closeModal, dismissOnOverlayPress } from "./settings";
+import { state } from "./state";
 
 // restore the picker after a connect/disconnect: the bar's connect chrome is over,
 // and the body follows whatever the listing the picker is about to ask for answers
@@ -17,51 +31,50 @@
 // answers, and no answer means it stays folded). The ask itself is a fact the bar's
 // door reads (fsListing, setFsListing below): while the listing is on its way, the
 // folded bar is WAITING for a body, which is not the welcome page.
-function refreshPicker() {
+export function refreshPicker() {
   resetConnChrome();
   loadDir("", false); // re-list the (new) backend from home; keep the remembered dir
   renderConnSelector();
 }
 
-function showPasswordPrompt(label) {
+export function showPasswordPrompt(label) {
   return new Promise((resolve) => {
     passLabel.textContent = label;
     passInput.value = "";
-    passResolve = resolve;
+    state.passResolve = resolve;
     passModal.classList.remove("hidden", "closing");
     passInput.focus();
   });
 }
 
-function closePasswordPrompt() {
+export function closePasswordPrompt() {
   // resolve immediately (the connect flow is waiting); only the visual close animates
   closeModal(passModal);
   // A declined password is not "keep trying": the user answered the one question
   // the reconnect had, so the disconnect dialog stops retrying behind them and
-  // waits for the button (see connLostNeedsUser in js/conn-lost.js)
+  // waits for the button (see connLostNeedsUser in conn-lost.ts)
   connLostNeedsUser();
-  if (passResolve) passResolve(null);
-  passResolve = null;
+  if (state.passResolve) state.passResolve(null);
+  state.passResolve = null;
 }
 
-let lastConn = null;  // { host, user, port, statusEl } of the last BAR attempt (Retry)
+export let lastConn = null;  // { host, user, port, statusEl } of the last BAR attempt (Retry)
 
-// Monotonic token for the file listing (loadDir in js/fs-browser.js): a listing
+// Monotonic token for the file listing (loadDir in fs-browser.ts): a listing
 // that comes back after the user asked for something else — another directory, a
 // connect that folded the body — must not paint itself, nor unfold the body, over
 // the newer intent.
-let fsListToken = 0;
 
 // A listing has been asked for and has not answered yet. The fold says the body is not
 // up; WHY it is not up is this: the picker is waiting to be shown something to browse
-// (loadDir in js/fs-browser.js — and the picker's own opening, which settles the
+// (loadDir in fs-browser.ts — and the picker's own opening, which settles the
 // backend's URL before it can list at all). Without this fact the only way to tell "the
 // bar is the picker" from "the bar is waiting for an answer" was the fold itself, and the
 // two read alike: the folded bar's Connect came back for the whole round-trip of the
 // listing a successful connect starts, then left again the moment it landed (device
 // report: a Connect flashing at the instant a connection succeeded).
-let fsListing = false;
-function setFsListing(on) {
+export let fsListing = false;
+export function setFsListing(on) {
   if (fsListing === on) return;
   fsListing = on;
   syncConnConnect(); // the door follows the wait, not only the fold
@@ -72,15 +85,15 @@ function setFsListing(on) {
 // first entry — is one press away. The fold alone is not that state — a connect folds the
 // body to retire it, and a listing in flight folds it to wait — so the button follows the
 // three facts that make the bar the picker: no attempt in flight (connBusy,
-// js/conn-store.js), no listing outstanding (fsListing above), and no failure verdict on
+// conn-store.ts), no listing outstanding (fsListing above), and no failure verdict on
 // the bar (Retry/Cancel, setFsConnectError below). Reading the fold alone is what put the
 // button back the instant an attempt started: a second Connect beside the one already
 // running, greyed only because that attempt had disabled it.
 //
 // This is the ONE place the button is drawn, both halves of it, so that "shown" and
-// "armed" cannot disagree: the armed half is js/conn-store.js's (updateConnConnect, the
+// "armed" cannot disagree: the armed half is conn-store.ts's (updateConnConnect, the
 // store owning the target and the in-flight flag), asked for from here.
-function syncConnConnect() {
+export function syncConnConnect() {
   const folded = $("#fs-body").classList.contains("collapsed");
   const busy = connBusy || fsListing || !$("#conn-actions").classList.contains("hidden");
   $("#conn-connect").classList.toggle("hidden", !folded || busy);
@@ -91,30 +104,30 @@ function syncConnConnect() {
 // Folding is also what retires a listing that is still in flight: its answer decides
 // nothing any more, so the wait ends with it (a retired listing returns early and never
 // clears the wait itself, which would leave fsListing true for good and the door with it).
-function hidePickerBody() {
-  fsListToken++;
+export function hidePickerBody() {
+  state.fsListToken++;
   setFsListing(false);
   $("#fs-body").classList.add("collapsed");
   syncConnConnect(); // the bar is the picker now — unless an attempt owns it
 }
-function showPickerBody() {
+export function showPickerBody() {
   $("#fs-body").classList.remove("collapsed");
   $("#fs-new").classList.toggle("hidden", fsMode !== "new");
   resetConnChrome();
 }
 // the connect chrome on the conn bar (progress, Retry/Cancel) belongs to an attempt
 // that is over the moment the picker is back in its browsing state
-function resetConnChrome() {
+export function resetConnChrome() {
   $("#conn-progress").classList.add("hidden");
   $("#conn-new-progress").classList.add("hidden");
   $("#conn-actions").classList.add("hidden");
   syncConnConnect(); // the attempt's chrome is over: the folded bar's door is back
 }
 
-let activeConnStatus = null; // status element of the modal currently connecting
+export let activeConnStatus = null; // status element of the modal currently connecting
 
 // connection progress bar: the tunnel reports coarse stages over IPC
-const CONN_STAGES = {
+export const CONN_STAGES = {
   auth: { pct: 10, label: "Connecting…" },
   probe: { pct: 22, label: "Inspecting remote…" },
   // the gate's own stage: a remote that already runs our version never reaches
@@ -131,7 +144,7 @@ const CONN_STAGES = {
   "install:start": { pct: 70, label: "Starting server…" },
   forward: { pct: 90, label: "Starting tunnel…" },
 };
-function updateConnProgress(stage) {
+export function updateConnProgress(stage) {
   const s = CONN_STAGES[stage];
   if (activeConnStatus) activeConnStatus.textContent = s ? s.label : "Working…";
   for (const bar of [$("#conn-progress"), $("#conn-new-progress"), $("#conn-lost-progress")]) {
@@ -151,7 +164,7 @@ function updateConnProgress(stage) {
 // where it is (updateConnProgress above). Every door that puts a bar up says it
 // through this call, so no door can leave a bar that never moves — and there is one
 // place to change how a bar waits.
-function connBarWaiting(bar) {
+export function connBarWaiting(bar) {
   bar.classList.remove("hidden");
   const fill = bar.querySelector(".conn-progress-fill");
   fill.classList.add("indeterminate");
@@ -163,7 +176,7 @@ function connBarWaiting(bar) {
 // disconnect dialog's (#conn-lost-why). The three carry different chrome, and each
 // door owns its own: the popup has its status line, its progress bar, its Connect to
 // press again; the disconnect dialog has its line, its bar, and the Reconnect that
-// js/conn-lost.js renders from the attempt itself. So the bar underneath is not the
+// conn-lost.ts renders from the attempt itself. So the bar underneath is not the
 // actor in a popup attempt, nor in the dialog's own reconnect — and an attempt of
 // theirs is not the bar's: it takes no fold from it, no progress bar, no
 // Retry/Cancel, and leaves the folded bar's Connect where the fold put it. Reading an
@@ -175,23 +188,23 @@ function connBarWaiting(bar) {
 // The door's name is read once, where the attempt starts (handleSshConnect), and the
 // functions below are TOLD which door they are acting for instead of each reading it
 // back out of the DOM node they were handed.
-function doorOf(statusEl) {
+export function doorOf(statusEl) {
   if (!statusEl) return "bar";
   if (statusEl.id === "conn-new-status") return "popup";
-  // the disconnect dialog: a re-dial of the host this window was on (js/conn-lost.js)
+  // the disconnect dialog: a re-dial of the host this window was on (conn-lost.ts)
   // reports here, and it is a door of its own for one more reason — the picker's Retry
   // re-uses the last attempt made FROM THE BAR, and a reconnect is not that press
   if (statusEl.id === "conn-lost-why") return "lost";
   return "bar";
 }
 
-function setFsConnecting(host, statusEl, door) {
+export function setFsConnecting(host, statusEl, door) {
   activeConnStatus = statusEl;
   if (door === "lost") {
     // The disconnect dialog is its own chrome, and it is already the whole UI: its
     // line says "Reconnecting…", the host it is going back to is on the line above
     // it, and its bar and button come from the attempt itself (connLostChrome,
-    // js/conn-lost.js) — so what the flow adds here is the stage it reaches
+    // conn-lost.ts) — so what the flow adds here is the stage it reaches
     // (updateConnProgress paints it into this line), not a second "connecting to
     // <host>" and not a second bar. The picker's own door still stands down: an
     // attempt is in flight, whichever door it came from.
@@ -210,7 +223,7 @@ function setFsConnecting(host, statusEl, door) {
   syncConnConnect(); // an attempt is in flight, either door: the door stands down
 }
 
-function setFsConnectError(msg, statusEl, door) {
+export function setFsConnectError(msg, statusEl, door) {
   activeConnStatus = statusEl;
   statusEl.textContent = msg;
   if (door === "popup") {
@@ -253,7 +266,7 @@ function setFsConnectError(msg, statusEl, door) {
 // The wait is only for the case in between: a hop for this host still bootstrapping
 // (active, no url yet), which is the winner this attempt lost to, a few seconds
 // behind its dial.
-async function hopLandedFor(host, user, port, budgetMs = 5000) {
+export async function hopLandedFor(host, user, port, budgetMs = 5000) {
   const st = window.clutchTunnel && window.clutchTunnel.status;
   if (typeof st !== "function") return false;
   const wantPort = Number(port) || 22;
@@ -275,9 +288,9 @@ async function hopLandedFor(host, user, port, budgetMs = 5000) {
   }
 }
 
-async function handleSshConnect(host, user, port, statusEl) {
+export async function handleSshConnect(host, user, port, statusEl) {
   // same door as connConnect, reached from the picker's New-connection popup, the
-  // bar's Retry and the outage redial (js/conn-lost.js): every one of them is an
+  // bar's Retry and the outage redial (conn-lost.ts): every one of them is an
   // attempt to BE on a host, so the exit's note is spent before it is made
   connLostExitClear();
   if (!window.clutchTunnel) {
@@ -376,7 +389,7 @@ async function handleSshConnect(host, user, port, statusEl) {
 // again (connConnect refuses to "connect" where it believes it already is). So a
 // failed move drops the stale base and redraws the picker: no ✓, no old listing,
 // and the host it left is a choice that can be dialled again.
-async function connSwitch(host, user, port, statusEl) {
+export async function connSwitch(host, user, port, statusEl) {
   // a request with nothing to dial (or no engine to dial it with, or an attempt
   // already in flight) is not a move: the flow answers it in place, and the host
   // this window is on is left exactly where it is
@@ -386,7 +399,7 @@ async function connSwitch(host, user, port, statusEl) {
   const leaving = Boolean(localStorage.getItem("clutch_ssh_connected"));
   if (leaving) {
     // the intent goes FIRST, so the teardown below is the user leaving on purpose
-    // and is not announced as a lost session (js/backend-lifecycle.js)
+    // and is not announced as a lost session (backend-lifecycle.ts)
     localStorage.removeItem("clutch_ssh_connected");
     localStorage.removeItem("clutch_degrade");
     if (window.clutchTunnel) await window.clutchTunnel.disconnect();
@@ -424,11 +437,11 @@ async function connSwitch(host, user, port, statusEl) {
 // Connect — the user's own act. The picker has two doors onto it: choosing a host
 // in the list (below), and pressing Connect while the body is folded — the welcome
 // state, where the list's first entry (the host this device was last on) is one
-// press away (connTarget() in js/conn-store.js). connOnValue is the backend this
+// press away (connTarget() in conn-store.ts). connOnValue is the backend this
 // window is already on, so a choice that does not move the window is not a dial.
-async function connConnect(v) {
+export async function connConnect(v) {
   // The user's own Connect: a session is what they just asked for, so the exit's
-  // note (js/conn-lost.js) is spent — this is the door that pays it. Cleared before
+  // note (conn-lost.ts) is spent — this is the door that pays it. Cleared before
   // the guards below on purpose: the note is about what the NEXT boot may claim, and
   // no press of this button is a boot nobody asked for.
   connLostExitClear();
@@ -437,7 +450,7 @@ async function connConnect(v) {
     if (localStorage.getItem("clutch_ssh_connected")) {
       // the standing intent goes FIRST: the disconnect below ends the tunnel and
       // the host announces that as "tunnel:ended", which the renderer reads as a
-      // LOST session unless the intent is already gone (backend-lifecycle.js)
+      // LOST session unless the intent is already gone (backend-lifecycle.ts)
       localStorage.removeItem("clutch_ssh_connected");
       localStorage.removeItem("clutch_degrade"); // exiting degrade mode too
       await window.clutchTunnel.disconnect();
@@ -461,7 +474,7 @@ async function connConnect(v) {
 // The list's door: choosing a host connects to it, immediately — selection IS the
 // dial (device report #4: the extra press the picker briefly required is gone).
 // The selection the picker LANDS on is not a choice — a list of hosts opens on its
-// first entry (js/conn-store.js) and dials nothing, because only the user's own act
+// first entry (conn-store.ts) and dials nothing, because only the user's own act
 // fires this listener; the folded bar's Connect below spends that same entry.
 connSelect.addEventListener("change", () => {
   updateConnConnect(); // the folded bar's Connect follows the new choice
@@ -472,10 +485,10 @@ connSelect.addEventListener("change", () => {
 $("#conn-connect").addEventListener("click", () => connConnect(connTarget()));
 
 // new-connection popup (only shown when the user asks to add an SSH host)
-const connNewModal = $("#conn-new-modal");
-const connNewStatus = $("#conn-new-status");
+export const connNewModal = $("#conn-new-modal");
+export const connNewStatus = $("#conn-new-status");
 
-function openConnNew() {
+export function openConnNew() {
   connNewHost.value = localStorage.getItem("clutch_ssh_host") || "";
   connNewUser.value = localStorage.getItem("clutch_ssh_user") || "";
   connNewPort.value = localStorage.getItem("clutch_ssh_port") || "22";
@@ -483,7 +496,7 @@ function openConnNew() {
   connNewModal.classList.remove("hidden", "closing");
   connNewHost.focus();
 }
-function closeConnNew() {
+export function closeConnNew() {
   closeModal(connNewModal);
 }
 $("#conn-new").addEventListener("click", openConnNew);
@@ -526,8 +539,8 @@ if (window.clutchTunnel && window.clutchTunnel.onProgress) {
 $("#ssh-pass-ok").addEventListener("click", () => {
   const pw = passInput.value;
   closeModal(passModal);
-  if (passResolve) passResolve(pw);
-  passResolve = null;
+  if (state.passResolve) state.passResolve(pw);
+  state.passResolve = null;
 });
 $("#ssh-pass-cancel").addEventListener("click", closePasswordPrompt);
 dismissOnOverlayPress(passModal, closePasswordPrompt);

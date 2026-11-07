@@ -3,34 +3,40 @@
 // A guarded tool call is answered here on purpose, including the arming
 // countdown that stops a stray keypress from granting trust.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch } from "./app";
+import { els } from "./els";
+import { $ } from "./dom";
+import { closeModal } from "./settings";
+import { state } from "./state";
+import { setStatus } from "./stream-view";
+import { extractCommand, permReason } from "./tool-render";
 
 // ---- permission confirm ----
-const permModal = $("#perm-modal");
-let pendingPerm = null;
+export const permModal = $("#perm-modal");
+export let pendingPerm = null;
 // asks this window has already answered: an ask is re-announced while it waits
 // and re-delivered on every (re)connect (agent/core/permission.py REANNOUNCE_S,
 // agent/api/events.py) — a copy arriving after the verdict must not re-open a
 // prompt the user already answered, and one already on screen is rendered in
 // place, never as a second dialog (or a restarted trust countdown)
-const answeredPerm = new Set();
+export const answeredPerm = new Set();
 // ...and the marks are per RUN, not per page. A request_id belongs to the run
 // whose gate minted it (agent/core/permission.py), and a run's ids are dead the
 // moment it ends. Hosts that predate this fix numbered asks from 1 in EVERY run, so
 // a page-lifetime mark swallowed the next run's first prompt: the frame returned
 // early, no dialog ever appeared, and the run stayed blocked on an answer nobody
 // could give until Stop. The stream calls this at every run boundary
-// (js/stream-events.js), so a copy of a LIVE ask is still deduped while an id
+// (stream-events.ts), so a copy of a LIVE ask is still deduped while an id
 // the run that just ended used can never mute a new one.
-function forgetAnsweredPerm() {
+export function forgetAnsweredPerm() {
   if (answeredPerm.size) answeredPerm.clear();
 }
-function openPerm(ev) {
+export function openPerm(ev) {
   if (answeredPerm.has(ev.request_id)) return;
   if (pendingPerm && pendingPerm.request_id === ev.request_id) return;
   pendingPerm = ev;
@@ -58,13 +64,13 @@ function openPerm(ev) {
   setStatus("waiting");
   if (trustArmed()) startTrustCountdown(); // armed: the prompt answers itself in 10s
 }
-function closePerm() {
+export function closePerm() {
   // respond immediately (the agent is blocked); only the visual close animates
   stopTrustCountdown(); // any close (allow/deny/stale final) kills the clock
   closeModal(permModal);
   pendingPerm = null;
 }
-async function respondPerm(allow) {
+export async function respondPerm(allow) {
   if (!pendingPerm) return;
   const ev = pendingPerm;
   closePerm();
@@ -98,7 +104,7 @@ $("#perm-deny").addEventListener("click", () => respondPerm(false));
 // permissive one — and nothing else may answer for them: this modal takes no
 // backdrop dismiss (a click outside the box used to mean DENY), so a stray
 // press can only ever allow, never reject a permission request.
-function permKey(e) {
+export function permKey(e) {
   if (e.key !== "Enter" || e.isComposing || !pendingPerm) return false;
   if (e.ctrlKey || e.metaKey || e.altKey) return false; // those are the task box's shortcuts
   e.preventDefault(); // a focused Deny button must not take the key too
@@ -120,20 +126,20 @@ document.addEventListener("keydown", permKey);
 // answers its own prompt first; the far side's expiry is the backstop for a
 // page that is not running, and a copy of the ask arriving after either verdict
 // is swallowed by the answered marks above.
-const TRUST_COUNTDOWN_S = 10; // keep in step with agent/core/permission.py
-let trustTimer = null;
-let trustDeadline = 0; // wall-clock ms at which an armed prompt allows
+export const TRUST_COUNTDOWN_S = 10; // keep in step with agent/core/permission.py
+export let trustTimer = null;
+export let trustDeadline = 0; // wall-clock ms at which an armed prompt allows
 
-function trustArmed() {
+export function trustArmed() {
   return localStorage.getItem("clutch_trust_all") === "1";
 }
 
 // Mirror the armed flag to the backend, which is what actually counts down.
 // Best effort by design: a push that cannot land (no backend yet, a session
 // being replaced) costs nothing, because the page's own clock still answers a
-// visible prompt and the next (re)connect pushes again (js/sse-stream.js).
-async function pushTrustArmed() {
-  if (!API_BASE) return; // no session to arm: the connect below pushes it
+// visible prompt and the next (re)connect pushes again (sse-stream.ts).
+export async function pushTrustArmed() {
+  if (!state.apiBase) return; // no session to arm: the connect below pushes it
   try {
     await apiFetch("/api/permission/trust", { method: "POST", body: { armed: trustArmed() } });
   } catch (e) {
@@ -141,11 +147,11 @@ async function pushTrustArmed() {
   }
 }
 
-function paintTrustBtn() {
+export function paintTrustBtn() {
   els.trust.textContent = trustArmed() ? "🛡 Trusted" : "🛡 Trust";
 }
 
-function setTrustArmed(on) {
+export function setTrustArmed(on) {
   localStorage.setItem("clutch_trust_all", on ? "1" : "0");
   els.trust.classList.toggle("trust-on", on);
   els.trust.title = on
@@ -162,7 +168,7 @@ function setTrustArmed(on) {
 // ticks down) is what makes a thawed page honest: a timer that came due while
 // the page was frozen fires late with a deadline already behind it, so the
 // prompt it belongs to closes at once instead of reliving its last seconds.
-function trustTick() {
+export function trustTick() {
   trustTimer = null;
   if (!pendingPerm) return; // prompt closed under a pending tick
   const left = Math.ceil((trustDeadline - Date.now()) / 1000);
@@ -178,8 +184,8 @@ function trustTick() {
 // away: re-tick now rather than wait for the overdue timer, so a prompt whose
 // deadline already passed (the far side has long since answered it) closes on
 // the spot. The platform's own resume signals, exactly as the SSE stream
-// listens for them (js/sse-stream.js).
-function trustResumeTick() {
+// listens for them (sse-stream.ts).
+export function trustResumeTick() {
   if (typeof document !== "undefined" && document.hidden) return; // still away
   if (!pendingPerm || !trustArmed()) return;
   if (trustTimer) {
@@ -189,14 +195,14 @@ function trustResumeTick() {
   trustTick();
 }
 
-function startTrustCountdown() {
+export function startTrustCountdown() {
   stopTrustCountdown();
   if (!trustArmed() || !pendingPerm) return;
   trustDeadline = Date.now() + TRUST_COUNTDOWN_S * 1000;
   trustTick();
 }
 
-function stopTrustCountdown() {
+export function stopTrustCountdown() {
   if (trustTimer) {
     clearTimeout(trustTimer);
     trustTimer = null;

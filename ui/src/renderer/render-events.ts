@@ -3,14 +3,29 @@
 // Run/Stop, the completion line, markdown/diff rendering and `renderEvent` — the
 // switch that turns a host event into the row the renderers above draw.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { agentMode, setMode } from "./env";
+import { els } from "./els";
+import { switchBackendResolved } from "./backend-lifecycle";
+import { connectionLost } from "./conn-lost";
+import { openPerm } from "./permissions";
+import { currentProject, pageSink } from "./project";
+import { TASK_BASE_H, notice } from "./settings";
+import { state } from "./state";
+import { addEvent } from "./stream-events";
+import { eventsEl, stream } from "./els";
+import {
+  autoScroll, busy, gliding, setJumpVisible, setStatus, toolCalls,
+} from "./stream-view";
+import { recordSentTask } from "./task-input";
+import { buildResultBlock, buildResultRowBlock, uiOfResult } from "./tool-render";
+import { scheduleTreeRefresh } from "./workspace-panel";
 
-function appendCompletion(status, summary) {
+export function appendCompletion(status, summary) {
   const div = document.createElement("div");
   div.className = "completion";
   div.textContent = status === "completed" ? "completed" : status;
@@ -26,25 +41,25 @@ function appendCompletion(status, summary) {
   if (!stream.classList.contains("loading")) {
     // never yank mid-glide: the user's jump animation owns the scroll until it lands
     if (gliding) return;
-    if (followTail) stream.scrollTop = stream.scrollHeight;
+    if (state.followTail) stream.scrollTop = stream.scrollHeight;
     else setJumpVisible(true);
   }
 }
 
 // The host's write-claim changes are announced on the document, never called:
-// js/project.js (which owns #readonly-badge) loads after this file. A test
+// project.ts (which owns #readonly-badge) loads after this file. A test
 // harness may model the DOM without dispatchEvent/CustomEvent; then there is
 // no badge to update and the announcement is skipped.
-function announceProjectReadOnly(readOnly) {
+export function announceProjectReadOnly(readOnly) {
   if (typeof document === "undefined" || typeof document.dispatchEvent !== "function") return;
   const detail = { readOnly: !!readOnly };
   const ev = typeof CustomEvent === "function"
     ? new CustomEvent("clutch:project-read-only", { detail })
     : { type: "clutch:project-read-only", detail };
-  document.dispatchEvent(ev);
+  document.dispatchEvent(ev as Event);
 }
 
-function renderEvent(ev) {
+export function renderEvent(ev) {
   const wrap = document.createElement("div");
   const body = document.createElement("div");
   body.className = "body";
@@ -55,7 +70,7 @@ function renderEvent(ev) {
       wrap.className = "event user";
       // what the user actually typed, verbatim, kept on the row: the rendered
       // DOM is markdown and cannot be turned back into the message, and the
-      // roll-back gesture has to put the message back in the box (js/task-rollback.js)
+      // roll-back gesture has to put the message back in the box (task-rollback.ts)
       wrap._taskText = String(ev.content == null ? "" : ev.content);
       wrap.innerHTML = '<div class="hdr">task</div>';
       body.className = "body";
@@ -76,7 +91,7 @@ function renderEvent(ev) {
       // The write claim is HOST state, like the run state: every connect's
       // status frame carries it, and a live change (the watchdog took the
       // claim back once the other window was gone) arrives as its own frame.
-      // Announced, not called — js/project.js owns the badge and loads after
+      // Announced, not called — project.ts owns the badge and loads after
       // this file (tests/ui-load-order-test.js).
       if (typeof ev.read_only === "boolean") announceProjectReadOnly(ev.read_only);
       if (ev.key === "project_read_only") announceProjectReadOnly(!!ev.value);
@@ -92,12 +107,12 @@ function renderEvent(ev) {
         // itself is not one either (a phone that is not being looked at when it
         // fires has learned nothing). The run's ending belongs in the transcript
         // with everything else, so this frame records the question and the
-        // record the new session replays answers it (js/stream-events.js).
-        if (ev.value === "idle" && sseRunAtRisk) {
-          sseRunAtRisk = false;
-          sseRunLostPending = true;
+        // record the new session replays answers it (stream-events.ts).
+        if (ev.value === "idle" && state.sseRunAtRisk) {
+          state.sseRunAtRisk = false;
+          state.sseRunLostPending = true;
         } else if (ev.value !== "idle") {
-          sseRunAtRisk = false; // the run is still there: nothing was lost after all
+          state.sseRunAtRisk = false; // the run is still there: nothing was lost after all
         }
         setStatus(ev.value);
       }
@@ -114,7 +129,7 @@ function renderEvent(ev) {
   return wrap;
 }
 
-function escapeHtml(s) {
+export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
@@ -122,7 +137,7 @@ function escapeHtml(s) {
 
 // markdown via marked + DOMPurify (LLM output is untrusted); breaks=true
 // hard-wraps user tasks
-function renderMarkdown(text, breaks = false) {
+export function renderMarkdown(text, breaks = false) {
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
     return escapeHtml(text);
   }
@@ -143,7 +158,7 @@ function renderMarkdown(text, breaks = false) {
 }
 
 // render a unified diff string as a <pre> with per-line +/- colouring
-function renderDiff(diff) {
+export function renderDiff(diff) {
   const pre = document.createElement("pre");
   pre.className = "diff-view";
   const lines = diff.split("\n");
@@ -175,10 +190,10 @@ function renderDiff(diff) {
 // removes.
 //
 // The host's answers arrive in two shapes — ui/preload.js resolves {ok, error},
-// ui/bridge-shim.js rejects it (an unreachable bridge IS a dead IPC channel) —
+// ui/src/renderer/bridge-shim.ts rejects it (an unreachable bridge IS a dead IPC channel) —
 // and that difference is not this file's business: hostCall() turns both into
 // one Error carrying the host's own code (no_session, project_mismatch, …).
-async function hostCall(promise) {
+export async function hostCall(promise) {
   const answer = await promise;
   if (answer && answer.ok === false) {
     const err = new Error(answer.error || "the host refused the call");
@@ -188,7 +203,7 @@ async function hostCall(promise) {
   return answer;
 }
 
-async function run() {
+export async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
   if (!currentProject) return;
@@ -202,10 +217,10 @@ async function run() {
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
   // ...and it joins the box's sent-message history: ArrowUp walks it back
-  // (js/task-input.js), which is how the user re-reads or re-asks what they sent
+  // (task-input.ts), which is how the user re-reads or re-asks what they sent
   recordSentTask(task);
   // sending a message returns to the live tail unconditionally
-  followTail = true;
+  state.followTail = true;
   autoScroll(true);
   // The payload /api/run used to take, and the host still takes: the task, the
   // mode the loop is built for, and the .clc this page is showing. The project
@@ -240,7 +255,7 @@ async function run() {
   }
 }
 
-async function stop() {
+export async function stop() {
   const host = window.clutchRun;
   if (!host || typeof host.stop !== "function") {
     notice("this build has no host run loop — nothing to stop");
@@ -285,12 +300,12 @@ async function stop() {
 // nobody is looking at.
 //
 // Asked from two doors, the same function: a boot that already knows a project
-// (js/boot.js) can continue a turn before the first row is drawn, and a boot
+// (boot.ts) can continue a turn before the first row is drawn, and a boot
 // that does not — today the page has no project until the user opens one —
-// asks the moment the log it is looking at exists (js/project.js). An idle
+// asks the moment the log it is looking at exists (project.ts). An idle
 // answer does nothing at all; an open turn is driven exactly as the Run button
 // drives it, same host call, same frames. Nothing is written here.
-async function resumeTurn() {
+export async function resumeTurn() {
   const host = window.clutchRun;
   if (!host || typeof host.state !== "function" || typeof host.drive !== "function") return;
   if (!currentProject || busy) return; // no log to resume, or a turn already ours

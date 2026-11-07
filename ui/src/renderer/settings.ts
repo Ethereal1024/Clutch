@@ -5,16 +5,22 @@
 // the overlay kit every modal is built from — dismissal, close animation, notice,
 // confirm.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch } from "./app";
+import { els } from "./els";
+import { $ } from "./dom";
+import { state } from "./state";
+import { addEvent } from "./stream-events";
+import { reducedMotion } from "./stream-text";
+import { autoScroll, nearBottom } from "./stream-view";
 
 // ---- task input auto-grow (grows as you type, shrinks back after sending) ----
-const TASK_BASE_H = els.task.offsetHeight; // default 3-row height
-function autoGrowTask() {
+export const TASK_BASE_H = els.task.offsetHeight; // default 3-row height
+export function autoGrowTask() {
   const was = els.task.style.height;
   if (!els.task.value.trim()) {
     els.task.style.height = TASK_BASE_H + "px";
@@ -25,8 +31,8 @@ function autoGrowTask() {
   // the input resize clamps scrollTop; the listener ignores it, so re-pin while
   // typing to stay on the tail
   if (was !== els.task.style.height) {
-    suppressLatchUntil = performance.now() + 120;
-    if (followTail && !nearBottom()) autoScroll();
+    state.suppressLatchUntil = performance.now() + 120;
+    if (state.followTail && !nearBottom()) autoScroll();
   }
 }
 els.task.addEventListener("input", autoGrowTask);
@@ -43,7 +49,7 @@ els.task.addEventListener("input", autoGrowTask);
 // last characters of the text: unbreakable user@host:port labels overflowed to
 // the right, and the space before the ✓ was the only break opportunity there
 // was, so the tick dropped to the next line (device report).
-function customSelect(root) {
+export function customSelect(root) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "cselect-btn";
@@ -175,7 +181,7 @@ function customSelect(root) {
   document.addEventListener("click", (e) => {
     // the list lives on <body> now: a press on one of its rows is a press INSIDE
     // the picker, however far from `root` that node is
-    if (!root.contains(e.target) && !pop.contains(e.target)) close();
+    if (!root.contains(e.target as Node) && !pop.contains(e.target as Node)) close();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") close();
@@ -207,10 +213,10 @@ function customSelect(root) {
   };
 }
 
-const modal = $("#settings-modal");
-const keyInput = $("#api-key-input");
-const modelInput = $("#model-input");
-const reasoningEffortInput = customSelect($("#reasoning-effort-input"));
+export const modal = $("#settings-modal");
+export const keyInput = $("#api-key-input");
+export const modelInput = $("#model-input");
+export const reasoningEffortInput = customSelect($("#reasoning-effort-input"));
 // reasoning-effort options
 for (const [v, t] of [["", "default"], ["low", "low"], ["medium", "medium"], ["max", "max"]]) {
   const o = document.createElement("option");
@@ -221,7 +227,7 @@ for (const [v, t] of [["", "default"], ["low", "low"], ["medium", "medium"], ["m
 reasoningEffortInput.value = "";
 // wire protocol: empty = the endpoint's default (chat completions); providers
 // serving the Responses API on the same base URL need the explicit choice
-const apiProtocolInput = customSelect($("#api-protocol-input"));
+export const apiProtocolInput = customSelect($("#api-protocol-input"));
 for (const [v, t] of [["", "chat completions (default)"], ["responses", "responses API"]]) {
   const o = document.createElement("option");
   o.value = v;
@@ -230,13 +236,13 @@ for (const [v, t] of [["", "chat completions (default)"], ["responses", "respons
 }
 apiProtocolInput.value = "";
 // "chat" in the settings file IS the default choice, so show it as such
-function setApiProtocol(v) {
+export function setApiProtocol(v) {
   apiProtocolInput.value = v === "chat" ? "" : v || "";
 }
-const llmUrlInput = $("#llm-url-input");
-const profileSelect = customSelect($("#llm-profile-select"));
+export const llmUrlInput = $("#llm-url-input");
+export const profileSelect = customSelect($("#llm-profile-select"));
 
-function llmProfiles() {
+export function llmProfiles() {
   try {
     return JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
   } catch (e) {
@@ -244,11 +250,11 @@ function llmProfiles() {
   }
 }
 
-function saveLlmProfiles(profiles) {
+export function saveLlmProfiles(profiles) {
   localStorage.setItem("clutch_llm_profiles", JSON.stringify(profiles));
 }
 
-function renderLlmProfiles(activeName) {
+export function renderLlmProfiles(activeName) {
   const profiles = llmProfiles();
   profileSelect.innerHTML = "";
   const names = Object.keys(profiles).sort();
@@ -268,7 +274,7 @@ function renderLlmProfiles(activeName) {
 }
 
 // apply a saved profile: fill the form and push it to the backend immediately
-async function applyLlmProfile(name) {
+export async function applyLlmProfile(name) {
   const p = llmProfiles()[name];
   if (!p) return;
   keyInput.value = p.api_key || "";
@@ -287,9 +293,9 @@ profileSelect.addEventListener("change", async () => {
   else renderLlmProfiles("");
 });
 
-const profileNameInput = $("#llm-profile-name");
+export const profileNameInput = $("#llm-profile-name");
 
-function saveProfileAs(name, oldName) {
+export function saveProfileAs(name, oldName) {
   const profiles = llmProfiles();
   if (oldName && oldName !== name) delete profiles[oldName]; // rename: drop the old key
   profiles[name] = {
@@ -306,23 +312,23 @@ function saveProfileAs(name, oldName) {
 
 // ---- LLM profile editor (mirrors the SSH connection modal) ----
 // pick to apply, ＋ New (blank), Edit, Delete; url/key/model fields live here
-const llmProfileModal = $("#llm-profile-modal");
-const llmProfileTitle = $("#llm-profile-title");
-const llmProfileError = $("#llm-profile-error");
-let editingProfile = null; // the profile being edited, or null for a new one
+export const llmProfileModal = $("#llm-profile-modal");
+export const llmProfileTitle = $("#llm-profile-title");
+export const llmProfileError = $("#llm-profile-error");
+export let editingProfile = null; // the profile being edited, or null for a new one
 
-function showLlmProfileError(msg) {
+export function showLlmProfileError(msg) {
   llmProfileError.textContent = msg;
   llmProfileError.classList.remove("hidden");
   profileNameInput.classList.add("profile-name-error");
 }
-function clearLlmProfileError() {
+export function clearLlmProfileError() {
   llmProfileError.classList.add("hidden");
   llmProfileError.textContent = "";
   profileNameInput.classList.remove("profile-name-error");
 }
 
-function openLlmProfileEditor(name) {
+export function openLlmProfileEditor(name = null) {
   // ＋ New (no name) opens a BLANK form; Edit prefills the selected profile
   const p = name ? llmProfiles()[name] : null;
   editingProfile = name && p ? name : null;
@@ -337,7 +343,7 @@ function openLlmProfileEditor(name) {
   llmProfileModal.classList.remove("hidden", "closing");
   profileNameInput.focus();
 }
-function closeLlmProfileEditor() {
+export function closeLlmProfileEditor() {
   editingProfile = null;
   closeModal(llmProfileModal);
 }
@@ -394,7 +400,7 @@ $("#llm-profile-del").addEventListener("click", async () => {
   renderLlmProfiles("");
 });
 
-async function openSettings() {
+export async function openSettings() {
   modal.classList.remove("hidden", "closing");
   // url/key/model fields live in the profile editor; nothing to prefill here
   renderLlmProfiles(localStorage.getItem("clutch_llm_active") || "");
@@ -403,7 +409,7 @@ async function openSettings() {
   // the place they land (and its lists are re-read when they do)
   showSettingsTab("llm");
 }
-function closeSettings() {
+export function closeSettings() {
   closeModal(modal);
 }
 
@@ -413,7 +419,7 @@ function closeSettings() {
 // the other two are the ones that make the first mean something: the same renderer
 // runs inside Electron and inside the phone's system WebView, so the number alone
 // does not say what was on screen.
-function aboutVersion() {
+export function aboutVersion() {
   const v = String(window.CLUTCH_VERSION == null ? "" : window.CLUTCH_VERSION).trim();
   // no stamp: a checkout served plainly, or a page from before this file existed.
   // Saying so beats an empty row that looks like a broken read.
@@ -424,7 +430,7 @@ function aboutVersion() {
 // version facts a page in a WebView has for free. Electron names itself there, and
 // so does the Android WebView ("; Android 13; …) Version/4.0 Chrome/108…"); a
 // plain desktop browser is neither, and says so.
-function aboutPlatform() {
+export function aboutPlatform() {
   const ua = String((navigator && navigator.userAgent) || "");
   const grab = (re) => {
     const m = ua.match(re);
@@ -442,14 +448,14 @@ function aboutPlatform() {
   return [system, shell, chrome ? "Chromium " + chrome : ""].filter(Boolean).join(" · ");
 }
 
-// The session this window holds (ui/app.js API_BASE): local, or a tunnel to the
+// The session this window holds (ui/src/renderer/app.ts API_BASE): local, or a tunnel to the
 // machine on the far side. It is the one row that says whether a version report is
 // about this device or about the host it was talking to.
-function aboutBackend() {
-  return API_BASE || "not connected";
+export function aboutBackend() {
+  return state.apiBase || "not connected";
 }
 
-function paintAbout() {
+export function paintAbout() {
   const set = (id, text) => {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
@@ -461,7 +467,7 @@ function paintAbout() {
 
 // ---- the settings modal's panes ----
 // A tab strip over one modal box: "Model" (the LLM profile form), "Plugins"
-// (ui/js/components-panel.js) and "About" (the three facts above). Purely visual —
+// (ui/src/renderer/components-panel.ts) and "About" (the three facts above). Purely visual —
 // this only moves a class; the plugin pane draws itself when it becomes visible,
 // and the About pane is painted on its own tab's click below.
 //
@@ -470,7 +476,7 @@ function paintAbout() {
 // the pane that is showing is announced. No tab is removed from the tab order and
 // there are no arrow keys — with three of them, Tab reaches the others, which is
 // what a reader expects anyway.
-const SETTINGS_TABS = ["llm", "plugins", "about"];
+export const SETTINGS_TABS = ["llm", "plugins", "about"];
 
 // ---- the box follows its pane ----
 // The panes are different lengths and the box is only as tall as the one that
@@ -488,19 +494,19 @@ const SETTINGS_TABS = ["llm", "plugins", "about"];
 // arrives AFTER the switch. A transition aimed at a height measured at the switch
 // would travel to the wrong number and then jump; this one is aimed, once per
 // frame, at whatever the box wants on that frame.
-const SETTINGS_HEIGHT_MS = 420; // --size
-let settingsHeightAnim = null; // { box, raf, from, t0 } while the box is travelling
+export const SETTINGS_HEIGHT_MS = 420; // --size
+export let settingsHeightAnim = null; // { box, raf, from, t0 } while the box is travelling
 
 // the box's own height, with nothing holding it: the inline height is cleared for
 // the length of one forced layout — no paint happens inside a single task, so the
 // box is never DRAWN at its natural height unless that is where it belongs — and
 // the number read back is the pane's own
-function settingsBoxWants(box) {
+export function settingsBoxWants(box) {
   box.style.height = "";
   return box.getBoundingClientRect().height;
 }
 
-function settingsHeightStop() {
+export function settingsHeightStop() {
   if (!settingsHeightAnim) return;
   const anim = settingsHeightAnim;
   settingsHeightAnim = null;
@@ -510,11 +516,11 @@ function settingsHeightStop() {
 
 // ease-out: leaves in one direction and arrives without a stop — the shape the
 // sheet's `ease` gives `#fs-body`
-function settingsHeightEase(p) {
+export function settingsHeightEase(p) {
   return 1 - Math.pow(1 - p, 3);
 }
 
-function settingsHeightStep(anim, now) {
+export function settingsHeightStep(anim, now) {
   if (settingsHeightAnim !== anim) return; // a later switch took the box over
   const first = !anim.t0;
   if (first) anim.t0 = now;
@@ -533,7 +539,7 @@ function settingsHeightStep(anim, now) {
   anim.raf = requestAnimationFrame((t) => settingsHeightStep(anim, t));
 }
 
-function showSettingsTab(name) {
+export function showSettingsTab(name) {
   const tab = SETTINGS_TABS.includes(name) ? name : "llm";
   const swap = () => {
     for (const t of SETTINGS_TABS) {
@@ -564,7 +570,7 @@ function showSettingsTab(name) {
   const anim = { box, from, raf: 0, t0: 0 };
   settingsHeightAnim = anim;
   // the first step is the NEXT frame on purpose: this tab has a second listener
-  // (ui/js/components-panel.js, loaded after this file) and it draws the plugin
+  // (ui/src/renderer/components-panel.ts, loaded after this file) and it draws the plugin
   // pane's reading state in this same task — the height to travel to is the one
   // that state asks for, not the empty pane's
   anim.raf = requestAnimationFrame((t) => settingsHeightStep(anim, t));
@@ -578,11 +584,11 @@ for (const t of SETTINGS_TABS) {
 // comes or goes under a modal that is already open.
 $("#settings-tab-about").addEventListener("click", paintAbout);
 // push the profile-editor form values to the backend
-async function pushSettings() {
+export async function pushSettings() {
   const key = keyInput.value.trim();
   const llmUrl = llmUrlInput.value.trim();
   const model = modelInput.value.trim();
-  const payload = {
+  const payload: Record<string, any> = {
     base_url: llmUrl,
     model,
     // always sent: empty values clear the knobs on the backend
@@ -620,7 +626,7 @@ dismissOnOverlayPress(modal, closeSettings);
 
 // close only when the press STARTS on the overlay (a drag released outside
 // must not close it)
-function dismissOnOverlayPress(overlayEl, onClose) {
+export function dismissOnOverlayPress(overlayEl, onClose) {
   overlayEl.addEventListener("mousedown", (e) => {
     if (e.target === overlayEl) onClose();
   });
@@ -629,10 +635,10 @@ function dismissOnOverlayPress(overlayEl, onClose) {
 // --move in ui/style.css, in milliseconds. `.modal.closing` runs for exactly this
 // long, and the constant has to move with it: a shorter timer lands .hidden
 // mid-slide, a longer one paints a frame of a modal that is already gone.
-const MODAL_CLOSE_MS = 200;
+export const MODAL_CLOSE_MS = 200;
 
 // animated close: fade the overlay, then land display:none when done
-function closeModal(overlayEl, onDone) {
+export function closeModal(overlayEl, onDone = null) {
   if (!overlayEl || overlayEl.classList.contains("hidden") || overlayEl.classList.contains("closing")) return;
   const finish = () => {
     // reopened before the animation finished: this stale timer must not hide it
@@ -656,8 +662,8 @@ function closeModal(overlayEl, onDone) {
 
 // one self-dismissing line at the bottom of the viewport; never intercepts a
 // tap, never covers a dialog (z-index below .modal)
-let noticeTimer = null;
-function notice(message, kind = "error") {
+export let noticeTimer = null;
+export function notice(message, kind = "error") {
   const el = document.getElementById("notice");
   if (!el) return;
   el.textContent = message;
@@ -667,10 +673,10 @@ function notice(message, kind = "error") {
   noticeTimer = setTimeout(() => el.classList.add("hidden"), kind === "error" ? 8000 : 4000);
 }
 
-const confirmModal = $("#confirm-modal");
-let confirmResolve = null;
+export const confirmModal = $("#confirm-modal");
+export let confirmResolve = null;
 // promise-based: `if (await askConfirm({...})) ...` replaces `if (!confirm(...))`
-function askConfirm({ title, text, ok = "OK", cancel = "Cancel" }) {
+export function askConfirm({ title, text, ok = "OK", cancel = "Cancel" }) {
   $("#confirm-title").textContent = title;
   $("#confirm-text").textContent = text;
   $("#confirm-ok").textContent = ok;
@@ -681,7 +687,7 @@ function askConfirm({ title, text, ok = "OK", cancel = "Cancel" }) {
     confirmResolve = resolve;
   });
 }
-function closeConfirm(answer) {
+export function closeConfirm(answer) {
   if (!confirmResolve) return;
   const resolve = confirmResolve;
   confirmResolve = null; // settle before the close animation: a re-press cannot double-answer

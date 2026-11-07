@@ -30,17 +30,12 @@ files:
   # artifact scripts/market_index.py publishes as the release's index.
   - "!components.sources.json"
   - "!market.snapshot.json"
-  # The renderer is ONE committed bundle now (ui/renderer.js, built by
-  # ui/build-renderer.js from ui/renderer.modules.json), and index.html loads
+  # The renderer is ONE committed bundle now (ui/renderer.js, bundled by
+  # ui/build-renderer.js from ui/src/renderer/*.ts), and index.html loads
   # exactly that. Its sources stay in the repo — the build and every test read
   # them — but nothing at runtime resolves them, so shipping them would put a
-  # second, dead copy of the program in the deb and make an edit under ui/js/
-  # look live when the page cannot see it.
-  - "!app.js"
-  - "!bridge-shim.js"
-  - "!js"
-  - "!js/**"
-  - "!renderer.modules.json"
+  # second, dead copy of the program in the deb and make an edit under
+  # ui/src/renderer/ look live when the page cannot see it.
   - "!build-renderer.js"
   # The host half is TypeScript now: src/host/*.ts compiles to the ui/*.js that
   # ship. The emit is IN PLACE (ui/build-host.js) on purpose — every module finds
@@ -53,6 +48,7 @@ files:
   - "!build-host.js"
   - "!build-ts.js"
   - "!tsconfig.host.json"
+  - "!tsconfig.renderer.json"
   - "!*.ts"
 
 # Native-dependency rebuild is OFF on purpose — it is what made `npm run dist`

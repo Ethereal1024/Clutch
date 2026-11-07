@@ -601,7 +601,7 @@ def check_ui_protocol() -> None:
     check(reg.ui("run_command")["mutates"] is True, "the host's own command may change the tree")
     # a name this registry does not hold gets the defaults and nothing else: it
     # invented a `mutates` for a tool it cannot see, while the renderer already
-    # reads an absent key as the same value (ui/app.js UI_DEFAULTS)
+    # reads an absent key as the same value (ui/src/renderer/app.ts UI_DEFAULTS)
     unknown = reg.ui("no_such_tool")
     check(unknown == {**catalog.DEFAULTS, "undo": False}, "an unknown tool gets the defaults alone")
     check("mutates" not in unknown, "and no `mutates` the host cannot derive")

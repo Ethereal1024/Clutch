@@ -17,7 +17,7 @@
 // stub DOM, so a silent edit that merges the result back into the call row,
 // drops the chip, or routes on a tool name or a purpose word fails here.
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet, stateStub } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
@@ -47,6 +47,7 @@ global.document = { createElement: (tag) => node(tag) };
 global.autoScroll = () => {};
 global.eventsEl = node("div");
 global.pageSink = null;
+global.state = stateStub(); // the shared state leaf: the stream slices read it (lastTextEl, …)
 // the fold system is its own tested code; here the form is what matters
 global.wrapFold = (el) => { const w = node("div"); w.className = "fold"; w._body = el; w._hidden = true; return w; };
 global.toggleFold = (fold) => { const was = fold._hidden; fold._hidden = !was; return was; };
@@ -57,11 +58,11 @@ global.highlightPreByPath = (pre, p) => { pre._highlightPath = p; highlightPaths
 global.renderDiff = () => node("div");
 
 // ---- load the real code: state + row builders, the body parts, the stream ----
-(0, eval)(region("const toolCalls = {};", "addToolCallRow"));
-(0, eval)(region("function buildResultRow", "appendResultRow"));
-(0, eval)(region("function buildResultRowBlock", "buildResultRowBlock"));
-(0, eval)(region("function buildResultBody", "buildResultBody"));
-(0, eval)(region("const streamRows", "handleToolCallDelta"));
+(0, eval)(runnableSnippet(region("const toolCalls = {};", "addToolCallRow")));
+(0, eval)(runnableSnippet(region("function buildResultRow", "appendResultRow")));
+(0, eval)(runnableSnippet(region("function buildResultRowBlock", "buildResultRowBlock")));
+(0, eval)(runnableSnippet(region("function buildResultBody", "buildResultBody")));
+(0, eval)(runnableSnippet(region("const streamRows", "handleToolCallDelta")));
 
 // the read_file declaration, exactly as the component states it — a
 // composition of parts, no purpose word anywhere in it
@@ -77,7 +78,7 @@ const READ_UI = {
 
 (async () => {
   // ---- 1) the call row: the tool's own name leads it, args one click away ----
-  const ev = { name: "read_file", arguments: '{"path": "ui/app.js"}', tool_call_id: "r1", ui: READ_UI };
+  const ev = { name: "read_file", arguments: '{"path": "ui/src/renderer/app.ts"}', tool_call_id: "r1", ui: READ_UI };
   const row = makeToolRow(ev);
   const chip = row.children.find((c) => c.className === "tool-name");
   check(chip && chip.textContent === "read_file", "the call row leads with the tool's own name");
@@ -100,17 +101,17 @@ const READ_UI = {
   handleToolCallDelta({ type: "tool_call_delta", tool_call_id: "c1", name: "x_tool", delta: "", ui: { preview: "args" } });
 
   // ---- 3) the result: a collapsible row of its own beside the call ----
-  const call = { name: "read_file", args: { path: "ui/app.js" } };
+  const call = { name: "read_file", args: { path: "ui/src/renderer/app.ts" } };
   const block = { el: node("div") };
   appendResultRow(block, Object.assign({}, { chip: "name" }, READ_UI), call, { content: "a\nb\nc" });
   const resultRow = block.el.children[0];
   const fold = block.el.children[1];
   check(resultRow.className === "result-row", "the result is its own collapsible row");
   const lbl = resultRow.children.find((c) => c.className !== "fold-toggle");
-  check(lbl.textContent === "read ui/app.js (3 lines)", "the label is the declaration's summary, filled from the call");
+  check(lbl.textContent === "read ui/src/renderer/app.ts (3 lines)", "the label is the declaration's summary, filled from the call");
   check(fold._body.className === "result-detail", "the declared code body folds under the row");
   check(fold._body.textContent === "a\nb\nc", "the content folds under the row, whole");
-  check(fold._body._highlightPath === "ui/app.js", "the code body is highlighted as the declaration asks (path)");
+  check(fold._body._highlightPath === "ui/src/renderer/app.ts", "the code body is highlighted as the declaration asks (path)");
   check(typeof resultRow.onclick === "function", "the row itself is the toggle");
   resultRow.onclick();
   check(resultRow.children[0].textContent === "▾", "the toggle flips when the row is clicked");

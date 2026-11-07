@@ -6,7 +6,7 @@
 // open/new -> "+ New SSH connection" — re-entering the very host parameters the
 // window had never actually left (an old host introduced as a new one).
 //
-// The contract under test (ui/js/conn-lost.js):
+// The contract under test (ui/src/renderer/conn-lost.ts):
 //   * every detected disconnect funnels into connectionLost(), one idempotent
 //     announcement named by the cause that got there first;
 //   * the dialog it raises IS the reconnect entry, and it has exactly TWO exits,
@@ -37,7 +37,7 @@ const { check, summary, slicer, uiSource } = require("./harness.js");
 const ROOT = path.join(__dirname, "..");
 const APP = uiSource(); // the renderer, every module in page load order
 const HTML = fs.readFileSync(path.join(ROOT, "ui", "index.html"), "utf8");
-const CONN_LOST = fs.readFileSync(path.join(ROOT, "ui", "js", "conn-lost.js"), "utf8");
+const CONN_LOST = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "conn-lost.ts"), "utf8");
 const { fnBody } = slicer(APP);
 const { fnBody: connFn } = slicer(CONN_LOST);
 
@@ -105,7 +105,7 @@ check(!/Escape[\s\S]{0,120}closeModal/.test(CONN_LOST) &&
 // one of the two exits is proof of life: the dialog resolves itself in exactly
 // one place, and that place is the stream opening
 const closerCalls = APP.match(/(?<!function )resolveConnectionLost\(\)/g) || [];
-const SSESRC = fs.readFileSync(path.join(ROOT, "ui", "js", "sse-stream.js"), "utf8");
+const SSESRC = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "sse-stream.ts"), "utf8");
 const onOpen = SSESRC.slice(SSESRC.indexOf("es.onopen = ()"), SSESRC.indexOf("es.onerror = "));
 check(closerCalls.length === 1 && /resolveConnectionLost\(\)/.test(onOpen),
   "a stream that OPENED is what resolves the outage (an adopted URL is not a session)");
@@ -592,10 +592,10 @@ async function main() {
   "and a press cannot land on an attempt already in flight: the button is off screen then, and this is why that is safe");
 
   // ---- 12. the module state is real, not a per-call local ----
-  check(/^let connLost = false;/m.test(CONN_LOST) &&
-    /^let connLostTries = 0;/m.test(CONN_LOST) &&
-    /^let connLostAttempting = false;/m.test(CONN_LOST) &&
-    /^let connLostManualOnly = false;/m.test(CONN_LOST),
+  check(/^export let connLost = false;/m.test(CONN_LOST) &&
+    /^export let connLostTries = 0;/m.test(CONN_LOST) &&
+    /^export let connLostAttempting = false;/m.test(CONN_LOST) &&
+    /^export let connLostManualOnly = false;/m.test(CONN_LOST),
   "the outage is module state: several detectors share one dialog");
   check(/const CONN_LOST_BACKOFF_MS = \[1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000\];/.test(CONN_LOST) &&
     /const CONN_LOST_NOTICE_MS = 8000;/.test(CONN_LOST) &&
@@ -623,7 +623,7 @@ async function main() {
   // dialog goes down before the page does, and the teardown goes before the reload
   // (a reload that left the main process's tunnel up would be handed the very
   // session the user just left).
-  check(/^function connLostCancel\(\) \{\n  if \(!connLost\) return;\n  localStorage\.removeItem\("clutch_ssh_connected"\);/m.test(CONN_LOST),
+  check(/^export function connLostCancel\(\) \{\n  if \(!connLost\) return;\n  localStorage\.removeItem\("clutch_ssh_connected"\);/m.test(CONN_LOST),
   "Cancel is a no-op with no outage up, and its FIRST act is to drop the standing intent");
   check(!/switchBackendResolved/.test(connFn("connLostCancel")),
   "and it asks the host for nothing: an adopted URL would arrive as a new base and raise this very dialog straight back up");
@@ -646,7 +646,7 @@ async function main() {
   check(/closeModal\(connLostModal\);\n  connLostQuit\(\);/.test(connFn("connLostCancel")),
   "and leaving is the LAST thing Cancel does: nothing of this dialog is still painting while the page goes");
 
-  const lifecycle = fs.readFileSync(path.join(ROOT, "ui", "js", "backend-lifecycle.js"), "utf8");
+  const lifecycle = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "backend-lifecycle.ts"), "utf8");
   check(/if \(!localStorage\.getItem\("clutch_ssh_connected"\)\) return;/.test(lifecycle),
   "which is exactly why the intent goes first: the renderer's own detector ignores a teardown with no intent behind it");
 
@@ -772,7 +772,7 @@ async function main() {
   // note BEFORE it tears anything down, and the page that comes back reads it before
   // it asks anything at all.
   const quitFn2 = connFn("connLostQuit");
-  check(/^async function connLostQuit\(\) \{\n  connLostExitMark\(\);/m.test(CONN_LOST) &&
+  check(/^export async function connLostQuit\(\) \{\n  connLostExitMark\(\);/m.test(CONN_LOST) &&
     quitFn2.indexOf("connLostExitMark()") < quitFn2.indexOf("boundedDisconnect("),
   "the exit writes its note FIRST: the reload must never outrun the word it leaves behind");
   const markFn = connFn("connLostExitMark");
@@ -804,7 +804,7 @@ async function main() {
   check(/connLostExitPending\(\)\) return null;/.test(reconciledFn) &&
     reconciledFn.indexOf("connLostExitPending()") < reconciledFn.indexOf("hostSessionUrl()"),
   "the second claim entry (a tunnel that still answers) refuses for the same note, also before it asks");
-  check(/if \(!API_BASE\) return;/.test(fnBody("connectSSE")),
+  check(/if \(!state\.apiBase\) return;/.test(fnBody("connectSSE")),
   "and the stream the boot opens next refuses to open on nothing: no null/api/events ever leaves the window");
   const connConnectFn = fnBody("connConnect");
   check(connConnectFn.indexOf("connLostExitClear()") > -1 &&

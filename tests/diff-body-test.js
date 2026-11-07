@@ -15,10 +15,10 @@
 // stub DOM, so a silent edit that re-gates the pane on the diff fails here.
 //
 // The source is the page's own script list (harness.uiSource), not one file: the
-// result builders used to sit in ui/app.js, which is now only the entry module —
+// result builders used to sit in ui/src/renderer/app.ts, which is now only the entry module —
 // reading a fixed path made this runner fail on a move that broke nothing.
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, runnableSnippet } = require("./harness.js");
 
 const src = uiSource(); // every module, in page load order
 const { fnBody, region } = slicer(src);
@@ -58,12 +58,12 @@ global.renderDiff = (d) => { const n = node("div"); n.className = "diff"; n._dif
 // (the fold threshold is read out of the source: the functions below close over
 // it, and a sloppy indirect eval is what makes them globals)
 global.RESULT_FOLD_LINES = Number(src.match(/const RESULT_FOLD_LINES = (\d+);/)[1]);
-(0, eval)(fnBody("templateText"));
-(0, eval)(region("function buildResultBody", "plainBody")); // body + its plain-body fallback
-(0, eval)(fnBody("foldAtRest"));
-(0, eval)(region("function buildResultBlock(", "buildResultBlock"));
-(0, eval)(region("function buildResultRow", "appendResultRow"));
-(0, eval)(region("function buildResultRowBlock", "buildResultRowBlock"));
+(0, eval)(runnableSnippet(fnBody("templateText")));
+(0, eval)(runnableSnippet(region("function buildResultBody", "plainBody"))); // body + its plain-body fallback
+(0, eval)(runnableSnippet(fnBody("foldAtRest")));
+(0, eval)(runnableSnippet(region("function buildResultBlock(", "buildResultBlock")));
+(0, eval)(runnableSnippet(region("function buildResultRow", "appendResultRow")));
+(0, eval)(runnableSnippet(region("function buildResultRowBlock", "buildResultRowBlock")));
 
 // the write_file/edit_file declaration, exactly as clutch-workspace states it
 const EDIT_UI = {
@@ -89,8 +89,8 @@ const bodyish = (n) => n.className.split(" ").includes("body") || n.tag === "pre
 
 // ---- 1) THE BUG: a failed diff-shaped call shows its reason ----
 // the exact shape of the 29 real failures found in the logs
-const FAIL = { content: "ERROR: old_string not found in ui/app.js", is_error: true, diff: "" };
-let wrap = buildResultBlock(EDIT_UI, "edit_file", { path: "ui/app.js" }, FAIL);
+const FAIL = { content: "ERROR: old_string not found in ui/src/renderer/app.ts", is_error: true, diff: "" };
+let wrap = buildResultBlock(EDIT_UI, "edit_file", { path: "ui/src/renderer/app.ts" }, FAIL);
 check(wrap.children[0].textContent === "result ⚠", "the header is still the host's one verdict");
 check(
   wrap.children.length === 2 && bodyish(wrap.children[1]) && text(wrap.children[1]).includes("old_string not found"),
@@ -112,11 +112,11 @@ wrap.children[1].onclick();
 check(wrap.children[1].textContent === "▾" && wrap.children[2]._hidden === false, "clicking the toggle opens it");
 
 // ---- 3) a real diff keeps its pane: one note, then the diff ----
-const okDiff = { content: "OK: edited ui/app.js (+1 -1 lines)", is_error: false, diff: "--- a\n+++ b\n-1\n+2" };
-wrap = buildResultBlock(EDIT_UI, "edit_file", { path: "ui/app.js" }, okDiff);
-check(wrap.children[0].textContent === "✎ edited ui/app.js", "a healthy call still wears the declaration's header");
+const okDiff = { content: "OK: edited ui/src/renderer/app.ts (+1 -1 lines)", is_error: false, diff: "--- a\n+++ b\n-1\n+2" };
+wrap = buildResultBlock(EDIT_UI, "edit_file", { path: "ui/src/renderer/app.ts" }, okDiff);
+check(wrap.children[0].textContent === "✎ edited ui/src/renderer/app.ts", "a healthy call still wears the declaration's header");
 check(wrap.children.length === 3, "the diff pane is the note plus the diff");
-check(text(wrap.children[1]) === "OK: edited ui/app.js (+1 -1 lines)", "the verdict sits above the diff");
+check(text(wrap.children[1]) === "OK: edited ui/src/renderer/app.ts (+1 -1 lines)", "the verdict sits above the diff");
 check(wrap.children[2].className === "diff" && wrap.children[2]._diff === okDiff.diff, "the diff follows it");
 check(
   wrap.children.filter((c) => text(c).includes("OK: edited")).length === 1,

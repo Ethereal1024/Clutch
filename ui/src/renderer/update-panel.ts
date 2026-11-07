@@ -32,33 +32,31 @@
 // "error" is the only state whose line is a FAILURE the user has to act on, so it is
 // the only one that takes the alert colour (.about-update-note.error).
 
-"use strict";
-
-const UPDATE_BUTTON_ID = "about-update-btn";
-const UPDATE_NOTE_ID = "about-update-note";
+export const UPDATE_BUTTON_ID = "about-update-btn";
+export const UPDATE_NOTE_ID = "about-update-note";
 
 // What the button says and what the line under it says. One object painted, so a
 // state change can never leave the two disagreeing — a button reading "Installing…"
 // over a note that still says "downloading" is the kind of thing a person reports
 // as a hang.
-const updateUi = { label: "Check for updates", note: "", error: false, disabled: false };
+export const updateUi = { label: "Check for updates", note: "", error: false, disabled: false };
 
-let updateBusy = false; // a check, a download or an install is in flight
-let updatePhase = ""; // which one: "check" | "download" | "install"
-let updatePlan = null; // the answer check() settled on (the service's own shape)
-let updateFile = ""; // a verified download that is waiting for its Install press
+export let updateBusy = false; // a check, a download or an install is in flight
+export let updatePhase = ""; // which one: "check" | "download" | "install"
+export let updatePlan = null; // the answer check() settled on (the service's own shape)
+export let updateFile = ""; // a verified download that is waiting for its Install press
 
 // The two bridges. `clutchUpdate` is the common one: the Electron preload and the
 // Android host's window both expose it, so check and download are the same call on
 // both. `clutchShell` is the phone's own escape hatch — an APK is installed by the
 // phone, not by node — and its presence is also how this file tells which platform
 // it is painting for.
-function updateBridge() {
+export function updateBridge() {
   const bridge = window.clutchUpdate;
   return bridge && typeof bridge.check === "function" ? bridge : null;
 }
 
-function updateShell() {
+export function updateShell() {
   const shell = window.clutchShell;
   return shell && typeof shell.installApk === "function" ? shell : null;
 }
@@ -69,19 +67,19 @@ function updateShell() {
 // is a real answer ("this build does not state its own version", which the service
 // says back), and the desktop shell falls back to its own package version only when
 // the page has nothing to say at all.
-function updateVersion() {
+export function updateVersion() {
   return String(window.CLUTCH_VERSION == null ? "" : window.CLUTCH_VERSION).trim();
 }
 
 // A release tag is "v0.1.61" and the About row is "0.1.61": the prefix belongs to
 // git, not to the sentence under the button.
-function updateTag(version) {
+export function updateTag(version) {
   return String(version == null ? "" : version).trim().replace(/^v/i, "");
 }
 
 // Bytes in the units a person reads and no further: one decimal is the whole
 // difference between "23 MB" and "23.4 MB", and nobody needs the second one.
-function updateSize(bytes) {
+export function updateSize(bytes) {
   const n = Number(bytes) || 0;
   if (n <= 0) return "";
   if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + " KB";
@@ -92,8 +90,8 @@ function updateSize(bytes) {
 // than cached at load: the pane's markup is not something this file is allowed to
 // make a load-time assumption about (index.html owns it), and a missing one must
 // leave the other working.
-function paintUpdate() {
-  const button = document.getElementById(UPDATE_BUTTON_ID);
+export function paintUpdate() {
+  const button = document.getElementById(UPDATE_BUTTON_ID) as HTMLButtonElement | null;
   if (button) {
     button.textContent = updateUi.label;
     button.disabled = updateUi.disabled;
@@ -109,7 +107,7 @@ function paintUpdate() {
   }
 }
 
-function updateSay(label, note, opts = {}) {
+export function updateSay(label, note, opts: { error?: boolean; disabled?: boolean } = {}) {
   updateUi.label = label;
   updateUi.note = note || "";
   updateUi.error = Boolean(opts.error);
@@ -120,7 +118,7 @@ function updateSay(label, note, opts = {}) {
 // The idle line as it reads when nothing has been asked yet — and the one taken
 // when the pane is reopened, so a finished answer does not sit there looking like
 // the state of the world an hour later.
-function updateIdle() {
+export function updateIdle() {
   const bridge = updateBridge();
   if (!bridge) {
     updateSay(
@@ -139,7 +137,7 @@ function updateIdle() {
 // means is decided by what is already in hand, in this order: a verified file (the
 // installer was refused once — a permission, a missing polkit prompt), a checked
 // release that is newer (download it now), anything else (go and ask).
-async function runUpdate() {
+export async function runUpdate() {
   const bridge = updateBridge();
   if (updateBusy || !bridge) return;
   updateBusy = true;
@@ -156,7 +154,7 @@ async function runUpdate() {
   }
 }
 
-async function checkUpdate(bridge) {
+export async function checkUpdate(bridge) {
   updatePlan = null;
   updatePhase = "check";
   updateSay("Checking…", "asking the release page which build is newest…", { disabled: true });
@@ -192,7 +190,7 @@ async function checkUpdate(bridge) {
   updateSay("Check for updates", "nothing to install: " + (answer.reason || "the release has no build for " + answer.key) + ".", {});
 }
 
-async function downloadUpdate(bridge) {
+export async function downloadUpdate(bridge) {
   const asset = (updatePlan && updatePlan.asset) || {};
   const label = updateTag(updatePlan && updatePlan.latest);
   updatePhase = "download";
@@ -219,7 +217,7 @@ async function downloadUpdate(bridge) {
 // Handing the file over. Three ways this ends, and the line under the button says
 // which one it was: the installer took it (and on Windows/macOS this process is
 // about to be replaced), the phone wants a permission first, or nothing started.
-async function installUpdateFile(bridge, file) {
+export async function installUpdateFile(bridge, file) {
   updatePhase = "install";
   const label = updateTag(updatePlan && updatePlan.latest);
   const shell = updateShell();
@@ -284,7 +282,7 @@ async function installUpdateFile(bridge, file) {
 // arrives while the pane is not downloading is ignored: the desktop shell forwards
 // progress to the window that asked, but the phone's bridge fans out to every
 // window, and a stale "42%" on a pane that is not downloading is a lie.
-function updateProgress(stage) {
+export function updateProgress(stage) {
   if (!stage || typeof stage !== "object" || updatePhase !== "download") return;
   const file = String(stage.file || "the update");
   if (stage.phase === "verified") {
@@ -305,7 +303,7 @@ function updateProgress(stage) {
 // the pane starts from "Check for updates". An in-flight download or a started
 // installer keeps its line — those are still true, and taking them away would be
 // the one thing worse than a stale note.
-function resetUpdate() {
+export function resetUpdate() {
   if (updateBusy || updateFile) return;
   updatePlan = null;
   updatePhase = "";
@@ -315,7 +313,7 @@ function resetUpdate() {
 {
   const button = document.getElementById(UPDATE_BUTTON_ID);
   if (button) button.addEventListener("click", runUpdate);
-  // the About tab is painted by ui/js/settings.js on its own click; this hangs the
+  // the About tab is painted by ui/src/renderer/settings.ts on its own click; this hangs the
   // reset on the same click (two listeners, one gesture, no ordering to get wrong)
   const tab = document.getElementById("settings-tab-about");
   if (tab) tab.addEventListener("click", resetUpdate);

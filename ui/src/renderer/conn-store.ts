@@ -4,29 +4,31 @@
 // that record and the <select> the user picks a backend from, including the
 // "✓ connected" entry and the phone's no-Local variant of the list.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { IS_ANDROID } from "./env";
+import { $ } from "./dom";
+import { customSelect } from "./settings";
+import { state } from "./state";
 
 // ---- SSH connection (in the project picker) ----
-const connSelect = customSelect($("#conn-select"));
-const connStatus = $("#conn-status");
+export const connSelect = customSelect($("#conn-select"));
+export const connStatus = $("#conn-status");
 // report #2: the tooltip's "go back to the local backend" reads wrong on the
 // phone, where no local backend exists to go back to
 if (IS_ANDROID) $("#conn-cancel").title = "abort the connection attempt";
-const connNewHost = $("#conn-new-host");
-const connNewUser = $("#conn-new-user");
-const connNewPort = $("#conn-new-port");
+export const connNewHost = $("#conn-new-host");
+export const connNewUser = $("#conn-new-user");
+export const connNewPort = $("#conn-new-port");
 
-const passModal = $("#ssh-pass-modal");
-const passInput = $("#ssh-pass-input");
-const passLabel = $("#ssh-pass-label");
-let passResolve = null;
+export const passModal = $("#ssh-pass-modal");
+export const passInput = $("#ssh-pass-input");
+export const passLabel = $("#ssh-pass-label");
 
-function sshConns() {
+export function sshConns() {
   try {
     return JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
   } catch (e) {
@@ -34,7 +36,7 @@ function sshConns() {
   }
 }
 
-function upsertConn(host, user, port) {
+export function upsertConn(host, user, port) {
   const list = sshConns().filter((c) => !(c.host === host && c.user === user && String(c.port) === String(port)));
   list.unshift({ host, user, port: String(port) });
   localStorage.setItem("clutch_ssh_connections", JSON.stringify(list));
@@ -43,14 +45,14 @@ function upsertConn(host, user, port) {
   localStorage.setItem("clutch_ssh_port", String(port));
 }
 
-function connLabel(c) {
+export function connLabel(c) {
   return `${c.user}@${c.host}:${c.port}`;
 }
 
 // The option whose backend this window is ALREADY on ("" = none). renderConnSelector
 // computes it from the same state it draws the list from, so the picker cannot
 // offer to "connect" to where it already is.
-let connOnValue = "";
+export let connOnValue = "";
 
 // The host this window would connect to: the one the picker holds. The list IS the
 // choice — a phone with saved hosts opens on its first (most recent) one, and the
@@ -62,31 +64,31 @@ let connOnValue = "";
 // the first host without anything being dialled behind the user's back, and the
 // user's own press — the folded conn bar's Connect, or another entry in the list —
 // is what spends the choice (connTarget(), by that press). "" = nothing to dial.
-function connTarget() {
+export function connTarget() {
   const chosen = connSelect.value;
   if (!chosen || chosen === connOnValue) return "";
   return chosen;
 }
 
-let connBusy = false; // a connect is in flight: it cannot be taken twice
+export let connBusy = false; // a connect is in flight: it cannot be taken twice
 
 // Both buttons that start a connect read the same two facts: is one already in
 // flight, and is there anywhere to dial. This is the DISABLED half of both of them:
-// the conn bar's Connect is shown or hidden by syncConnConnect (js/conn-flow.js, the
+// the conn bar's Connect is shown or hidden by syncConnConnect (conn-flow.ts, the
 // file below this one in the page, which asks for this as the other half of its own
 // render), and #conn-new-connect (the new-connection popup's) only exists while the
 // popup is up. The list carries no button, because choosing an entry in it IS the dial.
-function updateConnConnect() {
+export function updateConnConnect() {
   $("#conn-connect").disabled = connBusy || !connTarget();
   $("#conn-new-connect").disabled = connBusy;
 }
-function setConnBusy(b) {
+export function setConnBusy(b) {
   connBusy = b;
   updateConnConnect();
 }
 
-function renderConnSelector() {
-  // sessionStorage, like every reader of it (js/backend-lifecycle.js): the URL
+export function renderConnSelector() {
+  // sessionStorage, like every reader of it (backend-lifecycle.ts): the URL
   // names THIS window's session, and localStorage is shared by every window in the
   // process — a global key here made one window's URL the next window's memory
   const override = sessionStorage.getItem("clutch_api_url");
@@ -96,7 +98,7 @@ function renderConnSelector() {
   // a host — the first of the list, which is the most recent one — but being
   // selected is not being connected: nothing is dialled until the user asks (the
   // folded conn bar's Connect, or choosing another entry).
-  const connected = !!(override && localStorage.getItem("clutch_ssh_connected") && API_BASE);
+  const connected = !!(override && localStorage.getItem("clutch_ssh_connected") && state.apiBase);
   const cHost = localStorage.getItem("clutch_ssh_host");
   const cUser = localStorage.getItem("clutch_ssh_user");
   const cPort = localStorage.getItem("clutch_ssh_port");
@@ -148,7 +150,7 @@ function renderConnSelector() {
   } else if (!IS_ANDROID) {
     connSelect.value = "local";
     // this machine's own session: where the window is, once it has a base at all
-    if (API_BASE) onValue = "local";
+    if (state.apiBase) onValue = "local";
   } else if (hosts.length) {
     // the phone's welcome page opens ON a host: the list is most recent first, so
     // its first entry is the host this device was last on, and a picker with
@@ -170,7 +172,7 @@ function renderConnSelector() {
   // port refused as a base, API_BASE is either a real session or null
   connStatus.textContent = connected
     ? "Connected: " + override
-    : API_BASE
-      ? "Using " + API_BASE
+    : state.apiBase
+      ? "Using " + state.apiBase
       : "Not connected — no backend";
 }

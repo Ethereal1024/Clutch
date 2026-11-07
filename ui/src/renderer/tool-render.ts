@@ -5,12 +5,22 @@
 // below IS the abstraction of the forms this UI has always drawn. The normative
 // description of that protocol is the header of agent/tools/catalog.py.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { apiFetch } from "./app";
+import { highlightPreByPath } from "./diagram-viewer";
+import { pageSink } from "./project";
+import { renderDiff } from "./render-events";
+import { state } from "./state";
+import {
+  collapseDiff, expandDiff, foldCollapse, foldExpand, toggleFold, wrapFold,
+} from "./stream-text";
+import { autoScroll, toolCallGroups, toolCalls } from "./stream-view";
+import { eventsEl } from "./els";
+import { refreshTree } from "./workspace-panel";
 
 // ---- the component UI protocol (agent/tools/catalog.py) ---------------------
 // The host renders tool events it did not design, so NO TOOL NAME appears in
@@ -68,11 +78,10 @@
 // what was compiled in. The constants stay as the fallback -- a host that
 // predates the endpoint, or a fetch that fails -- so the renderer never waits
 // on the network to draw a row.
-let hostUiDefaults = null;
-function uiDefaults() {
-  return hostUiDefaults ? Object.assign({}, UI_DEFAULTS, hostUiDefaults) : UI_DEFAULTS;
+export function uiDefaults() {
+  return state.hostUiDefaults ? Object.assign({}, UI_DEFAULTS, state.hostUiDefaults) : UI_DEFAULTS;
 }
-const UI_DEFAULTS = {
+export const UI_DEFAULTS = {
   group: null,
   chip: "name",
   summary: "",
@@ -86,17 +95,17 @@ const UI_DEFAULTS = {
   mutates: true,
   undo: false,
 };
-const CALL_BLOCK = "__calls__"; // the block calls that declared no group share
-const RESULT_FOLD_LINES = 60; // "long": fold a body past this many lines
+export const CALL_BLOCK = "__calls__"; // the block calls that declared no group share
+export const RESULT_FOLD_LINES = 60; // "long": fold a body past this many lines
 
-function uiOf(ev) {
+export function uiOf(ev) {
   return Object.assign({}, uiDefaults(), (ev && ev.ui) || {});
 }
 
 // the declaration of the call a result belongs to: the tool_call event that
 // produced it carries it, and a tool_result whose call is not in memory (an
 // older log page) renders from its own copy
-function uiOfResult(ev) {
+export function uiOfResult(ev) {
   const call = toolCalls[ev.tool_call_id];
   if (call && call.ui) return Object.assign({}, uiDefaults(), call.ui);
   return uiOf(ev);
@@ -106,7 +115,7 @@ function uiOfResult(ev) {
 // the renderer has: the tool's own name and how many lines came back (… while
 // the result is still on its way — the row must not claim "0 lines" it does not
 // know yet). `content === null` is "no result yet", "" is an empty one.
-function templateText(tpl, name, args, content) {
+export function templateText(tpl, name, args, content) {
   const lines = content === null || content === undefined ? "…" : String(content).split("\n").length;
   // a call that is still streaming has only its JSON text: parse it here, so a
   // caller may pass either the payload or what the model has sent so far
@@ -124,7 +133,7 @@ function templateText(tpl, name, args, content) {
 
 // the row's one-line label, and (through it) a result block's default header
 // one argument out of a JSON payload that may still be arriving (hence invalid)
-function partialArg(raw, key) {
+export function partialArg(raw, key) {
   try {
     const p = JSON.parse(raw);
     if (p && typeof p === "object" && p[key] !== undefined) {
@@ -143,7 +152,7 @@ function partialArg(raw, key) {
 // and a leading "-", "+" or "✎" on a key is a mark printed before its value.
 // "command" prints the unwrapped command under its `mark` ("$ " by default) —
 // the component's choice, not this file's.
-function previewText(ui, name, raw) {
+export function previewText(ui, name, raw) {
   const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
   const mode = spec.mode || "args";
   if (mode === "none") return "";
@@ -169,24 +178,24 @@ function previewText(ui, name, raw) {
 }
 
 // ensure the collection block for one group key exists
-function ensureToolGroup(key) {
-  if (!toolGroupEl || toolGroupEl.closed || toolGroupEl.key !== key) {
-    toolGroupEl = {
+export function ensureToolGroup(key) {
+  if (!state.toolGroupEl || state.toolGroupEl.closed || state.toolGroupEl.key !== key) {
+    state.toolGroupEl = {
       el: document.createElement("div"),
       ids: new Set(),
       key,
       closed: false,
     };
-    toolGroupEl.el.className = "event tool_group";
-    toolGroupEl.el.innerHTML = '<div class="hdr">tools</div>';
-    (pageSink || eventsEl).appendChild(toolGroupEl.el);
+    state.toolGroupEl.el.className = "event tool_group";
+    state.toolGroupEl.el.innerHTML = '<div class="hdr">tools</div>';
+    (pageSink || eventsEl).appendChild(state.toolGroupEl.el);
   }
-  return toolGroupEl;
+  return state.toolGroupEl;
 }
 
 // reserve a call row in its block: the declaration's group, or the generic call
 // block when it declared none. Shared by the finished and streaming paths.
-function toolGroupFor(id, ui) {
+export function toolGroupFor(id, ui) {
   const group = ensureToolGroup(ui.group || CALL_BLOCK);
   group.ids.add(id);
   toolCallGroups.set(id, group);
@@ -196,7 +205,7 @@ function toolGroupFor(id, ui) {
 // shared tool-row skeleton: the declaration's own part — the tool's own name
 // as the row's chip (its title), unless the declaration asked for none — plus
 // the caller's tail (the live preview body, then the args expander)
-function makeToolRowBase(ui, name) {
+export function makeToolRowBase(ui, name) {
   const row = document.createElement("div");
   row.className = "tool-row";
   if (ui.chip !== "none") {
@@ -210,7 +219,7 @@ function makeToolRowBase(ui, name) {
 
 // the raw arguments, one click away: the declaration decides how a call LOOKS,
 // never what it is — a summary is not a substitute for the payload
-function argsButton(raw, ui) {
+export function argsButton(raw, ui) {
   const btn = document.createElement("span");
   btn.className = "tool-args-btn";
   btn.textContent = "args ▸";
@@ -236,7 +245,7 @@ function argsButton(raw, ui) {
 
 // the payload as the args panel shows it: a command-shaped declaration gets its
 // command unwrapped under its own prompt mark, everything else is pretty JSON
-function argsDetail(ui, raw) {
+export function argsDetail(ui, raw) {
   const spec = ui.preview && typeof ui.preview === "object" ? ui.preview : { mode: ui.preview };
   if (spec.mode === "command") {
     const cmd = extractCommand(raw);
@@ -252,7 +261,7 @@ function argsDetail(ui, raw) {
 // plain command; null means "this payload is not a command" (caller shows JSON).
 // Which tools are command-shaped is the declaration's business (preview:
 // "command"), never this file's: no tool name appears here.
-function extractCommand(txt) {
+export function extractCommand(txt) {
   let s = txt;
   for (let depth = 0; depth < 3; depth++) {
     let parsed;
@@ -273,21 +282,21 @@ function extractCommand(txt) {
 
 // ask reasons must stay a reason: the args box below the header shows args_repr,
 // so strip the legacy "... with args {...}" dump older backends still send
-function permReason(reason) {
+export function permReason(reason) {
   return String(reason || "").replace(/\s+with args\b[\s\S]*$/, "");
 }
 
 // one tool_call row: the declaration's chip — the tool's own name leading the
 // row — and the raw payload one click away; the call says what it is, its
 // result speaks for the outcome
-function makeToolRow(ev) {
+export function makeToolRow(ev) {
   const row = makeToolRowBase(uiOf(ev), ev.name);
   row.appendChild(argsButton(ev.arguments, uiOf(ev)));
   return row;
 }
 
 // render one tool_call row; consecutive calls append to the same block
-function addToolCallRow(ev) {
+export function addToolCallRow(ev) {
   const group = toolGroupFor(ev.tool_call_id, uiOf(ev));
   group.el.appendChild(makeToolRow(ev));
   autoScroll();
@@ -296,7 +305,7 @@ function addToolCallRow(ev) {
 // one collapsible result row (toggle + label + hidden body): the declaration's
 // summary as the label, whatever body it declares folding under it — the
 // "row" form, composed entirely from the declaration
-function buildResultRow(ui, call, result) {
+export function buildResultRow(ui, call, result) {
   const summary = templateText(ui.summary, call.name, call.args || {}, result.content);
   const row = document.createElement("div");
   row.className = "result-row";
@@ -324,7 +333,7 @@ function buildResultRow(ui, call, result) {
 }
 
 // the row lands beside its call, in the block their calls collect in
-function appendResultRow(group, ui, call, ev) {
+export function appendResultRow(group, ui, call, ev) {
   const { row, full } = buildResultRow(ui, call, ev);
   group.el.appendChild(row);
   if (full) group.el.appendChild(full);
@@ -333,7 +342,7 @@ function appendResultRow(group, ui, call, ev) {
 
 // a row whose call row is gone (an older log page) shows the same collapsible
 // row inside its own durable block
-function buildResultRowBlock(ui, call, ev) {
+export function buildResultRowBlock(ui, call, ev) {
   const wrap = document.createElement("div");
   wrap.className = "event tool_result" + (ev.is_error ? " error" : "") + " form-row";
   const hdr = document.createElement("div");
@@ -350,7 +359,7 @@ function buildResultRowBlock(ui, call, ev) {
 // (falling back to the summary it would wear in a group, then to the plain
 // "result" the host shows for anything that says nothing), and the body is what
 // the declaration says it is, chromed by the declaration's style.
-function buildResultBlock(ui, name, args, result) {
+export function buildResultBlock(ui, name, args, result) {
   const wrap = document.createElement("div");
   wrap.className = "event tool_result" + (result.is_error ? " error" : "")
     + (ui.chrome ? " " + ui.chrome : "");
@@ -436,7 +445,7 @@ function buildResultBlock(ui, name, args, result) {
 // "code" a code panel, "diff" the unified diff it returned, "none" nothing but
 // the status line. A code panel takes the declared decoration ("path":
 // highlighted by the call's path argument).
-function buildResultBody(ui, result, args) {
+export function buildResultBody(ui, result, args) {
   if (ui.body === "none") return null;
   if (ui.body === "diff") {
     // no diff to draw: the result's own message is the body. Every failure
@@ -457,7 +466,7 @@ function buildResultBody(ui, result, args) {
 
 // the plain text body a "text" declaration draws (and the one a diff-shaped
 // result falls back to when it returned no diff)
-function plainBody(text) {
+export function plainBody(text) {
   const plain = document.createElement("div");
   plain.className = "body md-plain";
   plain.textContent = text || "";
@@ -465,7 +474,7 @@ function plainBody(text) {
 }
 
 // whether the declaration wants this body folded at rest
-function foldAtRest(ui, result) {
+export function foldAtRest(ui, result) {
   if (ui.collapse === "always") return true;
   if (ui.collapse !== "long") return false;
   // the text the body actually draws: a diff pane with a diff draws that, and a

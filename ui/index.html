@@ -469,12 +469,11 @@
   </script>
   <script src="vendor/mathjax-tex-chtml.js"></script>
   <!-- The renderer is one program, built into one script: ui/renderer.js is what
-       ui/build-renderer.js produces from the file list in ui/renderer.modules.json
-       (the host bridge first, then the modules in page order). Electron serves this
-       page over file://, where module scripts are refused, so the bundle is a
-       classic script wrapped in one IIFE: the files keep the bindings they had when
-       they shared a global scope, but nothing leaks to window and there is no load
-       order left to get wrong. Edit the sources, then `cd ui && npm run build`. -->
+       ui/build-renderer.js bundles from ui/src/renderer/*.ts (entry boot.ts, whose
+       imports are the load order, and whose leaves evaluate first). Electron
+       serves this page over file://, where module scripts are refused, so the
+       bundle is a classic script wrapped in one IIFE: nothing leaks to window.
+       Edit the sources, then `cd ui && npm run build`. -->
   <script src="renderer.js"></script>
   <!-- the build stamp: a data file, not a module — the release scripts rewrite it
        after the bundle exists, so it keeps its own tag. Nothing reads it at load

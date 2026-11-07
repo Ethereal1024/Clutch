@@ -371,7 +371,7 @@ async function main() {
     // still need a VPN: the domestic mirror never took effect"). The same server,
     // the same assertion: with the env unset, a source_mirror in
     // ~/.clutch/settings.json must move every read this device makes. This is the
-    // path the plugin page's mirror field writes (ui/js/components-panel.js ->
+    // path the plugin page's mirror field writes (ui/src/renderer/components-panel.ts ->
     // clutchSettings.save -> settings-mirror.js).
     delete process.env.CLUTCH_SOURCE_MIRROR;
     const settingsPath = path.join(HOME, ".clutch", "settings.json");

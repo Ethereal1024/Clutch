@@ -46,8 +46,8 @@ const APP = uiSource(); // the renderer, every module in page load order
 const MAIN = fs.readFileSync(path.join(ROOT, "ui", "main.js"), "utf8");
 const HOST = fs.readFileSync(path.join(ROOT, "android", "host", "android-host.js"), "utf8");
 const PRELOAD = fs.readFileSync(path.join(ROOT, "ui", "preload.js"), "utf8");
-const SHIM = fs.readFileSync(path.join(ROOT, "ui", "bridge-shim.js"), "utf8");
-const LIBS = fs.readFileSync(path.join(ROOT, "ui", "js", "backend-lifecycle.js"), "utf8");
+const SHIM = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "bridge-shim.ts"), "utf8");
+const LIBS = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "backend-lifecycle.ts"), "utf8");
 
 // ---- 1. the host answers per window, and says so in the message ----
 const sendAt = MAIN.indexOf('tunnel.onTunnelEnd');

@@ -43,29 +43,34 @@
 // the welcome page, which is what quitting the app and starting it again would do
 // (connLostCancel, connLostQuit).
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { dropStaleBackend, switchBackendResolved } from "./backend-lifecycle";
+import { connBarWaiting, handleSshConnect } from "./conn-flow";
+import { connBusy, renderConnSelector } from "./conn-store";
+import { $ } from "./dom";
+import { closeModal } from "./settings";
+import { setStatus } from "./stream-view";
 
-const connLostModal = $("#conn-lost-modal");
-const connLostReasonEl = $("#conn-lost-reason");
-const connLostTargetEl = $("#conn-lost-target");
-const connLostStatusEl = $("#conn-lost-status");
+export const connLostModal = $("#conn-lost-modal");
+export const connLostReasonEl = $("#conn-lost-reason");
+export const connLostTargetEl = $("#conn-lost-target");
+export const connLostStatusEl = $("#conn-lost-status");
 // the flow's verdict, in its own line: the dialog paints its progress into
 // #conn-lost-status, so reading that back as "why" quoted the dialog's own
 // "Reconnecting…" at the user ("Not back yet — retrying. (Reconnecting…)"). It is
 // the stage the attempt reached, or why it failed — never quoted into the
 // progress line beside it (that would be the same fact twice).
-const connLostWhyEl = $("#conn-lost-why");
+export const connLostWhyEl = $("#conn-lost-why");
 // the dialog's own chrome: the progress bar an attempt in flight animates, and the
 // two buttons that are the user's once it is over (connLostChrome, below)
-const connLostProgressEl = $("#conn-lost-progress");
-const connLostActionsEl = $("#conn-lost-actions");
-const connLostRetryBtn = $("#conn-lost-retry");
-const connLostCancelBtn = $("#conn-lost-cancel");
+export const connLostProgressEl = $("#conn-lost-progress");
+export const connLostActionsEl = $("#conn-lost-actions");
+export const connLostRetryBtn = $("#conn-lost-retry");
+export const connLostCancelBtn = $("#conn-lost-cancel");
 
 // How long to wait before the next automatic attempt: the same ladder the LLM
 // client redials on and the same one the ssh hop uses (js/../tunnel-connect.js),
@@ -75,21 +80,21 @@ const connLostCancelBtn = $("#conn-lost-cancel");
 // answering, so the gap must not settle at a "steady 30s" and hammer a host that
 // is simply down either: doubling is what keeps both cheap. Nothing here gives
 // up; the way out of a redial that never lands is the user's Cancel.
-const CONN_LOST_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000];
+export const CONN_LOST_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000];
 
 // the dialog's one line for "nothing is running: it is your move" (a declined
 // password, or an attempt that came back after one). One string, one meaning — the
 // button under it says what the move is.
-const CONN_LOST_WAITING = "Waiting for you";
+export const CONN_LOST_WAITING = "Waiting for you";
 
-let connLost = false; // this window has no session, and the dialog is up
-let connLostTries = 0; // attempts spent on the outage (drives the backoff)
-let connLostAttempting = false; // one attempt at a time: the timer and the button race
-let connLostTimer = null;
-let connLostManualOnly = false; // the user declined the password prompt: wait for them
+export let connLost = false; // this window has no session, and the dialog is up
+export let connLostTries = 0; // attempts spent on the outage (drives the backoff)
+export let connLostAttempting = false; // one attempt at a time: the timer and the button race
+export let connLostTimer = null;
+export let connLostManualOnly = false; // the user declined the password prompt: wait for them
 
 // what the dialog says the window is trying to get back to
-function connLostTargetText() {
+export function connLostTargetText() {
   const host = localStorage.getItem("clutch_ssh_host");
   const user = localStorage.getItem("clutch_ssh_user");
   const port = localStorage.getItem("clutch_ssh_port");
@@ -97,7 +102,7 @@ function connLostTargetText() {
   return "Host: " + (user ? user + "@" : "") + host + (port ? ":" + port : "");
 }
 
-function connLostPaint(status) {
+export function connLostPaint(status) {
   connLostStatusEl.textContent = status || "";
 }
 
@@ -107,9 +112,9 @@ function connLostPaint(status) {
 // so a live "Reconnect now" would read as a second door and swallow its own press.
 // Cancel is the exception and is never taken off screen: it does not act on the
 // attempt at all — it leaves the outage (see connLostCancel).
-// The bar is the attempt's own: it animates until js/conn-flow.js paints a stage
+// The bar is the attempt's own: it animates until conn-flow.ts paints a stage
 // into its fill.
-function connLostChrome() {
+export function connLostChrome() {
   // The dialog can come down while an attempt is still finishing (the user's own
   // Cancel): there is no chrome to paint for a dialog nobody is looking at, and
   // focusing a button inside a hidden modal would take the keys nowhere.
@@ -144,7 +149,7 @@ connLostModal.addEventListener("keydown", (e) => {
 // Idempotent by design: several detectors may fire for one outage (the ssh
 // close, the dead stream, the failed request), and the user must see one dialog,
 // named by the cause that got there first.
-function connectionLost(reason) {
+export function connectionLost(reason) {
   if (connLost) return;
   // A connect attempt of its own is already re-establishing a session, and a
   // connect to another host STOPS the old tunnel — that end is not a loss. The
@@ -175,7 +180,7 @@ function connectionLost(reason) {
 }
 
 // called only where a session really answers: the dialog has no other exit
-function resolveConnectionLost() {
+export function resolveConnectionLost() {
   if (!connLost) return;
   connLost = false;
   connLostManualOnly = false;
@@ -189,7 +194,7 @@ function resolveConnectionLost() {
 }
 
 // the password prompt was declined: stop retrying behind the user's back
-function connLostNeedsUser() {
+export function connLostNeedsUser() {
   if (!connLost) return;
   connLostManualOnly = true;
   connLostPaint(CONN_LOST_WAITING);
@@ -203,10 +208,10 @@ function connLostNeedsUser() {
 //
 // What it does, and why each part is needed:
 //   * the standing intent goes FIRST, exactly as the picker's own Cancel does
-//     (js/conn-flow.js): the hop this window asked for is no longer wanted, so
+//     (conn-flow.ts): the hop this window asked for is no longer wanted, so
 //     the teardown that follows is not a LOST session — the renderer reads
 //     "tunnel:ended" as a loss only while the intent is there
-//     (backend-lifecycle.js), and this is what keeps a detector from raising the
+//     (backend-lifecycle.ts), and this is what keeps a detector from raising the
 //     dialog again for an outage the user has just ended. The same is true of the
 //     next page load: reconciledBackendUrl has nothing to dial without the intent;
 //   * the redial timer is disarmed and connLost goes false: no attempt of ours is
@@ -218,13 +223,13 @@ function connLostNeedsUser() {
 //     it would block the picker (openFsBrowser refuses while a run is active)
 //     and make Stop raise this very dialog again. The run's real fate is not
 //     guessed here: sseRunAtRisk is already set, so the next session's own
-//     history settles it (see js/stream-events.js);
+//     history settles it (see stream-events.ts);
 //   * the picker stops claiming a connection, the dialog comes down — and then the
 //     window itself goes: connLostQuit tears the tunnel down and reloads, so the
 //     page boots exactly as it would after quitting the app and starting it again
 //     (no session, no dialog, nothing dialled). Cancel is therefore usable at any
 //     moment, attempt in flight or not: it is not "stop trying", it is "I am done".
-function connLostCancel() {
+export function connLostCancel() {
   if (!connLost) return;
   localStorage.removeItem("clutch_ssh_connected");
   localStorage.removeItem("clutch_degrade"); // exiting the degrade mode too
@@ -244,7 +249,7 @@ function connLostCancel() {
 
 // How long the teardown is given before the reload goes ahead anyway. The bound is
 // the point: "the host did not answer" must not be a reason the user cannot leave.
-const CONN_LOST_EXIT_MS = 2000;
+export const CONN_LOST_EXIT_MS = 2000;
 
 // ---- one teardown, two callers ----
 //
@@ -259,7 +264,7 @@ const CONN_LOST_EXIT_MS = 2000;
 // session belongs to the window that claimed it. Cancelling an outage in one window
 // is not a reason to end another window's session, so the host releases the claim of
 // the window that asked — and stops the tunnel only when no window is left on it.
-async function boundedDisconnect(ms) {
+export async function boundedDisconnect(ms) {
   let bye = Promise.resolve();
   try {
     if (window.clutchApi && window.clutchApi.releaseSession) {
@@ -275,7 +280,7 @@ async function boundedDisconnect(ms) {
 //
 // The reload is what gets a clean page, and it is also the ONE thing that can hand
 // the new page the very session the user just left: its boot asks the host for a
-// session (app.js resolveApiBase, and js/backend-lifecycle.js reconciledBackendUrl
+// session (app.ts resolveApiBase, and backend-lifecycle.ts reconciledBackendUrl
 // when the tunnel still answers), and the host is what hands sessions out. That ask
 // is answered by claimWindowBackend from what the host still holds for this window —
 // so a teardown that has not finished yet (and the bound above exists precisely for
@@ -287,14 +292,14 @@ async function boundedDisconnect(ms) {
 // — the exit's own call either landed or is still queued) and claims nothing, which
 // is what the exit promised: a boot with no session, no dialog, nothing dialled.
 // sessionStorage, not localStorage: the mark belongs to this page life (a real quit
-// takes it with it), and the user's own Connect clears it (js/conn-flow.js) — so the
+// takes it with it), and the user's own Connect clears it (conn-flow.ts) — so the
 // only boot it can ever hold back is one nobody asked for.
-const CONN_LOST_EXIT_KEY = "clutch_conn_lost_exit";
+export const CONN_LOST_EXIT_KEY = "clutch_conn_lost_exit";
 // the successor's own bound on that teardown: shorter than the exit's, because this
 // one is not holding a user's press down — and it must never keep a boot open.
-const CONN_LOST_EXIT_BOOT_MS = 1500;
+export const CONN_LOST_EXIT_BOOT_MS = 1500;
 
-function connLostExitMark() {
+export function connLostExitMark() {
   try {
     sessionStorage.setItem(CONN_LOST_EXIT_KEY, "1");
   } catch (e) {
@@ -304,8 +309,8 @@ function connLostExitMark() {
 }
 
 // the user's own Connect: they asked for a session, so the exit's note is spent
-// (js/conn-flow.js, the two doors every connect goes through)
-function connLostExitClear() {
+// (conn-flow.ts, the two doors every connect goes through)
+export function connLostExitClear() {
   try {
     sessionStorage.removeItem(CONN_LOST_EXIT_KEY);
   } catch (e) {
@@ -313,9 +318,9 @@ function connLostExitClear() {
   }
 }
 
-// read by the boot path before it asks the host for anything (app.js,
-// js/backend-lifecycle.js)
-function connLostExitPending() {
+// read by the boot path before it asks the host for anything (app.ts,
+// backend-lifecycle.ts)
+export function connLostExitPending() {
   try {
     return sessionStorage.getItem(CONN_LOST_EXIT_KEY) === "1";
   } catch (e) {
@@ -327,8 +332,8 @@ function connLostExitPending() {
 // wait, and never allowed to throw into the boot path. The call is idempotent by
 // nature (the host releases a claim it no longer holds and stopTunnel nulls what it
 // closes), so asking twice is the same as asking once.
-let connLostExitToreDown = false;
-function connLostExitBootTeardown() {
+export let connLostExitToreDown = false;
+export function connLostExitBootTeardown() {
   if (connLostExitToreDown) return Promise.resolve();
   connLostExitToreDown = true;
   return boundedDisconnect(CONN_LOST_EXIT_BOOT_MS);
@@ -337,7 +342,7 @@ function connLostExitBootTeardown() {
 // Exit the window — the second half of Cancel, and the one that makes it equal to
 // quitting and reopening. The reload is what gets a clean page (no session, no
 // dialog, no redial: the welcome page is what a page with nothing claimed boots
-// into, js/boot.js), and it only works if THIS window's claim is released FIRST: a
+// into, boot.ts), and it only works if THIS window's claim is released FIRST: a
 // claim survives in the main process (Electron, ui/preload.js) or in the Android
 // host (bridge-shim → android-host), so a reload that left it would boot into the
 // very session the user just left — the new page's own claimWindowBackend would
@@ -350,18 +355,18 @@ function connLostExitBootTeardown() {
 // OLD claim one beat before it dies. Two seconds is far longer than a teardown
 // takes, and the alternative — waiting without a bound — is exactly the dead end
 // this exit exists to end.
-async function connLostQuit() {
+export async function connLostQuit() {
   connLostExitMark(); // FIRST: the reload must never outrun the note it leaves behind
   await boundedDisconnect(CONN_LOST_EXIT_MS);
   window.location.reload();
 }
 
-function connLostArm() {
+export function connLostArm() {
   if (connLostTimer) clearTimeout(connLostTimer);
   if (!connLost) return;
   if (connLostManualOnly) return; // the user said no: the button is the way back
   // A window nobody is looking at has nothing to reconnect FOR yet: the stream
-  // itself is suspended while the page is hidden (js/sse-stream.js), and a try from
+  // itself is suspended while the page is hidden (sse-stream.ts), and a try from
   // behind it only wakes the phone's radio for an answer nobody can see. The arm
   // waits; the listener below fires the attempt the moment the user looks, so the
   // redial still needs nobody touching anything — it just stops paying for a page
@@ -375,7 +380,7 @@ function connLostArm() {
   }, CONN_LOST_BACKOFF_MS[idx]);
 }
 
-async function connLostAttempt() {
+export async function connLostAttempt() {
   if (!connLost || connLostAttempting) return;
   connLostAttempting = true;
   connLostTries += 1;
@@ -391,7 +396,7 @@ async function connLostAttempt() {
       // The door reported success, and that verdict can only come from
       // connLostAwaitAnswer — which waits for connLost to go false, i.e. for a
       // session to answer. That answer already took the dialog down (the only
-      // closer is es.onopen in js/sse-stream.js), so there is nothing to close
+      // closer is es.onopen in sse-stream.ts), so there is nothing to close
       // here. Had it timed out instead, the notice below says so and the retry
       // still goes to the same host.
       return;
@@ -438,9 +443,9 @@ async function connLostAttempt() {
 // No door is proof on its own: an adopted URL can name a forwarded port nobody
 // serves (that IS the bug this dialog exists for), and a tunnel that came up can
 // still front a dead session. The proof is the one that closes the dialog — a
-// stream that opened (js/sse-stream.js es.onopen) — so a door reporting success
+// stream that opened (sse-stream.ts es.onopen) — so a door reporting success
 // is only allowed to claim it once that has happened.
-async function connLostRecover() {
+export async function connLostRecover() {
   const remote = connLostRemoteIntent();
   if (remote && !(await connLostTunnelUp())) return connLostRedial(remote);
   if (!remote) return connLostAskHost();
@@ -471,7 +476,7 @@ async function connLostRecover() {
 }
 
 // the host's own session for this window, if it holds or can claim one
-async function connLostAskHost() {
+export async function connLostAskHost() {
   if (!(await switchBackendResolved())) return false; // no session: it said so
   return connLostAwaitAnswer();
 }
@@ -479,14 +484,14 @@ async function connLostAskHost() {
 // the standing remote intent the picker keeps — the host to re-dial, or null
 // when there is nothing to re-attempt BY NAME (no host remembered, or the user
 // left the picker disconnected on purpose)
-function connLostRemoteIntent() {
+export function connLostRemoteIntent() {
   const host = localStorage.getItem("clutch_ssh_host");
   const user = localStorage.getItem("clutch_ssh_user");
   if (!host || !user || !localStorage.getItem("clutch_ssh_connected")) return null;
   return { host, user, port: localStorage.getItem("clutch_ssh_port") || "22" };
 }
 
-function connLostTunnelUp() {
+export function connLostTunnelUp() {
   if (!window.clutchTunnel) return Promise.resolve(false);
   return window.clutchTunnel.status().then((s) => Boolean(s && s.active), () => false);
 }
@@ -494,7 +499,7 @@ function connLostTunnelUp() {
 // re-establish the remote the window was on: keys/agent first, the password
 // prompt only if the host demands one (the same path the picker's own connect
 // takes), and then the only verdict that counts — a session that answers.
-async function connLostRedial(intent) {
+export async function connLostRedial(intent) {
   const ok = await handleSshConnect(intent.host, intent.user, intent.port, connLostWhyEl);
   if (!ok) return false;
   return connLostAwaitAnswer();
@@ -502,13 +507,13 @@ async function connLostRedial(intent) {
 
 // How long a door is given to produce the only verdict that counts before the
 // dialog says "Not back yet". This is a NOTICE throttle, not a state change: a
-// window is back when a stream opens (es.onopen, js/sse-stream.js) and never
+// window is back when a stream opens (es.onopen, sse-stream.ts) and never
 // because this wait said so — the question asked here is simply "is the dialog
 // still up?", and its answer only chooses the sentence. The bound exists so that
 // a door which never produces a session cannot hold the attempt (the retry
 // button included) open forever; the wait between attempts is the backoff's job.
-const CONN_LOST_NOTICE_MS = 8000;
-function connLostAwaitAnswer(ms = CONN_LOST_NOTICE_MS) {
+export const CONN_LOST_NOTICE_MS = 8000;
+export function connLostAwaitAnswer(ms = CONN_LOST_NOTICE_MS) {
   if (!connLost) return Promise.resolve(true);
   const deadline = Date.now() + ms;
   return new Promise((resolve) => {

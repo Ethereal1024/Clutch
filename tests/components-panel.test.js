@@ -10,7 +10,7 @@
 // page's own file tests that, and the page is DOM code driven by
 // ui/components-view.js over the clutchComponents channel.
 //
-// So this runner loads ui/js/components-panel.js itself (taken from
+// So this runner loads ui/src/renderer/components-panel.ts itself (taken from
 // ui/index.html's script list, so a page that forgets to load it fails here)
 // into a vm context with a hand-rolled mini-DOM and a fake component channel,
 // then presses the buttons the way a user would.
@@ -23,7 +23,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, uiModules } = require("./harness.js");
+const { check, summary, uiModules, rendererScript } = require("./harness.js");
 
 // ---- mini-DOM: elements, ids, text, clicks, parents ----
 function makeDocument(ids) {
@@ -128,7 +128,7 @@ function rowOf(el) {
   return cur;
 }
 
-// a row is TWO columns now (ui/js/components-panel.js): the words in
+// a row is TWO columns now (ui/src/renderer/components-panel.ts): the words in
 // `.plug-row-main` and the controls in `.plug-row-actions` beside them. So the
 // name is no longer the row's first child — it leads the words column instead.
 // Walking finds the row's OWN name first: the versions box (the row's last child)
@@ -350,7 +350,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
   ctx.window = ctx;
   ctx.globalThis = ctx;
   ctx.window.clutchComponents = api;
-  // the mirror row's channel, one for one with ui/preload.js + ui/bridge-shim.js:
+  // the mirror row's channel, one for one with ui/preload.js + ui/src/renderer/bridge-shim.ts:
   // a save is asked of the HOST (it holds ~/.clutch/settings.json), so this is the
   // only way a value becomes the mirror reads are sent under
   ctx.window.clutchSettings = {
@@ -361,7 +361,7 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     },
   };
   vm.createContext(ctx);
-  vm.runInContext(CODE, ctx, { filename: "ui/js/components-panel.js" });
+  vm.runInContext(CODE, ctx, { filename: "ui/src/renderer/components-panel.ts" });
   return {
     ctx,
     world,
@@ -434,9 +434,12 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
 }
 
 // ---- the page loads this file at all ----
-const mod = uiModules().find((m) => m.file === "js/components-panel.js");
-check(Boolean(mod), "ui/index.html loads js/components-panel.js");
-const CODE = mod ? mod.code : "";
+const mod = uiModules().find((m) => m.file === "components-panel.ts");
+check(Boolean(mod), "boot.ts loads this module (uiModules() is boot.ts's own import list)");
+// the source as a runnable classic script: imports dropped, types stripped. What
+// the file used to take from the page's global scope ($, the bridges) the context
+// below still provides; nothing else crosses a module boundary at load.
+const CODE = mod ? rendererScript("components-panel") : "";
 
 (async function main() {
   // 1. a row per market entry, each with its own install control

@@ -2,7 +2,7 @@
 //
 // The reported symptom: "the automatic reconnect waits until I bring the app
 // back to the foreground". The redial policy lived in the renderer
-// (ui/js/conn-lost.js), which the platform freezes in the background, while the
+// (ui/src/renderer/conn-lost.ts), which the platform freezes in the background, while the
 // capability lived in the FGS-held engine — so a hop that died in a pocket
 // stayed dead until the page ran again. The fix moves the ladder to the side
 // that survives, and this runner pins the rules that keep it from becoming a
@@ -131,7 +131,7 @@ async function main() {
   // Read out of the renderer, not copied: if either side's numbers move the
   // other must move with them, or a hop that dies on the phone reconnects on a
   // rhythm the dialog tells the user to expect and nothing else does.
-  const connLost = fs.readFileSync(path.join(ROOT, "ui", "js", "conn-lost.js"), "utf8");
+  const connLost = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "conn-lost.ts"), "utf8");
   const m = connLost.match(/CONN_LOST_BACKOFF_MS\s*=\s*\[([^\]]+)\]/);
   const pageDelays = m ? m[1].split(",").map((s) => Number(s.trim())) : null;
   check(

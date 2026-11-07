@@ -3,15 +3,15 @@
 // The composer behaves like the ones people arrived from (DeepSeek, Doubao):
 // Ctrl/Cmd+Z takes back what you typed, ArrowUp/ArrowDown walk the messages you
 // already sent, Escape empties the box. `fillTaskInput` is the one programmatic
-// entry, used by the roll-back action (js/task-rollback.js) to put a message
+// entry, used by the roll-back action (task-rollback.ts) to put a message
 // back in the box.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { els } from "./els";
 
 // ---- undo (Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y) ----
 //
@@ -21,18 +21,18 @@
 // programmatic write resets. Entries are coalesced into typing BURSTS (a pause,
 // or a moment of silence, closes one): one entry per keystroke would make Ctrl+Z
 // a per-character rewind, which is not what the shortcut means anywhere.
-const TASK_UNDO_MAX = 200;
-const TASK_UNDO_BURST_MS = 500;
-let taskUndoStack = [];
-let taskRedoStack = [];
-let taskUndoAt = 0; // when the last entry was pushed (burst grouping)
+export const TASK_UNDO_MAX = 200;
+export const TASK_UNDO_BURST_MS = 500;
+export let taskUndoStack = [];
+export let taskRedoStack = [];
+export let taskUndoAt = 0; // when the last entry was pushed (burst grouping)
 
 // What the box held when the LAST change was recorded. Kept in sync with every
 // write (so a redundant `input` event — the one fillTaskInput dispatches itself
 // — cannot push a duplicate entry).
-let taskLastValue = els.task.value;
+export let taskLastValue = els.task.value;
 
-function taskPushUndo(value, forced) {
+export function taskPushUndo(value, forced) {
   const now = performance.now();
   if (!forced && now - taskUndoAt < TASK_UNDO_BURST_MS && taskUndoStack.length) return;
   taskUndoAt = now;
@@ -43,22 +43,22 @@ function taskPushUndo(value, forced) {
 }
 
 // write the box and let its other listeners see a normal edit: the auto-grow
-// (js/settings.js) and the history-browsing reset below both hang off `input`,
+// (settings.ts) and the history-browsing reset below both hang off `input`,
 // so dispatching one keeps every path in agreement with a keystroke.
-function taskSetValue(value) {
+export function taskSetValue(value) {
   els.task.value = value;
   taskLastValue = value;
   els.task.dispatchEvent(new Event("input"));
 }
 
-function taskUndo() {
+export function taskUndo() {
   if (!taskUndoStack.length) return false;
   taskRedoStack.push(els.task.value);
   taskSetValue(taskUndoStack.pop());
   return true;
 }
 
-function taskRedo() {
+export function taskRedo() {
   if (!taskRedoStack.length) return false;
   taskUndoStack.push(els.task.value);
   taskSetValue(taskRedoStack.pop());
@@ -73,12 +73,12 @@ function taskRedo() {
 // they started browsing is kept aside and restored by walking back down past the
 // newest entry — so ArrowUp, ArrowUp, ArrowDown, ArrowDown lands exactly where
 // the user was, which is the shape every composer with this feature has.
-const TASK_HISTORY_MAX = 200;
-let taskHistory = []; // sent tasks, oldest first
-let taskHistoryPos = -1; // -1 = not browsing; else an index into taskHistory
-let taskDraft = ""; // what the box held before browsing started
+export const TASK_HISTORY_MAX = 200;
+export let taskHistory = []; // sent tasks, oldest first
+export let taskHistoryPos = -1; // -1 = not browsing; else an index into taskHistory
+export let taskDraft = ""; // what the box held before browsing started
 
-function recordSentTask(task) {
+export function recordSentTask(task) {
   const text = String(task == null ? "" : task);
   if (text.trim() && taskHistory[taskHistory.length - 1] !== text) taskHistory.push(text);
   if (taskHistory.length > TASK_HISTORY_MAX) taskHistory.shift();
@@ -91,7 +91,7 @@ function recordSentTask(task) {
   taskLastValue = els.task.value;
 }
 
-function taskHistoryOlder() {
+export function taskHistoryOlder() {
   if (!taskHistory.length) return false;
   if (taskHistoryPos < 0) {
     taskDraft = els.task.value;
@@ -106,7 +106,7 @@ function taskHistoryOlder() {
   return true;
 }
 
-function taskHistoryNewer() {
+export function taskHistoryNewer() {
   if (taskHistoryPos < 0) return false; // not browsing: ArrowDown keeps its own meaning
   if (taskHistoryPos < taskHistory.length - 1) {
     taskHistoryPos++;
@@ -119,7 +119,7 @@ function taskHistoryNewer() {
   return true;
 }
 
-function taskCaretToEnd() {
+export function taskCaretToEnd() {
   const n = els.task.value.length;
   try { els.task.setSelectionRange(n, n); } catch (e) { /* not a text field (stub/browser dev) */ }
 }
@@ -127,7 +127,7 @@ function taskCaretToEnd() {
 // The one programmatic entry (the task roll-back puts the message back here).
 // The value it REPLACES goes on the undo stack, so Ctrl+Z takes the box back to
 // whatever the user was composing.
-function fillTaskInput(text) {
+export function fillTaskInput(text) {
   taskPushUndo(els.task.value, true);
   taskSetValue(String(text == null ? "" : text));
   taskHistoryPos = -1;
@@ -151,13 +151,13 @@ els.task.addEventListener("input", () => {
 // Is the caret on the first/last line, with nothing selected? Arrow keys mean
 // "move the caret" inside the text and "walk the history" only from the edge —
 // otherwise a multi-line task could never be navigated with the keyboard.
-function taskCaretOnFirstLine() {
+export function taskCaretOnFirstLine() {
   const s = els.task.selectionStart, e = els.task.selectionEnd;
   if (s !== e) return false;
   return els.task.value.lastIndexOf("\n", s - 1) < 0;
 }
 
-function taskCaretOnLastLine() {
+export function taskCaretOnLastLine() {
   const s = els.task.selectionStart, e = els.task.selectionEnd;
   if (s !== e) return false;
   return els.task.value.indexOf("\n", s) < 0;

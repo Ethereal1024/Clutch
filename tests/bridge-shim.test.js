@@ -1,4 +1,4 @@
-// Bridge-shim contract check (R4): ui/bridge-shim.js must expose EXACTLY the
+// Bridge-shim contract check (R4): ui/src/renderer/bridge-shim.ts must expose EXACTLY the
 // window.clutch* surface of ui/preload.js — same namespaces, same method names,
 // same arities — and reproduce its call semantics (invoke resolves / throws,
 // event subscriptions return removers). Drift between the two breaks either
@@ -7,6 +7,7 @@
 const assert = require("assert");
 const path = require("path");
 const Module = require("module");
+const { loadRendererModule } = require("./harness.js");
 const origLoad = Module._load;
 
 // ---- capture preload's exposed surface through an electron stub ----
@@ -56,8 +57,9 @@ class FakeES {
 FakeES.instances = [];
 globalThis.EventSource = FakeES;
 
-delete require.cache[require.resolve("../ui/bridge-shim")];
-require("../ui/bridge-shim");
+// the shim is a renderer module now (ui/src/renderer/bridge-shim.ts): run its
+// stripped source in THIS context, the way the page loads it after the bundle
+loadRendererModule("bridge-shim");
 
 function arityOf(api) {
   const out = {};

@@ -5,9 +5,9 @@ Run: uv run python -m tests.trust_countdown_test
 The failure this guards (the permission twin of the M4 tunnel freeze): trust
 mode arms a prompt to answer ITSELF with allow after TRUST_COUNTDOWN_S
 ("the Allow button presses itself"). That countdown used to live only in the
-renderer (ui/js/permissions.js setTimeout chain) — and Android freezes the
+renderer (ui/src/renderer/permissions.ts setTimeout chain) — and Android freezes the
 WebView and its timers the moment the app goes to the background (see
-ui/js/sse-stream.js sseSuspend). So a prompt armed at 10s, then backgrounded,
+ui/src/renderer/sse-stream.ts sseSuspend). So a prompt armed at 10s, then backgrounded,
 simply stopped counting: the phone came back to a dialog that had "nearly"
 expired while the run sat blocked in PermissionGate.require the whole time —
 which has no timeout by design, so the run never finished, the supervisor never

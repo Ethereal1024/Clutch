@@ -16,7 +16,7 @@
 // end, and the phone re-attempts the REMOTE it lost instead of pretending a
 // local one exists.
 //
-// That re-attempt is now the disconnect dialog's job (ui/js/conn-lost.js), not a
+// That re-attempt is now the disconnect dialog's job (ui/src/renderer/conn-lost.ts), not a
 // private retry loop in the tunnel-end handler: every detected loss funnels into
 // connectionLost(), which re-dials the same host BY NAME from the standing
 // intent — the user re-enters nothing, and the one door back is the dialog.
@@ -29,7 +29,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const APP = uiSource(); // the renderer, every module in page load order
@@ -40,10 +40,13 @@ const { fnBody } = slicer(APP);
 // ---- 1. the renderer refuses the supervisor's lifecycle port ----
 // (real switchBackend / switchBackendResolved, stubbed storage + stream)
 const store = new Map();
+// the shared state leaf (ui/src/renderer/state.ts), at its declared
+// defaults: what used to be module-level globals is a field of this object
+global.state = stateStub();
 global.SUPERVISOR_BASE = "http://127.0.0.1:8890";
-global.API_BASE = "http://127.0.0.1:31001";
+global.state.apiBase = "http://127.0.0.1:31001";
 global.busy = false; // the run state switchBackend reads (see silent-idle-test.js)
-global.sseRunAtRisk = false;
+global.state.sseRunAtRisk = false;
 global.localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, String(v)),
@@ -84,7 +87,7 @@ for (const name of ["switchBackend", "switchBackendResolved", "dropStaleBackend"
 
 check(global.switchBackend("http://127.0.0.1:8890") === false,
   "the supervisor's lifecycle port is refused as a base");
-check(global.API_BASE === "http://127.0.0.1:31001",
+check(global.state.apiBase === "http://127.0.0.1:31001",
   "a refused URL leaves the live session base untouched");
 check(session.get("clutch_api_url") !== "http://127.0.0.1:8890",
   "and it is not persisted as this window's backend");
@@ -95,7 +98,7 @@ check(global.switchBackend("") === false && global.switchBackend(null) === false
 
 check(global.switchBackend("http://127.0.0.1:31002/") === true,
   "a real session URL still switches (trailing slash trimmed)");
-check(global.API_BASE === "http://127.0.0.1:31002" && reconnects === 1,
+check(global.state.apiBase === "http://127.0.0.1:31002" && reconnects === 1,
   "the live stream is re-scoped to it");
 check(session.get("clutch_api_url") === "http://127.0.0.1:31002" && store.get("clutch_api_url") === undefined,
   "and the URL is remembered for THIS window's page life, never in the shared storage");
@@ -104,7 +107,7 @@ check(session.get("clutch_api_url") === "http://127.0.0.1:31002" && store.get("c
 session.set("clutch_api_url", "http://127.0.0.1:31002");
 store.set("clutch_api_url", "http://127.0.0.1:31002"); // a stale global leftover: not this window's
 global.dropStaleBackend();
-check(global.API_BASE === null, "a dropped remote leaves no base behind");
+check(global.state.apiBase === null, "a dropped remote leaves no base behind");
 check(session.get("clutch_api_url") === undefined, "the stale URL is forgotten");
 check(store.get("clutch_api_url") === "http://127.0.0.1:31002",
   "and the shared storage is not this window's to write: another window's value is left alone");
@@ -115,10 +118,10 @@ store.delete("clutch_api_url");
 // cannot quietly repaint the badge (the whole journey is in silent-idle-test.js)
 global.busy = true;
 global.switchBackend("http://127.0.0.1:31005");
-check(global.sseRunAtRisk === true,
+check(global.state.sseRunAtRisk === true,
   "a base move while a run is in flight is remembered for the status frame");
 global.busy = false;
-global.sseRunAtRisk = false;
+global.state.sseRunAtRisk = false;
 
 // ---- 2. the host answers null, never a local placeholder ----
 // Both shells' api:base handlers are shaped the same way since the plugin
@@ -189,20 +192,20 @@ async function main() {
   // ---- 1b. the one ask: switchBackendResolved goes through app.js hostSessionUrl,
   // so the sentinel refusal and the read-the-note-before-you-ask rule exist once
   // instead of once per caller (the exit's note is what a re-claim must not win)
-  global.API_BASE = "http://127.0.0.1:31001";
+  global.state.apiBase = "http://127.0.0.1:31001";
   asked = 0;
-  check(await global.switchBackendResolved() === true && asked === 1 && global.API_BASE === "http://127.0.0.1:31003",
+  check(await global.switchBackendResolved() === true && asked === 1 && global.state.apiBase === "http://127.0.0.1:31003",
     "the host's answer is adopted through the one ask");
   global.connLostExitPending = () => true; // the conn-lost exit's note is up
   asked = 0;
-  check(await global.switchBackendResolved() === false && asked === 0 && global.API_BASE === "http://127.0.0.1:31003",
+  check(await global.switchBackendResolved() === false && asked === 0 && global.state.apiBase === "http://127.0.0.1:31003",
     "and a boot behind that exit claims nothing: the note is read BEFORE the host is asked");
   global.connLostExitPending = () => false;
   global.window.clutchApi.baseUrl = async () => {
     asked++;
     return "http://127.0.0.1:8890"; // the lifecycle port: an answer that is not a session
   };
-  check(await global.switchBackendResolved() === false && global.API_BASE === "http://127.0.0.1:31003",
+  check(await global.switchBackendResolved() === false && global.state.apiBase === "http://127.0.0.1:31003",
     "the sentinel is refused at the ask itself, so no caller can adopt it");
 
   // tunnel down: no session, and nothing to invent -> null (renderer: "not running")

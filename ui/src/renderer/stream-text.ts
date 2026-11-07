@@ -3,14 +3,19 @@
 // Renders the agent's text as it streams (batched through one rAF), the fold
 // open/close animation every collapsible shares, and the reasoning blocks.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import { highlightCode, typesetMath } from "./markdown";
+import { pageSink } from "./project";
+import { renderMarkdown } from "./render-events";
+import { state } from "./state";
+import { autoScroll } from "./stream-view";
+import { eventsEl, stream } from "./els";
 
-function createAgentTextBlock() {
+export function createAgentTextBlock() {
   const wrap = document.createElement("div");
   wrap.className = "event text";
   wrap.innerHTML = '<div class="hdr">agent</div><div class="body"></div>';
@@ -26,45 +31,44 @@ function createAgentTextBlock() {
 // whole-window freeze (clicks queue, Stop included). Math is deferred to the
 // flush render: typesetting the whole block per frame for a stray "$…$" pair
 // was the single most expensive frame cost.
-let textRenderRaf = 0;
-let textRenderLast = 0;
-const TEXT_RENDER_MIN_MS = 120;
-function renderTextBlock(force = false) {
-  textRenderRaf = 0;
+export let textRenderLast = 0;
+export const TEXT_RENDER_MIN_MS = 120;
+export function renderTextBlock(force = false) {
+  state.textRenderRaf = 0;
   const now = performance.now();
   if (!force && now - textRenderLast < TEXT_RENDER_MIN_MS) {
     // too soon since the last full render: skip this frame (cheap no-op), a
     // later frame renders once with every delta that arrived in between
-    textRenderRaf = requestAnimationFrame(() => renderTextBlock(false));
+    state.textRenderRaf = requestAnimationFrame(() => renderTextBlock(false));
     return;
   }
   textRenderLast = now;
-  if (!lastTextEl) return;
-  const bodyEl = lastTextEl.querySelector(".body");
-  bodyEl.innerHTML = renderMarkdown(lastTextContent);
-  lastTextEl._mathDone = false; // fresh content: the flush owes a math pass
-  highlightCode(lastTextEl, true);
+  if (!state.lastTextEl) return;
+  const bodyEl = state.lastTextEl.querySelector(".body");
+  bodyEl.innerHTML = renderMarkdown(state.lastTextContent);
+  state.lastTextEl._mathDone = false; // fresh content: the flush owes a math pass
+  highlightCode(state.lastTextEl, true);
   if (force && !stream.classList.contains("loading")) {
-    typesetMath(lastTextEl);
-    lastTextEl._mathDone = true;
+    typesetMath(state.lastTextEl);
+    state.lastTextEl._mathDone = true;
   }
   autoScroll();
 }
-function scheduleTextRender() {
-  if (textRenderRaf) return;
-  textRenderRaf = requestAnimationFrame(() => renderTextBlock(false));
+export function scheduleTextRender() {
+  if (state.textRenderRaf) return;
+  state.textRenderRaf = requestAnimationFrame(() => renderTextBlock(false));
 }
-function flushTextRender() {
-  if (textRenderRaf) {
-    cancelAnimationFrame(textRenderRaf);
+export function flushTextRender() {
+  if (state.textRenderRaf) {
+    cancelAnimationFrame(state.textRenderRaf);
     renderTextBlock(true);
-  } else if (lastTextEl && !lastTextEl._mathDone && !stream.classList.contains("loading")) {
+  } else if (state.lastTextEl && !state.lastTextEl._mathDone && !stream.classList.contains("loading")) {
     // content is current (a render landed within the throttle window) but the
     // math pass was deferred while streaming: run it exactly once here — the
     // _mathDone flag keeps bursty non-text events (tool_call_delta chunks)
     // from re-typesetting an unchanged block over and over
-    typesetMath(lastTextEl);
-    lastTextEl._mathDone = true;
+    typesetMath(state.lastTextEl);
+    state.lastTextEl._mathDone = true;
   }
 }
 
@@ -87,50 +91,49 @@ function flushTextRender() {
 // the same O(n²) the text block was fixed for, so an open block APPENDS what
 // arrived since the last render instead (_drawn); expanding the fold re-syncs
 // that mark, because the <pre> it rewrites whole is fully drawn again.
-let thinkingRenderRaf = 0;
-let thinkingRenderLast = 0;
-const THINKING_RENDER_MIN_MS = 120;
-function renderThinkingBlock(force = false) {
-  thinkingRenderRaf = 0;
-  if (!thinkingEl) return;
+export let thinkingRenderLast = 0;
+export const THINKING_RENDER_MIN_MS = 120;
+export function renderThinkingBlock(force = false) {
+  state.thinkingRenderRaf = 0;
+  if (!state.thinkingEl) return;
   const now = performance.now();
   if (!force && now - thinkingRenderLast < THINKING_RENDER_MIN_MS) {
     // too soon since the last render: one more frame, which then carries every
     // delta that arrived in between
-    thinkingRenderRaf = requestAnimationFrame(() => renderThinkingBlock(false));
+    state.thinkingRenderRaf = requestAnimationFrame(() => renderThinkingBlock(false));
     return;
   }
   thinkingRenderLast = now;
-  const label = thinkingEl.querySelector(".thinking-label");
-  if (label) label.textContent = "thinking… " + thinkingContent.length + " chars";
-  const full = thinkingEl.querySelector(".thinking-full");
+  const label = state.thinkingEl.querySelector(".thinking-label");
+  if (label) label.textContent = "thinking… " + state.thinkingContent.length + " chars";
+  const full = state.thinkingEl.querySelector(".thinking-full");
   if (!full) return;
-  full._content = thinkingContent; // the block's own copy; survives step_start resets
-  const fold = thinkingEl.querySelector(".fold");
+  full._content = state.thinkingContent; // the block's own copy; survives step_start resets
+  const fold = state.thinkingEl.querySelector(".fold");
   if (fold && !fold.classList.contains("hidden")) {
     // open: the text a reader is watching grows by what was not drawn yet
     const drawn = full._drawn;
-    if (typeof drawn === "number" && drawn > 0 && drawn <= thinkingContent.length) {
+    if (typeof drawn === "number" && drawn > 0 && drawn <= state.thinkingContent.length) {
       // only the part past the mark is new; an empty slice (nothing arrived since
       // the last frame) must not append an empty text node per frame either
-      const add = thinkingContent.slice(drawn);
+      const add = state.thinkingContent.slice(drawn);
       if (add) full.appendChild(document.createTextNode(add));
     } else {
-      full.textContent = thinkingContent;
+      full.textContent = state.thinkingContent;
     }
-    full._drawn = thinkingContent.length;
+    full._drawn = state.thinkingContent.length;
   }
   autoScroll();
 }
-function scheduleThinkingRender() {
-  if (thinkingRenderRaf) return;
-  thinkingRenderRaf = requestAnimationFrame(() => renderThinkingBlock(false));
+export function scheduleThinkingRender() {
+  if (state.thinkingRenderRaf) return;
+  state.thinkingRenderRaf = requestAnimationFrame(() => renderThinkingBlock(false));
 }
 // A non-reasoning event ends the block's stream: render it once, complete, before
 // the next block takes the tail (the same flush the text block gets).
-function flushThinkingRender() {
-  if (!thinkingRenderRaf) return;
-  cancelAnimationFrame(thinkingRenderRaf);
+export function flushThinkingRender() {
+  if (!state.thinkingRenderRaf) return;
+  cancelAnimationFrame(state.thinkingRenderRaf);
   renderThinkingBlock(true);
 }
 
@@ -139,11 +142,11 @@ function flushThinkingRender() {
 // ARRIVES decelerates into place on --arrival, one that LEAVES accelerates out
 // on --departure. Nothing in either language can see the other, so
 // tests/ui_css_check.py pins all three numbers to ui/style.css's tokens.
-const ARRIVE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
-const LEAVE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
-const FOLD_MS = 200; // --move: a fold the size of a row
-const FOLD_SIZE_MS = 420; // --size: the same move once it has a screenful to cover
-const FOLD_PX = 1000; // the screenful --size is written for
+export const ARRIVE_EASE = "cubic-bezier(.23, 1, .32, 1)"; // --arrival
+export const LEAVE_EASE = "cubic-bezier(.4, 0, 1, 1)"; // --departure
+export const FOLD_MS = 200; // --move: a fold the size of a row
+export const FOLD_SIZE_MS = 420; // --size: the same move once it has a screenful to cover
+export const FOLD_PX = 1000; // the screenful --size is written for
 
 // The fold's own content height in pixels: the inner's scrollHeight — the whole
 // content, because the inner clips its overflow but still reports its extent, and
@@ -151,17 +154,17 @@ const FOLD_PX = 1000; // the screenful --size is written for
 // move travels AND the distance its duration is paced by). A fold with nothing
 // measured (a test double, a box with no layout) is 0, so both callers stay on the
 // sheet's own numbers instead of a NaN.
-function foldContentPx(fold) {
+export function foldContentPx(fold) {
   const inner = fold.firstElementChild;
   return inner && typeof inner.scrollHeight === "number" ? inner.scrollHeight : 0;
 }
 
 // How long THIS fold's move runs. The region fold swallows a turn of a hundred
-// rows (js/auto-fold.js) and a flat 200ms closed those at a speed the eye reads as
+// rows (auto-fold.ts) and a flat 200ms closed those at a speed the eye reads as
 // a jump — the same gesture, given the time the distance it covers deserves. The
 // two ends are the sheet's own: under half a screenful rides --move, a screenful
 // leaves on --size, and the move walks between them on the distance.
-function foldMoveMs(fold) {
+export function foldMoveMs(fold) {
   const px = foldContentPx(fold);
   return Math.max(FOLD_MS, Math.min(FOLD_SIZE_MS, Math.round(px * FOLD_SIZE_MS / FOLD_PX)));
 }
@@ -171,16 +174,16 @@ function foldMoveMs(fold) {
 // pane's give-back have to travel on. With nothing in flight the move is over, so
 // the answer is 1 — that is how a landing call after a stop reads the destination
 // instead of 0.
-function foldProgress(el) {
+export function foldProgress(el) {
   const anim = el && el._foldAnim;
   const timing = anim && anim.effect && anim.effect.getComputedTiming ? anim.effect.getComputedTiming() : null;
   return timing && typeof timing.progress === "number" ? timing.progress : 1;
 }
 
 // The wrapper a close SLIDES: the region fold's rows inside the clipping inner
-// (`.fold-body`, js/auto-fold.js). A thinking or diff fold holds its content
+// (`.fold-body`, auto-fold.ts). A thinking or diff fold holds its content
 // directly, with no body, and takes the opacity leg of the move instead.
-function foldBody(fold) {
+export function foldBody(fold) {
   const inner = fold.firstElementChild;
   const body = inner ? inner.firstElementChild : null;
   return body && body.classList && body.classList.contains("fold-body") ? body : null;
@@ -189,7 +192,7 @@ function foldBody(fold) {
 // The head that HANGS over this fold — the `.turn-fold-head` it follows — or null
 // for every other fold, which has no band pinned at the pane's top and so no
 // scroll of its own to give back.
-function foldHead(fold) {
+export function foldHead(fold) {
   const head = fold.previousElementSibling;
   return head && head.classList && head.classList.contains("turn-fold-head") ? head : null;
 }
@@ -199,7 +202,7 @@ function foldHead(fold) {
 // instead of being carried off with the box it belongs to. Read from the BLOCK,
 // never from the head — a pinned head reports where sticky put it, not where it
 // belongs.
-function headLag(fold) {
+export function headLag(fold) {
   const block = fold.parentElement;
   if (!block) return 0;
   const pane = stream.getBoundingClientRect();
@@ -216,26 +219,26 @@ function headLag(fold) {
    eased — a second easing here would let the head drift off the pane's edge
    mid-move). The one extra call after the animation has been stopped is how the
    move lands exactly on the lag instead of on the last frame it managed to draw.
-   While a give-back runs the pane belongs to it (foldHoldsScroll): js/stream-view.js
+   While a give-back runs the pane belongs to it (foldHoldsScroll): stream-view.ts
    does not re-pin the tail under it, and the ResizeObserver that watches the
    transcript's height does not either. */
-let foldScrollHold = 0;
+export let foldScrollHold = 0;
 
-function foldHoldsScroll() { return foldScrollHold > 0; }
+export function foldHoldsScroll() { return foldScrollHold > 0; }
 
-function giveBack(fold) {
+export function giveBack(fold) {
   if (!fold._scrollLag) return;
   stream.scrollTop = fold._scrollFrom - fold._scrollLag * foldProgress(fold);
 }
 
-function stopGiveBack(fold) {
+export function stopGiveBack(fold) {
   if (fold._scrollRaf) cancelAnimationFrame(fold._scrollRaf);
   fold._scrollRaf = 0;
   if (fold._scrollHold) { foldScrollHold--; fold._scrollHold = false; }
 }
 
 // one fold/diff animation per element; cancel any in-flight one
-function cancelFoldAnim(el) {
+export function cancelFoldAnim(el) {
   if (el._foldAnim) { try { el._foldAnim.cancel(); } catch (e) {} }
   el._foldAnim = null;
   if (el._bodyAnim) { try { el._bodyAnim.cancel(); } catch (e) {} }
@@ -243,7 +246,7 @@ function cancelFoldAnim(el) {
   stopGiveBack(el);
 }
 
-function animateFold(el, from, to, onDone) {
+export function animateFold(el, from, to, onDone) {
   cancelFoldAnim(el);
   el.style.overflowY = "hidden";
   el.style.height = from + "px";
@@ -251,7 +254,7 @@ function animateFold(el, from, to, onDone) {
     cancelFoldAnim(el);
     onDone();
     // the fold's height settled (or was cancelled): re-pin the tail if latched
-    if (followTail && !stream.classList.contains("loading")) autoScroll();
+    if (state.followTail && !stream.classList.contains("loading")) autoScroll();
   };
   if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     el.style.height = to + "px";
@@ -269,20 +272,20 @@ function animateFold(el, from, to, onDone) {
   followTailDuring(anim);
 }
 
-function resetFold(el) {
+export function resetFold(el) {
   el.style.height = "";
   el.style.overflowY = "";
 }
 
 // diff expand: grow from its collapsed 140px to the content height
-function expandDiff(pre) {
+export function expandDiff(pre) {
   const start = pre.offsetHeight; // 140 while .diff-collapsed
   pre.classList.remove("diff-collapsed");
   const target = Math.min(pre.scrollHeight, 320);
   animateFold(pre, start, target, () => resetFold(pre));
 }
 
-function collapseDiff(pre) {
+export function collapseDiff(pre) {
   animateFold(pre, pre.offsetHeight, 140, () => {
     pre.classList.add("diff-collapsed");
     resetFold(pre);
@@ -290,7 +293,7 @@ function collapseDiff(pre) {
 }
 
 // grid-rows accordion: animate 0fr<->1fr so large text never reflows per frame
-function wrapFold(contentEl) {
+export function wrapFold(contentEl) {
   const inner = document.createElement("div");
   inner.className = "fold-inner";
   inner.appendChild(contentEl);
@@ -300,14 +303,14 @@ function wrapFold(contentEl) {
   return fold;
 }
 
-function reducedMotion() {
+export function reducedMotion() {
   return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 // keep the view pinned to the tail each frame while a fold/diff expands
-function followTailDuring(anim) {
+export function followTailDuring(anim) {
   let raf = requestAnimationFrame(function tick() {
-    if (followTail && !stream.classList.contains("loading")) autoScroll();
+    if (state.followTail && !stream.classList.contains("loading")) autoScroll();
     raf = requestAnimationFrame(tick);
   });
   const stop = () => cancelAnimationFrame(raf);
@@ -319,7 +322,7 @@ function followTailDuring(anim) {
 // curve already applied, so it IS the fraction of the height on screen (not how far
 // the clock got); the fold's own record of the direction turns that into "fr". With
 // nothing in flight, the settled class is the whole answer.
-function foldFraction(fold) {
+export function foldFraction(fold) {
   // only a move this function started carries the two fractions; the diff body's
   // own height animation shares the same slot on its own element
   if (!fold._foldAnim || typeof fold._foldFrom !== "number") {
@@ -330,7 +333,7 @@ function foldFraction(fold) {
 
 // Where the body's slide is right now, in px from its resting place: read before a
 // move is cancelled so a reversal carries on from the frame on screen.
-function foldBodyY(fold) {
+export function foldBodyY(fold) {
   if (typeof fold._bodyFrom !== "number") return 0;
   return fold._bodyFrom + (fold._bodyTo - fold._bodyFrom) * foldProgress(fold);
 }
@@ -338,7 +341,7 @@ function foldBodyY(fold) {
 // Where the fold is GOING. Mid-flight that is not what its class list says — the
 // list holds neither `hidden` nor `open` while a fold moves — so a second click
 // there used to re-run the move the reader had just asked to reverse.
-function foldOpen(fold) {
+export function foldOpen(fold) {
   return fold._foldAnim ? !!fold._foldTarget : !fold.classList.contains("hidden");
 }
 
@@ -348,7 +351,7 @@ function foldOpen(fold) {
 // state the fold started from. The move itself begins at the fraction that is on
 // screen, so an interrupted fold carries on from its current frame rather than
 // jumping to 0fr/1fr and replaying the whole distance.
-function foldAnim(fold, open, onDone) {
+export function foldAnim(fold, open, onDone = null) {
   // where the move is RIGHT NOW, read before the cancel throws it away
   const from = foldFraction(fold);
   const fromY = foldBodyY(fold);
@@ -470,15 +473,15 @@ function foldAnim(fold, open, onDone) {
   queueStuck();
 }
 
-function foldExpand(fold) {
+export function foldExpand(fold) {
   foldAnim(fold, true);
 }
 
-function foldCollapse(fold, onDone) {
+export function foldCollapse(fold, onDone = null) {
   foldAnim(fold, false, onDone);
 }
 
-function toggleFold(fold, onExpand) {
+export function toggleFold(fold, onExpand = null) {
   const open = foldOpen(fold);
   if (open) {
     foldCollapse(fold);
@@ -500,9 +503,9 @@ function toggleFold(fold, onExpand) {
    react-sticky-box); rects need no extra element and every one of them is read in
    the scroll path the pane already runs. rAF-coalesced, because a scroll event can
    arrive several times a frame and this must not. */
-let stuckRaf = 0;
+export let stuckRaf = 0;
 
-function paintStuck() {
+export function paintStuck() {
   stuckRaf = 0;
   const heads = stream.querySelectorAll(".turn-fold-head");
   if (!heads.length) return;
@@ -520,13 +523,13 @@ function paintStuck() {
   for (const [head, stuck] of state) head.classList.toggle("stuck", stuck);
 }
 
-function queueStuck() {
+export function queueStuck() {
   if (stuckRaf) return;
   stuckRaf = requestAnimationFrame(paintStuck);
 }
 
 // The pane's own scroll is where this has to run, and it runs on its OWN listener:
-// js/stream-view.js's listener returns early on every programmatic scroll (it must —
+// stream-view.ts's listener returns early on every programmatic scroll (it must —
 // the latch may only follow the reader's gestures), and the give-back above IS a
 // programmatic scroll that has to repaint the heads. A resize moves the pane's top
 // edge under the heads without any scroll at all, so it repaints too.
@@ -534,7 +537,7 @@ stream.addEventListener("scroll", queueStuck, { passive: true });
 window.addEventListener("resize", queueStuck);
 
 // collapsible thinking row; shared by the stored-replay and live streaming paths
-function buildThinkingBlock(initialLabel, initialContent) {
+export function buildThinkingBlock(initialLabel, initialContent) {
   const el = document.createElement("div");
   el.className = "event thinking";
   el.innerHTML = '<div class="hdr">thinking</div>';
@@ -568,7 +571,7 @@ function buildThinkingBlock(initialLabel, initialContent) {
 }
 
 // thinking row rebuilt from a stored assistant_message.reasoning
-function appendThinkingRow(reasoning) {
+export function appendThinkingRow(reasoning) {
   const block = buildThinkingBlock("thinking", reasoning);
   (pageSink || eventsEl).appendChild(block.el);
 }

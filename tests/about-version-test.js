@@ -16,8 +16,8 @@
 //      strip, the panes and SETTINGS_TABS agree, so a fourth tab cannot be added
 //      to one of them alone;
 //   3. the painting: the real aboutVersion/aboutPlatform/aboutBackend/paintAbout are
-//      sliced out of ui/js/settings.js and driven with stubbed window/navigator/
-//      API_BASE/document — Electron, an Android WebView, a plain desktop browser, a
+//      sliced out of ui/src/renderer/settings.ts and driven with stubbed window/navigator/
+//      state.apiBase/document — Electron, an Android WebView, a plain desktop browser, a
 //      checkout with no stamp, and a window with no session;
 //   4. the build: the APK is stamped with the version it was given, and the stamp
 //      step sits between the asset sync and gradle (before the sync it would be
@@ -28,7 +28,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary, slicer, uiSource, uiModules } = require("./harness.js");
+const { check, summary, slicer, stripModuleSyntax, uiSource, uiModules } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const UI = path.join(ROOT, "ui");
@@ -81,8 +81,13 @@ function decls(sheet, selector) {
     "and it is the page's last script — no module can read it while loading, which is why the About pane reads it when it is opened"
   );
   check(
-    uiModules().some((m) => m.file === "version.js"),
-    "the module list still carries it (not the bundle): the source readers (uiSource) and the About pane's own file agree on the stamp"
+    uiModules().every((m) => m.file !== "version.js"),
+    "and it is not one of the bundle's modules: boot.ts never imports it, so a rebuild cannot bury the number in the generated file the release scripts are forbidden to touch"
+  );
+  const bundle = read(UI, "renderer.js");
+  check(
+    !/window\.CLUTCH_VERSION\s*=(?!=)/.test(bundle) && (bundle.match(/window\.CLUTCH_VERSION/g) || []).length >= 1,
+    "the shipped bundle only ever READS the stamp (the About pane, when it is opened) — nothing in ui/src can write the number it is supposed to report"
   );
 
   // the strip and the panes come out of the two files that have to agree, not out of
@@ -90,7 +95,7 @@ function decls(sheet, selector) {
   // markup is what a reader sees before any script runs
   const src = uiSource();
   const tabsLit = src.match(/const SETTINGS_TABS = (\[[^\]]*\]);/);
-  check(Boolean(tabsLit), "ui/js/settings.js still declares SETTINGS_TABS");
+  check(Boolean(tabsLit), "ui/src/renderer/settings.ts still declares SETTINGS_TABS");
   const tabs = tabsLit ? JSON.parse(tabsLit[1]) : [];
   check(tabs.includes("about"), "and that list includes the About tab, so the switch knows to hide the other panes when it shows");
   check(tabs[0] === "llm", "the model pane is still the one the modal opens on");
@@ -129,14 +134,17 @@ function decls(sheet, selector) {
   // the number is never spelled out where it is painted: a version typed into the
   // pane is a version that lies one release later. (Comments are not code — the
   // header explains the stamp by naming the current number.)
-  const settingsSrc = (uiModules().find((m) => m.file === "js/settings.js") || { code: "" }).code
+  const settingsSrc = (uiModules().find((m) => m.file === "settings.ts") || { code: "" }).code
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
-  check(!/\b\d+\.\d+\.\d+\b/.test(settingsSrc), "ui/js/settings.js names no version at all — it reads the stamp on every paint");
+  check(!/\b\d+\.\d+\.\d+\b/.test(settingsSrc), "ui/src/renderer/settings.ts names no version at all — it reads the stamp on every paint");
 }
 
 // ---- 3. the painting: the real functions, one scenario each ----
-const ABOUT = slicer(uiSource()).region("// ---- the About pane", "paintAbout");
+// The slice is source text, so it still carries the module's `export ` prefixes;
+// a vm context runs a classic script, which refuses them. Nothing else is
+// translated: the About functions are plain JavaScript once the keyword is gone.
+const ABOUT = stripModuleSyntax(slicer(uiSource()).region("// ---- the About pane", "paintAbout"));
 
 // (the app's own product token carries the release number; built from VERSION so
 // this file holds no version literal of its own to go stale)
@@ -169,7 +177,7 @@ function makePane(opts) {
   const ctx = {
     window: { CLUTCH_VERSION: o.version },
     navigator: { userAgent: o.ua },
-    API_BASE: o.backend,
+    state: { apiBase: o.backend },
     document: { getElementById: (id) => rows[id] || null },
   };
   vm.createContext(ctx);

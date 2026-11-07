@@ -4,17 +4,45 @@
 // the host's own `ui` defaults before the first row is drawn, heal the settings
 // mirror, open the stream.
 //
-// Load order is the contract: these are CLASSIC scripts (Electron loads the
-// renderer over file://, where Chromium refuses module scripts), so this file
-// sees every `const`/`let`/`function` the earlier files declared. It may rely
-// on anything above it in ui/index.html and on nothing below it.
+// This file is a MODULE: what it uses, it imports above; what the others use,
+// it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts,
+// whose imports are the old page order) into ui/renderer.js, because Electron
+// loads the page over file://, where Chromium refuses module scripts.
 
-"use strict";
+import "./bridge-shim";
+import "./app";
+import "./stream-view";
+import "./tool-render";
+import "./stream-events";
+import "./stream-text";
+import "./markdown";
+import "./diagram-viewer";
+import "./render-events";
+import "./settings";
+import "./update-panel";
+import "./conn-store";
+import "./components-panel";
+import "./backend-lifecycle";
+import "./conn-flow";
+import "./conn-lost";
+import "./permissions";
+import "./workspace-panel";
+import "./sse-stream";
+import "./project";
+import "./fs-browser";
+import "./task-input";
+import "./auto-fold";
+import "./task-rollback";
+import { apiFetch, resolveApiBase } from "./app";
+import { reconciledBackendUrl, switchBackend } from "./backend-lifecycle";
+import { resumeTurn } from "./render-events";
+import { connectSSE } from "./sse-stream";
+import { state } from "./state";
 
 // the flat LLM config this UI would mirror to ~/.clutch/settings.json, read
 // from localStorage (the UI's own source of truth); null when nothing stored.
 // Active profile first, then the legacy clutch_llm + clutch_api_key pair.
-function storedLlmConfig() {
+export function storedLlmConfig() {
   try {
     const active = localStorage.getItem("clutch_llm_active");
     const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
@@ -47,7 +75,7 @@ function storedLlmConfig() {
 
 // rebuild the settings.json mirror if it went missing while the UI still has
 // the config (fire-and-forget: the next session spawn / proxy request needs it)
-function healSettingsMirror() {
+export function healSettingsMirror() {
   const cfg = storedLlmConfig();
   if (!cfg) return; // nothing stored: nothing to heal from
   if (window.clutchSettings && window.clutchSettings.ensure) {
@@ -60,10 +88,10 @@ function healSettingsMirror() {
 // that carries no `ui` of its own. Best effort in both directions: an older
 // host without the endpoint, or any fetch failure, leaves the compiled-in
 // constants standing -- the renderer never waits on the network to draw.
-async function loadHostDefaults() {
+export async function loadHostDefaults() {
   try {
     const data = await apiFetch("/api/host");
-    if (data && data.ui) hostUiDefaults = data.ui;
+    if (data && data.ui) state.hostUiDefaults = data.ui;
   } catch (e) {} // constants remain the fallback
 }
 
@@ -78,9 +106,9 @@ async function loadHostDefaults() {
   if (url) switchBackend(url);
   connectSSE();
   // A boot that already knows a project can continue a turn the last page left
-  // open (js/render-events.js resumeTurn); one that does not gets the same call
+  // open (render-events.ts resumeTurn); one that does not gets the same call
   // when a project is opened, because that is when the log it can resume appears.
   resumeTurn();
   // Nothing dials a host on startup: a remembered remote stays a PRESELECTION in
-  // the picker (js/conn-store.js) until the user presses Connect there.
+  // the picker (conn-store.ts) until the user presses Connect there.
 })();

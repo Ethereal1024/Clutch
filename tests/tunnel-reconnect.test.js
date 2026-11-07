@@ -853,9 +853,9 @@ async function main() {
   );
 
   // the healer's retry is the first step of the SAME ladder the dialog redials
-  // on (ui/js/conn-lost.js): two ends of a blinking link have to mean the same
+  // on (ui/src/renderer/conn-lost.ts): two ends of a blinking link have to mean the same
   // thing by "a first retry", and a hand-picked number here would drift
-  const CONN_LOST_SRC = fs.readFileSync(path.join(UI_DIR, "js", "conn-lost.js"), "utf8");
+  const CONN_LOST_SRC = fs.readFileSync(path.join(UI_DIR, "src", "renderer", "conn-lost.ts"), "utf8");
   const step1 = Number(/const CONN_LOST_BACKOFF_MS = \[(\d+)/.exec(CONN_LOST_SRC)[1]);
   const healStep = Number(/const HEAL_RETRY_MS = (\d+);/.exec(LIFECYCLE_SRC)[1]);
   check(

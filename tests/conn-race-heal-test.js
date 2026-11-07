@@ -28,7 +28,7 @@ const { check, summary, slicer, uiSource, uiModules } = require("./harness");
 
 const APP = uiSource();
 const { fnBody } = slicer(APP);
-const CONN_FLOW = uiModules().find((m) => m.file === "js/conn-flow.js").code;
+const CONN_FLOW = uiModules().find((m) => m.file === "conn-flow.ts").code;
 
 // the function under test, taken out of the page exactly as it ships
 const SRC = fnBody("hopLandedFor");

@@ -11,7 +11,7 @@
 // extracts the real functions from the renderer and drives them against stubs, so
 // a silent change that regresses the fix fails this test.
 
-const { check, summary, slicer, uiSource } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub, runnableSnippet } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody, region } = slicer(src);
@@ -23,8 +23,11 @@ global.cancelAnimationFrame = (id) => { rafQ[id - 1] = null; };
 const flushRaf = async () => { const q = rafQ; rafQ = []; for (const cb of q) if (cb) await cb(); };
 
 let markdownCalls = 0, mathCalls = 0, autoScrollCalls = 0;
-global.lastTextEl = null;
-global.lastTextContent = "";
+// the shared state leaf (ui/src/renderer/state.ts), at its declared defaults: the
+// two live blocks and their render handles are fields of it, not globals
+global.state = stateStub();
+global.state.lastTextEl = null;
+global.state.lastTextContent = "";
 global.renderMarkdown = (t) => { markdownCalls++; return "<p>" + t + "</p>"; };
 global.typesetMath = () => { mathCalls++; };
 // every autoScroll is a scrollHeight read over the whole transcript: a forced
@@ -89,34 +92,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // edge under the pinned heads). This runner drives it with reduced motion, so the
 // stub exists for the subscription itself.
 global.window = { matchMedia: () => ({ matches: true }), addEventListener: () => {} };
-(0, eval)(region("let textRenderRaf = 0;", "flushTextRender"));
-(0, eval)(region("let thinkingRenderRaf = 0;", "flushThinkingRender"));
-(0, eval)(region("const ARRIVE_EASE", "buildThinkingBlock"));
-(0, eval)(region("const hlCache = new Map();", "highlightCode"));
-(0, eval)(fnBody("noBackend"));
-(0, eval)(fnBody("apiFetch"));
+(0, eval)(runnableSnippet(region("export let textRenderLast", "flushTextRender")));
+(0, eval)(runnableSnippet(region("export let thinkingRenderLast", "flushThinkingRender")));
+(0, eval)(runnableSnippet(region("const ARRIVE_EASE", "buildThinkingBlock")));
+(0, eval)(runnableSnippet(region("const hlCache = new Map();", "highlightCode")));
+(0, eval)(runnableSnippet(fnBody("noBackend")));
+(0, eval)(runnableSnippet(fnBody("apiFetch")));
 
 (async () => {
   // ---- 1) throttle: 60fps rAF stream must collapse to <=8 renders/sec ----
-  global.lastTextEl = makeBlock();
+  global.state.lastTextEl = makeBlock();
   scheduleTextRender(); await flushRaf(); await sleep(130); await flushRaf(); // warm-up primes textRenderLast
   await sleep(130);
   markdownCalls = 0; mathCalls = 0;
 
   // 12 delta frames at ~0ms apart: the old code rendered 12 times
-  for (let i = 0; i < 12; i++) { global.lastTextContent += "x"; scheduleTextRender(); await flushRaf(); }
+  for (let i = 0; i < 12; i++) { global.state.lastTextContent += "x"; scheduleTextRender(); await flushRaf(); }
   check(markdownCalls <= 3, `throttle: 12 rapid deltas render <=3 times, not 12 (got ${markdownCalls})`);
 
   scheduleTextRender(); flushTextRender();
   check(markdownCalls >= 1, "flush forces a render even inside the throttle window");
   check(mathCalls === 1, "flush typesets math exactly once");
-  mathCalls = 0; global.lastTextEl._mathDone = false; flushTextRender();
+  mathCalls = 0; global.state.lastTextEl._mathDone = false; flushTextRender();
   check(mathCalls === 1, "flush without a pending render runs the owed math pass");
   mathCalls = 0; flushTextRender();
   check(mathCalls === 0, "_mathDone guard: bursty non-text events never re-typeset");
 
   // the streaming render itself never pays for math
-  mathCalls = 0; global.lastTextEl._mathDone = false;
+  mathCalls = 0; global.state.lastTextEl._mathDone = false;
   scheduleTextRender(); await flushRaf(); await sleep(130); await flushRaf();
   check(mathCalls === 0, "streaming renders defer math to the flush");
 
@@ -139,7 +142,7 @@ global.window = { matchMedia: () => ({ matches: true }), addEventListener: () =>
   check(big.innerHTML === "HL:" + "y".repeat(20000), "deferred fence is highlighted after the flush");
 
   // ---- 3) apiFetch: bounded, and callers can tell abort from HTTP errors ----
-  global.API_BASE = "http://unit.test";
+  global.state.apiBase = "http://unit.test";
   global.fetch = (url, opts) => new Promise((_, rej) => {
     if (opts && opts.signal) opts.signal.addEventListener("abort", () => {
       const e = new Error("The operation was aborted.");
@@ -164,7 +167,7 @@ global.window = { matchMedia: () => ({ matches: true }), addEventListener: () =>
   // fetch layer: `null + "/api/host"` is the relative URL "null/api/host" and
   // resolves against whatever origin served the UI. The request must never
   // leave, and the failure must look like an unreachable backend.
-  global.API_BASE = null;
+  global.state.apiBase = null;
   let sent = null;
   global.fetch = async (url) => { sent = url; return { ok: true, json: async () => ({}) }; };
   let noBase = null;
@@ -178,7 +181,7 @@ global.window = { matchMedia: () => ({ matches: true }), addEventListener: () =>
   check(Number(src.match(/TEXT_RENDER_MIN_MS = (\d+)/)[1]) >= 100, "throttle window is at least ~100ms");
   check(/HL_STREAM_MAX = \d+/.test(src), "streaming fence size cap present");
   check(/_mathDone/.test(src), "math idempotence guard present");
-  check(/if \(!API_BASE\) throw noBackend\(\)/.test(src),
+  check(/if \(!state\.apiBase\) throw noBackend\(\)/.test(src),
         "the raw NDJSON stream in openProject guards its base too");
   check(/timeout = \d+/.test(fnBody("apiFetch").slice(0, 200)), "apiFetch has a default timeout");
 
@@ -199,31 +202,31 @@ global.window = { matchMedia: () => ({ matches: true }), addEventListener: () =>
   const label = makeNode(), full = makeNode(), fold = makeNode();
   fold.className = "fold"; // open: a reader is watching it grow
   full._drawn = 0; // what buildThinkingBlock("", "") leaves on a live block
-  global.thinkingEl = { querySelector: (s) => (s === ".thinking-label" ? label : s === ".thinking-full" ? full : s === ".fold" ? fold : null) };
-  global.thinkingContent = "a";
+  global.state.thinkingEl = { querySelector: (s) => (s === ".thinking-label" ? label : s === ".thinking-full" ? full : s === ".fold" ? fold : null) };
+  global.state.thinkingContent = "a";
   renderThinkingBlock(true); // warm-up: primes the throttle clock, like the first frame
   check(label.textContent === "thinking… 1 chars", "the counter renders on the warm-up frame");
   check(full.textContent === "a" && full._drawn === 1, "the open <pre> is drawn and the append mark set");
 
   // 12 deltas, no frame in between: not one write may happen per delta
   label.rewrites = 0; full.rewrites = 0; full.appends = 0; autoScrollCalls = 0;
-  for (let i = 0; i < 12; i++) { global.thinkingContent += "x"; scheduleThinkingRender(); }
+  for (let i = 0; i < 12; i++) { global.state.thinkingContent += "x"; scheduleThinkingRender(); }
   check(label.rewrites === 0 && full.rewrites === 0 && autoScrollCalls === 0,
         `12 reasoning deltas in one frame do no DOM work at all (label ${label.rewrites}, pre ${full.rewrites}, pins ${autoScrollCalls})`);
   flushThinkingRender(); // the next non-reasoning event is the end of this stream
   check(label.rewrites === 1 && autoScrollCalls === 1,
         "the flush renders the whole burst exactly once (one pass, one pin)");
   check(label.textContent === "thinking… 13 chars", "the flush lands the counter on the full length");
-  check(full._content === global.thinkingContent, "the block's own copy is current, so a click expands to everything");
+  check(full._content === global.state.thinkingContent, "the block's own copy is current, so a click expands to everything");
 
   // an open block appends the tail; rewriting the whole <pre> per frame is the
   // O(n²) the text block was already fixed for
   full.rewrites = 0; full.appends = 0; full.text = "";
-  for (let i = 0; i < 5; i++) global.thinkingContent += "y";
+  for (let i = 0; i < 5; i++) global.state.thinkingContent += "y";
   scheduleThinkingRender(); await sleep(130); await flushRaf();
   check(full.appends === 1 && full.rewrites === 0, "an open reasoning block APPENDS the new tail (1 append, 0 rewrites)");
   check(full.text === "yyyyy", "the appended tail is exactly what arrived since the last pass");
-  check(full.textContent === global.thinkingContent && full._drawn === global.thinkingContent.length,
+  check(full.textContent === global.state.thinkingContent && full._drawn === global.state.thinkingContent.length,
         "the block reads back as the whole reasoning text, and the mark follows it");
   scheduleThinkingRender(); await sleep(130); await flushRaf(); // a frame with nothing new
   check(full.appends === 1, "an idle frame appends nothing (no empty text node per frame)");
@@ -246,11 +249,11 @@ global.window = { matchMedia: () => ({ matches: true }), addEventListener: () =>
         "the reasoning branch writes no DOM of its own: no label write, no <pre> rewrite, no tail pin");
   check(/ev\.type !== "reasoning_delta"\) flushThinkingRender\(\)/.test(src),
         "every non-reasoning event flushes a pending reasoning render");
-  check(/if \(thinkingRenderRaf\) \{ cancelAnimationFrame\(thinkingRenderRaf\)/.test(src),
+  check(/if \(state\.thinkingRenderRaf\) \{ cancelAnimationFrame\(state\.thinkingRenderRaf\)/.test(src),
         "a discarded live partial cancels its pending reasoning render too");
   check(Number((src.match(/THINKING_RENDER_MIN_MS = (\d+)/) || [])[1]) >= 100,
         "the reasoning path carries the same ~100ms+ throttle window as the text path");
-  check(full._drawn !== undefined && /full\._drawn = thinkingContent\.length/.test(src),
+  check(full._drawn !== undefined && /full\._drawn = state\.thinkingContent\.length/.test(src),
         "the append mark is what the render pass maintains");
 
   summary("stream-render-test");
