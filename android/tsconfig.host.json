@@ -1,0 +1,35 @@
+{
+  // The phone's host, compiled from android/host/src/*.ts to android/host/*.js
+  // by android/build-host.js (which shares ui/build-ts.js with the desktop
+  // build). same shape as ui/tsconfig.host.json, one tree over:
+  //
+  //   * moduleDetection "force" is mandatory: these files carry no import/export
+  //     at all (CommonJS require/module.exports), and without it tsc treats them
+  //     as global scripts and collides the names.
+  //   * outDir "." with an explicit exclude: the source tree is the directory
+  //     above, so tsc would otherwise exclude itself and fail with TS18003.
+  //   * strict false is a ratchet, exactly as in ui/tsconfig.host.json: get the
+  //     whole tree compiling first, annotate, then flip that line. It is not a
+  //     permanent answer; it is the order of the work.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "moduleDetection": "force",
+    "types": ["node"],
+    // The repo's single @types/node lives with the single TypeScript install
+    // (ui/node_modules), and tsc's default typeRoots would look beside THIS
+    // config and above it, where there is no node_modules. Same reason
+    // ui/build-ts.js resolves the compiler from ui/: one install, two trees.
+    "typeRoots": ["../ui/node_modules/@types"],
+    "rootDir": "host/src",
+    "outDir": "host",
+    "removeComments": false,
+    "strict": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["host/src/**/*.ts"],
+  "exclude": ["node_modules"]
+}

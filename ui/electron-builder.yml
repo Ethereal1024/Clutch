@@ -51,6 +51,7 @@ files:
   - "!src"
   - "!src/**"
   - "!build-host.js"
+  - "!build-ts.js"
   - "!tsconfig.host.json"
   - "!*.ts"
 

@@ -115,7 +115,7 @@ function handlerBody(src, name) {
 
 // ---- 4. ...and on the phone's wire ----
 {
-  const src = read("android/host/android-host.js");
+  const src = read("android/host/src/android-host.ts");
   check(count(src, /createSessionRun\(/g) === 1, "one construction site on the phone too");
   const ensure = slicer(src).fnBody("ensureRun");
   check(/createSessionRun\(/.test(ensure), "the ensure path is where the instance is built");

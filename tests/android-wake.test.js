@@ -19,7 +19,7 @@ const { check, summary, slicer } = require("./harness.js");
 const ROOT = path.join(__dirname, "..");
 const read = (p) => fs.readFileSync(path.join(ROOT, p), "utf8");
 
-const HOST = read("android/host/android-host.js");
+const HOST = read("android/host/src/android-host.ts");
 const SERVICE = read("android/app/src/main/java/io/clutch/mobile/TunnelService.kt");
 const ACTIVITY = read("android/app/src/main/java/io/clutch/mobile/MainActivity.kt");
 const STRINGS = read("android/app/src/main/res/values/strings.xml");

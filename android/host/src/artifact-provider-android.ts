@@ -1,0 +1,398 @@
+// N3 — Android pylibs artifact provider. The pylibs tar is ABI-sensitive
+// (os,arch,libc,pyver) and Android has no pip/bash, so the tar comes from CI
+// prebuilt Release artifacts instead of a local build (the desktop default in
+// server-bundle.js runs build-pylibs-tar.sh — unavailable on the phone).
+//
+// The tars are byte-deterministic, so a tar's sha256 IS its content hash and
+// its first 16 hex chars are the VERSION-gate value — the same fileHash()
+// computation server-bundle.js applies on desktop. After download we recompute
+// the hash locally, so the remote VERSION gate runs unmodified.
+//
+// Release index (published by the pylibs-matrix CI job alongside the tars):
+//   { "<os>-<arch>-<libc>-py<ver>": { "file": "agent-pylibs-<...>-<hash>.tar.gz",
+//                                     "sha256": "<64 hex>",
+//                                     "version": "<16 hex = gate value>" } }
+//
+// The index must be the SAME COMMIT as the installed app: the tar embeds the
+// agent/ source the remote executes, so a newer release's tar could speak a
+// protocol the installed app's host JS doesn't. Resolution order:
+//   1. CLUTCH_PYLIBS_INDEX_URL env (dev runs / tests)
+//   2. pylibs-index-url.txt next to this file — stamped by the release CI
+//      with THIS APK's own tag (…/download/<tag>/pylibs-index.json)
+//   3. releases/latest/download of THIS repo (dev APKs: best effort)
+const crypto = require("crypto");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const http = require("http");
+const https = require("https");
+
+// The shared ui/ modules this file uses: on the phone the copy synced beside it
+// wins (the nodejs-project layout, see scripts/sync-android-host.sh), and the repo
+// layout wins for the tests + a dev run straight from the checkout.
+function useUI(name) {
+  const local = path.join(__dirname, "ui", name);
+  return require(fs.existsSync(local) ? local : path.join(__dirname, "..", "..", "ui", name));
+}
+
+// The same mirror the component sources are read under (ui/net-fetch.js): one
+// setting moves every remote this app reads from, so a network where github.com is
+// only reachable through a proxy or an accelerator does not need a per-supply-line
+// answer. It rewrites the URL this DEVICE fetches and nothing else: the release's
+// own URL stays the identity, because the index cache is keyed by it and the stamp
+// names a tag — an index published for THIS APK's tag has to keep matching the copy
+// already on disk, mirror or not.
+const { mirrorPrefix, mirrored } = useUI("net-fetch.js");
+// The ladder BEHIND that one setting (ui/mirrors.js): the accelerators this build
+// ships plus whatever the user added, tried in turn when a read fails for a reason
+// that is about reaching the release rather than about the release's answer. The
+// component supply line already falls back through it (ui/components-view.js); the
+// one thing this app downloads that is BIGGER than a settings file did not, which
+// is the phone that could not fetch the 4 MB tar over a link where github.com does
+// not answer.
+const mirrors = useUI("mirrors.js");
+// The mirror decision is written to the tunnel log (report: "downloads and uploads
+// to the server still need a VPN — the domestic mirror never took effect"). "the
+// mirror was not set" and "the mirror was set and this is what it fetched" are two
+// different reports, and on a phone the log is the only place the difference is
+// visible: the settings file it comes from is the app's own filesDir.
+const { tunnelLog } = useUI("tunnel-core.js");
+
+// What the LAST fetchUrl reported, so the decision is stated once per prefix
+// rather than once per chunk of a 30 MB tar (~500 of them): the question this
+// answers — "did the mirror take effect?" — is answered by the first line.
+let loggedPrefix = null;
+
+function fetchUrl(url) {
+  const prefix = mirrorPrefix();
+  if (loggedPrefix !== prefix) {
+    loggedPrefix = prefix;
+    tunnelLog(
+      prefix
+        ? `[artifact] source mirror ${prefix} — fetching ${mirrored(url, prefix)}`
+        : `[artifact] no source mirror set: fetching ${url} (github.com) directly`
+    );
+  }
+  return mirrored(url, prefix);
+}
+
+// What a read says when the release's own URL could not be reached AND the
+// mirrors did not answer either: the failure that started it, where else this
+// device tried, and the last thing one of them said. Both ends keep the host's
+// own words — the phone's log is the only place this is ever read.
+function coveredFailure(first, tried, last) {
+  const n = tried.length;
+  const where = `${n} mirror${n === 1 ? "" : "s"} (${tried.join(", ")})`;
+  return `${first} — and not through ${where} either: the last one said ${last}`;
+}
+
+function defaultIndexUrl() {
+  if (process.env.CLUTCH_PYLIBS_INDEX_URL) return process.env.CLUTCH_PYLIBS_INDEX_URL;
+  try {
+    const stamped = fs.readFileSync(path.join(__dirname, "pylibs-index-url.txt"), "utf-8").trim();
+    if (stamped) return stamped;
+  } catch (e) {
+    /* not stamped: dev build */
+  }
+  // this repo, never a placeholder host: a 404 from a repo that does not
+  // exist gets reported as "that release carries no pylibs-matrix assets
+  // (the tag predates the job)" -- sending the user after a release that is
+  // fine. Only an unstamped dev build lands here (build-android-apk.sh always
+  // stamps), i.e. exactly the assets sync-android-host.sh produces alone.
+  return "https://github.com/Ethereal1024/Clutch/releases/latest/download/pylibs-index.json";
+}
+
+function cacheDir() {
+  return path.join(os.homedir(), ".clutch", "bundles"); // same cache the desktop uses
+}
+
+function sha256(buf) {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+// tiny GET with redirect following (GitHub release assets redirect to S3).
+// The timeout is the point: without one a stalled TLS/HTTP connection never
+// errors, and the connect sits on "Installing remote server…" for as long as
+// the phone's network cares to hold the socket open — the reported "it keeps
+// installing the server" on a reconnect to a remote that was already ready.
+const INDEX_TIMEOUT_MS = 20000;
+const TAR_TIMEOUT_MS = 180000; // ~30 MB over mobile data
+
+function fetchBuf(url: string, redirects = 0, timeoutMs = INDEX_TIMEOUT_MS): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error("too many redirects fetching " + url));
+    const mod = url.startsWith("https:") ? https : http;
+    const req = mod.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(fetchBuf(new URL(res.headers.location, url).toString(), redirects + 1, timeoutMs));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+      }
+      const chunks = [];
+      res.on("data", (c) => {
+        chunks.push(c);
+        req.setTimeout(timeoutMs); // a download that stalls mid-body is struck too
+      });
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("error", reject);
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`timed out after ${timeoutMs}ms fetching ${url}`));
+    });
+    req.on("error", reject);
+  });
+}
+
+async function fetchJson(url) {
+  return JSON.parse((await fetchBuf(url)).toString("utf-8"));
+}
+
+// One cached index per index URL — the URL carries the tag an APK is stamped
+// with (or "latest" for a dev build), so a cached copy can only ever describe
+// the release this app was built from.
+function indexCachePath(indexUrl) {
+  const stamp = crypto.createHash("sha256").update(indexUrl).digest("hex").slice(0, 12);
+  return path.join(cacheDir(), `pylibs-index-${stamp}.json`);
+}
+
+function readCachedIndex(indexUrl) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(indexCachePath(indexUrl), "utf-8"));
+    // the URL is stored inside: a cache written for another release is not ours
+    return parsed && parsed.url === indexUrl && parsed.index ? parsed.index : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeCachedIndex(indexUrl, index) {
+  try {
+    const out = indexCachePath(indexUrl);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out + ".tmp", JSON.stringify({ url: indexUrl, index }));
+    fs.renameSync(out + ".tmp", out);
+  } catch (e) {
+    /* an index we cannot cache is not a failed connect */
+  }
+}
+
+// probe spellings vary (uname -s says "Linux"); the CI index is lowercase
+function indexKey(target) {
+  return `${String(target.os || "").toLowerCase()}-${target.arch}-${target.libc || "unknown"}-py${target.pyver}`;
+}
+
+function createAndroidArtifactProvider({
+  indexUrl = defaultIndexUrl(),
+  fetchIndex = fetchJson,
+  fetch = fetchBuf,
+  // which mirrors a failed read falls back through: null is this machine's own
+  // (ui/mirrors.js), an ARRAY is exactly that list (a test's stand-in accelerator),
+  // and false is "no fallback at all" (a packager pointing a build at one host)
+  mirrorList = null,
+} = {}) {
+  // Where one release file is read from, in the order it is read: the URL this
+  // DEVICE already has (source_mirror applied by fetchUrl) and then the ladder.
+  // An accelerator rewrites a github.com release URL; a LAN index or a test
+  // server is nobody's to rewrite, so those get the one place, and while
+  // source_mirror is set mirrors.fallbackFor itself returns nothing (that knob
+  // already moved every read).
+  function placesFor(url) {
+    const places = [{ prefix: "", url }];
+    if (mirrorList === false) return places;
+    if (!Array.isArray(mirrorList)) {
+      let host = "";
+      try {
+        host = new URL(url).host;
+      } catch (e) {
+        return places;
+      }
+      if (host !== "github.com") return places;
+    }
+    for (const prefix of mirrors.fallbackFor(url, Array.isArray(mirrorList) ? mirrorList : null)) {
+      const moved = mirrored(url, prefix);
+      if (moved !== url) places.push({ prefix, url: moved });
+    }
+    return places;
+  }
+
+  // The catalogue, read through the release host and then through the ladder when
+  // the failure was about REACHING it: an index a phone cannot download is a
+  // connect that never happens, and a few KB is what an accelerator carries best.
+  // A 404 or a body that is not JSON is an ANSWER (a mirror serves the same path
+  // and would say the same), so the ladder stops there.
+  async function readIndexThroughMirrors(url) {
+    const places = placesFor(url);
+    let first = "";
+    const tried = [];
+    for (let i = 0; i < places.length; i++) {
+      try {
+        const index = await fetchIndex(places[i].url);
+        if (places[i].prefix) tunnelLog(`[artifact] index came through ${places[i].prefix}`);
+        return index;
+      } catch (e) {
+        const reason = (e && e.message) || String(e);
+        if (i === 0) first = reason;
+        else tried.push(places[i].prefix);
+        if (i === places.length - 1 || !mirrors.looksLikeNetwork(reason)) {
+          throw tried.length ? new Error(coveredFailure(first, tried, reason)) : e;
+        }
+        tunnelLog(`[artifact] index fetch failed (${reason}); trying ${places[i + 1].prefix}`);
+      }
+    }
+    throw new Error(first || "the pylibs index produced no answer");
+  }
+
+  // The tar, read the same way — with one addition that is the whole reason this
+  // is safe: every answer is weighed against the index's own sha256 BEFORE it
+  // counts, so a prefix that serves other bytes is refused rather than installed
+  // (the same pin ui/components.js accept() reads). A mismatch is a fact about
+  // the bytes, not about the path, so the ladder stops on it.
+  async function readTarThroughMirrors(url, entry) {
+    const places = placesFor(url);
+    let first = "";
+    const tried = [];
+    for (let i = 0; i < places.length; i++) {
+      try {
+        const buf = await fetch(places[i].url, 0, TAR_TIMEOUT_MS);
+        const got = sha256(buf);
+        if (got !== entry.sha256) {
+          throw new Error(
+            `pylibs artifact ${entry.file} failed sha256: expected ${entry.sha256}, got ${got}`
+          );
+        }
+        if (places[i].prefix) tunnelLog(`[artifact] tar came through ${places[i].prefix}`);
+        return buf;
+      } catch (e) {
+        const reason = (e && e.message) || String(e);
+        if (i === 0) first = reason;
+        else tried.push(places[i].prefix);
+        if (i === places.length - 1 || !mirrors.looksLikeNetwork(reason)) {
+          throw tried.length ? new Error(coveredFailure(first, tried, reason)) : e;
+        }
+        tunnelLog(`[artifact] tar fetch failed (${reason}); trying ${places[i + 1].prefix}`);
+      }
+    }
+    throw new Error(first || "the pylibs tar produced no answer");
+  }
+
+  // The release catalogue for THIS index URL: freshly fetched when the release
+  // host answers, otherwise the copy already cached for this URL — the same
+  // release, because the URL carries the tag. `held` is the caller's test of
+  // whether an offline answer may be honoured at all: the version question needs
+  // nothing beyond the catalogue, while handing over the artifact needs the tar
+  // itself to be on this device. When it cannot be honoured the fetch error
+  // surfaces — an unreachable release must never be dressed up as a catalogue.
+  async function loadIndex(held) {
+    try {
+      const index = await readIndexThroughMirrors(fetchUrl(indexUrl));
+      writeCachedIndex(indexUrl, index);
+      return index;
+    } catch (e) {
+      // a 404 here is the supply line, not the network: the release this
+      // APK's stamp points at predates the pylibs-matrix job (v0.1.14 did)
+      // and simply has no index asset. Say so — "HTTP 404 for …" sent the
+      // user chasing a connectivity ghost.
+      if (/HTTP 404/.test((e && e.message) || "")) {
+        throw new Error(
+          `pylibs index 404 at ${indexUrl}: that release carries no pylibs-matrix ` +
+            "assets (the tag predates the job). Cut a new tag so the release CI " +
+            "publishes the index + tars, or point the stamp at a LAN index " +
+            "(docs/android/02 §7)."
+        );
+      }
+      // An unreachable release host (the phone sits on a LAN with no
+      // internet, or the release CDN is blocked) is NOT a reason a reconnect
+      // to a remote that already runs this tar must fail: the cached index
+      // names the same artifact, the cache holds it byte-for-byte, and the
+      // hash is recomputed below, so the gate stays exact. Only a cached
+      // index for THIS index URL counts, and only when `held` says the answer
+      // it gives can be honoured here.
+      const cached = readCachedIndex(indexUrl);
+      if (!cached || !held(cached)) throw e;
+      return cached;
+    }
+  }
+
+  // One entry, or the supply line's own verdict. `version` is part of the
+  // published index contract (pylibs-index CI writes file + sha256 + version),
+  // and it IS the sha256's first 16 hex chars: the tar's content hash is the one
+  // source of truth for the gate, the index only publishes it twice. An entry
+  // whose halves disagree would gate every connect against a version no bytes can
+  // satisfy — an install on every reconnect — so it is refused here, before the
+  // gate ever reads it.
+  function entryFor(index, key) {
+    const entry = index && index[key];
+    if (!entry || !entry.file || !entry.sha256 || !entry.version) {
+      throw new Error(`no prebuilt pylibs artifact for ${key}: the pylibs-matrix CI job has not published one`);
+    }
+    if (entry.version !== entry.sha256.slice(0, 16)) {
+      throw new Error(
+        `pylibs index entry for ${key} disagrees with itself: version ${entry.version} is not the ` +
+          `sha256 prefix ${entry.sha256.slice(0, 16)}`
+      );
+    }
+    return entry;
+  }
+
+  return {
+    // Android never hosts a backend locally (N4): the PyInstaller bundle path
+    // is unreachable by construction (chooseStrategy requires platform match);
+    // this hard reject is the belt to that brace.
+    ensureBundle: async () => {
+      throw new Error("no backend bundle on Android: the backend runs on the SSH remote");
+    },
+
+    // The version the install gate compares against, from the CATALOGUE alone:
+    // a few KB naming file + sha256 + version per target. No tar, no cache
+    // lookup, no transfer — so "Checking remote server…" is a check, and a
+    // remote that already runs the release's artifact is recognised without
+    // sending anybody the wheel stack.
+    async resolvePyLibsVersion(target) {
+      const key = indexKey(target);
+      return entryFor(await loadIndex(() => true), key).version;
+    },
+
+    // target: { os, arch, libc, pyver } — the probe result, exactly what the
+    // desktop key is built from. Returns { path, version } like the desktop:
+    // version = recomputed content-hash prefix, i.e. the expected VERSION gate.
+    async ensurePyLibsTar(target) {
+      const key = indexKey(target);
+      // offline, an index we cannot turn into bytes is not a catalogue: the tar
+      // for this target has to be here for the cached copy to be honoured
+      const bytesHere = (c) => !!(c[key] && c[key].file && fs.existsSync(path.join(cacheDir(), c[key].file)));
+      const index = await loadIndex(bytesHere);
+      const entry = entryFor(index, key);
+      const dir = cacheDir();
+      fs.mkdirSync(dir, { recursive: true });
+      const out = path.join(dir, entry.file);
+      if (fs.existsSync(out)) {
+        // cache hit still returns the RECOMPUTED hash: trust nothing, not even ourselves
+        return { path: out, version: sha256(fs.readFileSync(out)).slice(0, 16) };
+      }
+      // the tar is ~30 MB: give the body transfer its own, longer stall window
+      const tarUrl = fetchUrl(indexUrl.replace(/[^/]*$/, "") + entry.file);
+      let buf;
+      try {
+        buf = await readTarThroughMirrors(tarUrl, entry);
+      } catch (e) {
+        // the URL this DEVICE tried, mirror and all: "it needed a VPN" is answered
+        // by reading which host was actually asked (see fetchUrl)
+        tunnelLog(`[artifact] tar fetch failed: ${tarUrl} :: ${(e && e.message) || e}`);
+        throw e;
+      }
+      const got = sha256(buf);
+      if (got !== entry.sha256) {
+        throw new Error(`pylibs artifact ${entry.file} failed sha256: expected ${entry.sha256}, got ${got}`);
+      }
+      const tmp = path.join(dir, `.pylibs-${key}-${process.pid}.tar.gz`);
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, out); // atomic: a partial download must never satisfy the gate
+      return { path: out, version: got.slice(0, 16) };
+    },
+  };
+}
+
+module.exports = { createAndroidArtifactProvider };

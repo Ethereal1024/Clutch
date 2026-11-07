@@ -8,6 +8,11 @@
 # The host gets the SAME files the desktop runs: android/host/* + the pure-Node
 # ui/ subset (R1-R4 kept them Electron-free). The Electron-only modules
 # (main.js, preload.js, server-bootstrap.js) stay out by construction.
+#
+# android/host/*.js is COMPILED from android/host/src/*.ts (android/build-host.js,
+# in place — libnode 18 cannot strip types), so the glob below copies output, not
+# sources; src/ is a directory and `*.js` does not match it. The other inputs
+# check their own digests before anything is copied.
 # Run from anywhere:  scripts/sync-android-host.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -60,6 +65,10 @@ node ui/build-renderer.js --check
 # old module. --check is tsc-free (it compares the digest banner), which is what
 # this job can rely on.
 node ui/build-host.js --check
+# ...and once more for the PHONE's own half: android/host/src/*.ts is compiled to
+# the android/host/*.js copied below by android/build-host.js, and it is just as
+# stale-able as ui/. Same tsc-free digest check, same reason.
+node android/build-host.js --check
 rm -rf "$UI_ASSETS"
 mkdir -p "$UI_ASSETS"
 cp ui/index.html ui/renderer.js ui/style.css ui/mobile.css "$UI_ASSETS/"

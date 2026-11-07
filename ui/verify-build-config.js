@@ -120,6 +120,7 @@ const EXCLUDED_FILES = [
   "src/host/main.ts",
   "src/host/run.ts",
   "build-host.js",
+  "build-ts.js",
   "tsconfig.host.json",
 ];
 
