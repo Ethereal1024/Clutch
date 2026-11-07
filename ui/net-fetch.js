@@ -1,4 +1,6 @@
-// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
+// GENERATED FILE — do not edit; edit src/host/net-fetch.ts and run `npm run build:host`.
+// source sha256: 21c5bc6c6171c5514db189de2d7da01c9b1f5e50a764db81f5d3fc00c0b9fc2c
+
 // The two things a remote read has to decide before it happens: WHICH fetch this
 // machine uses, and WHERE the reads this build makes are sent. Both are
 // "the network this app runs on" questions, so both live in one small seam.
@@ -46,75 +48,73 @@
 // deployment's shell) and then from source_mirror in ~/.clutch/settings.json — a
 // GUI launch inherits no environment from you, and the settings widget is a later
 // round, so until then that key is written by hand.
-
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
 const { readSettings } = require("./settings-mirror");
-
 // --------------------------------------------------------------- the fetch --
-
 let electronFetch = null; // Chromium's, once this process has one
-
 // Electron's fetch, or null wherever there is none: plain node (every test, any
 // script, the phone) has no `electron` to require, and a main process that asks
 // for `net` before the app is ready would get a throw rather than a fetch — so
 // readiness is checked FIRST and the answer is only cached once it is a yes.
 // A read that happens before ready then takes node's fetch and still happens.
 function appFetch() {
-  if (electronFetch) return electronFetch;
-  if (!process.versions.electron) return null;
-  try {
-    const { app, net } = require("electron");
-    if (app && typeof app.isReady === "function" && !app.isReady()) return null;
-    if (net && typeof net.fetch === "function") electronFetch = net.fetch.bind(net);
-  } catch (e) {
-    /* no electron to require here, or not ready yet: node's fetch below */
-  }
-  return electronFetch;
+    if (electronFetch)
+        return electronFetch;
+    if (!process.versions.electron)
+        return null;
+    try {
+        const { app, net } = require("electron");
+        if (app && typeof app.isReady === "function" && !app.isReady())
+            return null;
+        if (net && typeof net.fetch === "function")
+            electronFetch = net.fetch.bind(net);
+    }
+    catch (e) {
+        /* no electron to require here, or not ready yet: node's fetch below */
+    }
+    return electronFetch;
 }
-
 // The fetch a remote read should use. Same (url, init) either way — `signal`
 // included, so every caller's AbortController timeout still bounds the read:
 // a fetch that ignores it would turn a 30s manifest budget into an unbounded
 // one, which is the failure this file exists to make rare, not longer.
 function netFetch() {
-  const app = appFetch();
-  // (url, init) spelled out, not a spread: the two parameters are what lets the
-  // checker see a caller's signal/init instead of an opaque forwarding wrapper
-  // (every caller passes exactly those two).
-  return app || ((url, init) => fetch(url, init));
+    const app = appFetch();
+    // (url, init) spelled out, not a spread: the two parameters are what lets the
+    // checker see a caller's signal/init instead of an opaque forwarding wrapper
+    // (every caller passes exactly those two).
+    return app || ((url, init) => fetch(url, init));
 }
-
 // -------------------------------------------------------------- the mirror --
-
 // The scheme-less half of a mirror value, or "" for "none": a prefix that is not
 // http(s) is dropped rather than obeyed — obeying it would rewrite http(s)
 // sources into something that is not a URL at all, and the report would name a
 // network failure for what is a typo in this file's setting.
 function normalize(prefix) {
-  const p = String(prefix || "").trim();
-  if (!/^https?:\/\//i.test(p)) return "";
-  return p.replace(/\/+$/, ""); // "<mirror>" and "<mirror>/" are the same mirror
+    const p = String(prefix || "").trim();
+    if (!/^https?:\/\//i.test(p))
+        return "";
+    return p.replace(/\/+$/, ""); // "<mirror>" and "<mirror>/" are the same mirror
 }
-
 // The mirror this machine reads sources under, or "". Env first: a shell that
 // sets it is a deliberate, this-run answer. Then the settings mirror, which is
 // where a desktop launch can put one at all.
 function mirrorPrefix() {
-  const env = normalize(process.env.CLUTCH_SOURCE_MIRROR);
-  if (env) return env;
-  const settings = readSettings();
-  return normalize(settings && settings.source_mirror);
+    const env = normalize(process.env.CLUTCH_SOURCE_MIRROR);
+    if (env)
+        return env;
+    const settings = readSettings();
+    return normalize(settings && settings.source_mirror);
 }
-
 // One URL under the prefix. Only http(s) is rewritten — a source may be a path
 // on disk, and a path has no mirror — and a URL already under the prefix is left
 // alone, so a URL that was written pre-mirrored (or a source read twice) is not
 // rewritten twice into a URL nobody serves.
 function mirrored(url, prefix) {
-  const p = normalize(prefix);
-  if (!p || !/^https?:\/\//i.test(url)) return url;
-  return url.startsWith(p + "/") ? url : `${p}/${url}`;
+    const p = normalize(prefix);
+    if (!p || !/^https?:\/\//i.test(url))
+        return url;
+    return url.startsWith(p + "/") ? url : `${p}/${url}`;
 }
-
 module.exports = { netFetch, mirrorPrefix, mirrored, normalize };

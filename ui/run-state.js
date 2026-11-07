@@ -1,4 +1,7 @@
-// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
+// GENERATED FILE — do not edit; edit src/host/run-state.ts and run `npm run build:host`.
+// source sha256: 1bbcb59e2faafaa6d794d5e69dc254f77e63d021092cd7fdfc9480d8e098d24a
+
+"use strict";
 // The run's state, READ from the log instead of remembered.
 //
 // A turn is not something this process holds in memory: it is a stretch of .clc
@@ -33,7 +36,7 @@
 // honest reading of a log that never recorded its outcome, and a tool whose
 // effect must not be repeated is a tool that has to make itself idempotent, not
 // a loop that has to guess.
-
+Object.defineProperty(exports, "__esModule", { value: true });
 // The six types that reach the file. Kept here as a set of strings rather than
 // imported from Python: the log is the contract between the two halves, and a
 // name is cheaper to compare than a shared artifact (P2 keeps the format).
@@ -53,30 +56,25 @@
 /**
  * @typedef {"user_message" | "assistant_message" | "tool_call" | "tool_result" | "final" | "compaction"} DurableEventType
  */
-
 /** @type {Record<DurableEventType, true>} */
 const DURABLE_FLAGS = {
-  user_message: true,
-  assistant_message: true,
-  tool_call: true,
-  tool_result: true,
-  final: true,
-  compaction: true,
+    user_message: true,
+    assistant_message: true,
+    tool_call: true,
+    tool_result: true,
+    final: true,
+    compaction: true,
 };
-
 /** @type {ReadonlySet<DurableEventType>} */
 const DURABLE_TYPES = new Set(/** @type {DurableEventType[]} */ (Object.keys(DURABLE_FLAGS)));
-
 function isDurable(ev) {
-  return Boolean(ev && typeof ev === "object" && DURABLE_TYPES.has(ev.type));
+    return Boolean(ev && typeof ev === "object" && DURABLE_TYPES.has(ev.type));
 }
-
 // Every durable event of `events`, in file order.
 function durableEvents(events) {
-  const list = Array.isArray(events) ? events : [];
-  return list.filter(isDurable);
+    const list = Array.isArray(events) ? events : [];
+    return list.filter(isDurable);
 }
-
 // A tool call the log records, in the one shape the caller needs to run it.
 // `assistant_message.tool_calls` and the `tool_call` records carry the same call
 // twice — the assistant turn first (so a stored session replays as text → tools
@@ -84,13 +82,12 @@ function durableEvents(events) {
 // the line the tool actually ran from, and it carries what the assistant turn
 // does not (`ui`, `path_arg`).
 function callOf(tc) {
-  return {
-    id: String((tc && tc.id) || (tc && tc.tool_call_id) || ""),
-    name: String((tc && tc.name) || ""),
-    arguments: String((tc && tc.arguments) || ""),
-  };
+    return {
+        id: String((tc && tc.id) || (tc && tc.tool_call_id) || ""),
+        name: String((tc && tc.name) || ""),
+        arguments: String((tc && tc.arguments) || ""),
+    };
 }
-
 // The fold. `events` is one project's event log — parsed lines, in file order —
 // or a window of it; the answer only depends on the stretch after the last
 // `final`, so passing the whole file and passing its tail are the same question.
@@ -110,113 +107,115 @@ function callOf(tc) {
 // this turn starts in the array that was passed, so a caller can re-derive from
 // the same window) and `events` (how many durable events the turn is made of).
 function foldRun(events) {
-  const list = Array.isArray(events) ? events : [];
-  // The open turn starts just past the newest final. Everything before it is
-  // context (and the compactor's business), never a step.
-  let start = 0;
-  for (let i = list.length - 1; i >= 0; i--) {
-    if (list[i] && list[i].type === "final") {
-      start = i + 1;
-      break;
+    const list = Array.isArray(events) ? events : [];
+    // The open turn starts just past the newest final. Everything before it is
+    // context (and the compactor's business), never a step.
+    let start = 0;
+    for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i] && list[i].type === "final") {
+            start = i + 1;
+            break;
+        }
     }
-  }
-  // ...and `at` is in the caller's own coordinates: a caller that sliced a
-  // window has to be able to ask the same question of the same bytes.
-  let at = list.length;
-  const region = [];
-  for (let i = start; i < list.length; i++) {
-    if (!isDurable(list[i])) continue;
-    if (at === list.length) at = i;
-    region.push(list[i]);
-  }
-
-  const idle = {
-    phase: "idle",
-    next: "start",
-    task: "",
-    steps: 0,
-    calls: [],
-    emptyReply: false,
-    final: null,
-    at,
-    events: 0,
-  };
-  if (!region.length) return idle;
-
-  let task = "";
-  let taskSet = false;
-  let steps = 0;
-  let lastAssistant = null;
-  const issued = []; // calls in the order the turn issued them
-  const index = new Map(); // id -> position in `issued`
-  const resulted = new Set(); // the ids a tool_result already answered
-  let tail = "";
-
-  for (const ev of region) {
-    tail = ev.type;
-    if (ev.type === "user_message") {
-      // the turn's first user message is the task; any later one is the loop
-      // talking to itself (an empty reply, a truncation) and stays part of it
-      if (!taskSet) {
-        task = String(ev.content || "");
-        taskSet = true;
-      }
-      continue;
+    // ...and `at` is in the caller's own coordinates: a caller that sliced a
+    // window has to be able to ask the same question of the same bytes.
+    let at = list.length;
+    const region = [];
+    for (let i = start; i < list.length; i++) {
+        if (!isDurable(list[i]))
+            continue;
+        if (at === list.length)
+            at = i;
+        region.push(list[i]);
     }
-    if (ev.type === "assistant_message") {
-      steps += 1;
-      lastAssistant = ev;
-      for (const tc of Array.isArray(ev.tool_calls) ? ev.tool_calls : []) {
-        const call = callOf(tc);
-        if (!call.id || index.has(call.id)) continue;
-        index.set(call.id, issued.length);
-        issued.push(call);
-      }
-      continue;
-    }
-    if (ev.type === "tool_call") {
-      const call = callOf(ev);
-      if (!call.id) continue;
-      if (index.has(call.id)) issued[index.get(call.id)] = call;
-      else {
-        index.set(call.id, issued.length);
-        issued.push(call);
-      }
-      continue;
-    }
-    if (ev.type === "tool_result") {
-      if (ev.tool_call_id) resulted.add(String(ev.tool_call_id));
-      continue;
-    }
-    // `final` cannot appear here (the region starts after the newest one) and
-    // `compaction` is a boundary in the context, not a step: the next iteration
-    // simply derives again and calls the model.
-  }
-
-  const base = { phase: "open", task, steps, at, events: region.length };
-  const pending = issued.filter((c) => !resulted.has(c.id));
-  if (pending.length) {
-    return { ...base, next: "tool", calls: pending, emptyReply: false, final: null };
-  }
-  // A model turn whose text is the answer and whose `final` never landed: the
-  // sentence is already durable, so the honest next step is to close the turn
-  // with it rather than to ask the model the same question twice.
-  if (tail === "assistant_message") {
-    const content = lastAssistant ? String(lastAssistant.content || "") : "";
-    if (content.trim()) {
-      return {
-        ...base,
-        next: "final",
+    const idle = {
+        phase: "idle",
+        next: "start",
+        task: "",
+        steps: 0,
         calls: [],
         emptyReply: false,
-        final: { status: "completed", summary: content },
-      };
+        final: null,
+        at,
+        events: 0,
+    };
+    if (!region.length)
+        return idle;
+    let task = "";
+    let taskSet = false;
+    let steps = 0;
+    let lastAssistant = null;
+    const issued = []; // calls in the order the turn issued them
+    const index = new Map(); // id -> position in `issued`
+    const resulted = new Set(); // the ids a tool_result already answered
+    let tail = "";
+    for (const ev of region) {
+        tail = ev.type;
+        if (ev.type === "user_message") {
+            // the turn's first user message is the task; any later one is the loop
+            // talking to itself (an empty reply, a truncation) and stays part of it
+            if (!taskSet) {
+                task = String(ev.content || "");
+                taskSet = true;
+            }
+            continue;
+        }
+        if (ev.type === "assistant_message") {
+            steps += 1;
+            lastAssistant = ev;
+            for (const tc of Array.isArray(ev.tool_calls) ? ev.tool_calls : []) {
+                const call = callOf(tc);
+                if (!call.id || index.has(call.id))
+                    continue;
+                index.set(call.id, issued.length);
+                issued.push(call);
+            }
+            continue;
+        }
+        if (ev.type === "tool_call") {
+            const call = callOf(ev);
+            if (!call.id)
+                continue;
+            if (index.has(call.id))
+                issued[index.get(call.id)] = call;
+            else {
+                index.set(call.id, issued.length);
+                issued.push(call);
+            }
+            continue;
+        }
+        if (ev.type === "tool_result") {
+            if (ev.tool_call_id)
+                resulted.add(String(ev.tool_call_id));
+            continue;
+        }
+        // `final` cannot appear here (the region starts after the newest one) and
+        // `compaction` is a boundary in the context, not a step: the next iteration
+        // simply derives again and calls the model.
     }
-    // an empty reply is NOT a completion (agent/loop.py): the next step is the
-    // model again, with the loop's own note that it said nothing
-    return { ...base, next: "model", calls: [], emptyReply: true, final: null };
-  }
-  return { ...base, next: "model", calls: [], emptyReply: false, final: null };
+    const base = { phase: "open", task, steps, at, events: region.length };
+    const pending = issued.filter((c) => !resulted.has(c.id));
+    if (pending.length) {
+        return { ...base, next: "tool", calls: pending, emptyReply: false, final: null };
+    }
+    // A model turn whose text is the answer and whose `final` never landed: the
+    // sentence is already durable, so the honest next step is to close the turn
+    // with it rather than to ask the model the same question twice.
+    if (tail === "assistant_message") {
+        const content = lastAssistant ? String(lastAssistant.content || "") : "";
+        if (content.trim()) {
+            return {
+                ...base,
+                next: "final",
+                calls: [],
+                emptyReply: false,
+                final: { status: "completed", summary: content },
+            };
+        }
+        // an empty reply is NOT a completion (agent/loop.py): the next step is the
+        // model again, with the loop's own note that it said nothing
+        return { ...base, next: "model", calls: [], emptyReply: true, final: null };
+    }
+    return { ...base, next: "model", calls: [], emptyReply: false, final: null };
 }
-
 module.exports = { DURABLE_TYPES, durableEvents, foldRun };

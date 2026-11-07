@@ -117,6 +117,13 @@ const EXCLUDED_FILES = [
   "js/stream-view.js",
   "renderer.modules.json",
   "build-renderer.js",
+  // the host half's sources and its build config: src/host/*.ts is compiled to
+  // the ui/*.js that ship (build-host.js emits in place), and nothing at runtime
+  // resolves a .ts — a shipped source tree is a second copy of the program.
+  "src/host/main.ts",
+  "src/host/run.ts",
+  "build-host.js",
+  "tsconfig.host.json",
 ];
 
 const FILE = { isDirectory: () => false, isFile: () => true };

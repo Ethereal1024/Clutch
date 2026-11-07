@@ -45,6 +45,17 @@ files:
   - "!js/**"
   - "!renderer.modules.json"
   - "!build-renderer.js"
+  # The host half is TypeScript now: src/host/*.ts compiles to the ui/*.js that
+  # ship. The emit is IN PLACE (ui/build-host.js) on purpose — every module finds
+  # its neighbours, its preload and its JSON by __dirname, so moving the output
+  # would mean rewriting all of that. The sources are build inputs only: shipping
+  # them would put a second, dead copy of the program in the deb, and an edit
+  # there would look live while the app runs the emitted file.
+  - "!src"
+  - "!src/**"
+  - "!build-host.js"
+  - "!tsconfig.host.json"
+  - "!*.ts"
 
 # Native-dependency rebuild is OFF on purpose — it is what made `npm run dist`
 # depend on the host compiler.

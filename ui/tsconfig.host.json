@@ -1,0 +1,39 @@
+{
+  // The host half: every module the Electron main process, the plugin host and
+  // the shared node library load. Sources live in src/host/ as TypeScript; the
+  // build (ui/build-host.js) writes the .js beside them at ui/ root, which is
+  // where every existing resolver already looks (require("./x"), tests'
+  // require("../ui/x"), scripts/sync-android-host.sh's UI_NODE list).
+  //
+  // `moduleDetection: "force"` is what makes the move possible at all: these
+  // files carry no import/export syntax (they are CommonJS), so without it the
+  // compiler would treat every file as a global script and report each shared
+  // top-level name (fs, path, log, …) as a redeclaration.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "moduleDetection": "force",
+    "types": ["node"],
+    "rootDir": "src/host",
+    "outDir": ".",
+    // strict:false is the RATCHET, not the goal: 41 modules were converted at
+    // once, and full strict is ~1,400 errors on this code (implicit `any` on
+    // every callback, every `catch (e)`, every `= {}` default). Everything that
+    // is typed is checked now; the untyped remainders are visible here as the
+    // next pass (`npx tsc -p tsconfig.host.json --noEmit --noImplicitAny` lists
+    // them). Turning this on file by file is not possible — there is ONE config
+    // for all 41 — so the order is: make the build+tests green, then land the
+    // annotations, then flip this line.
+    "strict": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": false
+  },
+  "include": ["src/host/*.ts"],
+  // outDir "." would otherwise make every source its own output and exclude it.
+  "exclude": ["node_modules"]
+}

@@ -1,4 +1,7 @@
-// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
+// GENERATED FILE — do not edit; edit src/host/event-text.ts and run `npm run build:host`.
+// source sha256: 9f70e208ef6633d9d7823f3fc38f34565d003d875e20a22114d5930e49435abc
+
+"use strict";
 // One durable event, as the text a READER of the log sees.
 //
 // The one projection both readers of a stored session share: the compaction
@@ -16,32 +19,37 @@
 //
 // Port of agent/events.py:event_text, unchanged — the Python half still renders
 // history pages this way until P4 removes it.
-
+Object.defineProperty(exports, "__esModule", { value: true });
 function clip(text, limit) {
-  if (limit === null || limit === undefined || text.length <= limit) return text;
-  return text.slice(0, limit) + "\n[truncated]";
+    if (limit === null || limit === undefined || text.length <= limit)
+        return text;
+    return text.slice(0, limit) + "\n[truncated]";
 }
-
 function eventText(ev, limit = null) {
-  if (!ev || typeof ev !== "object") return "";
-  const arg = limit === undefined ? null : limit;
-  const text = (v) => (typeof v === "string" ? v : v === null || v === undefined ? "" : String(v));
-  if (ev.type === "user_message") return `[User]: ${clip(text(ev.content), arg)}`;
-  if (ev.type === "assistant_message") {
-    const parts = [];
-    if (ev.content) parts.push(`[Assistant]: ${clip(text(ev.content), arg)}`);
-    if (ev.reasoning) parts.push(`[Assistant reasoning]: ${clip(text(ev.reasoning), arg)}`);
-    return parts.join("\n");
-  }
-  if (ev.type === "tool_call") {
-    return `[Assistant tool call]: ${clip(`${text(ev.name)}(${text(ev.arguments)})`, arg)}`;
-  }
-  if (ev.type === "tool_result") return `[Tool result]: ${clip(text(ev.content), arg)}`;
-  if (ev.type === "compaction") return `[Compaction summary]: ${clip(text(ev.summary), arg)}`;
-  if (ev.type === "final") {
-    return `[Final]: ${clip(text(ev.summary) || text(ev.status), arg)}`;
-  }
-  return "";
+    if (!ev || typeof ev !== "object")
+        return "";
+    const arg = limit === undefined ? null : limit;
+    const text = (v) => (typeof v === "string" ? v : v === null || v === undefined ? "" : String(v));
+    if (ev.type === "user_message")
+        return `[User]: ${clip(text(ev.content), arg)}`;
+    if (ev.type === "assistant_message") {
+        const parts = [];
+        if (ev.content)
+            parts.push(`[Assistant]: ${clip(text(ev.content), arg)}`);
+        if (ev.reasoning)
+            parts.push(`[Assistant reasoning]: ${clip(text(ev.reasoning), arg)}`);
+        return parts.join("\n");
+    }
+    if (ev.type === "tool_call") {
+        return `[Assistant tool call]: ${clip(`${text(ev.name)}(${text(ev.arguments)})`, arg)}`;
+    }
+    if (ev.type === "tool_result")
+        return `[Tool result]: ${clip(text(ev.content), arg)}`;
+    if (ev.type === "compaction")
+        return `[Compaction summary]: ${clip(text(ev.summary), arg)}`;
+    if (ev.type === "final") {
+        return `[Final]: ${clip(text(ev.summary) || text(ev.status), arg)}`;
+    }
+    return "";
 }
-
 module.exports = { eventText, clip };

@@ -55,6 +55,11 @@ cp -r ui/prompts "$NODEJS_PROJECT/ui/"
 # compares the digest of the inputs, which the bundle's own banner records),
 # which is exactly what this script has to rely on.
 node ui/build-renderer.js --check
+# ...and the same for the host half: the phone runs emitted .js (libnode 18 does
+# not strip types), so a src/host/*.ts edited without a rebuild would ship the
+# old module. --check is tsc-free (it compares the digest banner), which is what
+# this job can rely on.
+node ui/build-host.js --check
 rm -rf "$UI_ASSETS"
 mkdir -p "$UI_ASSETS"
 cp ui/index.html ui/renderer.js ui/style.css ui/mobile.css "$UI_ASSETS/"

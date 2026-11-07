@@ -1,3 +1,8 @@
+// GENERATED FILE — do not edit; edit src/host/supervisor-client.ts and run `npm run build:host`.
+// source sha256: 33ba478a3a4f37ad50080b67e2d35ac0b2665723366c91bc436d08e2d341841b
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
 // Pure HTTP client for the machine supervisor (agent/supervisor.py): probe,
 // session start/stop, heartbeat, shutdown, and the lock list/reclaim a window
 // asks its own host about. No process management and no
@@ -28,12 +33,10 @@ const HEARTBEAT_INTERVAL_MS = 8000; // << the supervisor's stale window (300s)
 // — tests/session-heartbeat-test.js fails if they drift apart.
 const HEARTBEAT_RETRY_MS = 1000; // get a beat in before the stale window closes
 const HEARTBEAT_STALE_MS = 300000; // must match agent/procmgr/supervise.py STALE_S
-
 async function supervisorProbe(base) {
-  // "up" = supervisor shape, "foreign" = another server on the port, "down" = nothing listening
-  return (await supervisorIdentity(base)).state;
+    // "up" = supervisor shape, "foreign" = another server on the port, "down" = nothing listening
+    return (await supervisorIdentity(base)).state;
 }
-
 // ---- who answers on the port, not just whether something does ----
 // A fixed machine-wide port plus a supervisor that outlives the app is an
 // upgrade trap: the NEXT build's app finds the PREVIOUS build's supervisor still
@@ -50,88 +53,100 @@ async function supervisorProbe(base) {
 // behind. `pid` is null the same way, and the retirement then falls back to
 // asking it to exit (see server-bootstrap.js).
 async function supervisorIdentity(base) {
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
     try {
-      const r = await fetch(`${base}/api/health`, { signal: ctl.signal });
-      if (!r.ok) return { state: "foreign", version: "", pid: null };
-      let body = null;
-      try {
-        body = await r.json();
-      } catch {
-        return { state: "foreign", version: "", pid: null };
-      }
-      // the supervisor's own word for "this is a Clutch supervisor" — a session
-      // child answers /api/health too, with in_flight and no status
-      if (!body || body.status !== "ok") return { state: "foreign", version: "", pid: null };
-      return {
-        state: "up",
-        version: typeof body.version === "string" ? body.version.trim() : "",
-        pid: Number.isInteger(body.pid) ? body.pid : null,
-      };
-    } finally {
-      clearTimeout(t);
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+        try {
+            const r = await fetch(`${base}/api/health`, { signal: ctl.signal });
+            if (!r.ok)
+                return { state: "foreign", version: "", pid: null };
+            let body = null;
+            try {
+                body = await r.json();
+            }
+            catch {
+                return { state: "foreign", version: "", pid: null };
+            }
+            // the supervisor's own word for "this is a Clutch supervisor" — a session
+            // child answers /api/health too, with in_flight and no status
+            if (!body || body.status !== "ok")
+                return { state: "foreign", version: "", pid: null };
+            return {
+                state: "up",
+                version: typeof body.version === "string" ? body.version.trim() : "",
+                pid: Number.isInteger(body.pid) ? body.pid : null,
+            };
+        }
+        finally {
+            clearTimeout(t);
+        }
     }
-  } catch {
-    return { state: "down", version: "", pid: null };
-  }
+    catch {
+        return { state: "down", version: "", pid: null };
+    }
 }
-
 // ---- shared supervisor session HTTP (identical local and behind the tunnel) ----
 async function supervisorSessionStart(base, baseUrl, model, knobs = {}) {
-  // POST {base}/api/session/start {base_url, model, reasoning_effort,
-  //   api_protocol} -> {session_id, port}
-  // model travels with base_url: a remote session reads its own host's empty
-  // settings and would fail LLM init ("missing LLM argument: model")
-  const payload = {};
-  if (baseUrl) payload.base_url = baseUrl;
-  if (model) payload.model = model;
-  // the knobs travel with the model: the remote host settings file has
-  // neither, so the session would otherwise run with provider defaults
-  // instead of the levels this client chose (empty = child default)
-  if (knobs.reasoning_effort) payload.reasoning_effort = knobs.reasoning_effort;
-  if (knobs.api_protocol) payload.api_protocol = knobs.api_protocol;
-  // The LOCAL window that is claiming, as its OS process id. The supervisor pins
-  // it to a start tick and records both in the session and in the .clc's owner
-  // record, which is what lets this host PROVE later that the window is gone
-  // (agent/core/lock_reconcile.py) instead of waiting out a timer. A remote
-  // claim sends nothing: that pid lives on the client's machine and the far host
-  // could never check it — the record then says unverifiable and no more.
-  if (Number.isInteger(knobs.claim_pid) && knobs.claim_pid > 0) payload.claim_pid = knobs.claim_pid;
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), SESSION_START_TIMEOUT_MS);
-  try {
-    const r = await fetch(`${base}/api/session/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: ctl.signal,
-    });
-    if (r.status === 404) {
-      return { error: `${base} is not a Clutch supervisor (old shared server?)` };
+    // POST {base}/api/session/start {base_url, model, reasoning_effort,
+    //   api_protocol} -> {session_id, port}
+    // model travels with base_url: a remote session reads its own host's empty
+    // settings and would fail LLM init ("missing LLM argument: model")
+    const payload = {};
+    if (baseUrl)
+        payload.base_url = baseUrl;
+    if (model)
+        payload.model = model;
+    // the knobs travel with the model: the remote host settings file has
+    // neither, so the session would otherwise run with provider defaults
+    // instead of the levels this client chose (empty = child default)
+    if (knobs.reasoning_effort)
+        payload.reasoning_effort = knobs.reasoning_effort;
+    if (knobs.api_protocol)
+        payload.api_protocol = knobs.api_protocol;
+    // The LOCAL window that is claiming, as its OS process id. The supervisor pins
+    // it to a start tick and records both in the session and in the .clc's owner
+    // record, which is what lets this host PROVE later that the window is gone
+    // (agent/core/lock_reconcile.py) instead of waiting out a timer. A remote
+    // claim sends nothing: that pid lives on the client's machine and the far host
+    // could never check it — the record then says unverifiable and no more.
+    if (Number.isInteger(knobs.claim_pid) && knobs.claim_pid > 0)
+        payload.claim_pid = knobs.claim_pid;
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), SESSION_START_TIMEOUT_MS);
+    try {
+        const r = await fetch(`${base}/api/session/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: ctl.signal,
+        });
+        if (r.status === 404) {
+            return { error: `${base} is not a Clutch supervisor (old shared server?)` };
+        }
+        if (!r.ok)
+            return { error: `session start failed (${r.status})` };
+        const d = await r.json();
+        return { sessionId: d.session_id, port: d.port };
     }
-    if (!r.ok) return { error: `session start failed (${r.status})` };
-    const d = await r.json();
-    return { sessionId: d.session_id, port: d.port };
-  } catch (e) {
-    return { error: `session start error: ${e && e.message}` };
-  } finally {
-    clearTimeout(t);
-  }
+    catch (e) {
+        return { error: `session start error: ${e && e.message}` };
+    }
+    finally {
+        clearTimeout(t);
+    }
 }
-
 function supervisorSessionStop(base, sid) {
-  if (!sid) return;
-  try {
-    fetch(`${base}/api/session/stop`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sid }),
-    }).catch(() => {});
-  } catch { /* supervisor already gone: nothing to tell */ }
+    if (!sid)
+        return;
+    try {
+        fetch(`${base}/api/session/stop`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sid }),
+        }).catch(() => { });
+    }
+    catch { /* supervisor already gone: nothing to tell */ }
 }
-
 // One heartbeat, AWAITED: "does this supervisor still hold this session?" —
 // three answers, because the question has three fates. TRUE = the session is
 // still there — and the beat just told the reaper a window is watching it
@@ -161,41 +176,45 @@ function supervisorSessionStop(base, sid) {
 // with no base is a pure liveness beat, and the supervisor must never move a
 // live session to a port this client does not actually serve.
 function beatBody(sid, target) {
-  const body = { session_id: sid };
-  try {
-    const t = typeof target === "function" ? target() : target;
-    if (t && t.base_url) {
-      body.base_url = t.base_url;
-      if (t.model) body.model = t.model;
-    }
-  } catch {
-    // a target that cannot be named is no target: beat for liveness alone
-  }
-  return body;
-}
-
-async function supervisorSessionHeartbeat(base, sid, target) {
-  if (!sid) return false; // nothing to re-bind to: gone is the honest answer
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+    const body = { session_id: sid };
     try {
-      const r = await fetch(`${base}/api/session/heartbeat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(beatBody(sid, target)),
-        signal: ctl.signal,
-      });
-      if (r.ok) return true;
-      return r.status === 404 ? false : null; // 404 is the supervisor's own "unknown"
-    } finally {
-      clearTimeout(t);
+        const t = typeof target === "function" ? target() : target;
+        if (t && t.base_url) {
+            body.base_url = t.base_url;
+            if (t.model)
+                body.model = t.model;
+        }
     }
-  } catch {
-    return null; // unreachable: doubt, never a verdict
-  }
+    catch {
+        // a target that cannot be named is no target: beat for liveness alone
+    }
+    return body;
 }
-
+async function supervisorSessionHeartbeat(base, sid, target) {
+    if (!sid)
+        return false; // nothing to re-bind to: gone is the honest answer
+    try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+        try {
+            const r = await fetch(`${base}/api/session/heartbeat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(beatBody(sid, target)),
+                signal: ctl.signal,
+            });
+            if (r.ok)
+                return true;
+            return r.status === 404 ? false : null; // 404 is the supervisor's own "unknown"
+        }
+        finally {
+            clearTimeout(t);
+        }
+    }
+    catch {
+        return null; // unreachable: doubt, never a verdict
+    }
+}
 // Keep a session alive; onFail fires when the supervisor stops answering for
 // longer than its own stale window (see HEARTBEAT_STALE_MS) — i.e. when the
 // session is provably gone, not when one request happened to fail.
@@ -205,62 +224,68 @@ async function supervisorSessionHeartbeat(base, sid, target) {
 // (see beatBody). Liveness is unaffected either way: a beat that cannot name a
 // target is a beat.
 function startSupervisorHeartbeat(base, sid, onFail, target) {
-  let stopped = false;
-  let timer = null;
-  let lastOk = Date.now();
-  async function beat() {
-    try {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
-      try {
-        const r = await fetch(`${base}/api/session/heartbeat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(beatBody(sid, target)),
-          signal: ctl.signal,
-        });
-        return r.ok;
-      } finally {
-        clearTimeout(t);
-      }
-    } catch {
-      return false; // never throw: the caller is a timer
+    let stopped = false;
+    let timer = null;
+    let lastOk = Date.now();
+    async function beat() {
+        try {
+            const ctl = new AbortController();
+            const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+            try {
+                const r = await fetch(`${base}/api/session/heartbeat`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(beatBody(sid, target)),
+                    signal: ctl.signal,
+                });
+                return r.ok;
+            }
+            finally {
+                clearTimeout(t);
+            }
+        }
+        catch {
+            return false; // never throw: the caller is a timer
+        }
     }
-  }
-  async function tick() {
-    timer = null;
-    if (stopped) return;
-    if (await beat()) {
-      if (stopped) return;
-      lastOk = Date.now();
-      timer = setTimeout(tick, HEARTBEAT_INTERVAL_MS);
-      return;
+    async function tick() {
+        timer = null;
+        if (stopped)
+            return;
+        if (await beat()) {
+            if (stopped)
+                return;
+            lastOk = Date.now();
+            timer = setTimeout(tick, HEARTBEAT_INTERVAL_MS);
+            return;
+        }
+        if (stopped)
+            return;
+        if (Date.now() - lastOk < HEARTBEAT_STALE_MS) {
+            timer = setTimeout(tick, HEARTBEAT_RETRY_MS); // the session is still there; get through
+            return;
+        }
+        if (onFail)
+            onFail(); // outlived the stale window: the host reaped it already
     }
-    if (stopped) return;
-    if (Date.now() - lastOk < HEARTBEAT_STALE_MS) {
-      timer = setTimeout(tick, HEARTBEAT_RETRY_MS); // the session is still there; get through
-      return;
-    }
-    if (onFail) onFail(); // outlived the stale window: the host reaped it already
-  }
-  timer = setTimeout(tick, HEARTBEAT_INTERVAL_MS);
-  return {
-    stop: () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      timer = null;
-    },
-  };
+    timer = setTimeout(tick, HEARTBEAT_INTERVAL_MS);
+    return {
+        stop: () => {
+            stopped = true;
+            if (timer)
+                clearTimeout(timer);
+            timer = null;
+        },
+    };
 }
-
 // Ask a supervisor to exit once its sessions are gone (fire-and-forget: it may
 // already be gone, and there is nobody left to tell).
 function supervisorShutdown(base) {
-  try {
-    fetch(`${base}/api/shutdown`, { method: "POST" }).catch(() => {});
-  } catch { /* best effort */ }
+    try {
+        fetch(`${base}/api/shutdown`, { method: "POST" }).catch(() => { });
+    }
+    catch { /* best effort */ }
 }
-
 // The locks a supervisor can see, each classified by the KERNEL on ITS machine:
 // is the lock file still held, is the recorded holder alive, is the window that
 // claimed it alive ("live"/"orphan"/"ghost"/"unclaimed"/"unverifiable"/...).
@@ -268,55 +293,59 @@ function supervisorShutdown(base) {
 // about a remote session — so the window asks the supervisor that owns its
 // session. Read-only; an odd lock is data, not a failure.
 async function supervisorLocks(base) {
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
     try {
-      const r = await fetch(`${base}/api/locks`, { signal: ctl.signal });
-      if (!r.ok) return { error: `lock list failed (${r.status})` };
-      const d = await r.json();
-      return { locks: Array.isArray(d.locks) ? d.locks : [] };
-    } finally {
-      clearTimeout(t);
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), HEALTH_REQUEST_TIMEOUT_MS);
+        try {
+            const r = await fetch(`${base}/api/locks`, { signal: ctl.signal });
+            if (!r.ok)
+                return { error: `lock list failed (${r.status})` };
+            const d = await r.json();
+            return { locks: Array.isArray(d.locks) ? d.locks : [] };
+        }
+        finally {
+            clearTimeout(t);
+        }
     }
-  } catch (e) {
-    return { error: `lock list error: ${e && e.message}` };
-  }
+    catch (e) {
+        return { error: `lock list error: ${e && e.message}` };
+    }
 }
-
 // The user's hand on a project the host can PROVE is orphaned. The host refuses
 // a live window and says why; the verdict is returned so the page reports what
 // actually happened instead of assuming it worked.
 async function supervisorLockReclaim(base, project) {
-  try {
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), LOCK_RECLAIM_TIMEOUT_MS);
     try {
-      const r = await fetch(`${base}/api/locks/reclaim`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project }),
-        signal: ctl.signal,
-      });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) return { revoked: false, why: d.error || `reclaim failed (${r.status})` };
-      return d;
-    } finally {
-      clearTimeout(t);
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), LOCK_RECLAIM_TIMEOUT_MS);
+        try {
+            const r = await fetch(`${base}/api/locks/reclaim`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ project }),
+                signal: ctl.signal,
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok)
+                return { revoked: false, why: d.error || `reclaim failed (${r.status})` };
+            return d;
+        }
+        finally {
+            clearTimeout(t);
+        }
     }
-  } catch (e) {
-    return { revoked: false, why: `reclaim error: ${e && e.message}` };
-  }
+    catch (e) {
+        return { revoked: false, why: `reclaim error: ${e && e.message}` };
+    }
 }
-
 module.exports = {
-  supervisorProbe,
-  supervisorIdentity,
-  supervisorSessionStart,
-  supervisorSessionStop,
-  supervisorSessionHeartbeat,
-  startSupervisorHeartbeat,
-  supervisorShutdown,
-  supervisorLocks,
-  supervisorLockReclaim,
+    supervisorProbe,
+    supervisorIdentity,
+    supervisorSessionStart,
+    supervisorSessionStop,
+    supervisorSessionHeartbeat,
+    startSupervisorHeartbeat,
+    supervisorShutdown,
+    supervisorLocks,
+    supervisorLockReclaim,
 };

@@ -1,0 +1,202 @@
+// Client-side LLM reverse proxy (Electron main process): accepts the OpenAI
+// wire protocols the client can speak (/chat/completions and /responses),
+// injects the client API key, forwards to the upstream provider, and streams
+// the response back. The remote backend reaches it via the SSH -R tunnel (no
+// remote internet/key needed). Honors the machine's HTTP proxy and surfaces the
+// real upstream error.
+const http = require("http");
+const https = require("https");
+const os = require("os");
+const path = require("path");
+const fs = require("fs");
+// proxy-agent is ESM-only since v7, so only runtimes with require(esm) support
+// (node >= 20.19, Electron >= 33) can load it synchronously. The Android shell
+// runs embedded node 18, where this require throws ERR_REQUIRE_ESM — and an
+// uncaught throw while embedded libnode is still loading modules exits the
+// whole app (the "tap the apk and it dies" bug). Load it best-effort: where it
+// is unavailable (the phone), getAgent() returns undefined and upstream LLM
+// requests connect directly — the normal case on a device.
+let ProxyAgent = null;
+try {
+  ({ ProxyAgent } = require("proxy-agent"));
+} catch (e) {
+  if (!e || e.code !== "ERR_REQUIRE_ESM") throw e;
+}
+
+const UPSTREAM_TIMEOUT_MS = 90000;
+
+let server = null;
+let agent = null;
+
+// Read ~/.clutch/settings.json; legacy {profiles, active} maps resolve to the active profile
+function readSettingsFile() {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
+    if (d && d.profiles) {
+      return d.profiles[d.active] || {};
+    }
+    return d || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+// Upstream LLM endpoint: env first, then ~/.clutch/settings.json, then the
+// DeepSeek default — any OpenAI-compatible base URL works.
+function getUpstream() {
+  const e = process.env;
+  if (e.CLUTCH_LLM_UPSTREAM) return e.CLUTCH_LLM_UPSTREAM;
+  const d = readSettingsFile();
+  if (d.base_url) return d.base_url;
+  return "https://api.deepseek.com";
+}
+
+// Client API key: env first, then the settings file, so a UI-saved key is honored
+function getApiKey() {
+  const e = process.env;
+  if (e.CLUTCH_API_KEY) return e.CLUTCH_API_KEY;
+  const d = readSettingsFile();
+  if (d.api_key) return d.api_key;
+  return "";
+}
+
+function detectProxy() {
+  const e = process.env;
+  const fromEnv =
+    e.https_proxy || e.HTTPS_PROXY || e.http_proxy || e.HTTP_PROXY || e.all_proxy || e.ALL_PROXY;
+  if (fromEnv) return fromEnv;
+  try {
+    const npmrc = fs.readFileSync(path.join(os.homedir(), ".npmrc"), "utf-8");
+    const m =
+      npmrc.match(/^\s*https?-proxy\s*=\s*(\S+)/m) || npmrc.match(/^\s*proxy\s*=\s*(\S+)/m);
+    if (m) return m[1];
+  } catch (e) {
+    /* no npmrc */
+  }
+  return undefined;
+}
+
+function getAgent(target) {
+  const host = target.hostname;
+  if (host === "127.0.0.1" || host === "localhost" || host === "::1") {
+    return undefined; // loopback upstream (local mock / tests): never proxy
+  }
+  if (!agent) {
+    const proxy = detectProxy();
+    if (proxy && ProxyAgent) agent = new ProxyAgent(proxy);
+    // no ProxyAgent (embedded node 18): ignore the proxy, connect directly
+  }
+  return agent;
+}
+
+// Build the upstream URL: strip the SDK's /v1, append the remainder to the
+// upstream's own path (which may carry one, e.g. Zhipu /api/paas/v4) — not new
+// URL(path, base), whose leading "/" would replace that path.
+function joinUpstream(upstream, reqUrl) {
+  const [rawPath, search = ""] = reqUrl.split("?");
+  const rel = rawPath.replace(/^\/v1(?=\/|$)/, "").replace(/^\//, "");
+  const u = new URL(upstream);
+  u.pathname = (u.pathname.endsWith("/") ? u.pathname : u.pathname + "/") + rel;
+  u.search = search ? "?" + search : "";
+  return u.href;
+}
+
+// Which request paths this proxy serves: the two OpenAI wire protocols the
+// client can be configured for. The SDK appends the resource to the configured
+// base URL, so the path ends with the resource name however the base URL is
+// shaped (/v1/responses, /api/paas/v4/chat/completions, …).
+function isLlmPath(reqUrl) {
+  const path = (reqUrl || "").split("?")[0];
+  return path.endsWith("/chat/completions") || path.endsWith("/responses");
+}
+
+function startLlmProxy(upstream) {
+  server = http.createServer((req, res) => {
+    if (req.method !== "POST" || !isLlmPath(req.url)) {
+      res.writeHead(404).end("not found");
+      return;
+    }
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      try {
+        const body = Buffer.concat(chunks);
+        const target = new URL(joinUpstream(upstream || getUpstream(), req.url));
+        const transport = target.protocol === "http:" ? http : https;
+        const preq = transport.request(
+          target,
+          {
+            method: "POST",
+            agent: getAgent(target),
+            headers: {
+              "Content-Type": req.headers["content-type"] || "application/json",
+              Accept: req.headers["accept"] || "application/json",
+              Authorization: "Bearer " + getApiKey(),
+              "Content-Length": body.length,
+            },
+          },
+          (pres) => {
+            res.writeHead(pres.statusCode, { "Content-Type": pres.headers["content-type"] || "application/json" });
+            // The far side can die MID-BODY (a provider dropping a slow stream, a
+            // reset by the network in between). pipe() alone leaves this response
+            // open forever in that case, and the agent's read sitting on it then
+            // parks until its own 240s budget — the "still thinking after the
+            // network came back" report, seen from the proxy end as an accepted
+            // connection nobody ever answers. Tearing the response down is the
+            // only honest outcome: it makes that read raise now, so the run's own
+            // retry takes over instead of waiting out a budget.
+            pres.on("error", () => res.destroy());
+            pres.on("aborted", () => res.destroy());
+            pres.pipe(res);
+          }
+        );
+        preq.setTimeout(UPSTREAM_TIMEOUT_MS, () => preq.destroy(new Error("upstream timed out")));
+        preq.on("error", (e) => {
+          if (res.headersSent) {
+            // mid-stream: an SSE body cannot be replaced by a 502, and ending it
+            // cleanly would be worse than failing — a truncated answer would be
+            // read as a complete one. Destroy: the client's read fails, which is
+            // what it can act on.
+            res.destroy();
+            return;
+          }
+          try {
+            res.writeHead(502, { "Content-Type": "text/plain" });
+            res.end("upstream LLM unreachable: " + (e && e.message));
+          } catch (err) {
+            /* response already started */
+          }
+        });
+        // The client hung up mid-response (the app was backgrounded, its window
+        // closed, the tunnel died): stop pumping upstream into a socket nobody is
+        // reading. An unfinished response that is left to sit is a ghost — it
+        // holds a descriptor and any upstream work behind it for nothing.
+        res.on("close", () => {
+          if (!res.writableFinished) preq.destroy();
+        });
+        res.on("error", () => preq.destroy());
+        preq.end(body);
+      } catch (e) {
+        // never let an upstream/parse failure become an uncaught main-process error
+        try {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("proxy error: " + (e && e.message));
+        } catch (err) {
+          /* response already started */
+        }
+      }
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+  });
+}
+
+function stopLlmProxy() {
+  if (server) {
+    server.close();
+    server = null;
+  }
+}
+
+module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, isLlmPath, getUpstream, getApiKey, getAgent };

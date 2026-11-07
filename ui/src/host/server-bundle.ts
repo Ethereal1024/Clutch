@@ -1,0 +1,281 @@
+// Bundle builder + content-hash cache: the hash doubles as the version written
+// to the remote's VERSION file (an exact content match is the only install gate).
+const { spawnSync } = require("child_process");
+const crypto = require("crypto");
+const os = require("os");
+const path = require("path");
+const fs = require("fs");
+
+const REPO = path.join(__dirname, "..");
+const CACHE = path.join(os.homedir(), ".clutch", "bundles");
+
+// On Windows, a bare "bash" from PATH may not exist (an Explorer-launched app
+// does not see Git's bin/) or may be WSL's System32\bash.exe, which sees a
+// completely different filesystem. Locate a real Git Bash / MSYS2 bash — the
+// same detection tests/ssh-tunnel.test.js and agent/tools/localshell.py use.
+let bashPath = null;
+function resolveBash() {
+  if (bashPath) return bashPath;
+  if (process.platform !== "win32") return (bashPath = "bash");
+  const sysDir = path.resolve(process.env.SystemRoot || "C:\\Windows", "System32").toLowerCase();
+  const candidates = [
+    process.env.CLUTCH_BASH,
+    "C:\\Program Files\\Git\\bin\\bash.exe",
+    "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
+    "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs\\Git\\bin\\bash.exe"),
+  ].filter(Boolean);
+  for (const cand of candidates) {
+    try {
+      if (!fs.existsSync(cand)) continue;
+      if (path.resolve(cand).toLowerCase().startsWith(sysDir + path.sep)) continue;
+      const probe = spawnSync(cand, ["-c", "echo clutch-bash-ok"], { stdio: "pipe" });
+      if (String(probe.stdout || "").includes("clutch-bash-ok")) return (bashPath = cand);
+    } catch (e) {
+      /* broken install: try the next candidate */
+    }
+  }
+  return (bashPath = "bash"); // last resort: whatever PATH has
+}
+
+const OS_MAP = { linux: "linux", darwin: "darwin", win32: "windows", freebsd: "freebsd" };
+const ARCH_MAP = { x64: "x86_64", arm64: "arm64", ia32: "i686" };
+
+function platformTag() {
+  return `${OS_MAP[os.platform()] || os.platform()}-${ARCH_MAP[os.arch()] || os.arch()}`;
+}
+
+function fileHash(p) {
+  return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+}
+
+// Content fingerprint of a set of files/directories: every path it holds (relative
+// to `base`) plus its bytes, so an edit anywhere in the set changes the digest and
+// an untouched set does not. Directories and files that never affect the artifact
+// are skipped — __pycache__, .pyc, and (for a checkout) the repo's own test files.
+//
+// Two callers hash two different sets (server-bundle and components.js), which is
+// why the skip rules are parameters: the walk itself is the shared part.
+function treeHash(
+  roots,
+  {
+    base,
+    skipDirs = new Set(),
+    skipFile = () => false,
+  }: { base: string; skipDirs?: Set<string>; skipFile?: (p: string) => boolean },
+) {
+  const h = crypto.createHash("sha256");
+  const visit = (p) => {
+    const st = fs.statSync(p);
+    if (st.isDirectory()) {
+      for (const name of fs.readdirSync(p).sort()) {
+        if (skipDirs.has(name)) continue;
+        visit(path.join(p, name));
+      }
+    } else if (!skipFile(p)) {
+      h.update(path.relative(base, p)).update("\0").update(fs.readFileSync(p));
+    }
+  };
+  for (const root of roots) {
+    if (fs.existsSync(root)) visit(root); // a module that is not checked out
+  }
+  return h.digest("hex");
+}
+
+// Dev build gate: fingerprint the source so PyInstaller only reruns on changes.
+// Only the HOST's own files are in here: the bundle ships no module, so a module
+// edit must not invalidate it (nothing in the binary depends on one).
+function sourceFingerprint() {
+  return treeHash(
+    [
+      path.join(REPO, "agent"),
+      path.join(REPO, "scripts", "server_entry.py"),
+      path.join(REPO, "scripts", "supervisor_entry.py"),
+      path.join(REPO, "scripts", "build-server-bundle.sh"),
+    ],
+    {
+      base: REPO,
+      skipDirs: new Set(["__pycache__"]),
+      skipFile: (p) => p.endsWith(".pyc") || p.endsWith("_test.py"),
+    }
+  );
+}
+
+function buildIfStale() {
+  const dist = path.join(REPO, "dist");
+  const marker = path.join(dist, ".clutch-fingerprint");
+  const fp = sourceFingerprint();
+  const built =
+    fs.existsSync(path.join(dist, "agent-server")) && fs.existsSync(path.join(dist, "agent-supervisor"));
+  if (built && fs.existsSync(marker) && fs.readFileSync(marker, "utf8") === fp) return;
+  fs.mkdirSync(dist, { recursive: true });
+  const r = spawnSync(
+    resolveBash(),
+    [path.join(REPO, "scripts", "build-server-bundle.sh"), "dev", path.join(dist, "agent-server")],
+    { cwd: REPO, stdio: "inherit" }
+  );
+  if (r.status !== 0) throw new Error("bundle build failed");
+  fs.writeFileSync(marker, fp);
+}
+
+// app.isPackaged is the signal: resourcesPath also exists in dev mode, and in
+// plain node (.app undefined) we fall back to the dev build. The
+// `process.versions.electron` guard comes FIRST on purpose: under plain node
+// (every test, any node-run script) requiring the electron npm package
+// *downloads* a binary, so a lazy "require and catch" would not be lazy at all.
+function isPackagedApp() {
+  if (!process.versions.electron) return false; // plain node: no app, no resourcesPath
+  try {
+    return require("electron").app.isPackaged;
+  } catch (e) {
+    return false; // electron present but not ready: treat as dev
+  }
+}
+
+// ---- artifact provider seam (R3) ----
+// Where agent binaries and pylibs tars COME FROM. The default is "build or
+// locate them on THIS machine" (desktop). The Android host registers a
+// downloader for CI prebuilt tars instead (N3) and hard-rejects ensureBundle
+// (no PyInstaller on a phone). ssh-tunnel.js cannot tell the difference.
+// Provider methods may be async (a download is); the defaults are sync and
+// simply wrapped, so existing call sites just await the seam.
+//
+// Two questions, two methods, deliberately: WHICH artifact this release ships
+// for the target (resolvePyLibsVersion — the install gate's input) and the
+// BYTES of it (ensurePyLibsTar — an upload's input). A provider that can answer
+// the first without the second must do so: the gate runs on every connect, the
+// bytes are only ever needed when there really is an install to do.
+let artifactProvider = null; // { ensureBundle, ensurePyLibsTar, resolvePyLibsVersion }
+
+function setArtifactProvider(provider) {
+  if (provider) {
+    for (const m of ["ensurePyLibsTar", "resolvePyLibsVersion"]) {
+      if (typeof provider[m] !== "function") throw new Error("artifact provider must implement " + m);
+    }
+  }
+  artifactProvider = provider;
+}
+
+// Whether THIS machine can ship the PyInstaller bundle: the desktop default
+// yes (packaged resources or a local build); a registered Android provider
+// means no — a phone has no PyInstaller and never hosts a backend, so even a
+// same-platform remote (nodejs-mobile reports linux/aarch64!) must go through
+// pylibs. chooseStrategy consults this instead of platform equality alone.
+function hasLocalBundle() {
+  return !artifactProvider;
+}
+
+// Resolve agent binaries (packaged resources or a dev build), cache under a
+// content-hash key, return paths + combined version hash.
+async function ensureBundle() {
+  if (artifactProvider) return artifactProvider.ensureBundle();
+  return defaultEnsureBundle();
+}
+
+async function defaultEnsureBundle() {
+  let server, supervisor;
+  if (isPackagedApp()) {
+    server = path.join((process as any).resourcesPath, "agent-server");
+    supervisor = path.join((process as any).resourcesPath, "agent-supervisor");
+    if (!fs.existsSync(server) || !fs.existsSync(supervisor)) {
+      throw new Error("packaged server binaries missing from resources/");
+    }
+  } else {
+    buildIfStale();
+    server = path.join(REPO, "dist", "agent-server");
+    supervisor = path.join(REPO, "dist", "agent-supervisor");
+  }
+  const version = fileHash(server) + fileHash(supervisor);
+  const tag = platformTag();
+  const out = path.join(CACHE, `agent-server-${tag}-${version}`);
+  const supOut = path.join(CACHE, `agent-supervisor-${tag}-${version}`);
+  if (!fs.existsSync(out) || !fs.existsSync(supOut)) {
+    fs.mkdirSync(CACHE, { recursive: true });
+    fs.copyFileSync(server, out);
+    fs.copyFileSync(supervisor, supOut);
+    try {
+      fs.chmodSync(out, 0o755);
+      fs.chmodSync(supOut, 0o755);
+    } catch (e) {
+      /* best effort */
+    }
+  }
+  return { server: out, supervisor: supOut, version };
+}
+
+// Pin the venv's LLM-stack versions into the cache key: a pip upgrade must
+// invalidate cached tars even when agent/ sources did not change.
+function venvPin() {
+  const venvPy =
+    process.platform === "win32"
+      ? path.join(REPO, ".venv", "Scripts", "python.exe")
+      : path.join(REPO, ".venv", "bin", "python");
+  if (!fs.existsSync(venvPy)) return "novenv";
+  const r = spawnSync(
+    venvPy,
+    ["-c", "import importlib.metadata as m;print(m.version('openai'),m.version('httpx2'))"],
+    { encoding: "utf8" }
+  );
+  return r.status === 0 ? r.stdout.trim().replace(/\s+/g, "-") : "unknown";
+}
+
+// Download exact wheels for the remote platform, package agent + site-packages
+// into a tar cached under a content-derived key: the script builds
+// byte-deterministic tars, so key hit == the exact artifact the remote's
+// VERSION gate expects and the rebuild (pip download: tens of seconds) is
+// skipped entirely on reconnect.
+function defaultEnsurePyLibsTar(target) {
+  const key = `${target.os}-${target.arch}-${target.libc}-${target.pyver}-${venvPin()}-${sourceFingerprint().slice(0, 16)}`;
+  fs.mkdirSync(CACHE, { recursive: true });
+  const out = path.join(CACHE, `agent-pylibs-${key}.tar.gz`);
+  if (fs.existsSync(out)) return { path: out, version: fileHash(out).slice(0, 16) };
+  const tmp = path.join(CACHE, `.pylibs-${key}-${process.pid}.tar.gz`);
+  const r = spawnSync(
+    resolveBash(),
+    [path.join(REPO, "scripts", "build-pylibs-tar.sh"), key, tmp, target.os, target.arch, target.libc, target.pyver],
+    { cwd: REPO, stdio: "inherit" }
+  );
+  if (r.status !== 0) {
+    const why = r.error ? r.error.message : `exit=${r.status}${r.signal ? " signal=" + r.signal : ""}`;
+    throw new Error(`pylibs tar build failed (${why})`);
+  }
+  fs.renameSync(tmp, out);
+  return { path: out, version: fileHash(out).slice(0, 16) };
+}
+
+// The seam every caller goes through: an Android provider downloads the
+// CI-built tar (async); the desktop default builds/reads it from disk.
+async function ensurePyLibsTar(target) {
+  if (artifactProvider) return artifactProvider.ensurePyLibsTar(target);
+  return defaultEnsurePyLibsTar(target);
+}
+
+// The install gate's question — the version of the artifact this release ships
+// for the target — answered WITHOUT the artifact's bytes where that is possible.
+// On the phone it is: the release catalogue names file + sha256 + version per
+// target in a few KB of JSON. That matters beyond speed: the gate runs before
+// every install decision, so a gate that needs the tar makes a check into a
+// multi-megabyte transfer, and on a phone link that transfer IS the connect —
+// the reported "it only checks the remote server and never installs the new
+// version" (the check stage carried the whole download, and a slow or blocked
+// CDN left it there, install never reached, connection dead).
+// The desktop default has no catalogue to read: its artifact is built here, so
+// the file's own hash is the only answer, and resolving it builds/reads the
+// same cache entry it would install anyway.
+async function resolvePyLibsVersion(target) {
+  if (artifactProvider) return artifactProvider.resolvePyLibsVersion(target);
+  return (await defaultEnsurePyLibsTar(target)).version;
+}
+
+module.exports = {
+  platformTag,
+  ensureBundle,
+  ensurePyLibsTar,
+  resolvePyLibsVersion,
+  setArtifactProvider,
+  hasLocalBundle,
+  resolveBash,
+  isPackagedApp,
+  fileHash,
+  treeHash,
+};

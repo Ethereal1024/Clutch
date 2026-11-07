@@ -1,37 +1,37 @@
-// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
+// GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
+// source sha256: 0d9eb9468a463e2344ac18f66e2380c87fce92d7596bf138738e3d0dedc65038
+
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
 // Expose the backend URL + SSH tunnel bridge to the renderer.
 // baseUrl is an async IPC call: the session port is only known to the main process.
 const { contextBridge, ipcRenderer } = require("electron");
-
 contextBridge.exposeInMainWorld("clutchApi", {
-  baseUrl: () => ipcRenderer.invoke("api:base"),
-  // this window leaving its session, named by the window itself: a renderer can
-  // only ever release what it holds (the main process reads e.sender), so the
-  // dialog's Cancel cannot take another window's session down with it
-  releaseSession: () => ipcRenderer.invoke("session:release"),
-  onBaseChanged: (cb) => {
-    const wrap = (_e, url) => cb(url);
-    ipcRenderer.on("backend:base-changed", wrap);
-    return () => ipcRenderer.removeListener("backend:base-changed", wrap);
-  },
+    baseUrl: () => ipcRenderer.invoke("api:base"),
+    // this window leaving its session, named by the window itself: a renderer can
+    // only ever release what it holds (the main process reads e.sender), so the
+    // dialog's Cancel cannot take another window's session down with it
+    releaseSession: () => ipcRenderer.invoke("session:release"),
+    onBaseChanged: (cb) => {
+        const wrap = (_e, url) => cb(url);
+        ipcRenderer.on("backend:base-changed", wrap);
+        return () => ipcRenderer.removeListener("backend:base-changed", wrap);
+    },
 });
-
 // the project locks the HOST can see (GET /api/locks) and the one action a user
 // is allowed: reclaim a project whose claiming window is PROVEN gone. The host
 // that holds the lock answers — the far side of a tunnel when this window works
 // there, this machine otherwise — so the page never guesses and never frees a
 // live window's project. Both are read/act on a peer, never a local file write.
 contextBridge.exposeInMainWorld("clutchLocks", {
-  list: () => ipcRenderer.invoke("locks:list"),
-  reclaim: (project) => ipcRenderer.invoke("locks:reclaim", project),
+    list: () => ipcRenderer.invoke("locks:list"),
+    reclaim: (project) => ipcRenderer.invoke("locks:reclaim", project),
 });
-
 contextBridge.exposeInMainWorld("clutchSettings", {
-  save: (data) => ipcRenderer.invoke("settings:save", data),
-  // rebuild the ~/.clutch/settings.json mirror when it is missing (self-heal)
-  ensure: (data) => ipcRenderer.invoke("settings:ensure", data),
+    save: (data) => ipcRenderer.invoke("settings:save", data),
+    // rebuild the ~/.clutch/settings.json mirror when it is missing (self-heal)
+    ensure: (data) => ipcRenderer.invoke("settings:ensure", data),
 });
-
 // the plugin tab's channel: what each of the two places holds, what can be given
 // either one, the writes (an install onto one, a removal off it, and the switch
 // that stops driving a component there or starts it again), and the mirrors a
@@ -39,53 +39,50 @@ contextBridge.exposeInMainWorld("clutchSettings", {
 // place from the component's own declaration (ui/components-view.js) — the
 // renderer never writes anything itself and never chooses a machine.
 contextBridge.exposeInMainWorld("clutchComponents", {
-  list: () => ipcRenderer.invoke("components:list"),
-  market: (opts) => ipcRenderer.invoke("components:market", opts),
-  install: (name) => ipcRenderer.invoke("components:install", name),
-  versions: (name) => ipcRenderer.invoke("components:versions", name),
-  remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
-  setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
-  mirrors: () => ipcRenderer.invoke("components:mirrors"),
-  addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
-  removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),
-  onProgress: (cb) => {
-    const wrap = (_e, stage) => cb(stage);
-    ipcRenderer.on("components:progress", wrap);
-    return () => ipcRenderer.removeListener("components:progress", wrap);
-  },
+    list: () => ipcRenderer.invoke("components:list"),
+    market: (opts) => ipcRenderer.invoke("components:market", opts),
+    install: (name) => ipcRenderer.invoke("components:install", name),
+    versions: (name) => ipcRenderer.invoke("components:versions", name),
+    remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
+    setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
+    mirrors: () => ipcRenderer.invoke("components:mirrors"),
+    addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
+    removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),
+    onProgress: (cb) => {
+        const wrap = (_e, stage) => cb(stage);
+        ipcRenderer.on("components:progress", wrap);
+        return () => ipcRenderer.removeListener("components:progress", wrap);
+    },
 });
-
 // the About pane's update button. `check` takes the version the page is showing
 // (ui/version.js) rather than letting the shell decide: the answer has to be about
 // the number on screen. `download` streams its progress on its own channel
 // (`update:progress`), because a download takes minutes and a spinner that is
 // really a dead button gets pressed again.
 contextBridge.exposeInMainWorld("clutchUpdate", {
-  check: (current) => ipcRenderer.invoke("update:check", current),
-  download: () => ipcRenderer.invoke("update:download"),
-  install: (file) => ipcRenderer.invoke("update:install", file),
-  onProgress: (cb) => {
-    const wrap = (_e, stage) => cb(stage);
-    ipcRenderer.on("update:progress", wrap);
-    return () => ipcRenderer.removeListener("update:progress", wrap);
-  },
+    check: (current) => ipcRenderer.invoke("update:check", current),
+    download: () => ipcRenderer.invoke("update:download"),
+    install: (file) => ipcRenderer.invoke("update:install", file),
+    onProgress: (cb) => {
+        const wrap = (_e, stage) => cb(stage);
+        ipcRenderer.on("update:progress", wrap);
+        return () => ipcRenderer.removeListener("update:progress", wrap);
+    },
 });
-
 contextBridge.exposeInMainWorld("clutchTunnel", {
-  connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
-  status: () => ipcRenderer.invoke("tunnel:status"),
-  disconnect: () => ipcRenderer.invoke("tunnel:disconnect"),
-  onEnd: (cb) => {
-    ipcRenderer.on("tunnel:ended", cb);
-    return () => ipcRenderer.removeListener("tunnel:ended", cb);
-  },
-  onProgress: (cb) => {
-    const wrap = (_e, stage) => cb(stage);
-    ipcRenderer.on("tunnel:progress", wrap);
-    return () => ipcRenderer.removeListener("tunnel:progress", wrap);
-  },
+    connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
+    status: () => ipcRenderer.invoke("tunnel:status"),
+    disconnect: () => ipcRenderer.invoke("tunnel:disconnect"),
+    onEnd: (cb) => {
+        ipcRenderer.on("tunnel:ended", cb);
+        return () => ipcRenderer.removeListener("tunnel:ended", cb);
+    },
+    onProgress: (cb) => {
+        const wrap = (_e, stage) => cb(stage);
+        ipcRenderer.on("tunnel:progress", wrap);
+        return () => ipcRenderer.removeListener("tunnel:progress", wrap);
+    },
 });
-
 // the host-side run loop (P1-4): the renderer is a view only — it calls
 // start/stop/step/drive/state and subscribes to run:event pushes. The loop
 // survives a page reload: the main process owns it, so a closed window does
@@ -98,14 +95,14 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
 // writes) — it is how a page that was not there when the turn opened learns
 // whether a turn is still open, and it builds the loop when there is none yet.
 contextBridge.exposeInMainWorld("clutchRun", {
-  start: (payload) => ipcRenderer.invoke("run:start", payload),
-  stop: () => ipcRenderer.invoke("run:stop"),
-  step: () => ipcRenderer.invoke("run:step"),
-  drive: () => ipcRenderer.invoke("run:drive"),
-  state: (payload) => ipcRenderer.invoke("run:state", payload),
-  onEvent: (cb) => {
-    const wrap = (_e, ev) => cb(ev);
-    ipcRenderer.on("run:event", wrap);
-    return () => ipcRenderer.removeListener("run:event", wrap);
-  },
+    start: (payload) => ipcRenderer.invoke("run:start", payload),
+    stop: () => ipcRenderer.invoke("run:stop"),
+    step: () => ipcRenderer.invoke("run:step"),
+    drive: () => ipcRenderer.invoke("run:drive"),
+    state: (payload) => ipcRenderer.invoke("run:state", payload),
+    onEvent: (cb) => {
+        const wrap = (_e, ev) => cb(ev);
+        ipcRenderer.on("run:event", wrap);
+        return () => ipcRenderer.removeListener("run:event", wrap);
+    },
 });

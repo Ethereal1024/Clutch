@@ -51,9 +51,10 @@ process.env.CLUTCH_TUNNEL_STOP_GRACE_MS = process.env.CLUTCH_TUNNEL_STOP_GRACE_M
 const UI_DIR = path.join(__dirname, "..", "ui");
 const BOOTSTRAP = path.join(UI_DIR, "tunnel-bootstrap.js");
 const BOOTSTRAP_SRC = fs.readFileSync(BOOTSTRAP, "utf8");
-const CONNECT_SRC = fs.readFileSync(path.join(UI_DIR, "tunnel-connect.js"), "utf8");
-const LIFECYCLE_SRC = fs.readFileSync(path.join(UI_DIR, "tunnel-lifecycle.js"), "utf8");
-const HOST_CORE_SRC = fs.readFileSync(path.join(UI_DIR, "host-core.js"), "utf8");
+// the sources, not the build output: these assert on how the files are written
+const CONNECT_SRC = fs.readFileSync(path.join(UI_DIR, "src", "host", "tunnel-connect.ts"), "utf8");
+const LIFECYCLE_SRC = fs.readFileSync(path.join(UI_DIR, "src", "host", "tunnel-lifecycle.ts"), "utf8");
+const HOST_CORE_SRC = fs.readFileSync(path.join(UI_DIR, "src", "host", "host-core.ts"), "utf8");
 
 // ---- the fake far side ----
 //

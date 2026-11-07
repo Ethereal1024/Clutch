@@ -17,15 +17,18 @@ const UI_DIR = path.join(__dirname, "..", "ui");
 // ui/ssh-tunnel.js is only the public face: the tunnel is six files over one
 // shared state object. The source assertions below slice whichever file holds
 // the function, so they read the whole module, in dependency order.
+// the SOURCES, not the emitted .js: the assertions below are about how the code
+// is written, and the compiler re-prints statements (a one-line `if (x) y();`
+// becomes a block), which would make every one of them fail for no reason.
 const TUNNEL_FILES = [
-  "ssh-tunnel.js",
-  "tunnel-core.js",
-  "tunnel-net.js",
-  "tunnel-remote.js",
-  "tunnel-bootstrap.js",
-  "tunnel-lifecycle.js",
-  "tunnel-connect.js",
-].map((f) => path.join(UI_DIR, f));
+  "ssh-tunnel",
+  "tunnel-core",
+  "tunnel-net",
+  "tunnel-remote",
+  "tunnel-bootstrap",
+  "tunnel-lifecycle",
+  "tunnel-connect",
+].map((f) => path.join(UI_DIR, "src", "host", f + ".ts"));
 const TUNNEL_SRC = TUNNEL_FILES.map((f) => fs.readFileSync(f, "utf8")).join("\n");
 
 // stopTunnel appends to ~/.clutch/tunnel.log -- the forensic record of the

@@ -69,7 +69,8 @@ const sorted = (set) => [...set].sort();
 
 // ---- 1. the machine's list, read as text (it is the contract, not an import) ----
 const py = read("agent/events.py");
-const runState = read("ui/run-state.js");
+// the source, not the build output: this asserts on how the file is written
+const runState = read("ui/src/host/run-state.ts");
 const assignments = [...py.matchAll(/^DURABLE_TYPES = \{([^}]*)\}/gm)];
 check(assignments.length === 1, `agent/events.py defines DURABLE_TYPES exactly once (found ${assignments.length})`);
 

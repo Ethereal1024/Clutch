@@ -1,3 +1,6 @@
+// GENERATED FILE — do not edit; edit src/host/components.ts and run `npm run build:host`.
+// source sha256: c903e4aaee45507b31252376d5f85215681f671fe6b55f2f363d38bec1c618e9
+
 // The install layer's SENDING half: getting a component's artifact onto the
 // machine whose server will run it.
 //
@@ -74,9 +77,8 @@
 // the release's component.json asset (digest-pinned the same way), or — for an
 // archive that carries its own manifest — nowhere at all, since the host merges
 // what the artifact says about itself (agent/tools/components.py).
-
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
 const { spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -87,7 +89,6 @@ const { resolveBash, platformTag, isPackagedApp, fileHash, treeHash } = require(
 // under — both are "the network this app runs on", see ui/net-fetch.js.
 const { netFetch, mirrorPrefix, mirrored } = require("./net-fetch");
 const mirrors = require("./mirrors");
-
 const REPO = path.join(__dirname, "..");
 const CACHE = path.join(os.homedir(), ".clutch", "artifacts");
 const TAR_SCRIPT = path.join(REPO, "scripts", "build-component-tar.sh");
@@ -98,7 +99,6 @@ const MANIFEST_TIMEOUT_MS = Number(process.env.CLUTCH_MANIFEST_TIMEOUT_MS || 30_
 const MANIFEST_ATTEMPTS = 3; // one ask, then two more: a reset is a moment, not a verdict
 const MANIFEST_RETRY_MS = 500; // the wait before the second ask; the third waits twice that
 const BUDGET_MS = 300_000; // the whole pass; beyond it the rest is deferred
-
 // The market index: one URL, one document, and the two local copies a read can
 // fall back to (the degradation chain is spelled out in readIndex).
 //
@@ -111,113 +111,106 @@ const INDEX_URL = "https://github.com/Ethereal1024/Clutch/releases/download/mark
 const INDEX_SCHEMA = 2;
 const MANIFEST_SCHEMA = 1; // a module's own release manifest (unchanged by the index)
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/; // <owner>/<name>
-
 const SKIP_DIRS = new Set([".git", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules"]);
-
-// ------------------------------------------------------------------ the index --
-
-// One row of the index, validated the way the host validates a declaration: a
-// word this client cannot read is refused rather than guessed at. What a row is
-// is a POINTER plus a display copy — where the module's own manifest is, what
-// digest those bytes have, which version this line calls current, and enough
-// words to draw a row without reading every module's release. It is NOT a
-// decision: which machine a component belongs to is read from its own
-// declaration (destinationOf), and the install path re-reads the real manifest
-// (entryManifest) before anything is placed.
 function parseEntry(raw, where) {
-  if (!raw || typeof raw !== "object") throw new Error(`${where} is not an object`);
-  const id = typeof raw.id === "string" ? raw.id.trim() : "";
-  if (!ID_RE.test(id)) throw new Error(`${where} names no <owner>/<name> id`);
-  const name = typeof raw.name === "string" ? raw.name.trim() : "";
-  if (!name) throw new Error(`${where} names no component`);
-  // A URL or a path to the same document: a row works the same wherever the
-  // index that carried it came from, and a test can point a row at a directory.
-  const manifest = typeof raw.manifest === "string" ? raw.manifest.trim() : "";
-  if (!manifest) throw new Error(`${where} names no manifest`);
-  const sha = typeof raw.manifest_sha256 === "string" ? raw.manifest_sha256.trim() : "";
-  if (!/^[0-9a-f]{64}$/.test(sha)) {
-    throw new Error(`${where} pins no sha256 for its manifest — an unpinned row is refused`);
-  }
-  return {
-    id,
-    name,
-    manifest,
-    manifest_sha256: sha,
-    version: typeof raw.version === "string" ? raw.version.trim() : "",
-    summary: typeof raw.summary === "string" ? raw.summary : "",
-    tags: Array.isArray(raw.tags) ? raw.tags.filter((t) => typeof t === "string" && t) : [],
-    homepage: typeof raw.homepage === "string" ? raw.homepage : "",
-    license: typeof raw.license === "string" ? raw.license : "",
-  };
+    if (!raw || typeof raw !== "object")
+        throw new Error(`${where} is not an object`);
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    if (!ID_RE.test(id))
+        throw new Error(`${where} names no <owner>/<name> id`);
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name)
+        throw new Error(`${where} names no component`);
+    // A URL or a path to the same document: a row works the same wherever the
+    // index that carried it came from, and a test can point a row at a directory.
+    const manifest = typeof raw.manifest === "string" ? raw.manifest.trim() : "";
+    if (!manifest)
+        throw new Error(`${where} names no manifest`);
+    const sha = typeof raw.manifest_sha256 === "string" ? raw.manifest_sha256.trim() : "";
+    if (!/^[0-9a-f]{64}$/.test(sha)) {
+        throw new Error(`${where} pins no sha256 for its manifest — an unpinned row is refused`);
+    }
+    return {
+        id,
+        name,
+        manifest,
+        manifest_sha256: sha,
+        version: typeof raw.version === "string" ? raw.version.trim() : "",
+        summary: typeof raw.summary === "string" ? raw.summary : "",
+        tags: Array.isArray(raw.tags) ? raw.tags.filter((t) => typeof t === "string" && t) : [],
+        homepage: typeof raw.homepage === "string" ? raw.homepage : "",
+        license: typeof raw.license === "string" ? raw.license : "",
+    };
 }
-
 // One document: `{schema: 2, entries: [...]}`. A document that is not an index
 // is an error (there is nothing to draw); a ROW that is wrong is dropped with a
 // reason, because one bad line in the market must not blank the other five.
 function parseIndex(data, where) {
-  if (!data || typeof data !== "object") throw new Error("the index is not a JSON object");
-  if (data.schema !== INDEX_SCHEMA) throw new Error(`unknown index schema ${JSON.stringify(data.schema)}`);
-  if (!Array.isArray(data.entries)) throw new Error("the index lists no entries");
-  const out = { entries: [], problems: [] };
-  const seen = new Set();
-  data.entries.forEach((raw, i) => {
-    let entry;
-    try {
-      entry = parseEntry(raw, `${where} entries[${i}]`);
-    } catch (e) {
-      out.problems.push((e && e.message) || String(e));
-      return;
-    }
-    if (seen.has(entry.name)) {
-      out.problems.push(`${where} lists ${entry.name} twice; the first row is the one that counts`);
-      return;
-    }
-    seen.add(entry.name);
-    out.entries.push(entry);
-  });
-  return out;
+    if (!data || typeof data !== "object")
+        throw new Error("the index is not a JSON object");
+    if (data.schema !== INDEX_SCHEMA)
+        throw new Error(`unknown index schema ${JSON.stringify(data.schema)}`);
+    if (!Array.isArray(data.entries))
+        throw new Error("the index lists no entries");
+    const out = { entries: [], problems: [] };
+    const seen = new Set();
+    data.entries.forEach((raw, i) => {
+        let entry;
+        try {
+            entry = parseEntry(raw, `${where} entries[${i}]`);
+        }
+        catch (e) {
+            out.problems.push((e && e.message) || String(e));
+            return;
+        }
+        if (seen.has(entry.name)) {
+            out.problems.push(`${where} lists ${entry.name} twice; the first row is the one that counts`);
+            return;
+        }
+        seen.add(entry.name);
+        out.entries.push(entry);
+    });
+    return out;
 }
-
 // A source is a URL or a local path; this is the one place the difference is
 // read, so a source works the same wherever it came from.
 function isRemote(source) {
-  return /^https?:\/\//i.test(source);
+    return /^https?:\/\//i.test(source);
 }
-
 // One asset of a source: the manifest is the source itself, everything else it
 // names is its sibling — so a module's release needs no knowledge of its own
 // absolute URL, and a directory of artifacts on disk works the same way.
 function assetLocation(source, asset) {
-  return isRemote(source) ? new URL(asset, source).toString() : path.join(path.dirname(source), asset);
+    return isRemote(source) ? new URL(asset, source).toString() : path.join(path.dirname(source), asset);
 }
-
 // One module's manifest, validated the way the host validates a declaration:
 // a word this client cannot read is refused rather than guessed at. The
 // `declaration` the manifest names is a LOCATION (an asset plus its digest), not
 // a declaration: the file itself is fetched (and pinned) only when a client
 // actually has to hand it to a host, so a manifest stays a few hundred bytes.
 function parseManifest(data, source) {
-  if (!data || typeof data !== "object") throw new Error("the manifest is not a JSON object");
-  if (data.schema !== MANIFEST_SCHEMA) throw new Error(`unknown manifest schema ${JSON.stringify(data.schema)}`);
-  if (typeof data.name !== "string" || !data.name) throw new Error("the manifest names no component");
-  const artifacts = data.artifacts && typeof data.artifacts === "object" ? data.artifacts : {};
-  return {
-    name: data.name,
-    version: typeof data.version === "string" ? data.version : "",
-    declaration: null, // what this client will send: filled from the asset below
-    declarationRef: data.declaration && typeof data.declaration === "object" ? data.declaration : null,
-    artifacts,
-    source,
-  };
+    if (!data || typeof data !== "object")
+        throw new Error("the manifest is not a JSON object");
+    if (data.schema !== MANIFEST_SCHEMA)
+        throw new Error(`unknown manifest schema ${JSON.stringify(data.schema)}`);
+    if (typeof data.name !== "string" || !data.name)
+        throw new Error("the manifest names no component");
+    const artifacts = data.artifacts && typeof data.artifacts === "object" ? data.artifacts : {};
+    return {
+        name: data.name,
+        version: typeof data.version === "string" ? data.version : "",
+        declaration: null, // what this client will send: filled from the asset below
+        declarationRef: data.declaration && typeof data.declaration === "object" ? data.declaration : null,
+        artifacts,
+        source,
+    };
 }
-
 // The wait between two asks of the same source. Short on purpose: the reset that
 // killed the first ask is a moment in the network, and a user watching a page that
 // says "reading…" should not be made to wait out a backoff worthy of a service.
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 // Every failure of a read, in the words the plugin page shows. What a library
 // says about a connection is not one of them: node's fetch reports a reset, a
 // DNS failure and a refused socket as the same bare "fetch failed", which tells
@@ -231,20 +224,20 @@ function sleep(ms) {
 // like CLUTCH_TUNNEL_STOP_GRACE_MS): a 30 s budget is 30 s of suite for every case
 // that wants to see this branch, and the words below are asserted with it.
 function readFailure(e, attempts) {
-  const kind = e && e.clutchKind;
-  if (kind === "timeout") return `the source did not answer within ${MANIFEST_TIMEOUT_MS / 1000} s`;
-  if (kind === "unreachable") {
-    // A system code (ENOTFOUND, ECONNRESET) is the diagnosis. undici's own
-    // UND_ERR_* codes are its internal names for the same conditions, and its
-    // message beside them ("other side closed") says more than the code does.
-    const cause = e.cause || {};
-    const detail = cause.code && !/^UND_ERR_/.test(cause.code) ? cause.code : cause.message || e.message || "";
-    const asked = attempts > 1 ? `, asked ${attempts} times` : "";
-    return `the source could not be reached (${detail}${asked})`;
-  }
-  return (e && e.message) || String(e);
+    const kind = e && e.clutchKind;
+    if (kind === "timeout")
+        return `the source did not answer within ${MANIFEST_TIMEOUT_MS / 1000} s`;
+    if (kind === "unreachable") {
+        // A system code (ENOTFOUND, ECONNRESET) is the diagnosis. undici's own
+        // UND_ERR_* codes are its internal names for the same conditions, and its
+        // message beside them ("other side closed") says more than the code does.
+        const cause = e.cause || {};
+        const detail = cause.code && !/^UND_ERR_/.test(cause.code) ? cause.code : cause.message || e.message || "";
+        const asked = attempts > 1 ? `, asked ${attempts} times` : "";
+        return `the source could not be reached (${detail}${asked})`;
+    }
+    return (e && e.message) || String(e);
 }
-
 // One ask of one document, and the three verdicts it can come back with. Two of
 // them are ANSWERS — a status that is not ok, and bytes this client cannot read
 // as the document it asked for — and an answer is not asked for twice. The third
@@ -256,68 +249,73 @@ function readFailure(e, attempts) {
 // sha256, and a digest is a fact about bytes — parsing first and hashing second
 // would hash a re-serialisation rather than what the release published.
 async function readOnce(source, { pin = "", parse = parseManifest } = {}) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
-  const answer = (e) => {
-    const err = e instanceof Error ? e : new Error(String(e));
-    err.clutchKind = "answer";
-    return err;
-  };
-  try {
-    const r = await netFetch()(source, { signal: ctl.signal });
-    if (!r.ok) throw answer(new Error(`the source answered ${r.status}`));
-    const bytes = Buffer.from(await r.arrayBuffer());
-    if (pin) {
-      const got = sha256Bytes(bytes);
-      if (got !== pin) throw answer(new Error(`${source} has sha256 ${got}, not the ${pin} the index pins`));
-    }
-    let data;
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), MANIFEST_TIMEOUT_MS);
+    const answer = (e) => {
+        const err = (e instanceof Error ? e : new Error(String(e)));
+        err.clutchKind = "answer";
+        return err;
+    };
     try {
-      data = JSON.parse(bytes.toString("utf8"));
-    } catch (e) {
-      throw answer(new Error(`${source} is not JSON (${e.message})`));
+        const r = await netFetch()(source, { signal: ctl.signal });
+        if (!r.ok)
+            throw answer(new Error(`the source answered ${r.status}`));
+        const bytes = Buffer.from(await r.arrayBuffer());
+        if (pin) {
+            const got = sha256Bytes(bytes);
+            if (got !== pin)
+                throw answer(new Error(`${source} has sha256 ${got}, not the ${pin} the index pins`));
+        }
+        let data;
+        try {
+            data = JSON.parse(bytes.toString("utf8"));
+        }
+        catch (e) {
+            throw answer(new Error(`${source} is not JSON (${e.message})`));
+        }
+        try {
+            return parse(data, source);
+        }
+        catch (e) {
+            throw answer(e);
+        }
     }
-    try {
-      return parse(data, source, bytes);
-    } catch (e) {
-      throw answer(e);
+    catch (e) {
+        const err = (e instanceof Error ? e : new Error(String(e)));
+        if (!err.clutchKind) {
+            // the read never became a response: this machine's own budget ran out, or
+            // the connection did not come up. (A redirect chain counts as the latter:
+            // every hop is a connection of its own.)
+            err.clutchKind = ctl.signal.aborted || err.name === "AbortError" ? "timeout" : "unreachable";
+        }
+        throw err;
     }
-  } catch (e) {
-    const err = e instanceof Error ? e : new Error(String(e));
-    if (!err.clutchKind) {
-      // the read never became a response: this machine's own budget ran out, or
-      // the connection did not come up. (A redirect chain counts as the latter:
-      // every hop is a connection of its own.)
-      err.clutchKind = ctl.signal.aborted || err.name === "AbortError" ? "timeout" : "unreachable";
+    finally {
+        clearTimeout(t);
     }
-    throw err;
-  } finally {
-    clearTimeout(t);
-  }
 }
-
 function sha256Bytes(bytes) {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
+    return crypto.createHash("sha256").update(bytes).digest("hex");
 }
-
 // The same three verdicts, from a file: a local index (a test, a packager's
 // mirror directory) is read exactly like a remote one, pin included — the
 // difference between a URL and a path is one branch, not two code paths.
 function readLocal(source, { pin = "", parse = parseManifest } = {}) {
-  const bytes = fs.readFileSync(source);
-  if (pin) {
-    const got = sha256Bytes(bytes);
-    if (got !== pin) throw new Error(`${source} has sha256 ${got}, not the ${pin} the index pins`);
-  }
-  let data;
-  try {
-    data = JSON.parse(bytes.toString("utf8"));
-  } catch (e) {
-    throw new Error(`${source} is not JSON (${e.message})`);
-  }
-  return parse(data, source, bytes);
+    const bytes = fs.readFileSync(source);
+    if (pin) {
+        const got = sha256Bytes(bytes);
+        if (got !== pin)
+            throw new Error(`${source} has sha256 ${got}, not the ${pin} the index pins`);
+    }
+    let data;
+    try {
+        data = JSON.parse(bytes.toString("utf8"));
+    }
+    catch (e) {
+        throw new Error(`${source} is not JSON (${e.message})`);
+    }
+    return parse(data, source);
 }
-
 // One document, and the retry that makes a flaky network a smaller fact than it
 // used to be. A release is read from a host on the other side of a redirect, and
 // a connection that dies there dies once: asking again a moment later is what a
@@ -326,38 +324,37 @@ function readLocal(source, { pin = "", parse = parseManifest } = {}) {
 // a source that spent its whole 30 s budget is not given two more of them (the
 // page would sit on "reading…" for a minute and a half).
 async function readWithRetry(source, opts = {}) {
-  if (!isRemote(source)) return readLocal(source, opts);
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await readOnce(source, opts);
-    } catch (e) {
-      if (!e || e.clutchKind !== "unreachable" || attempt >= MANIFEST_ATTEMPTS) {
-        // the KIND survives the wording: `readFailure` turns it into a sentence for
-        // the page, and the page still has to know whether asking through a mirror
-        // could help ("unreachable" / "timeout") or whether the source answered
-        // ("answer" — the same bytes are at the same path everywhere else)
-        const err = new Error(readFailure(e, attempt), { cause: e });
-        err.clutchKind = e && e.clutchKind;
-        throw err;
-      }
-      await sleep(MANIFEST_RETRY_MS * 2 ** (attempt - 1));
+    if (!isRemote(source))
+        return readLocal(source, opts);
+    for (let attempt = 1;; attempt++) {
+        try {
+            return await readOnce(source, opts);
+        }
+        catch (e) {
+            if (!e || e.clutchKind !== "unreachable" || attempt >= MANIFEST_ATTEMPTS) {
+                // the KIND survives the wording: `readFailure` turns it into a sentence for
+                // the page, and the page still has to know whether asking through a mirror
+                // could help ("unreachable" / "timeout") or whether the source answered
+                // ("answer" — the same bytes are at the same path everywhere else)
+                const err = new Error(readFailure(e, attempt), { cause: e });
+                err.clutchKind = e && e.clutchKind;
+                throw err;
+            }
+            await sleep(MANIFEST_RETRY_MS * 2 ** (attempt - 1));
+        }
     }
-  }
 }
-
 // One module's own release manifest. `pin` is the digest an index row carries
 // for these bytes: with it, a manifest that was swapped under a row is refused
 // here rather than after its digits were believed.
 async function readManifest(source, { pin = "" } = {}) {
-  return readWithRetry(source, { pin, parse: parseManifest });
+    return readWithRetry(source, { pin, parse: parseManifest });
 }
-
 // The index document. (Its bytes are not kept anywhere: a remembered copy would
 // be the second read path this build deleted — see readIndex.)
 async function readIndexDoc(source) {
-  return readWithRetry(source, { parse: parseIndex });
+    return readWithRetry(source, { parse: parseIndex });
 }
-
 // The market index itself. Never throws: a market that cannot be read is a
 // report with an EMPTY list, and the page says why it is empty and offers the
 // retry (ui/components-view.js readMarket). ONE read — no cache, no shipped copy.
@@ -367,200 +364,200 @@ async function readIndexDoc(source) {
 // nothing else on purpose: no environment variable, no file under HOME, no
 // second way in.
 async function readIndex({ index = null } = {}) {
-  const place = index || mirrored(INDEX_URL, mirrorPrefix());
-  const unreachable = (e) => {
-    const kind = e && e.clutchKind;
-    return kind === "unreachable" || kind === "timeout";
-  };
-  try {
-    const doc = await readIndexDoc(place);
-    return {
-      entries: doc.entries,
-      errors: doc.problems.map((reason) => ({ name: "", reason, unreachable: false })),
-      // a row the index itself refuses is not a network problem; the flag is only
-      // ever about reaching the document (which is what offers a mirror)
-      unreachable: false,
+    const place = index || mirrored(INDEX_URL, mirrorPrefix());
+    const unreachable = (e) => {
+        const kind = e && e.clutchKind;
+        return kind === "unreachable" || kind === "timeout";
     };
-  } catch (e) {
-    return {
-      entries: [],
-      errors: [
-        { name: "", reason: `${place}: ${(e && e.message) || String(e)}`, unreachable: unreachable(e) },
-      ],
-      unreachable: unreachable(e),
-    };
-  }
+    try {
+        const doc = await readIndexDoc(place);
+        return {
+            entries: doc.entries,
+            errors: doc.problems.map((reason) => ({ name: "", reason, unreachable: false })),
+            // a row the index itself refuses is not a network problem; the flag is only
+            // ever about reaching the document (which is what offers a mirror)
+            unreachable: false,
+        };
+    }
+    catch (e) {
+        return {
+            entries: [],
+            errors: [
+                { name: "", reason: `${place}: ${(e && e.message) || String(e)}`, unreachable: unreachable(e) },
+            ],
+            unreachable: unreachable(e),
+        };
+    }
 }
-
 // One module's manifest, from the row that named it — and the three agreements a
 // row has to keep: the bytes are the ones its digest names (readManifest's pin),
 // the manifest belongs to the component the row names, and it is the version the
 // row calls current. A row that fails any of them is a reason, not a component.
 async function entryManifest(entry) {
-  // A row's manifest is a URL like any other read this build makes, so the one
-  // prefix a machine configured is applied HERE — where the row becomes a URL —
-  // and not to the document: the index a mirror serves names releases by their
-  // github URLs, which is what keeps a mirror a transport and not a second
-  // registry. The URL that was read is what the manifest carries as `source`, so
-  // an artifact (a SIBLING of it) and `via` stay under the same prefix.
-  const manifest = await readManifest(mirrored(entry.manifest, mirrorPrefix()), { pin: entry.manifest_sha256 });
-  if (manifest.name !== entry.name) {
-    throw new Error(`the index names ${entry.name}, ${entry.manifest} declares ${manifest.name}`);
-  }
-  if (entry.version && manifest.version !== entry.version) {
-    throw new Error(
-      `the index calls ${entry.name} ${entry.version}, ${entry.manifest} says ${manifest.version || "no version"} ` +
-        `— the index decides which version is current, so this row is stale`
-    );
-  }
-  return { ...manifest, id: entry.id, entry };
+    // A row's manifest is a URL like any other read this build makes, so the one
+    // prefix a machine configured is applied HERE — where the row becomes a URL —
+    // and not to the document: the index a mirror serves names releases by their
+    // github URLs, which is what keeps a mirror a transport and not a second
+    // registry. The URL that was read is what the manifest carries as `source`, so
+    // an artifact (a SIBLING of it) and `via` stay under the same prefix.
+    const manifest = await readManifest(mirrored(entry.manifest, mirrorPrefix()), { pin: entry.manifest_sha256 });
+    if (manifest.name !== entry.name) {
+        throw new Error(`the index names ${entry.name}, ${entry.manifest} declares ${manifest.name}`);
+    }
+    if (entry.version && manifest.version !== entry.version) {
+        throw new Error(`the index calls ${entry.name} ${entry.version}, ${entry.manifest} says ${manifest.version || "no version"} ` +
+            `— the index decides which version is current, so this row is stale`);
+    }
+    return { ...manifest, id: entry.id, entry };
 }
-
 // The market as a page draws it: this repo's checkouts (a contributor's edit
 // beats a release), then one row per index entry — WITHOUT reading the manifests
 // they point at. That is the whole point of an index: opening the page is one
 // request, and a module's release is read when something is installed from it.
 async function marketEntries({ index = null } = {}) {
-  const listed = await readIndex({ index });
-  const specs = checkoutComponents();
-  const byName = new Map(specs.map((s) => [s.name, s]));
-  for (const entry of listed.entries) {
-    if (byName.has(entry.name)) {
-      // A checkout beside the host repo outranks the index for BYTES — and is
-      // still described by it: the row carries the id, the summary and the tags
-      // that a module's own declaration does not, so the page has something to
-      // say about a component a contributor is editing.
-      byName.get(entry.name).entry = entry;
-      byName.get(entry.name).id = entry.id;
-      continue;
+    const listed = await readIndex({ index });
+    const specs = checkoutComponents();
+    const byName = new Map(specs.map((s) => [s.name, s]));
+    for (const entry of listed.entries) {
+        if (byName.has(entry.name)) {
+            // A checkout beside the host repo outranks the index for BYTES — and is
+            // still described by it: the row carries the id, the summary and the tags
+            // that a module's own declaration does not, so the page has something to
+            // say about a component a contributor is editing.
+            byName.get(entry.name).entry = entry;
+            byName.get(entry.name).id = entry.id;
+            continue;
+        }
+        specs.push({
+            name: entry.name,
+            id: entry.id,
+            version: entry.version,
+            source: entry.manifest,
+            entry, // what the install path reads its manifest from
+            checkout: false,
+            published: null,
+        });
     }
-    specs.push({
-      name: entry.name,
-      id: entry.id,
-      version: entry.version,
-      source: entry.manifest,
-      entry, // what the install path reads its manifest from
-      checkout: false,
-      published: null,
-    });
-  }
-  return {
-    specs,
-    entries: listed.entries,
-    errors: listed.errors,
-    unreachable: listed.unreachable,
-  };
+    return {
+        specs,
+        entries: listed.entries,
+        errors: listed.errors,
+        unreachable: listed.unreachable,
+    };
 }
-
 // The full spec for ONE name, read from a FRESH index: the bulk pass
 // (componentSpecs) plus a lookup. The page does not use this — it already holds
 // the row it drew, and reads that row's manifest directly (ui/components-view.js
 // specFor) — so this is for a caller that knows a name and nothing else.
 async function specForName(name, { index = null } = {}) {
-  const known = await marketEntries({ index });
-  const found = known.specs.find((s) => s.name === name) || null;
-  if (!found || found.checkout || !found.entry) return found;
-  const manifest = await entryManifest(found.entry);
-  return { ...found, ...manifest, published: manifest, declaration: await remoteDeclaration(manifest) };
+    const known = await marketEntries({ index });
+    const found = known.specs.find((s) => s.name === name) || null;
+    if (!found || found.checkout || !found.entry)
+        return found;
+    const manifest = await entryManifest(found.entry);
+    return { ...found, ...manifest, published: manifest, declaration: await remoteDeclaration(manifest) };
 }
-
 // ------------------------------------------------------------ local sources --
-
 // A prebuilt artifact sitting on this machine: a dev build, or whatever a
 // platform packager placed in the app's resources (nothing, today — the release
 // ships no component bytes, which is the point).
 function shippedArtifact(name) {
-  const exe = process.platform === "win32" ? ".exe" : "";
-  const tag = platformTag();
-  const dirs = [];
-  if (isPackagedApp()) dirs.push(path.join(process.resourcesPath, "components"));
-  dirs.push(path.join(REPO, "dist", "components"));
-  for (const dir of dirs) {
-    for (const file of [`${name}-${tag}${exe}`, `${name}${exe}`, `${name}-${tag}.tar.gz`, `${name}.tar.gz`]) {
-      const p = path.join(dir, file);
-      try {
-        if (fs.statSync(p).isFile()) return p;
-      } catch (e) {
-        /* keep looking */
-      }
+    const exe = process.platform === "win32" ? ".exe" : "";
+    const tag = platformTag();
+    const dirs = [];
+    if (isPackagedApp())
+        dirs.push(path.join(process.resourcesPath, "components"));
+    dirs.push(path.join(REPO, "dist", "components"));
+    for (const dir of dirs) {
+        for (const file of [`${name}-${tag}${exe}`, `${name}${exe}`, `${name}-${tag}.tar.gz`, `${name}.tar.gz`]) {
+            const p = path.join(dir, file);
+            try {
+                if (fs.statSync(p).isFile())
+                    return p;
+            }
+            catch (e) {
+                /* keep looking */
+            }
+        }
     }
-  }
-  return null;
+    return null;
 }
-
 // The checkout, fingerprinted: an edited source has to produce a new artifact
 // (and so pass the host's gate), an untouched one has to upload nothing.
 function sourceFingerprint(dir) {
-  return treeHash([dir], {
-    base: dir,
-    skipDirs: SKIP_DIRS,
-    skipFile: (p) => p.endsWith(".pyc"),
-  });
+    return treeHash([dir], {
+        base: dir,
+        skipDirs: SKIP_DIRS,
+        skipFile: (p) => p.endsWith(".pyc"),
+    });
 }
-
 // The dev fallback artifact: the checkout as a tar, members at its top level (the
 // install directory IS the component's own directory, so `memory.py` has to be
 // at its root, not inside a `<name>/` subtree).
 function checkoutArtifact(name) {
-  const src = path.join(REPO, name);
-  if (!fs.existsSync(path.join(src, "pyproject.toml"))) return null; // not a checkout
-  const out = path.join(CACHE, `${name}-${platformTag()}-${sourceFingerprint(src).slice(0, 16)}.tar.gz`);
-  if (fs.existsSync(out)) return out;
-  fs.mkdirSync(CACHE, { recursive: true });
-  const tmp = `${out}.${process.pid}.tmp`;
-  const r = spawnSync(resolveBash(), [TAR_SCRIPT, src, tmp], { stdio: "pipe" });
-  if (r.status !== 0 || !fs.existsSync(tmp)) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch (e) {
-      /* never created */
+    const src = path.join(REPO, name);
+    if (!fs.existsSync(path.join(src, "pyproject.toml")))
+        return null; // not a checkout
+    const out = path.join(CACHE, `${name}-${platformTag()}-${sourceFingerprint(src).slice(0, 16)}.tar.gz`);
+    if (fs.existsSync(out))
+        return out;
+    fs.mkdirSync(CACHE, { recursive: true });
+    const tmp = `${out}.${process.pid}.tmp`;
+    const r = spawnSync(resolveBash(), [TAR_SCRIPT, src, tmp], { stdio: "pipe" });
+    if (r.status !== 0 || !fs.existsSync(tmp)) {
+        try {
+            fs.unlinkSync(tmp);
+        }
+        catch (e) {
+            /* never created */
+        }
+        return null;
     }
-    return null;
-  }
-  fs.renameSync(tmp, out);
-  return out;
+    fs.renameSync(tmp, out);
+    return out;
 }
-
 // The declaration a checkout carries: the component's own component.json, which
 // travels with the artifact's bytes when the artifact IS the checkout.
 function checkoutDeclaration(name) {
-  const p = path.join(REPO, name, "component.json");
-  try {
-    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
-    if (parsed && parsed.name === name) return parsed;
-  } catch (e) {
-    /* not a checkout, or not readable */
-  }
-  return null;
+    const p = path.join(REPO, name, "component.json");
+    try {
+        const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (parsed && parsed.name === name)
+            return parsed;
+    }
+    catch (e) {
+        /* not a checkout, or not readable */
+    }
+    return null;
 }
-
 // The components checked out beside the host repo: the whole development path,
 // read from the same manifests the host itself discovers (one file per module,
 // nothing here that has to be kept in step).
 function checkoutComponents() {
-  const out = [];
-  let entries;
-  try {
-    entries = fs.readdirSync(REPO, { withFileTypes: true });
-  } catch (e) {
+    const out = [];
+    let entries;
+    try {
+        entries = fs.readdirSync(REPO, { withFileTypes: true });
+    }
+    catch (e) {
+        return out;
+    }
+    for (const entry of entries) {
+        if (!entry.isDirectory() || SKIP_DIRS.has(entry.name))
+            continue;
+        const declaration = checkoutDeclaration(entry.name);
+        if (!declaration)
+            continue;
+        out.push({
+            name: declaration.name,
+            declaration,
+            checkout: true,
+            source: path.join(REPO, entry.name),
+        });
+    }
     return out;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
-    const declaration = checkoutDeclaration(entry.name);
-    if (!declaration) continue;
-    out.push({
-      name: declaration.name,
-      declaration,
-      checkout: true,
-      source: path.join(REPO, entry.name),
-    });
-  }
-  return out;
 }
-
 // ----------------------------------------------------------- remote source --
-
 // Download once, into a name that carries the digest the manifest pinned: a
 // second pass finds the file and needs no network, and a manifest that changes
 // its bytes changes the name. What still comes down through here is the
@@ -568,41 +565,46 @@ function checkoutComponents() {
 // host reads); an ARTIFACT's bytes are the target machine's to fetch, not this
 // client's.
 async function downloadPinned(url, sha256, dest, timeoutMs = REQUEST_TIMEOUT_MS) {
-  if (fs.existsSync(dest)) return dest;
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  const tmp = `${dest}.${process.pid}.tmp`;
-  try {
-    const r = await netFetch()(url, { signal: ctl.signal });
-    if (!r.ok) throw new Error(`the artifact answered ${r.status}`);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
-    const got = fileHash(tmp);
-    if (got !== sha256) throw new Error(`${url} has sha256 ${got}, not the ${sha256} its manifest pins`);
-    fs.renameSync(tmp, dest);
-    return dest;
-  } finally {
-    clearTimeout(t);
+    if (fs.existsSync(dest))
+        return dest;
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    const tmp = `${dest}.${process.pid}.tmp`;
     try {
-      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-    } catch (e) {
-      /* never created */
+        const r = await netFetch()(url, { signal: ctl.signal });
+        if (!r.ok)
+            throw new Error(`the artifact answered ${r.status}`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
+        const got = fileHash(tmp);
+        if (got !== sha256)
+            throw new Error(`${url} has sha256 ${got}, not the ${sha256} its manifest pins`);
+        fs.renameSync(tmp, dest);
+        return dest;
     }
-  }
+    finally {
+        clearTimeout(t);
+        try {
+            if (fs.existsSync(tmp))
+                fs.unlinkSync(tmp);
+        }
+        catch (e) {
+            /* never created */
+        }
+    }
 }
-
 // The asset one entry names, `{asset, sha256}` or the asset name alone — a bare
 // name is a manifest that pinned nothing, and it is refused rather than trusted.
 function pinnedAsset(entry, what, name) {
-  const asset = typeof entry === "string" ? entry : entry && entry.asset;
-  const sha256 = typeof entry === "string" ? "" : entry && entry.sha256;
-  if (typeof asset !== "string" || !asset) throw new Error(`the ${name} manifest names no ${what}`);
-  if (!/^[0-9a-f]{64}$/.test(String(sha256))) {
-    throw new Error(`the ${name} manifest pins no sha256 for ${what} ${asset} — an unpinned artifact is refused`);
-  }
-  return { asset, sha256 };
+    const asset = typeof entry === "string" ? entry : entry && entry.asset;
+    const sha256 = typeof entry === "string" ? "" : entry && entry.sha256;
+    if (typeof asset !== "string" || !asset)
+        throw new Error(`the ${name} manifest names no ${what}`);
+    if (!/^[0-9a-f]{64}$/.test(String(sha256))) {
+        throw new Error(`the ${name} manifest pins no sha256 for ${what} ${asset} — an unpinned artifact is refused`);
+    }
+    return { asset, sha256 };
 }
-
 // The artifact a published manifest points at for THIS platform, or why there is
 // none: the exact platform key, else `any` (a shape that needs no per-platform
 // build — the tar of a pure-Python component is one).
@@ -613,30 +615,29 @@ function pinnedAsset(entry, what, name) {
 // install it has never held, which is the point — and the pin keeps a URL from
 // being a weaker promise than a body.
 function publishedArtifact(manifest) {
-  const tag = platformTag();
-  const entry = manifest.artifacts[tag] || manifest.artifacts.any;
-  if (!entry) return { problem: `no artifact for ${tag} in its manifest` };
-  const { asset, sha256 } = pinnedAsset(entry, "artifact", manifest.name);
-  return { url: assetLocation(manifest.source, asset), artifact: path.basename(asset), digest: sha256 };
+    const tag = platformTag();
+    const entry = manifest.artifacts[tag] || manifest.artifacts.any;
+    if (!entry)
+        return { problem: `no artifact for ${tag} in its manifest` };
+    const { asset, sha256 } = pinnedAsset(entry, "artifact", manifest.name);
+    return { url: assetLocation(manifest.source, asset), artifact: path.basename(asset), digest: sha256 };
 }
-
 // The declaration that rode with a release: its component.json asset, pinned by
 // digest like the artifact. An archive that carries its own manifest needs none,
 // so a manifest without a `declaration` is legal and lands as a thinner install.
 async function remoteDeclaration(manifest) {
-  if (!manifest.declarationRef) return null;
-  const { asset, sha256 } = pinnedAsset(manifest.declarationRef, "declaration", manifest.name);
-  const dest = path.join(CACHE, `${manifest.name}-${sha256.slice(0, 16)}-component.json`);
-  await downloadPinned(assetLocation(manifest.source, asset), sha256, dest, MANIFEST_TIMEOUT_MS);
-  const parsed = JSON.parse(fs.readFileSync(dest, "utf8"));
-  if (!parsed || parsed.name !== manifest.name) {
-    throw new Error(`the declaration names ${parsed && parsed.name}, not ${manifest.name}`);
-  }
-  return parsed;
+    if (!manifest.declarationRef)
+        return null;
+    const { asset, sha256 } = pinnedAsset(manifest.declarationRef, "declaration", manifest.name);
+    const dest = path.join(CACHE, `${manifest.name}-${sha256.slice(0, 16)}-component.json`);
+    await downloadPinned(assetLocation(manifest.source, asset), sha256, dest, MANIFEST_TIMEOUT_MS);
+    const parsed = JSON.parse(fs.readFileSync(dest, "utf8"));
+    if (!parsed || parsed.name !== manifest.name) {
+        throw new Error(`the declaration names ${parsed && parsed.name}, not ${manifest.name}`);
+    }
+    return parsed;
 }
-
 // ------------------------------------------------------------------- the pass --
-
 // Every component this client could install, each with the manifest it will be
 // installed FROM. Never throws: a row whose manifest cannot be read is a reason
 // on the report (and that row alone is dropped, because one broken module must
@@ -647,40 +648,41 @@ async function remoteDeclaration(manifest) {
 // is a fact of its own declaration and of nothing the index says about it
 // (destinationOf).
 async function componentSpecs({ index = null } = {}) {
-  const listed = await marketEntries({ index });
-  const out = { specs: [], errors: listed.errors.slice() };
-  for (const spec of listed.specs) {
-    if (!spec.entry) {
-      out.specs.push(spec); // a checkout the market does not list: nothing to read
-      continue;
+    const listed = await marketEntries({ index });
+    const out = { specs: [], errors: listed.errors.slice() };
+    for (const spec of listed.specs) {
+        if (!spec.entry) {
+            out.specs.push(spec); // a checkout the market does not list: nothing to read
+            continue;
+        }
+        try {
+            const manifest = await entryManifest(spec.entry);
+            // A manifest may pin no declaration (a thinner install), and then this row
+            // has nothing to read a place out of — which is the declaration's own
+            // answer: a component that names none of `service`/`launch`/`entry` is one
+            // nothing could drive, and the pass says so rather than guessing.
+            const declaration = await remoteDeclaration(manifest);
+            if (spec.checkout) {
+                // a checkout's own bytes win, but the release it published stays reachable
+                // under it: a machine that already HOLDS the checkout has nothing to
+                // receive, and the published artifact is then the only thing to hand over
+                spec.published = manifest;
+                out.specs.push(spec);
+            }
+            else {
+                out.specs.push(Object.assign(spec, manifest, { published: manifest, declaration }));
+            }
+        }
+        catch (e) {
+            out.errors.push({
+                name: spec.name,
+                reason: `${spec.entry.manifest}: ${(e && e.message) || String(e)}`,
+                unreachable: Boolean(e && (e.clutchKind === "unreachable" || e.clutchKind === "timeout")),
+            });
+        }
     }
-    try {
-      const manifest = await entryManifest(spec.entry);
-      // A manifest may pin no declaration (a thinner install), and then this row
-      // has nothing to read a place out of — which is the declaration's own
-      // answer: a component that names none of `service`/`launch`/`entry` is one
-      // nothing could drive, and the pass says so rather than guessing.
-      const declaration = await remoteDeclaration(manifest);
-      if (spec.checkout) {
-        // a checkout's own bytes win, but the release it published stays reachable
-        // under it: a machine that already HOLDS the checkout has nothing to
-        // receive, and the published artifact is then the only thing to hand over
-        spec.published = manifest;
-        out.specs.push(spec);
-      } else {
-        out.specs.push(Object.assign(spec, manifest, { published: manifest, declaration }));
-      }
-    } catch (e) {
-      out.errors.push({
-        name: spec.name,
-        reason: `${spec.entry.manifest}: ${(e && e.message) || String(e)}`,
-        unreachable: Boolean(e && (e.clutchKind === "unreachable" || e.clutchKind === "timeout")),
-      });
-    }
-  }
-  return out;
+    return out;
 }
-
 // The version ONE install is recorded under: the component's own version with
 // the content digest appended — `0.1.0+<hex16>`. The host already reads that
 // shape (agent/tools/components.py `_VERSION_RE`), so nothing new is being
@@ -694,12 +696,12 @@ async function componentSpecs({ index = null } = {}) {
 // would be a claim it cannot back. A version that already carries a digest is
 // handed over as it stands, rather than suffixed twice.
 function installVersion(named, digest) {
-  const short = digest.slice(0, 16);
-  const version = named && typeof named.version === "string" ? named.version.trim() : "";
-  if (!version) return short;
-  return version.includes("+") ? version : `${version}+${short}`;
+    const short = digest.slice(0, 16);
+    const version = named && typeof named.version === "string" ? named.version.trim() : "";
+    if (!version)
+        return short;
+    return version.includes("+") ? version : `${version}+${short}`;
 }
-
 // The artifact one install would hand over, or null when there is none. Where the
 // bytes ARE decides which of the two shapes the install takes:
 //
@@ -722,42 +724,43 @@ function installVersion(named, digest) {
 // read these same bytes from — because the bytes travel by URL, so the retry is
 // the host's fetch and not this client's (fetchInstall).
 async function artifactFor(spec, { checkout = true, mirrorFallback = null } = {}) {
-  const local = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
-  if (local) {
-    // the bytes are this machine's own: the declaration is the one that travels
-    // with them — the checkout's own component.json, which is a checkout's whole
-    // point (an edited manifest describes the edited code beside it)
-    const declaration = spec.declaration || (spec.published ? await remoteDeclaration(spec.published) : null);
-    const digest = fileHash(local);
-    return { ...spec, declaration, path: local, digest, version: installVersion(declaration || spec, digest) };
-  }
-  const published = spec.published || (spec.checkout ? null : spec);
-  if (!published || !published.artifacts) return null; // nothing here and nothing published
-  const remote = publishedArtifact(published);
-  if (remote.problem) throw new Error(remote.problem);
-  const declaration = await remoteDeclaration(published);
-  return {
-    ...spec,
-    // the published bytes are described by the published declaration, never by a
-    // checkout's (the two can disagree the moment a contributor edits one)
-    declaration,
-    url: remote.url, // the target machine's own fetch: no copy of this here
-    artifact: remote.artifact, // its own file name, so the host reads its shape
-    digest: remote.digest,
-    // the others a network failure may fall back to, in the order it tries them:
-    // an artifact is a SIBLING of the manifest source, so the prefixes that apply
-    // to the source are the ones these bytes can be read through (ui/mirrors.js)
-    mirrors: mirrors.fallbackFor(published.source, mirrorFallback),
-    // where this URL is ALREADY read from, when that is a mirror (an explicit
-    // source_mirror, or a source somebody wrote pre-mirrored): the page says
-    // which, so "installed" never hides whose copy of the bytes it was
-    via: mirrors.viaPrefix(remote.url),
-    // the release's own manifest names its version too, and a manifest that pins
-    // no separate declaration is a legal (thinner) install
-    version: installVersion(declaration || published, remote.digest),
-  };
+    const local = shippedArtifact(spec.name) || (checkout ? checkoutArtifact(spec.name) : null);
+    if (local) {
+        // the bytes are this machine's own: the declaration is the one that travels
+        // with them — the checkout's own component.json, which is a checkout's whole
+        // point (an edited manifest describes the edited code beside it)
+        const declaration = spec.declaration || (spec.published ? await remoteDeclaration(spec.published) : null);
+        const digest = fileHash(local);
+        return { ...spec, declaration, path: local, digest, version: installVersion(declaration || spec, digest) };
+    }
+    const published = spec.published || (spec.checkout ? null : spec);
+    if (!published || !published.artifacts)
+        return null; // nothing here and nothing published
+    const remote = publishedArtifact(published);
+    if (remote.problem)
+        throw new Error(remote.problem);
+    const declaration = await remoteDeclaration(published);
+    return {
+        ...spec,
+        // the published bytes are described by the published declaration, never by a
+        // checkout's (the two can disagree the moment a contributor edits one)
+        declaration,
+        url: remote.url, // the target machine's own fetch: no copy of this here
+        artifact: remote.artifact, // its own file name, so the host reads its shape
+        digest: remote.digest,
+        // the others a network failure may fall back to, in the order it tries them:
+        // an artifact is a SIBLING of the manifest source, so the prefixes that apply
+        // to the source are the ones these bytes can be read through (ui/mirrors.js)
+        mirrors: mirrors.fallbackFor(published.source, mirrorFallback),
+        // where this URL is ALREADY read from, when that is a mirror (an explicit
+        // source_mirror, or a source somebody wrote pre-mirrored): the page says
+        // which, so "installed" never hides whose copy of the bytes it was
+        via: mirrors.viaPrefix(remote.url),
+        // the release's own manifest names its version too, and a manifest that pins
+        // no separate declaration is a legal (thinner) install
+        version: installVersion(declaration || published, remote.digest),
+    };
 }
-
 // The bytes of ONE published artifact, brought to THIS machine, for the domain
 // that has no other machine to ask: a client plugin is installed by this client
 // itself (ui/plugin-host.js), and `install()` there is handed a path, not a URL —
@@ -769,83 +772,86 @@ async function artifactFor(spec, { checkout = true, mirrorFallback = null } = {}
 // second install of the same release reads the disk. The pin is checked by
 // `downloadPinned`, which is the same gate the receiving host applies.
 async function localArtifact(file) {
-  if (!file) return null;
-  if (file.path) return file.path;
-  if (!file.url) return null;
-  const name = [file.name || "component", String(file.digest || "").slice(0, 16), file.artifact || "artifact"]
-    .filter(Boolean)
-    .join("-");
-  const dest = path.join(CACHE, name);
-  try {
-    return await downloadPinned(file.url, file.digest, dest);
-  } catch (e) {
-    // a release host that cannot be reached is retried through the mirrors this
-    // machine knows of (the same ones `fetchInstall` sends a HOST to) — the bytes
-    // still have to hash to the release's own pin, so a mirror only moves them.
-    // artifactFor already resolved that list against the caller answer, so the
-    // only list to retry here is the one it carried on the spec.
-    const prefixes = Array.isArray(file.mirrors) ? file.mirrors : [];
-    let last = e;
-    for (const prefix of Array.isArray(prefixes) ? prefixes : []) {
-      try {
-        return await downloadPinned(mirrored(prefix, file.url), file.digest, dest);
-      } catch (retry) {
-        last = retry;
-      }
+    if (!file)
+        return null;
+    if (file.path)
+        return file.path;
+    if (!file.url)
+        return null;
+    const name = [file.name || "component", String(file.digest || "").slice(0, 16), file.artifact || "artifact"]
+        .filter(Boolean)
+        .join("-");
+    const dest = path.join(CACHE, name);
+    try {
+        return await downloadPinned(file.url, file.digest, dest);
     }
-    throw last;
-  }
+    catch (e) {
+        // a release host that cannot be reached is retried through the mirrors this
+        // machine knows of (the same ones `fetchInstall` sends a HOST to) — the bytes
+        // still have to hash to the release's own pin, so a mirror only moves them.
+        // artifactFor already resolved that list against the caller answer, so the
+        // only list to retry here is the one it carried on the spec.
+        const prefixes = Array.isArray(file.mirrors) ? file.mirrors : [];
+        let last = e;
+        for (const prefix of Array.isArray(prefixes) ? prefixes : []) {
+            try {
+                return await downloadPinned(mirrored(prefix, file.url), file.digest, dest);
+            }
+            catch (retry) {
+                last = retry;
+            }
+        }
+        throw last;
+    }
 }
-
 // One JSON call to a machine's component endpoints, with the timeout every
 // caller in this file passes. A refusal comes back as the HOST's own sentence
 // (`{"error": …}`, the shape every component endpoint refuses with): "that
 // version is not installed" and "a daemon is running it" are outcomes a page has
 // to be able to quote, and a bare status code would leave it guessing which.
 async function hostJSON(url, { method = "GET", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { method, signal: ctl.signal });
-    const text = await r.text();
-    let body = {};
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
     try {
-      body = JSON.parse(text);
-    } catch (e) {
-      /* a non-JSON body is reported below as the status */
+        const r = await fetch(url, { method, signal: ctl.signal });
+        const text = await r.text();
+        let body = {};
+        try {
+            body = JSON.parse(text);
+        }
+        catch (e) {
+            /* a non-JSON body is reported below as the status */
+        }
+        if (!r.ok)
+            throw new Error(body.error || `${method} ${url} answered ${r.status}`);
+        return body;
     }
-    if (!r.ok) throw new Error(body.error || `${method} ${url} answered ${r.status}`);
-    return body;
-  } finally {
-    clearTimeout(t);
-  }
+    finally {
+        clearTimeout(t);
+    }
 }
-
 // What the host already holds (the version gate's first half).
 async function hostInventory(base, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const body = await hostJSON(`${base}/api/components`, { timeoutMs });
-  return Array.isArray(body.components) ? body.components : [];
+    const body = await hostJSON(`${base}/api/components`, { timeoutMs });
+    return Array.isArray(body.components) ? body.components : [];
 }
-
 // Every version of ONE component this machine holds, newest first and with
 // `resolved` marking the one a launch would use — the rows a removal is asked
 // about. The host answers the ORDER too: which version wins is its decision, and
 // re-sorting it here would be a second opinion.
 async function hostVersions(base, name, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const body = await hostJSON(`${base}/api/components/versions?name=${encodeURIComponent(name)}`, { timeoutMs });
-  return Array.isArray(body.versions) ? body.versions : [];
+    const body = await hostJSON(`${base}/api/components/versions?name=${encodeURIComponent(name)}`, { timeoutMs });
+    return Array.isArray(body.versions) ? body.versions : [];
 }
-
 // Let ONE component go. `version` names a single version to drop; with no
 // version the component goes whole (agent/tools/components.py remove()). The
 // verdict is the host's — "removed" with the versions that went, or "absent"
 // when there was nothing to remove (the request is already true, so it is not an
 // error) — and a refusal arrives as the host's own sentence, thrown.
 async function hostRemove(base, name, version = "", timeoutMs = REQUEST_TIMEOUT_MS) {
-  const q = version ? `?version=${encodeURIComponent(version)}` : "";
-  return hostJSON(`${base}/api/components/${encodeURIComponent(name)}${q}`, { method: "DELETE", timeoutMs });
+    const q = version ? `?version=${encodeURIComponent(version)}` : "";
+    return hostJSON(`${base}/api/components/${encodeURIComponent(name)}${q}`, { method: "DELETE", timeoutMs });
 }
-
 // Stop driving ONE component on this machine, or start again. The one verb on
 // this layer that touches no bytes: the component stays installed, stays whole
 // and stays LISTED, and the only thing that changes is whether this machine
@@ -858,67 +864,66 @@ async function hostRemove(base, name, version = "", timeoutMs = REQUEST_TIMEOUT_
 // a failure: the request is already true there). A refusal arrives as the host's
 // own sentence, thrown.
 async function hostSetDisabled(base, name, disabled, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const verb = disabled ? "disable" : "enable";
-  return hostJSON(`${base}/api/components/${encodeURIComponent(name)}/${verb}`, { method: "POST", timeoutMs });
+    const verb = disabled ? "disable" : "enable";
+    return hostJSON(`${base}/api/components/${encodeURIComponent(name)}/${verb}`, { method: "POST", timeoutMs });
 }
-
 // The manifest ONE install request carries: the component's own declaration with
 // the install facts on top — a host that never saw the checkout still receives a
 // component it can drive, because the declaration rode with the request.
 // `artifact` is the artifact's own file name (the receiving host reads its shape
 // from the suffix: an archive is unpacked, anything else is one executable).
 function manifestFor(spec) {
-  return {
-    ...(spec.declaration || {}),
-    name: spec.name,
-    version: spec.version,
-    digest: spec.digest,
-    artifact: spec.path ? path.basename(spec.path) : spec.artifact || "",
-  };
+    return {
+        ...(spec.declaration || {}),
+        name: spec.name,
+        version: spec.version,
+        digest: spec.digest,
+        artifact: spec.path ? path.basename(spec.path) : spec.artifact || "",
+    };
 }
-
 // The install request itself, whichever way the bytes travel: one endpoint, one
 // header, one answer — the host's verdict, or the host's own sentence thrown so
 // the page can quote the machine that refused.
 async function postInstall(base, manifest, body, timeoutMs) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const r = await fetch(`${base}/api/components/install`, {
-      method: "POST",
-      headers: {
-        [MANIFEST_HEADER]: Buffer.from(JSON.stringify(manifest), "utf8").toString("base64"),
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(body.length),
-      },
-      body,
-      signal: ctl.signal,
-    });
-    const text = await r.text();
-    let out = {};
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
     try {
-      out = JSON.parse(text);
-    } catch (e) {
-      /* a non-JSON body is reported below as the status */
+        const r = await fetch(`${base}/api/components/install`, {
+            method: "POST",
+            headers: {
+                [MANIFEST_HEADER]: Buffer.from(JSON.stringify(manifest), "utf8").toString("base64"),
+                "Content-Type": "application/octet-stream",
+                "Content-Length": String(body.length),
+            },
+            body,
+            signal: ctl.signal,
+        });
+        const text = await r.text();
+        let out = {};
+        try {
+            out = JSON.parse(text);
+        }
+        catch (e) {
+            /* a non-JSON body is reported below as the status */
+        }
+        if (!r.ok)
+            throw new Error(out.error || `install refused (${r.status})`);
+        return out;
     }
-    if (!r.ok) throw new Error(out.error || `install refused (${r.status})`);
-    return out;
-  } finally {
-    clearTimeout(t);
-  }
+    finally {
+        clearTimeout(t);
+    }
 }
-
 // The fallback shape: the bytes go in the body, because this machine is the only
 // place they are (`api/components.js` decides with `artifactFor`: a checkout, or a
 // prebuilt artifact beside the app). A release's artifact does NOT come through
 // here unless a caller has it locally — the target machine fetches its own.
 async function upload(base, spec, timeoutMs) {
-  if (!spec.path) {
-    throw new Error(`this client holds no bytes for ${spec.name} to upload: it has neither a local artifact nor a URL`);
-  }
-  return postInstall(base, manifestFor(spec), fs.readFileSync(spec.path), timeoutMs);
+    if (!spec.path) {
+        throw new Error(`this client holds no bytes for ${spec.name} to upload: it has neither a local artifact nor a URL`);
+    }
+    return postInstall(base, manifestFor(spec), fs.readFileSync(spec.path), timeoutMs);
 }
-
 // The default shape: the request carries NO bytes and
 // names the URL the release published, and the machine that will RUN the
 // component fetches it for itself. That machine is the one that needs the bytes,
@@ -940,56 +945,60 @@ async function upload(base, spec, timeoutMs) {
 // take their own timeout each time, and a page that shows nothing for two minutes
 // is indistinguishable from a page that is broken.
 async function fetchInstall(base, spec, timeoutMs, { mirrorFallback = null, via = "", onRetry = null } = {}) {
-  const list = mirrorFallback === false ? [] : Array.isArray(mirrorFallback) ? mirrorFallback : spec.mirrors || [];
-  // A URL already under a prefix is not prefixed again (that URL is served by
-  // nobody), which is also what keeps an explicit source_mirror from stacking.
-  const already = mirrors.viaPrefix(spec.url);
-  const places = [{ prefix: via || already, url: spec.url }];
-  if (!already) {
-    for (const prefix of list) {
-      if (!prefix || prefix === via) continue;
-      const url = mirrored(spec.url, prefix);
-      if (url !== spec.url) places.push({ prefix, url });
+    const list = mirrorFallback === false ? [] : Array.isArray(mirrorFallback) ? mirrorFallback : spec.mirrors || [];
+    // A URL already under a prefix is not prefixed again (that URL is served by
+    // nobody), which is also what keeps an explicit source_mirror from stacking.
+    const already = mirrors.viaPrefix(spec.url);
+    const places = [{ prefix: via || already, url: spec.url }];
+    if (!already) {
+        for (const prefix of list) {
+            if (!prefix || prefix === via)
+                continue;
+            const url = mirrored(spec.url, prefix);
+            if (url !== spec.url)
+                places.push({ prefix, url });
+        }
     }
-  }
-  let first = ""; // what the release's own URL said: the reason this loop exists
-  const tried = []; // the prefixes that did not answer either
-  for (let i = 0; i < places.length; i++) {
-    const place = places[i];
-    const manifest = { ...manifestFor(spec), [ARTIFACT_URL_FIELD]: place.url };
-    try {
-      const out = await postInstall(base, manifest, Buffer.alloc(0), timeoutMs);
-      return place.prefix ? { ...out, via: place.prefix } : out;
-    } catch (e) {
-      const reason = (e && e.message) || String(e);
-      if (i === 0) first = reason;
-      else tried.push(place.prefix);
-      const more = i < places.length - 1;
-      if (!more || !mirrors.looksLikeNetwork(reason)) {
-        // Nothing further to try, or nothing further worth trying: an answer is
-        // the host's verdict on the bytes, and it goes back as the host wrote it
-        // (the one exception is a first attempt that failed in the network and
-        // was followed by mirrors — then the answer has to carry all of it).
-        throw new Error(tried.length ? coveredFailure(first, tried, reason) : reason);
-      }
-      if (onRetry) onRetry(place.prefix || places[i + 1].prefix, reason);
+    let first = ""; // what the release's own URL said: the reason this loop exists
+    const tried = []; // the prefixes that did not answer either
+    for (let i = 0; i < places.length; i++) {
+        const place = places[i];
+        const manifest = { ...manifestFor(spec), [ARTIFACT_URL_FIELD]: place.url };
+        try {
+            const out = await postInstall(base, manifest, Buffer.alloc(0), timeoutMs);
+            return place.prefix ? { ...out, via: place.prefix } : out;
+        }
+        catch (e) {
+            const reason = (e && e.message) || String(e);
+            if (i === 0)
+                first = reason;
+            else
+                tried.push(place.prefix);
+            const more = i < places.length - 1;
+            if (!more || !mirrors.looksLikeNetwork(reason)) {
+                // Nothing further to try, or nothing further worth trying: an answer is
+                // the host's verdict on the bytes, and it goes back as the host wrote it
+                // (the one exception is a first attempt that failed in the network and
+                // was followed by mirrors — then the answer has to carry all of it).
+                throw new Error(tried.length ? coveredFailure(first, tried, reason) : reason);
+            }
+            if (onRetry)
+                onRetry(place.prefix || places[i + 1].prefix, reason);
+        }
     }
-  }
-  // unreachable: the loop returns or throws on its last place
-  throw new Error(first || "the install produced no answer");
+    // unreachable: the loop returns or throws on its last place
+    throw new Error(first || "the install produced no answer");
 }
-
 // What a page shows when the release's own URL could not be reached AND the
 // mirrors did not answer either: the failure that started it, the number of other
 // places this machine tried, and the last thing one of them said. A single
 // sentence on purpose — the plugin page has one row to draw it in — and it keeps
 // the host's own words at both ends.
 function coveredFailure(first, tried, last) {
-  const n = tried.length;
-  const where = `${n} mirror${n === 1 ? "" : "s"} (${tried.join(", ")})`;
-  return `${first} — and not through ${where} either: the last one said ${last}`;
+    const n = tried.length;
+    const where = `${n} mirror${n === 1 ? "" : "s"} (${tried.join(", ")})`;
+    return `${first} — and not through ${where} either: the last one said ${last}`;
 }
-
 // ---- where a component goes ------------------------------------------------
 //
 // A declaration already answers this, and it is the ONLY thing that answers it:
@@ -1032,46 +1041,44 @@ function coveredFailure(first, tried, last) {
 // declaration was not read yet OR it contradicts itself, and `error` says which.
 const PLACE_CLIENT = "client";
 const PLACE_SESSION = "session";
-
 // What ONE declaration contributes, from the declaration itself: a checkout's own
 // component.json, or the declaration asset a release pinned (fetched and measured
 // by `remoteDeclaration`). `null` means there was no declaration to read.
 function declaredContribution(spec) {
-  const declared = (spec && spec.declaration) || null;
-  if (!declared || typeof declared !== "object") return null;
-  const launch = declared.launch && typeof declared.launch === "object" ? declared.launch : null;
-  return {
-    // presence, not truthiness: `service: {}` is a service (the host reads it the
-    // same way, agent/tools/catalog.py Component.service)
-    service: declared.service !== undefined && declared.service !== null,
-    launch: Boolean(launch && (launch.argv || launch.entry || launch.binary || launch.importable)),
-    entry: typeof declared.entry === "string" ? declared.entry : "",
-  };
-}
-
-function destinationOf(spec) {
-  const name = (spec && spec.name) || "this component";
-  const what = declaredContribution(spec);
-  if (!what) return { place: null, read: false, error: "" };
-  const starts = what.service || what.launch;
-  if (what.entry && starts) {
+    const declared = (spec && spec.declaration) || null;
+    if (!declared || typeof declared !== "object")
+        return null;
+    const launch = declared.launch && typeof declared.launch === "object" ? declared.launch : null;
     return {
-      place: null,
-      read: true,
-      error:
-        `${name} declares \`entry\` and ${what.service ? "\`service\`" : "\`launch\`"}: \`entry\` is the module this client ` +
-        `runs for a component with no process here, and that one starts a process where the session's commands run`,
+        // presence, not truthiness: `service: {}` is a service (the host reads it the
+        // same way, agent/tools/catalog.py Component.service)
+        service: declared.service !== undefined && declared.service !== null,
+        launch: Boolean(launch && (launch.argv || launch.entry || launch.binary || launch.importable)),
+        entry: typeof declared.entry === "string" ? declared.entry : "",
     };
-  }
-  if (!starts && !what.entry) {
-    // no process anywhere: legal, and not this machine's to start (invariant I5).
-    // It is still this CLIENT's to hold — what it contributes is read where the
-    // loop runs, and the loop is the frontend's (decision D1 in TODO.md).
-    return { place: PLACE_CLIENT, read: true, error: null };
-  }
-  return { place: starts ? PLACE_SESSION : PLACE_CLIENT, read: true, error: null };
 }
-
+function destinationOf(spec) {
+    const name = (spec && spec.name) || "this component";
+    const what = declaredContribution(spec);
+    if (!what)
+        return { place: null, read: false, error: "" };
+    const starts = what.service || what.launch;
+    if (what.entry && starts) {
+        return {
+            place: null,
+            read: true,
+            error: `${name} declares \`entry\` and ${what.service ? "\`service\`" : "\`launch\`"}: \`entry\` is the module this client ` +
+                `runs for a component with no process here, and that one starts a process where the session's commands run`,
+        };
+    }
+    if (!starts && !what.entry) {
+        // no process anywhere: legal, and not this machine's to start (invariant I5).
+        // It is still this CLIENT's to hold — what it contributes is read where the
+        // loop runs, and the loop is the frontend's (decision D1 in TODO.md).
+        return { place: PLACE_CLIENT, read: true, error: null };
+    }
+    return { place: starts ? PLACE_SESSION : PLACE_CLIENT, read: true, error: null };
+}
 // The reverse of the pass: an install session also LETS GO of what this machine
 // holds when the roster no longer asks it to hold it.
 //
@@ -1105,139 +1112,147 @@ function destinationOf(spec) {
 // component something is running refuses in its own sentence, which lands in
 // `errors` and leaves it installed.
 async function retireComponents(base, have, known, out, say, deadline) {
-  if (!known.specs.length || known.errors.length) return;
-  const asked = new Map(); // name -> the place the roster asks for (null: no verdict)
-  for (const spec of known.specs) asked.set(spec.name, destinationOf(spec).place);
-  for (const held of have) {
-    if (!held || !held.name) continue;
-    let reason;
-    if (!asked.has(held.name)) reason = "the market no longer lists it";
-    else if (asked.get(held.name) === PLACE_CLIENT) reason = "the market's copy belongs to the client";
-    else continue; // asked for here, or no verdict to delete by
-    const left = deadline - Date.now();
-    if (left <= 0) {
-      out.deferred.push(held.name);
-      continue;
+    if (!known.specs.length || known.errors.length)
+        return;
+    const asked = new Map(); // name -> the place the roster asks for (null: no verdict)
+    for (const spec of known.specs)
+        asked.set(spec.name, destinationOf(spec).place);
+    for (const held of have) {
+        if (!held || !held.name)
+            continue;
+        let reason;
+        if (!asked.has(held.name))
+            reason = "the market no longer lists it";
+        else if (asked.get(held.name) === PLACE_CLIENT)
+            reason = "the market's copy belongs to the client";
+        else
+            continue; // asked for here, or no verdict to delete by
+        const left = deadline - Date.now();
+        if (left <= 0) {
+            out.deferred.push(held.name);
+            continue;
+        }
+        const version = held.version || "";
+        try {
+            const res = await hostRemove(base, held.name, "", Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
+            out.retired.push({ name: held.name, version, reason, status: (res && res.status) || "removed" });
+            say(`${held.name}${version ? " " + version : ""} let go: ${reason}`);
+        }
+        catch (e) {
+            out.errors.push({ name: held.name, reason: (e && e.message) || String(e) });
+            say(`${held.name} could not be let go: ${e && e.message}`);
+        }
     }
-    const version = held.version || "";
-    try {
-      const res = await hostRemove(base, held.name, "", Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
-      out.retired.push({ name: held.name, version, reason, status: (res && res.status) || "removed" });
-      say(`${held.name}${version ? " " + version : ""} let go: ${reason}`);
-    } catch (e) {
-      out.errors.push({ name: held.name, reason: (e && e.message) || String(e) });
-      say(`${held.name} could not be let go: ${e && e.message}`);
-    }
-  }
 }
-
 // Make sure `base`'s machine holds every component this client can give it —
 // and holds nothing the roster has moved away from (`retireComponents`).
 // Never throws: the returned summary is what the caller logs, and components
 // that were deferred or refused simply stay absent — the host then offers no
 // tool for them, because it has no implementation of its own to fall back to.
 async function ensureComponents(base, { checkout = true, index = null, progress = null, budgetMs = BUDGET_MS } = {}) {
-  const out = { current: [], installed: [], skipped: [], deferred: [], retired: [], errors: [] };
-  const say = (msg) => {
-    if (progress) progress(msg);
-  };
-  let have;
-  try {
-    have = await hostInventory(base);
-  } catch (e) {
-    out.errors.push({ name: "", reason: `the host did not answer: ${e && e.message}` });
+    const out = { current: [], installed: [], skipped: [], deferred: [], retired: [], errors: [] };
+    const say = (msg) => {
+        if (progress)
+            progress(msg);
+    };
+    let have;
+    try {
+        have = await hostInventory(base);
+    }
+    catch (e) {
+        out.errors.push({ name: "", reason: `the host did not answer: ${e && e.message}` });
+        return out;
+    }
+    const known = await componentSpecs({ index });
+    out.errors.push(...known.errors);
+    const deadline = Date.now() + budgetMs;
+    // before installing: a machine that holds a retired form of a name must stop
+    // holding it first, or the pass would give one implementation two homes (I4)
+    await retireComponents(base, have, known, out, say, deadline);
+    for (const spec of known.specs) {
+        // the automatic pass is about ONE machine (the session machine): a component
+        // whose declaration puts it on this client is not its business, and sending
+        // those bytes here would give one implementation two homes (destinationOf).
+        // Not an error and not a deferral: nothing was asked of this machine.
+        const place = destinationOf(spec);
+        if (place.place !== PLACE_SESSION) {
+            out.skipped.push(spec.name);
+            // "not this machine's" has two shapes: a declaration that names the client,
+            // and one that names no place at all (place: null — reported as `error` when
+            // the declaration contradicts itself, silent when it simply names none)
+            const why = place.error ||
+                (place.place === PLACE_CLIENT ? "its declaration puts it on the client" : "its declaration names no place this machine holds");
+            say(`${spec.name} is not for this machine: ${why}`);
+            continue;
+        }
+        let file;
+        try {
+            file = await artifactFor(spec, { checkout });
+        }
+        catch (e) {
+            out.errors.push({ name: spec.name, reason: (e && e.message) || String(e) });
+            say(`${spec.name} failed: ${e && e.message}`);
+            continue;
+        }
+        if (!file) {
+            out.skipped.push(spec.name);
+            continue;
+        }
+        const held = have.find((h) => h.name === spec.name);
+        if (held && held.version === file.version && held.digest === file.digest) {
+            out.current.push(spec.name);
+            continue;
+        }
+        const left = deadline - Date.now();
+        if (left <= 0) {
+            out.deferred.push(spec.name);
+            continue;
+        }
+        // the machine that will RUN it fetches its own bytes when this client has
+        // none; only bytes that exist here and nowhere else travel in the body
+        const send = file.path ? upload : fetchInstall;
+        try {
+            const res = await send(base, file, Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
+            (res.status === "current" ? out.current : out.installed).push(spec.name);
+            say(`${spec.name} ${res.status}`);
+        }
+        catch (e) {
+            out.errors.push({ name: spec.name, reason: e && e.message });
+            say(`${spec.name} failed: ${e && e.message}`);
+        }
+    }
     return out;
-  }
-  const known = await componentSpecs({ index });
-  out.errors.push(...known.errors);
-  const deadline = Date.now() + budgetMs;
-  // before installing: a machine that holds a retired form of a name must stop
-  // holding it first, or the pass would give one implementation two homes (I4)
-  await retireComponents(base, have, known, out, say, deadline);
-  for (const spec of known.specs) {
-    // the automatic pass is about ONE machine (the session machine): a component
-    // whose declaration puts it on this client is not its business, and sending
-    // those bytes here would give one implementation two homes (destinationOf).
-    // Not an error and not a deferral: nothing was asked of this machine.
-    const place = destinationOf(spec);
-    if (place.place !== PLACE_SESSION) {
-      out.skipped.push(spec.name);
-      // "not this machine's" has two shapes: a declaration that names the client,
-      // and one that names no place at all (place: null — reported as `error` when
-      // the declaration contradicts itself, silent when it simply names none)
-      const why =
-        place.error ||
-        (place.place === PLACE_CLIENT ? "its declaration puts it on the client" : "its declaration names no place this machine holds");
-      say(`${spec.name} is not for this machine: ${why}`);
-      continue;
-    }
-    let file;
-    try {
-      file = await artifactFor(spec, { checkout });
-    } catch (e) {
-      out.errors.push({ name: spec.name, reason: (e && e.message) || String(e) });
-      say(`${spec.name} failed: ${e && e.message}`);
-      continue;
-    }
-    if (!file) {
-      out.skipped.push(spec.name);
-      continue;
-    }
-    const held = have.find((h) => h.name === spec.name);
-    if (held && held.version === file.version && held.digest === file.digest) {
-      out.current.push(spec.name);
-      continue;
-    }
-    const left = deadline - Date.now();
-    if (left <= 0) {
-      out.deferred.push(spec.name);
-      continue;
-    }
-    // the machine that will RUN it fetches its own bytes when this client has
-    // none; only bytes that exist here and nowhere else travel in the body
-    const send = file.path ? upload : fetchInstall;
-    try {
-      const res = await send(base, file, Math.max(Math.min(left, REQUEST_TIMEOUT_MS), 1000));
-      (res.status === "current" ? out.current : out.installed).push(spec.name);
-      say(`${spec.name} ${res.status}`);
-    } catch (e) {
-      out.errors.push({ name: spec.name, reason: e && e.message });
-      say(`${spec.name} failed: ${e && e.message}`);
-    }
-  }
-  return out;
 }
-
 module.exports = {
-  ensureComponents,
-  artifactFor,
-  installVersion,
-  componentSpecs,
-  readManifest,
-  readIndex,
-  marketEntries,
-  entryManifest,
-  remoteDeclaration,
-  specForName,
-  downloadPinned,
-  localArtifact,
-  checkoutArtifact,
-  checkoutComponents,
-  destinationOf,
-  declaredContribution,
-  PLACE_CLIENT,
-  PLACE_SESSION,
-  manifestFor,
-  hostInventory,
-  hostVersions,
-  hostRemove,
-  hostSetDisabled,
-  upload,
-  fetchInstall,
-  CACHE,
-  REQUEST_TIMEOUT_MS,
-  MANIFEST_ATTEMPTS,
-  MANIFEST_TIMEOUT_MS,
-  INDEX_URL,
-  INDEX_SCHEMA,
+    ensureComponents,
+    artifactFor,
+    installVersion,
+    componentSpecs,
+    readManifest,
+    readIndex,
+    marketEntries,
+    entryManifest,
+    remoteDeclaration,
+    specForName,
+    downloadPinned,
+    localArtifact,
+    checkoutArtifact,
+    checkoutComponents,
+    destinationOf,
+    declaredContribution,
+    PLACE_CLIENT,
+    PLACE_SESSION,
+    manifestFor,
+    hostInventory,
+    hostVersions,
+    hostRemove,
+    hostSetDisabled,
+    upload,
+    fetchInstall,
+    CACHE,
+    REQUEST_TIMEOUT_MS,
+    MANIFEST_ATTEMPTS,
+    MANIFEST_TIMEOUT_MS,
+    INDEX_URL,
+    INDEX_SCHEMA,
 };

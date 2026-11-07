@@ -1,3 +1,6 @@
+// GENERATED FILE — do not edit; edit src/host/plugin-link.ts and run `npm run build:host`.
+// source sha256: db84f375cd20176fe3ce763c9bdf1ad5d34b6c3c9d20306edc4453ba0ef0c170
+
 // The client's plugin PATH: the listener, the reverse channel it answers on, and
 // the push that tells a session what this client runs.
 //
@@ -33,99 +36,91 @@
 //
 // It is deliberately NOT part of the supervisor: a frontend component is managed
 // by the frontend, and the session child is the process that holds tool state.
-
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
 const http = require("http");
-
 const { registerChannel, channels, tunnelLog, state: tunnelState } = require("./tunnel-core");
 const { createPluginServer } = require("./plugin-server");
-
 // A push is a few hundred bytes of JSON to a loopback port of our own session.
 // If that does not answer in five seconds, the session is not there — retrying
 // inside this call would only make the caller wait for the same silence again.
 const PUSH_TIMEOUT_MS = 5000;
-
 // One object, one lifetime (the app's), because the listener and the row outlive
 // any single tunnel: only the far-side PORT and the session bases change.
 const state = {
-  server: null, // the /call listener (ui/plugin-server.js)
-  chan: null, // the tunnel-core row that routes the far side's connection to it
-  client: null, // the ssh client the forward was installed for
-  installing: null, // the in-flight install, so ten asks are one forward
-  installingFor: null, // …and which client it is about
-  bases: new Set(), // session bases this client serves (/api/channel of each)
-  told: new Map(), // base -> the declaration JSON it was last told
+    server: null, // the /call listener (ui/plugin-server.js)
+    chan: null, // the tunnel-core row that routes the far side's connection to it
+    client: null, // the ssh client the forward was installed for
+    installing: null, // the in-flight install, so ten asks are one forward
+    installingFor: null, // …and which client it is about
+    bases: new Set(), // session bases this client serves (/api/channel of each)
+    told: new Map(), // base -> the declaration JSON it was last told
 };
-
 function log(...args) {
-  tunnelLog("[plugin]", ...args);
+    tunnelLog("[plugin]", ...args);
 }
-
 // The session's own local forward is always a loopback http address (`wb.url` is
 // `http://127.0.0.1:<port>` for a local session and for a tunnelled one alike).
 // The push carries the token, so this is also the fence around it: a base that is
 // not that is a bug or a misconfiguration, and it must not be the thing that
 // sends a secret onto the internet.
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-
 // One HTTP call at a session base: the answer body as JSON, or a thrown sentence.
 // Never through the proxy stack: this is loopback at both ends (the session base
 // is a local forward), and a system proxy would send it to the internet.
 function session(method, base, payload) {
-  return new Promise((resolve, reject) => {
-    let url;
-    try {
-      url = new URL(String(base).replace(/\/+$/, "") + "/api/channel");
-    } catch (e) {
-      reject(new Error(`not a session base: ${JSON.stringify(base)}`));
-      return;
-    }
-    if (url.protocol !== "http:" || !LOOPBACK.has(url.hostname)) {
-      reject(new Error(`not a session base: ${JSON.stringify(base)} is not a loopback http address`));
-      return;
-    }
-    const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload), "utf8");
-    const req = http.request(
-      {
-        host: url.hostname,
-        port: url.port || 80,
-        path: url.pathname,
-        method,
-        headers: body
-          ? { "Content-Type": "application/json", "Content-Length": body.length }
-          : {},
-        timeout: PUSH_TIMEOUT_MS,
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          let parsed = null;
-          try {
-            parsed = text ? JSON.parse(text) : null;
-          } catch (e) {
-            parsed = null;
-          }
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            const why = parsed && parsed.error ? parsed.error : `HTTP ${res.statusCode}`;
-            reject(new Error(why));
+    return new Promise((resolve, reject) => {
+        let url;
+        try {
+            url = new URL(String(base).replace(/\/+$/, "") + "/api/channel");
+        }
+        catch (e) {
+            reject(new Error(`not a session base: ${JSON.stringify(base)}`));
             return;
-          }
-          resolve(parsed || {});
+        }
+        if (url.protocol !== "http:" || !LOOPBACK.has(url.hostname)) {
+            reject(new Error(`not a session base: ${JSON.stringify(base)} is not a loopback http address`));
+            return;
+        }
+        const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload), "utf8");
+        const req = http.request({
+            host: url.hostname,
+            port: url.port || 80,
+            path: url.pathname,
+            method,
+            headers: body
+                ? { "Content-Type": "application/json", "Content-Length": body.length }
+                : {},
+            timeout: PUSH_TIMEOUT_MS,
+        }, (res) => {
+            const chunks = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () => {
+                const text = Buffer.concat(chunks).toString("utf8");
+                let parsed = null;
+                try {
+                    parsed = text ? JSON.parse(text) : null;
+                }
+                catch (e) {
+                    parsed = null;
+                }
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    const why = parsed && parsed.error ? parsed.error : `HTTP ${res.statusCode}`;
+                    reject(new Error(why));
+                    return;
+                }
+                resolve(parsed || {});
+            });
         });
-      }
-    );
-    req.setTimeout(PUSH_TIMEOUT_MS, () => req.destroy(new Error(`the session did not answer within ${PUSH_TIMEOUT_MS}ms`)));
-    // A dead forward fails the request itself; the sentence is all the caller
-    // needs, and an unhandled 'error' would be an uncaught main-process throw.
-    req.on("error", (e) => reject(new Error(String((e && e.message) || e))));
-    if (body) req.write(body);
-    req.end();
-  });
+        req.setTimeout(PUSH_TIMEOUT_MS, () => req.destroy(new Error(`the session did not answer within ${PUSH_TIMEOUT_MS}ms`)));
+        // A dead forward fails the request itself; the sentence is all the caller
+        // needs, and an unhandled 'error' would be an uncaught main-process throw.
+        req.on("error", (e) => reject(new Error(String((e && e.message) || e))));
+        if (body)
+            req.write(body);
+        req.end();
+    });
 }
-
 // What a session should be told right now, as the exact bytes that would be
 // pushed. Compared as JSON because the push is a replacement: "the same set" has
 // to mean the same bytes, or every sync would be a new generation.
@@ -138,55 +133,54 @@ function session(method, base, payload) {
 // is `state.client`: set when a forward is installed for a live ssh client,
 // cleared by stop() and by the tunnel's own hopLost().
 const FOREIGN_FS = "foreign-fs";
-
 function snapshot() {
-  const components = state.server ? state.server.declarations() : [];
-  if (state.client) return components;
-  return components.filter((c) => c.subject !== FOREIGN_FS);
+    const components = state.server ? state.server.declarations() : [];
+    if (state.client)
+        return components;
+    return components.filter((c) => c.subject !== FOREIGN_FS);
 }
-
 async function pushTo(base) {
-  const components = snapshot();
-  const text = JSON.stringify(components);
-  if (state.told.get(base) === text) return { base, status: "unchanged" };
-  if (!state.chan || state.chan.remote() == null) {
-    // no far-side port (the forward never landed): say nothing rather than name
-    // a port that would answer nothing
-    return { base, status: "no-forward" };
-  }
-  if (!components.length) {
-    const answer = await session("DELETE", base);
+    const components = snapshot();
+    const text = JSON.stringify(components);
+    if (state.told.get(base) === text)
+        return { base, status: "unchanged" };
+    if (!state.chan || state.chan.remote() == null) {
+        // no far-side port (the forward never landed): say nothing rather than name
+        // a port that would answer nothing
+        return { base, status: "no-forward" };
+    }
+    if (!components.length) {
+        const answer = await session("DELETE", base);
+        state.told.set(base, text);
+        log(`nothing to declare to ${base}; the session was told so`);
+        return { base, status: "cleared", answer };
+    }
+    const answer = await session("POST", base, {
+        port: state.chan.remote(),
+        token: state.server.token,
+        components,
+    });
     state.told.set(base, text);
-    log(`nothing to declare to ${base}; the session was told so`);
-    return { base, status: "cleared", answer };
-  }
-  const answer = await session("POST", base, {
-    port: state.chan.remote(),
-    token: state.server.token,
-    components,
-  });
-  state.told.set(base, text);
-  log(`declared ${components.map((c) => c.name).join(", ")} to ${base} on far-side port ${state.chan.remote()}`);
-  return { base, status: "pushed", answer };
+    log(`declared ${components.map((c) => c.name).join(", ")} to ${base} on far-side port ${state.chan.remote()}`);
+    return { base, status: "pushed", answer };
 }
-
 // Every session this client serves, brought up to date. Failures are per base
 // and never fatal: one unreachable session must not stop this client from
 // serving the others, and an unpushed base is retried on the next sync.
 async function sync() {
-  const results = [];
-  for (const base of [...state.bases]) {
-    try {
-      results.push(await pushTo(base));
-    } catch (e) {
-      state.told.delete(base); // the next sync tries again
-      results.push({ base, status: "failed", error: String((e && e.message) || e) });
-      log(`declaring to ${base} failed: ${(e && e.message) || e}`);
+    const results = [];
+    for (const base of [...state.bases]) {
+        try {
+            results.push(await pushTo(base));
+        }
+        catch (e) {
+            state.told.delete(base); // the next sync tries again
+            results.push({ base, status: "failed", error: String((e && e.message) || e) });
+            log(`declaring to ${base} failed: ${(e && e.message) || e}`);
+        }
     }
-  }
-  return results;
+    return results;
 }
-
 // Bring the whole path up for `client`: the listener, the row, the far-side port,
 // and every session this client serves. It is not called when a hop comes up, and
 // that is deliberate — the hop's job is the hop, and asking the far side for a
@@ -202,52 +196,54 @@ async function sync() {
 // it as abandoned), so the stale one must not clear the new one's slot on its way
 // out: that would let a third caller start a third install on one row.
 function start(client) {
-  if (!client) return Promise.resolve(false);
-  if (state.installing && state.installingFor === client) return state.installing;
-  state.client = client;
-  const run = async () => {
-    try {
-      if (!state.server) {
-        // `host` is the client plugin domain the APP owns (ui/main.js): the page
-        // installs into it through the components view, and this server is what
-        // declares what it holds. One table, one writer, one reader — a server
-        // that made its own would declare a domain nothing was ever installed
-        // into, and the page and the session would disagree about what exists.
-        state.server = createPluginServer({ log, host: host || undefined });
-        await state.server.listen();
-        log(`listening 127.0.0.1:${state.server.port()} for this client's plugins`);
-      }
-      if (!state.chan) {
-        // No contract port: unlike the model path, nothing on the far side is
-        // configured with this number in advance, so the far side always picks
-        // and there is nothing to collide with. The row exists only while a
-        // listener does — a row with nothing behind it would route a connection
-        // into a refusal.
-        state.chan = registerChannel("plugin", {
-          local: () => (state.server ? state.server.port() : null),
-          what: "client plugins",
-        });
-      }
-      const { installReverseForward } = require("./tunnel-connect"); // lazy: tunnel-connect is this file's sibling, not its dependency
-      const ok = await installReverseForward(client, state.chan);
-      if (!ok) {
-        log("the far side would not forward a port for this client's plugins");
-        return false;
-      }
-      await sync();
-      return true;
-    } finally {
-      if (state.installing === run) {
-        state.installing = null;
-        state.installingFor = null;
-      }
-    }
-  };
-  state.installing = run();
-  state.installingFor = client;
-  return state.installing;
+    if (!client)
+        return Promise.resolve(false);
+    if (state.installing && state.installingFor === client)
+        return state.installing;
+    state.client = client;
+    const run = async () => {
+        try {
+            if (!state.server) {
+                // `host` is the client plugin domain the APP owns (ui/main.js): the page
+                // installs into it through the components view, and this server is what
+                // declares what it holds. One table, one writer, one reader — a server
+                // that made its own would declare a domain nothing was ever installed
+                // into, and the page and the session would disagree about what exists.
+                state.server = createPluginServer({ log, host: host || undefined });
+                await state.server.listen();
+                log(`listening 127.0.0.1:${state.server.port()} for this client's plugins`);
+            }
+            if (!state.chan) {
+                // No contract port: unlike the model path, nothing on the far side is
+                // configured with this number in advance, so the far side always picks
+                // and there is nothing to collide with. The row exists only while a
+                // listener does — a row with nothing behind it would route a connection
+                // into a refusal.
+                state.chan = registerChannel("plugin", {
+                    local: () => (state.server ? state.server.port() : null),
+                    what: "client plugins",
+                });
+            }
+            const { installReverseForward } = require("./tunnel-connect"); // lazy: tunnel-connect is this file's sibling, not its dependency
+            const ok = await installReverseForward(client, state.chan);
+            if (!ok) {
+                log("the far side would not forward a port for this client's plugins");
+                return false;
+            }
+            await sync();
+            return true;
+        }
+        finally {
+            if (state.installing === run) {
+                state.installing = null;
+                state.installingFor = null;
+            }
+        }
+    };
+    state.installing = run();
+    state.installingFor = client;
+    return state.installing;
 }
-
 // A window's session is ready: remember where it is and tell it what we run.
 // The base is kept even while a push fails, so the next sync retries it.
 //
@@ -263,61 +259,59 @@ function start(client) {
 // exists instead of a declaration naming nothing. The retry is bounded by the
 // installer's own clocks, and it joins whatever install is already in flight.
 async function offer(base) {
-  if (!base) return [];
-  state.bases.add(String(base));
-  const client = tunnelState.sshClient;
-  if (client && (!state.chan || state.chan.remote() == null)) {
-    await start(client);
-  }
-  return sync();
+    if (!base)
+        return [];
+    state.bases.add(String(base));
+    const client = tunnelState.sshClient;
+    if (client && (!state.chan || state.chan.remote() == null)) {
+        await start(client);
+    }
+    return sync();
 }
-
 // That session is going away (a window closed, the app is quitting). The session
 // child's channel is memory, so a DELETE is courtesy: it makes the next call
 // read "this host has no channel" instead of dialling a forward that is gone.
 async function forget(base) {
-  state.bases.delete(String(base));
-  state.told.delete(String(base));
-  try {
-    await session("DELETE", base);
-  } catch (e) {
-    log(`clearing ${base} failed (the session is probably gone already): ${(e && e.message) || e}`);
-  }
+    state.bases.delete(String(base));
+    state.told.delete(String(base));
+    try {
+        await session("DELETE", base);
+    }
+    catch (e) {
+        log(`clearing ${base} failed (the session is probably gone already): ${(e && e.message) || e}`);
+    }
 }
-
 // The install set changed (a plugin was installed, stopped or removed): re-declare
 // to everyone. A stopped plugin leaves the set, which is what makes its tools
 // disappear from the session's surface.
 function refresh() {
-  return sync();
+    return sync();
 }
-
 async function stop() {
-  const bases = [...state.bases];
-  state.bases.clear();
-  state.told.clear();
-  await Promise.all(bases.map((base) => forget(base)));
-  if (state.chan) {
-    channels.delete(state.chan.name);
-    state.chan = null;
-  }
-  const server = state.server;
-  state.server = null;
-  state.client = null;
-  state.installing = null;
-  state.installingFor = null;
-  if (server) await server.stop();
+    const bases = [...state.bases];
+    state.bases.clear();
+    state.told.clear();
+    await Promise.all(bases.map((base) => forget(base)));
+    if (state.chan) {
+        channels.delete(state.chan.name);
+        state.chan = null;
+    }
+    const server = state.server;
+    state.server = null;
+    state.client = null;
+    state.installing = null;
+    state.installingFor = null;
+    if (server)
+        await server.stop();
 }
-
 // The client plugin domain this path speaks for (ui/plugin-host.js), handed in by
 // the shell that owns it. Absent, the server makes one over its default root —
 // which is what the tests and a host with no components page still want.
 let host = null;
 function useHost(next) {
-  host = next || null;
-  return host;
+    host = next || null;
+    return host;
 }
-
 // What the tunnel calls when its hop dies: the forward is gone, so the far-side
 // port is no longer ours. The listener stays (a re-connect re-uses it) but the
 // row must forget the port it was granted, or the next push would name a dead one.
@@ -329,22 +323,22 @@ function useHost(next) {
 // pushing a new port to a session nobody has re-established, whose answer is
 // silence, once per base, on every sync.
 function hopLost() {
-  state.client = null;
-  if (state.chan) state.chan.setRemote(null);
-  state.bases.clear();
-  state.told.clear(); // a new hop is a new port: the next sync really pushes
+    state.client = null;
+    if (state.chan)
+        state.chan.setRemote(null);
+    state.bases.clear();
+    state.told.clear(); // a new hop is a new port: the next sync really pushes
 }
-
 module.exports = {
-  PUSH_TIMEOUT_MS,
-  state,
-  useHost,
-  start,
-  offer,
-  forget,
-  refresh,
-  stop,
-  hopLost,
-  // exported for the tests: the two halves this file glues
-  snapshot,
+    PUSH_TIMEOUT_MS,
+    state,
+    useHost,
+    start,
+    offer,
+    forget,
+    refresh,
+    stop,
+    hopLost,
+    // exported for the tests: the two halves this file glues
+    snapshot,
 };

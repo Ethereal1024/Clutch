@@ -1,3 +1,6 @@
+// GENERATED FILE — do not edit; edit src/host/plugin-worker.ts and run `npm run build:host`.
+// source sha256: 5ac22ce2c9bc17c8a14fa67b0335d3a916278eb954b8a668972062d10a90f43f
+
 // The runtime for a host that cannot fork: one worker thread per plugin call.
 //
 // ui/plugin-host.js starts a plugin through a `spawn` port and defaults to
@@ -29,20 +32,16 @@
 // The adapter below is deliberately child-LIKE (`.on("message"|"error"|"exit")`,
 // `.send()`, `.kill()`, `.stderr`) instead of a new interface, so plugin-host has
 // one code path and cannot drift into "the phone works differently".
-
 "use strict";
-
+Object.defineProperty(exports, "__esModule", { value: true });
 // Required at load: a node build without worker_threads is a build where this
 // host has no runtime at all, and that must be a sentence at wiring time rather
 // than a mysterious failure at the first tool call.
 const { Worker } = require("worker_threads");
-
 const path = require("path");
-
 // The child entry this module starts: ui/plugin-child.js, resolved from HERE so a
 // phone layout (ui/ copied beside the host) and the repo layout both work.
 const CHILD = path.join(__dirname, "plugin-child.js");
-
 // Start one call's runtime. The shape `plugin-host.call` waits for, no more:
 // messages out, messages in, and a kill that really stops the thread.
 //
@@ -52,22 +51,22 @@ const CHILD = path.join(__dirname, "plugin-child.js");
 // console.log must not land in the app's output); stderr is kept, because it is
 // the only thing left to say why a plugin died before answering.
 function spawnInWorker({ childEntry, env } = {}) {
-  const worker = new Worker(childEntry || CHILD, { env, stdout: true, stderr: true });
-  return {
-    stderr: worker.stderr,
-    send: (message) => worker.postMessage(message),
-    // `terminate()` is async by contract; nobody waits for it — the answer (or the
-    // failure) has already been settled when this is called.
-    kill: () => {
-      try {
-        worker.terminate();
-      } catch (e) {
-        /* already gone */
-      }
-    },
-    on: (event, fn) => worker.on(event, fn),
-    removeAllListeners: (event) => worker.removeAllListeners(event),
-  };
+    const worker = new Worker(childEntry || CHILD, { env, stdout: true, stderr: true });
+    return {
+        stderr: worker.stderr,
+        send: (message) => worker.postMessage(message),
+        // `terminate()` is async by contract; nobody waits for it — the answer (or the
+        // failure) has already been settled when this is called.
+        kill: () => {
+            try {
+                worker.terminate();
+            }
+            catch (e) {
+                /* already gone */
+            }
+        },
+        on: (event, fn) => worker.on(event, fn),
+        removeAllListeners: (event) => worker.removeAllListeners(event),
+    };
 }
-
 module.exports = { CHILD, spawnInWorker };
