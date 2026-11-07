@@ -61,9 +61,10 @@ class EventsMixin:
         gates = self._state.live_gates()
         if not gates or not request_id:
             return self._json({"error": "no pending permission request"}, status=400)
-        # a run's gate and each in-flight tool call's gate (api/exec.py) answer
-        # the same POST: the page does not know which half asked, and the prompt
-        # it is looking at was published under this request_id by exactly one
+        # every in-flight tool call has its own gate (api/exec.py), and they all
+        # answer the same POST: the page does not know which call asked, and the
+        # prompt it is looking at was published under this request_id by exactly
+        # one of them
         for gate in gates:
             if gate.resolve(request_id, allow):
                 return self._json({"status": "ok"})
@@ -290,12 +291,15 @@ class EventsMixin:
             # request_id, which the UI renders in place (or recovers after a
             # reload), and the gate re-announces while they wait (REANNOUNCE_S).
             try:
-                gate = self._state.gate
                 rp = self._state.run_project
-                if gate is not None and not (rp and project_q and rp != project_q):
-                    for request_id, tool, args_repr, reason in gate.pending_asks():
-                        self._write_sse(PermissionRequestEvent(
-                            request_id=request_id, tool=tool, args_repr=args_repr, reason=reason))
+                if not (rp and project_q and rp != project_q):
+                    # every live gate, not just the newest: one turn may have
+                    # several exec calls in flight, and each prompt waits on its
+                    # own gate (api/exec.py registers one per call)
+                    for gate in self._state.live_gates():
+                        for request_id, tool, args_repr, reason in gate.pending_asks():
+                            self._write_sse(PermissionRequestEvent(
+                                request_id=request_id, tool=tool, args_repr=args_repr, reason=reason))
             except host._SSE_ERR:
                 return  # client went away: nothing left to stream
             # then live events
@@ -310,8 +314,17 @@ class EventsMixin:
                         # it missed is in the log it will ask for again
                         break
                     rp = self._state.run_project
-                    if rp and project_q and rp != project_q:
-                        continue  # another window's run: don't leak its events here
+                    if (rp and project_q and rp != project_q
+                            and getattr(ev, "log_offset", None) is None):
+                        # another window's RUN is streaming here: a delta, a
+                        # status, a retry notice belongs to the run that made
+                        # it. Durable records are not that — a line is the
+                        # file's, and the file belongs to whoever watches it:
+                        # the append that publishes them already narrowed the
+                        # fan-out to that project (agent/api/log.py), so an
+                        # offset-bearing event that arrived here is this
+                        # window's to paint.
+                        continue
                     # A run that streams deltas never falls into the idle branch
                     # below, which is the only place the keepalive looks for a
                     # peer that CLOSED its socket. So look here too: the FIN is

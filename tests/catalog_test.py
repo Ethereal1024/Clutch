@@ -68,8 +68,6 @@ from typing import Any
 
 from agent.config import Config
 from agent.core import permission
-from agent.core.context import derive_messages
-from agent.core.lazy import LazyEventLog
 from agent.tools import catalog, components, facts, host, modules, registry, rendezvous
 from agent.tools.envelope import Envelope
 from agent.tools.localshell import local_shell
@@ -442,8 +440,6 @@ def check_prompt_travels_with_the_declaration() -> None:
             str(cfg.read_max_chars) in section and "$config" not in section,
             "and the host's facts are resolved in it, exactly as in a tool description",
         )
-        system = derive_messages(LazyEventLog.in_memory(), cfg, "t", components=section)[0]["content"]
-        check("say_hello is this component's" in system, "the fragment lands in the system prompt")
         check("say_hello" in ToolRegistry(build_tools(cfg)).names(), "and names a tool that is really here")
 
         # a component the host cannot drive says nothing: the same filter that
@@ -475,7 +471,7 @@ def check_prompt_travels_with_the_declaration() -> None:
 def check_host_prompt_names_no_component_tool() -> None:
     """The host's own prompt files name no tool a component owns (audit 6).
 
-    A tool name written into agent/prompts/*.md is a promise about the surface
+    A tool name written into ui/prompts/*.md is a promise about the surface
     THIS host happens to have installed, and it survives the component being
     absent, renamed or replaced — at which point the prompt tells the model about
     a tool it cannot call. The names belong in the components' own fragments
@@ -489,11 +485,35 @@ def check_host_prompt_names_no_component_tool() -> None:
     if not owned:
         print("SKIP: no component checkout beside the repo")
         return
-    prompts = Path(__file__).resolve().parent.parent / "agent" / "prompts"
+    prompts = Path(__file__).resolve().parent.parent / "ui" / "prompts"
     for name in ("system.md", "mode_work.md", "mode_chat.md"):
         text = (prompts / name).read_text(encoding="utf-8")
         leaked = sorted(t for t in owned if re.search(rf"\b{re.escape(t)}\b", text))
         check(not leaked, f"the host's {name} names no component's tool (found {leaked})")
+
+
+def check_host_prompt_offers_recall() -> None:
+    """The host's workflow says WHEN to search the log, not only that it exists.
+
+    The log readers are reachable only if the prompt asks for one at the moment
+    the model plans: an anchor appended after the tool list states a fact ("there
+    is a log"), and a fact at the end of a long prompt is not a trigger. This
+    holds the two places that make it one — the numbered workflow step, and the
+    anchor's own instruction — against a future edit that trims prose.
+
+    Both names are the HOST's own tools (tools/host.py), so unlike a component's
+    they are the host's to name here (check_host_prompt_names_no_component_tool).
+    """
+    prompts = Path(__file__).resolve().parent.parent / "ui" / "prompts"
+    workflow = (prompts / "system.md").read_text(encoding="utf-8")
+    check("grep_memory" in workflow, "the host's workflow names the log reader as a step")
+    check("grep_memory" in workflow.split("2. ", 1)[0], "and that step comes before planning")
+    anchor = (prompts / "recall.md").read_text(encoding="utf-8")
+    check("grep_memory" in anchor and "read_memory" in anchor, "the recall anchor names both readers")
+    check(
+        re.search(r"no save tool|nothing to save", anchor) is not None,
+        "and says there is nothing to save, which is the rule a deleted tool needs",
+    )
 
 
 def check_ui_protocol() -> None:
@@ -1224,6 +1244,7 @@ def main() -> int:
     check_merge_is_named_means_override()
     check_prompt_travels_with_the_declaration()
     check_host_prompt_names_no_component_tool()
+    check_host_prompt_offers_recall()
     check_host_facts_in_schema()
     check_a_component_publishes_the_host_fact()
     check_registration()

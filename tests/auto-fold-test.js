@@ -17,7 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary } = require("./harness.js");
+const { check, summary, uiModules } = require("./harness.js");
 
 // ---- a DOM stub with the three things this file touches: classes, children,
 // moves (insertBefore/appendChild, fragments included) and the click handler ----
@@ -1158,7 +1158,6 @@ ctx.busy = false;
 
 // ---- 8) the wiring the page has to carry ----
 const uiDir = path.join(__dirname, "..", "ui");
-const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
 const events = fs.readFileSync(path.join(uiDir, "js", "stream-events.js"), "utf8");
 const project = fs.readFileSync(path.join(uiDir, "js", "project.js"), "utf8");
 const lifecycle = fs.readFileSync(path.join(uiDir, "js", "backend-lifecycle.js"), "utf8");
@@ -1167,7 +1166,8 @@ const css = fs.readFileSync(path.join(uiDir, "style.css"), "utf8");
 // it replaced ("deliberately NOT `position: relative` any more"), and a structural
 // pin has to read the declarations, not the argument about them
 const cssBare = css.replace(/\/\*[\s\S]*?\*\//g, "");
-check(/<script src="js\/auto-fold\.js"><\/script>/.test(html), "the page loads auto-fold.js");
+check(uiModules().some((m) => m.file === "js/auto-fold.js"),
+      "the module list carries auto-fold.js, so the bundle the page loads runs it");
 check(/appendCompletion\(ev\.status, ev\.summary\);[\s\S]{0,400}autoFoldTurn\(\);/.test(events),
       "the run's final folds the turn it just closed (after the divider is placed)");
 check(/\.turn-fold\s*\{[^}]*margin:\s*0 0 var\(--s4\)/.test(cssBare) &&

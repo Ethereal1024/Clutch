@@ -184,7 +184,8 @@ def read_manifest(entry: dict) -> dict:
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise Problem(f"{entry['id']}: {url} is not JSON ({e})") from e
     if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
-        raise Problem(f"{entry['id']}: {url} declares schema {manifest.get('schema') if isinstance(manifest, dict) else '?'}, not {MANIFEST_SCHEMA}")
+        declared = manifest.get("schema") if isinstance(manifest, dict) else "?"
+        raise Problem(f"{entry['id']}: {url} declares schema {declared}, not {MANIFEST_SCHEMA}")
     if manifest.get("name") != entry["name"]:
         raise Problem(f"{entry['id']}: {url} declares {manifest.get('name')!r}, not {entry['name']!r}")
     if manifest.get("version") != entry["version"]:

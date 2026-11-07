@@ -248,7 +248,6 @@ def _endpoint_arms_the_live_gate() -> None:
     # starts disarmed, so the page re-sends on every (re)connect.
     broadcaster = Broadcaster()
     state = RunState()
-    state.api_key = "sk-fake"  # build_llm only constructs a client; nothing dials out
     cfg = Config(port=0, base_url="http://127.0.0.1:1/v1", model="m")
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -257,11 +256,21 @@ def _endpoint_arms_the_live_gate() -> None:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         url = f"http://127.0.0.1:{cfg.port}/api/permission/trust"
         watcher = None
+        # the gate one tool call builds (agent/api/exec.py), assembled here by
+        # hand: nothing on this side starts a run any more — the client's loop
+        # drives the turn, and this session only executes its calls
+        gate = PermissionGate(
+            evaluator=PermissionEvaluator(),
+            on_ask=None,
+            auto_allow=False,
+            is_attached=lambda: broadcaster.count(str(project.path)) > 0,
+            trust=lambda: state.trust_armed,
+        )
+        with state.lock:
+            state.gates.append(gate)
         try:
-            run = srv.app.start_task("t", project)
-            check(run is not None, "a run's gate is assembled from this state")
             check(
-                state.trust_armed is False and run.gate.trust() is False,
+                state.trust_armed is False and gate.trust() is False,
                 "a fresh session starts disarmed",
             )
 
@@ -269,21 +278,21 @@ def _endpoint_arms_the_live_gate() -> None:
             check(status == 200, f"arming is accepted ({status} {body!r})")
             check(json.loads(body) == {"status": "ok", "armed": True}, f"the reply echoes the flag ({body!r})")
             check(state.trust_armed is True, "the endpoint flips RunState.trust_armed")
-            check(run.gate.trust() is True, "the LIVE gate sees the arm, with no new run")
+            check(gate.trust() is True, "the LIVE gate sees the arm, with no new run")
 
             # and that gate, so armed, now answers its own ask — the frozen phone
             # it is standing in for keeps its stream open, so it is attached
             watcher = broadcaster.subscribe(str(project.path))
-            run.gate.trust_s = 0.3  # the countdown is 10s; the wiring is what is on trial
+            gate.trust_s = 0.3  # the countdown is 10s; the wiring is what is on trial
             out: dict = {}
-            t = _require_in_thread(run.gate, LocalWorkspace(str(tmp)), out)
+            t = _require_in_thread(gate, LocalWorkspace(str(tmp)), out)
             t.join(timeout=5)
             check(out.get("ok"), f"the armed live gate allowed the ask itself ({out!r})")
-            check(run.gate.pending_ids() == [], "no prompt is left behind on the live gate")
+            check(gate.pending_ids() == [], "no prompt is left behind on the live gate")
 
             status, body = http_post(url, {"armed": False})
             check(json.loads(body) == {"status": "ok", "armed": False}, f"disarming is echoed ({body!r})")
-            check(state.trust_armed is False and run.gate.trust() is False, "disarm reaches the gate too")
+            check(state.trust_armed is False and gate.trust() is False, "disarm reaches the gate too")
 
             status, body = http_post(url)  # empty body: {armed: false} is a disarm
             check(status == 200, f"an empty body is accepted ({status} {body!r})")

@@ -12,7 +12,7 @@ what a client can rely on:
      open turn. That head is the point: compaction happens DURING a turn and
      slides cpr_start past the turn's `user_message`, and the host's loop
      answers its `task` from that line instead of holding it in a variable
-     (agent/loop.py's `run(task)` did; TODO.md I6 forbids it). A read that
+     (the retired loop's `run(task)` did; TODO.md I6 forbids it). A read that
      stopped at cpr_start would resume a turn with no task.
   2. POST /api/log appends ONE line through the same writer every other path
      uses, answers the offset the log stamped on it (what a follow-up slide
@@ -31,11 +31,17 @@ what a client can rely on:
      the window: resident when the turn opened after the newest compaction,
      a bounded backward walk when it opened before it — and the head survives
      a slide PAST the task line.
+  6. An append is ANNOUNCED to the live streams, narrowed to the .clc it landed
+     in, carrying the stored event (and therefore its offset). The loop that
+     writes these lines is in the other process (P1-5), so an unpushed line is
+     a line the page cannot paint until it reconnects; a line pushed to every
+     window would append one project's transcript to another's.
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import sys
 import tempfile
 import threading
@@ -157,13 +163,14 @@ def open_server(tmp: Path, name: str, read_only: bool = False):
     offs = build_clc(path)
     cfg = Config(host="127.0.0.1", port=0)
     state = RunState()
-    srv = build(cfg, Broadcaster(), state)
+    bus = Broadcaster()
+    srv = build(cfg, bus, state)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{cfg.port}"
     project = open_project_lazy(path, workspace=None, read_only=read_only)
     check(project.read_only is read_only, f"the fixture opens read-only={read_only}")
     state.set_project(project)
-    return base, srv, path, offs
+    return base, srv, path, offs, bus
 
 
 def endpoint_check(tmp: Path) -> None:
@@ -189,7 +196,7 @@ def endpoint_check(tmp: Path) -> None:
         empty_srv.shutdown()
         empty_srv.server_close()
 
-    base, srv, path, offs = open_server(tmp, "api")
+    base, srv, path, offs, bus = open_server(tmp, "api")
     try:
         # ---- 1. read
         st, out = http_get(base + "/api/log")
@@ -353,6 +360,52 @@ def endpoint_check(tmp: Path) -> None:
         check(offsets_from(path) == {**offs, "comp": boundary},
               "and every event offset is unchanged (fixed-width header line)")
         check(reopened.turn_start() == offs["u2"], "the head survives a reopen too")
+
+        # ---- 4. an append is ANNOUNCED, narrowed to the .clc it landed in
+        #
+        # The loop lives in the other process now (P1-5), so a durable line is a
+        # line the page cannot paint unless this side pushes it — and it must
+        # reach the windows watching THAT file and no others. The push carries
+        # the stored event itself, so the frame a live window gets is the same
+        # {offset, event} shape a replay sends and its watermark still works.
+        # The append comes LAST in this suite on purpose: it moves the file, and
+        # every count above is a count of the file as it was.
+        mine = bus.subscribe(str(path))
+        other = bus.subscribe(str(tmp / "elsewhere" / "elsewhere.clc"))
+        everyone = bus.subscribe()
+        try:
+            st, out = http_post(
+                base + "/api/log", {"event": {"type": "user_message", "content": "announced"}}
+            )
+            check(st == 200, f"the append under test persists (got {st}: {out[:200]})")
+            written = json.loads(out)
+            try:
+                announced = mine.get(timeout=2)
+            except queue.Empty:
+                announced = None
+            check(announced is not None, "the append is pushed to the stream watching its project")
+            check(
+                getattr(announced, "log_offset", None) == written["offset"],
+                "and the pushed event is the PERSISTED one: it carries the offset the log stamped",
+            )
+            check(
+                getattr(announced, "type", None) == "user_message"
+                and getattr(announced, "content", None) == "announced",
+                f"the pushed line is the line that was written ({announced!r})",
+            )
+            check(
+                other.empty(),
+                "a window watching another project is not handed this transcript",
+            )
+            try:
+                unfiltered = everyone.get(timeout=2)
+            except queue.Empty:
+                unfiltered = None
+            check(unfiltered is not None, "an unfiltered stream still sees it (the reconnect's audience)")
+        finally:
+            for q in (mine, other, everyone):
+                bus.unsubscribe(q)
+
     finally:
         srv.shutdown()
         srv.server_close()
@@ -360,7 +413,7 @@ def endpoint_check(tmp: Path) -> None:
 
 def read_only_check(tmp: Path) -> None:
     """A read-only project must not answer "persisted" to a line it dropped (4)."""
-    base, srv, path, _offs = open_server(tmp, "ro", read_only=True)
+    base, srv, path, _offs, _bus = open_server(tmp, "ro", read_only=True)
     try:
         size = path.stat().st_size
         st, out = http_post(base + "/api/log", {"event": {"type": "user_message", "content": "x"}})

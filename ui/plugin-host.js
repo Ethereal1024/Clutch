@@ -53,6 +53,20 @@
 // numbers the session's own exec path already uses, passed down rather than
 // rediscovered by each plugin.
 //
+// HOW the runtime is started is a port (`spawn`), because the two shells answer
+// it differently and only one of them has a node binary. A desktop forks a process
+// (child_process.fork, the default here). Android cannot: its engine is libnode
+// loaded INTO the app process (android/app/src/main/cpp/native-lib.cpp), so
+// `process.execPath` is the app itself and a fork would exec the app instead of
+// node. There the plugin runs in a worker thread instead (ui/plugin-worker.js) —
+// same isolation in time (its own isolate and heap, `terminate()` kills a plugin
+// stuck in a tight loop, a throw at load kills a thread and not the app), and one
+// honest difference: a worker cannot chdir, so a plugin on the phone must find its
+// own files through `__dirname` or `CLUTCH_PLUGIN_DIR`, not through a relative path
+// resolved against the current directory. A host with NO way to start either hands
+// in a `spawn` that throws, and every call then fails with that sentence — never
+// with a plugin that "exited before answering" for a reason nobody can read.
+//
 // Stdlib only (node builtins): this module is shipped to Android's embedded
 // node as well, where there is no npm tree.
 
@@ -482,6 +496,23 @@ function createPluginHost(options = {}) {
   const root = options.root || defaultRoot();
   const log = options.log || (() => {});
   const childEntry = options.childEntry || CHILD;
+  // How one call is started, and the only thing a shell may answer differently
+  // (see the header): `{childEntry, cwd, env}` in, a child-like handle out —
+  // `.on("message"|"error"|"exit")`, `.send(message)`, `.kill()`, an optional
+  // `.stderr` — which is exactly what `fork` already gives. A desktop keeps the
+  // default; a host without a node binary to exec hands in ui/plugin-worker.js.
+  const spawnChild =
+    typeof options.spawn === "function"
+      ? options.spawn
+      : ({ childEntry: entry, cwd, env }) =>
+          fork(entry, [], {
+            cwd,
+            env,
+            // stdout is nobody's: a plugin's console.log must not be able to land
+            // in this app's output. stderr is kept — it is the only thing left to
+            // say WHY a plugin died before answering.
+            stdio: ["ignore", "ignore", "pipe", "ipc"],
+          });
   // Where a plugin can reach the far side of a tunnel: a FUNCTION, because the
   // bridge port only lives while a tunnel is up and a captured string would go
   // stale the moment the tunnel is rebuilt. No bridge configured (no tunnel
@@ -811,7 +842,8 @@ function createPluginHost(options = {}) {
     return new Promise((settle, fail) => {
       let child;
       try {
-        child = fork(childEntry, [], {
+        child = spawnChild({
+          childEntry,
           cwd: target.directory,
           env: {
             ...process.env,
@@ -824,10 +856,6 @@ function createPluginHost(options = {}) {
             // ...and the budget one far-side command may spend in bytes:
             ...execLimitEnv(),
           },
-          // stdout is nobody's: a plugin's console.log must not be able to land
-          // in this app's output. stderr is kept — it is the only thing left to
-          // say WHY a plugin died before answering.
-          stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
       } catch (e) {
         fail(new Error(`${name} could not be started: ${e.message}`));
@@ -837,7 +865,11 @@ function createPluginHost(options = {}) {
       let done = false;
       let tail = "";
       const timer = setTimeout(() => {
-        finish(new Error(`${name}.${tool} did not answer within ${limit}ms — its process was stopped`));
+        // "stopped", not "killed"/"process": what stops it depends on the runtime
+        // port — a process on a desktop, a worker thread where there is no node
+        // binary to fork (ui/plugin-worker.js) — and the sentence is the same fact
+        // either way.
+        finish(new Error(`${name}.${tool} did not answer within ${limit}ms — it was stopped`));
       }, limit);
       if (child.stderr) {
         child.stderr.on("data", (chunk) => {

@@ -121,14 +121,35 @@ global.busy = false;
 global.sseRunAtRisk = false;
 
 // ---- 2. the host answers null, never a local placeholder ----
+// Both shells' api:base handlers are shaped the same way since the plugin
+// announcement was folded into the claim (announcePlugins): resolve the window's
+// session, remember it as `base`, push it, return THAT local. Sliced out of the
+// handler rather than matched anywhere in the file — `return base;` alone would
+// also match the run-loop path, and the point is that the URL this handler
+// announces is the one it hands out, so neither can drift into a literal.
+function handlerBody(source, marker) {
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error("missing handler: " + marker);
+  return source.slice(start, slicer(source).bodyEnd(source.indexOf("{", start)));
+}
+const HOST_BASE = handlerBody(HOST, "baseUrl: async () => {");
+const MAIN_BASE = handlerBody(MAIN, 'ipcMain.handle("api:base", async (e) => {');
 check(!/DEFAULT_API_BASE/.test(HOST),
   "the Android host has no placeholder base to hand out");
-check(/return \(await hostCore\.ensureWindowBackend\(window\)\) \|\| null;/.test(HOST),
-  "it returns this window's real session URL, or null");
+check(/const base = \(await hostCore\.ensureWindowBackend\(window\)\) \|\| null;/.test(HOST_BASE),
+  "it asks for this window's session and turns every 'nothing' into null");
+check(/announcePlugins\(base\);/.test(HOST_BASE) && /return base;/.test(HOST_BASE),
+  "and the URL it announces to the session is the one it returns: one local, no second lookup");
+check(!/["']http:\/\/127\.0\.0\.1:[\d]+["']/.test(HOST_BASE),
+  "no literal local base is invented anywhere in the answer");
 check(!/DEFAULT_API_BASE/.test(MAIN),
   "the desktop shell has no placeholder base either");
-check(/const base = \(await hostCore\.ensureWindowBackend\(e\.sender\)\) \|\| null;/.test(MAIN),
-  "it returns this window's real session URL, or null");
+check(/const base = \(await hostCore\.ensureWindowBackend\(e\.sender\)\) \|\| null;/.test(MAIN_BASE),
+  "it asks for this window's (e.sender's) session and turns 'nothing' into null");
+check(/announcePlugins\(e\.sender\.id, base\);/.test(MAIN_BASE) && /return base;/.test(MAIN_BASE),
+  "and the desktop announces and returns that same local, one lookup per claim");
+check(!/["']http:\/\/127\.0\.0\.1:[\d]+["']/.test(MAIN_BASE),
+  "no literal local base is invented anywhere in the desktop answer");
 
 // behavioral: the REAL handler, with a tunnel that is down and one that is up
 const { createAndroidHost } = require(path.join(ROOT, "android", "host", "android-host.js"));

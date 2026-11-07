@@ -222,14 +222,15 @@ TRUST_COUNTDOWN_S = 10.0
 
 # Request ids are unique for the LIFE OF THE PROCESS, not just inside one gate.
 #
-# A gate is built per run (agent/base.py start_task), and its own counter started
-# at 1 again — so "perm-1" named the first ask of EVERY run. An id is the only
-# thing a window has to tell "the ask I just answered" from "a new ask", and
-# ui/js/permissions.js remembers the ids it answered for as long as the page
-# lives: with a reused id the next run's prompt was silently swallowed (the mark
-# matched, the frame returned early), the run stayed blocked in
-# PermissionGate.require — which has no timeout by design — and the only way out
-# was Stop, which answers every pending ask "denied by user". One counter for the
+# A gate is built per run (the session builds one for each turn the client's loop
+# drives), and its own counter started at 1 again — so "perm-1" named the first
+# ask of EVERY run. An id is the only thing a window has to tell "the ask I just
+# answered" from "a new ask", and ui/js/permissions.js remembers the ids it
+# answered for as long as the page lives: with a reused id the next run's prompt
+# was silently swallowed (the mark matched, the frame returned early), the run
+# stayed blocked in PermissionGate.require — which has no timeout by design — and
+# the only way out was Stop, which answers every pending ask "denied by user".
+# One counter for the
 # whole process, tagged per process so a restarted host cannot hand out an id a
 # window still remembers, removes the collision at its source.
 _ASK_IDS = itertools.count(1)
@@ -329,7 +330,7 @@ class PermissionGate:
         if self.auto_allow:
             if escapes:
                 raise PermissionRequired("", tool, args_repr, "sandbox escape requires user approval")
-            return  # non-escape rule ask auto-allowed (eval harness behavior)
+            return  # non-escape rule ask auto-allowed (unattended: no one to ask)
         with self._lock:
             # see _ASK_IDS/_PROCESS_TAG: an id must not repeat across runs
             request_id = f"perm-{_PROCESS_TAG}-{next(_ASK_IDS)}"

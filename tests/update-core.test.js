@@ -25,7 +25,7 @@ const os = require("os");
 const path = require("path");
 const vm = require("vm");
 const crypto = require("crypto");
-const { check, summary } = require("./harness.js");
+const { check, summary, uiModules } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const UI = path.join(ROOT, "ui");
@@ -869,11 +869,12 @@ async function section10() {
   check(/<button id="about-update-btn" type="button">/.test(pane), "the button is a plain type=button (a form submit would reload the page)");
   check(pane.indexOf('id="about-update-btn"') > pane.indexOf('<dl class="about-list">'), "and it sits under the facts, not inside them: it is a control, not a fact");
 
+  const order = uiModules().map((m) => m.file);
   check(
-    html.indexOf('<script src="js/update-panel.js"></script>') > html.indexOf('<script src="js/settings.js"></script>'),
-    "the panel loads after the file that paints the About pane (it reads the same build stamp)"
+    order.indexOf("js/update-panel.js") > order.indexOf("js/settings.js"),
+    "the panel sits after the file that paints the About pane (it reads the same build stamp)"
   );
-  check(html.indexOf('<script src="js/update-panel.js"></script>') < html.indexOf('<script src="js/boot.js"></script>'), "and before boot.js, which starts the app");
+  check(order.indexOf("js/update-panel.js") < order.indexOf("js/boot.js"), "and before boot.js, which starts the app");
 
   const rule = (sel) => {
     const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

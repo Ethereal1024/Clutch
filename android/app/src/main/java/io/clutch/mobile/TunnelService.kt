@@ -31,30 +31,33 @@ import java.io.File
  *   2. boot the engine via NodeEngine.ensureStarted (idempotent — a sticky
  *      restart after the system killed the process re-boots it the same way
  *      MainActivity's first call did),
- *   3. M4: hold the CPU awake while — and only while — the engine's own marker
- *      file under HOME says a tunnel is wanted,
+ *   3. M4/P5-2: hold the CPU awake while — and only while — the engine's own
+ *      marker files under HOME say something needs it: `tunnel.state` = "up"
+ *      while the user has a standing tunnel intent, `run.state` = "busy" while
+ *      a turn is actually being driven on this device,
  * and nothing else: every tunnel decision stays in the JS host (docs/android/
- * 02 §3 — the native shell is a stage, not a second brain). The marker is that
+ * 02 §3 — the native shell is a stage, not a second brain). The markers are that
  * rule applied to the one thing a service can do and the engine cannot: the
- * engine writes "up"/"down" (android/host/android-host.js, off the reconnect
- * ladder's own state) and this service only ever READS it. A service that
- * guessed "up" from "an engine is running" would pin the CPU for a phone that
- * never connected to anything.
+ * engine writes them (android/host/android-host.js — "up"/"down" off the
+ * reconnect ladder's own state, "busy"/"idle" off the run loop's busy edges) and
+ * this service only ever READS them. A service that guessed "up" from "an engine
+ * is running" would pin the CPU for a phone that never connected to anything.
  */
 class TunnelService : Service() {
 
     private lateinit var power: PowerManager
     private lateinit var marker: File
+    private lateinit var runMarker: File
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    // The marker poll: a stat and a read of a one-word file, then the same again
-    // in two seconds. Cheap enough to run for the app's whole life, slow enough
-    // that gaining or losing a lock is invisible next to the backoff it serves.
+    // The marker poll: two stats and two one-word reads, then the same again in
+    // two seconds. Cheap enough to run for the app's whole life, slow enough that
+    // gaining or losing a lock is invisible next to the backoff it serves.
     private val watchMarker = object : Runnable {
         override fun run() {
-            applyWakeState(wantsTunnel())
+            applyWakeState(wakeReason())
             handler.postDelayed(this, MARKER_POLL_MS)
         }
     }
@@ -63,6 +66,7 @@ class TunnelService : Service() {
         super.onCreate()
         power = getSystemService(Context.POWER_SERVICE) as PowerManager
         marker = File(filesDir, STATE_MARKER) // filesDir == HOME on the engine side (N2)
+        runMarker = File(filesDir, RUN_STATE_MARKER) // same HOME, same rule
         if (Build.VERSION.SDK_INT >= 26) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -103,11 +107,45 @@ class TunnelService : Service() {
         false
     }
 
-    private fun applyWakeState(want: Boolean) {
-        if (want) acquireWakeLocks() else releaseWakeLocks()
+    /**
+     * The second reason, and a different fact (P5-2): "a turn is being driven on
+     * this device, now". Written by the engine's run loop off its own busy edges
+     * (ui/run-session.js onBusy → android/host/android-host.js writeRunMarker), so
+     * "busy" means a loop is between entry and return — not merely that a turn is
+     * OPEN. An open turn waits for the user's next message and nobody is stepping
+     * it, which can be hours: holding the CPU for that is a flat battery. Same
+     * rule as above otherwise — this can only ADD a reason to stay awake, never a
+     * reason to dial. Anything that is not "busy" (no file, an unreadable file, a
+     * word this build does not know) reads as idle.
+     */
+    private fun runBusy(): Boolean = try {
+        runMarker.isFile && runMarker.readText().trim() == "busy"
+    } catch (e: Exception) {
+        false
     }
 
-    private fun acquireWakeLocks() {
+    /**
+     * Which reason holds the CPU, or null for "neither". Returning the reason
+     * rather than a boolean keeps the log honest: a bugreport has to be able to
+     * tell "awake for the tunnel" from "awake for a turn", because those two
+     * want different fixes when a user reports the battery.
+     */
+    private fun wakeReason(): String? {
+        val tunnel = wantsTunnel()
+        val turn = runBusy()
+        return when {
+            tunnel && turn -> "a tunnel is wanted and a turn is running"
+            tunnel -> "a tunnel is wanted, so the ladder may have to redial with the screen off"
+            turn -> "a turn is running on this device, and its loop must not be frozen mid-step"
+            else -> null
+        }
+    }
+
+    private fun applyWakeState(reason: String?) {
+        if (reason != null) acquireWakeLocks(reason) else releaseWakeLocks()
+    }
+
+    private fun acquireWakeLocks(why: String) {
         if (wakeLock == null) {
             val wl = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_TAG)
             // non-reference-counted: this class acquires and releases once per
@@ -121,8 +159,9 @@ class TunnelService : Service() {
                 // the ladder's timers are the whole point, and a timer parked on a
                 // suspended CPU fires whenever the phone next wakes for something
                 // else, which is exactly the reported "it reconnects when I open
-                // the app" symptom. Held for as long as the marker says up and
-                // released the moment it does not (there is no timeout to leak).
+                // the app" symptom. Held for as long as a marker says it is
+                // wanted and released the moment none does (there is no timeout
+                // to leak).
                 //
                 // CAVEAT, unverified: this checkout cannot reach developer.android.com
                 // and has no device, so the Doze rules below are stated from the
@@ -131,7 +170,7 @@ class TunnelService : Service() {
                 // idle — the battery-optimization exemption MainActivity asks for is
                 // what lifts that, and it is why the two ship together.
                 wl.acquire()
-                Log.i(TAG, "[wake] CPU held: a tunnel is wanted, so the ladder may have to redial with the screen off")
+                Log.i(TAG, "[wake] CPU held: $why")
             }
         }
         var lock = wifiLock
@@ -170,7 +209,7 @@ class TunnelService : Service() {
         val held = (wakeLock?.isHeld == true) || (wifiLock?.isHeld == true)
         wakeLock?.let { if (it.isHeld) it.release() }
         wifiLock?.let { if (it.isHeld) it.release() }
-        if (held) Log.i(TAG, "[wake] CPU released: no tunnel is wanted")
+        if (held) Log.i(TAG, "[wake] CPU released: neither a tunnel nor a running turn wants it")
     }
 
     private fun startForegroundCompat() {
@@ -223,6 +262,8 @@ class TunnelService : Service() {
         const val NOTIFICATION_ID = 1
         // written by the engine (android/host/android-host.js), read here
         const val STATE_MARKER = "tunnel.state"
+        // ditto for P5-2: "busy" while the run loop is between entry and return
+        const val RUN_STATE_MARKER = "run.state"
         // one tag for both locks: what a bugreport's dumpsys will show as ours
         const val WAKE_TAG = "clutch:tunnel"
         const val MARKER_POLL_MS = 2000L

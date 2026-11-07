@@ -77,8 +77,10 @@ class RoutingMixin:
             self._project_new()
         elif parsed.path == "/api/project/open":
             self._project_open()
-        elif parsed.path == "/api/run":
-            self._run()
+        elif parsed.path == "/api/run/state":
+            # the HOST's lease on the run slot (P2-3): claim/renew while it
+            # drives a turn, release when the turn ends
+            self._run_state()
         elif parsed.path == "/api/log":
             # one durable line, appended where the .clc lives: the host produced
             # the event, the execution layer stays the only writer of the file
@@ -91,14 +93,8 @@ class RoutingMixin:
         elif parsed.path == "/api/exec/cancel":
             # the same call's interrupt: Stop must reach a process still running
             self._exec_cancel()
-        elif parsed.path == "/api/stop":
-            self._stop()
         elif parsed.path == "/api/settings":
             self._settings_post()
-        elif parsed.path == "/api/llm/base":
-            # the endpoint a claiming client re-points a LIVE session to when its
-            # own model path moved (agent/api/settings._llm_base_post)
-            self._llm_base_post()
         elif parsed.path == "/api/permission/respond":
             self._permission_respond()
         elif parsed.path == "/api/permission/trust":

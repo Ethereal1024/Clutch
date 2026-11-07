@@ -1,12 +1,13 @@
 """Where the standalone tool modules live, and which interpreter runs them.
 
-Each decoupled tool component has its own repository (clutch-workspace /
-clutch-websearch / clutch-skills), checked out next to the host
-repo in the dev layout. The host never imports them, and — since the host ships
-no built-in component — the RUNTIME never names them either:
-a component is discovered through its own manifest (tools/catalog.py), and these
-names are kept in one place for the consumers that are allowed to point — the
-tests, and the UI's list of what to ship on install (ui/components.js).
+Each decoupled component has its own repository, checked out next to the host
+repo in the dev layout: clutch-workspace and clutch-skills are tool modules the
+host runs, clutch-websearch is a CLIENT plugin the client runs. The host never
+imports any of them, and — since the host ships no built-in component — the
+RUNTIME never names them either: a component is discovered through its own
+manifest (tools/catalog.py), and these names are kept in one place for the
+consumers that are allowed to point — the tests, and the UI's list of what to
+ship on install (ui/components.js).
 
 Three things every consumer of a module needs, kept in one place:
 

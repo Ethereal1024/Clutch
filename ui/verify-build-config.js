@@ -2,9 +2,10 @@
 // Guards electron-builder.yml against two silent packaging traps.
 //
 // (2) The app's own files go in through the `files` glob. ui/electron-builder.yml
-// carries only an ignore ("!dev.sh"), and when a `files` list holds nothing but
-// ignores electron-builder PREPENDS "**/*" (fileMatcher.js getMainFileMatchers)
-// before appending its default excludes — so today everything under ui/ ships.
+// carries only ignores ("!dev.sh", the renderer's sources, …), and when a
+// `files` list holds nothing but ignores electron-builder PREPENDS "**/*"
+// (fileMatcher.js getMainFileMatchers) before appending its default excludes —
+// so today everything under ui/ ships unless it is excluded by name.
 // Narrowing that list later (e.g. listing "**/*.js") would drop an asset the UI
 // loads at runtime from file://…, and NOTHING fails: the app starts and just
 // renders in the OS fallback face. The vendored fonts are asserted against the
@@ -82,33 +83,19 @@ const REQUIRED_ASSETS = [
   "vendor/fonts/clutch-icons.LICENSE.txt",
   "vendor/fonts/clutch-icons.manifest.txt",
   "index.html",
-  "app.js",
+  // The whole renderer: one script, built from ui/js/** + ui/app.js +
+  // ui/bridge-shim.js (the sources do NOT ship — see electron-builder.yml).
+  // index.html loads exactly this file, so a `files` glob that drops it is a
+  // blank window, not a missing font. version.js is the build stamp, rewritten
+  // by the release scripts and loaded as its own tag.
+  "renderer.js",
+  "version.js",
   "style.css",
   // The mirrors a failed fetch is retried through (ui/mirrors.js BUILTIN_FILE,
   // read from __dirname). Dropped from the bundle, a packaged app silently
   // installs nothing on a machine that cannot reach the release host directly —
   // which is the one failure this list exists for.
   "components.mirrors.json",
-  // The renderer is one program in classic scripts; ui/index.html lists them in
-  // load order, and a module the packager drops (or a `files` glob that stops at
-  // the top level) is a blank window, not a missing font. List them all.
-  "js/stream-view.js",
-  "js/tool-render.js",
-  "js/stream-events.js",
-  "js/stream-text.js",
-  "js/markdown.js",
-  "js/diagram-viewer.js",
-  "js/render-events.js",
-  "js/settings.js",
-  "js/conn-store.js",
-  "js/backend-lifecycle.js",
-  "js/conn-flow.js",
-  "js/permissions.js",
-  "js/workspace-panel.js",
-  "js/sse-stream.js",
-  "js/project.js",
-  "js/fs-browser.js",
-  "js/boot.js",
 ];
 // …and files that must NOT ship. They prove the filter below really filters
 // (a filter that says "yes" to everything would pass the list above vacuously).
@@ -119,6 +106,17 @@ const EXCLUDED_FILES = [
   // the old per-client list of five source URLs: deleted, and a packager glob
   // that brought it back would be shipping a file nothing reads
   "components.sources.json",
+  // the type gate's config (TODO.md D14): `npm run typecheck` reads it from the
+  // checkout; nothing at runtime resolves it, so it stays out of the app
+  "tsconfig.check.json",
+  // P7-3: the renderer's sources and its build script. index.html loads the
+  // bundle; these are build inputs, and shipping them would be a dead copy.
+  "app.js",
+  "bridge-shim.js",
+  "js/boot.js",
+  "js/stream-view.js",
+  "renderer.modules.json",
+  "build-renderer.js",
 ];
 
 const FILE = { isDirectory: () => false, isFile: () => true };

@@ -155,16 +155,23 @@ class MainActivity : Activity() {
     }
 
     /**
-     * M4: the screen-off half of the "it only reconnects once I open the app"
-     * report. A foreground service keeps the PROCESS alive, not the PROCESSOR:
-     * with the device idle Android suspends network access and ignores wake locks
-     * (TunnelService holds one either way), so the engine can keep its ladder
-     * armed and still not dial. The battery-optimization exemption is what lifts
-     * that — and asking for it is an ACTIVITY's job: background activity starts
-     * are blocked from API 29, so the service could not show it even if it knew
-     * to. Asked once per install, and only when the engine's own marker says a
-     * tunnel is actually wanted, so a user who never connected is never nagged
-     * about battery settings.
+     * M4/P5-3: the screen-off half of the "it only reconnects once I open the
+     * app" report. A foreground service keeps the PROCESS alive, not the
+     * PROCESSOR: with the device idle Android suspends network access and ignores
+     * wake locks (TunnelService holds one either way), so the engine can keep its
+     * ladder armed — or a turn mid-step — and still make no progress. The
+     * battery-optimization exemption is what lifts that, and asking for it is an
+     * ACTIVITY's job: background activity starts are blocked from API 29, so the
+     * service could not show it even if it knew to.
+     *
+     * WHEN it is worth asking (P5-3): the moment the user has something that has
+     * to survive the screen going off — a standing tunnel intent, or a turn that
+     * is being driven right now. Both are the ENGINE's own answer, written to one
+     * word under HOME (`tunnel.state` = "up", `run.state` = "busy"); this screen
+     * never infers "something is probably running" from the app merely being open.
+     * An open-but-idle turn is NOT a reason: it can sit for hours waiting for the
+     * user's next message, and nagging about that is the nagging this rule exists
+     * to avoid. Asked once per install, on the first resume where a reason exists.
      */
     override fun onResume() {
         super.onResume()
@@ -175,22 +182,30 @@ class MainActivity : Activity() {
         if (isFinishing || batteryExemptionAsked()) return
         val power = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (power.isIgnoringBatteryOptimizations(packageName)) return
-        // "does this user want a tunnel" is the engine's answer — the same one-word
-        // file the service polls — never this screen's guess from "the app is open"
-        val wanted = try {
-            val marker = File(filesDir, TUNNEL_STATE_MARKER)
-            marker.isFile && marker.readText().trim() == "up"
-        } catch (e: Exception) {
-            false
-        }
-        if (!wanted) return
+        // the two independent reasons, read from the engine's own markers (the same
+        // files TunnelService polls) — and the message names the one that applies,
+        // because "keep my tunnel up" and "let this turn finish" are different asks
+        val tunnel = markerSays(TUNNEL_STATE_MARKER, "up")
+        val turn = markerSays(RUN_STATE_MARKER, "busy")
+        if (!tunnel && !turn) return
         markBatteryExemptionAsked() // once: "not now" is an answer too
         AlertDialog.Builder(this)
-            .setTitle(R.string.battery_title)
-            .setMessage(R.string.battery_message)
+            .setTitle(getString(if (turn) R.string.battery_title_turn else R.string.battery_title))
+            .setMessage(getString(if (turn) R.string.battery_message_turn else R.string.battery_message))
             .setPositiveButton(R.string.battery_action) { _, _ -> requestBatteryExemption() }
             .setNegativeButton(R.string.battery_later, null)
             .show()
+    }
+
+    /**
+     * One word in one file under filesDir — the engine's HOME (N2). A missing or
+     * unreadable marker answers "no": a prompt is never worth guessing for.
+     */
+    private fun markerSays(name: String, word: String): Boolean = try {
+        val file = File(filesDir, name)
+        file.isFile && file.readText().trim() == word
+    } catch (e: Exception) {
+        false
     }
 
     private fun requestBatteryExemption() {
@@ -259,10 +274,13 @@ class MainActivity : Activity() {
         const val POLL_INTERVAL_MS = 150L
         const val BRIDGE_TIMEOUT_MS = 30_000L
         const val REQ_NOTIFICATIONS = 1
-        // the engine's wake marker: android-host.js writes it, TunnelService polls
-        // it, and this screen only reads it — to decide whether a battery prompt is
-        // about anything the user is actually doing (filesDir == the engine's HOME)
+        // the engine's wake markers: android-host.js writes them, TunnelService
+        // polls them, and this screen only reads them — to decide whether a battery
+        // prompt is about anything that has to outlive the screen going off
+        // (filesDir == the engine's HOME). "up" = a standing tunnel intent,
+        // "busy" = a turn is being driven right now (P5-2/P5-3).
         const val TUNNEL_STATE_MARKER = "tunnel.state"
+        const val RUN_STATE_MARKER = "run.state"
         // install-scoped, so "once per install" survives a cold start
         const val PREFS = "clutch"
         const val PREF_BATTERY_ASKED = "battery_exemption_asked"

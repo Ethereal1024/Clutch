@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // One tool call, run where the tools are: POST /api/exec from the host half (P3).
 //
 // The loop moved here (TODO.md D1) and the execution layer kept the only thing
@@ -33,6 +34,13 @@
 const CANCEL_TIMEOUT_MS = 10_000; // one tiny JSON call to the same machine
 const MODES = ["chat", "work"];
 
+/**
+ * The session's base URL, normalized. `unknown` in, `string` out: this IS the
+ * validator (it throws on a non-URL), so callers' option bags can type `base`
+ * as optional without a cast at every call site.
+ * @param {unknown} base
+ * @returns {string}
+ */
 function sessionBase(base) {
   if (typeof base !== "string" || !base.trim()) {
     throw new TypeError("tool-client: base is required (http://127.0.0.1:<port>)");
@@ -40,6 +48,11 @@ function sessionBase(base) {
   return base.replace(/\/+$/, "");
 }
 
+/**
+ * @param {string} url
+ * @param {{ method: string, body?: unknown, timeoutMs?: number, signal?: AbortSignal }} opts
+ * @returns {Promise<any>} the parsed answer (each port below checks its own shape)
+ */
 async function call(url, { method, body, timeoutMs, signal }) {
   const ctl = new AbortController();
   const timer = timeoutMs ? setTimeout(() => ctl.abort(), timeoutMs) : null;
@@ -72,6 +85,7 @@ async function call(url, { method, body, timeoutMs, signal }) {
   }
   if (!r.ok) {
     const why = (parsed && parsed.error) || `${r.status} ${r.statusText}`;
+    /** @type {Error & { status?: number, code?: string }} */
     const err = new Error(`${method} ${url} answered ${r.status}: ${why}`);
     err.status = r.status;
     if (parsed && parsed.code) err.code = parsed.code;
@@ -80,6 +94,9 @@ async function call(url, { method, body, timeoutMs, signal }) {
   return parsed;
 }
 
+/**
+ * @param {{ base?: string, mode?: string, cancelTimeoutMs?: number }} [opts]
+ */
 function createToolClient({ base, mode, cancelTimeoutMs = CANCEL_TIMEOUT_MS } = {}) {
   const root = sessionBase(base);
   if (mode !== undefined && !MODES.includes(mode)) {
@@ -102,6 +119,10 @@ function createToolClient({ base, mode, cancelTimeoutMs = CANCEL_TIMEOUT_MS } = 
   return {
     cancel,
 
+    /**
+     * @param {{ call?: any, signal?: AbortSignal }} [opts]
+     * @returns {Promise<{ content: string, isError: boolean, diff: string }>}
+     */
     async run({ call: one, signal } = {}) {
       if (!one || typeof one !== "object") throw new TypeError("tool-client: run needs the call");
       const id = one.id;

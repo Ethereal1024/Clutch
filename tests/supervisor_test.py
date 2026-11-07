@@ -20,7 +20,6 @@ import tempfile
 import threading
 import time
 from io import StringIO
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent.procmgr.stdio import log
@@ -65,60 +64,6 @@ def start_supervisor(**kwargs) -> tuple[Supervisor, int, threading.Thread]:
     t.start()
     threading.Thread(target=sup.reap_loop, daemon=True).start()
     return sup, srv.server_address[1], t
-
-
-class _MockLlm:
-    """A chat-completions endpoint that really answers.
-
-    Section 17 needs one: the witness that a run's ENDPOINT moved has to be a
-    request landing somewhere, not a config value that says it did. HTTP/1.0 on
-    purpose — the SSE body is bounded by content-length here, and a reply that
-    ends with [DONE] is exactly what the SDK's stream reader expects.
-    """
-
-    def __init__(self) -> None:
-        self.seen: list[dict] = []
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.0"
-
-            def do_POST(self):  # noqa: N802 -- http.server's own spelling
-                raw = self.rfile.read(int(self.headers.get("content-length") or 0))
-                try:
-                    body = json.loads(raw or b"{}")
-                except ValueError:
-                    body = {}
-                outer.seen.append({"path": self.path, "model": body.get("model")})
-                model = body.get("model") or "mock"
-                head = {
-                    "id": "chatcmpl-mock",
-                    "object": "chat.completion.chunk",
-                    "created": 1,
-                    "model": model,
-                }
-                text = {**head, "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]}
-                stop = {**head, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
-                payload = f"data: {json.dumps(text)}\n\ndata: {json.dumps(stop)}\n\ndata: [DONE]\n\n"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload.encode())
-
-            def log_message(self, *_args):  # keep the test's own output readable
-                pass
-
-        self._srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
-
-    @property
-    def base(self) -> str:
-        return f"http://127.0.0.1:{self._srv.server_address[1]}"
-
-    def close(self) -> None:
-        self._srv.shutdown()
-        self._srv.server_close()
 
 
 def main() -> int:
@@ -640,70 +585,57 @@ def main() -> int:
     # running flip to idle, the .clc tail had no final). Silence is now a
     # QUESTION — the reaper asks the child (GET /api/health -> in_flight), and
     # a run in flight is the child's own liveness evidence. Real child, real
-    # endpoint that accepts and never answers: a genuine run in flight that no
-    # LLM call ever completes.
-    import socket as _socket
+    # lease: the claim is the one fact only a live host can keep saying.
+    sup15, port15, _ = start_supervisor(stale_s=0.6, idle_timeout_s=60)
+    base15 = f"http://127.0.0.1:{port15}"
+    st, body = http_post(f"{base15}/api/session/start")
+    check(st == 200, "session for the in-flight case started")
+    d15 = json.loads(body)
+    sid15, sport15 = d15["session_id"], d15["port"]
+    s15 = f"http://127.0.0.1:{sport15}"
 
-    hang = _socket.socket()
-    hang.bind(("127.0.0.1", 0))
-    hang.listen(5)  # connect completes; no response ever comes
-    hang_port = hang.getsockname()[1]
-    try:
-        sup15, port15, _ = start_supervisor(stale_s=0.6, idle_timeout_s=60)
-        base15 = f"http://127.0.0.1:{port15}"
-        st, body = http_post(
-            f"{base15}/api/session/start",
-            {"base_url": f"http://127.0.0.1:{hang_port}/v1", "model": "hang-model"},
-        )
-        check(st == 200, "session for the in-flight case started")
-        d15 = json.loads(body)
-        sid15, sport15 = d15["session_id"], d15["port"]
-        s15 = f"http://127.0.0.1:{sport15}"
-
-        with tempfile.TemporaryDirectory() as tdir15:
-            st, body = http_post(f"{s15}/api/project/new", {"dir": tdir15, "name": "inflight"})
-            check(st == 200, "the in-flight session owns a project")
-            clc15 = json.loads(body)["project"]
-            # beat while setting up (a window does exactly this)...
-            st, _ = http_post(f"{base15}/api/session/heartbeat", {"session_id": sid15})
-            check(st == 200, "heartbeat accepted before the run")
-            # ...then go silent for good: the frozen-phone case
-            st, body = http_post(f"{s15}/api/run", {"task": "hold the line", "project": clc15})
-            check(st == 200, "run accepted against an endpoint that never answers")
-            st, body = http_get(f"{s15}/api/health")
-            check(
-                st == 200 and json.loads(body).get("in_flight") is True,
-                "the child reports its run in flight (GET /api/health -> in_flight)",
-            )
-
-            # three stale windows with no beat at all: the child's answer is the
-            # only thing between this session and a reap
-            time.sleep(3.0)
-            check(sid15 in sup15.sessions, "a silent window's session survives because a run is in flight")
-            check(
-                sid15 in sup15.sessions and sup15.sessions[sid15].proc.poll() is None,
-                "the run's child is the same live process (never reaped, never restarted)",
-            )
-            st, body = http_get(f"{s15}/api/health")
-            check(
-                st == 200 and json.loads(body).get("in_flight") is True,
-                "the run is still in flight (the reap deferred, it did not disappear)",
-            )
-
-        # the rule DEFERS, it does not disable: the very same supervisor still
-        # reaps an idle session whose window went silent
-        st, body = http_post(f"{base15}/api/session/stop", {"session_id": sid15})
+    with tempfile.TemporaryDirectory() as tdir15:
+        st, body = http_post(f"{s15}/api/project/new", {"dir": tdir15, "name": "inflight"})
+        check(st == 200, "the in-flight session owns a project")
+        clc15 = json.loads(body)["project"]
+        # beat while setting up (a window does exactly this)...
+        st, _ = http_post(f"{base15}/api/session/heartbeat", {"session_id": sid15})
+        check(st == 200, "heartbeat accepted before the run")
+        # ...then go silent for good: the frozen-phone case
+        st, body = http_post(f"{s15}/api/run/state", {"busy": True, "project": clc15})
+        check(st == 200 and json.loads(body).get("busy") is True, "the run's host claims the slot")
+        st, body = http_get(f"{s15}/api/health")
         check(
-            st == 200 and json.loads(body).get("status") == "detached",
-            "the in-flight session is RELEASED, not ended (POST /api/session/stop -> detached)",
+            st == 200 and json.loads(body).get("in_flight") is True,
+            "the child reports its run in flight (GET /api/health -> in_flight)",
         )
-        st, body = http_post(f"{base15}/api/session/start")
-        sid15b = json.loads(body)["session_id"]
-        ok = wait_until(lambda: sid15b not in sup15.sessions, 10.0, "idle session reaped")
-        check(ok, "an idle session with the same silent window is still reaped")
-        sup15.shutdown_all()
-    finally:
-        hang.close()
+
+        # three stale windows with no beat at all: the child's answer is the
+        # only thing between this session and a reap
+        time.sleep(3.0)
+        check(sid15 in sup15.sessions, "a silent window's session survives because a run is in flight")
+        check(
+            sid15 in sup15.sessions and sup15.sessions[sid15].proc.poll() is None,
+            "the run's child is the same live process (never reaped, never restarted)",
+        )
+        st, body = http_get(f"{s15}/api/health")
+        check(
+            st == 200 and json.loads(body).get("in_flight") is True,
+            "the run is still in flight (the reap deferred, it did not disappear)",
+        )
+
+    # the rule DEFERS, it does not disable: the very same supervisor still
+    # reaps an idle session whose window went silent
+    st, body = http_post(f"{base15}/api/session/stop", {"session_id": sid15})
+    check(
+        st == 200 and json.loads(body).get("status") == "detached",
+        "the in-flight session is RELEASED, not ended (POST /api/session/stop -> detached)",
+    )
+    st, body = http_post(f"{base15}/api/session/start")
+    sid15b = json.loads(body)["session_id"]
+    ok = wait_until(lambda: sid15b not in sup15.sessions, 10.0, "idle session reaped")
+    check(ok, "an idle session with the same silent window is still reaped")
+    sup15.shutdown_all()
 
     # ---- 16. a release names what became of the child: stopped / detached / unknown ----
     # A window leaving its session is not the user's Stop — it happens on a
@@ -715,62 +647,52 @@ def main() -> int:
     # flight" into work nobody abandoned), "unknown" where there never was a
     # session to release. On the wire the answer keeps the old shape and gains
     # the middle value: {"status": "ok" | "detached" | "unknown"}.
-    hang16 = _socket.socket()
-    hang16.bind(("127.0.0.1", 0))
-    hang16.listen(5)  # connect completes; no response ever comes
-    hang16_port = hang16.getsockname()[1]
+    sup16, port16, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
+    base16 = f"http://127.0.0.1:{port16}"
     try:
-        sup16, port16, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
-        base16 = f"http://127.0.0.1:{port16}"
-        try:
-            # an idle child answers the release with eager cleanup
-            st, body = http_post(f"{base16}/api/session/start")
-            sid16a = json.loads(body)["session_id"]
-            st, body = http_post(f"{base16}/api/session/stop", {"session_id": sid16a})
-            check(
-                st == 200 and json.loads(body).get("status") == "ok",
-                "an idle child is stopped as eager cleanup (POST /api/session/stop -> ok)",
-            )
-            check(sid16a not in sup16.sessions, "the stopped child is gone: no record left behind")
+        # an idle child answers the release with eager cleanup
+        st, body = http_post(f"{base16}/api/session/start")
+        sid16a = json.loads(body)["session_id"]
+        st, body = http_post(f"{base16}/api/session/stop", {"session_id": sid16a})
+        check(
+            st == 200 and json.loads(body).get("status") == "ok",
+            "an idle child is stopped as eager cleanup (POST /api/session/stop -> ok)",
+        )
+        check(sid16a not in sup16.sessions, "the stopped child is gone: no record left behind")
 
-            # a run in flight is never what a release ends
-            st, body = http_post(
-                f"{base16}/api/session/start",
-                {"base_url": f"http://127.0.0.1:{hang16_port}/v1", "model": "hang-model"},
-            )
-            d16 = json.loads(body)
-            sid16b, s16 = d16["session_id"], f"http://127.0.0.1:{d16['port']}"
-            with tempfile.TemporaryDirectory() as tdir16:
-                st, body = http_post(f"{s16}/api/project/new", {"dir": tdir16, "name": "detached"})
-                check(st == 200, "the detached case owns a project")
-                clc16 = json.loads(body)["project"]
-                st, _ = http_post(f"{s16}/api/run", {"task": "hold the line", "project": clc16})
-                check(st == 200, "run accepted against an endpoint that never answers")
-                st, body = http_get(f"{s16}/api/health")
-                check(
-                    st == 200 and json.loads(body).get("in_flight") is True,
-                    "the child reports its run in flight (GET /api/health -> in_flight)",
-                )
-                st, body = http_post(f"{base16}/api/session/stop", {"session_id": sid16b})
-                check(
-                    st == 200 and json.loads(body).get("status") == "detached",
-                    "a run in flight OUTLIVES the release (POST /api/session/stop -> detached)",
-                )
-                check(
-                    sid16b in sup16.sessions and sup16.sessions[sid16b].proc.poll() is None,
-                    "the detached child is left RUNNING for the reaper — never SIGTERMed mid-run",
-                )
-
-            # a name that is no session is an answer, not a crash
-            st, body = http_post(f"{base16}/api/session/stop", {"session_id": "nope"})
+        # a run in flight is never what a release ends
+        st, body = http_post(f"{base16}/api/session/start")
+        d16 = json.loads(body)
+        sid16b, s16 = d16["session_id"], f"http://127.0.0.1:{d16['port']}"
+        with tempfile.TemporaryDirectory() as tdir16:
+            st, body = http_post(f"{s16}/api/project/new", {"dir": tdir16, "name": "detached"})
+            check(st == 200, "the detached case owns a project")
+            clc16 = json.loads(body)["project"]
+            st, body = http_post(f"{s16}/api/run/state", {"busy": True, "project": clc16})
+            check(st == 200 and json.loads(body).get("busy") is True, "the run's host claims the slot")
+            st, body = http_get(f"{s16}/api/health")
             check(
-                st == 404 and json.loads(body).get("status") == "unknown",
-                "releasing a session that is not there answers 'unknown' (POST /api/session/stop -> 404)",
+                st == 200 and json.loads(body).get("in_flight") is True,
+                "the child reports its run in flight (GET /api/health -> in_flight)",
             )
-        finally:
-            sup16.shutdown_all()
+            st, body = http_post(f"{base16}/api/session/stop", {"session_id": sid16b})
+            check(
+                st == 200 and json.loads(body).get("status") == "detached",
+                "a run in flight OUTLIVES the release (POST /api/session/stop -> detached)",
+            )
+            check(
+                sid16b in sup16.sessions and sup16.sessions[sid16b].proc.poll() is None,
+                "the detached child is left RUNNING for the reaper — never SIGTERMed mid-run",
+            )
+
+        # a name that is no session is an answer, not a crash
+        st, body = http_post(f"{base16}/api/session/stop", {"session_id": "nope"})
+        check(
+            st == 404 and json.loads(body).get("status") == "unknown",
+            "releasing a session that is not there answers 'unknown' (POST /api/session/stop -> 404)",
+        )
     finally:
-        hang16.close()
+        sup16.shutdown_all()
 
     # ---- 16b. a RELEASED session's run does not hold its child forever ----
     # The verdict above leaves a live run running, and that is the point. What it
@@ -782,195 +704,113 @@ def main() -> int:
     # 300s a backgrounded phone gets (see STALE_S), not a try limit on the client's
     # reconnect ladder: that is why only a release sets it, and why the control
     # case below must still hold an unreleased run past three stale windows.
-    hang16b = _socket.socket()
-    hang16b.bind(("127.0.0.1", 0))
-    hang16b.listen(5)  # connect completes; no response ever comes
-    hang16b_port = hang16b.getsockname()[1]
+    sup16b, port16b, _ = start_supervisor(stale_s=1.0, idle_timeout_s=60)
+    base16b = f"http://127.0.0.1:{port16b}"
+
+    def live_run_session(tdir, name) -> str:
+        """A session on sup16b whose host claimed the slot: the shape a release
+        leaves behind."""
+        st, body = http_post(f"{base16b}/api/session/start")
+        d = json.loads(body)
+        sid, child = d["session_id"], f"http://127.0.0.1:{d['port']}"
+        st, body = http_post(f"{child}/api/project/new", {"dir": tdir, "name": name})
+        clc = json.loads(body)["project"]
+        st, body = http_post(f"{child}/api/run/state", {"busy": True, "project": clc})
+        check(st == 200 and json.loads(body).get("busy") is True, f"a run is in flight for {name}")
+        return sid
+
     try:
-        sup16b, port16b, _ = start_supervisor(stale_s=1.0, idle_timeout_s=60)
-        base16b = f"http://127.0.0.1:{port16b}"
-
-        def live_run_session(tdir, name) -> str:
-            """A session on sup16b with a run in flight against the endpoint that
-            never answers: the shape a release leaves behind."""
-            st, body = http_post(
-                f"{base16b}/api/session/start",
-                {"base_url": f"http://127.0.0.1:{hang16b_port}/v1", "model": "hang-model"},
+        with tempfile.TemporaryDirectory() as released_dir:
+            sid16b = live_run_session(released_dir, "released")
+            check(
+                sup16b.sessions[sid16b].detached is False,
+                "a session its window still holds is not marked released",
             )
-            d = json.loads(body)
-            sid, child = d["session_id"], f"http://127.0.0.1:{d['port']}"
-            st, body = http_post(f"{child}/api/project/new", {"dir": tdir, "name": name})
-            clc = json.loads(body)["project"]
-            st, _ = http_post(f"{child}/api/run", {"task": "hold the line", "project": clc})
-            check(st == 200, f"a run is in flight for {name}")
-            return sid
+            st, body = http_post(f"{base16b}/api/session/stop", {"session_id": sid16b})
+            check(
+                st == 200 and json.loads(body).get("status") == "detached",
+                "releasing it with a run in flight still says detached",
+            )
+            check(
+                sup16b.sessions[sid16b].detached is True,
+                "and the record is MARKED: no window owns this child any more",
+            )
+            check(
+                wait_until(lambda: sid16b not in sup16b.sessions, 15.0, "released session reaped"),
+                "a released session is reaped after its stale window even with a run in flight",
+            )
 
-        try:
-            with tempfile.TemporaryDirectory() as released_dir:
-                sid16b = live_run_session(released_dir, "released")
-                check(
-                    sup16b.sessions[sid16b].detached is False,
-                    "a session its window still holds is not marked released",
-                )
-                st, body = http_post(f"{base16b}/api/session/stop", {"session_id": sid16b})
-                check(
-                    st == 200 and json.loads(body).get("status") == "detached",
-                    "releasing it with a run in flight still says detached",
-                )
-                check(
-                    sup16b.sessions[sid16b].detached is True,
-                    "and the record is MARKED: no window owns this child any more",
-                )
-                check(
-                    wait_until(lambda: sid16b not in sup16b.sessions, 15.0, "released session reaped"),
-                    "a released session is reaped after its stale window even with a run in flight",
-                )
-
-            with tempfile.TemporaryDirectory() as held_dir:
-                sid16c = live_run_session(held_dir, "held")
-                time.sleep(3.0)  # three stale windows, with nobody beating
-                check(
-                    sid16c in sup16b.sessions and sup16b.sessions[sid16c].detached is False,
-                    "an UNRELEASED session with a run in flight is still never reaped: the in-flight exemption is intact",
-                )
-                check(
-                    sup16b.sessions[sid16c].proc.poll() is None,
-                    "and that child is still alive: the release mark is the only thing that bounds it",
-                )
-        finally:
-            sup16b.shutdown_all()
+        with tempfile.TemporaryDirectory() as held_dir:
+            sid16c = live_run_session(held_dir, "held")
+            time.sleep(3.0)  # three stale windows, with nobody beating
+            check(
+                sid16c in sup16b.sessions and sup16b.sessions[sid16c].detached is False,
+                "an UNRELEASED session with a run in flight is still never reaped: the in-flight exemption is intact",
+            )
+            check(
+                sup16b.sessions[sid16c].proc.poll() is None,
+                "and that child is still alive: the release mark is the only thing that bounds it",
+            )
     finally:
-        hang16b.close()
+        sup16b.shutdown_all()
 
-    # ---- 17. a session's LLM endpoint follows its client (heartbeat re-point) ----
-    # THE incident, end to end. A remote session is spawned on a base_url that is
-    # the claiming client's own proxy at the end of an SSH reverse forward; a hop
-    # dies without a FIN, so the next forward lands on another port and the port
-    # the session was born on serves nobody. The session outlives every hop
-    # (STALE_S) and a run inside it outlives both, so the ONLY thing that can save
-    # that run is the endpoint moving IN PLACE: the beat carries where the client
-    # serves the model NOW, the supervisor forwards it, the child swaps its live
-    # client and breaks the read parked on the dead path, and the redial lands on
-    # the new endpoint — all while the session and the run stay exactly where they
-    # are. Without it the run redials into the old port forever and the user reads
-    # "Cannot reach the API endpoint" while their network is fine.
-    import socket as _socket
-
-    mock17 = _MockLlm()
-    hang17 = _socket.socket()
-    hang17.bind(("127.0.0.1", 0))
-    hang17.listen(5)  # connect completes; no response ever comes (the dead hop)
-    hang17.settimeout(25.0)
-    old_base17 = f"http://127.0.0.1:{hang17.getsockname()[1]}/v1"
-    parked17: list = []
-
-    def _accept_old_path() -> None:
-        try:
-            conn, _ = hang17.accept()  # the witness that the run is parked on the old path
-        except OSError:
-            return
-        parked17.append(conn)  # held open, never answered: a read with no budget left
-
-    threading.Thread(target=_accept_old_path, daemon=True).start()
+    # ---- 17. the beat is pure liveness: it answers, and it moves nothing ----
+    # The beat's contract now that the LLM loop has left the agent: it says
+    # whether the session is still alive and says nothing else. Two things are
+    # pinned here. The answer is exactly {"status": "ok"}, because a window
+    # parses it and any extra field is a promise no code keeps. And the beat has
+    # no power over the session's endpoint: a base_url or model riding on it is
+    # ignored, so a client whose proxy moved cannot re-point a child that no
+    # longer assembles a request at all — the endpoint belongs to the config the
+    # session was born with, not to whoever beats last.
+    sup17, port17, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
+    base17 = f"http://127.0.0.1:{port17}"
     try:
-        sup17, port17, _ = start_supervisor()
-        base17 = f"http://127.0.0.1:{port17}"
-        new_base17 = f"{mock17.base}/v1"
-        try:
-            st, body = http_post(
-                f"{base17}/api/session/start", {"base_url": old_base17, "model": "hang-model"}
+        st, body = http_post(
+            f"{base17}/api/session/start",
+            {"base_url": "http://127.0.0.1:9/v1", "model": "born-model"},
+        )
+        d17 = json.loads(body)
+        check(
+            st == 200 and bool(d17.get("session_id")),
+            "a session starts on the endpoint and model its caller named",
+        )
+        sid17, child17 = d17["session_id"], f"http://127.0.0.1:{d17['port']}"
+        st, body = http_get(f"{child17}/api/settings")
+        born17 = json.loads(body)
+        check(
+            st == 200
+            and born17.get("base_url") == "http://127.0.0.1:9/v1"
+            and born17.get("model") == "born-model",
+            "the child it spawned really holds the endpoint and model it was born with",
+        )
+
+        for beat17 in (
+            {"session_id": sid17, "base_url": "http://127.0.0.1:8/v1", "model": "live-model"},
+            {"session_id": sid17, "base_url": "  "},
+            {"session_id": sid17, "base_url": "ftp://nope/v1"},
+            {"session_id": sid17, "model": "live-model"},
+            {"session_id": sid17},
+        ):
+            st, body = http_post(f"{base17}/api/session/heartbeat", beat17)
+            check(
+                st == 200 and json.loads(body) == {"status": "ok"},
+                "a beat answers exactly {'status': 'ok'} and carries nothing else: "
+                f"{sorted(beat17)}",
             )
-            d17 = json.loads(body)
-            sid17, child17 = d17["session_id"], f"http://127.0.0.1:{d17['port']}"
-            with tempfile.TemporaryDirectory() as hop_dir:
-                st, body = http_post(f"{child17}/api/project/new", {"dir": hop_dir, "name": "hop"})
-                clc17 = json.loads(body)["project"]
-                st, _ = http_post(f"{child17}/api/run", {"task": "hold the line", "project": clc17})
-                check(st == 200, "a run is in flight against the endpoint the hop left behind")
-                check(
-                    wait_until(lambda: bool(parked17), 25.0, "the run's request reaches the old path"),
-                    "the in-flight run is parked in a read on the port nobody serves any more",
-                )
-
-                # the client's re-bind beat: it serves the model on a DIFFERENT port now
-                st, body = http_post(
-                    f"{base17}/api/session/heartbeat",
-                    {"session_id": sid17, "base_url": new_base17, "model": "live-model"},
-                )
-                beat = json.loads(body)
-                check(
-                    st == 200 and beat.get("status") == "ok",
-                    "the beat's own liveness answer is untouched by the re-point",
-                )
-                check(
-                    beat.get("repoint", {}).get("status") == "repointed"
-                    and beat["repoint"].get("base_url") == new_base17,
-                    "the beat carries the client's current base and the session MOVED to it",
-                )
-                st, body = http_get(f"{child17}/api/settings")
-                check(
-                    json.loads(body).get("base_url") == new_base17,
-                    "the child's config names the new endpoint (the next run assembles from it)",
-                )
-                check(
-                    wait_until(lambda: bool(mock17.seen), 25.0, "the moved run reaches the new endpoint"),
-                    "the parked read was broken and the redial landed on the NEW endpoint",
-                )
-                check(
-                    mock17.seen[0]["path"] == "/v1/chat/completions",
-                    "the redial is a real chat-completions request, not a liveness probe",
-                )
-
-                # steady state: a beat whose target is already current costs no child call
-                st, body = http_post(
-                    f"{base17}/api/session/heartbeat",
-                    {"session_id": sid17, "base_url": new_base17, "model": "live-model"},
-                )
-                check(
-                    json.loads(body).get("repoint", {}).get("status") == "current",
-                    "a beat whose base is already current answers 'current'",
-                )
-                # a beat that serves nothing is a PURE liveness beat: absent is not
-                # "move to ''" — a client between model paths would otherwise point
-                # its session at a port with no listener
-                st, body = http_post(f"{base17}/api/session/heartbeat", {"session_id": sid17})
-                check(
-                    st == 200 and "repoint" not in json.loads(body),
-                    "a beat that serves nothing does not touch the endpoint (absent != empty)",
-                )
-                st, body = http_post(
-                    f"{base17}/api/session/heartbeat",
-                    {"session_id": sid17, "base_url": "  ", "model": "live-model"},
-                )
-                check("repoint" not in json.loads(body), "a blank base is the same as none")
-
-                # a target the child REFUSES is data on a beat that still succeeds:
-                # a bad re-point must never be able to make a live session look dead
-                st, body = http_post(
-                    f"{base17}/api/session/heartbeat", {"session_id": sid17, "base_url": "ftp://nope/v1"}
-                )
-                beat = json.loads(body)
-                check(
-                    st == 200 and beat.get("status") == "ok" and beat.get("repoint", {}).get("status") == "failed",
-                    "a refused re-point is reported as data: the beat still answers 'ok'",
-                )
-                st, body = http_get(f"{child17}/api/settings")
-                check(
-                    json.loads(body).get("base_url") == new_base17,
-                    "a refused base never becomes the running config",
-                )
-                st, body = http_post(
-                    f"{base17}/api/session/heartbeat", {"session_id": sid17, "base_url": new_base17}
-                )
-                check(
-                    json.loads(body).get("repoint", {}).get("status") == "current",
-                    "the record still points where the last GOOD re-point left it",
-                )
-        finally:
-            sup17.shutdown_all()
+        st, body = http_get(f"{child17}/api/settings")
+        check(
+            json.loads(body) == born17,
+            "no beat moved the session's endpoint or model: the settings the child was "
+            "born with are intact",
+        )
+        st, body = http_post(f"{base17}/api/session/heartbeat", {"session_id": "no-such-session"})
+        check(
+            st == 404 and json.loads(body) == {"status": "unknown"},
+            "an unknown session is still answered 'unknown', with a 404",
+        )
     finally:
-        hang17.close()
-        mock17.close()
+        sup17.shutdown_all()
 
     # ---- 18. the lock names its WINDOW, and a proven orphan can be reclaimed ----
     # The accident this replaces: a session outlived the window that claimed it

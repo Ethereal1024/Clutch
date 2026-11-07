@@ -322,7 +322,9 @@ from agent.tools import catalog, filesystem, registry
 from agent.core import permission
 from agent.config import Config
 config = Config()
-sentinel = object()
+# `cachedir` below is taught as the word for `project`, and that condition reads
+# the log's path (agent/tools/gates.py gate_project): a bare object() has none
+sentinel = type("Log", (), {"path": "/tmp/project.clc"})()
 print(json.dumps({
     "access_args": catalog.ACCESS_ARGS,
     "gates": list(catalog.GATES),

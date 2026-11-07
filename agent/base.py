@@ -1,10 +1,14 @@
 """Server base class: the contract every backend host shares.
 
-The HTTP server (HttpAgentServer) and the eval harness both go through
-BaseServer.build_llm/build_tools/build_workspace/start_task, so a run assembled
-here behaves identically whether it serves SSE over HTTP or runs headless in an
-eval. The degraded SSH backend needs no code here at all: build_workspace is
-implemented per server, and the workspace/transport layer routes to the remote.
+This machine is the EXECUTION layer (TODO.md D1): it opens projects, holds the
+write lock, appends durable lines to a `.clc`, runs one tool call per request
+(api/exec.py) and answers the run-slot lease its client claims (api/run_state.py).
+The loop that drives a turn lives in the client; there is no model client on
+this side any more (P4 removed the one that used to be here).
+
+BaseServer is only `build_tools` + `build_workspace` now; the degraded SSH
+backend needs no code here at all, since build_workspace is implemented per
+server and the workspace/transport layer routes to the remote.
 
 Broadcaster and RunState live here too (not in server.py) so the base has no
 dependency on the HTTP layer.
@@ -14,14 +18,13 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
 from .config import Config
-from .core.permission import PermissionEvaluator, PermissionGate
+from .core.permission import PermissionGate
 from .core.project_lock import LockHandle, ProjectLock, ProjectOpenConflict
-from .llm import LlmClient, create_llm_client
-from .loop import Agent
 from .project import Project, open_project_lazy
 from .tools.registry import ToolRegistry, build_tools
 from .tools.workspace import LocalWorkspace, RemoteWorkspace, Workspace
@@ -126,7 +129,7 @@ class Broadcaster:
 
 
 class RunState:
-    """Holds the live agent, cancel flag, and the active project.
+    """Holds the run slot, the permission gates, and the active project.
 
     A project is a single .clc file; its working directory is the directory that
     contains it. Runs within the same project share the project's event log so
@@ -134,27 +137,39 @@ class RunState:
     backend_mode/bridge_url/remote_root select RemoteWorkspace vs LocalWorkspace.
     """
 
+    # The run slot is a LEASE, not a latch (P2-3). The host drives the turn now
+    # and says so on POST /api/run/state; a host that dies (kill -9, a phone
+    # reclaimed by the OS, a tunnel cut mid-turn) cannot say anything, and a
+    # latch nobody can release would refuse every project switch and keep the
+    # supervisor from ever reaping the session. So the claim carries a deadline,
+    # the host renews it every heartbeat (ui/run-session.js), and the honest
+    # answer comes back by itself. Long enough that a stalled step or a shaky
+    # hop does not lose it (6 heartbeats of slack), short enough that a dead
+    # host costs two minutes, not a session.
+    LEASE_DEFAULT_S = 120.0
+    HEARTBEAT_S = 20.0
+
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.busy = False
-        self.cancel: threading.Event | None = None
+        self._busy = False
+        # monotonic deadline of the current lease; 0.0 = no claim is held (a
+        # claim ALWAYS carries one: api/run_state.claim_run sets it and the
+        # release paths clear it, so there is no such thing as a deadline-less
+        # hold any more — that was the retired /api/run path)
+        self.run_lease_until: float = 0.0
         self.project: Project | None = None
         self.workspace: Workspace | None = None
         self.api_key: str | None = None
-        # The LLM client of the run in flight (None between runs). It is held here
-        # — not only inside the Agent — because the endpoint it talks to belongs
-        # to the CLIENT that claimed this session, and that client can move it
-        # while the run is going (POST /api/llm/base, see api/settings).
-        self.llm: LlmClient | None = None
-        self.gate: PermissionGate | None = None
-        # Gates whose prompts are still answerable. `gate` above is the RUN's own
-        # gate (a run is one slot); the exec endpoint (api/exec.py) serves one
-        # call per request — several may be in flight for one turn, and a prompt
-        # whose gate were only the last one assigned could be neither answered
-        # (api/events._permission_respond) nor resolved by Stop (api/run._stop).
+        # Gates whose prompts are still answerable. The exec endpoint
+        # (api/exec.py) serves one call per request and several may be in flight
+        # for one turn, so a prompt whose gate were only the last one assigned
+        # could be neither answered (api/events._permission_respond) nor
+        # resolved by a Stop that reached the client.
         self.gates: list[PermissionGate] = []
         # tool_call_id -> the call's interrupt event, so POST /api/exec/cancel
-        # reaches the command tree that is still running on this machine
+        # reaches the command tree that is still running on this machine — and,
+        # through the same event, the permission prompt the call may be blocked
+        # on instead (api/exec._CallCancel)
         self.exec_cancels: dict[str, threading.Event] = {}
         # trust mode (agent/core/permission.py TRUST_COUNTDOWN_S): the window's
         # armed flag, mirrored here by POST /api/permission/trust so the
@@ -168,6 +183,68 @@ class RunState:
         self.bridge_url: str | None = None
         self.remote_root: str | None = None  # initial browse root on the remote
 
+    @property
+    def busy(self) -> bool:
+        """Is a run in flight right now?
+
+        The ONE answer five other places read: `/api/health`'s in_flight
+        (api/routing), the status frame a reconnecting window is handed
+        (api/events), the project-switch and rollback gates (api/project,
+        api/workspace), the write-claim retry (below) and the release handler
+        (server.py install_release_handler). It is therefore answered WITHOUT
+        the lock: the release handler reads it from a signal path that holds no
+        lock, and it must not be able to wait behind a run that is exactly what
+        it is asking about.
+
+        Expiry is lazy and needs no timer: every claim carries a monotonic
+        deadline (claim_run), and the first reader past it sees False. There is
+        no deadline-less hold: the backend loop that used to set the flag
+        without one was removed in P4, and a lease whose holder cannot renew is
+        exactly what this shape is for.
+        """
+        return self._busy and time.monotonic() < self.run_lease_until
+
+    def claim_run(self, project: str, ttl_s: float = LEASE_DEFAULT_S) -> str:
+        """Claim or renew the run slot for `project`; answer "" or a refusal code.
+
+        This is the HOST's half of the flag (POST /api/run/state, api/run_state):
+        the loop that drives a turn lives in the client, so the client is the
+        only one who can say the turn is still alive.
+
+        Refusals, each naming a different problem:
+          "no_project"       nothing is open to run in
+          "project_mismatch" this session has another .clc open
+          "run_active"       the slot is another window's host: two drivers on
+                             one turn would write it twice
+        """
+        with self.lock:
+            active = self.project
+            if active is None:
+                return "no_project"
+            if str(active.path) != project:
+                return "project_mismatch"
+            if self.busy and self.run_project != project:
+                return "run_active"
+            self._busy = True
+            self.run_project = project
+            self.run_lease_until = time.monotonic() + ttl_s
+        return ""
+
+    def release_run(self, project: str) -> bool:
+        """Give the slot back if `project`'s host holds it; say whether it did.
+
+        The project and its write lock stay (a follow-up turn continues the same
+        .clc); only the "in flight" claim goes. A release from a non-holder is not an error — Stop can be pressed
+        twice, or after the lease already expired by itself — it answers False.
+        """
+        with self.lock:
+            if not self.busy or self.run_project != project:
+                return False
+            self._busy = False
+            self.run_lease_until = 0.0
+            self.run_project = None
+            return True
+
     def build_workspace(self, root: str) -> Workspace:
         """Workspace factory: RemoteWorkspace in ssh mode, LocalWorkspace otherwise."""
         if self.backend_mode == "ssh" and self.bridge_url:
@@ -177,13 +254,12 @@ class RunState:
     def live_gates(self) -> list[PermissionGate]:
         """Every gate a permission prompt could still be waiting on.
 
-        The run's own gate first (one run slot), then the exec endpoint's live
-        ones (one per call). Answering a prompt and Stop both read this: an ask
-        nobody can reach is a run that never ends, and a tool call that waits for
-        an answer that cannot be typed is the same failure one layer down.
+        The exec endpoint (api/exec.py) opens one per call, and several can be
+        in flight within one turn. Answering a prompt reads this: an ask nobody
+        can reach is a tool call that waits for an answer that cannot be typed.
         """
         with self.lock:
-            return [g for g in [self.gate, *self.gates] if g is not None]
+            return [g for g in self.gates if g is not None]
 
     def set_backend(self, mode: str, bridge_url: str | None = None, remote_root: str | None = None) -> None:
         """Switch the SSH-degradation backend (mode: "local" | "ssh"). A mode
@@ -196,7 +272,6 @@ class RunState:
             prev = self.project
             self.project = None
             self.workspace = None
-            self.gate = None
             self._retire_lock(prev)
 
     def set_project(self, project: Project, workspace: Workspace | None = None) -> Workspace:
@@ -276,57 +351,13 @@ class RunState:
         ProjectLock.release(prev.lock)
         prev.lock = None
 
-    def start(
-        self, task: str, workspace: Workspace, cancel: threading.Event, llm: LlmClient | None = None
-    ) -> bool:
-        with self.lock:
-            if self.busy:
-                return False
-            self.busy = True
-            self.cancel = cancel
-            self.workspace = workspace
-            # claimed under the same lock as `busy`: a re-point reads this to
-            # decide whether there is a live client to move, and a window where
-            # busy is True and llm is not yet set would be one it cannot reach
-            self.llm = llm
-        return True
-
-    def finish(self) -> None:
-        # keep the project + workspace so a follow-up run can continue
-        with self.lock:
-            self.busy = False
-            self.run_project = None
-            # the run is over: the next one builds its own client from the config
-            # a re-point already updated, so holding this one would only make
-            # "is there a live client?" answer yes when nothing is running
-            self.llm = None
-
-
 class BaseServer(ABC):
-    """Shared run-assembly contract. Subclasses implement build_workspace only."""
+    """Shared assembly contract. Subclasses implement build_workspace only."""
 
     def __init__(self, config: Config, broadcaster: Broadcaster, state: RunState) -> None:
         self.config = config
         self.broadcaster = broadcaster
         self.state = state
-
-    def _build_llm(self, api_key: str, model: str, cfg: Config) -> LlmClient:
-        """Assemble one LLM client — the only construction site in the repo."""
-        return create_llm_client(
-            api_key=api_key,
-            model=model,
-            base_url=cfg.base_url,
-            protocol=cfg.llm_api_protocol,
-            request_timeout=cfg.llm_request_timeout,
-            read_timeout=cfg.llm_read_timeout,
-            max_retries=cfg.llm_max_retries,
-            retryable_status=cfg.llm_retryable_status,
-            reasoning_effort=cfg.llm_reasoning_effort,
-        )
-
-    def build_llm(self) -> LlmClient:
-        """LLM client for this server. Raises RuntimeError when no API key."""
-        return self._build_llm(self.state.api_key or self.config.api_key, self.config.model, self.config)
 
     def build_tools(self, project: Project | None = None, config: Config | None = None) -> ToolRegistry:
         """Tools for a run; config overrides self.config for a per-run mode
@@ -336,8 +367,8 @@ class BaseServer(ABC):
         depends on which machine the root is on (`registry._serves_this_workspace`),
         and a local session must not be handed a plugin that reads a DIFFERENT
         machine's files under the local `read_file` name. `state.workspace` is
-        the run's workspace by the time this is asked (start_task claims the slot
-        first); before any run it is None, which offers everything.
+        the open project's workspace (set_project); before a project is open it
+        is None, which offers everything.
 
         The project's log goes with them too, and it is the same object in both
         places: `build_tools` needs it to answer the `project` gate, and the
@@ -350,50 +381,3 @@ class BaseServer(ABC):
     @abstractmethod
     def build_workspace(self, project: Project) -> Workspace:
         """Workspace for a project's working directory (local or remote)."""
-
-    def start_task(
-        self,
-        task: str,
-        project: Project,
-        on_ask=None,
-        cancel: threading.Event | None = None,
-        config: Config | None = None,
-    ) -> Agent | None:
-        """Assemble and claim a run on the project: workspace + LLM + tools +
-        gate + Agent. Returns the Agent (caller runs it) or None when a run is
-        already active.
-        """
-        cfg = config or self.config
-        # reuse the UI-built workspace when it matches the project root, else build fresh
-        workspace = self.state.workspace
-        if workspace is None or workspace.root != project.workdir:
-            workspace = self.build_workspace(project)
-        workspace.protect(project.path)
-        llm = self.build_llm()  # before claiming the slot: a bad key must not stick busy
-        cancel = cancel or threading.Event()
-        if not self.state.start(task, workspace, cancel, llm=llm):
-            return None
-        gate = PermissionGate(
-            evaluator=PermissionEvaluator(),
-            on_ask=on_ask,
-            auto_allow=cfg.non_interactive,
-            # a prompt is only answerable by a UI watching THIS project: when
-            # that stream is gone for good (a wrongly-closed connection), the
-            # gate denies instead of holding the run — and with it the project's
-            # write lock — forever
-            is_attached=lambda: self.broadcaster.count(str(project.path)) > 0,
-            # trust mode: the countdown belongs on this side (a backgrounded
-            # phone freezes the renderer and its timers with it), and the flag is
-            # read live so arming/disarming mid-prompt behaves like the button
-            trust=lambda: self.state.trust_armed,
-        )
-        return Agent(
-            llm=llm,
-            registry=self.build_tools(project, cfg),
-            workspace=workspace,
-            config=cfg,
-            log=project.log,
-            sink=self.broadcaster.publish,
-            cancel=cancel,
-            gate=gate,
-        )

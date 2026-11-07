@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The two things a remote read has to decide before it happens: WHICH fetch this
 // machine uses, and WHERE the reads this build makes are sent. Both are
 // "the network this app runs on" questions, so both live in one small seam.
@@ -78,7 +79,10 @@ function appFetch() {
 // one, which is the failure this file exists to make rare, not longer.
 function netFetch() {
   const app = appFetch();
-  return app || ((...args) => fetch(...args));
+  // (url, init) spelled out, not a spread: the two parameters are what lets the
+  // checker see a caller's signal/init instead of an opaque forwarding wrapper
+  // (every caller passes exactly those two).
+  return app || ((url, init) => fetch(url, init));
 }
 
 // -------------------------------------------------------------- the mirror --

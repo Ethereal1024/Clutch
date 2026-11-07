@@ -235,7 +235,8 @@ def _concurrent_gates_share_one_id_space(tmp: str) -> None:
 
 
 def _publish(broadcaster: Broadcaster, request_id: str, tool: str, args_repr: str, reason: str) -> bool:
-    # the run's own on_ask (agent/api/run.py): one publish to the broadcaster
+    # the client's own on_ask (the shape the retired agent/api/run.py had): one
+    # publish to the broadcaster
     broadcaster.publish(
         PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason)
     )
@@ -262,7 +263,7 @@ def _sse_streams_redeliver_pending_asks() -> None:
                 is_attached=lambda: broadcaster.count(str(pa.path)) > 0,
                 detach_grace_s=60.0,  # the test's brief stream gaps are not verdicts
             )
-            state.gate = gate
+            state.gates.append(gate)
             state.run_project = str(pa.path)
 
             # the ask is published while NO window is watching — the very case

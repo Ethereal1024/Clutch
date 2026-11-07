@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // Expose the backend URL + SSH tunnel bridge to the renderer.
 // baseUrl is an async IPC call: the session port is only known to the main process.
 const { contextBridge, ipcRenderer } = require("electron");
@@ -89,12 +90,19 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
 // start/stop/step/drive/state and subscribes to run:event pushes. The loop
 // survives a page reload: the main process owns it, so a closed window does
 // not cancel an in-flight turn (the aborted final is written on close).
+// start takes the page's payload {task, mode, project} — one object, because
+// the three travel together: the mode picks the tool surface the loop is built
+// with, and the project is the .clc the page believes it is showing (a claim
+// the host checks, ui/run-session.js, never a path an append could follow).
+// state takes that same {mode, project} pair (no task: it asks instead of
+// writes) — it is how a page that was not there when the turn opened learns
+// whether a turn is still open, and it builds the loop when there is none yet.
 contextBridge.exposeInMainWorld("clutchRun", {
-  start: (task) => ipcRenderer.invoke("run:start", task),
+  start: (payload) => ipcRenderer.invoke("run:start", payload),
   stop: () => ipcRenderer.invoke("run:stop"),
   step: () => ipcRenderer.invoke("run:step"),
   drive: () => ipcRenderer.invoke("run:drive"),
-  state: () => ipcRenderer.invoke("run:state"),
+  state: (payload) => ipcRenderer.invoke("run:state", payload),
   onEvent: (cb) => {
     const wrap = (_e, ev) => cb(ev);
     ipcRenderer.on("run:event", wrap);

@@ -26,6 +26,11 @@ bash scripts/build-server-bundle.sh "$VERSION" "$ROOT/dist/agent-server"
 # 3. exec-chunk limit must not drift between agent/ and ui/
 bash "$ROOT/scripts/check-transport-defaults.sh"
 
+# 3b. ui/renderer.js (the whole renderer, one committed script) must be what the
+#     sources build. This script calls electron-builder directly instead of
+#     `npm run dist`, so predist — which REBUILDS it — does not run on this path.
+node "$ROOT/ui/build-renderer.js" --check
+
 # 4. deb
 echo "==> building deb"
 cd ui

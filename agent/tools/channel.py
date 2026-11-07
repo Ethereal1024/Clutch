@@ -275,6 +275,17 @@ def _plugin_of(data: Any, index: int) -> catalog.Component:
             f"whose statements are the client's may be pushed: anything else is code this host is asked "
             f"to run, which is an install"
         )
+    if not component.entry:
+        # A declaration with no process here and no module there names nothing
+        # anyone can run: the catalog treats that as legal (a component may exist
+        # for its vars alone), but a PUSH whose tools the client is supposed to
+        # render is a promise to run them — clientSide() in ui/plugin-host.js
+        # returns "" for it, so the model would be offered tools that fail at the
+        # first call. Refused here, where the sentence can still name the fix.
+        raise ChannelError(
+            f"{where} must name the `entry` module the client runs for it: with no process here and no "
+            f"module there, a pushed component runs nothing at all"
+        )
     fatal = [d.message for d in catalog.component_diagnostics(component) if d.fatal]
     if fatal:
         raise ChannelError(f"{where} is refused: {'; '.join(fatal)}")

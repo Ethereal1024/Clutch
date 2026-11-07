@@ -125,12 +125,15 @@
   // the host-side run loop (P1-4): the page is a view only — it calls
   // start/stop/step/drive/state and subscribes to run:event pushes. The loop
   // lives in the host process, so a page reload does not cancel an in-flight turn.
+  // start takes one payload {task, mode, project}, exactly as preload.js does;
+  // state takes the same {mode, project} pair, because that is the question a
+  // page that was not there when the turn opened has to ask (P2-3 resume).
   expose("clutchRun", {
-    start: (task) => call("clutchRun", "start", [task]),
+    start: (payload) => call("clutchRun", "start", [payload]),
     stop: () => call("clutchRun", "stop"),
     step: () => call("clutchRun", "step"),
     drive: () => call("clutchRun", "drive"),
-    state: () => call("clutchRun", "state"),
+    state: (payload) => call("clutchRun", "state", [payload]),
     onEvent: (cb) => subscribe("run:event", cb),
   });
 

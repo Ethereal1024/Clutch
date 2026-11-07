@@ -101,9 +101,9 @@ system must allow installation from this source first.
 git clone https://github.com/Ethereal1024/Clutch.git
 cd Clutch
 pip install uv
-uv sync                  # backend dependencies
-cd ui && npm install     # frontend dependencies
-npm start                # start the application; backend sessions start on demand
+uv sync                  # the machine side's dependencies
+cd ui && npm install     # the client's dependencies
+npm start                # start the client; it runs the loop, the machine executes
 ```
 
 ## Configuration
@@ -144,50 +144,54 @@ these environment variables:
 
 ## Architecture
 
-Clutch has two layers: an interface and a backend. The interface handles interaction
-and event display; the backend handles model calls, tool execution, and session state.
-The two communicate over HTTP endpoints and server-sent events. Each window
-corresponds to one backend session, and closing the window ends that session.
+Clutch is split in two. The **client** runs the loop: the model stream, the conversation
+context, compaction, prompts, and tool orchestration. The **machine** only executes: it
+runs commands, reads and writes files, decides permissions, and appends the event log. No
+code on the machine calls a model, and no code on the client runs a command.
+
+The client is itself two halves. The **host** — the Electron main process on the desktop,
+the libnode process inside the app on Android — runs the loop. The **page** is the WebView,
+and Android freezes it — timers included — the moment it is not visible. That is why the
+loop cannot live there. The page shows events and answers one permission prompt at a time;
+it never decides what is allowed.
 
 ```mermaid
 flowchart LR
-    UI["Clutch UI"] -- "HTTP and events" --> API["Backend session"]
-    API -- "Tool calls" --> LLM["Large language model"]
-    API -- "File and command access" --> WS["Working directory"]
+    subgraph client["Client (your device)"]
+        HOST["host: the loop<br/>model stream, context, prompts"]
+        PAGE["page: display<br/>answers one ask"]
+    end
+    subgraph machine["Machine (may be remote)"]
+        EXEC["exec endpoint"]
+        PERM["permission rules"]
+        CLC[".clc event log"]
+    end
+    HOST -- "model stream" --> LLM["Large language model"]
+    HOST -- "one tool call" --> EXEC
+    EXEC --> PERM
+    PERM -- "allow / ask / deny" --> HOST
+    HOST -- "events" --> PAGE
+    PAGE -- "this call: allow or deny" --> HOST
+    EXEC -- "appends a line" --> CLC
 ```
 
-With a remote workspace, the backend runs on the remote host, and the interface
-reaches it over an SSH tunnel. Model requests are forwarded by the local client, so
-the remote host needs no API key.
-
-```mermaid
-flowchart LR
-    subgraph local["Local client"]
-        UI["Clutch UI"]
-        PXY["Model request forwarding"]
-    end
-    subgraph remote["Remote host"]
-        SUP["Session manager"]
-        AG["Backend session"]
-    end
-    UI -- "SSH tunnel" --> SUP
-    SUP -. "start and reclaim" .-> AG
-    AG -- "Tool calls" --> PXY
-    PXY -- "HTTPS" --> LLM["Large language model"]
-    AG -- "File and command access" --> WS["Remote working directory"]
-```
+With a remote workspace, only the exec endpoint and the `.clc` live on the remote host, and
+the client reaches them over an SSH tunnel. Model requests leave the client, so the remote
+host needs no API key.
 
 Design decisions:
 
-- Session state derives from an event log: conversation history and the interface are
-  generated from the same event sequence.
+- **The loop keeps no state of its own.** Every step can be derived from the last lines of
+  the `.clc`: kill the process, lock the screen, or reopen the window, and the run continues
+  from the log instead of from memory.
 - Project records are appended to the `.clc` file as events. The model receives only
   the content after the newest compaction; earlier records stay in the file and can
   be searched on demand.
-- Tool results and error messages are returned to the model, which uses them to adjust
-  its next steps.
-- Tool names, arguments, execution methods, and their display in the interface are
-  declared by components; the client contains no tool implementation of its own.
+- **There is one implementation of judgement**: the machine evaluates the permission rules
+  (`agent/core/permission.py`), and the page only answers the one ask in front of the user.
+- Tool results and error messages are returned to the loop, which uses them to choose its
+  next step. A tool's component declares its name, arguments, execution method, and how the
+  interface shows it, so installing one teaches both halves without touching code.
 - Permissions are decided by a rule table: routine operations inside the working
   directory are allowed by default, while file deletion, privilege escalation, and
   writes outside the working directory require approval.
@@ -195,11 +199,11 @@ Design decisions:
 ## Components
 
 File operations, web retrieval, the skill library, and remote workspaces are provided
-as independent components and are not bundled with the main program. Where a component
-is held — this client, or the machine the session's commands run on — is decided by the
-component's own declaration, so local use and remote-workspace use can require separate
-installations. The Plugins page in the settings lists the available components, their
-installation state, and their sources.
+as independent components and are not bundled with the main program. The component's own
+declaration decides where it is held: this client, or the machine the session's commands run
+on. Local use and remote-workspace use can therefore require separate installations. The
+Plugins page in the settings lists the available components, their installation state, and
+their sources.
 
 The available components come from the market index the release publishes. Each row
 names a component's release manifest and pins that manifest's digest. The manifest in

@@ -377,25 +377,25 @@ def main() -> int:
         # 6. a checkout, archived: the shape a client sends when it has no
         #    prebuilt onefile. Landing it must make the host RUN it — the whole
         #    point of a landing dir is that resolution finds it there.
-        tar = _tar_checkout(modules.WEBSEARCH, Path(root))
-        digest_ws = components.digest(tar)
+        tar = _tar_checkout(modules.SKILLS, Path(root))
+        digest_sk = components.digest(tar)
         result = components.accept(
             tar,
             {
-                "name": modules.WEBSEARCH,
-                "version": digest_ws[:16],
-                "digest": digest_ws,
+                "name": modules.SKILLS,
+                "version": digest_sk[:16],
+                "digest": digest_sk,
                 "artifact": tar.name,
             },
         )
         check(result["status"] == "installed", "an archived checkout installs too")
-        resolved = rendezvous.resolve(modules.WEBSEARCH)
+        resolved = rendezvous.resolve(modules.SKILLS)
         check(
             resolved is not None and resolved.installed and resolved.directory == Path(result["path"]),
             "the host resolves the component to the installed artifact, not to a checkout",
         )
         check(
-            resolved.argv == (modules.python_exe(), str(resolved.directory / "websearch.py")),
+            resolved.argv == (modules.python_exe(), "-m", "clutch_skills"),
             "and the launch template reads the entry point out of the install",
         )
         # the checkout archives its own component.json, so the landed record is
@@ -403,11 +403,11 @@ def main() -> int:
         # a host that never saw the checkout still receives a whole component
         declared = components.read_manifest(Path(result["path"]))
         check(
-            declared is not None and "web_search" in {t.get("name") for t in declared.get("tools", [])},
+            declared is not None and "load_skill" in {t.get("name") for t in declared.get("tools", [])},
             "a declaring archive lands whole: the artifact's own manifest is the record",
         )
         check(
-            declared.get("version") == digest_ws[:16] and declared.get("digest") == digest_ws,
+            declared.get("version") == digest_sk[:16] and declared.get("digest") == digest_sk,
             "the request's install facts sit on top of the artifact's declaration",
         )
         foreign = Path(root) / "foreign-src"
@@ -435,7 +435,7 @@ def main() -> int:
         st, body_json = http_get(f"{base}/api/components")
         listed = json.loads(body_json)["components"]
         check(
-            st == 200 and {c["name"] for c in listed} == {modules.WEBSEARCH},
+            st == 200 and {c["name"] for c in listed} == {modules.WEBSEARCH, modules.SKILLS},
             "GET /api/components lists the host's installs",
         )
         check(
@@ -465,9 +465,9 @@ def main() -> int:
         st, body_json = _post_artifact(base, "clutch-echo", blob2, digest=components.digest_of(blob2))
         check(st == 200 and json.loads(body_json)["status"] == "current", "the second upload is gated out")
 
-        st, body_json = _post_artifact(base, "clutch-skills", blob2, digest="0" * 64)
+        st, body_json = _post_artifact(base, "clutch-lying", blob2, digest="0" * 64)
         check(st == 400 and "hashes to" in json.loads(body_json)["error"], "a lying upload is refused with a reason")
-        check(components.installed("clutch-skills") is None, "and it landed nothing")
+        check(components.installed("clutch-lying") is None, "and it landed nothing")
 
         req = urllib.request.Request(
             f"{base}/api/components/install",
@@ -485,7 +485,7 @@ def main() -> int:
         check(list(scratch.iterdir()) == [], "no spooled body is left behind")
         listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
         check(
-            {c["name"] for c in listed} == {modules.WEBSEARCH, "clutch-echo"},
+            {c["name"] for c in listed} == {modules.WEBSEARCH, modules.SKILLS, "clutch-echo"},
             "the inventory grew by each install and by neither refusal",
         )
 
@@ -780,7 +780,10 @@ def main() -> int:
         )
         check(components.installed("clutch-echo") is None, "and the host no longer resolves it")
         listed = json.loads(http_get(f"{base}/api/components")[1])["components"]
-        check({c["name"] for c in listed} == {modules.WEBSEARCH}, "the inventory shrank by exactly that component")
+        check(
+            {c["name"] for c in listed} == {modules.WEBSEARCH, modules.SKILLS},
+            "the inventory shrank by exactly that component",
+        )
         st, body_json = _delete(f"{base}/api/components/clutch-echo")
         check(st == 200 and json.loads(body_json)["status"] == "absent", "removing it again is absent, not an error")
         st, _body = _delete(f"{base}/api/components/")

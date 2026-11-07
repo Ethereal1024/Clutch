@@ -40,7 +40,7 @@ jobs:
   # job from the run page — it attaches to the SAME release — not a new tag,
   # which leaves the partial one standing next to it forever.
   #
-  # Stdlib only, on purpose: the three scans import no third-party package, so
+  # Stdlib only, on purpose: the scans below import no third-party package, so
   # `python3 -m` works on the runner image without uv sync / npm ci — the gate
   # costs seconds and cannot itself fail for a dependency reason.
   verify:
@@ -68,6 +68,14 @@ jobs:
       # way). tests/android_icon_check.py docstring.
       - name: Verify the launcher icon
         run: python3 -m tests.android_icon_check
+
+      # The machine's half of the split: `agent/` must BE the execution layer,
+      # with nothing of the loop left on its import graph — the message
+      # projector nothing shipped imports, a resurrected `render("system.md")`,
+      # a model client, an orphan module (tests/exec_layer_test.py docstring).
+      # Offline and stdlib only, like the scans above.
+      - name: Verify the execution layer
+        run: python3 -m tests.exec_layer_test
 
       # The gate's own wiring: every job that attaches an asset must reach this
       # one, and the phone chain must also reach `deb` — the 0.1.51/0.1.52

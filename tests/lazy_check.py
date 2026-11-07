@@ -6,10 +6,12 @@ Builds a synthetic .clc with a compaction, opens it lazily, and checks:
      task and the summarized middle) stays on disk (older = cpr_start)
   2. read_page pages that earlier history with a PURE DISK read — the resident
      log never grows (history browsing is decoupled from the model context)
-  3. derive_messages on the lazy log == derive_messages on a fully loaded log
-  4. compact() works on the lazy log (input = the resident window, zero disk
-     reads), slides cpr_start to the new summary line via an in-place
-     fixed-width header write, and derive_messages sees the fresh summary head
+  3. the resident window is the tail of a fully loaded log — the same events in
+     the same order — and the paged head is the file's head (the projector that
+     would have compared messages lives in ui/context.js now)
+  4. a compaction on the lazy log: the summary line is appended, then cpr_start
+     slides to its start via an in-place fixed-width header write, and a reopen
+     starts at the fresh summary line
   5. the window contract survives a reopen: the persisted cpr_start resolves
      the SAME boundary, and the header write kept every event offset stable
   6. an out-of-range cpr_start clamps to 0 (nothing lost, full window)
@@ -38,8 +40,6 @@ from pathlib import Path
 
 from agent.api.events import EventsMixin
 from agent.config import Config
-from agent.core.compaction import Compactor
-from agent.core.context import derive_messages
 from agent.core.lazy import LazyEventLog
 from agent.events import (
     AssistantMessageEvent,
@@ -54,17 +54,6 @@ from agent.project import open_project_lazy
 from tests.testsupport import collecting_check
 
 check, failures = collecting_check()
-
-
-class FakeLlm:
-    """Compaction summarizer stub: returns a fixed summary."""
-
-    def __init__(self, summary: str = "NEW SUMMARY") -> None:
-        self.summary = summary
-
-    def stream(self, msgs, tools=None, cancel=None):
-        yield {"type": "text", "delta": self.summary}
-        yield {"type": "finish"}
 
 
 def build_clc(path: Path, recent: int = 9) -> dict:
@@ -159,46 +148,42 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     check(max(0, log.cpr_start()) == book["comp_off"],
           "older is unchanged by paging (pure disk read, no materialization)")
 
-    # ---- 3. lazy derive == full derive -------------------------------------
+    # ---- 3. the resident window is the tail of a full parse ----------------
     full = _load_full(path)
-    msgs_base = derive_messages(full, config, "task")
-    msgs_lazy = derive_messages(log, config, "task")
-    check(msgs_base[1:] == msgs_lazy[1:], "derive_messages(lazy log) == derive_messages(full log)")
-    # the system prompt of a REAL project log ends with the recall anchor (the
-    # file to search); the in-memory cross-check log has no path, so no anchor
-    check(
-        msgs_lazy[0]["content"].startswith(msgs_base[0]["content"])
-        and "This project's memory is its own log" in msgs_lazy[0]["content"]
-        and "This project's memory is its own log" not in msgs_base[0]["content"],
-        "the lazy prompt is the full one plus the log anchor",
-    )
-    check(msgs_lazy[-1] == {"role": "assistant", "content": "recent 109"},
-          "lazy context ends with the newest window event")
-    check(
-        not any(m.get("content", "") in ("old work 42", "old ask 43") for m in msgs_lazy),
-        "the summarized middle never enters the model context",
-    )
+    everything = [event_to_json(ev) for ev in full.events()]
+    resident = [event_to_json(ev) for _, ev in log.items()]
+    check(resident == everything[-len(resident):],
+          "the resident window is the tail of a full parse (same events, same order)")
+    head = [event_to_json(ev) for _, ev in page]
+    check(everything[:len(head)] == head, "and the paged head is the file's head")
+    check("old work 42" not in "".join(resident),
+          "the summarized middle never enters the resident log")
 
-    # ---- 4. compact() on the lazy log --------------------------------------
+    # ---- 4. compaction on the lazy log -------------------------------------
+    # The summarizer now runs in the client (ui/compaction.js); what the HOST
+    # still owns is the arithmetic below — append the summary line, then slide
+    # the window to its start — so that is what is driven here.
     p_long = tmp / "long.clc"
     book_long = build_clc(p_long, recent=400)
     long_log = open_project_lazy(p_long, workspace=None).log
     check(max(0, long_log.cpr_start()) == book_long["comp_off"],
           "long-window file lazy-opens with the middle unloaded")
-    comp = _make_compactor(long_log)
-    ok = comp.compact()
-    check(ok, "compact() succeeds on the lazy log (input = the resident window)")
-    check(isinstance(long_log.events()[-1], CompactionEvent),
-          "compact() appended a new CompactionEvent")
+    resident = [ev for off, ev in long_log.items() if off >= long_log.cpr_start()]
+    check(len(resident) > 1, "the window holds more than its own summary head")
+    long_log.append(CompactionEvent(summary="NEW SUMMARY"))
     new_off = long_log.items()[-1][0]
+    long_log.set_cpr_start(new_off)
+    check(isinstance(long_log.events()[-1], CompactionEvent),
+          "the summary line is the window's last record")
     check(new_off > book_long["comp_off"], f"new cpr_start ({new_off}) slides past the old boundary")
     check(long_log.cpr_start() == new_off, "cpr_start moved to the new summary line")
     check(long_log.window_bytes() == _line_bytes(long_log.events()[-1]),
           "the window collapsed to just the new summary line")
-    check(not comp.compact(), "second compact() is a no-op (the window holds only the summary)")
-    check(not comp.should_compact(), "should_compact is False right after compaction")
+    check(long_log.set_cpr_start(-1) is None and long_log.cpr_start() == new_off,
+          "a boundary outside the event region is refused (the window never moves back)")
     long_log.append(AssistantMessageEvent(content="post-compaction turn " + "q" * 100))
-    check(not comp.should_compact(), "one new turn after compaction does NOT re-trigger (200K window)")
+    check(0 < long_log.window_bytes() < 200_000,
+          "one new turn after compaction stays far under a 200K byte budget")
 
     # ---- 5. the window contract survives a reopen --------------------------
     # header write is an in-place fixed-width update: offsets stay stable
@@ -210,9 +195,11 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
     offs_r = [off for off, _ in r1.items()]
     check(offs_r[0] == new_off,
           "reopen materializes the collapsed window (first resident = the new summary line)")
-    msgs_re = derive_messages(r1, config, "task")
-    check(any("NEW SUMMARY" in m.get("content", "") for m in msgs_re),
-          "reopen derives the fresh summary head")
+    msgs_re = [ev for _, ev in r1.items()]
+    check(
+        bool(msgs_re) and getattr(msgs_re[0], "type", "") == "compaction" and "NEW SUMMARY" in msgs_re[0].summary,
+        "reopen starts at the fresh summary line",
+    )
 
     # ---- 6. out-of-range cpr_start clamps to 0 -----------------------------
     with tempfile.TemporaryDirectory() as d:
@@ -282,10 +269,9 @@ def _run(config: Config, tmp: Path, path: Path, book: dict) -> None:
             "window materializes only from the last compaction onward (history not re-summarized)",
         )
         check(
-            not Compactor(
-                Config(llm_context_window_bytes=200_000), proj2.log, FakeLlm(), emit=proj2.log.append
-            ).should_compact(),
-            "no spurious compaction on a legacy file with an existing summary",
+            proj2.log.window_bytes() == sum(_line_bytes(e) for e in proj2.events()),
+            "no spurious compaction on a legacy file with an existing summary: the window "
+            "is exactly the summary line plus the turn after it",
         )
 
     # ---- 8. a live append stamps the offset the replay will send ------------
@@ -431,12 +417,6 @@ def _load_full(path: Path) -> LazyEventLog:
 def _make_reader(path: Path):
     from agent.core.lazy import _make_reader
     return _make_reader(path, None)
-
-
-def _make_compactor(log):
-    # no broadcasters in a test: emit is still the one writer (append stamps the
-    # record's log offset, which compact() slides the window to)
-    return Compactor(Config(llm_context_window_bytes=200_000), log, FakeLlm(), emit=log.append)
 
 
 if __name__ == "__main__":

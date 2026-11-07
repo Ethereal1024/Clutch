@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The run: the doing that the fold only describes.
 //
 // ui/run-state.js answers one question from the .clc lines — is a turn open, and
@@ -17,7 +18,15 @@
 // A turn that never gets another step stays open on disk, which is the honest
 // picture: nothing happened after that line.
 //
-// Everything else is a PORT, and every port is required:
+// ...and one exception, which is a guard rather than a fact about the turn: the
+// doom-loop window (a few last calls, below). It is the ONE thing the guard
+// cannot re-derive cheaply — the warning it feeds the model is prose appended to
+// a tool result, so "was this exact call already warned about" would have to be
+// read back out of `tool_result.content`. It lives for one `createRun`, is
+// cleared when a turn opens, and decides nothing the log would have to believe:
+// every answer it produces is written as an ordinary result or final.
+//
+// Everything else is a PORT, and every port is required but two:
 //
 //   read()                        the log as it is now — parsed events, file order
 //   append(event)                 append one line; answers it AS PERSISTED (the
@@ -26,9 +35,14 @@
 //   model({messages, signal})     -> {content, toolCalls, finishReason} (P1-2)
 //   runTool({call, signal})       -> {content, isError, diff} (P3)
 //   text(key, vars)               the loop's own prose (P1-3): "cancelled",
-//                                 "empty_response", "max_tokens"
+//                                 "empty_response", "max_tokens", "budget_exceeded",
+//                                 "doom_loop"
 //   shouldCompact()               -> does the resident window fill the model's?
 //   compact({signal})             -> did the log change (ui/compaction.js)?
+//   limits?                       {maxTurns, doomLoopLimit, abortOnDoomLoop} —
+//                                 when this turn must end (agent/api/session.py
+//                                 serves it; P4-3)
+//   observe?(result)              what the page is told after each step
 //
 // `read` and `append` answer promises, and so do `state()` and `start()`. The
 // log does not live in this process: it is the session machine's `.clc`, a
@@ -46,14 +60,19 @@
 // the call was already made over budget, and a compaction that changed the log
 // re-derives instead of asking with the messages it had (agent/loop.py).
 //
-// Missing one throws at construction. There is no default, no in-memory log, no
-// simpler loop to fall back to: a half-wired run would be a second way to run a
-// turn, and the whole point of this phase is that there is only one.
+// Missing one of the required ports throws at construction. There is no
+// default, no in-memory log, no simpler loop to fall back to: a half-wired run
+// would be a second way to run a turn, and the whole point of this phase is
+// that there is only one.
 //
-// The single exception is `observe(result)`: the host broadcasts what a step did
-// over /events so the page can paint "running". It is called after each step,
-// with the step's own answer, and a failure inside it is swallowed — a page that
-// cannot be painted has not changed the work. It never decides anything.
+// The two optional ports answer "this session said nothing about it" rather than
+// "use something else": `observe` is the host broadcasting what a step did over
+// /events so the page can paint "running" — called after each step, with the
+// step's own answer, and a failure inside it is swallowed, because a page that
+// cannot be painted has not changed the work. `limits` absent means this session
+// imposes no budget and no doom-loop guard, which is exactly what the loop did
+// before the guard moved here; a session that serves the numbers (it does, from
+// its own config) is held to them.
 
 const { foldRun } = require("./run-state");
 
@@ -77,6 +96,29 @@ function requiredPort(ports, name) {
   return fn;
 }
 
+// What this session says about ending a turn (GET /api/session's `limits`,
+// from agent/config.py). Absent is a real answer — a session built before the
+// key existed imposes no budget and no doom-loop guard — so this normalizes to
+// "both off" rather than inventing numbers the session never chose.
+const NO_LIMITS = { maxTurns: 0, doomLoopLimit: 0, abortOnDoomLoop: false };
+
+function readLimits(ports) {
+  const given = ports && ports.limits;
+  if (given === undefined || given === null) return NO_LIMITS;
+  if (typeof given !== "object") {
+    throw new TypeError("run: limits must be {maxTurns, doomLoopLimit, abortOnDoomLoop}");
+  }
+  const maxTurns = given.maxTurns === undefined ? 0 : given.maxTurns;
+  const doomLoopLimit = given.doomLoopLimit === undefined ? 0 : given.doomLoopLimit;
+  if (!Number.isInteger(maxTurns) || maxTurns < 0) {
+    throw new TypeError("run: limits.maxTurns must be a whole number of turns (0 = no budget)");
+  }
+  if (!Number.isInteger(doomLoopLimit) || doomLoopLimit < 0) {
+    throw new TypeError("run: limits.doomLoopLimit must be a whole number of calls (0 = no guard)");
+  }
+  return { maxTurns, doomLoopLimit, abortOnDoomLoop: Boolean(given.abortOnDoomLoop) };
+}
+
 function createRun(ports) {
   const read = requiredPort(ports, "read");
   const append = requiredPort(ports, "append");
@@ -89,6 +131,8 @@ function createRun(ports) {
   // The one OPTIONAL port: what the page is told after each step. It observes;
   // it never owns. See announce().
   const observe = typeof ports.observe === "function" ? ports.observe : null;
+  // The other optional port: when this turn must end, as the session chose it.
+  const limits = readLimits(ports);
 
   // The stop intent, and the call it is currently aimed at. Neither describes
   // the turn: the log does that.
@@ -96,8 +140,23 @@ function createRun(ports) {
   let inflight = null;
   let busy = false;
 
-  function prose(key) {
-    const said = text(key);
+  // The doom-loop window: the last `doomLoopLimit` calls with the result each
+  // produced, whether a warning is outstanding, and the exact call it is about.
+  // Cleared by start(), because the Python half's window lived on an Agent that
+  // was built per run (agent/loop.py): a new task is a fresh cycle, never a
+  // stale warning about a call the previous turn made.
+  let doomCalls = []; // {name, args, result}
+  let doomWarned = false;
+  let doomCall = null; // {name, args} the warning is about
+
+  function forgetDoom() {
+    doomCalls = [];
+    doomWarned = false;
+    doomCall = null;
+  }
+
+  function prose(key, vars) {
+    const said = text(key, vars);
     if (typeof said !== "string" || !said) {
       throw new TypeError(`run: text("${key}") must answer the words to write`);
     }
@@ -122,11 +181,50 @@ function createRun(ports) {
     return foldRun(await read());
   }
 
-  // Write the final that ends the open turn, and say so.
-  async function finish(status, summaryKey) {
-    const summary = prose(summaryKey);
+  // Write the final that ends the open turn, and say so. `vars` are the
+  // template's slots, if the prose has any ("$max_turns", "$tool").
+  async function finish(status, summaryKey, vars) {
+    const summary = prose(summaryKey, vars);
     await put({ type: "final", status, summary });
     return { did: "final", status, summary };
+  }
+
+  // ---- the doom-loop guard (agent/core/terminate.py's Terminator, P4-3) ----
+  //
+  // A doom loop is N consecutive identical calls: same name, same arguments AND
+  // the same result content. Identical calls whose results change (polling, a
+  // flaky test) are progress, not a loop, and never trigger — which is why the
+  // result is part of what is compared and why the tool has to run once more
+  // before the guard can speak.
+
+  // Before the tool runs: is this the exact call the warning was about? If so it
+  // must NOT run again — that is the whole point of the guard.
+  function shouldEscalate(call) {
+    return doomWarned && doomCall !== null && doomCall.name === call.name && doomCall.args === call.arguments;
+  }
+
+  // After the tool ran with `content`: record the call, and answer "warn" on the
+  // first detection. The caller feeds the warning back and keeps going; if the
+  // model moves on, the warning is forgiven here (a later legitimate use of the
+  // same tool starts a fresh cycle instead of aborting an old one), and the
+  // window is cleared after a warning so the model gets a full cycle to change.
+  function recordCall(call, content) {
+    const limit = limits.doomLoopLimit;
+    if (limit <= 0) return ""; // the guard is off: no window, no warning
+    if (doomWarned) {
+      doomWarned = false;
+      doomCall = null;
+    }
+    doomCalls.push({ name: call.name, args: call.arguments, result: content });
+    if (doomCalls.length > limit) doomCalls.shift();
+    const same = doomCalls.every(
+      (c) => c.name === doomCalls[0].name && c.args === doomCalls[0].args && c.result === doomCalls[0].result
+    );
+    if (doomCalls.length !== limit || !same) return "";
+    doomWarned = true;
+    doomCall = { name: call.name, args: call.arguments };
+    doomCalls = []; // the warning resets the window (terminate.py)
+    return "warn";
   }
 
   // Roll the window into a summary, with the stop intent wired into it the same
@@ -238,6 +336,17 @@ function createRun(ports) {
   async function runCalls(answer) {
     const ran = [];
     for (const call of answer.calls) {
+      // The warned call, asked a second time. It is not run again: the turn is
+      // either ended here (the default) or told why not and allowed to continue
+      // with a changed approach (abort_on_doom_loop = false). Either way a
+      // result is recorded, so the fold does not hand this call back forever.
+      if (shouldEscalate(call)) {
+        if (limits.abortOnDoomLoop) return await finish("aborted", "doom_loop", { tool: call.name });
+        const note = prose("doom_loop", { tool: call.name });
+        await put({ type: "tool_result", tool_call_id: call.id, content: note, is_error: true, diff: "" });
+        ran.push({ id: call.id, isError: true });
+        continue;
+      }
       inflight = new AbortController();
       let res;
       try {
@@ -248,14 +357,24 @@ function createRun(ports) {
       if (!res || typeof res !== "object" || typeof res.content !== "string") {
         throw new TypeError("run: runTool must answer {content, isError, diff}");
       }
+      // The guard judges the call by its OWN work, so it reads the raw result —
+      // and only then may the warning be appended to what the model is told.
+      let content = res.content;
+      let isError = Boolean(res.isError);
+      if (recordCall(call, res.content) === "warn") {
+        // first detection: keep the real result, append the warning, and let the
+        // model course-correct (agent/loop.py)
+        content = `${res.content}\n\n${prose("doom_loop", { tool: call.name })}`;
+        isError = true;
+      }
       await put({
         type: "tool_result",
         tool_call_id: call.id,
-        content: res.content,
-        is_error: Boolean(res.isError),
+        content,
+        is_error: isError,
         diff: typeof res.diff === "string" ? res.diff : "",
       });
-      ran.push({ id: call.id, isError: Boolean(res.isError) });
+      ran.push({ id: call.id, isError });
     }
     return { did: "tool", calls: ran };
   }
@@ -273,6 +392,7 @@ function createRun(ports) {
       throw new Error("run.start: a turn is already open — drive() continues it");
     }
     stopped = false; // a new turn is a new intent; the old stop does not apply
+    forgetDoom(); // ...and a new task is a fresh doom cycle (one Agent per run)
     await put({ type: "user_message", content: task.trim() });
     return await state();
   }
@@ -295,6 +415,16 @@ function createRun(ports) {
     if (answer.next === "final") {
       await put({ type: "final", status: answer.final.status, summary: answer.final.summary });
       return { did: "final", status: answer.final.status, summary: answer.final.summary };
+    }
+    // The turn budget, before anything is asked: `steps` counts the model turns
+    // the LOG holds for this turn, so a process that died mid-turn resumes at the
+    // same count it left. The Python loop aborted when `turn > max_turns`, i.e.
+    // before starting turn max_turns + 1; a turn that is over budget therefore
+    // never reaches the model again. 0 means no budget (compaction keeps long
+    // runs going). A truncated turn records no assistant line, so it does not
+    // spend budget — the model is being told to be concise, not repeating itself.
+    if (limits.maxTurns > 0 && answer.steps >= limits.maxTurns) {
+      return await finish("aborted", "budget_exceeded", { max_turns: limits.maxTurns });
     }
     // About to ask the model: check the window first, never after. A
     // compaction that changed the log means these messages are stale — the

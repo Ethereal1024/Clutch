@@ -10,8 +10,6 @@ host's POSIX sh / a detected Git Bash / cmd.exe). These tests PIN that decision
   - PermissionEvaluator.escaped_paths  flavor comes from the WORKSPACE, so a
                                      remote (SSH) workspace tokenizes POSIX even
                                      on a host pinned to cmd
-  - context.derive_messages          the local-environment hint (and its absence
-                                     on posix-sh / remote workspaces)
   - supervisor._SafeStdStream        the no-fcntl (Windows) stdio degradation
 
 Run: uv run python3 -m tests.local_shell_test
@@ -26,8 +24,6 @@ import threading
 import time
 
 from agent.config import Config
-from agent.core.context import derive_messages
-from agent.core.lazy import LazyEventLog
 from agent.core.permission import PermissionEvaluator
 from agent.supervisor import _SafeStdStream
 from agent.tools import shell as shell_mod
@@ -212,33 +208,6 @@ def test_permission_flavor() -> None:
     )
 
 
-def test_context_hint() -> None:
-    # ---- 9. the system prompt names the dialect (and stays silent on posix) ----
-    with tempfile.TemporaryDirectory() as tmp:
-        ws = LocalWorkspace(tmp)
-        reset_cache(CMD)
-        sys_cmd = derive_messages(LazyEventLog.in_memory(), Config(), "task", workspace=ws)[0]["content"]
-        check("cmd.exe" in sys_cmd, "cmd host: prompt tells the model the dialect up front")
-        reset_cache(BASH)
-        sys_bash = derive_messages(LazyEventLog.in_memory(), Config(), "task", workspace=ws)[0]["content"]
-        check(
-            "Git Bash" in sys_bash and "cmd.exe" not in sys_bash,
-            "bash host: prompt names Git Bash, not cmd",
-        )
-        reset_cache(POSIX)
-        sys_posix = derive_messages(LazyEventLog.in_memory(), Config(), "task", workspace=ws)[0]["content"]
-        check(
-            "cmd.exe" not in sys_posix and "Git Bash" not in sys_posix,
-            "posix host: no platform line (zero prompt diff)",
-        )
-        reset_cache(CMD)
-        sys_nows = derive_messages(LazyEventLog.in_memory(), Config(), "task")[0]["content"]
-        check("cmd.exe" not in sys_nows, "no workspace arg (server/eval callers): no platform line")
-        rws = RemoteWorkspace("/srv/proj", "http://127.0.0.1:9")
-        sys_remote = derive_messages(LazyEventLog.in_memory(), Config(), "task", workspace=rws)[0]["content"]
-        check("cmd.exe" not in sys_remote, "remote workspace: no local-dialect line (the remote is POSIX)")
-
-
 def test_safe_std_stream() -> None:
     # ---- 10. supervisor stdio degradation (Windows has no fcntl) ----
     s = _SafeStdStream(None)  # pythonw: no console streams at all
@@ -325,7 +294,6 @@ def main() -> int:
         test_transport_spawn()
         test_workspace_exec_shell()
         test_permission_flavor()
-        test_context_hint()
         test_safe_std_stream()
     finally:
         reset_cache(None)  # never leak a pinned flavor into other test modules

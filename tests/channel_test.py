@@ -479,7 +479,7 @@ def check_the_endpoint() -> None:
 
             status, _, _ = _request(f"{base}/api/channel", "PUT")
             # 501 is BaseHTTPRequestHandler's answer for every verb this API does
-            # not implement (`PUT /api/run` included), so it is refused rather
+            # not implement (`PUT /api/exec` included), so it is refused rather
             # than silently accepted as a push.
             check(status == 501, "a verb the API does not implement is refused")
 

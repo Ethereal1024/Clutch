@@ -1,2 +1,0 @@
-Previous conversation summary:
-$summary

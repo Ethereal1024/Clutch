@@ -11,9 +11,11 @@ arguments' meaning, and this side never learns the conversation.
 Permission lives here and only here (D3). The declarations say which policy word
 a call is under (`registry.access` / `access_arg`) and `core.permission` judges
 it — exactly what `agent/loop.py:_execute_tool` did before the loop moved. An
-`ask` blocks THIS request until `POST /api/permission/respond` answers (or Stop
-resolves it as denied); the prompt goes to the page as a `PermissionRequestEvent`
-on the broadcaster, which is a UI event and never a `.clc` line (P3-4).
+`ask` blocks THIS request until `POST /api/permission/respond` answers, or until
+`POST /api/exec/cancel` for this call's id resolves it as denied (that is what
+the page's Stop button sends); the prompt goes to the page as a
+`PermissionRequestEvent` on the broadcaster, which is a UI event and never a
+`.clc` line (P3-4).
 
 Two refusals are the request's shape, not the tool's: no project open and a
 read-only project are answered 409 by every other writer of this session too
@@ -26,18 +28,42 @@ it behind the host's own retry logic.
 `POST /api/exec/cancel` is the same call's interrupt: a tool that runs a command
 polls the event this endpoint registers, so Stop reaches the tree that is still
 attached to it (a client that walks away from a socket cannot kill a process
-group by leaving).
+group by leaving). A call that is still waiting to be allowed is not running
+yet, so cancelling it denies the prompt it is blocked on — Stop is not an
+approval, and it must end the wait rather than leave a dialog nobody will answer.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import threading
+from collections.abc import Callable
 
 from ..core.parse import ParseError, parse_arguments
 from ..core.permission import PermissionEvaluator, PermissionGate, PermissionRequired
 from ..events import PermissionRequestEvent
 from ..tools.envelope import Envelope
+
+
+class _CallCancel(threading.Event):
+    """One call's interrupt, with the one thing a bare Event cannot do.
+
+    A call is interruptible in two places: the command it started polls this
+    flag, and the permission prompt it is blocked on waits on the ask's own
+    Event — a different object, owned by the gate. Setting the flag alone would
+    reach a running command but not a call that never got that far, so `deny`
+    is the hook that answers this call's pending prompt while `set()` still does
+    what every `threading.Event` does. It is attached once the gate exists and
+    is a no-op before that (the flag is registered before the gate is built, so
+    a cancel cannot slip in between and be lost).
+    """
+
+    deny: Callable[[], None] | None = None
+
+    def set(self) -> None:
+        if self.deny is not None:
+            self.deny()  # idempotent: resolve() ignores an id already answered
+        super().set()
 
 
 class ExecMixin:
@@ -83,12 +109,13 @@ class ExecMixin:
 
         workspace = self._state.workspace
         if workspace is None or workspace.root != project.workdir:
-            # the workspace a run uses is claimed by the run (base.start_task);
-            # a call that arrives between runs gets one built the same way
+            # the workspace a run uses is built on demand (state.build_workspace):
+            # nothing claims one up front any more, so a call arriving between two
+            # turns gets one built the same way a call inside a turn does
             workspace = self._state.build_workspace(str(project.workdir))
         workspace.protect(project.path)
 
-        cancel = threading.Event()
+        cancel = _CallCancel()
         with self._state.lock:
             if tool_call_id in self._state.exec_cancels:
                 return self._json(
@@ -103,7 +130,13 @@ class ExecMixin:
             if self._broadcaster.count(str(project.path)) == 0:
                 return False
             self._broadcaster.publish(
-                PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason)
+                PermissionRequestEvent(request_id=request_id, tool=tool, args_repr=args_repr, reason=reason),
+                # narrowed to the project this call belongs to: the gate above
+                # only counts the windows that would see it, so the prompt must
+                # only reach them. With the host driving the loop (P1-5) there
+                # is no run_project for _sse to filter on, and an unfiltered
+                # publish would put this ask in every window.
+                project=str(project.path),
             )
             return True
 
@@ -114,11 +147,13 @@ class ExecMixin:
             is_attached=lambda: self._broadcaster.count(str(project.path)) > 0,
             trust=lambda: self._state.trust_armed,
         )
-        # a prompt may be answered while this request is blocked on it, and Stop
-        # has to be able to resolve it: both find the gate through the state
+        # a prompt may be answered while this request is blocked on it (the
+        # responder walks state.gates), and Stop has to be able to resolve it.
+        # Cancelling this call answers its own prompt — and only its own: the
+        # hook reads this gate, not every live one.
+        cancel.deny = lambda: [gate.resolve(rid, False) for rid in gate.pending_ids()]
         with self._state.lock:
             self._state.gates.append(gate)
-            self._state.gate = gate
         try:
             return self._json(
                 self._exec_call(project, workspace, cfg, gate, cancel, name, arguments, tool_call_id)
@@ -128,8 +163,6 @@ class ExecMixin:
                 self._state.exec_cancels.pop(tool_call_id, None)
                 if gate in self._state.gates:
                     self._state.gates.remove(gate)
-            if self._state.gate is gate:
-                self._state.gate = None
             # a user-approved escape is scoped to the one call it was granted for
             workspace.clear_allowed()
 
@@ -182,5 +215,7 @@ class ExecMixin:
             # not a silent success: the caller believed a call was running, and
             # the honest answer to "stop it" is that there is nothing to stop
             return self._json({"error": "no call in flight with this tool_call_id"}, status=404)
+        # this also denies the prompt the call may be waiting on (see
+        # _CallCancel): the one id answers "stop this call" wherever it is
         cancel.set()
         self._json({"status": "cancelling"})

@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The messages the model is asked with, derived from the event log.
 //
 // The log is the single source of truth; what the model sees is a projection of
@@ -258,6 +259,10 @@ function deriveMessages(options) {
 // `deriveMessages` pinned to one session's facts, which is the shape the loop
 // asks for (ui/run.js's `derive({events, task})` port): the caller wires the
 // session once and the loop never has to know what a mode or a shell is.
+/**
+ * @param {object} [facts] the pinned session facts (mode, shell, memory…)
+ * @returns {(opts?: { events?: any[], task?: string }) => any[]}
+ */
 function createDerive(facts) {
   const pinned = facts || {};
   return function derive({ events, task } = {}) {

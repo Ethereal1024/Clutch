@@ -45,13 +45,10 @@ CHECKOUTS = (
     "clutch-skills",
     "clutch-workspace",
     "clutch-ssh-workspace",
-    "clutch-websearch",
 )
 
 # The machine's own values, fixed so the two readings are compared on one input.
 READ_MAX_CHARS = 4321
-WEB_SEARCH_MAX_RESULTS = 6
-WEB_SEARCH_TIMEOUT = 17.0
 SKILLS = ("alpha", "beta")
 
 
@@ -105,8 +102,6 @@ def surface() -> dict:
             config = Config(
                 mode="work",
                 read_max_chars=READ_MAX_CHARS,
-                web_search_max_results=WEB_SEARCH_MAX_RESULTS,
-                web_search_timeout=WEB_SEARCH_TIMEOUT,
             )
             registry_ = registry.ToolRegistry(registry.build_tools(config, log=_Log()))
             tools = [
@@ -126,8 +121,6 @@ def surface() -> dict:
                 "declarations": catalog.registrations(),
                 "config": {
                     "read_max_chars": READ_MAX_CHARS,
-                    "web_search_max_results": WEB_SEARCH_MAX_RESULTS,
-                    "web_search_timeout": WEB_SEARCH_TIMEOUT,
                 },
                 "backends": list(catalog.available_backends(config)),
                 "facts": {"skills": list(SKILLS)},

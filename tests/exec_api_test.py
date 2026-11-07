@@ -17,13 +17,16 @@ HTTP request instead of a Python frame. What this suite pins:
      into HTTP errors would hide the model's own mistake behind the host's
      retry logic.
   4. Permission is judged HERE and only here (D3): an `ask` publishes a
-     PermissionRequestEvent to the watching window, blocks THIS request until
-     POST /api/permission/respond answers it, and — with no window watching —
-     denies immediately instead of waiting for an answer that has nowhere to be
-     typed. A prompt is never a .clc line (P3-4).
-  5. POST /api/exec/cancel interrupts the CALL's own command: Stop has to reach
-     a process that is still running on this machine, because a client that
-     walks away from a socket cannot kill a process group by leaving.
+     PermissionRequestEvent to the watching window and blocks THIS request
+     until POST /api/permission/respond answers it; with no window watching it
+     waits out DETACH_GRACE_S before denying, because a reconnect is not a
+     verdict. A prompt is never a .clc line (P3-4). Both the audience check and
+     the publish are scoped to the call's own project: a window watching another
+     .clc is not someone to ask, and is not offered a prompt it cannot answer.
+  5. POST /api/exec/cancel interrupts the CALL: the event reaches the command
+     tree that is still running, and a call that is only waiting to be allowed
+     is answered as denied — Stop is not an approval. The cancel names one
+     tool_call_id, so it never answers another call's prompt.
   6. Nothing leaks: the call's cancel entry and gate are gone when the request
      answers, whatever the answer was. A gate left behind is a session that can
      never be answered again.
@@ -112,6 +115,22 @@ def body_of(status_text: tuple[int, str]) -> dict:
     return json.loads(status_text[1])
 
 
+def wait_settled(pred, seconds: float = 5.0) -> bool:
+    """Wait for the server's bookkeeping to catch up with an answer already read.
+
+    The response body reaches the client before the handler's `finally` releases
+    that call's gate and cancel entry, so equality on the state right after a
+    join is a race with the handler still unwinding — a real leak still fails,
+    it just fails after the deadline instead of instantly.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
 # ---- 1. the request's own shape -------------------------------------------------
 
 
@@ -148,7 +167,7 @@ def shape_check(tmp: Path) -> None:
 
     # nothing above created a gate or a cancel entry: a refused request must not
     # leave the session holding a prompt nobody asked
-    check(state.gate is None and state.gates == [], "a refused request leaves no gate behind")
+    check(state.gates == [], "a refused request leaves no gate behind")
     check(state.exec_cancels == {}, "a refused request leaves no cancel entry behind")
     check(broadcaster.count(str(project.path)) == 0, "no prompt was published for a refused request")
 
@@ -205,7 +224,10 @@ def envelope_check(tmp: Path) -> None:
     check(status == 200 and body["is_error"] is False, "the same command runs in work mode")
     check((project.workdir / "work.txt").exists(), "work mode really wrote the file")
 
-    check(state.exec_cancels == {} and state.gates == [], "every finished call released its gate and its cancel entry")
+    check(
+        wait_settled(lambda: state.exec_cancels == {} and state.gates == []),
+        "every finished call released its gate and its cancel entry",
+    )
 
 
 # ---- 3. permission, judged here ------------------------------------------------
@@ -259,7 +281,8 @@ def permission_check(tmp: Path) -> None:
     # (c) nobody watching is NOT permission: the call waits for a window that
     # could answer it (permission.DETACH_GRACE_S, the same rule a live run has —
     # an SSE reconnect must not turn an approvable command into "denied"), and
-    # Stop ends the wait as the user's denial.
+    # the page's Stop (POST /api/exec/cancel for this call's id) ends the wait
+    # as the user's denial.
     broadcaster.unsubscribe(q)
     other = root / "other.txt"
     other.write_text("x", encoding="utf-8")
@@ -273,13 +296,13 @@ def permission_check(tmp: Path) -> None:
     time.sleep(0.5)
     check(t.is_alive(), "with no window attached the call waits instead of guessing")
     check(other.exists(), "the unanswered command really did not run")
-    status, _body = http_post(f"{base}/api/stop", {})
-    check(status == 200, "Stop is accepted while a prompt waits")
+    status, _body = http_post(f"{base}/api/exec/cancel", {"tool_call_id": "p3"})
+    check(status == 200, "the call's own cancel is accepted while a prompt waits")
     t.join(timeout=15)
-    check(not t.is_alive(), "Stop ends the wait instead of leaving the call hanging")
+    check(not t.is_alive(), "a cancel ends the wait instead of leaving the call hanging")
     _status, answer = box["value"]  # type: ignore[misc]
-    check(answer["is_error"] is True, "a prompt resolved by Stop is an error envelope")
-    check("denied by user" in answer["content"], "Stop's verdict reaches the model in the user's words")
+    check(answer["is_error"] is True, "a prompt resolved by cancelling the call is an error envelope")
+    check("denied by user" in answer["content"], "the cancel's verdict reaches the model in the user's words")
     check(other.exists(), "the command Stop denied did not run")
 
     # (d) a prompt is a UI event, never a .clc line (P3-4)
@@ -290,15 +313,80 @@ def permission_check(tmp: Path) -> None:
     )
     check(types.count("tool_result") == 0, "the endpoint writes no events at all: the host appends the result")
 
-    check(state.gate is None and state.gates == [], "no gate outlives the calls that made it")
-    check(state.exec_cancels == {}, "no cancel entry outlives the calls that made it")
+    check(wait_settled(lambda: state.gates == []), "no gate outlives the calls that made it")
+    check(wait_settled(lambda: state.exec_cancels == {}), "no cancel entry outlives the calls that made it")
+
+
+# ---- 3b. only THIS project's windows are an audience ---------------------------
+
+
+def attachment_check(tmp: Path) -> None:
+    """The gate's is_attached is project-scoped, and the ask is published to that
+    one project.
+
+    Both halves used to be the backend run's (agent/base.py start_task, deleted in
+    P4-1): there is no run_project for the SSE fan-out to filter on any more, so
+    the call carries the scope itself. A window watching another .clc must not be
+    counted as "someone who can answer" — the prompt would appear in a window with
+    no call to answer it, and this one would wait for a verdict nobody can type.
+    """
+    base, broadcaster, state, project, _srv = open_server(tmp, "attach")
+    root = project.workdir
+    keep = root / "attach.txt"
+    keep.write_text("x", encoding="utf-8")
+    elsewhere = str(root.parent / "some-other-project.clc")
+
+    q_other = broadcaster.subscribe(elsewhere)
+    t, box = in_thread(
+        lambda: exec_call(
+            base,
+            {"name": "run_command", "arguments": json.dumps({"command": "rm attach.txt"}), "tool_call_id": "a1"},
+        )
+    )
+    deadline = time.monotonic() + 5.0
+    while "a1" not in state.exec_cancels and time.monotonic() < deadline:
+        time.sleep(0.02)
+    check("a1" in state.exec_cancels, "the call reached the gate")
+    check(q_other.empty(), "the ask is published to its own project only: another window's stream got nothing")
+    time.sleep(0.3)
+    check(t.is_alive(), "a window on another project is not an audience: the call is not answered by it")
+    check(keep.exists(), "the command that window never saw did not run")
+    status, _body = http_post(f"{base}/api/exec/cancel", {"tool_call_id": "a1"})
+    check(status == 200, "the waiting call is still this session's to cancel")
+    t.join(timeout=15)
+    _status, answer = box["value"]  # type: ignore[misc]
+    check(answer["is_error"] is True and "denied by user" in answer["content"], "and it ends as the user's denial")
+    broadcaster.unsubscribe(q_other)
+
+    # this project's own window IS the audience — the same call, so the difference
+    # above is the scope and not the tool
+    q_here = broadcaster.subscribe(str(project.path))
+    q_other = broadcaster.subscribe(elsewhere)
+    t, box = in_thread(
+        lambda: exec_call(
+            base,
+            {"name": "run_command", "arguments": json.dumps({"command": "rm attach.txt"}), "tool_call_id": "a2"},
+        )
+    )
+    ev = next_event(q_here)
+    check(ev.tool == "run_command", "this project's window gets the prompt someone can answer")
+    check(q_other.empty(), "and the window on another project still gets nothing")
+    status, _body = http_post(f"{base}/api/permission/respond", {"request_id": ev.request_id, "allow": True})
+    check(status == 200, "the scoped prompt is answerable")
+    t.join(timeout=15)
+    _status, answer = box["value"]  # type: ignore[misc]
+    check(answer["is_error"] is False, "the allowed command answers success")
+    check(not keep.exists(), "and it really ran")
+    broadcaster.unsubscribe(q_here)
+    broadcaster.unsubscribe(q_other)
+    check(wait_settled(lambda: state.gates == []), "the scoped asks leave no gate behind")
 
 
 # ---- 4. Stop reaches the running command ---------------------------------------
 
 
 def cancel_check(tmp: Path) -> None:
-    base, _bc, state, project, _srv = open_server(tmp, "cancel")
+    base, broadcaster, state, project, _srv = open_server(tmp, "cancel")
 
     t, box = in_thread(
         lambda: exec_call(base, {"name": "run_command", "arguments": json.dumps({"command": "sleep 5"}), "tool_call_id": "k1"})
@@ -321,29 +409,60 @@ def cancel_check(tmp: Path) -> None:
     check(answer["is_error"] is True, "a cancelled command is an error envelope")
     check("aborted" in answer["content"], "the model hears that it was stopped, not that it broke")
     check(time.monotonic() - started < 4.5, "the command was killed inside its own lifetime, not waited out")
-    check("k1" not in state.exec_cancels, "the cancel entry is released with the call")
+    check(wait_settled(lambda: "k1" not in state.exec_cancels), "the cancel entry is released with the call")
 
     status, body = http_post(f"{base}/api/exec/cancel", {"tool_call_id": "k1"})
     check(status == 404, "cancelling a call that is no longer running says so, instead of pretending")
     status, body = http_post(f"{base}/api/exec/cancel", {})
     check(status == 400, "cancel without a tool_call_id is refused")
 
-    # Stop (POST /api/stop) must also unblock a running exec call
-    t, box = in_thread(
-        lambda: exec_call(base, {"name": "run_command", "arguments": json.dumps({"command": "sleep 5"}), "tool_call_id": "k2"})
+    # a cancel names ONE call: with two prompts waiting at once, cancelling one
+    # must not answer the other's. That is the whole reason the denial hook is
+    # this call's gate and not every live one (the retired POST /api/stop, which
+    # denied the session's prompts wholesale, is now a 404).
+    q = broadcaster.subscribe(str(project.path))
+    root = project.workdir
+    one, two = root / "f1.txt", root / "f2.txt"
+    one.write_text("1", encoding="utf-8")
+    two.write_text("2", encoding="utf-8")
+    t1, box1 = in_thread(
+        lambda: exec_call(
+            base, {"name": "run_command", "arguments": json.dumps({"command": "rm f1.txt"}), "tool_call_id": "s1"}
+        )
     )
-    deadline = time.monotonic() + 5.0
-    while "k2" not in state.exec_cancels and time.monotonic() < deadline:
-        time.sleep(0.02)
-    check("k2" in state.exec_cancels, "the second call is running")
-    started = time.monotonic()
+    next_event(q)
+    t2, box2 = in_thread(
+        lambda: exec_call(
+            base, {"name": "run_command", "arguments": json.dumps({"command": "rm f2.txt"}), "tool_call_id": "s2"}
+        )
+    )
+    ev2 = next_event(q)
+    status, _body = http_post(f"{base}/api/exec/cancel", {"tool_call_id": "s1"})
+    check(status == 200, "a call waiting to be allowed can be cancelled by its id")
+    t1.join(timeout=15)
+    check(not t1.is_alive(), "the cancelled call returns instead of waiting out the grace")
+    _status, answer = box1["value"]  # type: ignore[misc]
+    check(
+        answer["is_error"] is True and "denied by user" in answer["content"],
+        "the cancel denies that call's prompt in the user's words",
+    )
+    time.sleep(0.2)
+    check(
+        t2.is_alive() and "s2" in state.exec_cancels,
+        "the other call is still waiting: one cancel answered one prompt",
+    )
+    check(one.exists() and two.exists(), "neither command ran while both were waiting")
+    status, _body = http_post(f"{base}/api/permission/respond", {"request_id": ev2.request_id, "allow": True})
+    check(status == 200, "the surviving prompt is still answerable")
+    t2.join(timeout=15)
+    check(not t2.is_alive(), "the answered call returns")
+    _status, answer = box2["value"]  # type: ignore[misc]
+    check(answer["is_error"] is False, "the call whose prompt survived ran normally")
+    check(not two.exists() and one.exists(), "only the call that was allowed touched the tree")
+    broadcaster.unsubscribe(q)
+
     status, _body = http_post(f"{base}/api/stop", {})
-    check(status == 200, "Stop is accepted")
-    t.join(timeout=15)
-    check(not t.is_alive(), "Stop returns the running call instead of leaving it running")
-    check(time.monotonic() - started < 4.5, "Stop killed the command tree promptly")
-    _status, answer = box["value"]  # type: ignore[misc]
-    check(answer["is_error"] is True, "the stopped call is an error envelope")
+    check(status == 404, "the retired /api/stop stays gone: Stop is the call's own cancel")
 
 
 # ---- 5. a read-only project runs nothing ---------------------------------------
@@ -361,7 +480,7 @@ def read_only_check(tmp: Path) -> None:
         "the refusal carries the code the client matches on (the same one api/log.py uses)",
     )
     check(not target.exists(), "the refused call really did not touch the workspace")
-    check(state.gate is None and state.exec_cancels == {}, "the refused call created no gate and no cancel entry")
+    check(state.gates == [] and state.exec_cancels == {}, "the refused call created no gate and no cancel entry")
     check(broadcaster.count(str(project.path)) == 0, "nothing was published for a refused call")
 
 
@@ -371,6 +490,7 @@ def main() -> None:
         shape_check(tmp)
         envelope_check(tmp)
         permission_check(tmp)
+        attachment_check(tmp)
         cancel_check(tmp)
         read_only_check(tmp)
     print("exec_api: ok")

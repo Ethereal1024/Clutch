@@ -11,9 +11,10 @@
 //
 //   1. the number: ui/version.js, VERSION and ui/package.json (what the desktop deb
 //      is built as) are ONE number — a release that bumps two of them fails here;
-//   2. the page: index.html loads the stamp after app.js and before the module that
-//      paints the pane, and the strip, the panes and SETTINGS_TABS agree, so a
-//      fourth tab cannot be added to one of them alone;
+//   2. the page: index.html loads the stamp as its own script after the renderer
+//      bundle (never inside it — the release scripts rewrite the file), and the
+//      strip, the panes and SETTINGS_TABS agree, so a fourth tab cannot be added
+//      to one of them alone;
 //   3. the painting: the real aboutVersion/aboutPlatform/aboutBackend/paintAbout are
 //      sliced out of ui/js/settings.js and driven with stubbed window/navigator/
 //      API_BASE/document — Electron, an Android WebView, a plain desktop browser, a
@@ -69,19 +70,19 @@ function decls(sheet, selector) {
 
 // ---- 2. the page: load order, the strip, the panes ----
 {
-  const at = (s) => html.indexOf(s);
-  check(at('<script src="version.js"></script>') > 0, "index.html loads the stamp as a script the page already runs");
+  const scripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
+  check(scripts.includes("version.js"), "index.html loads the stamp as a script the page already runs");
   check(
-    at('<script src="version.js"></script>') > at('<script src="app.js"></script>'),
-    "after app.js, so app.js stays the page's first renderer script (the load-order contract tests/ui-load-order-test.js pins)"
+    scripts.indexOf("version.js") > scripts.indexOf("renderer.js"),
+    "after the renderer bundle, and as its own tag: the stamp is rewritten by the release scripts AFTER the bundle exists, so bundling it would pin the number to build time"
   );
   check(
-    at('<script src="version.js"></script>') < at('<script src="js/settings.js"></script>'),
-    "and before the module that paints the About pane"
+    scripts[scripts.length - 1] === "version.js",
+    "and it is the page's last script — no module can read it while loading, which is why the About pane reads it when it is opened"
   );
   check(
     uiModules().some((m) => m.file === "version.js"),
-    "the page's script list really carries it: the load-order runner loads every file in that list, so a script index.html drops is a file nothing loads"
+    "the module list still carries it (not the bundle): the source readers (uiSource) and the About pane's own file agree on the stamp"
   );
 
   // the strip and the panes come out of the two files that have to agree, not out of

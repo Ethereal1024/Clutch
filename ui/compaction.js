@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // Context-window compaction: roll the older conversation into a summary.
 //
 // Compaction is pure context management — window sizing, serialization, the
@@ -188,6 +189,10 @@ function createCompactor(ports) {
   // came back empty, Stop landed mid-summary, or the call failed (reported, not
   // raised). Never leaves the log half-written: the event lands only after a
   // summary exists.
+  /**
+   * @param {{ signal?: AbortSignal, onProgress?: (ev: { type: string, chars: number, done: boolean, note: string }) => void }} [opts]
+   * @returns {Promise<boolean>}
+   */
   async function compact({ signal, onProgress } = {}) {
     const progress = onProgress ? reporter(onProgress) : report;
     try {

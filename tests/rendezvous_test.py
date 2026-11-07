@@ -310,21 +310,26 @@ def main() -> int:
     #     checkout's own shape is asked of the checkout DIRECTORY rather than of
     #     whatever resolve() prefers on this machine — a dev box with the module
     #     installed would otherwise be asserting the install's shape here.
-    mem = catalog.table()[modules.WEBSEARCH]
-    checkout_dir = modules.module_dir(modules.WEBSEARCH)
-    if checkout_dir.is_dir():  # the memory checkout may be absent on a bare host
-        rendered = rendezvous.render_launch(mem, checkout_dir, components.read_manifest(checkout_dir))
+    skills_mod = catalog.table()[modules.SKILLS]
+    checkout_dir = modules.module_dir(modules.SKILLS)
+    if checkout_dir.is_dir():  # the skills checkout may be absent on a bare host
+        rendered = rendezvous.render_launch(skills_mod, checkout_dir, components.read_manifest(checkout_dir))
         check(rendered is not None and rendered[1], "the dev checkout is a template launch, not an install")
         check(
-            rendered[0] == (modules.python_exe(), str(checkout_dir / "memory.py")),
-            "the CLI template is the interpreter plus the checkout's entry point",
+            # the module the checkout's own component.json names: a component that
+            # ships Python is started as `python -m`, never as a script path
+            rendered[0] == (modules.python_exe(), "-m", "clutch_skills"),
+            "the template is the interpreter plus the component's own module",
         )
-    checkout = rendezvous.resolve(modules.WEBSEARCH)
-    if checkout is not None:  # absent on a host that has neither an install nor the checkout
-        check(checkout.installed or checkout.template, "a resolved CLI is an install or a template, never neither")
+    resolved_checkout = rendezvous.resolve(modules.SKILLS)
+    if resolved_checkout is not None:  # absent on a host that has neither an install nor the checkout
         check(
-            rendezvous.unavailable_reason(modules.WEBSEARCH) == "",
-            "a checked-out CLI with an interpreter is available",
+            resolved_checkout.installed or resolved_checkout.template,
+            "a resolved module is an install or a template, never neither",
+        )
+        check(
+            rendezvous.unavailable_reason(modules.SKILLS) == "",
+            "a module with an interpreter is available",
         )
     _install_probe()
     _disabled_probe()

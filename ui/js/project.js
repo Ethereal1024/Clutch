@@ -365,6 +365,12 @@ async function openProject(path, readOnly = false) {
     reconnectSSE();
     refreshTree();
     refreshRollbackAnchors(); // the rows just replayed can be rolled back; ask the journal
+    // What was replayed may END with an open turn — a host that died before the
+    // final, a phone frozen mid-step. Now that this page is looking at that log,
+    // it is the one that asks the host to continue it (js/render-events.js
+    // resumeTurn: one state() question, then drive() if it is open). Not awaited:
+    // the open is finished and the turn is the host's to drive.
+    resumeTurn();
   } catch (e) {
     prog.classList.add("hidden");
     stream.classList.remove("loading");

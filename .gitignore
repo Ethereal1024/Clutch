@@ -38,6 +38,7 @@ docs/
 /watch_ci.sh
 
 # local scratch scripts/logs from ad-hoc testing sessions
+/tmp/
 /scratch-*.py
 /scratch_*.py
 /scratch_*.log

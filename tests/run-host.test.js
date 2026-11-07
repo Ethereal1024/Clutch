@@ -190,6 +190,13 @@ async function main() {
     refuses((p) => (p.contextWindowBytes = NaN), "a NaN window is refused", /positive number of bytes/);
     refuses((p) => (p.contextWindowBytes = "1000"), "a window given as a string is refused", /positive number of bytes/);
     refuses((p) => delete p.contextWindowBytes, "a missing window is refused", /positive number of bytes/);
+    // `limits` is optional, but not unvalidated: the numbers reach the loop, and
+    // a limit the session could not have served is refused there (P4-3)
+    refuses(
+      (p) => (p.limits = { maxTurns: -1 }),
+      "a negative turn budget is refused once the loop sees it",
+      /limits\.maxTurns must be/
+    );
 
     const { host } = hostWith();
     check(

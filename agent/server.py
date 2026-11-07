@@ -3,11 +3,10 @@
 Endpoints (all JSON except SSE/NDJSON):
   POST /api/project/new    {dir, name} -> create a .clc project file
   POST /api/project/open   {path} -> load a .clc project (NDJSON stream)
-  POST /api/run            {task} -> start run on the active project (409 if busy)
-  POST /api/stop           cancel the running agent
-  POST /api/llm/base       {base_url, model} re-point the LIVE run's LLM endpoint
-                           in memory (the claiming client's model path moved; not
-                           persisted — see api/settings._llm_base_post)
+  POST /api/run/state      {busy, project?, ttl_ms?} the HOST's lease on the run
+                           slot: claim/renew while it drives a turn, release when
+                           it ends (the loop lives in the client — see api/run_state).
+                           There is no POST /api/run: the backend runs no loop (P4)
   GET  /api/events         SSE: replay active project history, then live events
   GET  /api/log            the .clc as a byte-addressed log for the host's loop:
                            {items, windowBytes, cprStart, lastCompaction}
@@ -47,7 +46,9 @@ on another origin/host. The API key travels in request bodies, not cookies, so a
 wildcard origin leaks nothing. Bind --host 0.0.0.0 to expose beyond localhost.
 
 The agent's existing sink is fed into a thread-safe broadcaster; each SSE subscriber
-gets a private queue. One run at a time; Stop sets a cancel flag checked by the loop.
+gets a private queue. One run at a time: the slot is a LEASE the host renews
+(POST /api/run/state) while it drives a turn, or — until P4 retires the backend
+loop — that loop's own claim; Stop sets a cancel flag checked by the loop.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ from .api.exec import ExecMixin
 from .api.log import LogMixin
 from .api.project import ProjectMixin
 from .api.routing import RoutingMixin
-from .api.run import RunMixin
+from .api.run_state import RunStateMixin
 from .api.session import SessionMixin
 from .api.settings import SettingsMixin
 from .api.workspace import WorkspaceMixin
@@ -247,7 +248,7 @@ class HttpAgentServer(BaseServer):
 
 class Handler(
     RoutingMixin,
-    RunMixin,
+    RunStateMixin,
     SessionMixin,
     SettingsMixin,
     ChannelMixin,

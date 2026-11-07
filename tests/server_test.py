@@ -1,10 +1,12 @@
 """Server end-to-end check: boots the HTTP server in a thread and exercises it.
 
 Run: uv run python -m tests.server_test
-API/health/project are always checked. If a key is saved in ~/.clutch/settings.json
-(the GUI settings; the Python side never reads env), also runs a
-real task through /api/run, collects SSE events, and checks the workspace tree and
-.clc persistence. Skips the real-run section when no key is present (network-free).
+API/health/project are always checked. The turn sections drive a TURN the way
+the client does — claim the run slot, append the task line, run the tool call
+through /api/exec, append the result and the final, release — so the workspace
+tree, the rollback journal and the persisted transcript are checked with no
+model and no network. There is no POST /api/run: the loop that drove a turn
+lives in the client (P4), and a regression gate pins its absence.
 """
 
 from __future__ import annotations
@@ -32,15 +34,6 @@ from agent.config import Config
 from agent.server import Broadcaster, RunState, build
 from agent.tools import catalog
 from tests.testsupport import check, http_get, http_post, ui_source
-
-
-def _saved_api_key() -> str:
-    """The API key persisted by the GUI settings; the Python side never reads env."""
-    try:
-        d = json.loads(Path.home().joinpath(".clutch", "settings.json").read_text(encoding="utf-8"))
-        return d.get("api_key") or ""
-    except (OSError, json.JSONDecodeError):
-        return ""
 
 
 @contextlib.contextmanager
@@ -163,16 +156,6 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     proc.wait(timeout=15)
 
 
-def _saved_endpoint() -> tuple[str, str]:
-    """The (base_url, model) persisted by the GUI settings — the endpoint the
-    saved key belongs to."""
-    try:
-        d = json.loads(Path.home().joinpath(".clutch", "settings.json").read_text(encoding="utf-8"))
-        return d.get("base_url") or "", d.get("model") or ""
-    except (OSError, json.JSONDecodeError):
-        return "", ""
-
-
 def _saved_knob(name: str) -> str | None:
     """A knob's value in the PERSISTED settings store (None = not stored), read
     through the server's own loader — the test patches it onto a temp file, so
@@ -221,16 +204,17 @@ def _health_and_cors(base_url) -> None:
     check(st == 404, "static assets not served")
 
 
-def _run_without_project_rejected(base_url) -> None:
-    # 2. run without a project is rejected
-    st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
-    check(st == 400, "run without project rejected")
-
-
-def _empty_task_rejected(base_url) -> None:
-    # 2b. reject empty task
-    st, body = http_post(f"{base_url}/api/run", {"task": "   "})
-    check(st == 400, "empty task rejected")
+def _run_endpoint_retired(base_url) -> None:
+    # 2. there is no POST /api/run any more (P4): the loop that drove a turn
+    # lives in the client, so a task is never sent to this process at all. The
+    # gate is a REGRESSION check rather than a validation check — a resurrected
+    # endpoint would be a second driver on the same .clc, which is the one thing
+    # the lease (POST /api/run/state) exists to prevent. The two refusals this
+    # section used to make ("no project", "empty task") were its validations, so
+    # the endpoint's absence covers both.
+    for body in ({"task": "hi"}, {"task": "   "}, {"task": "hi", "project": "/tmp/x.clc"}):
+        st, _ = http_post(f"{base_url}/api/run", body)
+        check(st == 404, f"POST /api/run is gone, whatever the body ({sorted(body)})")
 
 
 def _settings_api_key(base_url, state) -> None:
@@ -300,11 +284,6 @@ def _settings_api_protocol(base_url, config) -> None:
     check(config.base_url == "https://open.bigmodel.cn/api/coding/paas/v4", "partial save keeps the saved base_url")
     st, body = http_post(f"{base_url}/api/settings", {})
     check(st == 400, "empty settings body rejected")
-    # restore the saved endpoint so the real-run section targets a working pairing
-    saved_url, saved_model = _saved_endpoint()
-    check(bool(saved_url and saved_model), "saved endpoint present for the real-run section")
-    st, body = http_post(f"{base_url}/api/settings", {"base_url": saved_url, "model": saved_model})
-    check(st == 200, "settings restored")
 
 
 def _host_defaults_table(base_url) -> None:
@@ -900,16 +879,17 @@ def _connecting_stream_status(base_url, clc, state, broadcaster) -> None:
     try:
         check(first_status(f"{base_url}/api/events?replay=0") == "idle",
               "nothing in flight: a connecting window is told idle")
-        state.busy = True
-        state.run_project = str(clc)
+        # the run slot is the lease the client holds while it drives a turn
+        # (POST /api/run/state): claiming it is what "a run is in flight" means
+        # to this process now
+        state.claim_run(str(clc))
         try:
             live = first_status(
                 f"{base_url}/api/events?replay=0&project={quote(str(clc))}")
             other = first_status(
                 f"{base_url}/api/events?replay=0&project={quote(str(clc.parent / 'elsewhere.clc'))}")
         finally:
-            state.busy = False
-            state.run_project = None
+            state.release_run(str(clc))
         check(live == "running",
               "reconnecting into a live run of THIS project is told running")
         check(other == "idle",
@@ -1062,23 +1042,23 @@ def _multi_window_isolation(base_url, clc, proj_dir, state, broadcaster) -> Path
     broadcaster.publish(FinalEvent(status="completed", summary="iso-b"))
     check(done_b.wait(timeout=10), "B's subscriber received B's run final")
 
-    # a run carrying project=<path> switches the active project before starting
-    state.run_project = None
-    state.api_key = "sk-fake"  # let start_task reach the busy check without LLM init
-    state.busy = True  # busy -> 409, and the project of the live run is left alone
-    st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
-    check(st == 409, "busy run rejected during switch test")
+    # a project switch while the run slot is held is refused: the project a run
+    # is writing must not be swapped (and its write lock released) underneath it.
+    # This used to be checked by sending a task with `project=`, a field only the
+    # deleted /api/run knew; the gate itself lives in api/project and reads the
+    # same lease.
+    state.claim_run(str(clc))
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
+    check(st == 409, "a project switch during a run is refused")
     check(
         str(state.project.path) == str(clc.resolve()),
         "a busy server never switches away from (and unlocks) the project of the live run",
     )
-    state.busy = False
-    state.api_key = None
-    # not busy: the switch happens (the run itself fails without a key, which
-    # is the part the lock section below builds on)
-    st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
-    check(st == 500, "run without an LLM key fails")
-    check(str(state.project.path) == str(clc2.resolve()), "run with project= switched the active project")
+    state.release_run(str(clc))
+    # not busy: the switch happens, exactly as the run path used to do it
+    st, _ = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
+    check(st == 200, "an idle session switches projects")
+    check(str(state.project.path) == str(clc2.resolve()), "the switch took effect")
     # restore the demo project so the real-run section stays untouched
     st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc)})
     check(st == 200, "switched back to the demo project after isolation")
@@ -1112,9 +1092,15 @@ def _write_lock_one_writer(base_url, clc, clc2, state) -> None:
         check(ro_meta is not None and ro_meta.get("read_only") is True, "meta carries read_only")
         check(state.project is not None and state.project.read_only, "project is read-only")
 
-        # a run on the read-only project is refused
-        st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
-        check(st == 409, "run on a read-only project rejected")
+        # a tool call is the writer now: /api/exec on a read-only project is
+        # refused before any tool runs, so no command of a turn can change the
+        # files its .clc talks about while this process does not hold the lock
+        st, body = http_post(
+            f"{base_url}/api/exec",
+            {"name": "run_command", "arguments": json.dumps({"command": "touch x.txt"}), "tool_call_id": "ro1"},
+        )
+        check(st == 409 and json.loads(body).get("code") == "read_only",
+              "an exec on a read-only project is refused")
 
         # a different project opens fine (the lock is per-path)
         st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc2)})
@@ -1125,13 +1111,14 @@ def _write_lock_one_writer(base_url, clc, clc2, state) -> None:
     # "close the other window first" for the rest of the session. Without the
     # retry the window is stuck read-only even though the .clc is free — the
     # user's "the project is locked AGAIN" long after the lock was handed back.
+    # Nothing but this may re-take a claim now (a session no longer hands one
+    # back for being quiet); the production callers are the window's own SSE
+    # reconnect (api/events._project_for_sse) and the host's reclaim poller.
     st, body = http_post(f"{base_url}/api/project/open", {"path": str(clc), "read_only": True})
     check(st == 200, "a free .clc still opens read-only when the flag is given")
     check(state.project is not None and state.project.read_only, "the fallback is read-only")
     check(state.project.lock is None, "and it holds no write lock")
-    state.api_key = None  # no key: the run fails AFTER the claim is (re)taken
-    st, body = http_post(f"{base_url}/api/run", {"task": "hi"})
-    check(st == 500, "a run re-opens a read-only project once its lock is free (never 409)")
+    check(state.reclaim_write_claim() is True, "a read-only project reclaims its claim once the lock is free")
     check(state.project is not None and not state.project.read_only, "the window is writable again")
     check(state.project.lock is not None, "and it holds the write lock again")
 
@@ -1206,17 +1193,18 @@ def _write_lock_follows_the_active_project(base_url, clc, clc2, state, sdir) -> 
         check(json.loads(body).get("code") == "project_open_conflict", "the create conflict carries the code")
         check(not victim.exists(), "the refused create wrote nothing at all")
 
-    # a run that switches the active project hands the old lock back too
+    # a switch of the active project hands the old lock back too. The switch
+    # used to be made by sending a task with `project=`, a field only the
+    # deleted /api/run knew; the switch endpoint is the only way now, and the
+    # lock rule it has to keep is the same one.
     check(open_project(clc) == 200, "demo open for write again")
-    state.api_key = None  # no key: the run fails, the switch is what is under test
-    st, _ = http_post(f"{base_url}/api/run", {"task": "noop", "project": str(clc2)})
-    check(st == 500, "run without a key fails (switch only)")
-    check(str(state.project.path) == str(clc2.resolve()), "the run switched the active project")
+    check(open_project(clc2) == 200, "switched to the other project")
+    check(str(state.project.path) == str(clc2.resolve()), "the switch is the active project")
     check(not lock_free(clc2), "the switched-to project holds the write lock")
     check(lock_free(clc), "the switched-away project hands its write lock back")
 
     st = open_project(clc)
-    check(st == 200, "demo reopened for the real-run section")
+    check(st == 200, "demo reopened for the turn section")
 
 
 def _remote_workspace_locks_locally() -> None:
@@ -1356,11 +1344,11 @@ def _read_only_reclaim_is_not_a_latch() -> None:
               "the project is read-only and the .clc is free")
 
         # a run in flight is a writer: the fallback must not flip under it
-        state.busy = True
+        state.claim_run(key)
         check(state.reclaim_write_claim() is False, "a busy session never swaps its project")
         check(state.project.read_only and state.project.lock is None,
               "the fallback stands while the run is in flight")
-        state.busy = False
+        state.release_run(key)
 
         # someone else still holds it: the kernel's refusal is the answer
         with _lock_held_elsewhere(key, _local_lock_path(key)):
@@ -1608,14 +1596,20 @@ def _session_release_is_recorded() -> None:
                 _, body = http_get(f"{base}/api/health")
                 check(json.loads(body).get("in_flight") is False, "health: no run before one starts")
 
-                st, _ = http_post(f"{base}/api/run", {"task": "hold the line", "project": str(clc)})
-                check(st == 200, "run accepted against an endpoint that never answers")
+                # a turn is in flight when a CLIENT holds the run slot on this
+                # session (POST /api/run/state). The loop is not here any more,
+                # so this is the only way the host can know a turn is open —
+                # and the release handler reads exactly this flag.
+                st, _ = http_post(f"{base}/api/run/state", {"busy": True, "project": str(clc)})
+                check(st == 200, "the client claims the run slot against an open project")
                 _, body = http_get(f"{base}/api/health")
                 check(json.loads(body).get("in_flight") is True, "health: the run is in flight")
 
-                deadline = time.time() + 10
-                while time.time() < deadline and "user_message" not in clc.read_text(encoding="utf-8"):
-                    time.sleep(0.05)
+                # the turn's opening line, written the way the client writes it:
+                # the outage's shape is a turn whose task line is in the .clc and
+                # whose final never arrives
+                st, _ = http_post(f"{base}/api/log", {"event": {"type": "user_message", "content": "hold the line"}})
+                check(st == 200, "the turn's task line is in the .clc")
                 evs = events_in(clc)
                 check(evs and evs[-1]["type"] != "final", "the run in flight has no final yet (the outage's shape)")
 
@@ -1671,7 +1665,7 @@ def _session_release_is_recorded() -> None:
             gproject = create_project(Path(gdir) / "once", "once", workspace=gws)
             gstate = server_mod.RunState()
             gstate.set_project(gproject, workspace=gws)
-            gstate.busy = True
+            gstate.claim_run(str(gproject.path))
             server_mod.record_release(gstate)
             server_mod.record_release(gstate)  # the second delivery
             finals = [ev for ev in events_in(Path(gproject.path)) if ev["type"] == "final"]
@@ -1680,69 +1674,103 @@ def _session_release_is_recorded() -> None:
         hang.close()
 
 
-def _start_real_run(base_url, state) -> bool:
-    # 4. real run (only with a key saved in ~/.clutch/settings.json)
-    key = _saved_api_key()
-    if not key:
-        print("\n(no API key in ~/.clutch/settings.json - real-run section skipped)")
-        print("\nall passed (network-free)")
-        return False
-    state.api_key = key  # the server uses the UI-saved key (no env fallback)
+def _scripted_turn(base_url, clc) -> None:
+    """4. ONE turn, driven the way the client drives it — and no model anywhere.
 
-    st, body = http_post(
-        f"{base_url}/api/run",
+    This section used to be "send a task to /api/run and let the loop finish",
+    which is why it only ran on a machine with a key saved: it called a real
+    model. The loop lives in the client now (P4), so what the SERVER does for a
+    turn is exactly this, verb by verb: claim the run slot, append the task
+    line, run the call through /api/exec, append its result and the final,
+    release. No key, no endpoint, no network — and the sections that used to be
+    skipped on a keyless machine (workspace tree, rollback, the persisted
+    transcript) now always run.
+    """
+    arguments = json.dumps({"path": "hello.txt", "content": "hi"})
+    st, _ = http_post(f"{base_url}/api/run/state", {"busy": True, "project": str(clc)})
+    check(st == 200, "the turn claims the run slot")
+    st, _ = http_post(
+        f"{base_url}/api/log",
+        {"event": {"type": "user_message", "content": "write hello.txt containing hi"}},
+    )
+    check(st == 200, "the task line is durable before anything runs")
+    st, _ = http_post(
+        f"{base_url}/api/log",
         {
-            "task": (
-                "write a file hello.txt containing the word hi using write_file, "
-                "then read it with run_command cat hello.txt"
-            ),
+            "event": {
+                "type": "tool_call",
+                "name": "write_file",
+                "arguments": arguments,
+                "tool_call_id": "t1",
+            }
         },
     )
-    check(st == 200 and body != "", "run accepted")
-    return True
+    check(st == 200, "the call is durable before it runs (a crash leaves it unanswered)")
+    st, body = http_post(
+        f"{base_url}/api/exec",
+        {"name": "write_file", "arguments": arguments, "tool_call_id": "t1"},
+    )
+    result = json.loads(body)
+    check(st == 200 and result.get("is_error") is False, f"the tool ran on this machine ({body[:120]})")
+    st, _ = http_post(
+        f"{base_url}/api/log",
+        {
+            "event": {
+                "type": "tool_result",
+                "tool_call_id": "t1",
+                "content": result.get("content", ""),
+                "is_error": False,
+                "diff": result.get("diff", ""),
+            }
+        },
+    )
+    check(st == 200, "the result is durable")
+    st, _ = http_post(
+        f"{base_url}/api/log",
+        {"event": {"type": "final", "status": "completed", "summary": "wrote hello.txt"}},
+    )
+    check(st == 200, "the turn closes with a final")
+    st, body = http_post(f"{base_url}/api/run/state", {"busy": False, "project": str(clc)})
+    check(st == 200 and json.loads(body).get("released") is True, "the turn gives the slot back")
 
 
-def _duplicate_run_rejected(base_url) -> None:
-    # 4b. duplicate run rejected (busy)
-    st, _ = http_post(f"{base_url}/api/run", {"task": "another"})
-    check(st == 409, "concurrent run rejected")
+def _lease_shape(base_url, clc) -> None:
+    # 4b. the slot is ONE lease, not a latch: a second claim on the same project
+    # RENEWS it (a turn heartbeats), a claim naming another project is refused
+    # (two drivers would write the same turn twice), and a release from a
+    # non-holder is a fact rather than an error (Stop can arrive twice).
+    st, body = http_post(f"{base_url}/api/run/state", {"busy": True, "project": str(clc), "ttl_ms": 5000})
+    check(st == 200 and json.loads(body).get("lease_ms") == 5000, "a claim answers with the lease taken")
+    st, body = http_post(f"{base_url}/api/run/state", {"busy": True, "project": str(clc), "ttl_ms": 5000})
+    check(st == 200 and json.loads(body).get("busy") is True, "renewing the same claim is not a second driver")
+    st, body = http_post(
+        f"{base_url}/api/run/state", {"busy": True, "project": str(clc.parent / "other.clc")}
+    )
+    check(
+        st == 409 and json.loads(body).get("code") == "project_mismatch",
+        "a claim naming a project this session does not have open is refused",
+    )
+    st, body = http_post(f"{base_url}/api/run/state", {"busy": False, "project": str(clc)})
+    check(st == 200 and json.loads(body).get("released") is True, "the holder gives the slot back")
+    st, body = http_post(f"{base_url}/api/run/state", {"busy": False, "project": str(clc)})
+    check(st == 200 and json.loads(body).get("released") is False, "a second release is not an error")
 
 
 def _collect_run_events(base_url) -> None:
-    # collect SSE events
-    events: list[dict] = []
-    done = threading.Event()
-
-    def sse_reader() -> None:
-        try:
-            # replay=0: this reader is after THIS run's frames, and a live durable
-            # frame is wrapped in {offset, event} exactly like a replayed one, so
-            # without the replay there is no second, historical copy to sort out
-            with urllib.request.urlopen(f"{base_url}/api/events?replay=0", timeout=90) as r:
-                for raw in r:
-                    line = raw.decode().strip()
-                    if line.startswith("data: "):
-                        ev = json.loads(line[6:])
-                        # a durable record arrives with its log offset on it
-                        if "event" in ev and isinstance(ev["event"], dict):
-                            ev = ev["event"]
-                        events.append(ev)
-                        if ev.get("type") == "final":
-                            done.set()
-                            break
-        except Exception as e:  # noqa: BLE001
-            print(f"  [sse] {e}")
-
-    rthread = threading.Thread(target=sse_reader, daemon=True)
-    rthread.start()
-    finished = done.wait(timeout=120)
-    check(finished, "final event received within 120s")
-
-    types = {e["type"] for e in events}
-    check("tool_call" in types, "tool calls streamed")
-    check("tool_result" in types, "tool results streamed")
+    # 4c. the turn is on the wire: every durable line is in the replay a
+    # (re)connecting window gets, in order, each carrying the offset it was
+    # stamped with. Read from the replay rather than from a live stream because
+    # the turn has already closed — the live frames are these same objects, and
+    # the replay is the only copy that cannot race the turn it is reading.
+    records = _records(_sse_collect(f"{base_url}/api/events?replay=1"))
+    events = [r["event"] for r in records if isinstance(r.get("event"), dict)]
+    types = [e["type"] for e in events]
+    check("tool_call" in types, "the tool call is on the wire")
+    check("tool_result" in types, "the tool result is on the wire")
+    check("user_message" in types and "final" in types, "the turn is bracketed by its task line and its final")
     finals = [e for e in events if e["type"] == "final"]
     check(finals and finals[-1]["status"] == "completed", "final status completed")
+    check(all(isinstance(r.get("offset"), int) for r in records), "every replayed line carries its log offset")
 
 
 def _workspace_tree(base_url, clc) -> None:
@@ -1791,20 +1819,20 @@ def _undo_endpoint(base_url, clc) -> None:
 
 
 def _rollback_after_real_run(base_url, clc) -> None:
-    """5d. whole-task rollback on a REAL run's own journal.
+    """5d. whole-task rollback on a REAL turn's own journal.
 
     This is the only place the two halves of the feature meet on the wire: the
     anchor the UI puts on a user row comes from the replay frame's ``offset``
-    (agent/api/events.py), and the journal's anchor comes from the log offset
-    Agent.run opened the checkpoint with — claim them equal here or "roll back
+    (agent/api/events.py), and the journal's anchor comes from the log offset the
+    task line opened the checkpoint with — claim them equal here or "roll back
     to this message" addresses a different point of the log than the row does.
 
     Conditional on the journal being non-empty: only TOOL-declared writes are
     journaled, and a model free to run `echo ... > hello.txt` through a shell
     journals nothing, which is not a failure of the rollback (the deterministic
-    anchor chain is covered by tests/loop_test.py). The guards before the run
+    anchor chain is covered by tests/selfcheck.py). The guards before the turn
     (_rollback_endpoint) proved the journal was empty, so every anchor here is
-    one this run recorded.
+    one this turn recorded.
     """
     st, body = http_get(f"{base_url}/api/workspace/checkpoints")
     data = json.loads(body)
@@ -1863,10 +1891,13 @@ def _clc_persisted_conversation(base_url, clc) -> None:
     check("user_message" in ev_types and "final" in ev_types, ".clc persisted conversation")
 
 
-def _stop_is_safe_on_idle(base_url, srv) -> None:
-    # 7. stop is safe on idle
+def _stop_is_safe_on_idle(base_url) -> None:
+    # 7. Stop is safe on idle: the verb is gone, and its replacement is already
+    # idempotent (a release from a non-holder answers released:false). The
+    # regression gate is what keeps a resurrected /api/stop from becoming a
+    # second, un-scoped way to deny a permission prompt.
     st, _ = http_post(f"{base_url}/api/stop", {})
-    check(st == 200, "stop on idle is safe")
+    check(st == 404, "POST /api/stop is gone (the client cancels per tool call)")
 
 
 def _run_server_test() -> int:
@@ -1885,8 +1916,7 @@ def _run_server_test() -> int:
         time.sleep(0.5)
 
         _health_and_cors(base_url)
-        _run_without_project_rejected(base_url)
-        _empty_task_rejected(base_url)
+        _run_endpoint_retired(base_url)
         _settings_api_key(base_url, state)
         _settings_endpoint(base_url, config)
         _settings_reasoning_effort(base_url, config)
@@ -1915,15 +1945,14 @@ def _run_server_test() -> int:
         _read_only_reclaim_is_not_a_latch()
         _lock_claim_identity()
         _session_release_is_recorded()
-        if not _start_real_run(base_url, state):
-            return 0
-        _duplicate_run_rejected(base_url)
+        _scripted_turn(base_url, clc)
+        _lease_shape(base_url, clc)
         _collect_run_events(base_url)
         _workspace_tree(base_url, clc)
         _undo_endpoint(base_url, clc)
         _rollback_after_real_run(base_url, clc)
         _clc_persisted_conversation(base_url, clc)
-        _stop_is_safe_on_idle(base_url, srv)
+        _stop_is_safe_on_idle(base_url)
 
         srv.shutdown()
         print("\nall passed (full)")

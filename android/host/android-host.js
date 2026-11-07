@@ -38,6 +38,24 @@ const { createTunnelLadder } = useUI("tunnel-ladder.js");
 // the same release — only the install step differs (the page's WebView shell owns
 // it here; this process cannot start an Intent)
 const { createUpdateService } = useUI("update-service.js");
+// This client's own plugin domain, one for one with the desktop shell's (P1-6):
+// the table the plugin page installs into (ui/plugin-host.js), the listener and
+// the reverse forward that declare it to a session (ui/plugin-link.js). One
+// object each, because two would be two truths — the same rule ui/main.js states.
+const { createPluginHost } = useUI("plugin-host.js");
+const pluginLink = useUI("plugin-link.js");
+// how a plugin is STARTED here: the desktop forks a process, the phone cannot
+// (`process.execPath` is the app itself — libnode is loaded INTO it, see
+// native-lib.cpp), so the runtime is a worker thread with the same containment.
+// ui/plugin-worker.js states the one difference (a worker cannot chdir).
+const { spawnInWorker } = useUI("plugin-worker.js");
+// the one place the exec budget is written down (ui/transport_defaults.json, the
+// same numbers agent/transport_defaults.json carries): a plugin is handed the
+// budget its far-side command obeys instead of inventing one
+const {
+  exec_max_command_bytes: EXEC_MAX_COMMAND_BYTES,
+  exec_chunk_bytes: EXEC_CHUNK_BYTES,
+} = useUI("transport_defaults.json");
 // the composition root for one session's run loop (P1-4) is resolved lazily
 // so it is only loaded when the renderer calls clutchRun.start for the first
 // time. This keeps UI_NODE in sync-android-host.sh minimal: the run loop's
@@ -107,6 +125,39 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     sessions,
   });
 
+  // This client's plugin domain (P1-6): the app process owns the bytes (root
+  // `~/.clutch/client`, which N2's HOME puts inside the app sandbox), the plugin
+  // page installs into it, and ui/plugin-link.js declares what it holds to the
+  // session. It is the SAME object the desktop builds, with one answer that has to
+  // differ: how a plugin process is started (ui/plugin-worker.js).
+  //
+  // A host with no worker support still has the domain — list/install/remove all
+  // work — and every call then fails with this sentence instead of a plugin that
+  // "exited before answering" for a reason nobody can read (I3).
+  const pluginHost = createPluginHost({
+    log,
+    // the far side of the tunnel, asked per call: the bridge port only lives while
+    // a hop is up, so a captured string would go stale the moment it is rebuilt
+    execBridge: () => {
+      const ts = tunnel.tunnelStatus() || {};
+      return typeof ts.execBridge === "string" ? ts.execBridge : "";
+    },
+    execLimits: {
+      maxCommandBytes: EXEC_MAX_COMMAND_BYTES,
+      chunkBytes: EXEC_CHUNK_BYTES,
+    },
+    spawn:
+      typeof spawnInWorker === "function"
+        ? spawnInWorker
+        : () => {
+            throw new Error(
+              "this phone's engine cannot start a plugin: it has no node binary to fork and no worker support — " +
+                "install the component on the session machine instead"
+            );
+          },
+  });
+  pluginLink.useHost(pluginHost);
+
   // The plugin tab's backend — the same object the desktop shell builds
   // (ui/main.js:55), fed this host's answers. N4 decides which machine a request
   // is about: with no local supervisor, `supervisorBase()` is null, so a window
@@ -119,8 +170,33 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     supervisorBase: () => null, // N4: no local supervisor on Android
     tunnelStatus: () => tunnel.tunnelStatus(),
     windowKind: (w) => hostCore.backendKind(w.id),
+    // …and the place a frontend plugin goes: THIS app process (ui/plugin-host.js).
+    // Without it the page reads `client: false` and says a plugin has nowhere to go
+    // here — which was true until this domain existed (ui/js/components-panel.js).
+    plugins: () => pluginHost,
     log,
   });
+
+  // This session's channel to that domain. A claim is the first moment a session
+  // could call a plugin, so it is the first moment declaring one is worth doing
+  // (ui/plugin-link.js offer). Never awaited: a declaration landing a heartbeat
+  // later is a plugin appearing in a session that is already running, not a reason
+  // to keep the window waiting on a push.
+  function announcePlugins(base) {
+    if (!base || hostCore.backendKind(window.id) !== "tunnel") return;
+    pluginLink.offer(base).catch((e) => log(`[plugin] declaring to ${base} failed: ${(e && e.message) || e}`));
+  }
+
+  // An install, a removal or a stop changed what every session is offered, so the
+  // declarations are re-pushed before the answer reaches the page — the same rule
+  // as the desktop shell (ui/main.js redeclare). A session-domain write changes
+  // nothing here, and a failed write changed nothing at all.
+  function redeclare(res) {
+    if (res && res.ok && res.place === "client") {
+      pluginLink.refresh().catch((e) => log(`[plugin] re-declaring failed: ${(e && e.message) || e}`));
+    }
+    return res;
+  }
 
   // The About pane's update button: the same check and download the desktop shell
   // runs (ui/update-service.js), over the same release, with one honest difference
@@ -168,21 +244,40 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
   // ladder's own stand-downs (nothing left to dial with, the hop came back on its
   // own) cleared it too — so a phone that can no longer redial does not hold the
   // processor awake for a tunnel it is not going to get.
-  const wakeMarker = path.join(os.homedir(), "tunnel.state");
-  function writeWakeMarker(state) {
-    const want = state && state.armed ? "up" : "down";
+  // Both markers are the same shape — decide the word, read, write only on a
+  // change — so the writing lives once. A failed write is logged and swallowed:
+  // a marker is a hint to a native service, never the engine's own work.
+  function writeMarker(file, want) {
     let current = null;
     try {
-      current = fs.readFileSync(wakeMarker, "utf8");
+      current = fs.readFileSync(file, "utf8");
     } catch (e) {
       /* absent on the first write */
     }
     if (current === want) return; // nothing changed: no write at all
     try {
-      fs.writeFileSync(wakeMarker, want);
+      fs.writeFileSync(file, want);
     } catch (e) {
-      log(`[wake] could not write ${wakeMarker}: ${(e && e.message) || e}`);
+      log(`[wake] could not write ${file}: ${(e && e.message) || e}`);
     }
+  }
+
+  const wakeMarker = path.join(os.homedir(), "tunnel.state");
+  function writeWakeMarker(state) {
+    writeMarker(wakeMarker, state && state.armed ? "up" : "down");
+  }
+
+  // The second marker (P5-2): "a turn is being driven on this device RIGHT NOW".
+  // That is not the standing intent above and not the run-slot lease either — the
+  // lease also stays held between two page calls while a turn is merely OPEN, and
+  // a phone must not keep its CPU awake for a turn nobody is stepping. So the word
+  // is written from the loop's own busy edges (ui/run-session.js onBusy): "busy"
+  // on entry of the first call, "idle" when the last one returns. Anything that is
+  // not "busy" reads as idle. TunnelService holds the CPU while EITHER marker says
+  // yes; see runBusy() there.
+  const runMarker = path.join(os.homedir(), "run.state");
+  function writeRunMarker(busy) {
+    writeMarker(runMarker, busy ? "busy" : "idle");
   }
 
   const ladder = createTunnelLadder({
@@ -198,15 +293,18 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     // side while the phone is still in the background
     onUp: async () => {
       const url = await hostCore.ensureWindowBackend(window, true);
+      // the same session claimed from a fresh hop: its channel moved with the hop
+      announcePlugins(url);
       log(`[ladder] claim re-bound: ${url || "parked (the far session is not provably there yet)"}`);
     },
     log,
   });
 
   // One run-loop instance per app life: the phone IS one window (N5), so there
-  // is no per-window map — just one slot that is replaced when the base URL
-  // changes (a new tunnel hop) and cleared when the session ends.
-  let runInst = null; // {run, base} | null
+  // is no per-window map — just one slot that is replaced when the base URL,
+  // the mode or the project changes (a new tunnel hop, a mode toggle, another
+  // .clc open) and cleared when the session ends.
+  let runInst = null; // {run, base, mode, project} | null
 
   // Stop flush: same logic as ui/main.js stopAndFlush — write the aborted final
   // before the loop is abandoned, so a cold restart sees a closed turn.
@@ -223,6 +321,31 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     }
   }
 
+  // One instance-building path for start and state, exactly as ui/main.js's
+  // ensureRunInstance: built when absent, rebuilt when the base, the mode or the
+  // project changed. Answers {run} or {error, code}.
+  async function ensureRun(payload) {
+    const mode = payload && (payload.mode === "chat" || payload.mode === "work") ? payload.mode : "";
+    const project = String((payload && payload.project) || "");
+    const base = (await hostCore.ensureWindowBackend(window)) || null;
+    if (!base) return { error: "no session — the backend is not running", code: "no_session" };
+    if (runInst && runInst.base === base && runInst.mode === mode && runInst.project === project) {
+      return { run: runInst.run };
+    }
+    const createSessionRun = loadSessionRun();
+    if (!createSessionRun) return { error: "the run loop is not available in this build" };
+    const run = await createSessionRun({
+      base,
+      mode: mode || undefined,
+      project: project || undefined,
+      onEvent: (ev) => window.send("run:event", ev),
+      onBusy: writeRunMarker,
+      warn: (msg) => log(`[run] ${msg}`),
+    });
+    runInst = { run, base, mode, project };
+    return { run };
+  }
+
   // the bridge surface: ui/main.js's ipcMain handlers, one for one
   const handlers = {
     clutchApi: {
@@ -230,7 +353,11 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
         try {
           // null = no session (no tunnel, and no local mode to fall back to):
           // the renderer shows "not running" and waits for backend:base-changed
-          return (await hostCore.ensureWindowBackend(window)) || null;
+          const base = (await hostCore.ensureWindowBackend(window)) || null;
+          // the claim is also the one moment this session may be told what this
+          // client runs — a push, never a gate (announcePlugins)
+          announcePlugins(base);
+          return base;
         } catch (err) {
           log(`[backend] api:base failed: ${err && err.message}`);
           return null;
@@ -297,6 +424,11 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       disconnect: async () => {
         // stop window backends first, while the tunnel/bridge is still alive
         ladder.noteUserLeft(); // the user leaving: the standing intent goes with them
+        // the sessions this client served are told below, while the hop is still
+        // up, so these DELETEs are a courtesy the far side may never read — not
+        // awaited, or one quiet session would hold the disconnect for its own
+        // timeout (ui/plugin-link.js)
+        pluginLink.stop();
         await hostCore.releaseAllBackends();
         await tunnel.stopTunnel();
         return { ok: true };
@@ -314,16 +446,21 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
       // one machine holds, `remove` asks it to let one go (the host may refuse —
       // something is running it — and that arrives as the error inside the answer)
       versions: async (name) => componentsView.versions(String(name || ""), window),
-      remove: async (name, opts) => componentsView.remove(String(name || ""), opts || {}, window),
+      // the three writes go through `redeclare`: a client-domain change is a tool
+      // appearing in every session this client serves (ui/plugin-link.js), and the
+      // answer is the one place that knows a write happened
+      remove: async (name, opts) => redeclare(await componentsView.remove(String(name || ""), opts || {}, window)),
       // the switch: the state being ASKED FOR travels, not a verb translated
       setDisabled: async (name, disabled) =>
-        componentsView.setDisabled(String(name || ""), Boolean(disabled), window),
+        redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), window)),
       install: async (name) =>
-        componentsView.install(String(name || ""), window, {
-          // one line at a time to the page that asked, on the channel the shim
-          // subscribes to; the window handle fans it out over the bridge's SSE
-          progress: (stage) => window.send("components:progress", stage),
-        }),
+        redeclare(
+          await componentsView.install(String(name || ""), window, {
+            // one line at a time to the page that asked, on the channel the shim
+            // subscribes to; the window handle fans it out over the bridge's SSE
+            progress: (stage) => window.send("components:progress", stage),
+          })
+        ),
       // the mirrors a failed fetch is retried through: a read, and the two writes
       // that move the user's half of the list (ui/mirrors.js). Each write answers
       // with the list as it now is, so the page draws what was written.
@@ -348,29 +485,20 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     // the host-side run loop (P1-4), one for one with the desktop's `run:*`
     // ipcMain handlers. The page calls start/drive/stop/step/state; live events
     // go out on the bridge's SSE stream (window.send → bus.broadcast). The
-    // instance is rebuilt when the base URL changes (a new tunnel hop).
+    // instance is rebuilt when the base URL, the mode or the project changes,
+    // and `state` builds it too — that is the resume question the page asks
+    // when it comes up with a project (P2-3).
     clutchRun: {
-      start: async (task) => {
+      start: async (payload) => {
         try {
-          const base = (await hostCore.ensureWindowBackend(window)) || null;
-          if (!base) return { ok: false, error: "no session — the backend is not running" };
-          if (!runInst || runInst.base !== base) {
-            const createSessionRun = loadSessionRun();
-            if (!createSessionRun) {
-              return { ok: false, error: "the run loop is not available in this build" };
-            }
-            const run = await createSessionRun({
-              base,
-              onEvent: (ev) => window.send("run:event", ev),
-              warn: (msg) => log(`[run] ${msg}`),
-            });
-            runInst = { run, base };
-          }
-          await runInst.run.start(String(task || ""));
+          const task = String((payload && payload.task) || "");
+          const got = await ensureRun(payload);
+          if (got.error) return { ok: false, error: got.error, code: got.code || null };
+          await got.run.start(task);
           return { ok: true };
         } catch (err) {
           log(`[run] start failed: ${(err && err.message) || err}`);
-          return { ok: false, error: String((err && err.message) || err) };
+          return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
         }
       },
       stop: async () => {
@@ -388,7 +516,7 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
           const result = await runInst.run.step();
           return { ok: true, result };
         } catch (err) {
-          return { ok: false, error: String((err && err.message) || err) };
+          return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
         }
       },
       drive: async () => {
@@ -397,16 +525,20 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
           const result = await runInst.run.drive();
           return { ok: true, result };
         } catch (err) {
-          return { ok: false, error: String((err && err.message) || err) };
+          return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
         }
       },
-      state: async () => {
-        if (!runInst) return { ok: true, result: { phase: "idle" } };
+      // the RESUME question (P2-3): takes the same {mode, project} payload start
+      // does, and builds the instance when the page asks before any start —
+      // "there is no instance" is not an answer to "is a turn open?".
+      state: async (payload) => {
         try {
-          const result = await runInst.run.state();
+          const got = await ensureRun(payload || {});
+          if (got.error) return { ok: false, error: got.error, code: got.code || null };
+          const result = await got.run.state();
           return { ok: true, result };
         } catch (err) {
-          return { ok: false, error: String((err && err.message) || err) };
+          return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
         }
       },
     },
@@ -419,6 +551,9 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
   // window (N5), so it is "was that window's claim one of the hop's?".
   tunnel.onTunnelEnd(async () => {
     const affected = await hostCore.releaseTunnelBackends();
+    // the plugin port this hop carried died with it (ui/plugin-link.js hopLost):
+    // the listener stays (a reconnect re-uses it) but the far-side port does not
+    pluginLink.hopLost();
     // the page hears about it (whenever it is running again) and the ENGINE acts
     // on it: while the app is in the background the renderer is frozen — its
     // redial ladder is parked on purpose (ui/js/conn-lost.js connLostArm) — so
@@ -444,6 +579,14 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
     // intent that does not exist in THIS life (nothing dials before the user does)
     try {
       fs.unlinkSync(path.join(os.homedir(), "tunnel.state"));
+    } catch (e) {
+      /* absent on first boot */
+    }
+    // and for the busy marker (P5-2): a "busy" left by a previous process life —
+    // killed mid-turn — would keep the CPU awake for a loop that no longer exists
+    // in THIS life, and nothing is driving anything before the page asks
+    try {
+      fs.unlinkSync(path.join(os.homedir(), "run.state"));
     } catch (e) {
       /* absent on first boot */
     }

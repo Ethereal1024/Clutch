@@ -67,6 +67,11 @@ bash scripts/build-server-bundle.sh "$VERSION" "$ROOT/dist/agent-server"
 # --- 3. exec-chunk limit must not drift between agent/ and ui/ -------------
 bash "$ROOT/scripts/check-transport-defaults.sh"
 
+# --- 3b. ui/renderer.js must be what the sources build: the committed bundle
+#       is the whole renderer, and this path calls electron-builder directly,
+#       so `npm run dist`'s predist (which rebuilds it) never runs ------------
+node "$ROOT/ui/build-renderer.js" --check
+
 # --- 4. dmg (unsigned) ------------------------------------------------------
 [[ -d ui/node_modules ]] || {
   echo "FATAL: ui/node_modules missing — install UI deps first:  cd ui && npm install" >&2

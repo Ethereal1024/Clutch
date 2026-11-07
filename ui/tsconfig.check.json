@@ -1,0 +1,47 @@
+{
+  // Type checking for the host half of the app, with NO build step (TODO.md D14).
+  //
+  // `noEmit: true` and `allowJs`: the files stay .js and stay CommonJS. `include`
+  // only says WHICH tree the checker may look at — the opt-in is one `// @ts-check`
+  // line at the top of each module, so the list of checked files lives in the
+  // source, not here. That is the RATCHET: a module enters when it is clean, the
+  // set only grows, and no pragma or setting is ever removed to make the gate
+  // pass. (With `checkJs: true` instead, EVERY .js in `include` would be checked
+  // — and every file they require — so the gate would go red for modules nobody
+  // opted in: llm-proxy.js(21,29) unresolved `proxy-agent`, settings-mirror.js(64,7)
+  // a stray argument. See the per-file rationale in TODO.md §11 P7-1.)
+  //
+  // The settings are deliberately loose to start with, because the point of the
+  // first slice is to catch SHAPE errors on the modules the refactor is writing
+  // (ports, event vocabularies, IPC answers) — not to force a style change on
+  // 14k lines written before types existed. Tighten per file over time; never
+  // loosen a global to silence one file.
+  "compilerOptions": {
+    "allowJs": true,
+    // NOT "checkJs": every file opted in with its own `// @ts-check` line
+    // instead, so the ratchet is one marker per file (visible to an editor too)
+    // and adding a file to the gate can never happen by accident.
+    "checkJs": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    // `strict` is off on purpose: turning it on today would bury the real
+    // findings in ~2000 implicit-any notes. Files migrate one by one; the ones
+    // that switched already carry `// @ts-check` at the top.
+    "strict": false,
+    "noImplicitAny": false,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["*.js"],
+  // ui/renderer.js is GENERATED (ui/build-renderer.js from ui/renderer.modules.json):
+  // 6k reprinted lines that no one edits, so it is not part of the ratchet — and
+  // parsing it on every `npm run typecheck` buys nothing. The sources it is built
+  // from are in `include` like the rest, so the gate still sees every line a human
+  // wrote. (tests/ui-load-order-test.js is what keeps the generated file honest.)
+  "exclude": ["renderer.js"]
+}

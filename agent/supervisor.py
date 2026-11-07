@@ -4,19 +4,15 @@ Every UI window is a SESSION: the supervisor spawns one agent.server child
 (--port 0, random port parsed from its stdout banner) per session and reports
 the port back. The window then talks to its child DIRECTLY (locally, or over
 its own tunnel forward) — the supervisor never proxies traffic, it only owns
-the lifecycle. The one control message it forwards (never data) is a re-point:
-the claiming client's model path moved and the child's LLM endpoint has to
-follow it, or the run retries into a port nobody serves any more.
+the lifecycle: spawn, beat, release, reap. No message it forwards carries work
+(the model path lives in the client, not in the child — see the P4 note below).
 
 Endpoints:
 
     POST /api/session/start      -> {session_id, port}
     POST /api/session/stop       -> release the session child; a run in flight
                                     is LEFT RUNNING (detached), never killed
-    POST /api/session/heartbeat  -> keep the session alive (stale ones die); a
-                                    {base_url, model} in the body ALSO re-points
-                                    that session's LLM endpoint when it moved
-                                    (see SessionSupervisor.repoint_session)
+    POST /api/session/heartbeat  -> keep the session alive (stale ones die)
     GET  /api/health             -> ok
 
     GET  /api/locks              -> every .clc write lock this user's temp dir
@@ -90,7 +86,7 @@ from dataclasses import dataclass
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from agent.build import version as build_version
 from agent.core import lock_reconcile, procstat
@@ -110,7 +106,6 @@ DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
 SESSION_START_TIMEOUT_S = 30.0  # child port banner: onefile extraction is slow on a remote
 HEALTH_PROBE_TIMEOUT_S = 1.0  # a live child answers at once; a wedged one is no evidence
-REPOINT_TIMEOUT_S = 5.0  # a child accepts a new base in-process: one lock, one SDK client
 
 
 def session_run_state(port: int | None) -> bool | None:
@@ -150,18 +145,6 @@ def session_in_flight(port: int | None) -> bool:
 SESSION_STALE_S = STALE_S
 
 
-def _post_json(url: str, payload: dict, timeout: float) -> dict:
-    """POST one small JSON body to a child and read its JSON answer.
-
-    Raises OSError/ValueError (a refusal, an unreachable child, a reply we cannot
-    parse) — the callers here treat every one of those as "did not land", never
-    as a reason to fail the request they were serving."""
-    data = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", "replace")
-    return json.loads(raw) if raw.strip() else {}
-
 # compat re-export: the dead-parent resilience test constructs this directly
 _SafeStdStream = SafeStdStream
 
@@ -170,14 +153,6 @@ _SafeStdStream = SafeStdStream
 class Session(ManagedProcess):
     """A session record: the generic child plus the session-facing names the
     HTTP API and the tests use (session_id, job)."""
-
-    # The LLM endpoint this child was told to use: --base-url/--model at spawn,
-    # then whatever the claiming client's last heartbeat put in force (see
-    # repoint_session). It is the LAST target this supervisor successfully
-    # applied, which is what makes "has it moved?" a comparison instead of a
-    # guess — the client repeats its current base on every beat.
-    llm_base: str | None = None
-    llm_model: str | None = None
 
     # The window that claimed this session, as the kernel knew it at spawn:
     # (pid, starttime). This is the fact the reaper uses to decide whether the
@@ -283,10 +258,6 @@ class SessionSupervisor(ProcessSupervisor):
         record = self.spawn(uuid.uuid4().hex[:12], spec, beat_required=True)
         if record is None:
             return None
-        # what this child was actually told, so a heartbeat that repeats the same
-        # base costs one comparison and a moved one costs one request
-        record.llm_base = base_url
-        record.llm_model = model
         record.claim_pid = claim_pid
         record.claim_start = claim_start
         log(f"[supervisor] session {record.key} on port {record.port}")
@@ -331,55 +302,6 @@ class SessionSupervisor(ProcessSupervisor):
 
     def heartbeat(self, session_id: str | None) -> bool:
         return self.beat(session_id)
-
-    def repoint_session(self, session_id: str | None, base_url: str, model: str | None = None) -> dict:
-        """Move one session's LLM endpoint to where its client serves it NOW.
-
-        The reason a session needs this at all: a REMOTE session's --base-url is
-        the claiming client's own proxy, reached through an SSH reverse forward,
-        and that forward can land on a different port after a hop — the far sshd
-        keeps an old hop's listener (no FIN from a phone that lost its radio), so
-        the next forward is granted another port. The session outlives the hop and
-        the run inside it outlives both (SESSION_STALE_S), so a frozen base is a
-        run that can never recover: every attempt redials into a port nobody
-        serves, and the user reads "Cannot reach the API endpoint" while their
-        network is fine.
-
-        So the client hands its current base to the beat, and this forwards it to
-        the child (POST /api/llm/base), which swaps its live client in place. The
-        verdict is data — the beat's own contract is liveness and must never be
-        turned into a failure by a re-point's outcome. ``{"status": "unknown"}``
-        means the session is gone; the caller answers 404 for the beat itself."""
-        with self._lock:
-            record = self.processes.get(session_id) if session_id else None
-            if record is None:
-                return {"status": "unknown"}
-            previous_base, previous_model = record.llm_base, record.llm_model
-            port = record.port
-        if not port:
-            return {"status": "pending"}  # spawned without a banner: nothing to ask
-        if base_url == previous_base and (not model or model == previous_model):
-            return {"status": "current", "base_url": base_url}
-        payload: dict = {"base_url": base_url}
-        if model:
-            payload["model"] = model
-        try:
-            answer = _post_json(f"http://127.0.0.1:{port}/api/llm/base", payload, REPOINT_TIMEOUT_S)
-        except (OSError, ValueError, HTTPException) as err:
-            # a child that cannot be reached or does not understand the request
-            # keeps its old target: the next beat asks again
-            log(f"[supervisor] session {session_id} re-point to {base_url} failed: {err}")
-            return {"status": "failed", "error": str(err)}
-        with self._lock:
-            if self.processes.get(session_id) is record:
-                record.llm_base = base_url
-                if model:
-                    record.llm_model = model
-        log(
-            f"[supervisor] session {session_id} LLM endpoint {previous_base} -> {base_url}"
-            + (f" (model {model})" if model else "")
-        )
-        return {"status": "repointed", "base_url": base_url, "child": answer}
 
     # ---- hooks ----
 
@@ -632,17 +554,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"status": "ok" if verdict == "stopped" else "detached"})
         elif path == "/api/session/heartbeat":
             body = self._read_body()
-            sid = body.get("session_id")
-            ok = sup.heartbeat(sid)
-            payload: dict = {"status": "ok" if ok else "unknown"}
-            # The beat is also how a session's LLM endpoint follows its client:
-            # the body carries where the claiming client serves the model RIGHT
-            # NOW (None when it serves nothing — a beat with no base is purely a
-            # liveness beat and must never move a live session to a dead port).
-            base_url = (body.get("base_url") or "").strip()
-            if ok and base_url:
-                payload["repoint"] = sup.repoint_session(sid, base_url, (body.get("model") or "").strip() or None)
-            self._json(payload, 200 if ok else 404)
+            ok = sup.heartbeat(body.get("session_id"))
+            # a purely liveness beat: the run's model path lives in the client
+            # (P4), so a {base_url, model} in the body is read as nothing
+            self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
         elif path == "/api/locks/reclaim":
             # The user's own hand on a project the host can PROVE is orphaned.
             # A live window is refused here, and the verdict says so, so the UI

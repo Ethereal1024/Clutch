@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // One durable event, as the text a READER of the log sees.
 //
 // The one projection both readers of a stored session share: the compaction

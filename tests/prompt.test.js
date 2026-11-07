@@ -1,9 +1,10 @@
 // ui/prompt.js is the loop's own words, loaded from files: `load` reads a
 // template, `render` fills it. These checks pin the placeholder grammar to
-// Python's string.Template (the other half still renders the same files), the
-// real templates to a documented set of slots, and every caller in ui/ to the
-// slots of the template it renders — a template that grows a `$name` nobody
-// passes fails here instead of reaching a model with "$name" in it.
+// Python's string.Template, the real templates to a documented set of slots,
+// and every caller in ui/ to the slots of the template it renders — a template
+// that grows a `$name` nobody passes fails here instead of reaching a model
+// with "$name" in it. The last section pins the split: these words live here
+// and nowhere else, while agent/prompts/ holds only what the MACHINE says.
 // Run: node tests/prompt.test.js
 const fs = require("fs");
 const path = require("path");
@@ -35,7 +36,6 @@ const SLOTS = {
   "recall.md": ["name", "size"],
   "system.md": [],
   "task.md": ["task"],
-  "unknown_tool.md": ["tool", "available"],
 };
 
 // Slots a template states about the world rather than for the caller to fill.
@@ -221,7 +221,19 @@ function main() {
     check(say("cancelled") === load("cancelled.md"), "say(cancelled) is the cancelled note");
     check(say("empty_response").includes("no visible text"), "say(empty_response) tells the model to answer visibly");
     check(say("max_tokens").includes("max_tokens limit"), "say(max_tokens) explains the truncation");
-    check(Object.keys(SAY).join(",") === "cancelled,empty_response,max_tokens", "the loop's three notes are the map");
+    // the two guard notes are the ones with slots: the loop passes what it ended
+    // the turn for, so these are the only SAY entries a caller fills (P4-3)
+    check(say("doom_loop", { tool: "run_command" }).includes("`run_command`"), "say(doom_loop) names the tool it was given");
+    check(!say("doom_loop", { tool: "run_command" }).includes("$tool"), "and leaves no slot behind");
+    check(
+      say("budget_exceeded", { max_turns: 3 }).includes("maximum of 3 turns"),
+      "say(budget_exceeded) states the limit it was given"
+    );
+    check(!say("budget_exceeded", { max_turns: 3 }).includes("$max_turns"), "and leaves no slot behind");
+    check(
+      Object.keys(SAY).join(",") === "budget_exceeded,cancelled,doom_loop,empty_response,max_tokens",
+      "the loop's five notes are the map"
+    );
     let threw = null;
     try {
       say("nope");
@@ -231,45 +243,59 @@ function main() {
     check(threw && /not one of/.test(threw.message), "an unknown note is an error, not silence");
   }
 
-  // ---- 6. the templates are one copy while both halves are still Python ----
+  // ---- 6. the split: the host owns the loop's words, the machine its own ----
   //
-  // P1-3 stages the move: ui/prompts/ is the host's copy now, agent/prompts/ the
-  // Python half's until P4 deletes it. While both exist they must be the SAME
-  // bytes, or the two halves would answer the same event with different words.
+  // A template the loop assembles a turn from lives in ui/prompts/ and nowhere
+  // else. agent/prompts/ keeps what the MACHINE says while executing: the
+  // answers registry.py and transport.py render at the model (`unknown_tool.md`,
+  // `errors/*`) and the per-tool prose host.py hands it. Two copies of one
+  // event's words would be two answers to it, so the copies stay deleted.
   {
-    if (fs.existsSync(AGENT_PROMPTS)) {
-      const mine = files(PROMPTS_DIR);
-      const theirs = files(AGENT_PROMPTS);
-      check(mine.join(",") === theirs.join(","), "both halves hold the same template names");
-      const diff = mine.filter(
-        (f) =>
-          !fs.existsSync(path.join(AGENT_PROMPTS, f)) ||
-          fs.readFileSync(path.join(PROMPTS_DIR, f), "utf8") !==
-            fs.readFileSync(path.join(AGENT_PROMPTS, f), "utf8")
-      );
-      check(!diff.length, "the staged templates are byte-identical" + (diff.length ? ": " + diff.join(", ") : ""));
-    } else {
-      check(files(PROMPTS_DIR).length > 0, "agent/prompts is gone (P4): ui/prompts is the only copy");
-    }
+    const machineTop = files(AGENT_PROMPTS);
+    check(
+      machineTop.join(",") === "unknown_tool.md",
+      "agent/prompts keeps one top-level template, the unknown-tool answer: " + machineTop.join(",")
+    );
+    const twice = files(PROMPTS_DIR).filter((f) => machineTop.includes(f));
+    check(
+      !twice.length,
+      "no top-level template the loop renders is written on the machine side too" +
+        (twice.length ? ": " + twice.join(", ") : "")
+    );
 
-    // The host's own tool prose (agent/prompts/tools/, staged by P3-1) follows
-    // the same rule one directory down: the model reads these words either way.
-    const toolsIn = (dir) => path.join(dir, "tools");
-    if (fs.existsSync(toolsIn(AGENT_PROMPTS))) {
-      const mine = fs.existsSync(toolsIn(PROMPTS_DIR)) ? files(toolsIn(PROMPTS_DIR)) : [];
-      const theirs = files(toolsIn(AGENT_PROMPTS));
-      check(mine.join(",") === theirs.join(","), "both halves hold the same tool prose names");
-      const diff = mine.filter(
-        (f) =>
-          !fs.existsSync(path.join(toolsIn(AGENT_PROMPTS), f)) ||
-          fs.readFileSync(path.join(toolsIn(PROMPTS_DIR), f), "utf8") !==
-            fs.readFileSync(path.join(toolsIn(AGENT_PROMPTS), f), "utf8")
-      );
-      check(!diff.length, "the staged tool prose is byte-identical" + (diff.length ? ": " + diff.join(", ") : ""));
-    }
+    // Everything else the machine holds is execution text as well: an answer
+    // under errors/, or prose under tools/ naming a tool the model may call.
+    const mdUnder = (dir) =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        if (e.isDirectory()) return mdUnder(path.join(dir, e.name)).map((f) => e.name + "/" + f);
+        return e.name.endsWith(".md") ? [e.name] : [];
+      });
+    const stray = mdUnder(AGENT_PROMPTS).filter(
+      (f) => !f.startsWith("errors/") && !f.startsWith("tools/") && f !== "unknown_tool.md"
+    );
+    check(
+      !stray.length,
+      "everything else under agent/prompts is execution text" + (stray.length ? ": " + stray.join(", ") : "")
+    );
+
+    // The one accepted duplication: the frozen machine bundle ships agent/ only,
+    // so the client cannot read this prose from there and keeps its own copy.
+    // Same names, same bytes — a reader on either side sees one text.
+    const uiTools = files(path.join(PROMPTS_DIR, "tools"));
+    const machineTools = files(path.join(AGENT_PROMPTS, "tools"));
+    check(
+      uiTools.length > 0 && uiTools.join(",") === machineTools.join(","),
+      "the tool prose is the same set of names on both sides"
+    );
+    const diff = uiTools.filter((f) => {
+      const there = path.join(AGENT_PROMPTS, "tools", f);
+      return !fs.existsSync(there) ||
+        fs.readFileSync(path.join(PROMPTS_DIR, "tools", f), "utf8") !== fs.readFileSync(there, "utf8");
+    });
+    check(!diff.length, "and byte-identical" + (diff.length ? ": " + diff.join(", ") : ""));
   }
 
-  summary("prompt: the loop's words, loaded from files (grammar / real templates / callers / staged move)");
+  summary("prompt: the loop's words, loaded from files (grammar / real templates / callers / the host-machine split)");
 }
 
 main();

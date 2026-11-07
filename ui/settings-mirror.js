@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The ~/.clutch/settings.json mirror (shared by the Electron shell and the
 // Android host): the UI's localStorage is the source of truth, this flat file
 // is what session children + the LLM proxy actually read. os.homedir()
@@ -14,6 +15,9 @@ const os = require("os");
 const path = require("path");
 
 // The flat mirror the backend + LLM proxy read; (re)written on every UI save.
+/**
+ * @param {any} data the renderer's config object ({} when nothing is set yet)
+ */
 function writeSettingsMirror(data) {
   const p = path.join(os.homedir(), ".clutch", "settings.json");
   let cur = {};
@@ -52,6 +56,11 @@ function writeSettingsMirror(data) {
 // next session silently boots with an EMPTY LLM config. Rebuild from the
 // renderer's copy, but ONLY when the file is missing/blank/corrupt: an
 // existing file may hold intentional manual edits.
+/**
+ * @param {any} data the renderer's config object ({} when nothing is set yet)
+ * @param {(msg: string) => void} [log] one line per heal, for the tunnel log
+ * @returns {{ ok: boolean, healed: boolean }}
+ */
 function ensureSettingsMirror(data, log = () => {}) {
   let cur = null;
   try {

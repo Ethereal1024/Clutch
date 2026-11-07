@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The session machine's .clc, seen from here: ui/run.js's log ports over HTTP (P2).
 //
 // The loop and the compactor (ui/run.js, ui/compaction.js) speak one vocabulary:
@@ -30,6 +31,14 @@
 // worst, over loopback or a tunnel. Long enough for a bad link, short enough that
 // a dead session does not hang a turn forever.
 const LOG_TIMEOUT_MS = 60_000;
+
+/**
+ * The session's base URL, normalized. `unknown` in, `string` out: this IS the
+ * validator (it throws on a non-URL), so the gate can type the callers' option
+ * bags as optional without a cast at every call site.
+ * @param {unknown} base
+ * @returns {string}
+ */
 function sessionBase(base) {
   if (typeof base !== "string" || !base.trim()) {
     throw new TypeError("log-client: base is required (http://127.0.0.1:<port>)");
@@ -37,10 +46,17 @@ function sessionBase(base) {
   return base.replace(/\/+$/, "");
 }
 
-// One JSON call to the session, with the host's own sentence on a refusal.
-// Every endpoint here answers `{error: …}` (with an optional `code`) when it
-// refuses; that sentence is what the caller shows, and a bare status code would
-// leave the host guessing which refusal it got.
+/**
+ * One JSON call to the session, with the host's own sentence on a refusal.
+ * Every endpoint here answers `{error: …}` (with an optional `code`) when it
+ * refuses; that sentence is what the caller shows, and a bare status code would
+ * leave the host guessing which refusal it got.
+ *
+ * @param {string} url
+ * @param {{ method: string, body?: unknown, timeoutMs: number }} opts
+ * @returns {Promise<any>} the parsed answer (the endpoints' own shapes are
+ *   checked by each port below, where the port's contract lives)
+ */
 async function call(url, { method, body, timeoutMs }) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -70,6 +86,11 @@ async function call(url, { method, body, timeoutMs }) {
   }
   if (!r.ok) {
     const why = (parsed && parsed.error) || `${r.status} ${r.statusText}`;
+    // the refusal's two machine-readable facts ride ON the Error: `status` is
+    // always there, `code` only when the session named one ("read_only",
+    // "not_durable", "project_open_conflict"). Annotated rather than classed so
+    // the caller's `e.status` / `e.code` is checked instead of guessed.
+    /** @type {Error & { status?: number, code?: string }} */
     const err = new Error(`${method} ${url} answered ${r.status}: ${why}`);
     err.status = r.status;
     if (parsed && parsed.code) err.code = parsed.code;
@@ -78,7 +99,10 @@ async function call(url, { method, body, timeoutMs }) {
   return parsed;
 }
 
-// The loop's three ports, over that.
+/**
+ * The loop's three ports, over that.
+ * @param {{ base?: string, timeoutMs?: number }} [opts]
+ */
 function createLogClient({ base, timeoutMs = LOG_TIMEOUT_MS } = {}) {
   const root = sessionBase(base);
 

@@ -1,11 +1,15 @@
-Search this project's log — every earlier session in this project — for the lines
-that match a regular expression, and get their line numbers back.
+Search this project's log — every session it has had — for the lines that match
+a regular expression, and get their line numbers back. Reach for it before you
+plan work the project may have done before: a feature, a release, a convention,
+a bug, the file you were told not to touch. There is no path to choose here,
+because there is exactly one file — this project's own log — so the only
+decision is the pattern.
 
 The log is the whole conversation this project has ever had: what the user asked,
-what you answered, the tools that ran and what they returned, one event per line.
-Your context holds only the part since the newest compaction, so everything older
-is here and nowhere else — the decision taken three sessions ago, the constraint
-the user stated once, the file you were told not to touch.
+what you answered, the tools that ran and what they came back with, one event per
+line. Your context holds only the part since the newest compaction, so everything
+older is here and nowhere else — including the reason behind a decision that
+looks arbitrary now.
 
 `pattern` is a Python regular expression, matched line by line (case-sensitive;
 start it with `(?i)` for not). `include` keeps one KIND of line only:

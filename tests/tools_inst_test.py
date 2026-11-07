@@ -29,9 +29,9 @@ that carries it, and the envelope its output becomes:
     own name, so a missing component can never be mistaken for a working tool.
 
 `--live` then drives the same definitions through the real modules instead of the
-stub: the workspace daemon over loopback HTTP, clutch-skills' CLI (which lazily
-spawns its own daemon) and clutch-websearch over the network. The live section is
-opt-in because it needs checkouts, a POSIX shell, curl and network.
+stub: the workspace daemon over loopback HTTP and clutch-skills' CLI (which
+lazily spawns its own daemon). The live section is opt-in because it needs
+checkouts, a POSIX shell and curl.
 
 Isolation: every daemon lives in a temp workspace and every discovery directory
 is repointed at a temp dir, so the run never sees or leaks a user's daemon.
@@ -141,8 +141,6 @@ TABLE = {
     "write_file": modules.WORKSPACE,
     "edit_file": modules.WORKSPACE,
     "run_command": None,
-    "web_search": modules.WEBSEARCH,
-    "web_fetch": modules.WEBSEARCH,
     "load_skill": modules.SKILLS,
 }
 
@@ -248,7 +246,6 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # dir; here it is whatever this machine has, and either spelling drives the
     # same declaration.
     declared = catalog.table()
-    search = shell_words(statement.launch_prefix(declared[modules.WEBSEARCH]))
     skills = shell_words(statement.launch_prefix(declared[modules.SKILLS]))
     # The `[--root {root}]` group this declaration once carried is gone, together
     # with the host var that filled it (config.skills_dir): the COMPONENT owns its
@@ -257,27 +254,6 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # to name a root, which is the point.
 
     cases = [
-        # clutch-websearch: the host's default fills the group, so it stays
-        (
-            "web_search",
-            {"query": "clutch agent"},
-            [*search, "search", "--envelope", "--max-results", str(cfg.web_search_max_results), "clutch agent"],
-        ),
-        (
-            "web_search",
-            {"query": "q", "max_results": 3, "backend": "ddg"},
-            [*search, "search", "--envelope", "--max-results", "3", "--backend", "ddg", "q"],
-        ),
-        (
-            "web_fetch",
-            {"url": "https://example.com/x?a=1&b=2"},
-            [*search, "fetch", "--envelope", "--max-chars", str(cfg.read_max_chars), "https://example.com/x?a=1&b=2"],
-        ),
-        (
-            "web_fetch",
-            {"url": "https://example.com/x", "max_chars": 500, "start": 100},
-            [*search, "fetch", "--envelope", "--max-chars", "500", "--start", "100", "https://example.com/x"],
-        ),
         # clutch-skills: the line names no root — the component's own library is
         # the only library this host has an opinion about
         (
@@ -327,7 +303,7 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
     )
 
     # a CLI module's {content, code} envelope (choice a): code != 0 is a refusal
-    r, _ = _call(reg, ws, cfg, "web_search", {"query": "x"}, CommandResult(1, _envelope("ERROR: boom", 1), ""))
+    r, _ = _call(reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(1, _envelope("ERROR: boom", 1), ""))
     check(r.error and r.content == "ERROR: boom", "a CLI refusal ({content, code:1}) is error-as-data")
     r, _ = _call(
         reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(1, _envelope("ERROR: unknown skill: 'x'", 1), "")
@@ -340,9 +316,9 @@ def check_envelopes(reg: ToolRegistry, ws, cfg: Config) -> None:
     r, _ = _call(reg, ws, cfg, "read_file", {"path": "a.txt"}, CommandResult(3, json.dumps({"content": "ok?"}), ""))
     check(r.error, "a non-zero exit beats an optimistic envelope")
     # a plain-text CLI answers without any envelope at all
-    r, _ = _call(reg, ws, cfg, "web_search", {"query": "q"}, CommandResult(0, "1. result\n2. result\n", ""))
-    check(not r.error and "1. result" in r.content, "non-JSON stdout is the content")
-    r, _ = _call(reg, ws, cfg, "web_search", {"query": "q"}, CommandResult(2, "", "usage: clutch-websearch ..."))
+    r, _ = _call(reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(0, "shown: plain text\n", ""))
+    check(not r.error and "shown: plain text" in r.content, "non-JSON stdout is the content")
+    r, _ = _call(reg, ws, cfg, "load_skill", {"name": "x"}, CommandResult(2, "", "usage: clutch-skills ..."))
     check(r.error and "exit 2" in r.content and "usage" in r.content, "a failed command reports exit + stderr")
 
     # transport failures are prose the model can act on
@@ -402,38 +378,34 @@ def check_guards(reg: ToolRegistry, cfg: Config) -> None:
 
 def check_arguments(reg: ToolRegistry, ws, cfg: Config) -> None:
     # a missing required argument is error-as-data, and no command is rendered
-    r, stub = _call(reg, ws, cfg, "web_fetch", {}, CommandResult(0, "x", ""))
+    r, stub = _call(reg, ws, cfg, "load_skill", {}, CommandResult(0, "x", ""))
     check(
-        r.error and "url" in r.content and stub.calls == [],
+        r.error and "name" in r.content and stub.calls == [],
         "a missing argument fails closed, before any line",
     )
-    r, stub = _call(reg, ws, cfg, "web_search", {}, CommandResult(0, "x", ""))
-    check(r.error and stub.calls == [], "a missing query fails closed too")
 
     # a hostile value in a CLI's positional slot stays one literal word
     result, stub = _call(
-        reg, ws, cfg, "web_search", {"query": "'; rm -rf / #"}, CommandResult(0, _envelope("ok"), "")
+        reg, ws, cfg, "load_skill", {"name": "'; rm -rf / #"}, CommandResult(0, _envelope("ok"), "")
     )
-    check(shell_words(stub.line)[-1] == "'; rm -rf / #", "a shell-metacharacter query stays one word")
+    check(shell_words(stub.line)[-1] == "'; rm -rf / #", "a shell-metacharacter name stays one word")
     check("rm -rf" in shell_words(stub.line)[-1], "and it is still the model's own text")
     check(not result.error, "the call itself is unaffected")
 
     # string-typed numbers are coerced to the schema's integer before rendering
-    _, stub = _call(
-        reg, ws, cfg, "web_search", {"query": "q", "max_results": "3"}, CommandResult(0, _envelope("ok"), "")
-    )
+    _, stub = _call(reg, ws, cfg, "read_file", {"path": "a.txt", "max_chars": "3"}, CommandResult(0, _envelope("ok"), ""))
     check(
-        shell_words(stub.line)[shell_words(stub.line).index("--max-results") + 1] == "3",
+        _payload(shell_words(stub.line))["max_chars"] == 3,
         "a numeric argument is rendered as the schema's integer",
     )
 
     # a value that cannot BE an integer is an invalid argument, not a value to
     # pass on: it must fail closed, naming the argument, before any command runs
     r, stub = _call(
-        reg, ws, cfg, "web_search", {"query": "q", "max_results": "three"}, CommandResult(0, _envelope("ok"), "")
+        reg, ws, cfg, "read_file", {"path": "a.txt", "max_chars": "three"}, CommandResult(0, _envelope("ok"), "")
     )
     check(
-        r.error and "max_results" in r.content and "three" in r.content and stub.calls == [],
+        r.error and "max_chars" in r.content and "three" in r.content and stub.calls == [],
         "an uncoercible integer argument fails closed, named, before the command",
     )
 
@@ -561,22 +533,6 @@ def live_skills(cfg: Config) -> None:
         os.environ.pop("CLUTCH_SKILLS_DISCOVERY_DIR", None)
 
 
-def live_web() -> None:
-    """clutch-websearch over the network."""
-    cfg = Config()
-    with tempfile.TemporaryDirectory(prefix="clutch-inst-ws-") as tmp:
-        ws = LocalWorkspace(tmp)
-        reg = ToolRegistry(build_tools(cfg))
-        r = reg.execute(ws, cfg, "web_search", {"query": "python shlex split", "max_results": 3})
-        check("could not reach" not in r.content, "live: the websearch CLI answered (not a transport failure)")
-        if r.error:
-            print(f"WARN: no search backend answered this run: {r.content[:120]}")
-        else:
-            check(len(r.content) > 20, "live: web_search returned entries")
-        r = reg.execute(ws, cfg, "web_fetch", {"url": "https://example.com/", "max_chars": 2000})
-        check(not r.error and "example" in r.content.lower(), "live: web_fetch returns the page text")
-
-
 def live(cfg: Config) -> None:
     if not rendezvous.available(modules.WORKSPACE):
         print("SKIP: live workspace module unavailable")
@@ -586,10 +542,6 @@ def live(cfg: Config) -> None:
         live_skills(cfg)
     else:
         print("SKIP: live skills module unavailable")
-    if rendezvous.available(modules.WEBSEARCH):
-        live_web()
-    else:
-        print("SKIP: live websearch module unavailable")
 
 
 def main(argv: list[str] | None = None) -> int:

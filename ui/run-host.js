@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The host's run: every piece the loop talks to, wired once.
 //
 // ui/run.js is the loop and knows nothing but its ports. ui/context.js derives
@@ -17,6 +18,12 @@
 //     session: {mode, components, shell, memory},
 //                                         the facts a turn is asked with (P1-3)
 //     contextWindowBytes,                 the model window, in bytes
+//     limits?, {maxTurns, doomLoopLimit, abortOnDoomLoop}
+//                                         the session's own termination numbers:
+//                                         the turn budget and the doom-loop guard
+//                                         are the loop's to enforce now (P4-3),
+//                                         and these are the numbers it enforces.
+//                                         Absent means this session imposes none.
 //     onEvent?(event),                    the page's live feed (/events)
 //     warn?(message),
 //   }) -> {start, stop, step, drive, state}
@@ -189,10 +196,14 @@ function createRunHost(ports) {
     // The execution layer runs the call and enforces every permission (P3): the
     // host asks for the effect, it never performs it.
     runTool: ({ call, signal }) => runTool({ call, signal }),
-    // the loop's own prose, from the same templates the Python half used
-    text: (key) => say(key),
+    // the loop's own prose, from the same templates the Python half used; the
+    // two guard notes are the only ones with slots ($max_turns, $tool)
+    text: (key, vars) => say(key, vars),
     shouldCompact: () => compactor.shouldCompact(),
     compact: ({ signal }) => compactor.compact({ signal }),
+    // when this turn must end, as the session itself chose it (P4-3): validated
+    // and defaulted by run.js, because it is the loop's rule to keep
+    limits: ports.limits,
     // what the page is told after each step, in the words it already paints
     observe: (result) => {
       if (result.did === "idle") return status("idle");

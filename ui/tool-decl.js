@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The model-facing tool surface, derived HERE (host side), from declarations.
 //
 // What the model may call, what each call looks like in the page, and which

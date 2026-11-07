@@ -165,10 +165,40 @@ function renderDiff(diff) {
 }
 
 // ---- run / stop ----
+//
+// The loop is the HOST's (P1-4): this page is a view. It hands the task to
+// window.clutchRun, drives the turn to its end, and paints what comes back —
+// the durable records off the log stream (the append that wrote them announces
+// them, agent/api/log.py) and the display frames off the run:event subscription
+// below. There is NO second path: a page-side POST /api/run would open a turn
+// nothing here can drive, and two ways to start a run is what this phase
+// removes.
+//
+// The host's answers arrive in two shapes — ui/preload.js resolves {ok, error},
+// ui/bridge-shim.js rejects it (an unreachable bridge IS a dead IPC channel) —
+// and that difference is not this file's business: hostCall() turns both into
+// one Error carrying the host's own code (no_session, project_mismatch, …).
+async function hostCall(promise) {
+  const answer = await promise;
+  if (answer && answer.ok === false) {
+    const err = new Error(answer.error || "the host refused the call");
+    err.code = answer.code || "host_error";
+    throw err;
+  }
+  return answer;
+}
+
 async function run() {
   const task = els.task.value.trim();
   if (!task || busy) return;
   if (!currentProject) return;
+  const host = window.clutchRun;
+  if (!host || typeof host.start !== "function" || typeof host.drive !== "function") {
+    // an honest absence, not a fallback: a build without a host loop cannot run
+    // a turn, and pretending otherwise is how two loops came to exist
+    notice("this build has no host run loop — it cannot run a task");
+    return;
+  }
   els.task.value = ""; // the task is now "in the stream"; keep the input clear
   els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
   // ...and it joins the box's sent-message history: ArrowUp walks it back
@@ -177,33 +207,55 @@ async function run() {
   // sending a message returns to the live tail unconditionally
   followTail = true;
   autoScroll(true);
-  // runs append to the active project; the mode travels with the request
+  // The payload /api/run used to take, and the host still takes: the task, the
+  // mode the loop is built for, and the .clc this page is showing. The project
+  // is a CLAIM the host checks against its session's open project
+  // (ui/run-session.js): a run that would land in another window's log is
+  // refused, never written.
   const payload = { task, mode: agentMode, project: currentProject };
+  let opened = false; // did a turn actually open on disk?
+  setStatus("running"); // the click is the user's claim; the host's frames confirm it
   try {
-    const data = await apiFetch("/api/run", { method: "POST", body: payload });
-    if (data.workspace) els.workspace.textContent = data.workspace;
-    refreshTree();
+    await hostCall(host.start(payload));
+    opened = true;
+    // Drive to the end. The turn's own ending is a durable `final` the loop
+    // writes and the log stream paints, so nothing here fabricates one.
+    await hostCall(host.drive());
   } catch (e) {
-    // No .status = the request itself never landed (a refused port, an aborted
-    // 30s wait): this window has no session, which is the dialog's business and
-    // not a one-line transcript error nobody can act on. The event still goes in
-    // so the record of the attempt survives the reconnect. A .status means the
-    // session answered and refused (e.g. already busy) — that stays inline.
-    if (!e.status) connectionLost("could not reach the session to start the task (" + ((e && e.message) || e) + ")");
-    addEvent({ type: "final", status: "error", summary: "run failed: " + e.message });
+    const msg = (e && e.message) || e;
+    // No code: the call never reached a host at all (a dead IPC channel, an
+    // unreachable bridge). no_session: the host answered that this window has
+    // no session. Both are the lost session the dialog owns, not a one-line
+    // transcript error nobody can act on. A project_mismatch is the opposite —
+    // the session answered and refused, and its message says why — so it stays
+    // inline with the attempt's record below.
+    if (!e || !e.code || e.code === "no_session") {
+      connectionLost("could not reach the session to start the task (" + msg + ")");
+    }
+    addEvent({ type: "final", status: "error", summary: "run failed: " + msg });
+    // A turn that never opened leaves nothing to drive: the button belongs to
+    // the user again. A turn that opened stays the host's to describe — its
+    // failure frame already said "error", and driving again continues it.
+    if (!opened) setStatus("idle");
   }
 }
 
 async function stop() {
+  const host = window.clutchRun;
+  if (!host || typeof host.stop !== "function") {
+    notice("this build has no host run loop — nothing to stop");
+    return;
+  }
   try {
-    // bounded so a wedged request cannot outlive the patience of the user —
-    // and never swallowed: the click must do SOMETHING either way. `busy` is
-    // refreshed by the SSE stream, not by this response, so when the cancel
-    // cannot be delivered the window must stop pretending that it was.
-    await apiFetch("/api/stop", { method: "POST", timeout: 8000 }); // bodyless
+    // The host stops the loop AND writes the aborted final (ui/main.js
+    // stopAndFlush), so the ending is a durable line like any other: this page
+    // never writes one it did not watch happen. `busy` is refreshed by the
+    // host's status frames, not by this answer, so when the stop cannot be
+    // delivered the window must stop pretending that it was.
+    await hostCall(host.stop());
   } catch (e) {
     const msg = (e && e.message) || e;
-    if (!e.status) {
+    if (!e || !e.code || e.code === "no_session") {
       // the request never landed: this is the reported "Failed to fetch", and
       // the dialog (not an 8-second toast) is what owns "this window has no
       // session". The task may still be running on a host we cannot reach.
@@ -216,6 +268,73 @@ async function stop() {
     // window (the tunnel or the supervisor may have re-claimed one under us)
     await switchBackendResolved();
   }
+}
+
+// ---- resume: the turn this page was not there for (P2-3) ------------------
+//
+// A turn lives in the log, not in a process (ui/run-state.js): it opens with a
+// user_message and closes with a final, and the loop holds nothing between two
+// steps. So "resume after a cold start or an unfreeze" is not a feature with its
+// own code — it is the ONE question the loop already asks itself, `state()`,
+// followed by `drive()` when the answer is `{phase:"open"}`. What was missing is
+// who asks it after the page that opened the turn is gone.
+//
+// This page asks. The mode a turn is resumed in and the .clc it is resumed for
+// are the page's own facts — a host resuming on its own would have to guess both
+// — and a host that resumed unasked would start spending money in a session
+// nobody is looking at.
+//
+// Asked from two doors, the same function: a boot that already knows a project
+// (js/boot.js) can continue a turn before the first row is drawn, and a boot
+// that does not — today the page has no project until the user opens one —
+// asks the moment the log it is looking at exists (js/project.js). An idle
+// answer does nothing at all; an open turn is driven exactly as the Run button
+// drives it, same host call, same frames. Nothing is written here.
+async function resumeTurn() {
+  const host = window.clutchRun;
+  if (!host || typeof host.state !== "function" || typeof host.drive !== "function") return;
+  if (!currentProject || busy) return; // no log to resume, or a turn already ours
+  let answer;
+  try {
+    // the payload run:start takes; `project` is the CLAIM the host checks, so a
+    // page looking at another file cannot continue somebody else's turn
+    answer = await hostCall(host.state({ mode: agentMode, project: currentProject }));
+  } catch (e) {
+    // no fold to read: a host with no session, or a log that refused. Neither is
+    // a turn this page may invent — stay on what the log stream replayed, and
+    // leave the user's own Run exactly as it was.
+    console.warn("[resume] no fold to resume from:", (e && e.message) || e);
+    return;
+  }
+  if (!answer || !answer.result || answer.result.phase !== "open") return;
+  setStatus("running");
+  try {
+    await hostCall(host.drive());
+  } catch (e) {
+    const msg = (e && e.message) || e;
+    if (e && e.code === "run_active") {
+      // another window's host holds the run slot and is driving this very turn:
+      // the honest answer is to leave it alone and say why nothing happens here
+      notice("this turn is being driven by another window");
+    } else if (!e || !e.code || e.code === "no_session") {
+      connectionLost("could not reach the session to resume the turn (" + msg + ")");
+    } else {
+      notice("could not resume the turn (" + msg + ")");
+    }
+    setStatus("idle");
+  }
+}
+
+// The host loop's display feed (P1-4): deltas, the execution_status frames,
+// retry notices, compaction progress. Durable records do NOT come here — they
+// arrive on the log stream, announced by the append that wrote them — which is
+// what lets a window that was closed for the whole turn still replay it.
+// addEvent takes both shapes, so a live frame lands exactly as the stream's own
+// would (and a status frame is a status frame whichever door it came through).
+if (window.clutchRun && typeof window.clutchRun.onEvent === "function") {
+  window.clutchRun.onEvent((ev) => {
+    if (ev && typeof ev === "object") addEvent(ev);
+  });
 }
 
 els.run.addEventListener("click", () => (busy ? stop() : run()));

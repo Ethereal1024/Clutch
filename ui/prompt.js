@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The loop's own words, loaded from files instead of embedded in code.
 //
 // A prompt is template text, not logic: the wording is tuned by editing a .md
@@ -159,10 +160,14 @@ function render(template, vars) {
 }
 
 // The loop's own prose that a turn writes to the log, by the name the loop knows
-// it by (ui/run.js's `text` port). These three are notes to the model, not
-// failures: a cancelled turn, an empty reply, a truncated one.
+// it by (ui/run.js's `text` port). A cancelled turn, an empty reply and a
+// truncated one are notes to the model; `budget_exceeded` and `doom_loop` are the
+// two ways the guard ends a turn (P4-3), and each carries the one slot its
+// template asks for ($max_turns, $tool).
 const SAY = {
+  budget_exceeded: "budget_exceeded.md",
   cancelled: "cancelled.md",
+  doom_loop: "doom_loop.md",
   empty_response: "empty_response.md",
   max_tokens: "max_tokens.md",
 };

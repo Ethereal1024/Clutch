@@ -141,8 +141,26 @@ let fetchImpl = async () => {
 };
 global.apiFetch = (p, o) => fetchImpl(p, o);
 
+// The run loop is the HOST's (P1-4): Stop and Run are IPC calls into
+// window.clutchRun, and there is no page-side /api/stop any more. The host's
+// answers arrive in two shapes — ui/preload.js resolves {ok,error} and
+// ui/bridge-shim.js rejects (an unreachable bridge IS a dead channel) — so the
+// stub can be either, and hostCall() (loaded below) is what normalises them.
+let hostStop = async () => ({ ok: true });
+const hostStops = { count: 0 };
+global.window = {
+  clutchRun: {
+    start: async () => ({ ok: true }),
+    drive: async () => ({ ok: true }),
+    stop: () => {
+      hostStops.count++;
+      return hostStop();
+    },
+  },
+};
+
 // ---- load the real code ----
-for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "sseSuspend", "sseResume", "stop"]) {
+for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "sseSuspend", "sseResume", "stop"]) {
   (0, eval)(fnBody(name));
 }
 
@@ -209,12 +227,18 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
     "a base that has not answered for the whole window is reported once");
 
   // ---- 6) Stop that cannot be delivered: the click answers, and heals ----
-  fetchImpl = async () => {
+  // The click is one host call now (no second POST /api/stop path — a page-side
+  // stop would leave the host loop driving a turn nobody owns). An unreachable
+  // bridge rejects with no code at all, which is the reported "Failed to fetch".
+  setStatus("running");
+  const stopsBefore = hostStops.count;
+  hostStop = async () => {
     throw new Error("Failed to fetch");
   };
-  setStatus("running");
   const noticesBeforeFailedStop = notices.length;
   await stop();
+  check(hostStops.count === stopsBefore + 1,
+    "the click is handed to the host loop, not to a page-side stop of its own");
   check(losses.length === 3 && /could not reach the session to stop the task/.test(losses[2]),
     "an undeliverable Stop is a LOST SESSION, and the dialog (not a toast) says so");
   check(notices.length === noticesBeforeFailedStop,
@@ -223,12 +247,35 @@ for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchd
     "an undeliverable Stop stops pretending the window is running it");
   check(probes === 1, "an undeliverable Stop re-resolves this session (the heal)");
 
+  // ---- 6b) a host that ANSWERED and refused stays inline, like any refusal --
+  // {ok:false, code} is ui/preload.js's shape: the session is reachable, so this
+  // is not the lost-session dialog — it is a transcript line the user can act on
+  setStatus("running");
+  hostStop = async () => ({ ok: false, code: "run_active", error: "another window is driving this run" });
+  const lossesBeforeRefusal = losses.length;
+  await stop();
+  check(losses.length === lossesBeforeRefusal,
+    "a refusal does not claim the session is lost: the host answered");
+  check(/backend refused to stop the task/.test(notices[notices.length - 1] || ""),
+    "a refusal says so inline, with the host's own reason");
+  check(global.busy === false && probes === 2,
+    "a refusal still gives the button back and re-resolves the session");
+
+  // ---- 6c) a build with no host loop: an honest absence, not a fake POST ----
+  const noLoop = global.window.clutchRun.stop;
+  delete global.window.clutchRun.stop;
+  const noticesBeforeNoLoop = notices.length;
+  await stop();
+  check(/no host run loop/.test(notices[notices.length - 1] || "") && notices.length === noticesBeforeNoLoop + 1,
+    "a page without the loop says it cannot stop, rather than inventing a second stop path");
+  global.window.clutchRun.stop = noLoop;
+
   // ---- 7) Stop that lands: nothing is claimed on its behalf ----
   const before = notices.length;
-  fetchImpl = async () => ({ status: "cancelling" });
+  hostStop = async () => ({ ok: true });
   setStatus("running");
   await stop();
-  check(notices.length === before && probes === 1,
+  check(notices.length === before && probes === 2,
     "a delivered Stop stays quiet: the stream carries the aborted final");
   check(global.busy === true, "a delivered Stop leaves the stream in charge of the status");
 

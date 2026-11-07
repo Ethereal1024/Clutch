@@ -468,46 +468,17 @@
     };
   </script>
   <script src="vendor/mathjax-tex-chtml.js"></script>
-  <!-- bridge into the host when preload.js is absent (browser dev / Android
-       WebView); inert under Electron thanks to the guard inside the shim -->
-  <script src="bridge-shim.js"></script>
-  <!-- The renderer is one program laid out as classic scripts: Electron serves
-       this page over file://, where module scripts are refused, so the files
-       share one global scope and LOAD ORDER IS THE CONTRACT. Each file may use
-       anything declared above it and nothing below it; only boot.js starts the
-       app. See the header of each file for what it owns. -->
-  <script src="app.js"></script>
-  <!-- the build stamp: a data file, not a module, and it sits here rather than in
-       the head so app.js stays the page's first renderer script (the load-order
-       contract tests/ui-load-order-test.js pins). Nothing reads it at load time —
-       the About pane reads it when it is opened. -->
+  <!-- The renderer is one program, built into one script: ui/renderer.js is what
+       ui/build-renderer.js produces from the file list in ui/renderer.modules.json
+       (the host bridge first, then the modules in page order). Electron serves this
+       page over file://, where module scripts are refused, so the bundle is a
+       classic script wrapped in one IIFE: the files keep the bindings they had when
+       they shared a global scope, but nothing leaks to window and there is no load
+       order left to get wrong. Edit the sources, then `cd ui && npm run build`. -->
+  <script src="renderer.js"></script>
+  <!-- the build stamp: a data file, not a module — the release scripts rewrite it
+       after the bundle exists, so it keeps its own tag. Nothing reads it at load
+       time; the About pane reads it when it is opened. -->
   <script src="version.js"></script>
-  <script src="js/stream-view.js"></script>
-  <script src="js/tool-render.js"></script>
-  <script src="js/stream-events.js"></script>
-  <script src="js/stream-text.js"></script>
-  <script src="js/markdown.js"></script>
-  <script src="js/diagram-viewer.js"></script>
-  <script src="js/render-events.js"></script>
-  <script src="js/settings.js"></script>
-  <script src="js/update-panel.js"></script>
-  <script src="js/conn-store.js"></script>
-  <script src="js/components-panel.js"></script>
-  <script src="js/backend-lifecycle.js"></script>
-  <script src="js/conn-flow.js"></script>
-  <script src="js/conn-lost.js"></script>
-  <script src="js/permissions.js"></script>
-  <script src="js/workspace-panel.js"></script>
-  <script src="js/sse-stream.js"></script>
-  <script src="js/project.js"></script>
-  <script src="js/fs-browser.js"></script>
-  <!-- the task surface itself: the box's own conveniences (undo / sent-message
-       history), the fold a finished task collapses into, and the roll-back
-       gesture on a sent task row. They shape the pane the files above build, so
-       they load last and touch nothing that runs before them. -->
-  <script src="js/task-input.js"></script>
-  <script src="js/auto-fold.js"></script>
-  <script src="js/task-rollback.js"></script>
-  <script src="js/boot.js"></script>
 </body>
 </html>

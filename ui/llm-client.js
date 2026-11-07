@@ -1,5 +1,8 @@
-// The model client — the host's half of agent/llm/: one streaming turn, the
-// retry policy that wraps it, and the error vocabulary the loop acts on.
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
+// The model client — what agent/llm/ was, now on the side that actually has a
+// model to talk to: one streaming turn, the retry policy that wraps it, and the
+// error vocabulary the loop acts on. (P4 deleted agent/llm/, agent/loop.py and
+// agent/api/run.py; nothing in agent/ makes a model request any more.)
 //
 // This is the JS side of a merge: ui/llm-proxy.js already owns where the
 // upstream is, which key goes with it and which proxy reaches it, and it serves
@@ -9,8 +12,8 @@
 // backend stops running a loop of its own (P1-3/P3) — after that nothing on the
 // far side asks the host for a model.
 //
-// The retry policy is agent/llm/llm_clients/stream_runner.py's, with the one
-// decision D12 made explicit:
+// The retry policy is what agent/llm/llm_clients/stream_runner.py did, with the
+// one decision D12 made explicit:
 //
 //   * an attempt that fails is ANNOUNCED (a `retry` notice carrying the attempt
 //     number, the reason and `discard`) and then retried — from scratch, with
@@ -25,15 +28,17 @@
 //     not pass midStreamRetry, and then a mid-stream failure is raised instead
 //     of replayed.
 //
-// Numbers are the loop's, not the proxy's: llm_read_timeout = 240s is a budget
-// for CHUNK GAPS (agent/config.py), and the 20s stall probe is stream_runner's
-// STALL_PROBE_S. ui/llm-proxy.js's 90s upstream timeout is a proxy budget for a
+// Numbers are the loop's, not the proxy's: the 240s read budget below is for
+// CHUNK GAPS (it was agent/config.py's llm_read_timeout while the host held the
+// loop; it is this module's own constant now), and the 20s stall probe is the
+// one stream_runner used to carry. ui/llm-proxy.js's 90s upstream timeout is a proxy budget for a
 // different pair of ends; it is not inherited here.
 //
-// One deliberate difference from the Python runner: that one is a thread parked
-// in a blocking read, so it needs a watchdog thread, an endpoint probe, and a
-// pre-flight that waits for a dead path to come back before issuing the next
-// request (all three exist to reach a read that cannot be woken otherwise).
+// One deliberate difference from the Python runner this replaces: that one was a
+// thread parked in a blocking read, so it needed a watchdog thread, an endpoint
+// probe, and a pre-flight that waits for a dead path to come back before issuing
+// the next request (all three exist to reach a read that cannot be woken
+// otherwise).
 // Node never parks its loop: this client owns the socket, so the silence clock
 // destroys the attempt directly, and the redial ladder is the whole recovery.
 // The probe survives for the thing it is actually for — telling "the provider is
@@ -44,12 +49,12 @@ const http = require("http");
 const https = require("https");
 const { joinUpstream, getAgent } = require("./llm-proxy");
 
-const READ_TIMEOUT_MS = 240000; // agent/config.py: llm_read_timeout
-const STALL_PROBE_MS = 20000; // stream_runner.py: STALL_PROBE_S
-const PROBE_TIMEOUT_MS = 6000; // stream_runner's probe budget
-const CONNECT_TIMEOUT_MS = 15000; // openai_base: connect=min(15, request_timeout)
+const READ_TIMEOUT_MS = 240000; // chunk-gap budget (was llm_read_timeout)
+const STALL_PROBE_MS = 20000; // the dead-path probe: silence this long starts asking
+const PROBE_TIMEOUT_MS = 6000; // the probe's own budget (one HEAD-ish round trip)
+const CONNECT_TIMEOUT_MS = 15000; // fail fast on a dead route; reads get the budget above
 const MAX_BACKOFF_MS = 60000; // D12: the ladder stops doubling here
-const GUARD_POLL_MS = 250; // stream_runner.py: GUARD_POLL_S
+const GUARD_POLL_MS = 250; // how often the silence clock is read while an attempt runs
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
@@ -741,6 +746,10 @@ function createLlmClient(options) {
   // `onEvent` sees every display delta; `onRetry` sees the retry notices (D12's
   // per-attempt record). A retry with discard=true wipes what this attempt had
   // accumulated, so the retried answer is not appended to a dead half-sentence.
+  /**
+   * @param {{ messages?: any[], tools?: any[], signal?: AbortSignal, onEvent?: (ev: any) => void, onRetry?: (ev: any) => void }} [opts]
+   * @returns {Promise<{ content: string, reasoning: string, toolCalls: any[], finishReason: string }>}
+   */
   async function ask({ messages, tools, signal, onEvent, onRetry } = {}) {
     const state = { content: [], reasoning: [], toolArgs: new Map(), finished: false, reason: "stop" };
     for await (const ev of stream({ messages, tools, signal })) {

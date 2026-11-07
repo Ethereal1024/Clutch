@@ -77,6 +77,10 @@ async function loadHostDefaults() {
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
+  // A boot that already knows a project can continue a turn the last page left
+  // open (js/render-events.js resumeTurn); one that does not gets the same call
+  // when a project is opened, because that is when the log it can resume appears.
+  resumeTurn();
   // Nothing dials a host on startup: a remembered remote stays a PRESELECTION in
   // the picker (js/conn-store.js) until the user presses Connect there.
 })();

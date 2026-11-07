@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
-const { check, summary } = require("./harness.js");
+const { check, summary, uiModules } = require("./harness.js");
 
 // ---- a pane of rows, with the two things the gestures use: closest() and
 // addEventListener (the file registers its handlers at load, on `eventsEl`) ----
@@ -338,15 +338,14 @@ async function main() {
 
   // ---- 12) the wiring the page has to carry ----
   const uiDir = path.join(__dirname, "..", "ui");
-  const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
   const events = fs.readFileSync(path.join(uiDir, "js", "stream-events.js"), "utf8");
   const project = fs.readFileSync(path.join(uiDir, "js", "project.js"), "utf8");
   const mobile = fs.readFileSync(path.join(uiDir, "mobile.css"), "utf8");
-  const iTask = html.indexOf('<script src="js/task-rollback.js"></script>');
-  check(/<script src="js\/task-rollback\.js"><\/script>/.test(html), "the page loads task-rollback.js");
-  check(html.indexOf('<script src="js/stream-events.js"></script>') < iTask &&
-        html.indexOf('<script src="js/stream-view.js"></script>') < iTask,
-        "it loads after the pane and the run state it reads (eventsEl, busy)");
+  const order = uiModules().map((m) => m.file);
+  const iTask = order.indexOf("js/task-rollback.js");
+  check(iTask >= 0, "the module list carries task-rollback.js, so the bundle the page loads runs it");
+  check(order.indexOf("js/stream-events.js") < iTask && order.indexOf("js/stream-view.js") < iTask,
+        "and it sits after the pane and the run state it reads (eventsEl, busy)");
   check(events.indexOf("autoFoldTurn();") !== -1 &&
         /autoFoldTurn\(\);[\s\S]{0,300}refreshRollbackAnchors\(\);/.test(events),
         "the end of a run re-reads the anchors, so its own message can be rolled back");

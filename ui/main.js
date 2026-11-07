@@ -477,49 +477,82 @@ if (!app.requestSingleInstanceLock()) {
     // run:state to read the fold. The page is a view only: it subscribes to
     // run:event pushes and never owns the loop.
     //
-    // run:start creates the instance if one does not exist or if the base URL has
+    // run:start creates the instance if one does not exist or if the base URL
     // changed (a reconnect, a new tunnel hop). Creating is async because
     // createSessionRun fetches /api/declarations and /api/session first.
+    // run:state builds through the same path, because the page asks it before
+    // any start exists: "is a turn open on this log?" is the resume question
+    // (P2-3), and "there is no instance" is not an answer to it.
     //
     // The instance is cleared when the window closes (win.on("closed") below),
     // which also stops any in-flight drive so the aborted final is written.
 
-    ipcMain.handle("run:start", async (e, task) => {
-      const wc = e.sender;
+    // run:start and run:state share ONE instance-building path: an instance is
+    // created when there is none, and rebuilt when the base, the mode or the
+    // project changed (a new hop, a reconnect, a mode toggle, another .clc open)
+    // — all three are baked into the tools and the client it was built with.
+    // Building is async (createSessionRun fetches /api/declarations and
+    // /api/session first), so both callers await it.
+    //
+    // Answers `{inst}` or `{error, code}`. The code rides on the refusal so the
+    // page can tell "another window is driving this turn" (run_active) from
+    // "this window has no session" (no_session) — two very different next steps.
+    async function ensureRunInstance(wc, payload) {
       const winId = wc.id;
-      const base = (runInstances.get(winId) || {}).base;
+      const mode = payload && (payload.mode === "chat" || payload.mode === "work") ? payload.mode : "";
+      const project = String((payload && payload.project) || "");
       // resolve the current session base for this window — null if not claimed
       let currentBase;
       try {
         currentBase = await hostCore.ensureWindowBackend(wc);
       } catch (err) {
-        tunnelLog(`[run] run:start base lookup failed for window ${winId}: ${err && err.message}`);
-        return { ok: false, error: String((err && err.message) || err) };
+        tunnelLog(`[run] base lookup failed for window ${winId}: ${err && err.message}`);
+        return { error: String((err && err.message) || err), code: (err && err.code) || null };
       }
-      if (!currentBase) return { ok: false, error: "no session — the backend is not running" };
-      // rebuild the instance when the base changed (new hop, reconnect) or absent
-      if (!runInstances.has(winId) || base !== currentBase) {
-        try {
-          const run = await createSessionRun({
-            base: currentBase,
-            // live events go straight to the renderer that holds this window
-            onEvent: (ev) => {
-              if (!wc.isDestroyed()) wc.send("run:event", ev);
-            },
-            warn: (msg) => tunnelLog(`[run] window ${winId}: ${msg}`),
-          });
-          runInstances.set(winId, { run, base: currentBase });
-        } catch (err) {
-          tunnelLog(`[run] run:start createSessionRun failed for window ${winId}: ${err && err.message}`);
-          return { ok: false, error: String((err && err.message) || err) };
-        }
+      if (!currentBase) {
+        // the one failure the page must treat as a lost session (it lands in
+        // the outage dialog, not in the transcript): this window has no host
+        return { error: "no session — the backend is not running", code: "no_session" };
       }
-      const { run } = runInstances.get(winId);
+      const inst = runInstances.get(winId);
+      if (inst && inst.base === currentBase && inst.mode === mode && inst.project === project) {
+        return { inst };
+      }
       try {
-        await run.start(String(task || ""));
+        const run = await createSessionRun({
+          base: currentBase,
+          mode: mode || undefined,
+          project: project || undefined,
+          // live events go straight to the renderer that holds this window
+          onEvent: (ev) => {
+            if (!wc.isDestroyed()) wc.send("run:event", ev);
+          },
+          warn: (msg) => tunnelLog(`[run] window ${winId}: ${msg}`),
+        });
+        const fresh = { run, base: currentBase, mode, project };
+        runInstances.set(winId, fresh);
+        return { inst: fresh };
+      } catch (err) {
+        tunnelLog(`[run] createSessionRun failed for window ${winId}: ${err && err.message}`);
+        return { error: String((err && err.message) || err), code: (err && err.code) || null };
+      }
+    }
+
+    // run:start takes the page's payload {task, mode, project} — the same shape
+    // /api/run took, because it is the same request: a task, the mode it runs
+    // in, and the .clc the page believes it is showing. `project` is a CLAIM,
+    // not a destination: the session has one open project and that is where the
+    // loop appends, so a mismatch is refused (ui/run-session.js) instead of
+    // writing this turn into another window's log.
+    ipcMain.handle("run:start", async (e, payload) => {
+      const task = String((payload && payload.task) || "");
+      const got = await ensureRunInstance(e.sender, payload);
+      if (got.error) return { ok: false, error: got.error, code: got.code || null };
+      try {
+        await got.inst.run.start(task);
         return { ok: true };
       } catch (err) {
-        return { ok: false, error: String((err && err.message) || err) };
+        return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
       }
     });
 
@@ -541,7 +574,7 @@ if (!app.requestSingleInstanceLock()) {
         const result = await inst.run.step();
         return { ok: true, result };
       } catch (err) {
-        return { ok: false, error: String((err && err.message) || err) };
+        return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
       }
     });
 
@@ -552,18 +585,25 @@ if (!app.requestSingleInstanceLock()) {
         const result = await inst.run.drive();
         return { ok: true, result };
       } catch (err) {
-        return { ok: false, error: String((err && err.message) || err) };
+        return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
       }
     });
 
-    ipcMain.handle("run:state", async (e) => {
-      const inst = runInstances.get(e.sender.id);
-      if (!inst) return { ok: true, result: { phase: "idle" } };
+    // run:state takes the same {mode, project} payload run:start does, and that
+    // is what makes it the RESUME question (P2-3): the page asks it when it
+    // comes up with a project and when it opens one, and a turn is open if the
+    // fold says so. Building the instance here is what makes the question
+    // answerable at all — before the page's first run:start there was no
+    // instance, and answering "idle" for that absence is the one wrong answer:
+    // it means "nothing to do" about a turn that is still on the log.
+    ipcMain.handle("run:state", async (e, payload) => {
+      const got = await ensureRunInstance(e.sender, payload);
+      if (got.error) return { ok: false, error: got.error, code: got.code || null };
       try {
-        const result = await inst.run.state();
+        const result = await got.inst.run.state();
         return { ok: true, result };
       } catch (err) {
-        return { ok: false, error: String((err && err.message) || err) };
+        return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
       }
     });
 

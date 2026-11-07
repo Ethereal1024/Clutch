@@ -114,15 +114,13 @@ def ui_source() -> str:
     """The renderer's source, in page load order — the Python twin of
     tests/harness.js's uiSource().
 
-    The renderer used to be one file (ui/app.js); it is now several classic
-    scripts that ui/index.html lists in the only order that works (they share one
-    global scope, so a file may use names declared above it and nothing below).
-    Scrapers that grep the renderer read the page's own script list, so a
-    constant that moves between modules keeps working and a module the page
-    forgets to load shows up as a missing constant rather than passing silently.
+    The renderer used to be one file (ui/app.js), then a stack of classic scripts
+    that ui/index.html listed in the only order that works. The page now loads one
+    bundle (ui/renderer.js), and the order lives in ui/renderer.modules.json —
+    deliberately the same list the build reads, so a constant that moves between
+    modules keeps working and a module dropped from the list shows up as a missing
+    constant rather than passing silently.
     """
     root = Path(__file__).resolve().parent.parent / "ui"
-    html = (root / "index.html").read_text(encoding="utf-8")
-    srcs = [s for s in re.findall(r'<script\s+src="([^"]+)"', html)
-            if not s.startswith("vendor/") and s != "bridge-shim.js"]  # third-party + host shim
-    return "\n".join((root / s).read_text(encoding="utf-8") for s in srcs)
+    manifest = json.loads((root / "renderer.modules.json").read_text(encoding="utf-8"))
+    return "\n".join((root / s).read_text(encoding="utf-8") for s in manifest["modules"])

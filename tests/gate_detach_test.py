@@ -22,14 +22,11 @@ import time
 from pathlib import Path
 
 from agent.base import Broadcaster
-from agent.config import Config
 from agent.core.permission import (
     PermissionEvaluator,
     PermissionGate,
     PermissionRequired,
 )
-from agent.project import ProjectLock, create_project
-from agent.server import HttpAgentServer, RunState
 from agent.tools.workspace import LocalWorkspace
 from tests.testsupport import check
 
@@ -141,7 +138,7 @@ def _unattached_publish_survives_a_reconnect(tmp: str) -> None:
     announces: list[bool] = []
 
     def _ask(*_a) -> bool:
-        # the run's own adapter shape (agent/api/run.py _on_ask): publish only
+        # the client's adapter shape (the retired run.py _on_ask): publish only
         # while a window watching THIS project is there to answer
         live = time.time() >= attached_at
         announces.append(live)
@@ -229,42 +226,6 @@ def _count_is_project_scoped() -> None:
     check(b.count() == 0, "no phantom subscribers")
 
 
-def _start_task_wires_the_check() -> None:
-    # end to end: the gate a real run gets counts subscribers of THAT project.
-    broadcaster = Broadcaster()
-    state = RunState()
-    state.api_key = "sk-fake"  # build_llm only constructs a client; nothing dials out
-    factory = HttpAgentServer(Config(port=0, base_url="http://127.0.0.1:1/v1", model="m"), broadcaster, state)
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        project = create_project(tmp / "w.clc", "w", "prov/model")
-        try:
-            run = factory.start_task("t", project)
-            check(run is not None, "start_task assembled the run")
-            attached = run.gate.is_attached
-            check(not attached(), "no subscriber -> the gate sees no one to answer")
-
-            q = broadcaster.subscribe(str(project.path))
-            check(attached(), "this project's watcher makes the prompt answerable")
-            broadcaster.unsubscribe(q)
-            check(not attached(), "watcher gone -> unanswerable again")
-
-            q_other = broadcaster.subscribe("some-other-project.clc")
-            check(
-                not attached(),
-                "a window on ANOTHER project cannot answer this project's prompt",
-            )
-            broadcaster.unsubscribe(q_other)
-
-            q_all = broadcaster.subscribe()
-            check(attached(), "an unfiltered stream sees every project's prompts")
-            broadcaster.unsubscribe(q_all)
-            check(not attached(), "back to nobody")
-        finally:
-            ProjectLock.release(project.lock)
-            project.lock = None
-
-
 def main() -> int:
     with tempfile.TemporaryDirectory() as wtmp:
         _gone_ui_denies_the_ask(wtmp)
@@ -281,8 +242,13 @@ def main() -> int:
         print("ok - a gate with no attachment probe waits instead of raising")
     _count_is_project_scoped()
     print("ok - Broadcaster.count is project-scoped")
-    _start_task_wires_the_check()
-    print("ok - start_task wires the gate to this project's subscribers")
+    # What used to follow here was "start_task wires the gate to this project's
+    # subscribers" — an end-to-end check of the BACKEND run's gate. P4-1 deleted
+    # start_task (the loop is the client's now), so the only gate this machine
+    # builds per call is agent/api/exec.py's; that wiring is pinned end to end
+    # against a real server in tests/exec_api_test.py (attachment_check), which
+    # also covers what this file cannot: the ask's publish is narrowed to the
+    # call's own project.
     print("all checks passed")
     return 0
 

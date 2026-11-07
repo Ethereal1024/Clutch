@@ -533,7 +533,16 @@ class ToolRegistry:
             return tool.host(workspace, config, **given)
         blocked = module_blocked_reason(workspace, tool.module)
         if blocked:
-            return Envelope(f"ERROR: {blocked}", error=True)
+            # A session holds the declarations it was assembled with, so a
+            # component removed while it runs leaves a tool here that cannot
+            # work. The sentence has to correct the model rather than send it
+            # to investigate the host: the call is dead, and the tools in the
+            # request are the ones to trust.
+            return Envelope(
+                f"ERROR: {tool.name} is not available in this session ({blocked}); "
+                "do not call it again — use the tools this request offers.",
+                error=True,
+            )
         # Where the statement runs is the declaration's answer, and it is asked
         # BEFORE the call: the undo record below is this host's bookkeeping about a
         # file on THIS machine, and a statement the client runs writes the client's

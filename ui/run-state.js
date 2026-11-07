@@ -1,3 +1,4 @@
+// @ts-check — in the type gate (ui/tsconfig.check.json, TODO.md D14).
 // The run's state, READ from the log instead of remembered.
 //
 // A turn is not something this process holds in memory: it is a stretch of .clc
@@ -36,14 +37,35 @@
 // The six types that reach the file. Kept here as a set of strings rather than
 // imported from Python: the log is the contract between the two halves, and a
 // name is cheaper to compare than a shared artifact (P2 keeps the format).
-const DURABLE_TYPES = new Set([
-  "user_message",
-  "assistant_message",
-  "tool_call",
-  "tool_result",
-  "final",
-  "compaction",
-]);
+//
+// This is the renderer's ONE statement of the vocabulary (P7-2). The names are
+// written twice on purpose and in the same file: the union below is the type,
+// the record below it is the value, and `Record<DurableEventType, true>` makes
+// the type gate reject a name added to one and forgotten in the other — in both
+// directions, since a missing key and a surplus key are both errors. The set is
+// then derived from the record, so no third copy exists to drift.
+//
+// What the gate CANNOT check is the other language. That is
+// tests/durable-types.test.js: it reads this set and Python's `DURABLE_TYPES`
+// (agent/events.py) and fails if they differ by one name. TS is for "the
+// renderer agrees with itself"; the assertion is for "the log agrees with the
+// reader", and a type could never be (TODO.md P7-2).
+/**
+ * @typedef {"user_message" | "assistant_message" | "tool_call" | "tool_result" | "final" | "compaction"} DurableEventType
+ */
+
+/** @type {Record<DurableEventType, true>} */
+const DURABLE_FLAGS = {
+  user_message: true,
+  assistant_message: true,
+  tool_call: true,
+  tool_result: true,
+  final: true,
+  compaction: true,
+};
+
+/** @type {ReadonlySet<DurableEventType>} */
+const DURABLE_TYPES = new Set(/** @type {DurableEventType[]} */ (Object.keys(DURABLE_FLAGS)));
 
 function isDurable(ev) {
   return Boolean(ev && typeof ev === "object" && DURABLE_TYPES.has(ev.type));

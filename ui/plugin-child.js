@@ -45,12 +45,60 @@
 // One call per process, deliberately: a plugin cannot keep a socket, a timer or
 // a mutated module between two calls, so "what the plugin did" is always one
 // process's lifetime and a Stop is always the whole of it.
+//
+// The TRANSPORT is the one thing a host decides: on a desktop this file is forked
+// and speaks child_process IPC; where there is no node binary to fork (Android —
+// the engine is libnode inside the app process, see ui/plugin-host.js) the same
+// file runs as a worker thread and speaks `parentPort`. The ABI above is identical
+// in both, because it is about the plugin, not about the channel. Two consequences
+// are spelled out here rather than discovered later:
+//
+//   * `leave()` — a forked child may exit itself, a worker may NOT (process.exit
+//     inside a worker ends the whole application). In a worker the host's
+//     `terminate()` is the exit, so leaving is a no-op there.
+//   * `cwd` — a fork is started with cwd = the plugin's own directory; a worker
+//     cannot chdir (node forbids it). A worker-hosted plugin finds its own files
+//     through `__dirname` or `CLUTCH_PLUGIN_DIR` (both always true), and only the
+//     relative-path reading of `fs` differs between the two shells.
 
 "use strict";
 
-// A parent that forks this file always brings a channel. Started by hand, it can
-// only be a mistake by somebody reading the source: say so instead of hanging.
-if (typeof process.send !== "function") {
+// The channel this runtime is speaking: `parentPort` when it is a worker thread,
+// process IPC when it was forked. Required defensively — a node build without
+// worker_threads is a legitimate desktop.
+const workerThreads = (() => {
+  try {
+    return require("worker_threads");
+  } catch (e) {
+    return null;
+  }
+})();
+const inWorker = !!(workerThreads && !workerThreads.isMainThread && workerThreads.parentPort);
+
+function send(message, onSent) {
+  if (inWorker) {
+    workerThreads.parentPort.postMessage(message);
+    if (onSent) setImmediate(onSent);
+    return;
+  }
+  process.send(message, onSent);
+}
+
+function listen(onMessage) {
+  if (inWorker) workerThreads.parentPort.on("message", onMessage);
+  else process.on("message", onMessage);
+}
+
+// See the header: in a worker there is nothing to leave — the host terminates the
+// thread on the message it just read, and `process.exit` here would end the app.
+function leave(code) {
+  if (inWorker) return;
+  process.exit(code);
+}
+
+// A parent always brings a channel. Started by hand, it can only be a mistake by
+// somebody reading the source: say so instead of hanging.
+if (!inWorker && typeof process.send !== "function") {
   console.error("plugin-child.js is the runtime of ui/plugin-host.js — start it with fork(), not by hand");
   process.exit(2);
 }
@@ -72,18 +120,19 @@ function describe(e) {
 
 // Answer, then leave — and leave only AFTER the message is out of this process:
 // exiting first would race the channel and turn every result into "exited
-// before answering". `process.exit` in the send callback is the only ordering
-// node gives us, so it is what is used. The fallback timer is a guard against a
-// closed channel whose callback never fires at all.
+// before answering". Sending from the channel's own callback is the only ordering
+// node gives us, so it is what is used; in a worker `leave()` is the no-op the
+// header explains. The fallback timer is a guard against a closed channel whose
+// callback never fires at all.
 function reply(message, code) {
-  const leave = () => process.exit(code);
+  const done = () => leave(code);
   try {
-    process.send(message, () => leave());
+    send(message, () => done());
   } catch (e) {
-    leave();
+    done();
     return;
   }
-  setTimeout(leave, 1000).unref();
+  setTimeout(done, 1000).unref();
 }
 
 const directory = process.env.CLUTCH_PLUGIN_DIR || "";
@@ -101,7 +150,7 @@ if (!directory || !entry) {
 // and a message that arrives with no listener attached is dropped by node, not
 // queued. That ordering is the whole reason this line sits above the require.
 let loaded = null;
-process.on("message", (message) => {
+listen((message) => {
   if (!message || message.type !== "call" || !loaded) return;
   Promise.resolve()
     .then(() => loaded.run(argvOf(message.argv)))
@@ -146,7 +195,7 @@ try {
 }
 
 try {
-  process.send({ type: "ready" });
+  send({ type: "ready" });
 } catch (e) {
-  process.exit(1);
+  leave(1);
 }

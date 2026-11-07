@@ -5,6 +5,15 @@ WebView 渲染层（`ui/` 原样）+ nodejs-mobile 宿主（`ui/` 纯 Node 子�
 宿主 JS，另换三样东西：引擎（nodejs-mobile 的 `libnode.so`）、后端供给（CI 预构建的
 pylibs tar）、以及一层只负责起引擎与端 WebView 的 Kotlin 壳。
 
+谁跑什么，一句话：**这个 libnode 宿主就是主循环所在的那一半**。模型流、上下文、压缩、
+提示词、工具编排都在 `ui/run.js` 一带，与桌面 Electron 主进程是同一份代码；Kotlin 壳只做
+三件事——起引擎、端 WebView、把进程留在前台；`agent/` 里只剩执行层（跑命令、读写文件、
+判权限、追加 `.clc`）。所以锁屏时被冻住的只有 WebView（page），循环本身在 host 里照旧跑。
+
+> 下面的复盘按时间顺序记录，会提到 `agent/loop.py`、`agent/core/compaction.py`、
+> `tests/loop_test.py` 这些路径——那段代码已随 P4 搬到客户端（`ui/run.js` / `ui/context.js`），
+> 复盘本身不改写。
+
 ```
 android/host/                  宿主 JS（仓库源码，随包分发）
   index.js                     nodejs-mobile 入口：main() → 装配 + 桥
@@ -133,22 +142,37 @@ Kotlin 与 Gradle 本机无 SDK 编译不了，正确性靠 CI 首跑验证（�
 2. `TunnelService` 每 2s 读这个标记：`up` 时持 `PARTIAL_WAKE_LOCK` + `WifiLock`
    （Q+ 用 `WIFI_MODE_FULL_LOW_LATENCY`，之前用 `WIFI_MODE_FULL_HIGH_PERF`），
    `down` 时立即释放，`onDestroy` 一律释放。
-3. `MainActivity.onResume` 在"标记为 up 且尚未豁免"时**每安装一次**问一次电池优化
-   豁免——Doze 里平台会挂起网络并**忽略唤醒锁**，豁免才是让上面两把锁在口袋里真正
-   有意义的那一步；后台启动 Activity 从 API 29 起被禁，所以这个问题只能由 Activity
-   问。新增权限：`WAKE_LOCK`、`ACCESS_WIFI_STATE`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
+3. **第二个理由（P5-2）**：隧道关着时，一轮 turn 开局的模型调用照样需要 CPU——只看
+   "隧道意图"的话锁会被放掉，屏一黑这一轮就停在半路。引擎另写一个 `$HOME/run.state`
+   （`busy`/`idle`），`TunnelService` 的判据变成 `wantsTunnel() || runBusy()`，并且
+   `wakeReason()` 把**原因**（隧道 / 在飞的一轮 / 两者）带进日志，电池报告里才分得清
+   该修哪一样。这个标记跟着 `ui/run-session.js` 的 busy **边沿**走（`onBusy` →
+   `android-host.js` 的 `writeRunMarker`），**不跟租约**：P2-3 的租约在 turn 只"开着"
+   （等用户下一句，可能几小时）时仍然持有，照它上锁就是拿电量换安心。开机同样先删
+   `run.state`——被 `kill -9` 的上一世留下的 `busy` 会让这一世的 CPU 永远醒着。
+4. `MainActivity.onResume` 在"有隧道意图**或**有一轮在飞，且尚未豁免"时**每安装一次**
+   问一次电池优化豁免（P5-3，两个理由各有自己的文案）——Doze 里平台会挂起网络并
+   **忽略唤醒锁**，豁免才是让上面两把锁在口袋里真正有意义的那一步；后台启动 Activity
+   从 API 29 起被禁，所以这个问题只能由 Activity 问。新增权限：`WAKE_LOCK`、
+   `ACCESS_WIFI_STATE`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`。
 
 **验证**：`tests/tunnel-ladder-test.js` 新增"观察者"一节（布防/撤防各通知一次、重挂
 同一主机不重复通知、凭据消失与"跳已活"两次内部放弃也要通知、观察者抛异常不破坏阶梯）
 以及两端 wiring 的源码断言（含标记文件写法与开机清理）；`tests/tunnel-concurrent-dial-test.js`
 用假 ssh2 钉住上面那条"败者不拆胜者"的规则（含两组对照：单拨失败仍然自己收尾、
-旧行为下该套件会红）；全 JS 套件 + 离线 `./gradlew --offline :app:assembleDebug` 编译
-通过，`scripts/sync-android-host.sh` 重新同步后 APK 的 `assets/nodejs-project/ui/` 里确实
-带上了 `tunnel-ladder.js`（此前 assets 是旧拷贝，装的 APK 不含这半条命）。
+旧行为下该套件会红）；`tests/android-wake.test.js` 把 P5-2/P5-3 的三方 seam 钉成事实
+（host / `TunnelService` / `MainActivity` 说的是同一个文件名、同一个词，只有 host 写，
+开机清理在 `createBridgeServer` 之前，P5-3 的两个理由缺一即不问）；全 JS 套件 + 离线
+`./gradlew --offline :app:assembleDebug` 编译通过，`scripts/sync-android-host.sh` 重新
+同步后 APK 的 `assets/nodejs-project/ui/` 里确实带上了 `tunnel-ladder.js`（此前 assets
+是旧拷贝，装的 APK 不含这半条命）。
 
 **待验（真机）**：连接成功后锁屏 5–10 分钟，让远端 sshd/网络断掉，手机不碰屏幕，隧道应
 在 ≤128s 内自己回来（`adb logcat -s clutch` 看 `[ladder] attempt`）；
-`adb shell dumpsys power | grep clutch:tunnel` 应只在有隧道意图时看到这把锁。
+`adb shell dumpsys power | grep clutch:tunnel` 应只在"有隧道意图**或**有一轮在飞"
+时看到这把锁，`logcat -s TunnelService` 的 `[wake] CPU held: …` 会写明是哪一种；
+不接隧道、只发起一轮带工具调用的 turn 再锁屏，`.clc` 里那几步的时间戳应当连续
+（P5-5 的实测项，本 checkout 无设备、**尚未跑过**）。
 未豁免电池优化时长 Doze 下仍要等到下次唤醒——**这一条来自设计而非实测**（本 checkout
 无网络，developer.android.com 不可达，Doze/唤醒锁语义未能核对）。
 

@@ -1,8 +1,7 @@
 """Self-check: validates core logic without needing the LLM.
 
 Run: uv run python -m tests.selfcheck
-Covers: parsing, message derivation, workspace path safety, tool execution,
-doom-loop detection.
+Covers: parsing, the project's log window, workspace path safety, tool execution.
 """
 
 from __future__ import annotations
@@ -14,20 +13,12 @@ import tempfile
 from pathlib import Path
 
 from agent.config import Config
-from agent.core.context import derive_messages
 from agent.core.lazy import LazyEventLog
 from agent.core.parse import ParseError, parse_arguments
-from agent.core.terminate import Terminator
 from agent.events import (
-    DURABLE_TYPES,
     AssistantMessageEvent,
     CompactionEvent,
-    StepStartEvent,
-    TextDeltaEvent,
-    ToolCallEvent,
-    ToolResultEvent,
     UserMessageEvent,
-    event_from_dict,
     event_to_json,
 )
 from agent.tools import modules, rendezvous, statement
@@ -72,8 +63,6 @@ def check_skills(config: Config) -> None:
         header in section and f"- {first}:" in section,
         "the component's own fragment reaches the prompt, catalog and all",
     )
-    system = derive_messages(LazyEventLog.in_memory(), config, "t", components=section)[0]["content"]
-    check("load_skill" in system, "and lands in the system prompt the model reads")
 
     # The empty-catalog answer (no skill in the component's library) is the
     # component's own question and is pinned by its suite; the host is never
@@ -401,21 +390,11 @@ def check_project_file(config: Config) -> None:
             "a call reads the session's log even when the model names another",
         )
 
-        # no project, no readers (the `project` gate) and no prompt anchor
+        # no project, no readers (the `project` gate)
         bare = ToolRegistry(build_tools(config), log=None)
         check(
             "grep_memory" not in bare.names() and "read_memory" not in bare.names(),
             "no project log, no log readers",
-        )
-        blank = derive_messages(LazyEventLog.in_memory(), config, "t")[0]["content"]
-        check(
-            "This project's memory is its own log" not in blank,
-            "no project log, no recall anchor in the system prompt",
-        )
-        anchor = derive_messages(proj.log, config, "t")[0]["content"]
-        check(
-            "This project's memory is its own log: mem.clc" in anchor,
-            "a project session's prompt names the log to search (and its size)",
         )
 
     # 10c. a .clc an older build wrote still opens exactly like a new one: the
@@ -521,7 +500,9 @@ def check_windowed_clc(config: Config) -> None:
         read, total = _make_reader(p, None)
         check(total == log._file_bytes, "reader sees the full file bytes")
 
-        # paging: pure-disk read of pre-window history; derived context == a full load
+        # paging: pure-disk read of pre-window history; the resident log is the
+        # tail of a full parse, so nothing was dropped by materializing only the
+        # window (the message projection that used to prove this is ui/context.js)
         page = log.read_page(0, comp_off)
         check(len(page) == 90, "read_page pages the task + the on-disk middle on demand (90 events)")
         check(
@@ -531,25 +512,10 @@ def check_windowed_clc(config: Config) -> None:
         full = LazyEventLog.in_memory()
         for ev in parse_durable(p.read_text(encoding="utf-8")):
             full.append(ev)
-        lazy_msgs = derive_messages(log, config, "task")
-        full_msgs = derive_messages(full, config, "task")
-        check(lazy_msgs[1:] == full_msgs[1:], "lazy derive == full derive (middle paged separately)")
-        # the system prompt differs in exactly one way: a REAL project log gets the
-        # recall anchor naming the file, and the in-memory scratch log (no path)
-        # gets none — a prompt must not promise a reader with nothing behind it.
-        check(
-            lazy_msgs[0]["content"].startswith(full_msgs[0]["content"])
-            and "big.clc" in lazy_msgs[0]["content"]
-            and "big.clc" not in full_msgs[0]["content"],
-            "the lazy prompt is the full one plus the log anchor",
-        )
-        check(
-            not any(
-                m["role"] == "assistant" and m.get("content") == "old work 42"
-                for m in derive_messages(log, config, "task")
-            ),
-            "middle stays summarized away (the window excludes it)",
-        )
+        everything = [event_to_json(ev) for ev in full.events()]
+        resident = [event_to_json(ev) for _, ev in log.items()]
+        check(resident == everything[-len(resident):],
+              "the resident window is the tail of a full parse (middle paged separately)")
 
         # no cpr_start line: full window; open never migrates it
         legacy = Path(ptmp) / "legacy.clc"
@@ -571,8 +537,9 @@ def check_windowed_clc(config: Config) -> None:
         check(len(up.log.items()) == 1 + 20,
               "legacy window materializes only the compaction + the recent tail")
         check(
-            derive_messages(up.log, config, "task")[1:] == derive_messages(full, config, "task")[1:],
-            "legacy derive == full derive",
+            [event_to_json(ev) for _, ev in up.log.items()]
+            == [event_to_json(ev) for ev in parse_durable(legacy.read_text(encoding="utf-8"))][-len(up.log.items()):],
+            "the legacy window is the tail of a full parse",
         )
         check(
             legacy.read_bytes() == legacy_before,
@@ -615,8 +582,8 @@ def check_lazy_open_legacy_notes(config: Config) -> None:
         )
         check(
             any(
-                m["role"] == "assistant" and m.get("content") == "after memory"
-                for m in derive_messages(proj.log, config, "task")
+                ev.type == "assistant_message" and getattr(ev, "content", "") == "after memory"
+                for ev in proj.events()
             ),
             "events after the memory section still load",
         )
@@ -642,189 +609,6 @@ def main() -> None:
         check(False, "parse_arguments rejects invalid json")
     except ParseError:
         check(True, "parse_arguments rejects invalid json")
-
-    # 2. message derivation: assistant(tool_calls) -> paired tool result
-    log = LazyEventLog.in_memory()
-    log.append(AssistantMessageEvent(content="", tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}]))
-    log.append(ToolResultEvent(tool_call_id="c1", content="file content"))
-    msgs = derive_messages(log, config, "test")
-    check(msgs[0]["role"] == "system", "derive_messages prepends system")
-    check(msgs[2]["role"] == "assistant" and msgs[2]["tool_calls"][0]["id"] == "c1", "assistant tool_calls preserved")
-    check(msgs[3] == {"role": "tool", "tool_call_id": "c1", "content": "file content"}, "tool result paired")
-
-    # 2b. dangling tool_calls are stripped, the user turn survives
-    log = LazyEventLog.in_memory()
-    log.append(
-        AssistantMessageEvent(
-            content="",
-            tool_calls=[
-                {"id": "c1", "name": "read_file", "arguments": "{}"},
-                {"id": "c2", "name": "read_file", "arguments": "{}"},
-            ],
-        )
-    )
-    log.append(ToolResultEvent(tool_call_id="c1", content="only c1 landed"))
-    log.append(UserMessageEvent(content="continue"))
-    msgs = derive_messages(log, config, "test")
-    check(
-        not any(m["role"] == "assistant" and "tool_calls" in m for m in msgs),
-        "dangling tool_calls stripped from context",
-    )
-    check(not any(m["role"] == "tool" for m in msgs), "orphan/partial tool messages dropped")
-    check(msgs[-1] == {"role": "user", "content": "continue"}, "user turn survives dangling block")
-
-    # 2c. real text + dangling tool_calls: text kept, calls dropped
-    log = LazyEventLog.in_memory()
-    log.append(
-        AssistantMessageEvent(
-            content="I started exploring",
-            tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}],
-        )
-    )
-    msgs = derive_messages(log, config, "test")
-    last_assistant = [m for m in msgs if m["role"] == "assistant"][-1]
-    check(
-        last_assistant.get("content") == "I started exploring" and "tool_calls" not in last_assistant,
-        "dangling block keeps text, drops tool_calls",
-    )
-
-    # 2d. reasoning-only assistant must not leak (API rejects it)
-    log = LazyEventLog.in_memory()
-    log.append(
-        AssistantMessageEvent(
-            content="",
-            reasoning="thinking that never led anywhere",
-            tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}],
-        )
-    )
-    msgs = derive_messages(log, config, "test")
-    check(
-        not any(m["role"] == "assistant" for m in msgs),
-        "reasoning-only dangling assistant dropped entirely",
-    )
-    valid_assistants = all(m["role"] != "assistant" or m.get("content") or "tool_calls" in m for m in msgs)
-    check(valid_assistants, "every surviving assistant has content or tool_calls")
-
-    # 2e. compaction: newest summary is the head; only events after it project
-    log = LazyEventLog.in_memory()
-    log.append(UserMessageEvent(content="old task"))
-    log.append(AssistantMessageEvent(content="old turn done"))
-    log.append(CompactionEvent(summary="old work summarized"))
-    log.append(UserMessageEvent(content="recent task"))
-    log.append(AssistantMessageEvent(content="recent answer"))
-    msgs = derive_messages(log, config, "test")
-    head = [m for m in msgs if m["role"] == "user" and "Previous conversation summary" in m.get("content", "")]
-    check(len(head) == 1 and "old work summarized" in head[0]["content"], "compaction summary injected as head")
-    check(msgs[-1] == {"role": "assistant", "content": "recent answer"}, "window kept after the compaction head")
-    check(
-        not any(m["role"] == "assistant" and m.get("content") == "old turn done" for m in msgs),
-        "pre-window turns omitted by compaction",
-    )
-
-    # 2e2. window files are listed so the model re-reads them
-    log2 = LazyEventLog.in_memory()
-    log2.append(UserMessageEvent(content="task"))
-    log2.append(AssistantMessageEvent(content="old work"))
-    log2.append(CompactionEvent(summary="s"))
-    # `path_arg` is what the loop stamps from the tool's declaration; the reader
-    # learns which argument named the file from there, never from a tool name.
-    log2.append(
-        ToolCallEvent(
-            name="write_file",
-            arguments='{"path": "a.py", "content": "x"}',
-            tool_call_id="c1",
-            path_arg="path",
-        )
-    )
-    log2.append(
-        ToolCallEvent(
-            name="edit_file",
-            arguments='{"path": "b.py", "old_string": "a", "new_string": "b"}',
-            tool_call_id="c2",
-            path_arg="path",
-        )
-    )
-    # a sweeping call (sweep policy: no single file) carries no path_arg and is
-    # not something to re-read
-    log2.append(
-        ToolCallEvent(
-            name="grep",
-            arguments='{"pattern": "x", "path": "c.py"}',
-            tool_call_id="c3",
-        )
-    )
-    msgs2 = derive_messages(log2, config, "test")
-    notes = [m for m in msgs2 if m["role"] == "user" and "Conversation compacted" in m.get("content", "")]
-    check(
-        len(notes) == 1 and "a.py" in notes[0]["content"] and "b.py" in notes[0]["content"],
-        "compaction note lists the working files to re-read",
-    )
-    check("c.py" not in notes[0]["content"], "a call that named no single file is not re-read advice")
-
-    # 2h. reopened (durable-only) log derives the same context as the live one
-    live = LazyEventLog.in_memory()
-    live.append(UserMessageEvent(content="task"))
-    live.append(TextDeltaEvent(content="x"))
-    live.append(AssistantMessageEvent(content="work a"))
-    live.append(CompactionEvent(summary="mid summary"))
-    live.append(StepStartEvent())
-    live.append(UserMessageEvent(content="recent"))
-    live.append(AssistantMessageEvent(content="recent work"))
-    durable = [e for e in live.events() if e.type in DURABLE_TYPES]
-    msgs_live = derive_messages(live, config, "test")
-    check(msgs_live[-1] == {"role": "assistant", "content": "recent work"},
-          "window = the events after the newest summary line")
-    check(
-        not any(m["role"] == "assistant" and m.get("content") == "work a" for m in msgs_live),
-        "pre-window work stays summarized away",
-    )
-    # persist the durable events and reopen — the same window derives the same context
-    reopened = LazyEventLog.in_memory()
-    for line in (event_to_json(e) for e in durable):
-        reopened.append(event_from_dict(json.loads(line)))
-    check(
-        derive_messages(reopened, Config(), "test") == derive_messages(live, config, "test"),
-        "reopen keeps the same window (index stable across persistence)",
-    )
-
-    # 2f. long log projects everything; the CURRENT task's raw copy is not sent twice
-    big = LazyEventLog.in_memory()
-    big.append(UserMessageEvent(content="test"))  # index 0 IS the current run's task
-    for i in range(30):
-        big.append(AssistantMessageEvent(content=f"turn {i}"))
-    msgs = derive_messages(big, config, "test")
-    assistants = [m for m in msgs if m["role"] == "assistant"]
-    check(len(assistants) == 30, "no windowing: all turns projected")
-    check(not any("omitted" in (m.get("content") or "") for m in msgs), "no omitted note without windowing")
-    check(
-        len([m for m in msgs if m["role"] == "user" and "Task: test" in m.get("content", "")]) == 1,
-        "task injected exactly once (raw copy dropped)",
-    )
-    check(
-        not any(m["role"] == "user" and m.get("content") == "test" for m in msgs),
-        "the current task's raw copy excluded from projection",
-    )
-
-    # 2f2. continued session: index 0 is a PAST task, so it must stay visible
-    big2 = LazyEventLog.in_memory()
-    big2.append(UserMessageEvent(content="original task"))
-    big2.append(AssistantMessageEvent(content="turn 0"))
-    big2.append(UserMessageEvent(content="follow up"))
-    msgs2 = derive_messages(big2, config, "follow up")
-    check(
-        any(m["role"] == "user" and m.get("content") == "original task" for m in msgs2),
-        "a continued session keeps the project's first user message",
-    )
-
-    # 2g. tool output is preserved verbatim (only compaction trims)
-    cblog = LazyEventLog.in_memory()
-    cblog.append(UserMessageEvent(content="t"))
-    cblog.append(AssistantMessageEvent(content="a", tool_calls=[{"id": "c1", "name": "read_file", "arguments": "{}"}]))
-    cblog.append(ToolResultEvent(tool_call_id="c1", content="x" * 40))
-    cblog.append(ToolResultEvent(tool_call_id="c2", content="y" * 40))
-    cmsgs = derive_messages(cblog, Config(), "test")
-    tool_msgs = [m for m in cmsgs if m["role"] == "tool"]
-    check([m["content"] for m in tool_msgs] == ["x" * 40, "y" * 40], "no incremental tool-output folding")
 
     # 3. workspace path escape protection
     with tempfile.TemporaryDirectory() as tmp:
@@ -978,71 +762,11 @@ def main() -> None:
         r = reg.execute(sb, config, "run_command", {"command": f"{PY} bad.py"})
         check(r.error and "syntax check failed" in r.content, "syntax check rejects bad python")
 
-        # 5. doom-loop detection: warn on first detection, escalate on repeat
-        term = Terminator(config)
-        status = ""
-        for _ in range(4):
-            status = term.record_call("run_command", '{"command": "ls"}', "same output")
-        check(status == "warn", "doom-loop warns after 4 identical calls (same args + result)")
-        check(term.should_escalate("run_command", '{"command": "ls"}'), "repeating the warned call escalates")
-        check(not term.should_escalate("run_command", '{"command": "ls -l"}'), "different call does not escalate")
-        term.record_call("run_command", '{"command": "ls -l"}', "other")
-        check(not term.should_escalate("run_command", '{"command": "ls"}'), "different call forgives the warning")
-        # identical calls whose results change are progress, not a doom loop
-        term2 = Terminator(config)
-        for i in range(4):
-            term2.record_call("run_command", '{"command": "poll"}', f"out {i}")
-        check(
-            not term2.should_escalate("run_command", '{"command": "poll"}'),
-            "changing results are progress, not doom",
-        )
-        # varying calls not doom-loop
-        term3 = Terminator(config)
-        for i in range(4):
-            term3.record_call("run_command", f'{{"command": "ls{i}"}}', "x")
-        check(term3.record_call("run_command", '{"command": "ls1"}', "x") != "warn", "varying calls not doom-loop")
+    # The doom-loop guard and the turn budget are the loop's, and the loop is the
+    # client's now (P4-3): agent/core/terminate.py is gone and these checks moved
+    # to tests/run-limits-test.js, where the guard runs through its real ports.
 
     check_skills(config)
-
-    # 8. proxy: socks scheme must never crash the client
-    import os
-
-    from agent.llm.proxy import get_proxy_for_url
-
-    saved = {
-        k: os.environ.get(k) for k in ("https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY")
-    }
-    try:
-        # environment with ALL_PROXY=socks:// must yield None (direct), not crash
-        os.environ["ALL_PROXY"] = "socks://127.0.0.1:7890/"
-        os.environ["all_proxy"] = "socks://127.0.0.1:7890/"
-        os.environ.pop("https_proxy", None)
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("no_proxy", None)
-        os.environ.pop("NO_PROXY", None)
-        check(get_proxy_for_url("https://api.deepseek.com") is None, "socks all_proxy skipped (no crash)")
-
-        # http proxy is passed through for httpx
-        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7890/"
-        check(
-            get_proxy_for_url("https://api.deepseek.com") == "http://127.0.0.1:7890/",
-            "http https_proxy passed through",
-        )
-
-        # no_proxy match -> direct
-        os.environ["NO_PROXY"] = "api.deepseek.com"
-        check(get_proxy_for_url("https://api.deepseek.com") is None, "no_proxy bypasses proxy")
-        os.environ.pop("NO_PROXY", None)
-        check(
-            get_proxy_for_url("https://api.deepseek.com") == "http://127.0.0.1:7890/",
-            "proxy restored after no_proxy cleared",
-        )
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
     check_permission()
 
@@ -1052,10 +776,8 @@ def main() -> None:
 
     check_lazy_open_legacy_notes(config)
 
-    # 13. LLM endpoint configurability: one flat settings surface + legacy migration
+    # 13. LLM settings surface: one flat map, legacy profiles migrate
     from agent.config import flatten_settings
-    from agent.llm import create_llm_client
-    from agent.llm.llm_clients import OpenaiLlmClient, OpenaiResponsesLlmClient
 
     flat = {
         "base_url": "https://x.example/v1",
@@ -1076,29 +798,9 @@ def main() -> None:
         "legacy profile map migrates to the active profile",
     )
     check(flatten_settings({}) == {}, "empty settings flatten to empty")
-
-    client = create_llm_client(
-        api_key="sk-test",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.3",
-    )
-    check(client.model == "glm-5.3" and client.api_key == "sk-test", "factory builds a client from url+key+model")
-    check(type(client) is OpenaiLlmClient, "unset api_protocol = the chat-completions client")
-    check(
-        type(create_llm_client(api_key="k", base_url="u", model="m", protocol="responses"))
-        is OpenaiResponsesLlmClient,
-        "api_protocol=responses builds the responses client",
-    )
-    try:
-        create_llm_client(api_key="k", base_url="u", model="m", protocol="carrier-pigeon")
-        check(False, "factory rejects an unknown protocol")
-    except RuntimeError as e:
-        check("unknown LLM protocol" in str(e), "factory rejects an unknown protocol")
-    try:
-        create_llm_client(api_key="", base_url="u", model="m")
-        check(False, "factory rejects missing api_key")
-    except RuntimeError:
-        check(True, "factory rejects missing api_key")
+    # the client that SPENDS these knobs is the window's (ui/llm-client.js): the
+    # host only persists and serves them, so the factory checks that used to live
+    # here (protocol selection, missing key) moved with the loop (P4).
 
     old_env = {
         k: os.environ.get(k) for k in ("CLUTCH_MODEL", "CLUTCH_BASE_URL", "CLUTCH_API_KEY")
@@ -1117,28 +819,6 @@ def main() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-
-    # 13b. provider error strings are tidied to the provider's own message
-    from agent.llm.client import _clean_provider_message
-
-    m = _clean_provider_message(
-        "Error code: 429 - {'error': {'code': '1113', 'message': '余额不足或无可用资源包,请充值。'}}", 429
-    )
-    check(
-        m == "余额不足或无可用资源包,请充值。 (code 1113, HTTP 429)",
-        f"error envelope tidied to the provider message ({m!r})",
-    )
-    m = _clean_provider_message(
-        "Error code: 402 - {'error': {'message': 'Insufficient Balance', 'type': 'unknown_error', "
-        "'param': None, 'code': 'invalid_request_error'}}",
-        402,
-    )
-    check(m == "Insufficient Balance (code invalid_request_error, HTTP 402)", f"402 error tidied ({m!r})")
-    check(
-        _clean_provider_message("Connection error: connection reset by peer", None)
-        == "Connection error: connection reset by peer",
-        "non-dict error text passes through verbatim",
-    )
 
     print("\nall passed")
     return 0

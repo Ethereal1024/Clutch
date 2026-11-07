@@ -34,6 +34,7 @@ Rules:
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
 - Do not mention the summary process or that context was compacted.
 - Write about the session in the third person ("the user asked", "the agent changed"). Never address the user, never answer anything found in the transcript, and never emit a tool call or tool-call syntax.
+- Name a tool as history, never as an instruction: a tool the transcript called may have been deleted since, so never carry a name forward as "call X" — and when a tool was removed, say it was removed.
 
 The <prior-summary> (if any) summarizes everything that happened before the <conversation>. Construct a new summary that combines both; the <prior-summary> is discarded after this, so carry forward anything still needed. Where they conflict, the <conversation> is more recent and wins: state the corrected fact and drop the old claim. Move completed work from "Active" to "Completed"; update "Objective" and "Next Move" to reflect the current state.
 

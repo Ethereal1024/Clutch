@@ -1,10 +1,14 @@
-"""Error handling.
+"""The one fatal error a non-loop module raises.
 
 Layer policy: recoverable errors always go back to the model as tool results
-(error-as-data) so it can self-correct; only fatal errors stop the loop.
-- tool/parse errors -> fed back as tool result (see parse.py / tools)
-- API errors -> normalized LlmError + retry with backoff (see llm/client.py)
-- budget exceeded / context overflow -> terminate with a summary
+(error-as-data) so it can self-correct; only fatal errors stop the work. What
+that means for the layer that is still Python here: a project that cannot be
+opened is fatal to THIS operation and is raised (project_lock.ProjectOpenConflict),
+while tool and parse errors are envelopes the client's loop feeds back.
+
+The loop's own retry/normalize/terminate policy went with the loop (P4-1/P4-3):
+retries, the context-window verdict and the budget live in ui/ (ui/llm-client.js,
+ui/compaction.js, ui/run.js).
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AgentError(Exception):
-    """Fatal error: terminates the loop."""
+    """Fatal error: the operation cannot continue."""
 
     code: str = "agent_error"
     message: str = ""
@@ -22,11 +26,3 @@ class AgentError(Exception):
 
     def __str__(self) -> str:
         return f"[{self.code}] {self.message}"
-
-
-def context_window_error(detail: str) -> AgentError:
-    return AgentError(
-        code="context_window_exceeded",
-        message="Context window is full; cannot continue. Restart with a more focused task.",
-        detail=detail,
-    )

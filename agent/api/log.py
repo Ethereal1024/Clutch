@@ -19,12 +19,18 @@ page's live feed and must never reach disk (agent/events.py's DURABLE_TYPES).
 Refused, not dropped: a client that appends a delta has a bug, and a silent
 success would leave it in place (TODO.md I3).
 
+An append is also ANNOUNCED: the loop that writes these lines lives in the other
+process now (ui/run.js), so a durable line nobody pushes is a line the page
+cannot paint until it reconnects. The push is narrowed to the .clc the line
+landed in — the page is a view of one project, and another window's transcript
+is not this one's news (agent/base.py Broadcaster.publish).
+
 The window is `[cpr_start, file_end)` — the model's context, unchanged from
 agent/core/lazy.py. `items` reaches back a little further, to the line that
 opened the turn still in progress (`LazyEventLog.turn_start`): compaction
 happens DURING a turn and slides `cpr_start` past that turn's task line, and the
 host's loop answers its `task` from it rather than holding it in a variable
-(agent/loop.py's `run(task)` held it; I6 forbids keeping it). The compactor
+(the retired backend loop held it; I6 forbids keeping it). The compactor
 filters `items` by `offset >= cprStart` itself, so the extra head costs it
 nothing.
 """
@@ -34,7 +40,7 @@ from __future__ import annotations
 import json
 
 from ..core.lazy import LazyEventLog
-from ..events import DURABLE_TYPES, event_from_dict, event_to_json
+from ..events import DURABLE_TYPES, UserMessageEvent, event_from_dict, event_to_json
 
 
 def _wire(event) -> dict:
@@ -118,6 +124,26 @@ class LogMixin:
         except (TypeError, ValueError) as e:
             return self._json({"error": f"bad event: {e}", "code": "bad_event"}, status=400)
         event = project.log.append(event)
+        if isinstance(event, UserMessageEvent):
+            # A turn's rollback journal opens where its task line lands. The
+            # anchor the UI's "roll back to this message" addresses IS this
+            # offset, and `record_mutation` journals nothing outside an open
+            # checkpoint (agent/tools/workspace.py) — the deleted backend loop
+            # opened it itself at Agent.run, and now that the CLIENT produces
+            # the line the host opens it here: one place, and an anchor that
+            # cannot drift from the offset the frame carries.
+            workspace = self._state.workspace
+            if workspace is not None:
+                workspace.begin_turn(event.log_offset)
+        # ...and it is ANNOUNCED to the live streams, narrowed to the .clc it
+        # landed in. The page is a view now (P1-5): every durable line it paints
+        # was pushed here, because the loop that wrote it lives in the other
+        # process and has no feed of its own to paint. Narrowed and not
+        # broadcast: a window watching another project must not have this one's
+        # transcript appended to it (agent/base.py Broadcaster.publish). The
+        # event carries the offset the log stamped on it, so the frame is the
+        # same {offset, event} shape a replay sends and the watermark works.
+        self._broadcaster.publish(event, project=str(project.path))
         # the persisted record answers with the offset the log stamped on it:
         # that number is what a follow-up `slideWindow` addresses and what the
         # page's watermark skips, so the caller must not have to compute it

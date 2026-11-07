@@ -439,6 +439,86 @@ async function main() {
       "call: one hung plugin does not take the runtime with it");
   }
 
+  // ---------------------------------------- the runtime when fork is impossible
+  {
+    // The phone has no node binary to exec: its engine is nodejs-mobile's libnode
+    // loaded INTO the app process (android/app/src/main/cpp/native-lib.cpp calls
+    // node::Start), so process.execPath is the app itself and child_process.fork
+    // would exec the app with node's arguments and die. `spawn` is the port that
+    // makes the runtime replaceable, and ui/plugin-worker.js is the replacement:
+    // the same child ABI on a worker thread. These checks drive the SAME fixtures
+    // through it, so "the phone works differently" is a fact a test can see.
+    const { spawnInWorker } = require("../ui/plugin-worker");
+    const threaded = pluginHost.createPluginHost({ root: freshRoot("worker"), spawn: spawnInWorker });
+
+    const echoSrc = pluginSource("w-echo", { code: ECHO, name: "w-echo" });
+    threaded.install({ manifest: { ...MANIFEST, name: "w-echo" }, artifact: echoSrc });
+    const answer = await threaded.call({ name: "w-echo", command: S("echo"), args: { text: "hi" } });
+    check(answer.content === "echo:hi" && answer.error === false,
+      "worker: the same plugin answers through a worker thread (one thread per call)");
+
+    // What a plugin may rely on to find its own files. The env is right, __dirname
+    // is right, and a RELATIVE path is the one thing that differs from the forked
+    // runtime: a worker cannot chdir (node forbids it — the working directory
+    // belongs to the process), so a relative path resolves against the APP's
+    // directory. Pinned here because it is a plugin author's survey question.
+    const localSrc = pluginSource("w-local", {
+      code:
+        "const fs = require('fs');\n" +
+        "const read = (p) => { try { return fs.readFileSync(p, 'utf8').trim(); } catch (e) { return e.code; } };\n" +
+        "exports.run = async () => [read(__dirname + '/payload.txt'), read(process.env.CLUTCH_PLUGIN_DIR + '/payload.txt'), read('payload.txt'), process.env.CLUTCH_PLUGIN_NAME].join('@');\n",
+      files: { "payload.txt": "beside\n" },
+      tools: [{ name: "read" }],
+      name: "w-local",
+    });
+    threaded.install({ manifest: { ...MANIFEST, name: "w-local" }, artifact: localSrc });
+    const found = (await threaded.call({ name: "w-local", command: S("read") })).content;
+    check(found === "beside@beside@ENOENT@w-local",
+      "worker: __dirname and CLUTCH_PLUGIN_DIR find the payload; a relative path does not (there is no cwd to change)");
+
+    // a throw and an entry that will not load are the call's failure, not the app's
+    const angrySrc = pluginSource("w-angry", {
+      code: "exports.run = async () => { throw new Error('boom from worker'); };\n",
+      tools: [{ name: "echo" }],
+      name: "w-angry",
+    });
+    threaded.install({ manifest: { ...MANIFEST, name: "w-angry" }, artifact: angrySrc });
+    check(await rejects(threaded.call({ name: "w-angry", command: S("echo") }), /boom from worker/),
+      "worker: a throw reaches the caller with the plugin's own words, and kills nothing else");
+    const brokenSrc = pluginSource("w-broken", { code: "this is not javascript(\n", name: "w-broken" });
+    threaded.install({ manifest: { ...MANIFEST, name: "w-broken" }, artifact: brokenSrc });
+    check(await rejects(threaded.call({ name: "w-broken", command: S("echo") }), /could not load the plugin's entry/),
+      "worker: an entry that will not load fails the call, not the app");
+
+    // the phone's SIGKILL: terminate() against a plugin spinning in a tight loop.
+    // A promise that never settles would not need it — a loop would, and a loop is
+    // what "one hung plugin cannot freeze the host" actually means.
+    const spinnerSrc = pluginSource("w-spin", {
+      code: "exports.run = async () => { for (;;) {} };\n",
+      tools: [{ name: "echo" }],
+      name: "w-spin",
+    });
+    threaded.install({ manifest: { ...MANIFEST, name: "w-spin" }, artifact: spinnerSrc });
+    check(await rejects(threaded.call({ name: "w-spin", command: S("echo"), timeoutMs: 500 }), /did not answer within 500ms/),
+      "worker: a plugin in a tight loop is terminated, and the caller is told");
+    check((await threaded.call({ name: "w-echo", command: S("echo"), args: { text: "alive" } })).content === "echo:alive",
+      "worker: terminating it leaves the host — and the app's own process — alive");
+
+    // and no runtime at all is a sentence, not an opaque exit: a host wired to
+    // nothing refuses each call by name (the phone passes a throwing `spawn` on a
+    // node build without worker_threads).
+    const doomed = pluginHost.createPluginHost({
+      root: freshRoot("no-runtime"),
+      spawn: () => {
+        throw new Error("this build has no plugin runtime");
+      },
+    });
+    const plainSrc = pluginSource("w-plain", { code: ECHO, name: "w-plain" });
+    doomed.install({ manifest: { ...MANIFEST, name: "w-plain" }, artifact: plainSrc });
+    check(await rejects(doomed.call({ name: "w-plain", command: S("echo") }), /could not be started: this build has no plugin runtime/),
+      "spawn: a host with no runtime says so at the call, instead of claiming the plugin exited before answering");
+  }
+
   // ------------------------------------------------- the statement -> argv
   {
     // renderArgv is the one place a declaration becomes words, and it is exported

@@ -17,7 +17,8 @@ The graph in .github/workflows/release.yml is therefore a contract:
     tars and the APK too, not just a failed scan.
 
 Checks (offline, stdlib only — a runner executes them with bare python3):
-  1. `verify` exists and runs all three scans
+  1. `verify` exists and runs every offline scan (fonts, stylesheets, launcher
+     icon, the execution layer, this graph)
   2. `verify` installs no package (no uv sync / npm ci / pip install)
   3. every attaching job transitively needs `verify`
   4. the phone chain (pylibs-index, android-apk) transitively needs `deb`
@@ -45,7 +46,8 @@ TOP = re.compile(r"^[A-Za-z]")
 NEEDS_BLOCK_ITEM = re.compile(r"^      -[ \t]*([A-Za-z0-9_-]+)[ \t]*$")
 
 ATTACH = "softprops/action-gh-release"
-SCANS = ("tests.ui_fonts_check", "tests.ui_css_check", "tests.android_icon_check")
+SCANS = ("tests.ui_fonts_check", "tests.ui_css_check", "tests.android_icon_check",
+         "tests.exec_layer_test")
 INSTALLS = ("uv sync", "npm ci", "npm install", "pip install", "yarn install")
 
 VERIFY, DEB = "verify", "deb"

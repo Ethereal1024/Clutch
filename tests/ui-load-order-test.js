@@ -1,37 +1,44 @@
-// The renderer is now several files, and ui/index.html's script order is the
-// contract between them: they are CLASSIC scripts sharing one global scope
-// (Electron serves the page over file://, where module scripts are refused), so
-// a file may use a name declared above it and nothing below. In the single-file
-// renderer this could not break — a function declaration hoists over the whole
-// script, so `$("#older-pill").addEventListener("click", loadOlder)` was fine
-// even with loadOlder defined 1500 lines below. Split across files it is a
-// ReferenceError during load: the line throws, the rest of that file never runs,
-// and the wiring it was going to do is silently missing.
+// The renderer is one program, and the page now loads it as one script.
 //
-// So this runner loads the page's real script list, in page order, into one vm
-// context with a universal DOM stub, and fails on the first load-time throw.
-// The stub is deliberately dumb: every global, property and call answers with
-// another stub (a callable, iterable proxy that stringifies to ""), which is
-// enough for the top-level wiring — element lookups, addEventListener calls,
-// timers — to run as it does in the browser, while any name that is NOT there
-// yet still throws. It does not model the DOM and asserts nothing about
-// rendering: its single claim is "every file loads in this order".
+// The history this file's name comes from: the renderer used to be a stack of
+// classic scripts that ui/index.html listed in the only order that worked (they
+// shared one global scope — Electron serves the page over file://, where module
+// scripts are refused — so a file could use a name declared above it and nothing
+// below). The failure mode was silent: a forward reference threw during load, the
+// rest of that file never ran, and the wiring it was going to do was simply
+// missing. The old runner caught that by loading every file, in page order, into
+// one vm context and failing on the first throw.
 //
-// The last section is the control: the same list with the first file dropped
-// must FAIL, proving this runner can tell the difference (a loader that swallows
-// everything would pass the page order and mean nothing).
+// The order is a BUILD INPUT now (ui/renderer.modules.json → ui/build-renderer.js
+// → ui/renderer.js, one IIFE), so the claims this runner can still make — and the
+// ones that matter — are:
+//
+//   1. the page loads ONE renderer script, and it is the bundle; no per-module
+//      <script> is left behind, and the two files that must stay separate stay
+//      separate for the reason written down (version.js is rewritten data, the
+//      vendored third-party libraries are not ours to bundle);
+//   2. the committed bundle IS what the sources build (a stale bundle is a page
+//      running code nobody edited — the one failure a build step can introduce);
+//   3. loading the bundle wires the whole program without a throw (the old
+//      claim, now over one file);
+//   4. it puts nothing on `window` except the five host-bridge namespaces the
+//      shim publishes deliberately — that was the point of the IIFE;
+//   5. the control: build with one module dropped and the load THROWS, so a green
+//      run above is not a loader that swallows everything.
 
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const { check, summary, uiModules } = require("./harness.js");
+const { loadModules, build } = require("../ui/build-renderer.js");
 
-// Loading a script also kicks off the app's async work (boot.js ends with an
+const UI = path.join(__dirname, "..", "ui");
+const read = (...p) => fs.readFileSync(path.join(UI, ...p), "utf8");
+
+// Loading the bundle also kicks off the app's async work (boot.js ends with an
 // async IIFE). A rejection there is not a load-time throw and is out of scope
 // here, so it must not decide this runner's exit code.
 process.on("unhandledRejection", () => {});
-
-const MODULES = uiModules(); // in page order
 
 // ---- the universal stub ----
 // One proxy per name, cached so identity holds (els.a === els.a): callable,
@@ -70,8 +77,8 @@ function makeStub() {
 // ---- a context with the globals the page expects to find ----
 // console.warn is silenced: load-time wiring legitimately warns (e.g. the
 // backend guard rejecting the stub's URL) and that noise belongs to the app, not
-// to a test about load order.
-function makeContext() {
+// to a test about the page's wiring.
+function makeBox() {
   const stub = makeStub();
   const box = {};
   box.window = box;
@@ -95,43 +102,77 @@ function makeContext() {
   box.addEventListener = () => {};
   box.removeEventListener = () => {};
   box.WebSocket = function () { return stub("WebSocket"); };
-  return vm.createContext(box);
+  return box;
 }
 
-// Load one script into a context, returning the error it threw or null.
-function load(ctx, mod) {
+// Load one script into a fresh context. Returns { error, added } where `added`
+// is what the script put on `window` (the box IS the window here).
+function load(code) {
+  const box = makeBox();
+  const before = new Set(Object.keys(box));
+  let error = null;
   try {
-    vm.runInContext(mod.code, ctx, { filename: mod.file });
-    return null;
+    vm.runInContext(code, vm.createContext(box), { filename: "renderer.js" });
   } catch (e) {
-    return e;
+    error = e;
   }
+  return { error, added: Object.keys(box).filter((k) => !before.has(k)) };
 }
 
-// ---- 1) the page's own order loads clean ----
-check(MODULES.length > 1, `the page loads ${MODULES.length} renderer scripts (not one big file)`);
-check(MODULES[0].file === "app.js" && MODULES[MODULES.length - 1].file === "js/boot.js",
-      "first file is the entry, last file is the one that starts the app");
+const describe = (r) => (r.error ? `${r.error.constructor.name}: ${r.error.message}` : "no throw");
 
-const ctx = makeContext();
-const failures = [];
-for (const mod of MODULES) {
-  const err = load(ctx, mod);
-  if (err) failures.push(`${mod.file}: ${err.constructor.name}: ${err.message}`);
-}
-check(failures.length === 0,
-      "every renderer script loads in page order (no forward reference, no TDZ)" +
-      (failures.length ? "\n      " + failures.join("\n      ") : ""));
+// ---- 1) the page loads one script for the renderer ----
+const html = read("index.html");
+const pageScripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
+const ownScripts = pageScripts.filter((s) => !s.startsWith("vendor/"));
+check(ownScripts.includes("renderer.js"),
+      `index.html loads the bundle (${ownScripts.join(", ")})`);
+check(ownScripts.filter((s) => s === "renderer.js").length === 1,
+      "exactly one renderer script — the bundle is not loaded twice");
+check(!pageScripts.some((s) => s === "app.js" || s === "bridge-shim.js" || s.startsWith("js/")),
+      "and no per-module script is left behind: a tag for a source file would run that file a second time, outside the IIFE");
+check(pageScripts[pageScripts.length - 1] === "version.js" && pageScripts.includes("renderer.js") &&
+      pageScripts.indexOf("renderer.js") < pageScripts.indexOf("version.js"),
+      "the build stamp keeps its own tag, after the bundle (the release scripts rewrite it; nothing reads it at load time)");
+check(pageScripts.slice(0, pageScripts.indexOf("renderer.js")).every((s) => s.startsWith("vendor/")),
+      "every script before the bundle is a vendored third-party library (marked / DOMPurify / highlight / mermaid / MathJax)");
 
-// ---- 2) control: this runner can fail ----
-// Same context, same loader, one file removed. A later file must then hit a name
-// that is not there — if it does not, this runner would pass any order and the
-// check above would mean nothing.
-const ctx2 = makeContext();
-const controlFailures = [];
-for (const mod of MODULES.slice(1)) if (load(ctx2, mod)) controlFailures.push(mod.file);
-check(controlFailures.length > 0,
-      "control: dropping the first file makes a later one throw, so a green run above means something" +
-      (controlFailures.length ? ` (threw: ${controlFailures.join(", ")})` : ""));
+// ---- 2) the manifest is the page's list, and the bundle is the sources ----
+const { bundled, separate } = loadModules();
+const modules = uiModules().map((m) => m.file);
+check(bundled.join() === ["bridge-shim.js", ...modules.filter((f) => !separate.includes(f))].join(),
+      `the bundle's modules are the manifest's, in order (${bundled.length} files)`);
+check(bundled[0] === "bridge-shim.js",
+      "the host bridge is bundled first: the page must run it before anything touches window.clutch");
+check(modules[modules.length - 1] === "js/boot.js" && modules[0] === "app.js",
+      "first module is the entry, last module is the one that starts the app");
+check(separate.join() === "version.js",
+      "version.js is the only module kept out of the bundle (rewritten data, not code)");
+
+const built = build({ bundled, separate });
+const onDisk = read("renderer.js");
+check(onDisk === built,
+      `ui/renderer.js is what these sources build — ${built.split("\n").length} lines; ` +
+      "a stale bundle ships a program nobody edited (rebuild: cd ui && npm run build)");
+check(!/CLUTCH_VERSION\s*=\s*"/.test(onDisk),
+      "and it does not carry the build stamp: bumping the version must not need a rebuild");
+
+// ---- 3) loading it wires the whole program ----
+const real = load(onDisk);
+check(!real.error, "loading the bundle wires the page with no load-time throw (" + describe(real) + ")");
+const PUBLISHED = ["clutchComponents", "clutchLocks", "clutchRun", "clutchSettings", "clutchUpdate"];
+check(real.added.slice().sort().join() === PUBLISHED.join(),
+      `the only names it puts on window are the host bridge's five namespaces (got ${JSON.stringify(real.added)})`);
+check(/^(?:\/\/[^\n]*\n)*(?:\(\(\) => \{|\(function \(\) \{|\(function\(\)\{)/.test(onDisk),
+      "and the whole renderer is inside ONE function scope (the IIFE at the top of the file)");
+
+// ---- 4) control: a build missing a module still throws ----
+// Same builder, same loader, one module dropped. If this passed, the loader above
+// would pass anything and claim 3 would mean nothing.
+const drop = "js/stream-view.js";
+const broken = build({ bundled: bundled.filter((f) => f !== drop), separate });
+const control = load(broken);
+check(Boolean(control.error),
+      `control: building without ${drop} makes the load throw, so a clean run above means something (${describe(control)})`);
 
 summary("ui-load-order");

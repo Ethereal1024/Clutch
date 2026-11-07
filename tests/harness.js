@@ -78,24 +78,22 @@ function slicer(src) {
 
 // ---- the renderer's source, in page load order ----
 //
-// The renderer used to be one file (ui/app.js); it is now several classic
-// scripts that ui/index.html lists in the only order that works (they share one
-// global scope, so each may use names declared above it and nothing below). The
-// runners care about the code, not the file layout, so they read the page's own
-// script list rather than a private copy of it: a function that moves between
-// modules keeps working, and a module the page forgets to load is simply absent
-// (the runner fails loudly instead of passing against dead code).
+// The renderer used to be one file (ui/app.js), then a stack of classic scripts
+// that ui/index.html listed in the only order that works (they shared one global
+// scope, so each could use names declared above it and nothing below). The page
+// now loads one bundle (ui/renderer.js, built by ui/build-renderer.js) and the
+// order lives in ui/renderer.modules.json — one list that the build and the
+// runners both read, so a function that moves between modules keeps working and
+// a module dropped from the list is simply absent (the runner fails loudly
+// instead of passing against dead code). The runners read SOURCE text on
+// purpose: they test the code that ships, not the formatted bundle.
 const UI_DIR = path.join(__dirname, "..", "ui");
 
-// [{ file, code }] — the renderer's own scripts, in page order. The load-order
-// test needs them separately (each file is a classic script with its own
-// directive prologue and its own declarations); everything else wants uiSource().
+// [{ file, code }] — the renderer's own modules, in page order. The bundle test
+// needs the same list the build uses; everything else wants uiSource().
 function uiModules() {
-  const html = fs.readFileSync(path.join(UI_DIR, "index.html"), "utf8");
-  const srcs = [...html.matchAll(/<script\s+src="([^"]+)"/g)]
-    .map((m) => m[1])
-    .filter((s) => !s.startsWith("vendor/") && s !== "bridge-shim.js"); // third-party + host shim
-  return srcs.map((file) => ({ file, code: fs.readFileSync(path.join(UI_DIR, file), "utf8") }));
+  const manifest = JSON.parse(fs.readFileSync(path.join(UI_DIR, "renderer.modules.json"), "utf8"));
+  return manifest.modules.map((file) => ({ file, code: fs.readFileSync(path.join(UI_DIR, file), "utf8") }));
 }
 
 function uiSource() {

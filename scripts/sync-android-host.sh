@@ -33,7 +33,7 @@ UI_ASSETS=$ASSETS/ui
 # the install does not — the page hands the path to the Kotlin shell instead. The
 # desktop-only installer (ui/update-install.js) is deliberately NOT copied: it
 # requires Electron-free nothing, but nothing on this side could run it either.
-UI_NODE="compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js prompt.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json update-core.js update-service.js"
+UI_NODE="compaction.js components-view.js components.js components.mirrors.json context.js event-text.js exec-bridge.js host-core.js llm-proxy.js mirrors.js net-fetch.js plugin-child.js plugin-host.js plugin-link.js plugin-server.js plugin-worker.js prompt.js server-bundle.js settings-mirror.js ssh-tunnel.js tunnel-core.js tunnel-net.js tunnel-remote.js tunnel-bootstrap.js tunnel-lifecycle.js tunnel-connect.js tunnel-ladder.js supervisor-client.js transport_defaults.json update-core.js update-service.js"
 
 # 1. nodejs-project = android/host + ui/ subset + production node_modules
 rm -rf "$NODEJS_PROJECT"
@@ -41,22 +41,29 @@ mkdir -p "$NODEJS_PROJECT/ui"
 cp android/host/*.js android/host/package.json "$NODEJS_PROJECT/"
 for f in $UI_NODE; do cp "ui/$f" "$NODEJS_PROJECT/ui/"; done
 # the loop's prompt templates, beside prompt.js which resolves them from its own
-# directory (P1-3): the host half is the owner of the wording now, so the phone
-# must ship exactly the files the desktop does — agent/prompts/ is the Python
-# half's copy only until P4 deletes it
+# directory: ui/prompts/ is the only copy of the loop's words now — agent/prompts/
+# keeps the machine's own text (its error answers and the tool prose)
 cp -r ui/prompts "$NODEJS_PROJECT/ui/"
 (cd "$NODEJS_PROJECT" && npm install --omit=dev --no-audit --no-fund)
 
 # 2. assets/ui = exactly what ui/index.html pulls (styles/scripts/vendor)
+#
+# The renderer is ONE committed bundle (ui/renderer.js): index.html loads that,
+# and its sources (ui/app.js, ui/bridge-shim.js, ui/js/**) stay in the repo for
+# the build and the tests. A stale copy here would ship the phone a program
+# nobody edited, so --check runs first — it needs node and NO npm packages (it
+# compares the digest of the inputs, which the bundle's own banner records),
+# which is exactly what this script has to rely on.
+node ui/build-renderer.js --check
 rm -rf "$UI_ASSETS"
 mkdir -p "$UI_ASSETS"
-cp ui/index.html ui/app.js ui/style.css ui/mobile.css ui/bridge-shim.js "$UI_ASSETS/"
+cp ui/index.html ui/renderer.js ui/style.css ui/mobile.css "$UI_ASSETS/"
 # the build stamp the About pane reads (ui/version.js): rewritten below by
 # build-android-apk.sh with the version it hands gradle, and carried at its
 # source-tree value when this script runs on its own
 cp ui/version.js "$UI_ASSETS/"
-# the renderer's own modules (ui/js) + the vendored third-party libraries
-cp -r ui/js "$UI_ASSETS/js"
+# the vendored third-party libraries keep their own <script> tags — marked,
+# DOMPurify, highlight, mermaid, MathJax: third-party globals, not ours to bundle
 cp -r ui/vendor "$UI_ASSETS/vendor"
 
 # 3. the N3 stamp, when this machine has one (build-android-apk.sh writes it

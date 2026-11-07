@@ -1,6 +1,7 @@
 """Centralized configuration.
 
-All tunables live here (or in CLI args); prompts stay in agent/prompts/.
+All tunables live here (or in CLI args); the machine's prompt text
+(its error answers and tool prose) stays in agent/prompts/.
 """
 
 from __future__ import annotations
@@ -35,30 +36,19 @@ class Config:
     model: str = field(default_factory=lambda: os.environ.get("CLUTCH_MODEL", ""))
     base_url: str = field(default_factory=lambda: os.environ.get("CLUTCH_BASE_URL", ""))
     api_key: str | None = field(default_factory=lambda: os.environ.get("CLUTCH_API_KEY"))
-    # LLM request tuning
-    llm_request_timeout: float = 60.0
-    # Streaming read budget. httpx's read timeout bounds the GAP between two
-    # chunks, not the total response time, so reusing request_timeout for it
-    # kills any stream whose provider stalls (or whose buffering relay flushes
-    # only at the end) for over 60s — the classic "network is fine yet request
-    # timed out". Connect stays tight (fail fast on dead routes) and reads get
-    # their own generous budget; see llm_clients/openai_client.py.
-    llm_read_timeout: float = 240.0
-    # 0 = redial until the run is stopped by hand (the default): the LLM call's
-    # counterparty is the CLIENT's proxy across the tunnel, so a budget counted
-    # in attempts is a budget in seconds spent while the reconnect that would
-    # fix everything is still dialing. Positive = that many attempts total, on
-    # the same 1,2,4,...,128s ladder (see llm_clients/stream_runner.py).
-    llm_max_retries: int = 0
-    llm_retryable_status: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+    # The knobs below are SETTINGS this host stores and serves, not numbers it
+    # spends: nothing in agent/ makes a model request any more (P4 — the loop,
+    # its client and its retry ladder live in the window: ui/llm-client.js). The
+    # request tuning that used to sit here (request/read timeouts, retry count,
+    # retryable statuses) went with them, into the module that acts on them.
     # None = leave the request unset (server default); otherwise one of REASONING_EFFORT_LEVELS
     llm_reasoning_effort: str | None = None
     # Which wire protocol the endpoint speaks; None = "chat" (the default).
     # Like the reasoning knob it is env-less: it describes this endpoint
     # pairing, which the settings surface already owns.
     llm_api_protocol: str | None = None
-    # model context window in BYTES: compaction fires when the window reaches
-    # this size. That window's content is then the summarizer's whole input.
+    # model context window in BYTES, served to the client as `contextWindowBytes`:
+    # the client's compactor fires when its window reaches this size.
     llm_context_window_bytes: int = 500_000
 
     # Loop budget
@@ -83,12 +73,10 @@ class Config:
     output_tail: int = 2500
     read_max_chars: int = 20000
 
-    # Web access (the clutch-websearch component; its declaration reads these
-    # knobs back through $config placeholders — the host only holds the values):
-    # keyless out of the box (Bing RSS -> DDG HTML); better backends activate
-    # automatically once their env is present
-    web_search_timeout: float = 15.0
-    web_search_max_results: int = 8
+    # Web access: the tools themselves live on the CLIENT now (the
+    # clutch-websearch plugin keeps its own settings in its own environment), so
+    # what stays here is only the host fact `$backends` reads — which search
+    # providers this machine has configured (catalog.DEFAULT_BACKENDS).
     # Tavily (https://tavily.com, LLM-first search API, free tier)
     tavily_api_key: str | None = field(
         default_factory=lambda: os.environ.get("CLUTCH_TAVILY_API_KEY") or os.environ.get("TAVILY_API_KEY")
@@ -122,7 +110,7 @@ class Config:
     port: int = 8890
     host: str = "127.0.0.1"  # bind address; 0.0.0.0 exposes the API to other devices
     # Permission: confirm risky actions with the user, not a sandbox
-    non_interactive: bool = False  # auto-allow (used by eval harness / unattended runs)
+    non_interactive: bool = False  # auto-allow (unattended runs: no one to ask)
 
     def truncate(self, text: str) -> str:
         """Head/tail trim oversized output; the middle is replaced with an omitted note."""

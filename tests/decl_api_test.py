@@ -153,7 +153,7 @@ def config_check(tmp: Path) -> None:
     check("api_key" not in body["config"], "a credential is never in `config`, even though this host holds one")
     check(SECRET not in text, "the credential's value appears nowhere in the answer")
     check("tavily_api_key" not in body["config"] and "searxng_url" not in body["config"], "string knobs stay here")
-    for unnamed in ("port", "host", "llm_read_timeout", "llm_max_retries", "model", "base_url"):
+    for unnamed in ("port", "host", "command_timeout", "output_limit", "model", "base_url"):
         check(unnamed not in body["config"], f"an UNNAMED knob is not served ({unnamed})")
 
     # the rule itself, without a manifest: naming a string field is not enough
@@ -165,11 +165,11 @@ def config_check(tmp: Path) -> None:
     named = decls._config(Config(port=4321), [{"d": "$config.port"}])
     check(named == {"port": 4321}, "naming a numeric field serves it, in a sentence or as a whole value")
     named = decls._config(
-        Config(read_max_chars=99, llm_max_retries=3),
-        [{"d": "$config.read_max_chars $config.llm_max_retries"}],
+        Config(read_max_chars=99, command_timeout=7),
+        [{"d": "$config.read_max_chars $config.command_timeout"}],
     )
     check(
-        named == {"llm_max_retries": 3, "read_max_chars": 99},
+        named == {"command_timeout": 7, "read_max_chars": 99},
         "naming several numeric fields in one sentence serves each",
     )
     named = decls._config(Config(), [{"d": "$config.no_such_field"}])
