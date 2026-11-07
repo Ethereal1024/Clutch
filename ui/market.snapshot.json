@@ -17,8 +17,8 @@
     {
       "id": "Ethereal1024/clutch-websearch",
       "name": "clutch-websearch",
-      "manifest": "https://github.com/Ethereal1024/clutch-websearch/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-websearch/releases/download/v0.2.0/clutch-component.json",
+      "version": "0.2.0",
       "summary": "search the web and read a page, ranked down to what the question actually needs",
       "tags": [
         "web",
@@ -26,7 +26,7 @@
       ],
       "homepage": "https://github.com/Ethereal1024/clutch-websearch",
       "license": "MIT",
-      "manifest_sha256": "52d79800d23354b541c3774014399e99d7346c65df671d41dc8c0a35ce2717cb"
+      "manifest_sha256": "289f7b80151572ad6d4eaf8285dae3d45b6413d8e9fe532e6320bd3bf22b18e8"
     },
     {
       "id": "Ethereal1024/clutch-skills",

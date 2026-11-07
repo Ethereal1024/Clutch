@@ -14,8 +14,8 @@
     {
       "id": "Ethereal1024/clutch-websearch",
       "name": "clutch-websearch",
-      "manifest": "https://github.com/Ethereal1024/clutch-websearch/releases/download/v0.1.0/clutch-component.json",
-      "version": "0.1.0",
+      "manifest": "https://github.com/Ethereal1024/clutch-websearch/releases/download/v0.2.0/clutch-component.json",
+      "version": "0.2.0",
       "summary": "search the web and read a page, ranked down to what the question actually needs",
       "tags": ["web", "search"],
       "homepage": "https://github.com/Ethereal1024/clutch-websearch",
