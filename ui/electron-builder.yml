@@ -21,9 +21,6 @@ directories:
 # exclude dev-only files from the app bundle
 files:
   - "!dev.sh"
-  # the type gate's config (TODO.md D14): read by `npm run typecheck` from the
-  # checkout, never by the app — no runtime file points at it
-  - "!tsconfig.check.json"
   # the asset survey doc next to the vendored fonts is for the repo, not runtime
   - "!vendor/fonts/README.md"
   # the deleted per-client source list: a stale checkout (or a glob that brought it

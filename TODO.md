@@ -85,7 +85,7 @@ flowchart TD
 | D11 | Android 的客户端插件域排在**桌面版发布之前**（P1-6 是发布的前置条件，不是发布后的活） |
 | D12 | 模型流的 mid-stream 重试**保留**；取代价是“每次重试都必须是 `.clc` 里的一条事实”，不是页面上的 toast |
 | D13 | `plugin.md` 不存在，不再查找；HEAD 就是全部，`agent/prompts/*` 与 `README*` 即为文档全集 |
-| D14 | 类型闸门 = **JSDoc + 每文件一行 `// @ts-check` + `tsc --noEmit`**，就跑在 `.js` 上：零构建步骤、CommonJS 形状不变、`node tests/*.test.js` 一行不改。**不做** `namespace`，**不做** `tsc --module none` 的逐文件产出（那只是把全局改个名字，契约照旧）。打包器（esbuild IIFE）推迟到 P7-3，前置是 P1-6。P4 要删的代码不打类型。详见 §11 |
+| D14 | 类型闸门 = **JSDoc + 每文件一行 `// @ts-check` + `tsc --noEmit`**，就跑在 `.js` 上：零构建步骤、CommonJS 形状不变、`node tests/*.test.js` 一行不改。**不做** `namespace`，**不做** `tsc --module none` 的逐文件产出（那只是把全局改个名字，契约照旧）。打包器（esbuild IIFE）推迟到 P7-3，前置是 P1-6。P4 要删的代码不打类型。详见 §11 **补记（TS 重写之后已作废）**：host 半现在是 `ui/src/host/*.ts` + `ui/tsconfig.host.json` 编译就地出 `ui/*.js`，逐文件 `// @ts-check` 与 `ui/tsconfig.check.json` 都已删除；闸门从“每文件自愿进门”改成“整个 host 树一个配置” |
 
 **执行顺序**：P0 → P1-1…P1-6（P1-6 = Android 客户端插件域，发布前必需，已落地）→ P2 → P3 → P4 → P6。P5（手机保活）与 P2–P4 无冲突，可随时并行插入，建议越早越好（它只是原生层的两处小改动，但决定了“锁屏不打断”能不能被验证）。
 
@@ -409,6 +409,12 @@ flowchart TD
 
 不是把 `.js` 改成 `.ts`，也不加构建步骤：**JSDoc + 每文件一行 `// @ts-check` + `tsc --noEmit`**。产出的 `.js` 与今天逐字节同类，`require` 的形状不变，34 个 `node tests/*.test.js` 一个都不用改。
 
+> **补记（TS 重写之后：本节以下只描述历史）**：这条“不加构建步骤”的前提被推翻了。host 那一半做了整体 TypeScript 重写（分支 `ts-rewrite`：`f480991` 是重写前的样子、`712f78d` 是 host 半之后的样子）：41 个 `ui/*.js` → `ui/src/host/*.ts`，`ui/tsconfig.host.json` 编译**就地**出 `ui/*.js`（`ui/build-host.js`，头部带“GENERATED FILE + 源文件 sha256”），`npm run typecheck` 现在跑的是这份配置；`ui/tsconfig.check.json` 已删除，`ui/electron-builder.yml` 的 `files` 与 `ui/verify-build-config.js` 的 `EXCLUDED_FILES` 里那两条 `tsconfig.check.json` 也一起删了，换成了 `src/**` / `build-host.js` / `tsconfig.host.json` / `*.ts`（`node ui/verify-build-config.js` 仍 OK）。
+> - 为什么不“保留 pragma 闸门、再把文件一个个搬”：两套规则并存，每个文件都要被问“算哪边”，而 pragma 对 `.ts` 根本没有意义（`.ts` 默认就被检查）——那正是“两个系统”的形状。一个系统：`ui/` 下面谁带 `.ts` 源，谁就在编译里。
+> - **棘轮没有丢，只是换了底座**：`ui/tsconfig.host.json` 里 `strict: false` 带注释写着为什么，以及下一步怎么翻。量过：`strict: true` 是 **1,402** 条错误，`--strict false --noImplicitAny` 是 **1,058** 条（756×TS7006、127×TS7005、54×TS7031、53×TS7018、40×TS7034…）。每一步的顺序写在配置里——先绿，再标类型，最后翻那一行——而不是把闸门一次性调到红着没人跑。
+> - 代价写清楚了：产出是 **tsc 重排过的 `.js`**（4 空格、`if (x) y();` 变块、文件头多一截 `Object.defineProperty(exports,"__esModule",…)`，惰性、无害）。所以**断言“代码怎么写”的测试改读 `.ts` 源**（`tests/durable-types.test.js`、`tests/ssh-tunnel.test.js`、`tests/tunnel-reconnect.test.js`），而**断言“产出与源一致”的测试是新加的** `tests/host-built.test.js`（源↔产出 digest、无缺失/无陈旧/无孤儿产出、恰好 41 个模块、无 ESM `exports.` 残留、无幸存 pragma）。
+> - 其余三块仍是 `.js`，各自转的时候各带自己的构建，**不回到 pragma**：渲染器 `ui/js/*.js`（受 `file://` 不许 module script 的限制，见 D-6）、`android/host/*.js`（手机是 libnode 18，没有类型剥离，只能吃编出来的 `.js`）、`clutch-websearch/plugin/*.js`（tar 里必须已经是 `.js`）。
+
 - [x] **P7-1 闸门本身（已落地）**
   - `ui/tsconfig.check.json`：`allowJs: true` + `checkJs: false` + `noEmit: true`，`module: commonjs`、`moduleResolution: node`、`types: ["node"]`、`skipLibCheck: true`；`strict: false` / `noImplicitAny: false` 是**故意的**——一上来开 strict 就是上千条历史噪音，闸门会立刻变成“没人跑的那条命令”。
   - `checkJs: false` + 每文件一行 pragma，就是这套东西的**棘轮**，三条理由都是实测的：
@@ -465,6 +471,7 @@ flowchart TD
   - 验证：`node --check ui/renderer.js` rc=0；`npm run typecheck` rc=0；`node ui/build-renderer.js --check` rc=0（改一个源文件后 rc=1 并给出命令，反证跑过）；两条 JS sweep 34 OK + 2 红（既有，用户 WIP 的 `prompt`/`tool-decl`）与 46/46；Python 22/23（只有既有的 `tools_inst_test.py` 红）；`ui_css_check` / `ui_fonts_check` / `selfcheck` / `release_graph_check` / `android_icon_check` / `lazy_check` 全绿。**真跑了一遍 `scripts/sync-android-host.sh`**：`assets/ui` 只剩 `index.html mobile.css renderer.js style.css version.js vendor`（无 `js/`），`--check` 在那儿也是绿的。**补记（P-C 之后）**：那两条“既有红”已经不见了——两条 sweep 现在是 **36/36 与 46/46 全绿**（文件数也涨了：`*.test.js` 36 个、`*-test.js` 46 个）。
 
 **P7 完成判据**：`cd ui && npm run typecheck` rc=0；`ui/*.js` 里被 D14 覆盖的那一栈全部在闸内（今天 15 个文件）；P7-2 的跨语言断言在 `tests/*` 里有一条会红的（已落地：`tests/durable-types.test.js`）；P7-3 落地后 `ui/index.html` 的**渲染器**只剩一个 `<script src>`（三方库与 `version.js` 各自保留，理由见 P7-3），且 `node ui/build-renderer.js --check` 与 `tests/ui-load-order-test.js` 都绿。
+**补记**：那“15 个文件”现在是 **41 个 `.ts` 源**（本节补记），命令还是 `(cd ui && npm run typecheck)`、还是 rc=0，只是它查的不再是 pragma 那一栈，而是整棵 `ui/src/host`。
 
 ---
 
@@ -477,7 +484,7 @@ flowchart TD
 | D-3 | Android 的客户端插件域在桌面版之前还是之后？ | **之前** | D11 → P1-6（发布前置） |
 | D-4 | 模型流的中途重试保留吗？ | **按推荐：保留，代价是可见** | D12 → P1-2 |
 | D-5 | `plugin.md` 在哪里？ | **不找了** | D13 → P4-5（已关闭） |
-| D-6 | 类型要不要上 TS / 构建步骤？ | **都不上：JSDoc + `// @ts-check` + `tsc --noEmit`，`.js` 原样** | D14 → P7-1（已落地）；打包器推迟到 P7-3 |
+| D-6 | 类型要不要上 TS / 构建步骤？ | **都不上：JSDoc + `// @ts-check` + `tsc --noEmit`，`.js` 原样** —— **补记（已推翻，见 §11 补记）**：host 半整体 TypeScript，`ui/src/host/*.ts` + `ui/tsconfig.host.json` + `ui/build-host.js` 就地编译，旧的逐文件 pragma 闸门 `ui/tsconfig.check.json` 删除；其余三块（渲染器 / Android host / 插件）转 TS 时各带自己的构建 | D14 → P7-1（已落地）；打包器推迟到 P7-3。渲染器还有一个硬约束没解：页面在 `file://` 下加载，**module script 被拒**，所以要么 esbuild 打成经典 IIFE，要么维持 concat |
 
 至此没有需要用户再拍板的阻塞项。后续若出现新分叉，写进本表再动手。
 
@@ -510,7 +517,7 @@ node tests/no-local-fallback-test.js            # P0-3/P0-4 之后必须 0 FAIL
 for t in tests/*_test.py; do python3 -m "tests.$(basename "${t%.py}")" >/dev/null || echo "FAIL $t"; done
 python3 -m ruff check agent scripts --output-format concise   # 3 条既有告警（M3 补记），CI 不跑这一步
 
-# 类型闸门（P7-1）：只查 `.js`，零构建步骤；rc=0（D14）
+# 类型闸门：host 半是 TypeScript（ui/tsconfig.host.json，--noEmit），rc=0（D14 补记）
 (cd ui && npm run typecheck)
 
 # 日志端点（P2）：76 条 ok，rc=0；起真 server、开真 .clc

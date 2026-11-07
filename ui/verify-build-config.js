@@ -106,9 +106,6 @@ const EXCLUDED_FILES = [
   // the old per-client list of five source URLs: deleted, and a packager glob
   // that brought it back would be shipping a file nothing reads
   "components.sources.json",
-  // the type gate's config (TODO.md D14): `npm run typecheck` reads it from the
-  // checkout; nothing at runtime resolves it, so it stays out of the app
-  "tsconfig.check.json",
   // P7-3: the renderer's sources and its build script. index.html loads the
   // bundle; these are build inputs, and shipping them would be a dead copy.
   "app.js",
