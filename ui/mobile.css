@@ -111,14 +111,15 @@
   /* the input bar stays pinned at the top, always visible */
   #taskbar {
     order: 0;
-    padding: 10px 12px 12px;
+    padding: 10px 12px 8px;
   }
   #task-input {
     padding: 8px;
   }
-  /* report #5: run/mode/trust share the row with the workspace path, which
-     already ellipsizes; keep the switches from shrinking below their text */
+  /* run/mode/trust are below the textarea on mobile too — keep them from
+     shrinking when the row is narrow */
   .run-actions button { flex: none; }
+  .run-actions { margin-top: var(--s2); }
 
   /* report #4: the panel is a right slide-over, out of the column flow — it
      no longer steals height from the stream, and its tree scrolls inside.

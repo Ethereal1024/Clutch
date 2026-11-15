@@ -1,0 +1,113 @@
+{
+  "cases": [
+    {
+      "body": {
+        "name": "demo",
+        "project": "<ROOT>/demo.clc",
+        "status": "ok",
+        "workdir": "<ROOT>"
+      },
+      "id": "project.new.ok",
+      "method": "POST",
+      "path": "/api/project/new",
+      "request": {
+        "dir": "<ROOT>",
+        "name": "demo"
+      },
+      "status": 200
+    },
+    {
+      "body": {
+        "error": "dir and name are required"
+      },
+      "id": "project.new.missing-name",
+      "method": "POST",
+      "note": "dir and name are required",
+      "path": "/api/project/new",
+      "request": {
+        "dir": "<ROOT>"
+      },
+      "status": 400
+    },
+    {
+      "id": "project.open.ok",
+      "method": "POST",
+      "ndjson": [
+        {
+          "progress": {
+            "done": 64,
+            "total": 64
+          }
+        },
+        {
+          "progress": {
+            "done": 64,
+            "total": 64
+          }
+        },
+        {
+          "meta": {
+            "name": "demo",
+            "project": "<ROOT>/demo.clc",
+            "read_only": false,
+            "workdir": "<ROOT>"
+          }
+        },
+        {
+          "count": 0,
+          "older": 0
+        },
+        {
+          "done": true
+        }
+      ],
+      "note": "NDJSON: meta, then {count, older}, then one {offset, event} per resident record (none in a fresh project), then {done}",
+      "path": "/api/project/open",
+      "request": {
+        "path": "<ROOT>/demo.clc"
+      },
+      "status": 200
+    },
+    {
+      "id": "project.open.read-only",
+      "method": "POST",
+      "ndjson": [
+        {
+          "progress": {
+            "done": 64,
+            "total": 64
+          }
+        },
+        {
+          "progress": {
+            "done": 64,
+            "total": 64
+          }
+        },
+        {
+          "meta": {
+            "name": "demo",
+            "project": "<ROOT>/demo.clc",
+            "read_only": true,
+            "workdir": "<ROOT>"
+          }
+        },
+        {
+          "count": 0,
+          "older": 0
+        },
+        {
+          "done": true
+        }
+      ],
+      "path": "/api/project/open",
+      "request": {
+        "path": "<ROOT>/demo.clc",
+        "read_only": true
+      },
+      "status": 200
+    }
+  ],
+  "endpoint": "project.lifecycle",
+  "route": "POST /api/project/{new,open}"
+}

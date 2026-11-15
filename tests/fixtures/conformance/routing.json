@@ -1,0 +1,25 @@
+{
+  "cases": [
+    {
+      "body": {
+        "error": "not found"
+      },
+      "id": "routing.unknown-get",
+      "method": "GET",
+      "path": "/api/nope",
+      "status": 404
+    },
+    {
+      "body": {
+        "error": "not found"
+      },
+      "id": "routing.unknown-post",
+      "method": "POST",
+      "path": "/api/nope",
+      "request": {},
+      "status": 404
+    }
+  ],
+  "endpoint": "routing",
+  "route": "GET|POST <unknown route>"
+}

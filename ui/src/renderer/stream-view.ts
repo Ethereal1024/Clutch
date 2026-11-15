@@ -193,6 +193,8 @@ export function setStatus(state) {
   els.status.className = "badge " + (state || "idle");
   els.status.textContent = state || "idle";
   busy = state === "running" || state === "waiting";
+  // notify status-bar.ts without creating a circular import
+  document.dispatchEvent(new CustomEvent("clutch:status-changed", { detail: state || "idle" }));
   // the run button doubles as Stop while a run is in progress
   els.run.textContent = busy ? "■ Stop" : "▶ Run";
   els.run.title = busy

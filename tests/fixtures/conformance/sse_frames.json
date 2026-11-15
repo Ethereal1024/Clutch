@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "frame": "data: {\"type\": \"state_update\", \"timestamp\": 1700000000.0, \"id\": \"000000000000\", \"key\": \"execution_status\", \"value\": \"idle\"}\n\n",
+      "id": "sse.transient.state-update",
+      "note": "transient: no log offset -> the bare event JSON"
+    },
+    {
+      "frame": "data: {\"offset\": 4096, \"event\": {\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000000\", \"content\": \"fixed task\"}}\n\n",
+      "id": "sse.durable.user-message",
+      "note": "durable: an explicit offset -> {offset, event}"
+    },
+    {
+      "frame": "data: {\"type\": \"history\", \"older\": 1024}\n\n",
+      "id": "sse.raw.history"
+    },
+    {
+      "frame": "data: {\"type\": \"replayed\", \"count\": 3}\n\n",
+      "id": "sse.raw.replayed"
+    },
+    {
+      "frame": "data: {\"type\": \"resync\"}\n\n",
+      "id": "sse.raw.resync",
+      "note": "the window's offset is past this log: start the pane over"
+    }
+  ],
+  "endpoint": "sse.frames",
+  "route": "(SSE encoder, in-process)"
+}

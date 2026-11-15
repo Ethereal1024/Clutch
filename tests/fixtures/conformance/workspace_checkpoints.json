@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "body": {
+        "anchors": []
+      },
+      "id": "checkpoints.no-workspace",
+      "method": "GET",
+      "path": "/api/workspace/checkpoints",
+      "status": 200
+    },
+    {
+      "body": {
+        "anchors": []
+      },
+      "id": "checkpoints.fresh",
+      "method": "GET",
+      "note": "a project with no recorded mutation has no anchor to offer",
+      "path": "/api/workspace/checkpoints",
+      "status": 200
+    },
+    {
+      "body": {
+        "anchors": [
+          1024,
+          4096
+        ]
+      },
+      "id": "checkpoints.anchors",
+      "method": "GET",
+      "path": "/api/workspace/checkpoints",
+      "status": 200
+    }
+  ],
+  "endpoint": "workspace.checkpoints",
+  "route": "GET /api/workspace/checkpoints"
+}

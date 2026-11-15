@@ -1,0 +1,822 @@
+{
+  "workspace": {
+    "root": "/home/u/proj",
+    "home": "/home/u"
+  },
+  "evaluate": [
+    {
+      "name": "plain",
+      "args": "{\"command\": \"ls -la\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "rm -rf /",
+      "args": "{\"command\": \"rm -rf /\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/"
+      ]
+    },
+    {
+      "name": "rm one file",
+      "args": "{\"command\": \"rm notes.txt\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": []
+    },
+    {
+      "name": "rm after a semicolon",
+      "args": "{\"command\": \"true; rm -rf build\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": []
+    },
+    {
+      "name": "sudo",
+      "args": "{\"command\": \"sudo apt install curl\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": []
+    },
+    {
+      "name": "mkfs",
+      "args": "{\"command\": \"mkfs.ext4 /dev/sdb1\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": []
+    },
+    {
+      "name": "dd",
+      "args": "{\"command\": \"dd if=/dev/zero of=/dev/null\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": []
+    },
+    {
+      "name": "mv onto root",
+      "args": "{\"command\": \"mv a / x\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/"
+      ]
+    },
+    {
+      "name": "relative escape",
+      "args": "{\"command\": \"cat ../../etc/passwd\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/home/etc/passwd"
+      ]
+    },
+    {
+      "name": "absolute escape",
+      "args": "{\"command\": \"cat /etc/passwd\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/etc/passwd"
+      ]
+    },
+    {
+      "name": "absolute INSIDE the root",
+      "args": "{\"command\": \"cat /home/u/proj/src/a.py\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "escape after cd",
+      "args": "{\"command\": \"cd src && cat ../../etc/passwd\"}",
+      "access": "command",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/home/u/etc/passwd"
+      ]
+    },
+    {
+      "name": "cd into home then escape",
+      "args": "{\"command\": \"cd ~ && cat proj/x\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/home/u/&&",
+        "/home/u/cat"
+      ]
+    },
+    {
+      "name": "cd into scratch",
+      "args": "{\"command\": \"cd /tmp && ls\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "redirect to scratch",
+      "args": "{\"command\": \"echo hi > /tmp/out.log\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "redirect in the workspace",
+      "args": "{\"command\": \"echo hi > out.log\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "tilde escape",
+      "args": "{\"command\": \"cat ~/secret\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/home/u/secret"
+      ]
+    },
+    {
+      "name": "tilde inside home",
+      "args": "{\"command\": \"cat ~/proj/a.py\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "dollar HOME is not expanded",
+      "args": "{\"command\": \"cat $HOME/secret\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "quoted path with a space",
+      "args": "{\"command\": \"cat 'a b.txt'\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "unbalanced quote",
+      "args": "{\"command\": \"cat 'unclosed\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "empty",
+      "args": "{\"command\": \"\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "find with -delete",
+      "args": "{\"command\": \"find . -name '*.py' -delete\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "grep sweep",
+      "args": "{\"command\": \"grep -rn x .\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "python module",
+      "args": "{\"command\": \"python3 -m http.server\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "printf to a relative file",
+      "args": "{\"command\": \"printf '%s\\\\n' hi > notes.md\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "read a file",
+      "args": "{\"path\": \"a.py\"}",
+      "access": "read",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "read upwards",
+      "args": "{\"path\": \"../a.py\"}",
+      "access": "read",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/home/u/a.py"
+      ]
+    },
+    {
+      "name": "read an absolute path",
+      "args": "{\"path\": \"/etc/passwd\"}",
+      "access": "read",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/etc/passwd"
+      ]
+    },
+    {
+      "name": "read inside, absolutely",
+      "args": "{\"path\": \"/home/u/proj/a.py\"}",
+      "access": "read",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "read a tilde",
+      "args": "{\"path\": \"~/x\"}",
+      "access": "read",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/home/u/x"
+      ]
+    },
+    {
+      "name": "read scratch",
+      "args": "{\"path\": \"/tmp/x.log\"}",
+      "access": "read",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "sweep the root",
+      "args": "{\"path\": \".\"}",
+      "access": "sweep",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "sweep upwards",
+      "args": "{\"path\": \"../\"}",
+      "access": "sweep",
+      "arg": "",
+      "action": "allow",
+      "escapes": [
+        "/home/u"
+      ]
+    },
+    {
+      "name": "write a file",
+      "args": "{\"path\": \"notes.md\"}",
+      "access": "write",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "write upwards",
+      "args": "{\"path\": \"../notes.md\"}",
+      "access": "write",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/home/u/notes.md"
+      ]
+    },
+    {
+      "name": "write an absolute path",
+      "args": "{\"path\": \"/etc/hosts\"}",
+      "access": "write",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/etc/hosts"
+      ]
+    },
+    {
+      "name": "write scratch",
+      "args": "{\"path\": \"/tmp/x.log\"}",
+      "access": "write",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "write a tilde",
+      "args": "{\"path\": \"~/x\"}",
+      "access": "write",
+      "arg": "",
+      "action": "ask",
+      "escapes": [
+        "/home/u/x"
+      ]
+    },
+    {
+      "name": "write, renamed argument",
+      "args": "{\"file\": \"../x\"}",
+      "access": "write",
+      "arg": "file",
+      "action": "ask",
+      "escapes": [
+        "/home/u/x"
+      ]
+    },
+    {
+      "name": "no access word",
+      "args": "{\"path\": \"../x\"}",
+      "access": "",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "unknown access word",
+      "args": "{\"path\": \"../x\"}",
+      "access": "other",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    },
+    {
+      "name": "garbage args",
+      "args": "{\"command\": \"{not json\"}",
+      "access": "command",
+      "arg": "",
+      "action": "allow",
+      "escapes": []
+    }
+  ],
+  "auto_allow": [
+    {
+      "name": "plain",
+      "args": "{\"command\": \"ls -la\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "rm -rf /",
+      "args": "{\"command\": \"rm -rf /\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "rm one file",
+      "args": "{\"command\": \"rm notes.txt\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "rm after a semicolon",
+      "args": "{\"command\": \"true; rm -rf build\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "sudo",
+      "args": "{\"command\": \"sudo apt install curl\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "mkfs",
+      "args": "{\"command\": \"mkfs.ext4 /dev/sdb1\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "dd",
+      "args": "{\"command\": \"dd if=/dev/zero of=/dev/null\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "mv onto root",
+      "args": "{\"command\": \"mv a / x\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "relative escape",
+      "args": "{\"command\": \"cat ../../etc/passwd\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "absolute escape",
+      "args": "{\"command\": \"cat /etc/passwd\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "absolute INSIDE the root",
+      "args": "{\"command\": \"cat /home/u/proj/src/a.py\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "escape after cd",
+      "args": "{\"command\": \"cd src && cat ../../etc/passwd\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "cd into home then escape",
+      "args": "{\"command\": \"cd ~ && cat proj/x\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "cd into scratch",
+      "args": "{\"command\": \"cd /tmp && ls\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "redirect to scratch",
+      "args": "{\"command\": \"echo hi > /tmp/out.log\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "redirect in the workspace",
+      "args": "{\"command\": \"echo hi > out.log\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "tilde escape",
+      "args": "{\"command\": \"cat ~/secret\"}",
+      "access": "command",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "tilde inside home",
+      "args": "{\"command\": \"cat ~/proj/a.py\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "dollar HOME is not expanded",
+      "args": "{\"command\": \"cat $HOME/secret\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "quoted path with a space",
+      "args": "{\"command\": \"cat 'a b.txt'\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "unbalanced quote",
+      "args": "{\"command\": \"cat 'unclosed\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "empty",
+      "args": "{\"command\": \"\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "find with -delete",
+      "args": "{\"command\": \"find . -name '*.py' -delete\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "grep sweep",
+      "args": "{\"command\": \"grep -rn x .\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "python module",
+      "args": "{\"command\": \"python3 -m http.server\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "printf to a relative file",
+      "args": "{\"command\": \"printf '%s\\\\n' hi > notes.md\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "read a file",
+      "args": "{\"path\": \"a.py\"}",
+      "access": "read",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "read upwards",
+      "args": "{\"path\": \"../a.py\"}",
+      "access": "read",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "read an absolute path",
+      "args": "{\"path\": \"/etc/passwd\"}",
+      "access": "read",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "read inside, absolutely",
+      "args": "{\"path\": \"/home/u/proj/a.py\"}",
+      "access": "read",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "read a tilde",
+      "args": "{\"path\": \"~/x\"}",
+      "access": "read",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "read scratch",
+      "args": "{\"path\": \"/tmp/x.log\"}",
+      "access": "read",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "sweep the root",
+      "args": "{\"path\": \".\"}",
+      "access": "sweep",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "sweep upwards",
+      "args": "{\"path\": \"../\"}",
+      "access": "sweep",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "write a file",
+      "args": "{\"path\": \"notes.md\"}",
+      "access": "write",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "write upwards",
+      "args": "{\"path\": \"../notes.md\"}",
+      "access": "write",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "write an absolute path",
+      "args": "{\"path\": \"/etc/hosts\"}",
+      "access": "write",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "write scratch",
+      "args": "{\"path\": \"/tmp/x.log\"}",
+      "access": "write",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "write a tilde",
+      "args": "{\"path\": \"~/x\"}",
+      "access": "write",
+      "arg": "",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "write, renamed argument",
+      "args": "{\"file\": \"../x\"}",
+      "access": "write",
+      "arg": "file",
+      "error": "sandbox escape requires user approval"
+    },
+    {
+      "name": "no access word",
+      "args": "{\"path\": \"../x\"}",
+      "access": "",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "unknown access word",
+      "args": "{\"path\": \"../x\"}",
+      "access": "other",
+      "arg": "",
+      "error": null
+    },
+    {
+      "name": "garbage args",
+      "args": "{\"command\": \"{not json\"}",
+      "access": "command",
+      "arg": "",
+      "error": null
+    }
+  ],
+  "unattended": {
+    "name": "no user interface",
+    "args": "{\"command\": \"rm -rf /\"}",
+    "access": "command",
+    "reason": "no user interface connected to confirm this action"
+  },
+  "split": [
+    {
+      "command": "ls -la",
+      "tokens": [
+        "ls",
+        "-la"
+      ]
+    },
+    {
+      "command": "cat 'a b.txt'",
+      "tokens": [
+        "cat",
+        "a b.txt"
+      ]
+    },
+    {
+      "command": "echo \"quoted \\\"inner\\\" text\"",
+      "tokens": [
+        "echo",
+        "quoted \"inner\" text"
+      ]
+    },
+    {
+      "command": "printf '%s\\n' hi",
+      "tokens": [
+        "printf",
+        "%s\\n",
+        "hi"
+      ]
+    },
+    {
+      "command": "cat ~/a ~/b",
+      "tokens": [
+        "cat",
+        "~/a",
+        "~/b"
+      ]
+    },
+    {
+      "command": "a\\ b",
+      "tokens": [
+        "a b"
+      ]
+    },
+    {
+      "command": "cat 'unclosed",
+      "tokens": null
+    },
+    {
+      "command": "echo \"unclosed",
+      "tokens": null
+    },
+    {
+      "command": "",
+      "tokens": []
+    },
+    {
+      "command": "   ",
+      "tokens": []
+    },
+    {
+      "command": "''",
+      "tokens": [
+        ""
+      ]
+    },
+    {
+      "command": "\"\" x",
+      "tokens": [
+        "",
+        "x"
+      ]
+    },
+    {
+      "command": "one;two",
+      "tokens": [
+        "one;two"
+      ]
+    },
+    {
+      "command": "rm -rf build && ls",
+      "tokens": [
+        "rm",
+        "-rf",
+        "build",
+        "&&",
+        "ls"
+      ]
+    },
+    {
+      "command": "echo \"a\\nb\"",
+      "tokens": [
+        "echo",
+        "a\\nb"
+      ]
+    },
+    {
+      "command": "echo \"a\\\\b\"",
+      "tokens": [
+        "echo",
+        "a\\b"
+      ]
+    },
+    {
+      "command": "a\\\nb",
+      "tokens": [
+        "a\nb"
+      ]
+    },
+    {
+      "command": "tail -c +1 f | head -c 10",
+      "tokens": [
+        "tail",
+        "-c",
+        "+1",
+        "f",
+        "|",
+        "head",
+        "-c",
+        "10"
+      ]
+    },
+    {
+      "command": "cat \"$HOME/x\"",
+      "tokens": [
+        "cat",
+        "$HOME/x"
+      ]
+    }
+  ]
+}

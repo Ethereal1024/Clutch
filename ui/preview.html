@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Clutch UI — Preview</title>
+<style>
+/* ============================================================
+   DESIGN TOKENS
+   ============================================================ */
+:root {
+  --bg:      #0F0F10;
+  --bg2:     #161618;
+  --bg3:     #1e1e20;
+  --border:  #26262A;
+  --text:    #F2F2F4;
+  --muted:   #8b8b92;
+  --accent:  #EF4444;
+  --font-display: system-ui, "Segoe UI", sans-serif;
+  --font-mono:    "JetBrains Mono", "Fira Code", monospace;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px;
+  --fs-xs:11px; --fs-sm:12px; --fs-md:13px;
+  --scroll-thumb: #2b2b31;
+  --quick:.15s;
+}
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+html,body { height:100%; background:var(--bg); color:var(--text);
+            font-family:var(--font-display); font-size:14px; }
+body { display:flex; flex-direction:column; user-select:none; }
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--scroll-thumb); border-radius:999px; }
+.spacer { flex:1; }
+.hidden { display:none !important; }
+
+/* ============================================================
+   TITLEBAR  (VS Code style: single 30px row, drag region)
+   ============================================================ */
+#titlebar {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  /* In Electron: -webkit-app-region: drag */
+  position: relative;
+  z-index: 100;
+}
+
+/* ---- app icon ---- */
+.tb-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 100%;
+  color: var(--accent);
+  font-size: 14px;
+  flex-shrink: 0;
+  /* -webkit-app-region: no-drag */
+}
+
+/* ---- menu bar ---- */
+.tb-menu {
+  display: flex; align-items: stretch;
+  height: 100%;
+  gap: 0;
+  /* -webkit-app-region: no-drag */
+}
+.tb-menu-item {
+  position: relative;
+  display: flex; align-items: center;
+  padding: 0 8px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  cursor: pointer;
+  height: 100%;
+  white-space: nowrap;
+  transition: background var(--quick), color var(--quick);
+  border-radius: 3px;
+}
+.tb-menu-item:hover,
+.tb-menu-item.open { background: var(--bg3); color: var(--text); }
+
+/* dropdown panel */
+.tb-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 200px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  z-index: 999;
+  padding: 4px 0;
+}
+.tb-menu-item.open .tb-dropdown { display: block; }
+
+.tb-dd-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 16px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  cursor: pointer;
+  gap: 32px;
+  white-space: nowrap;
+}
+.tb-dd-item:hover { background: var(--accent); color: #fff; }
+.tb-dd-item.disabled { color: var(--muted); cursor: default; }
+.tb-dd-item.disabled:hover { background: transparent; color: var(--muted); }
+.tb-dd-item kbd {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--muted); background: none; border: none;
+}
+.tb-dd-item.open:hover kbd { color: rgba(255,255,255,.6); }
+.tb-dd-sep {
+  height: 1px; background: var(--border);
+  margin: 4px 0;
+}
+.tb-dd-label {
+  padding: 3px 16px 1px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  cursor: default;
+}
+
+/* ---- drag region (title text) ---- */
+.tb-drag {
+  flex: 1;
+  display: flex; align-items: center; justify-content: center;
+  height: 100%;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  letter-spacing: .02em;
+  /* -webkit-app-region: drag */
+  pointer-events: none;   /* preview only */
+}
+
+/* ---- window controls (VS Code style) ---- */
+.tb-winctrl {
+  display: flex; align-items: stretch;
+  height: 100%;
+  margin-left: auto;
+  /* -webkit-app-region: no-drag */
+}
+.tb-winbtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 100%;
+  border: none; background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--quick), color var(--quick);
+}
+.tb-winbtn:hover { background: var(--bg3); color: var(--text); }
+.tb-winbtn.close:hover { background: #c42b1c; color: #fff; }
+
+/* ============================================================
+   TAB BAR
+   ============================================================ */
+.tab-bar {
+  display:flex; align-items:stretch;
+  height:32px;
+  border-bottom:1px solid var(--border);
+  background:var(--bg2);
+  overflow-x:auto; overflow-y:hidden;
+  scrollbar-width:none; flex-shrink:0;
+  position:relative;
+}
+.tab-bar::-webkit-scrollbar { display:none; }
+.doc-tab {
+  display:flex; align-items:center; gap:6px;
+  padding:0 10px;
+  min-width:100px; max-width:200px; height:100%;
+  border:none; border-right:1px solid var(--border);
+  border-bottom:2px solid transparent;
+  background:var(--bg2); color:var(--muted);
+  font-size:var(--fs-sm); cursor:pointer;
+  white-space:nowrap; overflow:hidden; flex-shrink:0;
+  transition:background var(--quick),color var(--quick);
+}
+.doc-tab:hover { background:var(--bg); color:var(--text); }
+.doc-tab.active { background:var(--bg); color:var(--text); border-bottom-color:var(--accent); }
+.doc-tab-label { overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+.doc-tab-dirty { width:6px; height:6px; border-radius:50%; background:var(--accent); flex-shrink:0; display:none; }
+.doc-tab.dirty .doc-tab-dirty { display:block; }
+.doc-tab-close {
+  flex-shrink:0; width:16px; height:16px;
+  display:flex; align-items:center; justify-content:center;
+  border:none; padding:0; background:transparent;
+  border-radius:2px; font-size:11px; line-height:1;
+  color:var(--muted); opacity:0; cursor:pointer;
+  transition:opacity .1s, background .1s;
+}
+.doc-tab:hover .doc-tab-close,
+.doc-tab.active .doc-tab-close { opacity:1; }
+.doc-tab-close:hover { background:rgba(255,255,255,.12); color:var(--text); }
+.tab-new {
+  display:flex; align-items:center; justify-content:center;
+  width:32px; height:100%; border:none;
+  border-right:1px solid var(--border);
+  background:none; color:var(--muted);
+  font-size:16px; cursor:pointer; flex-shrink:0; line-height:1;
+  margin-left:auto;
+}
+.tab-new:hover { color:var(--text); background:var(--bg); }
+/* overflow fade */
+.tab-bar::after {
+  content:""; position:absolute; top:0; right:32px; bottom:0; width:20px;
+  background:linear-gradient(to right, transparent, var(--bg2));
+  pointer-events:none;
+}
+
+/* ============================================================
+   MAIN LAYOUT
+   ============================================================ */
+main { display:flex; flex:1; min-height:0; }
+#left  { flex:1; display:flex; flex-direction:column; min-width:0; }
+#right {
+  width:220px; flex-shrink:0;
+  border-left:1px solid var(--border);
+  display:flex; flex-direction:column;
+  background:var(--bg);
+}
+.panel-head {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 var(--s3); height:26px;
+  border-bottom:1px solid var(--border);
+  font-size:var(--fs-xs); text-transform:uppercase;
+  letter-spacing:.06em; color:var(--muted); flex-shrink:0;
+}
+
+/* ============================================================
+   TASKBAR
+   ============================================================ */
+#taskbar { padding:var(--s4); border-bottom:1px solid var(--border); flex-shrink:0; }
+#task-input {
+  width:100%; background:var(--bg2); border:1px solid var(--border);
+  color:var(--text); padding:10px; font-family:var(--font-mono);
+  font-size:14px; line-height:1.5; resize:none; display:block;
+}
+#task-input:focus { outline:none; border-color:var(--accent); }
+.run-actions { display:flex; align-items:center; gap:var(--s2); margin-top:var(--s3); }
+.run-actions button {
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  min-width:90px; height:29px; line-height:1;
+  border:1px solid var(--border); background:var(--bg2); color:var(--muted);
+  font-family:var(--font-display); font-size:var(--fs-sm); cursor:pointer;
+}
+.run-actions button:hover { border-color:var(--muted); color:var(--text); }
+.run-actions button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+#mode-btn { border-color:var(--accent); color:var(--accent); text-transform:uppercase; letter-spacing:.04em; }
+
+/* ============================================================
+   STREAM
+   ============================================================ */
+.stream-wrap { position:relative; flex:1; display:flex; flex-direction:column; min-height:0; }
+#stream { flex:1; overflow-y:auto; padding:16px 16px 24px; position:relative; }
+#stream::before {
+  content:""; position:absolute; left:23px; top:0; bottom:0;
+  width:1px; background:var(--border); opacity:.55;
+}
+.event { display:flex; gap:10px; margin-bottom:14px; font-size:var(--fs-md); line-height:1.6; }
+.event-marker {
+  flex-shrink:0; width:14px; height:14px; margin-top:3px;
+  border-radius:50%; border:1px solid var(--border); background:var(--bg2); position:relative; z-index:1;
+}
+.event-marker.user   { background:var(--accent); border-color:var(--accent); }
+.event-marker.tool   { background:var(--border); border-color:var(--border); }
+.event-body { flex:1; min-width:0; }
+.event-role { font-size:var(--fs-xs); color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:4px; }
+.event-code {
+  background:var(--bg2); border:1px solid var(--border);
+  padding:8px 10px; font-family:var(--font-mono); font-size:12px;
+  color:var(--text); margin-top:6px;
+}
+
+/* ============================================================
+   STATUS BAR
+   ============================================================ */
+.statusbar {
+  display:flex; align-items:center; height:22px;
+  padding:0 var(--s3); border-top:1px solid var(--border);
+  background:var(--bg); font-size:var(--fs-xs); color:var(--muted);
+  flex-shrink:0; user-select:none;
+}
+.sb-item { padding:0 var(--s2); line-height:1; }
+.sb-sep  { color:var(--border); }
+.sb-status { font-weight:600; text-transform:uppercase; letter-spacing:.06em; }
+.sb-workdir,.sb-project { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* ============================================================
+   TREE
+   ============================================================ */
+.tree-item {
+  display:flex; align-items:center; gap:6px;
+  padding:3px var(--s3); font-size:var(--fs-sm); color:var(--muted); cursor:pointer;
+}
+.tree-item:hover { color:var(--text); background:var(--bg2); }
+.tree-item.dir { color:var(--text); }
+</style>
+</head>
+<body>
+
+<!-- =========================================================
+     TITLEBAR: icon + menus + drag + window controls
+     ========================================================= -->
+<div id="titlebar">
+
+  <!-- app icon -->
+  <div class="tb-icon">▣</div>
+
+  <!-- menu bar -->
+  <nav class="tb-menu" id="tb-menu">
+
+    <div class="tb-menu-item" data-menu="file">
+      文件
+      <div class="tb-dropdown">
+        <div class="tb-dd-item" data-action="open">打开项目… <kbd>Ctrl O</kbd></div>
+        <div class="tb-dd-item" data-action="new">新建项目… <kbd>Ctrl N</kbd></div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-label">最近打开</div>
+        <div class="tb-dd-item" data-action="recent">~/projects/my-app.clc</div>
+        <div class="tb-dd-item" data-action="recent">~/docs/docs-update.clc</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-item disabled">关闭项目</div>
+      </div>
+    </div>
+
+    <div class="tb-menu-item" data-menu="run">
+      运行
+      <div class="tb-dropdown">
+        <div class="tb-dd-item" data-action="run">▶ 执行任务 <kbd>Ctrl ↵</kbd></div>
+        <div class="tb-dd-item disabled">■ 停止</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-item" data-action="mode-work">模式：Work（全权限）</div>
+        <div class="tb-dd-item" data-action="mode-chat">模式：Chat（只读）</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-item" data-action="trust">🛡 Trust 模式</div>
+      </div>
+    </div>
+
+    <div class="tb-menu-item" data-menu="view">
+      视图
+      <div class="tb-dropdown">
+        <div class="tb-dd-item" data-action="toggle-right">工作区面板</div>
+        <div class="tb-dd-item" data-action="toggle-statusbar">状态栏</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-item" data-action="toggle-hidden">显示隐藏文件</div>
+      </div>
+    </div>
+
+    <div class="tb-menu-item" data-menu="window">
+      窗口
+      <div class="tb-dropdown">
+        <div class="tb-dd-item" data-action="tab-new">新建标签页</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-label">当前标签页</div>
+        <div class="tb-dd-item tab-list-placeholder" data-action="tab-switch-0">my-project.clc</div>
+        <div class="tb-dd-item" data-action="tab-switch-1">refactor-auth.clc</div>
+        <div class="tb-dd-item" data-action="tab-switch-2">docs-update.clc</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-item" data-action="tab-close">关闭当前标签页</div>
+      </div>
+    </div>
+
+    <div class="tb-menu-item" data-menu="help">
+      帮助
+      <div class="tb-dropdown">
+        <div class="tb-dd-item" data-action="settings">⚙ 模型设置…</div>
+        <div class="tb-dd-sep"></div>
+        <div class="tb-dd-item" data-action="about">关于 Clutch</div>
+      </div>
+    </div>
+
+  </nav>
+
+  <!-- drag region -->
+  <div class="tb-drag">Clutch</div>
+
+  <!-- window controls -->
+  <div class="tb-winctrl">
+    <button class="tb-winbtn minimize" title="最小化" aria-label="最小化">
+      <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+    </button>
+    <button class="tb-winbtn maximize" title="最大化" aria-label="最大化">
+      <svg width="10" height="10" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor"/></svg>
+    </button>
+    <button class="tb-winbtn close" title="关闭" aria-label="关闭">
+      <svg width="10" height="10" viewBox="0 0 10 10">
+        <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/>
+        <line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+    </button>
+  </div>
+
+</div>
+
+<!-- =========================================================
+     TAB BAR
+     ========================================================= -->
+<div class="tab-bar" id="tab-bar" role="tablist">
+  <button class="tab-new" id="tab-new-btn" title="打开另一个项目">＋</button>
+</div>
+
+<!-- =========================================================
+     MAIN
+     ========================================================= -->
+<main>
+  <section id="left">
+    <div class="stream-wrap">
+      <div id="stream">
+        <div class="event">
+          <div class="event-marker user"></div>
+          <div class="event-body">
+            <div class="event-role">user</div>
+            <div class="event-text">把 auth 模块的所有 console.log 替换成结构化日志。</div>
+          </div>
+        </div>
+        <div class="event">
+          <div class="event-marker"></div>
+          <div class="event-body">
+            <div class="event-role">agent</div>
+            <div class="event-text">好的，先读取 src/auth/ 目录结构，然后逐文件替换。</div>
+          </div>
+        </div>
+        <div class="event">
+          <div class="event-marker tool"></div>
+          <div class="event-body">
+            <div class="event-role" style="color:var(--muted)">tool — read_file</div>
+            <div class="event-code">src/auth/index.ts  (247 lines)</div>
+          </div>
+        </div>
+        <div class="event">
+          <div class="event-marker"></div>
+          <div class="event-body">
+            <div class="event-role">agent</div>
+            <div class="event-text">找到 8 处 console.log，全部替换为 logger.info / logger.error。完成。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="taskbar">
+      <textarea id="task-input" rows="3" placeholder="What should I do?"></textarea>
+      <div class="run-actions">
+        <button id="run-btn" class="primary">▶ Run</button>
+        <button id="mode-btn">WORK</button>
+        <button id="trust-btn">🛡 Trust</button>
+      </div>
+    </div>
+  </section>
+
+  <aside id="right">
+    <div class="panel-head"><span>workspace</span></div>
+    <div style="overflow-y:auto;flex:1;padding-top:4px;">
+      <div class="tree-item dir">▾ src</div>
+      <div class="tree-item" style="padding-left:22px;">▾ auth</div>
+      <div class="tree-item" style="padding-left:38px;">index.ts</div>
+      <div class="tree-item" style="padding-left:38px;">middleware.ts</div>
+      <div class="tree-item" style="padding-left:22px;">app.ts</div>
+      <div class="tree-item">package.json</div>
+    </div>
+  </aside>
+</main>
+
+<!-- STATUS BAR -->
+<footer class="statusbar" id="statusbar">
+  <span class="sb-item sb-status idle">idle</span>
+  <span class="sb-sep">|</span>
+  <span class="sb-item" title="backend">localhost:7779</span>
+  <span class="sb-sep">|</span>
+  <span class="sb-item" title="model">claude-opus-4-5</span>
+  <div class="spacer"></div>
+  <span class="sb-item sb-workdir" title="workdir">~/projects/my-app</span>
+  <span class="sb-sep">|</span>
+  <span class="sb-item sb-project" title="project">my-project.clc</span>
+</footer>
+
+<!-- =========================================================
+     INTERACTIVE JS
+     ========================================================= -->
+<script>
+// ---- tabs ----
+const tabs = [
+  { id:"t1", name:"my-project.clc",    path:"~/projects/my-app/my-project.clc",    dirty:false },
+  { id:"t2", name:"refactor-auth.clc", path:"~/projects/my-app/refactor-auth.clc", dirty:true  },
+  { id:"t3", name:"docs-update.clc",   path:"~/docs/docs-update.clc",              dirty:false },
+];
+let activeId = "t1";
+
+function renderTabs() {
+  const bar = document.getElementById("tab-bar");
+  const btn = document.getElementById("tab-new-btn");
+  bar.querySelectorAll(".doc-tab").forEach(e => e.remove());
+  tabs.forEach(tab => {
+    const el = document.createElement("div");
+    el.className = "doc-tab" + (tab.id===activeId?" active":"") + (tab.dirty?" dirty":"");
+    el.dataset.tabId = tab.id; el.title = tab.path;
+    el.innerHTML = `<span class="doc-tab-label">${tab.name}</span>
+      <span class="doc-tab-dirty"></span>
+      <button class="doc-tab-close" title="关闭">✕</button>`;
+    el.querySelector(".doc-tab-close").addEventListener("click", e => {
+      e.stopPropagation(); closeTab(tab.id);
+    });
+    el.addEventListener("click", () => activateTab(tab.id));
+    bar.insertBefore(el, btn);
+  });
+}
+function activateTab(id) { activeId = id; renderTabs(); }
+function closeTab(id) {
+  const idx = tabs.findIndex(t => t.id===id);
+  if (idx<0) return;
+  tabs.splice(idx,1);
+  if (activeId===id) { const n=tabs[idx]||tabs[idx-1]; activeId=n?n.id:null; }
+  renderTabs();
+}
+renderTabs();
+
+// ---- menu bar ----
+const menuItems = document.querySelectorAll(".tb-menu-item");
+let openItem = null;
+
+function openMenu(item) {
+  if (openItem && openItem !== item) openItem.classList.remove("open");
+  item.classList.toggle("open");
+  openItem = item.classList.contains("open") ? item : null;
+}
+menuItems.forEach(item => {
+  item.addEventListener("mousedown", e => { e.stopPropagation(); openMenu(item); });
+  // hover-to-switch when another menu is already open
+  item.addEventListener("mouseenter", () => { if (openItem && openItem!==item) openMenu(item); });
+});
+
+document.addEventListener("mousedown", () => {
+  if (openItem) { openItem.classList.remove("open"); openItem = null; }
+});
+
+// ---- menu actions ----
+document.getElementById("tb-menu").addEventListener("click", e => {
+  const item = e.target.closest(".tb-dd-item");
+  if (!item || item.classList.contains("disabled")) return;
+  const action = item.dataset.action;
+  if (action === "open")          alert("打开项目（demo）");
+  else if (action === "new")      alert("新建项目（demo）");
+  else if (action === "run")      alert("执行任务（demo）");
+  else if (action === "settings") alert("打开设置（demo）");
+  else if (action === "toggle-right") {
+    const r = document.getElementById("right");
+    r.style.display = r.style.display==="none" ? "" : "none";
+  }
+  else if (action === "toggle-statusbar") {
+    const sb = document.getElementById("statusbar");
+    sb.classList.toggle("hidden");
+  }
+  else if (action === "tab-new") {
+    const name = "new-"+Date.now().toString(36).slice(-4)+".clc";
+    tabs.push({id:"t"+Date.now(), name, path:"~/"+name, dirty:false});
+    activateTab(tabs[tabs.length-1].id);
+  }
+  else if (action === "tab-close") closeTab(activeId);
+  if (openItem) { openItem.classList.remove("open"); openItem = null; }
+});
+
+// keyboard: Escape closes menu
+document.addEventListener("keydown", e => {
+  if (e.key==="Escape" && openItem) { openItem.classList.remove("open"); openItem=null; }
+  // Ctrl+Tab
+  if (e.ctrlKey && e.key==="Tab" && tabs.length>1) {
+    e.preventDefault();
+    const idx = tabs.findIndex(t=>t.id===activeId);
+    const next = tabs[(idx+(e.shiftKey?-1:1)+tabs.length)%tabs.length];
+    activateTab(next.id);
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,136 @@
+{
+  "comparison": "status equals and the body's canonical JSON (sorted keys) is equal; `masked` fields are compared by type only; `pending` endpoints are not compared until the JS host answers them",
+  "endpoints": [
+    {
+      "cases": [
+        "tree.no-workspace",
+        "tree.root",
+        "tree.hidden",
+        "tree.expanded",
+        "tree.protected"
+      ],
+      "file": "workspace_tree.json",
+      "id": "workspace.tree",
+      "owner": "M1",
+      "route": "GET /api/workspace/tree",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "revert.no-workspace",
+        "revert.no-snapshot",
+        "revert.escape",
+        "revert.no-path",
+        "revert.bad-json",
+        "revert.protected",
+        "revert.ok"
+      ],
+      "file": "workspace_revert.json",
+      "id": "workspace.revert",
+      "owner": "M1",
+      "route": "POST /api/workspace/revert",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "checkpoints.no-workspace",
+        "checkpoints.fresh",
+        "checkpoints.anchors"
+      ],
+      "file": "workspace_checkpoints.json",
+      "id": "workspace.checkpoints",
+      "owner": "M1",
+      "route": "GET /api/workspace/checkpoints",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "rollback.no-workspace",
+        "rollback.no-record",
+        "rollback.bad-offset-missing",
+        "rollback.bad-offset-negative",
+        "rollback.bad-offset-boolean",
+        "rollback.bad-offset-string",
+        "rollback.bad-json",
+        "rollback.ok",
+        "rollback.run-active",
+        "rollback.read-only"
+      ],
+      "file": "workspace_rollback.json",
+      "id": "workspace.rollback",
+      "owner": "M1",
+      "route": "POST /api/workspace/rollback",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "fs.list.dir",
+        "fs.list.not-a-directory",
+        "fs.list.unknown-path",
+        "fs.list.home"
+      ],
+      "file": "fs_list.json",
+      "id": "fs.list",
+      "owner": "M1",
+      "route": "GET /api/fs/list",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "sse.transient.state-update",
+        "sse.durable.user-message",
+        "sse.raw.history",
+        "sse.raw.replayed",
+        "sse.raw.resync"
+      ],
+      "file": "sse_frames.json",
+      "id": "sse.frames",
+      "owner": "M2",
+      "route": "(SSE encoder, in-process)",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "project.new.ok",
+        "project.new.missing-name",
+        "project.open.ok",
+        "project.open.read-only"
+      ],
+      "file": "project_lifecycle.json",
+      "id": "project.lifecycle",
+      "owner": "M4",
+      "route": "POST /api/project/{new,open}",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "history.no-project"
+      ],
+      "file": "history.json",
+      "id": "history",
+      "owner": "M4",
+      "route": "GET /api/history",
+      "status": "enforced"
+    },
+    {
+      "cases": [
+        "routing.unknown-get",
+        "routing.unknown-post"
+      ],
+      "file": "routing.json",
+      "id": "routing",
+      "owner": "M1",
+      "route": "GET|POST <unknown route>",
+      "status": "enforced"
+    }
+  ],
+  "format": 1,
+  "generated_by": "tests/conformance_capture.py",
+  "normalizations": [
+    "<TMP>",
+    "<ROOT>",
+    "<HOME>"
+  ],
+  "source": "the Python `local` host (agent/server.py build()), deployment A/C",
+  "version": "0.1.64"
+}

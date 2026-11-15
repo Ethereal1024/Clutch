@@ -1,0 +1,90 @@
+{
+  "cases": [
+    {
+      "body": {
+        "error": "no workspace open"
+      },
+      "id": "revert.no-workspace",
+      "method": "POST",
+      "path": "/api/workspace/revert",
+      "request": {
+        "path": "alpha.txt"
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "no snapshot to restore"
+      },
+      "id": "revert.no-snapshot",
+      "method": "POST",
+      "path": "/api/workspace/revert",
+      "request": {
+        "path": "alpha.txt"
+      },
+      "status": 404
+    },
+    {
+      "body": {
+        "error": "path escapes workspace: '../escape'"
+      },
+      "id": "revert.escape",
+      "method": "POST",
+      "path": "/api/workspace/revert",
+      "request": {
+        "path": "../escape"
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "no workspace open"
+      },
+      "id": "revert.no-path",
+      "method": "POST",
+      "note": "no path and no workspace share one answer",
+      "path": "/api/workspace/revert",
+      "request": {},
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "bad json body"
+      },
+      "id": "revert.bad-json",
+      "method": "POST",
+      "path": "/api/workspace/revert",
+      "request": {
+        "raw": "{"
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "protected file"
+      },
+      "id": "revert.protected",
+      "method": "POST",
+      "path": "/api/workspace/revert",
+      "request": {
+        "path": "demo.clc"
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "path": "<ROOT>/alpha.txt",
+        "status": "ok"
+      },
+      "id": "revert.ok",
+      "method": "POST",
+      "path": "/api/workspace/revert",
+      "request": {
+        "path": "alpha.txt"
+      },
+      "status": 200
+    }
+  ],
+  "endpoint": "workspace.revert",
+  "route": "POST /api/workspace/revert"
+}

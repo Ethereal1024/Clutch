@@ -1,0 +1,135 @@
+{
+  "cases": [
+    {
+      "body": {
+        "error": "no workspace open"
+      },
+      "id": "rollback.no-workspace",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": 0
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "no recorded changes for that task"
+      },
+      "id": "rollback.no-record",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": 1
+      },
+      "status": 404
+    },
+    {
+      "body": {
+        "error": "offset (a non-negative integer) is required"
+      },
+      "id": "rollback.bad-offset-missing",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {},
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "offset (a non-negative integer) is required"
+      },
+      "id": "rollback.bad-offset-negative",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": -1
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "offset (a non-negative integer) is required"
+      },
+      "id": "rollback.bad-offset-boolean",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": true
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "offset (a non-negative integer) is required"
+      },
+      "id": "rollback.bad-offset-string",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": "12"
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "error": "bad json body"
+      },
+      "id": "rollback.bad-json",
+      "method": "POST",
+      "note": "`null` parses but is not an object -> the same 400 as malformed JSON",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "raw": "null"
+      },
+      "status": 400
+    },
+    {
+      "body": {
+        "count": 3,
+        "deleted": [
+          "<ROOT>/gamma.txt"
+        ],
+        "restored": [
+          "<ROOT>/sub/beta.md",
+          "<ROOT>/alpha.txt"
+        ],
+        "status": "ok"
+      },
+      "id": "rollback.ok",
+      "method": "POST",
+      "note": "restored newest-first; a creation the journal recorded is DELETED",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": 1024
+      },
+      "status": 200
+    },
+    {
+      "body": {
+        "error": "a run is active; stop it before rolling back"
+      },
+      "id": "rollback.run-active",
+      "method": "POST",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": 4096
+      },
+      "status": 409
+    },
+    {
+      "body": {
+        "error": "project opened read-only; close the other window first"
+      },
+      "id": "rollback.read-only",
+      "method": "POST",
+      "note": "the read-only refusal is checked BEFORE the journal, so it needs no anchor",
+      "path": "/api/workspace/rollback",
+      "request": {
+        "offset": 4096
+      },
+      "status": 409
+    }
+  ],
+  "endpoint": "workspace.rollback",
+  "route": "POST /api/workspace/rollback"
+}

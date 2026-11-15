@@ -1,0 +1,907 @@
+"""Golden capture for the statement layer (M3: `ui/host/statement.js` + `ui/host/orient.js`).
+
+A component's tool call has exactly one form —
+
+    render(template, the model's arguments ∪ the host's facts) → a runner → an envelope
+
+— and `agent/tools/statement.py` is the whole of it; `agent/tools/registry.py`'s
+`ExtensionTool.execute` is the order the pieces are used in, and
+`prompt.module_blocked_reason` is the question asked before anything is prepared.
+`tests/host-statement.test.js` and `tests/host-orient.test.js` replay both against
+the two JS files.
+
+    .venv/bin/python -m tests.statement_capture            # write the fixture
+    .venv/bin/python -m tests.statement_capture --check    # regenerate+compare
+
+Nothing here runs a process or touches the filesystem: the artifact lookup
+(`rendezvous.resolve`), the service table (`rendezvous.service`), the channel
+(`channel.current`/`channel.call`), the app host's transport
+(`statement.LocalTransport`) and the "may this component serve this root" probe
+(`registry.module_blocked_reason`) are all patched per case, and the workspace is
+the same kind of stub `tests/tools_capture.py` uses — it records what was asked of
+it, in a trace the JS replay reproduces call for call.
+
+What each group pins:
+
+  * `host_vars` — the facts a declaration may name (`{base}` ← `host.port_url`),
+    and that a fact the host has no value for is LEFT OUT rather than rendered as
+    an empty word;
+  * `launch_prefix` — the artifact's shape as a line prefix: "" for a service, the
+    interpreter + entry point for a checkout, `-m` with its directory on
+    PYTHONPATH for a package, a bare executable for an installed onefile, and the
+    rendezvous sentence when there is no artifact at all;
+  * `fence_globs` — the protected paths in the three spellings a client's glob is
+    matched against, sorted, with ""/"."/"/" dropped;
+  * `line` / `run` — one statement, rendered and carried: the prefix in front, the
+    host's values over the model's, `defaults` underneath, and a transport
+    failure left for the caller to word;
+  * `resident` / `per_call` / `client` — the three builders: which fact bundle
+    each one reads, that a client component with no live channel has NO statement
+    (fail closed, in the channel's own words), and that a client statement carries
+    the root and the fence;
+  * `client_run` — the template sent VERBATIM (not rendered, `defaults` ignored)
+    with the model's arguments, `ChannelError` → `ERROR: …`, the reply → envelope;
+  * `module_blocked` — `prompt.module_blocked_reason` itself, with `far_root`
+    marking the verdicts a host that only serves a far root can still reach (see
+    `ui/host/orient.js`'s header: the two subject clauses collapse there);
+  * `execute` — 20 whole calls through `registry.ExtensionTool.execute`, each
+    recording the trace of what the workspace/transport/channel saw AND the
+    envelope the model reads: the blocked reason, an uninstalled component, a
+    missing argument, success, a non-zero exit, a timeout, a Stop, an unreachable
+    transport, the client's refusal and its answer, and six shapes of the undo
+    record (replaced, created, failed run, escaping path, renamed argument, and a
+    CLIENT's write — which keeps its record, §5.5).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
+
+from agent.config import Config
+from agent.tools import catalog, channel, inst, prompt, registry, rendezvous, statement
+from agent.tools.envelope import Envelope
+from agent.tools.transport import CommandResult, TransportError
+from agent.tools.workspace import LocalWorkspace
+
+HERE = Path(__file__).resolve().parent
+OUT = HERE / "fixtures" / "statement" / "expected.json"
+
+ROOT = "/home/u/proj"
+LOG_PATH = f"{ROOT}/demo.clc"
+PORT = 51234
+TIMEOUT = 30.0
+
+
+# ----------------------------------------------------------------- the stubs
+
+
+@contextlib.contextmanager
+def patched(module, **names):
+    """Set attributes for one case and put them back, whatever happens."""
+    old = {name: getattr(module, name) for name in names}
+    try:
+        for name, value in names.items():
+            setattr(module, name, value)
+        yield
+    finally:
+        for name, value in old.items():
+            setattr(module, name, value)
+
+
+class FarWorkspace:
+    """A far root, in the only sense the statement layer asks for: a root, a
+    protected set, and file operations that RECORD what they were asked.
+
+    `files` maps a root-relative path to its content; anything else does not
+    exist. A path that names nothing inside the root is a `ValueError`, exactly
+    as `fs.js::resolve` answers (`path escapes workspace`).
+    """
+
+    def __init__(self, files: dict | None = None, protected: tuple = (LOG_PATH,)) -> None:
+        self.root = PurePosixPath(ROOT)
+        self._protected = tuple(PurePosixPath(p) for p in protected)
+        self._files = dict(files or {})
+        self.trace: list[str] = []
+        self.answers: dict[str, dict] = {}
+
+    # -- what the statement layer asks of a workspace ----------------------
+
+    def protected(self):
+        return self._protected
+
+    def resolve(self, path):
+        text = str(path)
+        self.trace.append(f"resolve {text}")
+        if text.startswith("/") or ".." in PurePosixPath(text).parts:
+            raise ValueError(f"path escapes workspace: {text}")
+        return self.root if text in ("", ".") else self.root / text
+
+    def read(self, path):
+        self.trace.append(f"read {path}")
+        key = str(PurePosixPath(path).relative_to(self.root))
+        if key not in self._files:
+            raise FileNotFoundError(str(path))
+        return self._files[key]
+
+    def snapshot(self, path, content):
+        self.trace.append(f"snapshot {path} {content}")
+
+    def record_mutation(self, path, existed, previous):
+        self.trace.append(f"record {path} {1 if existed else 0} {previous}")
+
+    # -- the runner (a service's statements go through the workspace) ------
+
+    def run(self, command: str, timeout: float, cancel=None):
+        self.trace.append(f"run {command}")
+        return canned(self.answers.get(command))
+
+
+class StubTransport:
+    """The app host's transport, for the statements that do not belong to a
+    workspace (`statement.LocalTransport`)."""
+
+    def __init__(self, answers: dict) -> None:
+        self.answers = answers
+        self.trace: list[str] = []
+
+    def run(self, command: str, timeout: float, cancel=None):
+        self.trace.append(f"run {command}")
+        return canned(self.answers.get(command))
+
+
+class StubService:
+    def __init__(self, values: dict) -> None:
+        self._values = values
+
+    def vars(self) -> dict:
+        return dict(self._values)
+
+
+class StubChannel:
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def reason_for(self, name: str) -> str:
+        return self._reason
+
+
+def canned(answer):
+    if answer is None:
+        raise AssertionError("the capture has no canned answer for that line")
+    error = answer.get("error")
+    if error:
+        raise TransportError(
+            error["message"], timeout=bool(error.get("timeout")), aborted=bool(error.get("aborted"))
+        )
+    return CommandResult(answer["code"], answer["stdout"], answer["stderr"])
+
+
+# --------------------------------------------------------------- the config
+
+
+def config() -> Config:
+    cfg = Config()
+    cfg.port = PORT
+    return cfg
+
+
+def envelope_of(env: Envelope) -> dict:
+    return {"content": env.content, "error": env.error}
+
+
+# ----------------------------------------------------------- one artifact --
+
+
+def resolved(argv, directory="/opt/clutch/components/probe", importable=False, name="clutch-probe"):
+    component = catalog.Component(name=name, run=catalog.PerCall(start=catalog.Launch(importable=importable)))
+    return rendezvous.Resolved(
+        module=component, directory=Path(directory), argv=tuple(argv), installed=True, template=False
+    )
+
+
+def launch_case(name: str, run, *, artifact=None, unavailable="") -> dict:
+    record = {"name": name, "kind": kind_of(run)}
+    if artifact is not None:
+        record["resolved"] = {
+            "argv": list(artifact.argv),
+            "directory": str(artifact.directory),
+            "importable": artifact.module.run.start.importable,
+        }
+    record["unavailable"] = unavailable
+    component = catalog.Component(name="clutch-probe", run=run)
+    with patched(rendezvous, resolve=lambda _name: artifact, unavailable_reason=lambda _name: unavailable):
+        try:
+            record["expect"] = {"prefix": statement.launch_prefix(component)}
+        except rendezvous.RendezvousError as e:
+            record["expect"] = {"error": str(e)}
+    return record
+
+
+def kind_of(run) -> str:
+    if isinstance(run, catalog.Resident):
+        return "resident"
+    if isinstance(run, catalog.ClientRun):
+        return "clientRun"
+    return "perCall"
+
+
+# --------------------------------------------------------------- the capture
+
+
+def capture() -> dict:
+    cfg = config()
+    return {
+        "config": {"port": PORT, "command_timeout": TIMEOUT},
+        "host_vars": capture_host_vars(cfg),
+        "launch_prefix": capture_launch_prefix(),
+        "fence_globs": capture_fence_globs(),
+        "line": capture_line(),
+        "run": capture_run(),
+        "resident": capture_resident(cfg),
+        "per_call": capture_per_call(cfg),
+        "client": capture_client(cfg),
+        "client_run": capture_client_run(),
+        "module_blocked": capture_module_blocked(),
+        "execute": capture_execute(cfg),
+    }
+
+
+def capture_host_vars(cfg) -> list:
+    cases = [
+        ("no vars", {}),
+        ("one fact", {"base": "host.port_url"}),
+        ("unknown fact skipped", {"other": "host.nothing", "base": "host.port_url"}),
+        ("two names, one fact", {"a": "host.port_url", "b": "host.port_url"}),
+        ("all unknown", {"x": "host.nope"}),
+    ]
+    out = []
+    for name, vars_ in cases:
+        component = catalog.Component(name="clutch-probe", vars=vars_)
+        out.append({"name": name, "vars": vars_, "expect": statement.host_vars(component, cfg)})
+    return out
+
+
+def capture_launch_prefix() -> list:
+    binary = resolved(["/usr/local/bin/clutch-probe"])
+    checkout = resolved(["python3", "/home/u/proj/clutch-probe/main.py"])
+    package = resolved(["python3", "-m", "clutch_probe"], directory="/opt/other dir", importable=True)
+    hostile = resolved(["python3", "/opt/it's here/main.py"], directory="/opt/it's here")
+    return [
+        launch_case("a service answers with no prefix", catalog.Resident(), artifact=package),
+        launch_case("an installed onefile is one word", catalog.PerCall(), artifact=binary),
+        launch_case("a checkout is interpreter + entry", catalog.PerCall(), artifact=checkout),
+        launch_case("a package goes on PYTHONPATH", catalog.PerCall(), artifact=package),
+        launch_case("quoting survives the prefix", catalog.PerCall(), artifact=hostile),
+        launch_case(
+            "no artifact",
+            catalog.PerCall(),
+            artifact=None,
+            unavailable="clutch-probe is not installed on this host",
+        ),
+    ]
+
+
+def capture_fence_globs() -> list:
+    cases = [
+        ("one protected file", [LOG_PATH], ROOT),
+        ("several", [LOG_PATH, f"{ROOT}/notes.clc"], ROOT),
+        ("outside the root", ["/etc/clutch/clutch.clc"], ROOT),
+        ("the root itself", [ROOT], ROOT),
+        ("duplicates collapse", [LOG_PATH, LOG_PATH, f"{LOG_PATH}"], ROOT),
+        ("none", [], ROOT),
+        ("relative entries", ["demo.clc", "./demo.clc"], ROOT),
+    ]
+    out = []
+    for name, protected, root in cases:
+        out.append(
+            {
+                "name": name,
+                "protected": list(protected),
+                "root": root,
+                "expect": list(rendezvous.fence_globs(protected, root)),
+            }
+        )
+    return out
+
+
+def capture_line() -> list:
+    cases = [
+        ("plain", {"prefix": "", "vars": {}, "module": "clutch-probe"},
+         "--json read {path}", {"path": "a.txt"}, {}),
+        ("behind a launch", {"prefix": "'python3' '-m' 'clutch_probe'", "vars": {"root": ROOT},
+                             "module": "clutch-probe"},
+         "--workspace {root} read {path}", {"path": "a.txt"}, {}),
+        ("a host value wins", {"prefix": "", "vars": {"root": "/host/root"}, "module": "clutch-probe"},
+         "read {root}", {"root": "/model/root"}, {}),
+        ("defaults fill what the model omitted", {"prefix": "", "vars": {}, "module": "clutch-probe"},
+         "read {max_chars} {*}", {"path": "a.txt"}, {"max_chars": 20000}),
+        ("an optional group drops", {"prefix": "", "vars": {}, "module": "clutch-probe"},
+         "curl [--data {body}] http://127.0.0.1:{port}/x", {}, {"port": "51234"}),
+        ("a missing value is a sentence", {"prefix": "", "vars": {}, "module": "clutch-probe"},
+         "read {path}", {}, {}),
+    ]
+    out = []
+    for name, fields, template, args, defaults in cases:
+        ready = statement.Statement(
+            vars=fields["vars"], runner=SimpleNamespace(), prefix=fields["prefix"], module=fields["module"]
+        )
+        record = {
+            "name": name,
+            "prefix": fields["prefix"],
+            "vars": fields["vars"],
+            "module": fields["module"],
+            "template": template,
+            "args": args,
+            "defaults": defaults,
+        }
+        try:
+            record["expect"] = {"line": ready.line(template, args, defaults)}
+        except inst.InstError as e:
+            record["expect"] = {"error": str(e)}
+        out.append(record)
+    return out
+
+
+def capture_run() -> list:
+    cases = [
+        ("an envelope passes through", {"code": 0, "stdout": '{"content":"hi","error":false,"diff":""}', "stderr": ""},
+         "", "clutch-probe"),
+        ("a non-zero exit is framed", {"code": 2, "stdout": "", "stderr": "ls: nope"}, "", "clutch-probe"),
+        ("a timeout is the transport's", {"error": {"message": "timed out", "timeout": True}}, "", "clutch-probe"),
+        ("a stop is the transport's", {"error": {"message": "aborted", "aborted": True}}, "", "clutch-probe"),
+        ("an unreachable transport keeps its words",
+         {"error": {"message": "the bridge is not answering"}}, "", "clutch-probe"),
+    ]
+    out = []
+    for name, answer, prefix, module in cases:
+        runner = StubTransport({})
+        ready = statement.Statement(vars={}, runner=runner, prefix=prefix, module=module)
+        record = {"name": name, "template": "read {path}", "args": {"path": "a.txt"}, "prefix": prefix,
+                  "module": module, "timeout": TIMEOUT, "answer": answer}
+        # the runner's answer is keyed by the line the REAL renderer produces, so
+        # the capture never guesses what a statement looks like
+        runner.answers[ready.line("read {path}", {"path": "a.txt"}, {})] = answer
+        try:
+            record["expect"] = envelope_of(ready.run("read {path}", {"path": "a.txt"}, {}, timeout=TIMEOUT))
+        except TransportError as e:
+            record["expect"] = {"raises": f"TransportError: {e}"}
+        record["trace"] = runner.trace
+        out.append(record)
+    # a missing argument never reaches the runner at all
+    runner = StubTransport({})
+    ready = statement.Statement(vars={}, runner=runner, prefix="", module="clutch-probe")
+    record = {"name": "a missing argument raises before the runner", "template": "read {path}", "args": {},
+              "prefix": "", "module": "clutch-probe", "timeout": TIMEOUT, "answer": {}}
+    try:
+        record["expect"] = envelope_of(ready.run("read {path}", {}, {}, timeout=TIMEOUT))
+    except inst.InstError as e:
+        record["expect"] = {"raises": f"InstError: {e}"}
+    record["trace"] = runner.trace
+    out.append(record)
+    return out
+
+
+def capture_resident(cfg) -> dict:
+    workspace = FarWorkspace()
+    calls = []
+
+    def service(root, name, protect=()):
+        calls.append([str(root), name, [str(p) for p in protect]])
+        return StubService({"port": "51234", "token": "abc", "pid": "77"})
+
+    component = catalog.Component(name="clutch-probe", run=catalog.Resident())
+    with patched(rendezvous, service=service):
+        ready = statement.resident(component, workspace, cfg)
+    line = ready.line("curl -H X-Token:{token} http://127.0.0.1:{port}/read {*}", {"path": "a.txt"}, {})
+    return {
+        "service_call": calls,
+        "vars": dict(ready.vars),
+        "prefix": ready.prefix,
+        "module": ready.module,
+        "runner": "the workspace",
+        "template": "curl -H X-Token:{token} http://127.0.0.1:{port}/read {*}",
+        "args": {"path": "a.txt"},
+        "line": line,
+    }
+
+
+def capture_per_call(cfg) -> dict:
+    artifact = resolved(["python3", "-m", "clutch_probe"], importable=True)
+    transport = StubTransport({})
+    component = catalog.Component(
+        name="clutch-probe", run=catalog.PerCall(), vars={"base": "host.port_url"}
+    )
+    with patched(rendezvous, resolve=lambda _name: artifact), patched(
+        statement, LocalTransport=lambda _root: transport
+    ):
+        ready = statement.per_call(component, cfg)
+    template = "--base {base} read {*}"
+    return {
+        "vars": dict(ready.vars),
+        "prefix": ready.prefix,
+        "module": ready.module,
+        "template": template,
+        "args": {"path": "a.txt"},
+        "line": ready.line(template, {"path": "a.txt"}, {}),
+    }
+
+
+def capture_client(cfg) -> list:
+    cases = [
+        ("a live channel holds it", "", [LOG_PATH], ROOT),
+        ("no channel", "clutch-probe runs on the client that calls it and this host has no channel to that client",
+         [LOG_PATH], ROOT),
+        ("a stopped client", "clutch-probe is stopped on this client — start it before calling it", [], ROOT),
+        ("no root", "", [], ""),
+    ]
+    out = []
+    component = catalog.Component(name="clutch-probe", run=catalog.ClientRun(entry="clutch-ws"))
+    for name, reason, protected, root in cases:
+        workspace = FarWorkspace(protected=tuple(protected))
+        workspace.root = PurePosixPath(root)
+        # the root AS THE STATEMENT LAYER READS IT (`str(workspace.root)`): an
+        # empty path is Python's ".", and recording the case's own "" instead
+        # would hide that spelling from the replay
+        record = {"name": name, "reason": reason, "protected": list(protected), "root": str(workspace.root)}
+        with patched(channel, current=lambda _reason=reason: StubChannel(_reason)):
+            try:
+                ready = statement.client(component, workspace, cfg)
+            except rendezvous.RendezvousError as e:
+                record["expect"] = {"error": str(e)}
+            else:
+                record["expect"] = {"module": ready.module, "root": ready.root, "fence": list(ready.fence)}
+        out.append(record)
+    return out
+
+
+def capture_client_run() -> list:
+    cases = [
+        ("the client answers", {"content": "file contents", "error": False}),
+        ("the client reports an error", {"content": "no such file", "error": True}),
+        ("the channel refuses", {"channel_error": "clutch-probe is not installed for this client"}),
+    ]
+    out = []
+    for name, answer in cases:
+        calls = []
+
+        def call(component, command, args, timeout_s, *, root="", fence=(), _answer=answer):
+            calls.append([component, command, dict(args), timeout_s, root, list(fence)])
+            if "channel_error" in _answer:
+                raise channel.ChannelError(_answer["channel_error"])
+            return channel.Reply(content=_answer["content"], error=_answer["error"])
+
+        ready = statement.ClientStatement(module="clutch-probe", root=ROOT, fence=(LOG_PATH, f"{ROOT}/notes.clc"))
+        record = {
+            "name": name,
+            "module": ready.module,
+            "root": ready.root,
+            "fence": list(ready.fence),
+            "template": "read_file {*}",
+            "args": {"path": "a.txt"},
+            "defaults": {"max_bytes": 100},
+            "timeout": TIMEOUT,
+            "reply": answer,
+        }
+        with patched(channel, call=call):
+            record["expect"] = envelope_of(
+                ready.run("read_file {*}", {"path": "a.txt"}, {"max_bytes": 100}, timeout=TIMEOUT)
+            )
+        record["calls"] = calls
+        out.append(record)
+    return out
+
+
+# `prompt.module_blocked_reason` asks `isinstance(workspace, LocalWorkspace)`, so
+# the "local" cases need a workspace that really is one — without its __init__,
+# which would create a directory on this machine.
+class FakeLocal(LocalWorkspace):  # noqa: D401 -- a LocalWorkspace with no disk
+    def __init__(self) -> None:  # noqa: D107
+        self.root = PurePosixPath(ROOT)
+
+
+def capture_module_blocked() -> list:
+    cases = [
+        ("an unknown component says so",
+         {"local": False, "unavailable": "unknown component: ghost", "serves_here": False,
+          "serves_channel": False}, True),
+        ("not installed on this host",
+         {"local": False, "unavailable": "clutch-probe is not installed on this host", "serves_here": False,
+          "serves_channel": True}, True),
+        ("drivable here",
+         {"local": False, "unavailable": "", "serves_here": False, "serves_channel": True}, True),
+        ("a process here cannot serve another machine's root",
+         {"local": False, "unavailable": "", "serves_here": True, "serves_channel": False}, False),
+        ("a client cannot serve a local root",
+         {"local": True, "unavailable": "", "serves_here": False, "serves_channel": True}, False),
+        ("drivable locally",
+         {"local": True, "unavailable": "", "serves_here": True, "serves_channel": False}, False),
+    ]
+    out = []
+    for name, fields, far_root in cases:
+        workspace = FakeLocal() if fields["local"] else FarWorkspace()
+        with patched(
+            rendezvous,
+            unavailable_reason=lambda _name, _f=fields: _f["unavailable"],
+            serves_workspace_here=lambda _name, _f=fields: _f["serves_here"],
+            serves_workspace_over_channel=lambda _name, _f=fields: _f["serves_channel"],
+        ):
+            reason = prompt.module_blocked_reason(workspace, "clutch-probe")
+        out.append(
+            {
+                "name": name,
+                **fields,
+                "far_root": far_root,
+                "expect": reason,
+            }
+        )
+    return out
+
+
+
+
+
+def capture_execute(cfg) -> list:
+    artifact = resolved(["python3", "-m", "clutch_probe"], importable=True)
+    out = []
+    for case in EXECUTE_CASES:
+        out.append(run_execute_case(case, artifact, cfg))
+    return out
+
+
+def run_execute_case(case: dict, artifact, cfg) -> dict:
+    name = case["name"]
+    workspace = FarWorkspace(files=case.get("files"))
+    transport = StubTransport({})
+    calls = []
+
+    def service(root, component_name, protect=()):
+        return StubService(case.get("service_vars", DEFAULT_SERVICE_VARS))
+
+    def channel_call(component, command, args, timeout_s, *, root="", fence=()):
+        calls.append(f"send {component} {command} {json.dumps(dict(args), sort_keys=True, ensure_ascii=False)}")
+        reply = case.get("reply") or {}
+        if "channel_error" in reply:
+            raise channel.ChannelError(reply["channel_error"])
+        return channel.Reply(content=reply.get("content", ""), error=bool(reply.get("error")))
+
+    run_ = case["kind"]
+    component = catalog.Component(
+        name=case["component"],
+        run={
+            "resident": catalog.Resident(),
+            "perCall": catalog.PerCall(),
+            "clientRun": catalog.ClientRun(entry="clutch-ws"),
+        }[run_],
+        vars=case.get("vars", {}),
+    )
+    tool = registry.ExtensionTool(
+        name=case.get("tool", "read_file"),
+        description="",
+        parameters={"properties": {}, "required": []},
+        access="",
+        access_arg="",
+        snapshot=case.get("snapshot", False),
+        snapshot_arg=case.get("snapshot_arg", ""),
+        component=component,
+        template=case["template"],
+        defaults=case.get("defaults", {}),
+    )
+    record = {
+        "name": name,
+        "kind": run_,
+        "component": case["component"],
+        "template": case["template"],
+        "args": case.get("args", {}),
+        "defaults": case.get("defaults", {}),
+        "snapshot": case.get("snapshot", False),
+        "snapshot_arg": case.get("snapshot_arg", ""),
+        "vars": case.get("vars", {}),
+        "blocked": case.get("blocked", ""),
+        "files": case.get("files", {}),
+        "resolved": None if run_ != "perCall" else {
+            "argv": list(artifact.argv),
+            "directory": str(artifact.directory),
+            "importable": True,
+        },
+        "unavailable": case.get("unavailable", ""),
+        "channel_reason": case.get("channel_reason", ""),
+        "service_vars": dict(case.get("service_vars", DEFAULT_SERVICE_VARS)),
+        "answer": case.get("answer", {}),
+        "reply": case.get("reply"),
+    }
+    call = registry.Call(workspace=workspace, config=cfg, args=dict(case.get("args", {})), cancel=None, log=None)
+    with patched(
+        registry,
+        module_blocked_reason=lambda _ws, _name, _blocked=case.get("blocked", ""): _blocked,
+    ), patched(
+        rendezvous,
+        resolve=lambda _name: artifact if run_ == "perCall" and not case.get("unavailable") else None,
+        unavailable_reason=lambda _name, _u=case.get("unavailable", ""): _u,
+        service=service,
+    ), patched(
+        statement,
+        LocalTransport=lambda _root: transport,
+    ), patched(
+        channel,
+        current=lambda _reason=case.get("channel_reason", ""): StubChannel(_reason),
+        call=channel_call,
+    ):
+        workspace.answers = {
+            tool_line(case, artifact, run_): case.get("answer", {}),
+        }
+        transport.answers = dict(workspace.answers)
+        result = tool.execute(call)
+    record["expect"] = envelope_of(result)
+    record["trace"] = workspace.trace + transport.trace + calls
+    return record
+
+
+def tool_line(case: dict, artifact, run_: str) -> str:
+    """The line this case is expected to run, so the stub can answer it.
+
+    Rendered with the REAL renderer and a throwaway runner, which is the point:
+    the capture must not re-implement what it is measuring. "" means nothing is
+    rendered at all — an unrenderable template, a component with no statement.
+    """
+    if run_ == "clientRun":
+        # the template IS the statement: sent verbatim, never rendered here
+        return case["template"]
+    component = catalog.Component(
+        name=case["component"],
+        run={
+            "resident": catalog.Resident(),
+            "perCall": catalog.PerCall(),
+            "clientRun": catalog.ClientRun(entry="clutch-ws"),
+        }[run_],
+        vars=case.get("vars", {}),
+    )
+    service_vars = dict(case.get("service_vars", DEFAULT_SERVICE_VARS))
+    workspace = FarWorkspace(files=case.get("files"))
+    with patched(
+        rendezvous,
+        resolve=lambda _name: None if case.get("unavailable") else artifact,
+        service=lambda *a, **k: StubService(service_vars),
+    ):
+        try:
+            ready = component.run.statement(component, workspace, config())
+        except rendezvous.RendezvousError:
+            return ""
+    workspace.trace.clear()
+    try:
+        return ready.line(case["template"], case.get("args", {}), case.get("defaults", {}))
+    except inst.InstError:
+        return ""
+
+
+DEFAULT_SERVICE_VARS = {"port": "51234", "token": "abc"}
+
+
+EXECUTE_CASES = [
+    # -- the artifact half: one process per call ---------------------------
+    {
+        "name": "a per-call statement runs behind its launch",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}",
+        "args": {"path": "a.txt"},
+        "answer": {"code": 0, "stdout": '{"content":"hi","error":false,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "a host fact the declaration asks for is in the line",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "vars": {"base": "host.port_url"},
+        "template": "--base {base} read {*}", "args": {"path": "a.txt"},
+        "answer": {"code": 0, "stdout": '{"content":"based","error":false,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "a non-zero exit is framed, not swallowed",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {"path": "a.txt"},
+        "answer": {"code": 2, "stdout": "", "stderr": "no such component state"},
+    },
+    {
+        "name": "a timeout is the transport's verdict",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {"path": "a.txt"},
+        "answer": {"error": {"message": "timed out after 30s", "timeout": True}},
+    },
+    {
+        "name": "a stop is the user's, and says so",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {"path": "a.txt"},
+        "answer": {"error": {"message": "aborted", "aborted": True}},
+    },
+    {
+        "name": "an unreachable transport never ran the command",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {"path": "a.txt"},
+        "answer": {"error": {"message": "the exec bridge is not answering"}},
+    },
+    {
+        "name": "a missing argument is the model's mistake",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {},
+        "answer": {"code": 0, "stdout": "", "stderr": ""},
+    },
+    {
+        "name": "a component this host has no artifact for says why",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {"path": "a.txt"},
+        "unavailable": "clutch-probe is not installed on this host",
+        "answer": {"code": 0, "stdout": "", "stderr": ""},
+    },
+    # -- the service half: a loopback call on the root's machine ------------
+    {
+        "name": "a service statement is the loopback call",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl -s -H X-Clutch-Token:{token} http://127.0.0.1:{port}/read {*}",
+        "args": {"path": "a.txt"},
+        "answer": {"code": 0, "stdout": '{"content":"served","error":false,"diff":""}', "stderr": ""},
+    },
+    # -- the blocked reason comes first ------------------------------------
+    {
+        "name": "a blocked component is answered, never prepared",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl http://127.0.0.1:{port}/read {*}",
+        "args": {"path": "a.txt"},
+        "blocked": "clutch-probe serves the filesystem of the machine this workspace root lives on, "
+                   "and this root is another machine's",
+        "answer": {"code": 0, "stdout": "", "stderr": ""},
+    },
+    {
+        "name": "a component no declaration answers to still has a sentence",
+        "kind": "perCall",
+        "component": "clutch-probe",
+        "template": "--json read {path}", "args": {"path": "a.txt"},
+        "blocked": "unknown component: clutch-probe",
+        "answer": {"code": 0, "stdout": "", "stderr": ""},
+    },
+    # -- the client half: the template IS the statement --------------------
+    {
+        "name": "a client statement is sent, not rendered",
+        "kind": "clientRun",
+        "component": "clutch-ws",
+        "template": "read_file {*}",
+        "args": {"path": "a.txt"},
+        "defaults": {"max_bytes": 100},
+        "reply": {"content": "client file contents", "error": False},
+    },
+    {
+        "name": "the client's error is the model's error",
+        "kind": "clientRun",
+        "component": "clutch-ws",
+        "template": "read_file {*}",
+        "args": {"path": "a.txt"},
+        "reply": {"content": "no such file", "error": True},
+    },
+    {
+        "name": "a component with no live channel has no statement at all",
+        "kind": "clientRun",
+        "component": "clutch-ws",
+        "template": "read_file {*}",
+        "args": {"path": "a.txt"},
+        "channel_reason": "clutch-ws runs on the client that calls it and this host has no channel to that client",
+        "reply": {"content": "", "error": False},
+    },
+    {
+        "name": "a channel that refuses says so in its own words",
+        "kind": "clientRun",
+        "component": "clutch-ws",
+        "template": "read_file {*}",
+        "args": {"path": "a.txt"},
+        "reply": {"channel_error": "clutch-ws is not installed for this client"},
+    },
+    # -- the undo record ---------------------------------------------------
+    {
+        "name": "a replaced file is remembered",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+        "args": {"path": "a.txt"},
+        "snapshot": True,
+        "snapshot_arg": "path",
+        "files": {"a.txt": "old contents"},
+        "answer": {"code": 0, "stdout": '{"content":"wrote","error":false,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "a created file is journaled without a snapshot",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+        "args": {"path": "new.txt"},
+        "snapshot": True,
+        "snapshot_arg": "path",
+        "answer": {"code": 0, "stdout": '{"content":"wrote","error":false,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "a failed write leaves nothing to restore",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+        "args": {"path": "a.txt"},
+        "snapshot": True,
+        "snapshot_arg": "path",
+        "files": {"a.txt": "old contents"},
+        "answer": {"code": 0, "stdout": '{"content":"refused","error":true,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "a path outside the root is never remembered",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+        "args": {"path": "/etc/passwd"},
+        "snapshot": True,
+        "snapshot_arg": "path",
+        "answer": {"code": 0, "stdout": '{"content":"wrote","error":false,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "the declaration names the argument",
+        "kind": "resident",
+        "component": "clutch-probe",
+        "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+        "args": {"file": "b.txt"},
+        "snapshot": True,
+        "snapshot_arg": "file",
+        "files": {"b.txt": "bee"},
+        "answer": {"code": 0, "stdout": '{"content":"wrote","error":false,"diff":""}', "stderr": ""},
+    },
+    {
+        "name": "a client's write keeps its record too",
+        "kind": "clientRun",
+        "component": "clutch-ws",
+        "template": "write_file {*}",
+        "args": {"path": "a.txt"},
+        "snapshot": True,
+        "snapshot_arg": "path",
+        "files": {"a.txt": "old contents"},
+        "reply": {"content": "wrote", "error": False},
+    },
+]
+
+
+def verify(fixture: dict) -> int:
+    expected = json.loads(OUT.read_text("utf-8"))
+    if expected != fixture:
+        print("statement goldens DO NOT reproduce:")
+        for key in fixture:
+            if expected.get(key) != fixture[key]:
+                print(f"  {key}: differs")
+                if isinstance(fixture[key], list):
+                    for want, have in zip(expected.get(key) or [], fixture[key]):
+                        if want != have:
+                            print(f"    want {json.dumps(want, ensure_ascii=False)}")
+                            print(f"    have {json.dumps(have, ensure_ascii=False)}")
+                            break
+        return 1
+    print(
+        f"statement goldens reproduce: {len(fixture['launch_prefix'])} prefixes, "
+        f"{len(fixture['fence_globs'])} fences, {len(fixture['line'])} lines, "
+        f"{len(fixture['run'])} runs, {len(fixture['execute'])} calls"
+    )
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    fixture = capture()
+    if "--check" in argv:
+        return verify(fixture)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n", "utf-8")
+    print(f"wrote {OUT.relative_to(HERE.parent)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(__import__("sys").argv[1:]))

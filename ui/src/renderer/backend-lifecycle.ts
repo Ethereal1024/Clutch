@@ -47,6 +47,8 @@ export function switchBackend(url) {
   // one profile) — a global key here made one window's base the next window's
   // remembered value. It survives a reload with the page, which is all it is for.
   sessionStorage.setItem("clutch_api_url", state.apiBase);
+  // notify status-bar.ts
+  document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
   reconnectSSE();
   return true;
 }

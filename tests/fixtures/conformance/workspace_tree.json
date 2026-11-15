@@ -1,0 +1,222 @@
+{
+  "cases": [
+    {
+      "body": {
+        "root": null,
+        "tree": []
+      },
+      "id": "tree.no-workspace",
+      "method": "GET",
+      "path": "/api/workspace/tree",
+      "status": 200
+    },
+    {
+      "body": {
+        "root": "<ROOT>",
+        "tree": [
+          {
+            "children": [
+              {
+                "dir": true,
+                "link": null,
+                "name": "deep",
+                "path": "sub/deep"
+              },
+              {
+                "dir": false,
+                "link": null,
+                "name": "beta.md",
+                "path": "sub/beta.md"
+              }
+            ],
+            "dir": true,
+            "link": null,
+            "name": "sub",
+            "path": "sub"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "alpha.txt",
+            "path": "alpha.txt"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "demo.clc",
+            "path": "demo.clc"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "gamma.txt",
+            "path": "gamma.txt"
+          }
+        ]
+      },
+      "id": "tree.root",
+      "method": "GET",
+      "note": "dirs before files, case-insensitive; .hidden.txt filtered; the .clc is NOT yet protected (protection is set at run start)",
+      "path": "/api/workspace/tree",
+      "status": 200
+    },
+    {
+      "body": {
+        "root": "<ROOT>",
+        "tree": [
+          {
+            "children": [
+              {
+                "dir": true,
+                "link": null,
+                "name": "deep",
+                "path": "sub/deep"
+              },
+              {
+                "dir": false,
+                "link": null,
+                "name": "beta.md",
+                "path": "sub/beta.md"
+              }
+            ],
+            "dir": true,
+            "link": null,
+            "name": "sub",
+            "path": "sub"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": ".hidden.txt",
+            "path": ".hidden.txt"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "alpha.txt",
+            "path": "alpha.txt"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "demo.clc",
+            "path": "demo.clc"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "gamma.txt",
+            "path": "gamma.txt"
+          }
+        ]
+      },
+      "id": "tree.hidden",
+      "method": "GET",
+      "path": "/api/workspace/tree?hidden=1",
+      "status": 200
+    },
+    {
+      "body": {
+        "root": "<ROOT>",
+        "tree": [
+          {
+            "children": [
+              {
+                "children": [
+                  {
+                    "dir": false,
+                    "link": null,
+                    "name": "leaf.txt",
+                    "path": "sub/deep/leaf.txt"
+                  }
+                ],
+                "dir": true,
+                "link": null,
+                "name": "deep",
+                "path": "sub/deep"
+              },
+              {
+                "dir": false,
+                "link": null,
+                "name": "beta.md",
+                "path": "sub/beta.md"
+              }
+            ],
+            "dir": true,
+            "link": null,
+            "name": "sub",
+            "path": "sub"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "alpha.txt",
+            "path": "alpha.txt"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "demo.clc",
+            "path": "demo.clc"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "gamma.txt",
+            "path": "gamma.txt"
+          }
+        ]
+      },
+      "id": "tree.expanded",
+      "method": "GET",
+      "note": "one level of lookahead: an expanded dir lists its children",
+      "path": "/api/workspace/tree?expanded=sub",
+      "status": 200
+    },
+    {
+      "body": {
+        "root": "<ROOT>",
+        "tree": [
+          {
+            "children": [
+              {
+                "dir": true,
+                "link": null,
+                "name": "deep",
+                "path": "sub/deep"
+              },
+              {
+                "dir": false,
+                "link": null,
+                "name": "beta.md",
+                "path": "sub/beta.md"
+              }
+            ],
+            "dir": true,
+            "link": null,
+            "name": "sub",
+            "path": "sub"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "alpha.txt",
+            "path": "alpha.txt"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "gamma.txt",
+            "path": "gamma.txt"
+          }
+        ]
+      },
+      "id": "tree.protected",
+      "method": "GET",
+      "path": "/api/workspace/tree",
+      "status": 200
+    }
+  ],
+  "endpoint": "workspace.tree",
+  "route": "GET /api/workspace/tree"
+}

@@ -1,0 +1,971 @@
+{
+  "render": [
+    {
+      "name": "no placeholders",
+      "template": "nothing to fill",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "nothing to fill"
+    },
+    {
+      "name": "empty template",
+      "template": "",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": ""
+    },
+    {
+      "name": "one word",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "plain"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s 'plain'"
+    },
+    {
+      "name": "hostile 'plain'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "plain"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s 'plain'"
+    },
+    {
+      "name": "hostile \"it's\"",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "it's"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s 'it'\\''s'"
+    },
+    {
+      "name": "hostile \"'; rm -rf /; echo '\"",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "'; rm -rf /; echo '"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s ''\\''; rm -rf /; echo '\\'''"
+    },
+    {
+      "name": "hostile '$(id)'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "$(id)"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s '$(id)'"
+    },
+    {
+      "name": "hostile '`id`'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "`id`"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s '`id`'"
+    },
+    {
+      "name": "hostile '${HOME}'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "${HOME}"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s '${HOME}'"
+    },
+    {
+      "name": "hostile \"a'; cat /etc/passwd; echo '\"",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "a'; cat /etc/passwd; echo '"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s 'a'\\''; cat /etc/passwd; echo '\\'''"
+    },
+    {
+      "name": "hostile 'line1\\nline2'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "line1\nline2"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s 'line1\nline2'"
+    },
+    {
+      "name": "hostile 'quote \" and \\\\ backslash'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "quote \" and \\ backslash"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s 'quote \" and \\ backslash'"
+    },
+    {
+      "name": "hostile '中文 参数，带标点。'",
+      "template": "printf %s {v}",
+      "args": {
+        "v": "中文 参数，带标点。"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s '中文 参数，带标点。'"
+    },
+    {
+      "name": "hostile ''",
+      "template": "printf %s {v}",
+      "args": {
+        "v": ""
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "printf %s ''"
+    },
+    {
+      "name": "payload",
+      "template": "curl --data-binary {*}",
+      "args": {
+        "path": "数据.txt",
+        "old_string": "it's \"quoted\""
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "curl --data-binary '{\"old_string\":\"it'\\''s \\\"quoted\\\"\",\"path\":\"数据.txt\"}'"
+    },
+    {
+      "name": "payload newline",
+      "template": "read {*}",
+      "args": {
+        "new_string": "line\nbreak",
+        "empty": ""
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "read '{\"empty\":\"\",\"new_string\":\"line\\nbreak\"}'"
+    },
+    {
+      "name": "payload nested",
+      "template": "read {*}",
+      "args": {
+        "opts": {
+          "b": 2,
+          "a": [
+            1,
+            true,
+            null
+          ]
+        },
+        "path": "x"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "read '{\"opts\":{\"a\":[1,true,null],\"b\":2},\"path\":\"x\"}'"
+    },
+    {
+      "name": "payload sorted keys",
+      "template": "read {*}",
+      "args": {
+        "z": 1,
+        "a": 2,
+        "m": 3
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "read '{\"a\":2,\"m\":3,\"z\":1}'"
+    },
+    {
+      "name": "payload from defaults",
+      "template": "read {*}",
+      "args": {
+        "path": "x"
+      },
+      "vars": {},
+      "defaults": {
+        "max_chars": 20000,
+        "path": "ignored"
+      },
+      "raw": [],
+      "line": "read '{\"max_chars\":20000,\"path\":\"x\"}'"
+    },
+    {
+      "name": "host var shadows",
+      "template": "-H X-Clutch-Token:{token} --data-binary {*}",
+      "args": {
+        "token": "model-supplied",
+        "path": "a.txt"
+      },
+      "vars": {
+        "token": "host-token",
+        "port": "51234"
+      },
+      "defaults": {},
+      "raw": [],
+      "line": "-H X-Clutch-Token:'host-token' --data-binary '{\"path\":\"a.txt\",\"token\":\"model-supplied\"}'"
+    },
+    {
+      "name": "host var quoting",
+      "template": "{host}",
+      "args": {},
+      "vars": {
+        "host": "127.0.0.1"
+      },
+      "defaults": {},
+      "raw": [],
+      "line": "'127.0.0.1'"
+    },
+    {
+      "name": "host var raw",
+      "template": "{host}",
+      "args": {},
+      "vars": {
+        "host": "a b"
+      },
+      "defaults": {},
+      "raw": [
+        "host"
+      ],
+      "line": "a b"
+    },
+    {
+      "name": "default fills",
+      "template": "read {max_chars} {*}",
+      "args": {
+        "path": "x"
+      },
+      "vars": {},
+      "defaults": {
+        "max_chars": 20000
+      },
+      "raw": [],
+      "line": "read '20000' '{\"max_chars\":20000,\"path\":\"x\"}'"
+    },
+    {
+      "name": "model beats default",
+      "template": "read {max_chars}",
+      "args": {
+        "max_chars": 5
+      },
+      "vars": {},
+      "defaults": {
+        "max_chars": 20000
+      },
+      "raw": [],
+      "line": "read '5'"
+    },
+    {
+      "name": "default under raw",
+      "template": "{m}",
+      "args": {
+        "m": "x"
+      },
+      "vars": {},
+      "defaults": {
+        "m": "ignored"
+      },
+      "raw": [
+        "m"
+      ],
+      "line": "x"
+    },
+    {
+      "name": "group kept",
+      "template": "search {query} [--max-results {max_results}] [--backend {backend}]",
+      "args": {
+        "query": "q",
+        "max_results": 3
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "search 'q' --max-results '3'"
+    },
+    {
+      "name": "group dropped",
+      "template": "search {query} [--max-results {max_results}] [--backend {backend}]",
+      "args": {
+        "query": "q"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "search 'q'"
+    },
+    {
+      "name": "groups independent",
+      "template": "search {query} [--max-results {max_results}] [--backend {backend}]",
+      "args": {
+        "query": "q",
+        "backend": "bing"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "search 'q' --backend 'bing'"
+    },
+    {
+      "name": "group drops whole",
+      "template": "[{a} {b}]",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": ""
+    },
+    {
+      "name": "group after placeholder",
+      "template": "cmd {a}[--x {b}]",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "cmd '1'"
+    },
+    {
+      "name": "group needs a host value",
+      "template": "curl -H X:{token} [--data {body}]",
+      "args": {},
+      "vars": {
+        "token": "t"
+      },
+      "defaults": {},
+      "raw": [],
+      "line": "curl -H X:'t'"
+    },
+    {
+      "name": "literal brackets",
+      "template": "x [[not a group]] y",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "x [not a group] y"
+    },
+    {
+      "name": "literal close",
+      "template": "x ]] y",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "x ] y"
+    },
+    {
+      "name": "group with tab separator",
+      "template": "cmd a\t[--flag {x}]",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "cmd a"
+    },
+    {
+      "name": "two groups, one filled",
+      "template": "[--a {a}] [--b {b}]",
+      "args": {
+        "b": 2
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": " --b '2'"
+    },
+    {
+      "name": "empty arg value fills",
+      "template": "read [--max {n}]",
+      "args": {
+        "n": ""
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "read --max ''"
+    },
+    {
+      "name": "raw verbatim",
+      "template": "{command}",
+      "args": {
+        "command": "ls | wc -l"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [
+        "command"
+      ],
+      "line": "ls | wc -l"
+    },
+    {
+      "name": "raw but unlisted",
+      "template": "{command}",
+      "args": {
+        "command": "ls | wc -l"
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "'ls | wc -l'"
+    },
+    {
+      "name": "boolean value",
+      "template": "{flag}",
+      "args": {
+        "flag": true
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "'True'"
+    },
+    {
+      "name": "number value",
+      "template": "{n}",
+      "args": {
+        "n": 2.5
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "'2.5'"
+    },
+    {
+      "name": "null value",
+      "template": "{v}",
+      "args": {
+        "v": null
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "'None'"
+    },
+    {
+      "name": "list value",
+      "template": "{v}",
+      "args": {
+        "v": [
+          "a",
+          1,
+          false
+        ]
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "'['\\''a'\\'', 1, False]'"
+    },
+    {
+      "name": "dict value",
+      "template": "{v}",
+      "args": {
+        "v": {
+          "b": 1,
+          "a": "x"
+        }
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "line": "'{'\\''b'\\'': 1, '\\''a'\\'': '\\''x'\\''}'"
+    },
+    {
+      "name": "missing value",
+      "template": "read {path}",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "missing value for {path} (tool arguments: [])"
+    },
+    {
+      "name": "missing value names sorted args",
+      "template": "read {path}",
+      "args": {
+        "zeta": 1,
+        "alpha": 2
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "missing value for {path} (tool arguments: ['alpha', 'zeta'])"
+    },
+    {
+      "name": "nested groups",
+      "template": "[{a} [{b}]]",
+      "args": {
+        "a": 1,
+        "b": 2
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "nested optional groups are not supported in a tool statement"
+    },
+    {
+      "name": "unmatched close",
+      "template": "x] y",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "unmatched ']' in tool statement: 'x] y'"
+    },
+    {
+      "name": "unclosed group",
+      "template": "[{a}",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "unclosed '[' in tool statement: '[{a}'"
+    },
+    {
+      "name": "empty braces",
+      "template": "{}",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "bad placeholder in tool statement: '{}'"
+    },
+    {
+      "name": "digit name",
+      "template": "{1st}",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "bad placeholder in tool statement: '{1st}'"
+    },
+    {
+      "name": "dash name",
+      "template": "{a-b}",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "bad placeholder in tool statement: '{a-b}'"
+    },
+    {
+      "name": "lone brace",
+      "template": "{",
+      "args": {},
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "bad placeholder in tool statement: '{'"
+    },
+    {
+      "name": "brace then name",
+      "template": "{a{",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "bad placeholder in tool statement: '{a{'"
+    },
+    {
+      "name": "star inside name",
+      "template": "{a*}",
+      "args": {
+        "a": 1
+      },
+      "vars": {},
+      "defaults": {},
+      "raw": [],
+      "error": "bad placeholder in tool statement: '{a*}'"
+    }
+  ],
+  "jarg": [
+    {
+      "value": {
+        "a": 1
+      },
+      "text": "'{\"a\":1}'"
+    },
+    {
+      "value": {
+        "b": 1,
+        "a": 2
+      },
+      "text": "'{\"a\":2,\"b\":1}'"
+    },
+    {
+      "value": {
+        "path": "数据.txt"
+      },
+      "text": "'{\"path\":\"数据.txt\"}'"
+    },
+    {
+      "value": {
+        "text": "it's"
+      },
+      "text": "'{\"text\":\"it'\\''s\"}'"
+    },
+    {
+      "value": {},
+      "text": "'{}'"
+    },
+    {
+      "value": {
+        "nested": {
+          "b": [
+            1,
+            2
+          ],
+          "a": null
+        }
+      },
+      "text": "'{\"nested\":{\"a\":null,\"b\":[1,2]}}'"
+    }
+  ],
+  "shq": [
+    {
+      "value": "plain",
+      "text": "'plain'"
+    },
+    {
+      "value": "it's",
+      "text": "'it'\\''s'"
+    },
+    {
+      "value": "",
+      "text": "''"
+    },
+    {
+      "value": "a b",
+      "text": "'a b'"
+    },
+    {
+      "value": "$(id)",
+      "text": "'$(id)'"
+    },
+    {
+      "value": "中文",
+      "text": "'中文'"
+    }
+  ],
+  "unwrap": [
+    {
+      "name": "envelope passes through",
+      "code": 0,
+      "stdout": "{\"content\": \"hello\", \"error\": false, \"diff\": \"\"}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "hello",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "error envelope",
+      "code": 66,
+      "stdout": "{\"content\": \"file not found: x\", \"error\": true, \"diff\": \"\", \"code\": 66}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "file not found: x",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "code alone fails",
+      "code": 66,
+      "stdout": "{\"content\": \"boom\", \"diff\": \"\", \"code\": 66}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "boom",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "non-zero exit beats an optimistic envelope",
+      "code": 3,
+      "stdout": "{\"content\": \"boom\", \"error\": false, \"diff\": \"\"}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "boom",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "diff rides through",
+      "code": 0,
+      "stdout": "{\"content\":\"x\",\"error\":false,\"diff\":\"d\"}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "x",
+        "error": false,
+        "diff": "d"
+      }
+    },
+    {
+      "name": "string code is truthy",
+      "code": 0,
+      "stdout": "{\"content\":\"x\",\"code\":\"0\"}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "x",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "zero code is falsy",
+      "code": 0,
+      "stdout": "{\"content\":\"x\",\"code\":0}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "x",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "non-string content is not an envelope",
+      "code": 0,
+      "stdout": "{\"content\":5}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "{\"content\":5}",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "array is not an envelope",
+      "code": 0,
+      "stdout": "[\"content\"]",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "[\"content\"]",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "null output",
+      "code": 0,
+      "stdout": "null",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "null",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "plain stdout",
+      "code": 0,
+      "stdout": "hello\n",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "hello",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "padded plain stdout",
+      "code": 0,
+      "stdout": "  hello  \n\n",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "hello",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "empty success",
+      "code": 0,
+      "stdout": "",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "OK: the tool service succeeded, no output.",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "whitespace-only success",
+      "code": 0,
+      "stdout": " \n\t ",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "OK: the tool service succeeded, no output.",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "failed command with stderr",
+      "code": 2,
+      "stdout": "",
+      "stderr": "ls: nope: No such file",
+      "service": null,
+      "expect": {
+        "content": "ERROR: the tool service failed (exit 2): ls: nope: No such file",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "failed command with stdout only",
+      "code": 2,
+      "stdout": "the output\n",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "ERROR: the tool service failed (exit 2): the output",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "failed and silent",
+      "code": 1,
+      "stdout": "",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "ERROR: the tool service failed (exit 1)",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "named service",
+      "code": 7,
+      "stdout": "",
+      "stderr": "curl: (7) Failed to connect",
+      "service": "the workspace service",
+      "expect": {
+        "content": "ERROR: the workspace service failed (exit 7): curl: (7) Failed to connect",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "long stderr is clipped",
+      "code": 2,
+      "stdout": "",
+      "stderr": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "service": null,
+      "expect": {
+        "content": "ERROR: the tool service failed (exit 2): xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "envelope beats stderr",
+      "code": 0,
+      "stdout": "{\"content\":\"x\",\"error\":true,\"diff\":\"\"}",
+      "stderr": "ignored",
+      "service": null,
+      "expect": {
+        "content": "x",
+        "error": true,
+        "diff": ""
+      }
+    },
+    {
+      "name": "trailing status line",
+      "code": 0,
+      "stdout": "{\"content\":\"bad or missing token\",\"error\":true,\"diff\":\"\"}\n403",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "{\"content\":\"bad or missing token\",\"error\":true,\"diff\":\"\"}\n403",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "broken json",
+      "code": 0,
+      "stdout": "{\"content\": ",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "{\"content\":",
+        "error": false,
+        "diff": ""
+      }
+    },
+    {
+      "name": "diff is not a string",
+      "code": 0,
+      "stdout": "{\"content\":\"x\",\"diff\":5}",
+      "stderr": "",
+      "service": null,
+      "expect": {
+        "content": "x",
+        "error": false,
+        "diff": "5"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1519 @@
+{
+  "config": {
+    "port": 51234,
+    "command_timeout": 30.0
+  },
+  "host_vars": [
+    {
+      "name": "no vars",
+      "vars": {},
+      "expect": {}
+    },
+    {
+      "name": "one fact",
+      "vars": {
+        "base": "host.port_url"
+      },
+      "expect": {
+        "base": "http://127.0.0.1:51234"
+      }
+    },
+    {
+      "name": "unknown fact skipped",
+      "vars": {
+        "other": "host.nothing",
+        "base": "host.port_url"
+      },
+      "expect": {
+        "base": "http://127.0.0.1:51234"
+      }
+    },
+    {
+      "name": "two names, one fact",
+      "vars": {
+        "a": "host.port_url",
+        "b": "host.port_url"
+      },
+      "expect": {
+        "a": "http://127.0.0.1:51234",
+        "b": "http://127.0.0.1:51234"
+      }
+    },
+    {
+      "name": "all unknown",
+      "vars": {
+        "x": "host.nope"
+      },
+      "expect": {}
+    }
+  ],
+  "launch_prefix": [
+    {
+      "name": "a service answers with no prefix",
+      "kind": "resident",
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/other dir",
+        "importable": true
+      },
+      "unavailable": "",
+      "expect": {
+        "prefix": ""
+      }
+    },
+    {
+      "name": "an installed onefile is one word",
+      "kind": "perCall",
+      "resolved": {
+        "argv": [
+          "/usr/local/bin/clutch-probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": false
+      },
+      "unavailable": "",
+      "expect": {
+        "prefix": "'/usr/local/bin/clutch-probe'"
+      }
+    },
+    {
+      "name": "a checkout is interpreter + entry",
+      "kind": "perCall",
+      "resolved": {
+        "argv": [
+          "python3",
+          "/home/u/proj/clutch-probe/main.py"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": false
+      },
+      "unavailable": "",
+      "expect": {
+        "prefix": "'python3' '/home/u/proj/clutch-probe/main.py'"
+      }
+    },
+    {
+      "name": "a package goes on PYTHONPATH",
+      "kind": "perCall",
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/other dir",
+        "importable": true
+      },
+      "unavailable": "",
+      "expect": {
+        "prefix": "PYTHONPATH='/opt/other dir' 'python3' '-m' 'clutch_probe'"
+      }
+    },
+    {
+      "name": "quoting survives the prefix",
+      "kind": "perCall",
+      "resolved": {
+        "argv": [
+          "python3",
+          "/opt/it's here/main.py"
+        ],
+        "directory": "/opt/it's here",
+        "importable": false
+      },
+      "unavailable": "",
+      "expect": {
+        "prefix": "'python3' '/opt/it'\\''s here/main.py'"
+      }
+    },
+    {
+      "name": "no artifact",
+      "kind": "perCall",
+      "unavailable": "clutch-probe is not installed on this host",
+      "expect": {
+        "error": "clutch-probe is not installed on this host"
+      }
+    }
+  ],
+  "fence_globs": [
+    {
+      "name": "one protected file",
+      "protected": [
+        "/home/u/proj/demo.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": [
+        "/home/u/proj/demo.clc",
+        "demo.clc"
+      ]
+    },
+    {
+      "name": "several",
+      "protected": [
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/notes.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": [
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/notes.clc",
+        "demo.clc",
+        "notes.clc"
+      ]
+    },
+    {
+      "name": "outside the root",
+      "protected": [
+        "/etc/clutch/clutch.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": [
+        "/etc/clutch/clutch.clc",
+        "clutch.clc"
+      ]
+    },
+    {
+      "name": "the root itself",
+      "protected": [
+        "/home/u/proj"
+      ],
+      "root": "/home/u/proj",
+      "expect": [
+        "/home/u/proj",
+        "proj"
+      ]
+    },
+    {
+      "name": "duplicates collapse",
+      "protected": [
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/demo.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": [
+        "/home/u/proj/demo.clc",
+        "demo.clc"
+      ]
+    },
+    {
+      "name": "none",
+      "protected": [],
+      "root": "/home/u/proj",
+      "expect": []
+    },
+    {
+      "name": "relative entries",
+      "protected": [
+        "demo.clc",
+        "./demo.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": [
+        "demo.clc"
+      ]
+    }
+  ],
+  "line": [
+    {
+      "name": "plain",
+      "prefix": "",
+      "vars": {},
+      "module": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "expect": {
+        "line": "--json read 'a.txt'"
+      }
+    },
+    {
+      "name": "behind a launch",
+      "prefix": "'python3' '-m' 'clutch_probe'",
+      "vars": {
+        "root": "/home/u/proj"
+      },
+      "module": "clutch-probe",
+      "template": "--workspace {root} read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "expect": {
+        "line": "'python3' '-m' 'clutch_probe' --workspace '/home/u/proj' read 'a.txt'"
+      }
+    },
+    {
+      "name": "a host value wins",
+      "prefix": "",
+      "vars": {
+        "root": "/host/root"
+      },
+      "module": "clutch-probe",
+      "template": "read {root}",
+      "args": {
+        "root": "/model/root"
+      },
+      "defaults": {},
+      "expect": {
+        "line": "read '/host/root'"
+      }
+    },
+    {
+      "name": "defaults fill what the model omitted",
+      "prefix": "",
+      "vars": {},
+      "module": "clutch-probe",
+      "template": "read {max_chars} {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {
+        "max_chars": 20000
+      },
+      "expect": {
+        "line": "read '20000' '{\"max_chars\":20000,\"path\":\"a.txt\"}'"
+      }
+    },
+    {
+      "name": "an optional group drops",
+      "prefix": "",
+      "vars": {},
+      "module": "clutch-probe",
+      "template": "curl [--data {body}] http://127.0.0.1:{port}/x",
+      "args": {},
+      "defaults": {
+        "port": "51234"
+      },
+      "expect": {
+        "line": "curl http://127.0.0.1:'51234'/x"
+      }
+    },
+    {
+      "name": "a missing value is a sentence",
+      "prefix": "",
+      "vars": {},
+      "module": "clutch-probe",
+      "template": "read {path}",
+      "args": {},
+      "defaults": {},
+      "expect": {
+        "error": "missing value for {path} (tool arguments: [])"
+      }
+    }
+  ],
+  "run": [
+    {
+      "name": "an envelope passes through",
+      "template": "read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "prefix": "",
+      "module": "clutch-probe",
+      "timeout": 30.0,
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"hi\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "expect": {
+        "content": "hi",
+        "error": false
+      },
+      "trace": [
+        "run read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a non-zero exit is framed",
+      "template": "read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "prefix": "",
+      "module": "clutch-probe",
+      "timeout": 30.0,
+      "answer": {
+        "code": 2,
+        "stdout": "",
+        "stderr": "ls: nope"
+      },
+      "expect": {
+        "content": "ERROR: the clutch-probe service failed (exit 2): ls: nope",
+        "error": true
+      },
+      "trace": [
+        "run read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a timeout is the transport's",
+      "template": "read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "prefix": "",
+      "module": "clutch-probe",
+      "timeout": 30.0,
+      "answer": {
+        "error": {
+          "message": "timed out",
+          "timeout": true
+        }
+      },
+      "expect": {
+        "raises": "TransportError: timed out"
+      },
+      "trace": [
+        "run read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a stop is the transport's",
+      "template": "read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "prefix": "",
+      "module": "clutch-probe",
+      "timeout": 30.0,
+      "answer": {
+        "error": {
+          "message": "aborted",
+          "aborted": true
+        }
+      },
+      "expect": {
+        "raises": "TransportError: aborted"
+      },
+      "trace": [
+        "run read 'a.txt'"
+      ]
+    },
+    {
+      "name": "an unreachable transport keeps its words",
+      "template": "read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "prefix": "",
+      "module": "clutch-probe",
+      "timeout": 30.0,
+      "answer": {
+        "error": {
+          "message": "the bridge is not answering"
+        }
+      },
+      "expect": {
+        "raises": "TransportError: the bridge is not answering"
+      },
+      "trace": [
+        "run read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a missing argument raises before the runner",
+      "template": "read {path}",
+      "args": {},
+      "prefix": "",
+      "module": "clutch-probe",
+      "timeout": 30.0,
+      "answer": {},
+      "expect": {
+        "raises": "InstError: missing value for {path} (tool arguments: [])"
+      },
+      "trace": []
+    }
+  ],
+  "resident": {
+    "service_call": [
+      [
+        "/home/u/proj",
+        "clutch-probe",
+        [
+          "/home/u/proj/demo.clc"
+        ]
+      ]
+    ],
+    "vars": {
+      "port": "51234",
+      "token": "abc",
+      "pid": "77"
+    },
+    "prefix": "",
+    "module": "clutch-probe",
+    "runner": "the workspace",
+    "template": "curl -H X-Token:{token} http://127.0.0.1:{port}/read {*}",
+    "args": {
+      "path": "a.txt"
+    },
+    "line": "curl -H X-Token:'abc' http://127.0.0.1:'51234'/read '{\"path\":\"a.txt\"}'"
+  },
+  "per_call": {
+    "vars": {
+      "base": "http://127.0.0.1:51234"
+    },
+    "prefix": "PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe'",
+    "module": "clutch-probe",
+    "template": "--base {base} read {*}",
+    "args": {
+      "path": "a.txt"
+    },
+    "line": "PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --base 'http://127.0.0.1:51234' read '{\"path\":\"a.txt\"}'"
+  },
+  "client": [
+    {
+      "name": "a live channel holds it",
+      "reason": "",
+      "protected": [
+        "/home/u/proj/demo.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": {
+        "module": "clutch-probe",
+        "root": "/home/u/proj",
+        "fence": [
+          "/home/u/proj/demo.clc",
+          "demo.clc"
+        ]
+      }
+    },
+    {
+      "name": "no channel",
+      "reason": "clutch-probe runs on the client that calls it and this host has no channel to that client",
+      "protected": [
+        "/home/u/proj/demo.clc"
+      ],
+      "root": "/home/u/proj",
+      "expect": {
+        "error": "clutch-probe runs on the client that calls it and this host has no channel to that client"
+      }
+    },
+    {
+      "name": "a stopped client",
+      "reason": "clutch-probe is stopped on this client — start it before calling it",
+      "protected": [],
+      "root": "/home/u/proj",
+      "expect": {
+        "error": "clutch-probe is stopped on this client — start it before calling it"
+      }
+    },
+    {
+      "name": "no root",
+      "reason": "",
+      "protected": [],
+      "root": ".",
+      "expect": {
+        "module": "clutch-probe",
+        "root": ".",
+        "fence": []
+      }
+    }
+  ],
+  "client_run": [
+    {
+      "name": "the client answers",
+      "module": "clutch-probe",
+      "root": "/home/u/proj",
+      "fence": [
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/notes.clc"
+      ],
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {
+        "max_bytes": 100
+      },
+      "timeout": 30.0,
+      "reply": {
+        "content": "file contents",
+        "error": false
+      },
+      "expect": {
+        "content": "file contents",
+        "error": false
+      },
+      "calls": [
+        [
+          "clutch-probe",
+          "read_file {*}",
+          {
+            "path": "a.txt"
+          },
+          30.0,
+          "/home/u/proj",
+          [
+            "/home/u/proj/demo.clc",
+            "/home/u/proj/notes.clc"
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "the client reports an error",
+      "module": "clutch-probe",
+      "root": "/home/u/proj",
+      "fence": [
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/notes.clc"
+      ],
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {
+        "max_bytes": 100
+      },
+      "timeout": 30.0,
+      "reply": {
+        "content": "no such file",
+        "error": true
+      },
+      "expect": {
+        "content": "no such file",
+        "error": true
+      },
+      "calls": [
+        [
+          "clutch-probe",
+          "read_file {*}",
+          {
+            "path": "a.txt"
+          },
+          30.0,
+          "/home/u/proj",
+          [
+            "/home/u/proj/demo.clc",
+            "/home/u/proj/notes.clc"
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "the channel refuses",
+      "module": "clutch-probe",
+      "root": "/home/u/proj",
+      "fence": [
+        "/home/u/proj/demo.clc",
+        "/home/u/proj/notes.clc"
+      ],
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {
+        "max_bytes": 100
+      },
+      "timeout": 30.0,
+      "reply": {
+        "channel_error": "clutch-probe is not installed for this client"
+      },
+      "expect": {
+        "content": "ERROR: clutch-probe is not installed for this client",
+        "error": true
+      },
+      "calls": [
+        [
+          "clutch-probe",
+          "read_file {*}",
+          {
+            "path": "a.txt"
+          },
+          30.0,
+          "/home/u/proj",
+          [
+            "/home/u/proj/demo.clc",
+            "/home/u/proj/notes.clc"
+          ]
+        ]
+      ]
+    }
+  ],
+  "module_blocked": [
+    {
+      "name": "an unknown component says so",
+      "local": false,
+      "unavailable": "unknown component: ghost",
+      "serves_here": false,
+      "serves_channel": false,
+      "far_root": true,
+      "expect": "unknown component: ghost"
+    },
+    {
+      "name": "not installed on this host",
+      "local": false,
+      "unavailable": "clutch-probe is not installed on this host",
+      "serves_here": false,
+      "serves_channel": true,
+      "far_root": true,
+      "expect": "clutch-probe is not installed on this host"
+    },
+    {
+      "name": "drivable here",
+      "local": false,
+      "unavailable": "",
+      "serves_here": false,
+      "serves_channel": true,
+      "far_root": true,
+      "expect": ""
+    },
+    {
+      "name": "a process here cannot serve another machine's root",
+      "local": false,
+      "unavailable": "",
+      "serves_here": true,
+      "serves_channel": false,
+      "far_root": false,
+      "expect": "clutch-probe serves the filesystem of the machine this workspace root lives on, and this root is another machine's"
+    },
+    {
+      "name": "a client cannot serve a local root",
+      "local": true,
+      "unavailable": "",
+      "serves_here": false,
+      "serves_channel": true,
+      "far_root": false,
+      "expect": "clutch-probe serves the filesystem of another machine over a channel, and this workspace root is a local one"
+    },
+    {
+      "name": "drivable locally",
+      "local": true,
+      "unavailable": "",
+      "serves_here": true,
+      "serves_channel": false,
+      "far_root": false,
+      "expect": ""
+    }
+  ],
+  "execute": [
+    {
+      "name": "a per-call statement runs behind its launch",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"hi\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "hi",
+        "error": false
+      },
+      "trace": [
+        "run PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --json read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a host fact the declaration asks for is in the line",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--base {base} read {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {
+        "base": "host.port_url"
+      },
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"based\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "based",
+        "error": false
+      },
+      "trace": [
+        "run PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --base 'http://127.0.0.1:51234' read '{\"path\":\"a.txt\"}'"
+      ]
+    },
+    {
+      "name": "a non-zero exit is framed, not swallowed",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 2,
+        "stdout": "",
+        "stderr": "no such component state"
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: the clutch-probe service failed (exit 2): no such component state",
+        "error": true
+      },
+      "trace": [
+        "run PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --json read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a timeout is the transport's verdict",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "error": {
+          "message": "timed out after 30s",
+          "timeout": true
+        }
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: command timed out (30s). Interactive commands are blocked here. Put the code in a file and run it as `python file.py` with scripted input (stdin or a --test flag); use `python3` only on hosts that provide it (Windows ships `python`).",
+        "error": true
+      },
+      "trace": [
+        "run PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --json read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a stop is the user's, and says so",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "error": {
+          "message": "aborted",
+          "aborted": true
+        }
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: the command was aborted because the user pressed Stop; the process tree was killed. Stop working on this task.",
+        "error": true
+      },
+      "trace": [
+        "run PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --json read 'a.txt'"
+      ]
+    },
+    {
+      "name": "an unreachable transport never ran the command",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "error": {
+          "message": "the exec bridge is not answering"
+        }
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: execution failed: the exec bridge is not answering",
+        "error": true
+      },
+      "trace": [
+        "run PYTHONPATH='/opt/clutch/components/probe' 'python3' '-m' 'clutch_probe' --json read 'a.txt'"
+      ]
+    },
+    {
+      "name": "a missing argument is the model's mistake",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {},
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: invalid arguments (missing value for {path} (tool arguments: [])); check names and types",
+        "error": true
+      },
+      "trace": []
+    },
+    {
+      "name": "a component this host has no artifact for says why",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "clutch-probe is not installed on this host",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: clutch-probe is not installed on this host",
+        "error": true
+      },
+      "trace": []
+    },
+    {
+      "name": "a service statement is the loopback call",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl -s -H X-Clutch-Token:{token} http://127.0.0.1:{port}/read {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"served\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "served",
+        "error": false
+      },
+      "trace": [
+        "run curl -s -H X-Clutch-Token:'abc' http://127.0.0.1:'51234'/read '{\"path\":\"a.txt\"}'"
+      ]
+    },
+    {
+      "name": "a blocked component is answered, never prepared",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl http://127.0.0.1:{port}/read {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "clutch-probe serves the filesystem of the machine this workspace root lives on, and this root is another machine's",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: clutch-probe serves the filesystem of the machine this workspace root lives on, and this root is another machine's",
+        "error": true
+      },
+      "trace": []
+    },
+    {
+      "name": "a component no declaration answers to still has a sentence",
+      "kind": "perCall",
+      "component": "clutch-probe",
+      "template": "--json read {path}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "unknown component: clutch-probe",
+      "files": {},
+      "resolved": {
+        "argv": [
+          "python3",
+          "-m",
+          "clutch_probe"
+        ],
+        "directory": "/opt/clutch/components/probe",
+        "importable": true
+      },
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "ERROR: unknown component: clutch-probe",
+        "error": true
+      },
+      "trace": []
+    },
+    {
+      "name": "a client statement is sent, not rendered",
+      "kind": "clientRun",
+      "component": "clutch-ws",
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {
+        "max_bytes": 100
+      },
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {},
+      "reply": {
+        "content": "client file contents",
+        "error": false
+      },
+      "expect": {
+        "content": "client file contents",
+        "error": false
+      },
+      "trace": [
+        "send clutch-ws read_file {*} {\"path\": \"a.txt\"}"
+      ]
+    },
+    {
+      "name": "the client's error is the model's error",
+      "kind": "clientRun",
+      "component": "clutch-ws",
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {},
+      "reply": {
+        "content": "no such file",
+        "error": true
+      },
+      "expect": {
+        "content": "no such file",
+        "error": true
+      },
+      "trace": [
+        "send clutch-ws read_file {*} {\"path\": \"a.txt\"}"
+      ]
+    },
+    {
+      "name": "a component with no live channel has no statement at all",
+      "kind": "clientRun",
+      "component": "clutch-ws",
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "clutch-ws runs on the client that calls it and this host has no channel to that client",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {},
+      "reply": {
+        "content": "",
+        "error": false
+      },
+      "expect": {
+        "content": "ERROR: clutch-ws runs on the client that calls it and this host has no channel to that client",
+        "error": true
+      },
+      "trace": []
+    },
+    {
+      "name": "a channel that refuses says so in its own words",
+      "kind": "clientRun",
+      "component": "clutch-ws",
+      "template": "read_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": false,
+      "snapshot_arg": "",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {},
+      "reply": {
+        "channel_error": "clutch-ws is not installed for this client"
+      },
+      "expect": {
+        "content": "ERROR: clutch-ws is not installed for this client",
+        "error": true
+      },
+      "trace": [
+        "send clutch-ws read_file {*} {\"path\": \"a.txt\"}"
+      ]
+    },
+    {
+      "name": "a replaced file is remembered",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": true,
+      "snapshot_arg": "path",
+      "vars": {},
+      "blocked": "",
+      "files": {
+        "a.txt": "old contents"
+      },
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"wrote\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "wrote",
+        "error": false
+      },
+      "trace": [
+        "resolve a.txt",
+        "read /home/u/proj/a.txt",
+        "run curl -s -H X-Clutch-Token:'abc' -X POST http://127.0.0.1:'51234'/write '{\"path\":\"a.txt\"}'",
+        "snapshot /home/u/proj/a.txt old contents",
+        "record /home/u/proj/a.txt 1 old contents"
+      ]
+    },
+    {
+      "name": "a created file is journaled without a snapshot",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+      "args": {
+        "path": "new.txt"
+      },
+      "defaults": {},
+      "snapshot": true,
+      "snapshot_arg": "path",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"wrote\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "wrote",
+        "error": false
+      },
+      "trace": [
+        "resolve new.txt",
+        "read /home/u/proj/new.txt",
+        "run curl -s -H X-Clutch-Token:'abc' -X POST http://127.0.0.1:'51234'/write '{\"path\":\"new.txt\"}'",
+        "record /home/u/proj/new.txt 0 "
+      ]
+    },
+    {
+      "name": "a failed write leaves nothing to restore",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": true,
+      "snapshot_arg": "path",
+      "vars": {},
+      "blocked": "",
+      "files": {
+        "a.txt": "old contents"
+      },
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"refused\",\"error\":true,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "refused",
+        "error": true
+      },
+      "trace": [
+        "resolve a.txt",
+        "read /home/u/proj/a.txt",
+        "run curl -s -H X-Clutch-Token:'abc' -X POST http://127.0.0.1:'51234'/write '{\"path\":\"a.txt\"}'"
+      ]
+    },
+    {
+      "name": "a path outside the root is never remembered",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+      "args": {
+        "path": "/etc/passwd"
+      },
+      "defaults": {},
+      "snapshot": true,
+      "snapshot_arg": "path",
+      "vars": {},
+      "blocked": "",
+      "files": {},
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"wrote\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "wrote",
+        "error": false
+      },
+      "trace": [
+        "resolve /etc/passwd",
+        "run curl -s -H X-Clutch-Token:'abc' -X POST http://127.0.0.1:'51234'/write '{\"path\":\"/etc/passwd\"}'"
+      ]
+    },
+    {
+      "name": "the declaration names the argument",
+      "kind": "resident",
+      "component": "clutch-probe",
+      "template": "curl -s -H X-Clutch-Token:{token} -X POST http://127.0.0.1:{port}/write {*}",
+      "args": {
+        "file": "b.txt"
+      },
+      "defaults": {},
+      "snapshot": true,
+      "snapshot_arg": "file",
+      "vars": {},
+      "blocked": "",
+      "files": {
+        "b.txt": "bee"
+      },
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {
+        "code": 0,
+        "stdout": "{\"content\":\"wrote\",\"error\":false,\"diff\":\"\"}",
+        "stderr": ""
+      },
+      "reply": null,
+      "expect": {
+        "content": "wrote",
+        "error": false
+      },
+      "trace": [
+        "resolve b.txt",
+        "read /home/u/proj/b.txt",
+        "run curl -s -H X-Clutch-Token:'abc' -X POST http://127.0.0.1:'51234'/write '{\"file\":\"b.txt\"}'",
+        "snapshot /home/u/proj/b.txt bee",
+        "record /home/u/proj/b.txt 1 bee"
+      ]
+    },
+    {
+      "name": "a client's write keeps its record too",
+      "kind": "clientRun",
+      "component": "clutch-ws",
+      "template": "write_file {*}",
+      "args": {
+        "path": "a.txt"
+      },
+      "defaults": {},
+      "snapshot": true,
+      "snapshot_arg": "path",
+      "vars": {},
+      "blocked": "",
+      "files": {
+        "a.txt": "old contents"
+      },
+      "resolved": null,
+      "unavailable": "",
+      "channel_reason": "",
+      "service_vars": {
+        "port": "51234",
+        "token": "abc"
+      },
+      "answer": {},
+      "reply": {
+        "content": "wrote",
+        "error": false
+      },
+      "expect": {
+        "content": "wrote",
+        "error": false
+      },
+      "trace": [
+        "resolve a.txt",
+        "read /home/u/proj/a.txt",
+        "snapshot /home/u/proj/a.txt old contents",
+        "record /home/u/proj/a.txt 1 old contents",
+        "send clutch-ws write_file {*} {\"path\": \"a.txt\"}"
+      ]
+    }
+  ]
+}

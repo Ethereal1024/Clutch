@@ -1,0 +1,83 @@
+{
+  "cases": [
+    {
+      "body": {
+        "entries": [
+          {
+            "dir": true,
+            "link": null,
+            "name": "sub",
+            "path": "<ROOT>/sub"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "alpha.txt",
+            "path": "<ROOT>/alpha.txt"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "demo.clc",
+            "path": "<ROOT>/demo.clc"
+          },
+          {
+            "dir": false,
+            "link": null,
+            "name": "gamma.txt",
+            "path": "<ROOT>/gamma.txt"
+          }
+        ],
+        "error": null,
+        "parent": "<TMP>",
+        "path": "<ROOT>"
+      },
+      "id": "fs.list.dir",
+      "method": "GET",
+      "path": "/api/fs/list?path=<ROOT>",
+      "status": 200
+    },
+    {
+      "body": {
+        "error": "not a directory: <ROOT>/alpha.txt"
+      },
+      "id": "fs.list.not-a-directory",
+      "method": "GET",
+      "note": "HTTP 200 with a non-null error, not a 4xx",
+      "path": "/api/fs/list?path=<ROOT>/alpha.txt",
+      "status": 200
+    },
+    {
+      "body": {
+        "error": "not a directory: /nonexistent_clutch_xyz"
+      },
+      "id": "fs.list.unknown-path",
+      "method": "GET",
+      "path": "/api/fs/list?path=/nonexistent_clutch_xyz",
+      "status": 200
+    },
+    {
+      "body": {
+        "entries": {
+          "__masked__": "list"
+        },
+        "error": null,
+        "parent": {
+          "__masked__": "str"
+        },
+        "path": "<HOME>"
+      },
+      "id": "fs.list.home",
+      "masked": [
+        "entries",
+        "parent"
+      ],
+      "method": "GET",
+      "note": "default root is the server user's home; the listing itself is machine-dependent, so only its shape is frozen",
+      "path": "/api/fs/list",
+      "status": 200
+    }
+  ],
+  "endpoint": "fs.list",
+  "route": "GET /api/fs/list"
+}

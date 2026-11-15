@@ -236,6 +236,85 @@ body { display: flex; flex-direction: column; }
   background: var(--bg2);
 }
 
+/* ---- project tab bar ---- */
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  height: 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.tab-bar::-webkit-scrollbar { display: none; }
+.tab-bar.hidden { display: none; }
+
+.doc-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--row-gutter);
+  min-width: 80px;
+  max-width: 200px;
+  height: 100%;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  background: var(--bg2);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-family: var(--font-display);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-shrink: 0;
+  user-select: none;
+  line-height: 1;
+}
+.doc-tab:hover { background: var(--bg); color: var(--text); }
+.doc-tab.active {
+  background: var(--bg);
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.doc-tab-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
+/* dirty mark (•): accent dot when the project has unsaved state */
+.doc-tab-dirty { color: var(--accent); font-size: 10px; flex-shrink: 0; display: none; }
+.doc-tab.dirty .doc-tab-dirty { display: block; }
+/* close ✕ button inside each tab */
+.doc-tab-close {
+  flex-shrink: 0;
+  width: 16px; height: 16px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; padding: 0;
+  background: transparent;
+  border-radius: 2px;
+  font-size: 11px; line-height: 1;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.1s;
+  cursor: pointer;
+}
+.doc-tab:hover .doc-tab-close,
+.doc-tab.active .doc-tab-close { opacity: 1; }
+.doc-tab-close:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+
+/* ＋ button at the right end of the tab bar */
+.tab-new {
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 100%;
+  border: none; border-right: 1px solid var(--border);
+  background: none; color: var(--muted);
+  font-size: 16px; cursor: pointer; flex-shrink: 0;
+  line-height: 1;
+  margin-left: auto;  /* pin to far right, away from the last tab */
+}
+.tab-new:hover { color: var(--text); background: var(--bg2); }
+
+
 .brand {
   font-family: var(--font-display);
   font-weight: 600;
@@ -411,7 +490,7 @@ button.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--te
 }
 
 /* mode toggle sits next to Run */
-.run-actions { display: flex; align-items: center; gap: 8px; }
+.run-actions { display: flex; align-items: center; gap: 8px; margin-top: var(--s3); }
 #mode-btn {
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -567,18 +646,6 @@ main { display: flex; flex: 1; min-height: 0; }
    keeps the UA's own ring out of the way; the modal's fields and the picker's host
    row are the same look, two rules below. */
 #task-input:focus { outline: none; border-color: var(--accent); }
-.actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
-/* the row is space-between: give the path the slack and ellipsize it — a long
-   cwd must never stretch the actions row (on the phone it painted past the
-   taskbar into the body clip) */
-#workspace-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-}
 .muted { color: var(--muted); font-size: 13px; }
 
 /* project-open progress: a thin overlay strip pinned over the top of the
@@ -2176,3 +2243,26 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   white-space: nowrap;
   border: 0;
 }
+
+/* ---- status bar ---- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: 22px;
+  padding: 0 var(--s3);
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-size: var(--fs-xs);     /* 11px */
+  color: var(--muted);
+  flex-shrink: 0;
+  user-select: none;
+}
+.sb-item { padding: 0 var(--s2); line-height: 1; }
+.sb-sep  { color: var(--border); }
+.sb-status { font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.sb-status.running { color: var(--accent); }
+.sb-status.idle    { color: var(--muted); }
+.sb-status.error   { color: var(--accent); }
+.sb-workdir { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-project { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

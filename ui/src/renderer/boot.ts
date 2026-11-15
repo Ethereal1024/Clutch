@@ -33,6 +33,8 @@ import "./fs-browser";
 import "./task-input";
 import "./auto-fold";
 import "./task-rollback";
+import "./status-bar";
+import "./tab-bar";
 import { apiFetch, resolveApiBase } from "./app";
 import { reconciledBackendUrl, switchBackend } from "./backend-lifecycle";
 import { resumeTurn } from "./render-events";

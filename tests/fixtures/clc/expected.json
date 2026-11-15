@@ -1,0 +1,1032 @@
+{
+  "append": {
+    "bytes": 125,
+    "fileBytesAfter": 1359,
+    "fileBytesBefore": 1234,
+    "line": "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000099\", \"status\": \"aborted\", \"summary\": \"appended by the golden\"}",
+    "offset": 1159
+  },
+  "files": {
+    "compacted.clc": {
+      "aligned": [
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 1027,
+          "reach": 4194304,
+          "result": 925
+        },
+        {
+          "lo": 812,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 925,
+          "reach": 4194304,
+          "result": 925
+        },
+        {
+          "lo": 926,
+          "reach": 16,
+          "result": 926
+        }
+      ],
+      "cprLineOffset": 54,
+      "cprStart": 812,
+      "durable": [
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}",
+        "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}",
+        "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}",
+        "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}",
+        "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000009\", \"summary\": \"the first turn, summarized\"}",
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000010\", \"content\": \"second task\\n\"}"
+      ],
+      "eventStart": 79,
+      "fileBytes": 1106,
+      "items": [
+        [
+          812,
+          "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000009\", \"summary\": \"the first turn, summarized\"}"
+        ],
+        [
+          925,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000010\", \"content\": \"second task\\n\"}"
+        ]
+      ],
+      "lastCompaction": "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000009\", \"summary\": \"the first turn, summarized\"}",
+      "meta": {
+        "model": "test-model",
+        "name": "compacted"
+      },
+      "pages": [
+        {
+          "hi": 1027,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+            ],
+            [
+              337,
+              "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+            ],
+            [
+              555,
+              "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+            ],
+            [
+              703,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+            ],
+            [
+              812,
+              "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000009\", \"summary\": \"the first turn, summarized\"}"
+            ],
+            [
+              925,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000010\", \"content\": \"second task\\n\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 513,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 1027,
+          "items": [
+            [
+              555,
+              "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+            ],
+            [
+              703,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+            ],
+            [
+              812,
+              "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000009\", \"summary\": \"the first turn, summarized\"}"
+            ],
+            [
+              925,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000010\", \"content\": \"second task\\n\"}"
+            ]
+          ],
+          "lo": 342
+        },
+        {
+          "hi": 40,
+          "items": [],
+          "lo": 1
+        },
+        {
+          "hi": 1027,
+          "items": [],
+          "lo": 1027
+        },
+        {
+          "hi": 1036,
+          "items": [],
+          "lo": 1032
+        }
+      ],
+      "rawHead": "# clutch project v1\nname",
+      "size": 1106,
+      "windowBytes": 215
+    },
+    "fresh.clc": {
+      "aligned": [
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        }
+      ],
+      "cprLineOffset": 49,
+      "cprStart": 0,
+      "durable": [],
+      "eventStart": 74,
+      "fileBytes": 74,
+      "items": [],
+      "lastCompaction": null,
+      "meta": {
+        "model": "test-model",
+        "name": "demo"
+      },
+      "pages": [
+        {
+          "hi": 0,
+          "items": [],
+          "lo": 0
+        },
+        {
+          "hi": 0,
+          "items": [],
+          "lo": 0
+        },
+        {
+          "hi": 0,
+          "items": [],
+          "lo": 0
+        },
+        {
+          "hi": 1,
+          "items": [],
+          "lo": 1
+        },
+        {
+          "hi": 0,
+          "items": [],
+          "lo": 0
+        },
+        {
+          "hi": 9,
+          "items": [],
+          "lo": 5
+        }
+      ],
+      "rawHead": "# clutch project v1\nname",
+      "size": 74,
+      "windowBytes": 0
+    },
+    "legacy.clc": {
+      "aligned": [
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 531,
+          "reach": 4194304,
+          "result": 321
+        },
+        {
+          "lo": 209,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 423,
+          "reach": 4194304,
+          "result": 321
+        },
+        {
+          "lo": 424,
+          "reach": 16,
+          "result": 424
+        }
+      ],
+      "cprLineOffset": null,
+      "cprStart": 209,
+      "durable": [
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000011\", \"content\": \"first task\\n\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000012\", \"status\": \"completed\", \"summary\": \"one\"}",
+        "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000013\", \"summary\": \"summary of the first task\"}",
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000014\", \"content\": \"second task\\n\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000015\", \"status\": \"completed\", \"summary\": \"two\"}"
+      ],
+      "eventStart": 43,
+      "fileBytes": 574,
+      "items": [
+        [
+          209,
+          "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000013\", \"summary\": \"summary of the first task\"}"
+        ],
+        [
+          321,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000014\", \"content\": \"second task\\n\"}"
+        ],
+        [
+          423,
+          "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000015\", \"status\": \"completed\", \"summary\": \"two\"}"
+        ]
+      ],
+      "lastCompaction": "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000013\", \"summary\": \"summary of the first task\"}",
+      "meta": {
+        "model": "m",
+        "name": "old"
+      },
+      "pages": [
+        {
+          "hi": 531,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000011\", \"content\": \"first task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000012\", \"status\": \"completed\", \"summary\": \"one\"}"
+            ],
+            [
+              209,
+              "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000013\", \"summary\": \"summary of the first task\"}"
+            ],
+            [
+              321,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000014\", \"content\": \"second task\\n\"}"
+            ],
+            [
+              423,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000015\", \"status\": \"completed\", \"summary\": \"two\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 265,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000011\", \"content\": \"first task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000012\", \"status\": \"completed\", \"summary\": \"one\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 531,
+          "items": [
+            [
+              209,
+              "{\"type\": \"compaction\", \"timestamp\": 1700000000.0, \"id\": \"000000000013\", \"summary\": \"summary of the first task\"}"
+            ],
+            [
+              321,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000014\", \"content\": \"second task\\n\"}"
+            ],
+            [
+              423,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000015\", \"status\": \"completed\", \"summary\": \"two\"}"
+            ]
+          ],
+          "lo": 177
+        },
+        {
+          "hi": 40,
+          "items": [],
+          "lo": 1
+        },
+        {
+          "hi": 531,
+          "items": [],
+          "lo": 531
+        },
+        {
+          "hi": 540,
+          "items": [],
+          "lo": 536
+        }
+      ],
+      "rawHead": "# clutch project v1\nname",
+      "size": 574,
+      "windowBytes": 322
+    },
+    "noise.clc": {
+      "aligned": [
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 314,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 204,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 205,
+          "reach": 16,
+          "result": 205
+        }
+      ],
+      "cprLineOffset": 41,
+      "cprStart": 0,
+      "durable": [
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000021\", \"content\": \"noise task\\n\"}",
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000022\", \"content\": \"bom task\\n\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000023\", \"status\": \"completed\", \"summary\": \"noisy\"}"
+      ],
+      "eventStart": 160,
+      "fileBytes": 474,
+      "items": [
+        [
+          0,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000021\", \"content\": \"noise task\\n\"}"
+        ],
+        [
+          204,
+          "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000023\", \"status\": \"completed\", \"summary\": \"noisy\"}"
+        ]
+      ],
+      "lastCompaction": null,
+      "meta": {
+        "model": "m",
+        "name": "noise"
+      },
+      "pages": [
+        {
+          "hi": 314,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000021\", \"content\": \"noise task\\n\"}"
+            ],
+            [
+              204,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000023\", \"status\": \"completed\", \"summary\": \"noisy\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 157,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000021\", \"content\": \"noise task\\n\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 314,
+          "items": [
+            [
+              104,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000022\", \"content\": \"bom task\\n\"}"
+            ],
+            [
+              204,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000023\", \"status\": \"completed\", \"summary\": \"noisy\"}"
+            ]
+          ],
+          "lo": 104
+        },
+        {
+          "hi": 40,
+          "items": [],
+          "lo": 1
+        },
+        {
+          "hi": 314,
+          "items": [],
+          "lo": 314
+        },
+        {
+          "hi": 323,
+          "items": [],
+          "lo": 319
+        }
+      ],
+      "rawHead": "# clutch project v1\nname",
+      "size": 474,
+      "windowBytes": 314
+    },
+    "plain.clc": {
+      "aligned": [
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 1159,
+          "reach": 4194304,
+          "result": 812
+        },
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 1054,
+          "reach": 4194304,
+          "result": 812
+        },
+        {
+          "lo": 1055,
+          "reach": 16,
+          "result": 1055
+        }
+      ],
+      "cprLineOffset": 50,
+      "cprStart": 0,
+      "durable": [
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}",
+        "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}",
+        "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}",
+        "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}",
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}",
+        "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+      ],
+      "eventStart": 75,
+      "fileBytes": 1234,
+      "items": [
+        [
+          0,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+        ],
+        [
+          101,
+          "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+        ],
+        [
+          337,
+          "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+        ],
+        [
+          555,
+          "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+        ],
+        [
+          703,
+          "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+        ],
+        [
+          812,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+        ],
+        [
+          914,
+          "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+        ],
+        [
+          1054,
+          "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+        ]
+      ],
+      "lastCompaction": null,
+      "meta": {
+        "model": "test-model",
+        "name": "plain"
+      },
+      "pages": [
+        {
+          "hi": 1159,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+            ],
+            [
+              337,
+              "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+            ],
+            [
+              555,
+              "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+            ],
+            [
+              703,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+            ],
+            [
+              812,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+            ],
+            [
+              914,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+            ],
+            [
+              1054,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 579,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+            ],
+            [
+              337,
+              "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 1159,
+          "items": [
+            [
+              555,
+              "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+            ],
+            [
+              703,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+            ],
+            [
+              812,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+            ],
+            [
+              914,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+            ],
+            [
+              1054,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+            ]
+          ],
+          "lo": 386
+        },
+        {
+          "hi": 40,
+          "items": [],
+          "lo": 1
+        },
+        {
+          "hi": 1159,
+          "items": [],
+          "lo": 1159
+        },
+        {
+          "hi": 1168,
+          "items": [],
+          "lo": 1164
+        }
+      ],
+      "rawHead": "# clutch project v1\nname",
+      "size": 1234,
+      "windowBytes": 1159
+    },
+    "torn.clc": {
+      "aligned": [
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 1178,
+          "reach": 4194304,
+          "result": 812
+        },
+        {
+          "lo": 0,
+          "reach": 4194304,
+          "result": 0
+        },
+        {
+          "lo": 1054,
+          "reach": 4194304,
+          "result": 812
+        },
+        {
+          "lo": 1055,
+          "reach": 16,
+          "result": 1055
+        }
+      ],
+      "cprLineOffset": 50,
+      "cprStart": 0,
+      "durable": [
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}",
+        "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}",
+        "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}",
+        "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}",
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}",
+        "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}",
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+      ],
+      "eventStart": 75,
+      "fileBytes": 1253,
+      "items": [
+        [
+          0,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+        ],
+        [
+          101,
+          "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+        ],
+        [
+          337,
+          "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+        ],
+        [
+          555,
+          "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+        ],
+        [
+          703,
+          "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+        ],
+        [
+          812,
+          "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+        ],
+        [
+          914,
+          "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+        ],
+        [
+          1054,
+          "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+        ]
+      ],
+      "lastCompaction": null,
+      "meta": {
+        "model": "test-model",
+        "name": "plain"
+      },
+      "pages": [
+        {
+          "hi": 1178,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+            ],
+            [
+              337,
+              "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+            ],
+            [
+              555,
+              "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+            ],
+            [
+              703,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+            ],
+            [
+              812,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+            ],
+            [
+              914,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+            ],
+            [
+              1054,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 589,
+          "items": [
+            [
+              0,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000001\", \"content\": \"alpha task\\n\"}"
+            ],
+            [
+              101,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000002\", \"content\": \"reading alpha\\n\", \"tool_calls\": [{\"id\": \"c1\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\"}], \"reasoning\": \"the file is small\"}"
+            ],
+            [
+              337,
+              "{\"type\": \"tool_call\", \"timestamp\": 1700000000.0, \"id\": \"000000000003\", \"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"alpha.txt\\\"}\", \"tool_call_id\": \"c1\", \"ui\": {\"title\": \"read file\", \"lines\": 3}, \"path_arg\": \"path\"}"
+            ]
+          ],
+          "lo": 0
+        },
+        {
+          "hi": 1178,
+          "items": [
+            [
+              555,
+              "{\"type\": \"tool_result\", \"timestamp\": 1700000000.0, \"id\": \"000000000004\", \"tool_call_id\": \"c1\", \"content\": \"alpha\\n\", \"is_error\": false, \"diff\": \"\"}"
+            ],
+            [
+              703,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000005\", \"status\": \"completed\", \"summary\": \"done\"}"
+            ],
+            [
+              812,
+              "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+            ],
+            [
+              914,
+              "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+            ],
+            [
+              1054,
+              "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+            ]
+          ],
+          "lo": 392
+        },
+        {
+          "hi": 40,
+          "items": [],
+          "lo": 1
+        },
+        {
+          "hi": 1178,
+          "items": [],
+          "lo": 1178
+        },
+        {
+          "hi": 1187,
+          "items": [],
+          "lo": 1183
+        }
+      ],
+      "rawHead": "# clutch project v1\nname",
+      "size": 1253,
+      "windowBytes": 1178
+    }
+  },
+  "format": 1,
+  "generated_by": "tests/clc_capture.py",
+  "header": {
+    "cprLineBytes": 21,
+    "cprLineOffset": 49,
+    "eventRegionStart": 74,
+    "readStart": "# clutch",
+    "size": 74,
+    "text": "# clutch project v1\nname: demo\nmodel: test-model\ncpr_start=0000000000\n---\n"
+  },
+  "open": {
+    "fresh.clc": [
+      {
+        "progress": {
+          "done": 74,
+          "total": 74
+        }
+      },
+      {
+        "progress": {
+          "done": 74,
+          "total": 74
+        }
+      },
+      {
+        "meta": {
+          "name": "demo",
+          "project": "<ROOT>/fresh.clc",
+          "read_only": false,
+          "workdir": "<ROOT>"
+        }
+      },
+      {
+        "count": 0,
+        "older": 0
+      },
+      {
+        "done": true
+      }
+    ],
+    "plain.clc": [
+      {
+        "progress": {
+          "done": 1234,
+          "total": 1234
+        }
+      },
+      {
+        "progress": {
+          "done": 1234,
+          "total": 1234
+        }
+      },
+      {
+        "meta": {
+          "name": "plain",
+          "project": "<ROOT>/plain.clc",
+          "read_only": false,
+          "workdir": "<ROOT>"
+        }
+      },
+      {
+        "count": 8,
+        "older": 0
+      },
+      {
+        "event": {
+          "content": "alpha task\n",
+          "id": "000000000001",
+          "timestamp": 1700000000.0,
+          "type": "user_message"
+        },
+        "offset": 0
+      },
+      {
+        "event": {
+          "content": "reading alpha\n",
+          "id": "000000000002",
+          "reasoning": "the file is small",
+          "timestamp": 1700000000.0,
+          "tool_calls": [
+            {
+              "arguments": "{\"path\": \"alpha.txt\"}",
+              "id": "c1",
+              "name": "read_file"
+            }
+          ],
+          "type": "assistant_message"
+        },
+        "offset": 101
+      },
+      {
+        "event": {
+          "arguments": "{\"path\": \"alpha.txt\"}",
+          "id": "000000000003",
+          "name": "read_file",
+          "path_arg": "path",
+          "timestamp": 1700000000.0,
+          "tool_call_id": "c1",
+          "type": "tool_call",
+          "ui": {
+            "lines": 3,
+            "title": "read file"
+          }
+        },
+        "offset": 337
+      },
+      {
+        "event": {
+          "content": "alpha\n",
+          "diff": "",
+          "id": "000000000004",
+          "is_error": false,
+          "timestamp": 1700000000.0,
+          "tool_call_id": "c1",
+          "type": "tool_result"
+        },
+        "offset": 555
+      },
+      {
+        "event": {
+          "id": "000000000005",
+          "status": "completed",
+          "summary": "done",
+          "timestamp": 1700000000.0,
+          "type": "final"
+        },
+        "offset": 703
+      },
+      {
+        "event": {
+          "content": "beta 任务\n",
+          "id": "000000000006",
+          "timestamp": 1700000000.0,
+          "type": "user_message"
+        },
+        "offset": 812
+      },
+      {
+        "event": {
+          "content": "beta done\n",
+          "id": "000000000007",
+          "reasoning": "",
+          "timestamp": 1700000000.0,
+          "tool_calls": [],
+          "type": "assistant_message"
+        },
+        "offset": 914
+      },
+      {
+        "event": {
+          "id": "000000000008",
+          "status": "completed",
+          "summary": "",
+          "timestamp": 1700000000.0,
+          "type": "final"
+        },
+        "offset": 1054
+      },
+      {
+        "done": true
+      }
+    ]
+  },
+  "read_only": {
+    "cprStart": 0,
+    "fileBytes": 1234,
+    "readOnly": true,
+    "unchanged": true,
+    "windowBytes": 1273
+  },
+  "set_cpr_start": {
+    "cprStart": 812,
+    "fileBytes": 1234,
+    "fileBytesBefore": 1234,
+    "headerLine": "cpr_start=0000000812\n",
+    "items": [
+      [
+        812,
+        "{\"type\": \"user_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000006\", \"content\": \"beta 任务\\n\"}"
+      ],
+      [
+        914,
+        "{\"type\": \"assistant_message\", \"timestamp\": 1700000000.0, \"id\": \"000000000007\", \"content\": \"beta done\\n\", \"tool_calls\": [], \"reasoning\": \"\"}"
+      ],
+      [
+        1054,
+        "{\"type\": \"final\", \"timestamp\": 1700000000.0, \"id\": \"000000000008\", \"status\": \"completed\", \"summary\": \"\"}"
+      ]
+    ],
+    "offset": 812,
+    "windowBytes": 347
+  },
+  "source": "agent/core/lazy.py + agent/project/format.py (deployment A/C)",
+  "timestamp": 1700000000.0,
+  "tokens": {
+    "root": "<ROOT>"
+  }
+}

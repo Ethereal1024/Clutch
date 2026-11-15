@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 875671b0b03506a69fb25882c781b9db32bb5f07ce8886ff7d4d23009a51c768
+// sources sha256: b7c80a6acde747016ce0c0ca531eb702224d0bec655005637667a97b1e40fc72
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -132,7 +132,7 @@
     trust: $("#trust-btn"),
     status: $("#status"),
     tree: $("#tree"),
-    workspace: $("#workspace-path"),
+    workspace: $("#sb-workdir"),
     projectLabel: $("#project-label")
   };
   var stream = $("#stream");
@@ -151,6 +151,9 @@
 
   // src/renderer/state.ts
   var state = {
+    // ---- tab-bar.ts ----
+    tabs: [],
+    activeTabId: null,
     // ---- app.ts ----
     // the session base this window talks to; null until resolveApiBase() has an
     // answer, and null again when the session goes away (js/backend-lifecycle.ts)
@@ -2070,6 +2073,7 @@
     els.status.className = "badge " + (state2 || "idle");
     els.status.textContent = state2 || "idle";
     busy = state2 === "running" || state2 === "waiting";
+    document.dispatchEvent(new CustomEvent("clutch:status-changed", { detail: state2 || "idle" }));
     els.run.textContent = busy ? "\u25A0 Stop" : "\u25B6 Run";
     els.run.title = busy ? "stop the running task" : "run the task \u2014 Cmd/Ctrl+Enter in the box";
     els.run.classList.toggle("stop-mode", busy);
@@ -2637,6 +2641,10 @@
     const badge = document.getElementById("readonly-badge");
     if (badge) badge.classList.toggle("hidden", !readOnly);
   }
+  document.addEventListener("clutch:tab-activate", (ev) => {
+    const { path } = ev.detail ?? {};
+    if (path) openProject(path);
+  });
   document.addEventListener("clutch:project-read-only", (ev) => {
     const d = ev && ev.detail || {};
     if (d.project && currentProject && d.project !== currentProject) return;
@@ -2649,6 +2657,7 @@
     if (info.workdir) els.workspace.textContent = info.workdir;
     showReadOnlyBadge(!!info.read_only);
     setStatus("idle");
+    document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: currentProject, name: info.name } }));
   }
   function hideWelcome() {
     document.getElementById("welcome").classList.add("hidden");
@@ -4286,8 +4295,8 @@
       return;
     }
     if (v.startsWith("ssh:") && !v.includes("__connected__")) {
-      const [user, hostPort] = v.slice(4).split("@");
-      const [host, port] = hostPort.split(":");
+      const [user, hostPort2] = v.slice(4).split("@");
+      const [host, port] = hostPort2.split(":");
       await connSwitch(host, user, port || "22", connStatus);
     }
   }
@@ -4360,6 +4369,7 @@
     if (busy && clean !== state.apiBase) state.sseRunAtRisk = true;
     state.apiBase = clean;
     sessionStorage.setItem("clutch_api_url", state.apiBase);
+    document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
     reconnectSSE();
     return true;
   }
@@ -6171,6 +6181,197 @@
       renderPlugins();
     });
   }
+
+  // src/renderer/status-bar.ts
+  var sbStatus = $("#sb-status");
+  var sbBackend = $("#sb-backend");
+  var sbModel = $("#sb-model");
+  var sbProject = $("#sb-project");
+  function paintStatus(s) {
+    sbStatus.textContent = s || "idle";
+    sbStatus.className = "sb-item sb-status " + (s || "idle");
+  }
+  document.addEventListener("clutch:status-changed", (ev) => {
+    paintStatus(ev.detail);
+  });
+  function hostPort(base) {
+    if (!base) return "\u2014";
+    try {
+      const u = new URL(base);
+      return u.host;
+    } catch {
+      return base.replace(/^https?:\/\//, "").replace(/\/$/, "").slice(0, 40);
+    }
+  }
+  function paintBackend(base) {
+    const label = hostPort(base);
+    sbBackend.textContent = label;
+    sbBackend.title = base || "no backend";
+  }
+  document.addEventListener("clutch:backend-changed", (ev) => {
+    paintBackend(ev.detail);
+  });
+  function readActiveModel() {
+    try {
+      const active = localStorage.getItem("clutch_llm_active");
+      if (!active) return "";
+      const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
+      return profiles[active] && profiles[active].model || "";
+    } catch {
+      return "";
+    }
+  }
+  function paintModel() {
+    const m = readActiveModel();
+    sbModel.textContent = m || "\u2014";
+    sbModel.title = m ? "model: " + m : "no model configured";
+  }
+  document.addEventListener("clutch:settings-saved", paintModel);
+  window.addEventListener("storage", (ev) => {
+    if (ev.key === "clutch_llm_profiles" || ev.key === "clutch_llm_active") paintModel();
+  });
+  function paintProject(path, name) {
+    if (!path) {
+      sbProject.textContent = "\u2014";
+      sbProject.title = "no project open";
+      return;
+    }
+    sbProject.textContent = name || path.split(/[/\\]/).pop() || path;
+    sbProject.title = path;
+  }
+  document.addEventListener("clutch:project-info", (ev) => {
+    const d = ev.detail || {};
+    paintProject(d.project || "", d.name || "");
+  });
+  paintStatus("idle");
+  paintModel();
+  paintProject("", "");
+
+  // src/renderer/tab-bar.ts
+  var LS_KEY = "clutch_tabs";
+  function saveTabs() {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({ tabs: state.tabs }));
+    } catch {
+    }
+  }
+  function loadTabs() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.tabs)) {
+        state.tabs = data.tabs.filter(
+          (t) => t && typeof t.id === "string" && typeof t.path === "string"
+        );
+      }
+      state.activeTabId = null;
+    } catch {
+    }
+  }
+  function newTabId() {
+    return "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+  function renderTabBar() {
+    const bar = document.getElementById("tab-bar");
+    if (!bar) return;
+    const newBtn = document.getElementById("tab-new-btn");
+    Array.from(bar.querySelectorAll(".doc-tab")).forEach((el) => el.remove());
+    bar.classList.toggle("hidden", state.tabs.length === 0);
+    bar.classList.toggle("hidden", state.tabs.length === 0);
+    for (const tab of state.tabs) {
+      const el = document.createElement("div");
+      el.className = "doc-tab" + (tab.id === state.activeTabId ? " active" : "");
+      el.dataset.tabId = tab.id;
+      el.setAttribute("role", "tab");
+      el.setAttribute("aria-selected", tab.id === state.activeTabId ? "true" : "false");
+      el.title = tab.path;
+      const label = document.createElement("span");
+      label.className = "doc-tab-label";
+      label.textContent = tab.name;
+      el.appendChild(label);
+      if (tab.dirty) {
+        const dot = document.createElement("span");
+        dot.className = "doc-tab-dirty";
+        dot.setAttribute("aria-label", "unsaved");
+        el.appendChild(dot);
+      }
+      const closeBtn = document.createElement("button");
+      closeBtn.className = "doc-tab-close";
+      closeBtn.setAttribute("aria-label", `Close ${tab.name}`);
+      closeBtn.textContent = "\u2715";
+      closeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        tabClose(tab.id);
+      });
+      el.appendChild(closeBtn);
+      el.addEventListener("click", () => tabActivate(tab.id));
+      if (newBtn) bar.insertBefore(el, newBtn);
+      else bar.appendChild(el);
+    }
+  }
+  function tabOpen(path, name) {
+    const existing = state.tabs.find((t) => t.path === path);
+    if (existing) {
+      if (existing.id === state.activeTabId) return;
+      state.activeTabId = existing.id;
+      renderTabBar();
+      saveTabs();
+      return;
+    }
+    const id = newTabId();
+    state.tabs.push({ id, path, name, dirty: false });
+    state.activeTabId = id;
+    renderTabBar();
+    saveTabs();
+  }
+  function tabClose(id) {
+    const idx = state.tabs.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    state.tabs.splice(idx, 1);
+    if (state.activeTabId === id) {
+      const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
+      if (next) {
+        state.activeTabId = next.id;
+        document.dispatchEvent(
+          new CustomEvent("clutch:tab-activate", { detail: { path: next.path } })
+        );
+      } else {
+        state.activeTabId = null;
+      }
+    }
+    renderTabBar();
+    saveTabs();
+  }
+  function tabActivate(id) {
+    const tab = state.tabs.find((t) => t.id === id);
+    if (!tab || tab.id === state.activeTabId) return;
+    state.activeTabId = id;
+    renderTabBar();
+    saveTabs();
+    document.dispatchEvent(
+      new CustomEvent("clutch:tab-activate", { detail: { path: tab.path } })
+    );
+  }
+  document.addEventListener("keydown", (e) => {
+    if (!e.ctrlKey || e.key !== "Tab" || state.tabs.length < 2) return;
+    e.preventDefault();
+    const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
+    if (idx < 0) return;
+    const len = state.tabs.length;
+    const next = e.shiftKey ? state.tabs[(idx - 1 + len) % len] : state.tabs[(idx + 1) % len];
+    tabActivate(next.id);
+  });
+  document.getElementById("tab-new-btn")?.addEventListener("click", () => {
+    const welcome = document.getElementById("welcome");
+    if (welcome) welcome.classList.remove("hidden");
+  });
+  document.addEventListener("clutch:project-info", (ev) => {
+    const { project, name } = ev.detail ?? {};
+    if (project) tabOpen(project, name || project.split("/").pop() || project);
+  });
+  loadTabs();
+  renderTabBar();
 
   // src/renderer/boot.ts
   function storedLlmConfig() {

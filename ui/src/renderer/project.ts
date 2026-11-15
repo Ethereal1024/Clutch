@@ -207,6 +207,14 @@ export function showReadOnlyBadge(readOnly) {
 // (render-events.ts). Clearing the badge from that is the whole point: the
 // ghost read-only was this state outliving the lock, and only this file's
 // open-time meta used to be allowed to clear it.
+// tab-bar.ts dispatches this when the user clicks a tab that is not yet active.
+// Calling openProject here keeps the dependency arrow one-way: tab-bar → event,
+// project → event, neither imports the other.
+document.addEventListener("clutch:tab-activate", (ev) => {
+  const { path } = (ev as CustomEvent).detail ?? {};
+  if (path) openProject(path);
+});
+
 document.addEventListener("clutch:project-read-only", (ev) => {
   const d = ((ev as any) && (ev as any).detail) || {};
   if (d.project && currentProject && d.project !== currentProject) return;
@@ -220,6 +228,8 @@ export function setProjectInfo(info) {
   if (info.workdir) els.workspace.textContent = info.workdir;
   showReadOnlyBadge(!!info.read_only);
   setStatus("idle");
+  // notify status-bar.ts
+  document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: currentProject, name: info.name } }));
 }
 
 export function hideWelcome() {

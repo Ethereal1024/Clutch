@@ -1,0 +1,16 @@
+{
+  "cases": [
+    {
+      "body": {
+        "events": [],
+        "older": 0
+      },
+      "id": "history.no-project",
+      "method": "GET",
+      "path": "/api/history",
+      "status": 200
+    }
+  ],
+  "endpoint": "history",
+  "route": "GET /api/history"
+}

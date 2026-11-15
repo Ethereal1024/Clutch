@@ -12,6 +12,10 @@
 // where the reasoning lives (each comment travelled with its variable).
 
 export const state = {
+  // ---- tab-bar.ts ----
+  tabs: [] as Array<{ id: string; path: string; name: string; dirty: boolean }>,
+  activeTabId: null as string | null,
+
   // ---- app.ts ----
   // the session base this window talks to; null until resolveApiBase() has an
   // answer, and null again when the session goes away (js/backend-lifecycle.ts)

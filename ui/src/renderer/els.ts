@@ -28,7 +28,7 @@ export const els = {
   trust: $("#trust-btn"),
   status: $("#status"),
   tree: $("#tree"),
-  workspace: $("#workspace-path"),
+  workspace: $("#sb-workdir"),
   projectLabel: $("#project-label"),
 };
 
