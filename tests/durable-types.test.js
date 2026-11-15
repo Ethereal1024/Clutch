@@ -128,7 +128,7 @@ check(
 // six is a copy of the vocabulary. Two files are allowed to have one, and only
 // these two: the fact itself, and compaction's transcript (which is not the
 // same set — see below).
-const uiDirs = ["ui", "ui/js"];
+const uiDirs = ["ui", "ui/src/renderer"];
 const uiJsFiles = [];
 for (const dir of uiDirs) {
   for (const name of fs.readdirSync(path.join(ROOT, dir))) {
