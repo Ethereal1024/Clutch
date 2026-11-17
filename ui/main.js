@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 7b90f1c18fd6a2fbb2e50b7be32f1688d2c2b121db3feaa3232143abaeeaa0c5
+// source sha256: 300becf156ad19aa7e157d964956eec82cc42b32d8c5975ea354c7712da80420
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -342,6 +342,10 @@ else {
         // the switch: the one write here that is reversible, so the state is sent
         // rather than a verb translated (ui/components-view.js setDisabled)
         ipcMain.handle("components:set-disabled", async (e, name, disabled) => redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender)));
+        // the knobs a component declares: the form is generated from THIS answer, so
+        // the page knows no setting by name (ui/components-view.js settings)
+        ipcMain.handle("components:settings", async (e, name) => componentsView.settings(String(name || ""), e.sender));
+        ipcMain.handle("components:set-setting", async (e, name, values) => redeclare(await componentsView.setSetting(String(name || ""), values, e.sender)));
         ipcMain.handle("components:install", async (e, name) => redeclare(await componentsView.install(String(name || ""), e.sender, {
             // one line at a time to the window that asked; a closed window is not an
             // error, it is a page that stopped caring

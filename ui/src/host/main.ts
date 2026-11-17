@@ -357,6 +357,12 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("components:set-disabled", async (e, name, disabled) =>
       redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender))
     );
+    // the knobs a component declares: the form is generated from THIS answer, so
+    // the page knows no setting by name (ui/components-view.js settings)
+    ipcMain.handle("components:settings", async (e, name) => componentsView.settings(String(name || ""), e.sender));
+    ipcMain.handle("components:set-setting", async (e, name, values) =>
+      redeclare(await componentsView.setSetting(String(name || ""), values, e.sender))
+    );
     ipcMain.handle("components:install", async (e, name) =>
       redeclare(await componentsView.install(String(name || ""), e.sender, {
         // one line at a time to the window that asked; a closed window is not an

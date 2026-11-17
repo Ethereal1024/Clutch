@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld("clutchComponents", {
   versions: (name) => ipcRenderer.invoke("components:versions", name),
   remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
   setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
+  settings: (name) => ipcRenderer.invoke("components:settings", name),
+  setSetting: (name, values) => ipcRenderer.invoke("components:set-setting", name, values),
   mirrors: () => ipcRenderer.invoke("components:mirrors"),
   addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
   removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),

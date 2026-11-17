@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
-// source sha256: 0d9eb9468a463e2344ac18f66e2380c87fce92d7596bf138738e3d0dedc65038
+// source sha256: c8cea3f2ca6757c2d31d289a8c6ad24f1b93974b816c30690214d0907c3bf260
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld("clutchComponents", {
     versions: (name) => ipcRenderer.invoke("components:versions", name),
     remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
     setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
+    settings: (name) => ipcRenderer.invoke("components:settings", name),
+    setSetting: (name, values) => ipcRenderer.invoke("components:set-setting", name, values),
     mirrors: () => ipcRenderer.invoke("components:mirrors"),
     addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
     removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),
