@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 8279c1d04f5e30e6ba2df8f67040a18566d00318a38134aa51c87977add54cc6
+// sources sha256: 4eb52b88f87757af2d3b5d5cb52c0a6c54d88e86716193b9b762c79b861a8cca
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -20,19 +20,13 @@
       return "http://127.0.0.1:8899/";
     }
     const base = resolveBase();
-    function argsOf(args) {
-      const out = args || [];
-      let n = out.length;
-      while (n > 0 && out[n - 1] === void 0) n--;
-      return out.slice(0, n);
-    }
     async function call(ns, method, args = []) {
       let r, d;
       try {
         r = await fetch(base + "api/" + ns + "/" + method, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(argsOf(args))
+          body: JSON.stringify(args || [])
         });
         d = await r.json();
       } catch (e) {
@@ -43,7 +37,7 @@
       }
       return d.result;
     }
-    const listeners2 = /* @__PURE__ */ new Map();
+    const listeners = /* @__PURE__ */ new Map();
     let stream2 = null;
     function ensureStream() {
       if (stream2) return;
@@ -55,7 +49,7 @@
         } catch (e) {
           return;
         }
-        const set = listeners2.get(d.event);
+        const set = listeners.get(d.event);
         if (!set) return;
         for (const cb of [...set]) {
           try {
@@ -67,23 +61,20 @@
     }
     function subscribe(channel, cb) {
       ensureStream();
-      let set = listeners2.get(channel);
+      let set = listeners.get(channel);
       if (!set) {
         set = /* @__PURE__ */ new Set();
-        listeners2.set(channel, set);
+        listeners.set(channel, set);
       }
       set.add(cb);
       return () => set.delete(cb);
     }
     expose("clutchApi", {
-      // the slotId names one tab's session (absent = the window's default slot)
-      baseUrl: (slotId) => call("clutchApi", "baseUrl", [slotId]),
-      slotStatus: (slotId) => call("clutchApi", "slotStatus", [slotId]),
+      baseUrl: () => call("clutchApi", "baseUrl"),
       // this window leaving its session (the conn-lost dialog's Cancel). The host
       // knows which window is asking — on the phone there is exactly one — so the
       // bridge route takes no window id and the renderer cannot name another one.
-      // The slotId only names WHICH of this page's sessions is leaving.
-      releaseSession: (slotId) => call("clutchApi", "releaseSession", [slotId]),
+      releaseSession: () => call("clutchApi", "releaseSession"),
       onBaseChanged: (cb) => subscribe("backend:base-changed", cb)
     });
     expose("clutchSettings", {
@@ -92,19 +83,15 @@
       ensure: (data) => call("clutchSettings", "ensure", [data])
     });
     expose("clutchLocks", {
-      list: (slotId) => call("clutchLocks", "list", [slotId]),
-      reclaim: (project, slotId) => call("clutchLocks", "reclaim", [project, slotId])
+      list: () => call("clutchLocks", "list"),
+      reclaim: (project) => call("clutchLocks", "reclaim", [project])
     });
-    function runArgs(slotOrPayload, maybePayload) {
-      if (typeof slotOrPayload === "string") return [slotOrPayload, maybePayload];
-      return ["", slotOrPayload];
-    }
     expose("clutchRun", {
-      start: (slotId, payload) => call("clutchRun", "start", runArgs(slotId, payload)),
-      stop: (slotId) => call("clutchRun", "stop", [slotId]),
-      step: (slotId) => call("clutchRun", "step", [slotId]),
-      drive: (slotId) => call("clutchRun", "drive", [slotId]),
-      state: (slotId, payload) => call("clutchRun", "state", runArgs(slotId, payload)),
+      start: (payload) => call("clutchRun", "start", [payload]),
+      stop: () => call("clutchRun", "stop"),
+      step: () => call("clutchRun", "step"),
+      drive: () => call("clutchRun", "drive"),
+      state: (payload) => call("clutchRun", "state", [payload]),
       onEvent: (cb) => subscribe("run:event", cb)
     });
     expose("clutchComponents", {
@@ -114,8 +101,6 @@
       versions: (name) => call("clutchComponents", "versions", [name]),
       remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
       setDisabled: (name, disabled) => call("clutchComponents", "setDisabled", [name, disabled]),
-      settings: (name) => call("clutchComponents", "settings", [name]),
-      setSetting: (name, values) => call("clutchComponents", "setSetting", [name, values]),
       mirrors: () => call("clutchComponents", "mirrors"),
       addMirror: (url) => call("clutchComponents", "addMirror", [url]),
       removeMirror: (url) => call("clutchComponents", "removeMirror", [url]),
@@ -147,7 +132,8 @@
     trust: $("#trust-btn"),
     status: $("#status"),
     tree: $("#tree"),
-    workspace: $("#sb-workdir")
+    workspace: $("#sb-workdir"),
+    projectLabel: $("#project-label")
   };
   var stream = $("#stream");
   var eventsEl = document.getElementById("events");
@@ -634,6 +620,8 @@
     createProject(fsPath, name);
   });
   dismissOnOverlayPress(fsModal, closeFsBrowser);
+  $("#new-project-btn").addEventListener("click", () => openFsBrowser("new"));
+  $("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
   $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
   $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 
@@ -657,6 +645,8 @@
   updateHiddenToggles();
   var shellBackdrop = $("#shell-backdrop");
   var shellPanel = $("#right");
+  var shellActions = $("#shell-project-actions");
+  var SHELL_ACTIONS = ["#open-project-btn", "#new-project-btn", "#settings-btn"];
   var NARROW_Q = window.matchMedia("(max-width: 640px)");
   function paintShellPanel(open) {
     shellPanel.classList.toggle("drawer-open", open);
@@ -701,13 +691,20 @@
     "click",
     () => setShellPanel(!shellPanel.classList.contains("drawer-open"))
   );
-  $("#shell-close-btn").addEventListener("click", () => {
-    if (NARROW_Q.matches) closeShellPanel();
-    else shellPanel.classList.add("panel-hidden");
-  });
+  $("#shell-close-btn").addEventListener("click", closeShellPanel);
   shellBackdrop.addEventListener("click", closeShellPanel);
+  shellActions.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest("button")) closeShellPanel();
+  });
   function layoutShell() {
-    if (!NARROW_Q.matches) closeShellPanel();
+    const narrow = NARROW_Q.matches;
+    for (const sel of SHELL_ACTIONS) {
+      const btn = $(sel);
+      if (!btn) continue;
+      if (narrow) shellActions.appendChild(btn);
+      else $("#topbar").insertBefore(btn, $("#shell-ws-btn"));
+    }
+    if (!narrow) closeShellPanel();
   }
   NARROW_Q.addEventListener("change", layoutShell);
   layoutShell();
@@ -1183,17 +1180,12 @@
     return localStorage.getItem("clutch_trust_all") === "1";
   }
   async function pushTrustArmed() {
-    const bases = /* @__PURE__ */ new Set();
-    if (state.apiBase) bases.add(state.apiBase);
-    for (const t of state.tabs) if (t.base) bases.add(t.base);
-    if (!bases.size) return;
-    await Promise.all(
-      [...bases].map(
-        (base) => apiFetch("/api/permission/trust", { method: "POST", body: { armed: trustArmed() }, base }).catch(
-          (e) => console.warn("[trust] could not mirror the armed flag to the backend", e)
-        )
-      )
-    );
+    if (!state.apiBase) return;
+    try {
+      await apiFetch("/api/permission/trust", { method: "POST", body: { armed: trustArmed() } });
+    } catch (e) {
+      console.warn("[trust] could not mirror the armed flag to the backend", e);
+    }
   }
   function paintTrustBtn() {
     els.trust.textContent = trustArmed() ? "\u{1F6E1} Trusted" : "\u{1F6E1} Trust";
@@ -1379,231 +1371,7 @@
     }
   });
 
-  // src/renderer/slots.ts
-  var SLOT_EVENT = "clutch:tab-state";
-  function activeTab() {
-    if (!state.activeTabId) return null;
-    return state.tabs.find((t) => t.id === state.activeTabId) || null;
-  }
-  function activeSlotId() {
-    return state.activeTabId || "";
-  }
-  function tabForSlot(slotId) {
-    if (!slotId) return null;
-    return state.tabs.find((t) => t.id === slotId) || null;
-  }
-  function findTabByPath(path) {
-    return state.tabs.find((t) => t.path === path || t.projectKey === path) || null;
-  }
-  function ensureTab(path, name = "") {
-    const existing = path ? findTabByPath(path) : null;
-    if (existing) return existing;
-    const tab = {
-      id: "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      path,
-      name: name || (path ? path.split("/").pop() || path : ""),
-      dirty: false,
-      base: null,
-      running: false,
-      needsInput: false
-    };
-    state.tabs.push(tab);
-    return tab;
-  }
-  function announceTabState() {
-    document.dispatchEvent(new CustomEvent(SLOT_EVENT));
-  }
-  async function claimTab(tab) {
-    if (!tab) return null;
-    if (!(window.clutchApi && window.clutchApi.baseUrl)) {
-      return tab.base || null;
-    }
-    try {
-      const base = await window.clutchApi.baseUrl(tab.id);
-      tab.base = base ? String(base).replace(/\/+$/, "") : null;
-      return tab.base;
-    } catch (e) {
-      console.warn("[slot] claim failed", tab.id, e);
-      tab.base = null;
-      return null;
-    }
-  }
-  async function releaseTab(tab) {
-    if (!tab) return;
-    unwatchTab(tab.id);
-    tab.running = false;
-    tab.needsInput = false;
-    if (window.clutchApi && window.clutchApi.releaseSession) {
-      try {
-        await window.clutchApi.releaseSession(tab.id);
-      } catch (e) {
-      }
-    }
-    tab.base = null;
-  }
-  function adoptBase(base) {
-    const clean = base ? String(base).replace(/\/+$/, "") : "";
-    state.apiBase = clean || null;
-    try {
-      if (clean) sessionStorage.setItem("clutch_api_url", clean);
-    } catch (e) {
-    }
-    document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
-  }
-  var mementos = /* @__PURE__ */ new Map();
-  var MEMENTO_KEY = (slotId) => "clutch_view:" + slotId;
-  function readStoredMemento(slotId) {
-    try {
-      const raw = localStorage.getItem(MEMENTO_KEY(slotId));
-      if (!raw) return null;
-      const m = JSON.parse(raw);
-      if (!m || typeof m !== "object" || typeof m.high !== "number") return null;
-      return {
-        scroll: typeof m.scroll === "number" ? m.scroll : 0,
-        follow: !!m.follow,
-        high: typeof m.high === "number" ? m.high : null,
-        oldest: typeof m.oldest === "number" ? m.oldest : null,
-        older: typeof m.older === "number" ? m.older : 0,
-        workdir: typeof m.workdir === "string" ? m.workdir : ""
-      };
-    } catch (e) {
-      return null;
-    }
-  }
-  function saveMemento(slotId, extra = {}) {
-    if (!slotId) return;
-    const stream2 = document.getElementById("stream");
-    const m = {
-      scroll: stream2 ? stream2.scrollTop : 0,
-      follow: !!state.followTail,
-      high: state.streamHighOffset,
-      oldest: state.oldestOffset,
-      older: typeof extra.older === "number" ? extra.older : 0,
-      workdir: extra.workdir || ""
-    };
-    mementos.set(slotId, m);
-    try {
-      localStorage.setItem(MEMENTO_KEY(slotId), JSON.stringify(m));
-    } catch (e) {
-    }
-  }
-  function mementoOf(slotId) {
-    return mementos.get(slotId) || readStoredMemento(slotId);
-  }
-  function forgetMemento(slotId) {
-    mementos.delete(slotId);
-    try {
-      localStorage.removeItem(MEMENTO_KEY(slotId));
-    } catch (e) {
-    }
-  }
-  function restoreMemento(slotId) {
-    const m = mementos.get(slotId);
-    const stream2 = document.getElementById("stream");
-    if (!m || !stream2) return false;
-    state.followTail = m.follow;
-    stream2.scrollTop = m.follow ? stream2.scrollHeight : m.scroll;
-    return true;
-  }
-  var watchers = /* @__PURE__ */ new Map();
-  function watchTab(tab) {
-    if (!tab || !tab.running || !tab.base || !tab.path) return;
-    if (watchers.has(tab.id)) return;
-    let es2;
-    try {
-      const qs = new URLSearchParams();
-      qs.set("project", tab.projectKey || tab.path);
-      qs.set("replay", "0");
-      es2 = new EventSource(tab.base + "/api/events?" + qs.toString());
-    } catch (e) {
-      return;
-    }
-    es2.onmessage = (m) => {
-      let ev;
-      try {
-        ev = JSON.parse(m.data);
-      } catch (e) {
-        return;
-      }
-      let changed = false;
-      if (ev && ev.type === "state_update" && ev.key === "execution_status") {
-        const running = ev.value === "running" || ev.value === "waiting";
-        if (tab.running !== running) {
-          tab.running = running;
-          changed = true;
-        }
-      } else if (ev && ev.type === "permission_request") {
-        if (!tab.needsInput) {
-          tab.needsInput = true;
-          changed = true;
-        }
-      } else if (ev && ev.type === "final") {
-        if (tab.running || tab.needsInput) {
-          tab.running = false;
-          tab.needsInput = false;
-          changed = true;
-        }
-        unwatchTab(tab.id);
-      }
-      if (changed) announceTabState();
-    };
-    es2.onerror = () => {
-    };
-    watchers.set(tab.id, es2);
-  }
-  function rewatchTab(tab) {
-    if (!tab) return;
-    unwatchTab(tab.id);
-    if (!tab.running) return;
-    watchTab(tab);
-  }
-  function unwatchTab(slotId) {
-    const es2 = watchers.get(slotId);
-    if (!es2) return;
-    watchers.delete(slotId);
-    try {
-      es2.close();
-    } catch (e) {
-    }
-  }
-  function unwatchAll() {
-    for (const id of [...watchers.keys()]) unwatchTab(id);
-  }
-  function noteTabEvent(slotId, ev) {
-    const tab = tabForSlot(slotId);
-    if (!tab || !ev || typeof ev !== "object") return false;
-    let changed = false;
-    if (ev.type === "state_update" && ev.key === "execution_status") {
-      const running = ev.value === "running" || ev.value === "waiting";
-      if (tab.running !== running) {
-        tab.running = running;
-        changed = true;
-      }
-    } else if (ev.type === "permission_request") {
-      if (!tab.needsInput) {
-        tab.needsInput = true;
-        changed = true;
-      }
-    } else if (ev.type === "final") {
-      if (tab.running || tab.needsInput) {
-        tab.running = false;
-        tab.needsInput = false;
-        changed = true;
-      }
-    }
-    if (changed) announceTabState();
-    return true;
-  }
-  function setTabRunning(slotId, running) {
-    const tab = tabForSlot(slotId);
-    if (!tab) return;
-    if (tab.running === running) return;
-    tab.running = running;
-    announceTabState();
-  }
-
   // src/renderer/render-events.ts
-  var driving = /* @__PURE__ */ new Set();
   function appendCompletion(status, summary) {
     const div = document.createElement("div");
     div.className = "completion";
@@ -1634,26 +1402,11 @@
     let appendedBody = false;
     switch (ev.type) {
       case "user_message": {
-        const said = String(ev.content == null ? "" : ev.content);
-        if (/^Your previous reply contained no visible text/.test(said)) {
-          wrap.className = "event internal-note";
-          wrap.innerHTML = '<div class="hdr">retry</div>';
-          body.className = "body";
-          body.textContent = "the model returned no visible text \u2014 asking again";
-          break;
-        }
-        if (/^ERROR: The previous response hit the max_tokens limit/.test(said)) {
-          wrap.className = "event internal-note";
-          wrap.innerHTML = '<div class="hdr">retry</div>';
-          body.className = "body";
-          body.textContent = "the response hit max_tokens \u2014 asking again, more concisely";
-          break;
-        }
         wrap.className = "event user";
-        wrap._taskText = said;
+        wrap._taskText = String(ev.content == null ? "" : ev.content);
         wrap.innerHTML = '<div class="hdr">task</div>';
         body.className = "body";
-        body.innerHTML = renderMarkdown(said, true);
+        body.innerHTML = renderMarkdown(ev.content, true);
         break;
       }
       case "tool_result": {
@@ -1758,29 +1511,19 @@
     state.followTail = true;
     autoScroll(true);
     const payload = { task, mode: agentMode, project: currentProject };
-    const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
     let opened = false;
     setStatus("running");
-    if (typeof setTabRunning === "function") setTabRunning(slotId, true);
     try {
-      await hostCall(host.start(slotId, payload));
+      await hostCall(host.start(payload));
       opened = true;
-      driving.add(slotId);
-      try {
-        await hostCall(host.drive(slotId));
-      } finally {
-        driving.delete(slotId);
-      }
+      await hostCall(host.drive());
     } catch (e) {
       const msg = e && e.message || e;
       if (!e || !e.code || e.code === "no_session") {
         connectionLost("could not reach the session to start the task (" + msg + ")");
       }
       addEvent({ type: "final", status: "error", summary: "run failed: " + msg });
-      if (!opened) {
-        setStatus("idle");
-        if (typeof setTabRunning === "function") setTabRunning(slotId, false);
-      }
+      if (!opened) setStatus("idle");
     }
   }
   async function stop() {
@@ -1790,9 +1533,7 @@
       return;
     }
     try {
-      const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
-      await hostCall(host.stop(slotId));
-      if (typeof setTabRunning === "function") setTabRunning(slotId, false);
+      await hostCall(host.stop());
     } catch (e) {
       const msg = e && e.message || e;
       if (!e || !e.code || e.code === "no_session") {
@@ -1801,33 +1542,24 @@
         notice("the backend refused to stop the task (" + msg + ") \u2014 it may still be running");
       }
       setStatus("idle");
-      if (typeof switchBackendActiveSlot === "function") await switchBackendActiveSlot();
-      else await switchBackendResolved();
+      await switchBackendResolved();
     }
   }
   async function resumeTurn() {
     const host = window.clutchRun;
     if (!host || typeof host.state !== "function" || typeof host.drive !== "function") return;
-    const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
     if (!currentProject || busy) return;
-    if (driving.has(slotId)) return;
     let answer;
     try {
-      answer = await hostCall(host.state(slotId, { mode: agentMode, project: currentProject }));
+      answer = await hostCall(host.state({ mode: agentMode, project: currentProject }));
     } catch (e) {
       console.warn("[resume] no fold to resume from:", e && e.message || e);
       return;
     }
     if (!answer || !answer.result || answer.result.phase !== "open") return;
     setStatus("running");
-    if (typeof setTabRunning === "function") setTabRunning(slotId, true);
     try {
-      driving.add(slotId);
-      try {
-        await hostCall(host.drive(slotId));
-      } finally {
-        driving.delete(slotId);
-      }
+      await hostCall(host.drive());
     } catch (e) {
       const msg = e && e.message || e;
       if (e && e.code === "run_active") {
@@ -1838,20 +1570,11 @@
         notice("could not resume the turn (" + msg + ")");
       }
       setStatus("idle");
-      if (typeof setTabRunning === "function") setTabRunning(slotId, false);
     }
   }
   if (window.clutchRun && typeof window.clutchRun.onEvent === "function") {
-    window.clutchRun.onEvent((payload) => {
-      const wrapped = payload && typeof payload === "object" && typeof payload.slotId === "string" && "event" in payload;
-      const slotId = wrapped ? payload.slotId : activeSlotId();
-      const ev = wrapped ? payload.event : payload;
-      if (!ev || typeof ev !== "object") return;
-      if (slotId && slotId !== activeSlotId()) {
-        noteTabEvent(slotId, ev);
-        return;
-      }
-      addEvent(ev);
+    window.clutchRun.onEvent((ev) => {
+      if (ev && typeof ev === "object") addEvent(ev);
     });
   }
   els.run.addEventListener("click", () => busy ? stop() : run());
@@ -2681,14 +2404,6 @@
   function reconnectSSE() {
     connectSSE();
   }
-  function closeSSE() {
-    if (!es) return;
-    try {
-      es.close();
-    } catch (e) {
-    }
-    es = null;
-  }
 
   // src/renderer/task-rollback.ts
   var LONG_PRESS_MS = 500;
@@ -2804,28 +2519,6 @@
 
   // src/renderer/project.ts
   var currentProject = "";
-  var openSeq = 0;
-  var openAbort = null;
-  var opening = null;
-  function supersedeOpen() {
-    openSeq++;
-    if (openAbort) {
-      try {
-        openAbort.abort();
-      } catch (e) {
-      }
-      openAbort = null;
-    }
-    return openSeq;
-  }
-  function isStale(seq, e) {
-    return seq !== openSeq || !!(e && e.name === "AbortError");
-  }
-  function dirOf(path) {
-    if (!path) return "";
-    const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-    return at > 0 ? path.slice(0, at) : "";
-  }
   function clearStream() {
     eventsEl.innerHTML = "";
     state.lastTextEl = null;
@@ -2959,6 +2652,10 @@
     const badge = document.getElementById("readonly-badge");
     if (badge) badge.classList.toggle("hidden", !readOnly);
   }
+  document.addEventListener("clutch:tab-activate", (ev) => {
+    const { path } = ev.detail ?? {};
+    if (path) openProject(path);
+  });
   document.addEventListener("clutch:project-read-only", (ev) => {
     const d = ev && ev.detail || {};
     if (d.project && currentProject && d.project !== currentProject) return;
@@ -2966,6 +2663,8 @@
   });
   function setProjectInfo(info) {
     currentProject = info.project || "";
+    els.projectLabel.textContent = info.name || "";
+    els.projectLabel.title = currentProject;
     if (info.workdir) els.workspace.textContent = info.workdir;
     showReadOnlyBadge(!!info.read_only);
     setStatus("idle");
@@ -2974,22 +2673,6 @@
   function hideWelcome() {
     document.getElementById("welcome").classList.add("hidden");
     els.run.disabled = busy || !currentProject;
-  }
-  function showWelcome() {
-    supersedeOpen();
-    const welcome = document.getElementById("welcome");
-    if (welcome) welcome.classList.remove("hidden");
-    currentProject = "";
-    state.apiBase = null;
-    try {
-      sessionStorage.removeItem("clutch_api_url");
-    } catch (e) {
-    }
-    closeSSE();
-    clearStream();
-    showReadOnlyBadge(false);
-    setStatus("idle");
-    document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: "", name: "" } }));
   }
   function describeHolder(owner) {
     if (!owner || typeof owner !== "object") return "";
@@ -3025,8 +2708,11 @@
     }
     return false;
   }
-  async function openInTab(tab, base, readOnly = false, seq = openSeq) {
-    const path = tab.path;
+  async function openProject(path, readOnly = false) {
+    if (busy) {
+      notice("a run is active \u2014 stop it before opening another project");
+      return;
+    }
     const prog = document.getElementById("open-progress");
     const fill = prog.querySelector(".open-progress-fill");
     const label = prog.querySelector(".open-progress-label");
@@ -3035,16 +2721,12 @@
       label.textContent = Math.round(pct) + "%";
     };
     try {
-      if (!base) throw noBackend();
-      const ctl = new AbortController();
-      openAbort = ctl;
-      const r = await fetch(base + "/api/project/open", {
+      if (!state.apiBase) throw noBackend();
+      const r = await fetch(state.apiBase + "/api/project/open", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, ...readOnly ? { read_only: true } : {} }),
-        signal: ctl.signal
+        body: JSON.stringify({ path, ...readOnly ? { read_only: true } : {} })
       });
-      if (isStale(seq)) return;
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         const e = new Error(err.error || r.status);
@@ -3053,7 +2735,6 @@
         e.project = err.project || null;
         throw e;
       }
-      if (isStale(seq)) return;
       clearStream();
       stream.classList.add("loading");
       prog.classList.remove("hidden");
@@ -3067,7 +2748,6 @@
       let rendered = 0;
       for (; ; ) {
         const { done, value } = await reader.read();
-        if (isStale(seq)) return;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         let nl;
@@ -3082,16 +2762,12 @@
             console.warn("[openProject] undecodable line", e);
             continue;
           }
-          if (isStale(seq)) return;
           if (msg.error) {
             const e = new Error(msg.error);
             e.code = msg.code || null;
             throw e;
           }
           if (msg.meta) {
-            tab.path = msg.meta.project;
-            tab.projectKey = msg.meta.project;
-            if (msg.meta.name) tab.name = msg.meta.name;
             setProjectInfo({
               project: msg.meta.project,
               name: msg.meta.name,
@@ -3112,24 +2788,21 @@
           if (++processed % 25 === 0) await new Promise((r2) => setTimeout(r2, 0));
         }
       }
-      if (isStale(seq)) return;
       await typesetProgressively(eventsEl, (f) => setPct(90 + 10 * f));
-      if (isStale(seq)) return;
       if (started) setPct(100);
       prog.classList.add("hidden");
       stream.classList.remove("loading");
       stream.scrollTop = stream.scrollHeight;
-      if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
-      finishOpen();
+      reconnectSSE();
+      refreshTree();
+      refreshRollbackAnchors();
+      resumeTurn();
     } catch (e) {
-      if (isStale(seq, e)) return;
       prog.classList.add("hidden");
       stream.classList.remove("loading");
       if (e && e.code === "project_open_conflict") {
         const held = describeHolder(e.owner);
-        if (seq !== openSeq) return;
         if (await provenOrphan(e.project)) {
-          if (seq !== openSeq) return;
           const take = await askConfirm({
             title: "Take this project back?",
             text: "The window that held this project is gone, but its session still holds the lock.\n" + (held ? held + "\n" : "") + "Reclaim the project and open it?",
@@ -3137,21 +2810,18 @@
             cancel: "Leave it"
           });
           if (take && await reclaimLock(e.project)) {
-            if (seq !== openSeq) return;
-            await openInTab(tab, base, readOnly, seq);
+            await openProject(path, readOnly);
             return;
           }
           return;
         }
-        if (seq !== openSeq) return;
         const wantReadOnly = await askConfirm({
           title: "Already open elsewhere",
           text: (held ? held + "\n" : "") + "This project is already open in another window.\nOpen it read-only? Read-only mode cannot run tasks.",
           ok: "Open read-only"
         });
         if (wantReadOnly) {
-          if (seq !== openSeq) return;
-          await openInTab(tab, base, true, seq);
+          await openProject(path, true);
           return;
         }
         return;
@@ -3160,149 +2830,22 @@
       console.error("[openProject] failed:", { api: state.apiBase, path, error: e && e.message });
     }
   }
-  function finishOpen() {
-    reconnectSSE();
-    refreshTree();
-    refreshRollbackAnchors();
-    resumeTurn();
-  }
-  var RESTORE_MAX_PAGES = 8;
-  var RESTORE_PAGE_BYTES = 256 * 1024;
-  async function restoreTabView(tab, base, seq) {
-    const m = mementoOf(tab.id);
-    if (!m || m.high === null || !tab.path) return false;
-    let info;
-    try {
-      info = await apiFetch("/api/session", { base });
-    } catch (e) {
-      return false;
-    }
-    if (isStale(seq)) return false;
-    const openPath = info && info.memory && typeof info.memory.path === "string" ? info.memory.path : "";
-    if (!openPath || openPath !== (tab.projectKey || tab.path)) return false;
-    const pages = [];
-    let cursor = m.high + 1;
-    const target = typeof m.oldest === "number" ? m.oldest : cursor - 1;
-    for (let i = 0; i < RESTORE_MAX_PAGES && cursor > target; i++) {
-      let page;
-      try {
-        page = await apiFetch(
-          `/api/history?before=${cursor}&limit=${RESTORE_PAGE_BYTES}&align=turn`,
-          { base }
-        );
-      } catch (e) {
-        break;
-      }
-      if (isStale(seq)) return false;
-      const events = page && Array.isArray(page.events) ? page.events : [];
-      if (!events.length) break;
-      pages.push(events);
-      const older = Number.isFinite(page.older) ? page.older : 0;
-      if (older >= cursor) break;
-      cursor = older;
-    }
-    if (!pages.length) return false;
-    const project = tab.projectKey || tab.path;
-    clearStream();
-    setProjectInfo({
-      project,
-      name: tab.name || project.split("/").pop() || project,
-      workdir: m.workdir || dirOf(project),
-      read_only: false
-      // the stream's status frame carries the real claim
-    });
-    hideWelcome();
-    for (let i = pages.length - 1; i >= 0; i--) {
-      for (const item of pages[i]) {
-        if (isStale(seq)) return true;
-        addEvent(item);
-      }
-    }
-    setOlderPill(Math.max(0, cursor));
-    stream.scrollTop = stream.scrollHeight;
-    if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
-    finishOpen();
-    return true;
-  }
-  async function activateTab(tab, readOnly = false) {
-    if (!tab) return;
-    const same = tab.id === state.activeTabId;
-    if (same && opening && opening.id === tab.id) return opening.promise;
-    const here = tab.projectKey || tab.path;
-    if (same && !opening && currentProject && currentProject === here) return;
-    const prev = activeTab();
-    if (prev && prev.id !== tab.id) {
-      saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
-      if (prev.running) watchTab(prev);
-    }
-    const seq = supersedeOpen();
-    closeSSE();
-    const changed = state.activeTabId !== tab.id;
-    state.activeTabId = tab.id;
-    if (changed) document.dispatchEvent(new CustomEvent("clutch:tab-state"));
-    unwatchTab(tab.id);
-    tab.needsInput = false;
-    const run2 = (async () => {
-      const base = await claimTab(tab);
-      if (isStale(seq)) return;
-      if (!base) {
-        notice("this tab has no session \u2014 the backend is not running");
-        return;
-      }
-      adoptBase(base);
-      if (!tab.path) return;
-      if (await restoreTabView(tab, base, seq)) return;
-      if (isStale(seq)) return;
-      await openInTab(tab, base, readOnly, seq);
-    })();
-    const mine = { id: tab.id, promise: run2 };
-    opening = mine;
-    try {
-      await run2;
-    } finally {
-      if (opening === mine) opening = null;
-    }
-  }
-  async function openProject(path, readOnly = false) {
-    const existing = findTabByPath(path);
-    if (existing && existing.id === state.activeTabId && currentProject === path) return;
-    const tab = existing || ensureTab(path);
-    await activateTab(tab, readOnly);
-  }
   async function createProject(dir, name) {
-    const seq = supersedeOpen();
-    closeSSE();
-    const tab = ensureTab("", name);
-    state.activeTabId = tab.id;
-    document.dispatchEvent(new CustomEvent("clutch:tab-state"));
-    const base = await claimTab(tab);
-    if (isStale(seq)) return;
-    if (!base) {
-      notice("could not start a session for the new project");
+    if (busy) {
+      notice("a run is active \u2014 stop it before creating a project");
       return;
     }
-    adoptBase(base);
     try {
       const data = await apiFetch("/api/project/new", { method: "POST", body: { dir, name } });
-      if (isStale(seq)) return;
-      tab.path = data.project;
-      tab.projectKey = data.project;
-      if (data.name) tab.name = data.name;
       clearStream();
       setProjectInfo(data);
       hideWelcome();
-      finishOpen();
+      reconnectSSE();
+      refreshTree();
+      refreshRollbackAnchors();
     } catch (e) {
-      if (isStale(seq)) return;
       const held = e && e.code === "project_open_conflict" ? describeHolder(e.owner) : "";
       notice("Failed to create project: " + e.message + (held ? " \u2014 " + held : ""));
-      if (!tab.path) {
-        const i = state.tabs.indexOf(tab);
-        if (i >= 0) state.tabs.splice(i, 1);
-        if (state.activeTabId === tab.id) state.activeTabId = null;
-        await releaseTab(tab);
-        document.dispatchEvent(new CustomEvent("clutch:tab-state"));
-      }
     }
   }
 
@@ -3968,7 +3511,7 @@
     const GAP = 4, EDGE = 8, MAX_H = 240, MIN_H = 72, MIN_W = 120, MAX_W = 460;
     const opts = [];
     let selected = null;
-    const listeners2 = [];
+    const listeners = [];
     const isOpen = () => root.classList.contains("open");
     const onScreen = (r) => r.bottom > 0 && r.top < window.innerHeight;
     function place() {
@@ -4029,7 +3572,7 @@
           selected = opt.value;
           render();
           close();
-          if (changed) for (const fn of listeners2) fn();
+          if (changed) for (const fn of listeners) fn();
         });
         pop.appendChild(row);
       }
@@ -4080,7 +3623,7 @@
         root.classList.toggle("disabled", !!b);
       },
       addEventListener(_ev, fn) {
-        listeners2.push(fn);
+        listeners.push(fn);
       },
       focus() {
         btn.focus();
@@ -4358,6 +3901,7 @@
     };
     if (key) payload.api_key = key;
     try {
+      await apiFetch("/api/settings", { method: "POST", body: payload });
       if (key) localStorage.setItem("clutch_api_key", key);
       localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
       if (window.clutchSettings && window.clutchSettings.save) {
@@ -4369,18 +3913,13 @@
           api_protocol: payload.api_protocol
         });
       }
-      try {
-        await apiFetch("/api/settings", { method: "POST", body: payload });
-      } catch (e) {
-        console.warn("[settings] the session did not take the update; the next run will:", e);
-      }
-      document.dispatchEvent(new CustomEvent("clutch:settings-saved"));
       return true;
     } catch (e) {
       addEvent({ type: "final", status: "error", summary: "save settings failed: " + e.message });
       return false;
     }
   }
+  $("#settings-btn").addEventListener("click", openSettings);
   $("#settings-close").addEventListener("click", closeSettings);
   dismissOnOverlayPress(modal, closeSettings);
   function dismissOnOverlayPress(overlayEl, onClose) {
@@ -4861,16 +4400,6 @@
     await reapplyDegradeIfNeeded();
     return true;
   }
-  async function switchBackendActiveSlot() {
-    const tab = activeTab();
-    if (!tab) return switchBackendResolved();
-    const base = await claimTab(tab);
-    if (!base) return false;
-    adoptBase(base);
-    reconnectSSE();
-    await reapplyDegradeIfNeeded();
-    return true;
-  }
   async function reapplyDegradeIfNeeded() {
     const raw = localStorage.getItem("clutch_degrade");
     if (!raw || !window.clutchTunnel) return;
@@ -4954,7 +4483,6 @@
     window.clutchTunnel.onEnd((info) => {
       localStorage.removeItem("clutch_degrade");
       if (info && info.lost === false) return;
-      if (typeof unwatchAll === "function") unwatchAll();
       if (!localStorage.getItem("clutch_ssh_connected")) return;
       const pickerOpen = !fsModal.classList.contains("hidden");
       connectionLost("lost the remote connection");
@@ -4962,17 +4490,7 @@
     });
   }
   if (window.clutchApi && window.clutchApi.onBaseChanged) {
-    window.clutchApi.onBaseChanged((change) => {
-      const slotId = change && typeof change === "object" ? change.slotId || "" : "";
-      const url = change && typeof change === "object" ? change.url : change;
-      if (slotId) {
-        const tab = tabForSlot(slotId);
-        if (tab) tab.base = url ? String(url) : null;
-        if (slotId !== state.activeTabId) {
-          if (tab) rewatchTab(tab);
-          return;
-        }
-      }
+    window.clutchApi.onBaseChanged((url) => {
       if (url) {
         switchBackend(url);
         if (!fsModal.classList.contains("hidden")) {
@@ -5163,8 +4681,7 @@
     return connLostRedial(remote);
   }
   async function connLostAskHost() {
-    const reconnected = await switchBackendActiveSlot() || await switchBackendResolved();
-    if (!reconnected) return false;
+    if (!await switchBackendResolved()) return false;
     return connLostAwaitAnswer();
   }
   function connLostRemoteIntent() {
@@ -5844,8 +5361,8 @@
     if (primary) actions.push(primary);
     const secondary = plugItemMenuItems(item, lead);
     if (secondary.length) {
-      const menu2 = plugMenu(secondary);
-      actions.push(plugMoreButton(item, menu2), menu2);
+      const menu = plugMenu(secondary);
+      actions.push(plugMoreButton(item, menu), menu);
     }
     return actions;
   }
@@ -5865,7 +5382,7 @@
     for (const item of items) box.appendChild(item);
     return box;
   }
-  function plugMoreButton(item, menu2) {
+  function plugMoreButton(item, menu) {
     const name = item.name;
     const where = plugPlaceName(item.held || item.entry);
     const btn = document.createElement("button");
@@ -5875,24 +5392,24 @@
     btn.title = `everything else ${name} can do on ${where}`;
     btn.setAttribute("aria-label", `more actions for ${name} on ${where}`);
     btn.setAttribute("aria-haspopup", "true");
-    btn.setAttribute("aria-controls", menu2.id);
-    btn.setAttribute("aria-expanded", String(menu2.classList.contains("open")));
+    btn.setAttribute("aria-controls", menu.id);
+    btn.setAttribute("aria-expanded", String(menu.classList.contains("open")));
     btn.addEventListener("click", (ev) => {
       if (ev && ev.stopPropagation) ev.stopPropagation();
-      const open = !menu2.classList.contains("open");
+      const open = !menu.classList.contains("open");
       plugCloseMenus();
-      menu2.classList.toggle("drop-up", open && !plugMenuFitsBelow(btn, menu2));
-      menu2.classList.toggle("open", open);
+      menu.classList.toggle("drop-up", open && !plugMenuFitsBelow(btn, menu));
+      menu.classList.toggle("open", open);
       btn.setAttribute("aria-expanded", String(open));
     });
     return btn;
   }
-  function plugMenuFitsBelow(btn, menu2) {
+  function plugMenuFitsBelow(btn, menu) {
     if (typeof btn.getBoundingClientRect !== "function") return true;
     if (typeof plugBodyEl.getBoundingClientRect !== "function") return true;
     const anchor = btn.getBoundingClientRect();
     const box = plugBodyEl.getBoundingClientRect();
-    const need = typeof menu2.getBoundingClientRect === "function" && menu2.getBoundingClientRect().height || 140;
+    const need = typeof menu.getBoundingClientRect === "function" && menu.getBoundingClientRect().height || 140;
     return anchor.bottom + need + 8 <= box.bottom;
   }
   function plugCloseMenus() {
@@ -6988,82 +6505,11 @@
   paintModel();
   paintProject("", "");
 
-  // src/renderer/commands.ts
-  var registry = /* @__PURE__ */ new Map();
-  var listeners = /* @__PURE__ */ new Set();
-  function register(def) {
-    registry.set(def.id, def);
-  }
-  function execute(id, arg) {
-    const cmd = registry.get(id);
-    if (!cmd) return false;
-    try {
-      if (cmd.enabled && !cmd.enabled()) return false;
-    } catch (e) {
-      return false;
-    }
-    try {
-      const out = cmd.run(arg);
-      if (out && typeof out.catch === "function") out.catch((e) => console.warn("[command] " + id, e));
-    } catch (e) {
-      console.warn("[command] " + id, e);
-    }
-    return true;
-  }
-  function isEnabled(id) {
-    const cmd = registry.get(id);
-    if (!cmd) return false;
-    try {
-      return !cmd.enabled || !!cmd.enabled();
-    } catch (e) {
-      return false;
-    }
-  }
-  function has(id) {
-    return registry.has(id);
-  }
-  function onChange(cb) {
-    listeners.add(cb);
-  }
-  function matches(e, spec) {
-    const parts = spec.toLowerCase().split("+");
-    const key = parts.pop() || "";
-    const needMod = parts.includes("mod") || parts.includes("ctrl");
-    const needShift = parts.includes("shift");
-    const needAlt = parts.includes("alt");
-    const mod = e.ctrlKey || e.metaKey;
-    if (needMod !== mod) return false;
-    if (needShift !== e.shiftKey) return false;
-    if (needAlt !== e.altKey) return false;
-    return (e.key || "").toLowerCase() === key;
-  }
-  var bound = false;
-  function bindKeys() {
-    if (bound) return;
-    bound = true;
-    document.addEventListener("keydown", (e) => {
-      if (e.isComposing) return;
-      for (const cmd of registry.values()) {
-        if (!cmd.key || !matches(e, cmd.key)) continue;
-        if (cmd.enabled && !cmd.enabled()) continue;
-        e.preventDefault();
-        execute(cmd.id);
-        return;
-      }
-    });
-  }
-
   // src/renderer/tab-bar.ts
   var LS_KEY = "clutch_tabs";
   function saveTabs() {
     try {
-      const tabs = state.tabs.map((t) => ({
-        id: t.id,
-        path: t.path,
-        name: t.name,
-        dirty: !!t.dirty
-      }));
-      localStorage.setItem(LS_KEY, JSON.stringify({ tabs }));
+      localStorage.setItem(LS_KEY, JSON.stringify({ tabs: state.tabs }));
     } catch {
     }
   }
@@ -7073,36 +6519,16 @@
       if (!raw) return;
       const data = JSON.parse(raw);
       if (Array.isArray(data.tabs)) {
-        const seenId = /* @__PURE__ */ new Set();
-        const seenPath = /* @__PURE__ */ new Set();
-        state.tabs = data.tabs.filter((t) => t && typeof t.id === "string" && typeof t.path === "string").filter((t) => {
-          if (!t.id || seenId.has(t.id) || !t.path || seenPath.has(t.path)) return false;
-          seenId.add(t.id);
-          seenPath.add(t.path);
-          return true;
-        }).map((t) => ({
-          id: t.id,
-          path: t.path,
-          name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
-          dirty: !!t.dirty,
-          base: null,
-          running: false,
-          needsInput: false
-        }));
+        state.tabs = data.tabs.filter(
+          (t) => t && typeof t.id === "string" && typeof t.path === "string"
+        );
       }
       state.activeTabId = null;
     } catch {
     }
   }
-  var mru = [];
-  var closedStack = [];
-  var draggingId = null;
-  function noteMru(id) {
-    mru = [id, ...mru.filter((x) => x !== id)];
-    if (mru.length > 50) mru.length = 50;
-  }
-  function closedTabCount() {
-    return closedStack.length;
+  function newTabId() {
+    return "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   }
   function renderTabBar() {
     const bar = document.getElementById("tab-bar");
@@ -7110,19 +6536,14 @@
     const newBtn = document.getElementById("tab-new-btn");
     Array.from(bar.querySelectorAll(".doc-tab")).forEach((el) => el.remove());
     bar.classList.toggle("hidden", state.tabs.length === 0);
+    bar.classList.toggle("hidden", state.tabs.length === 0);
     for (const tab of state.tabs) {
       const el = document.createElement("div");
-      el.className = "doc-tab" + (tab.id === state.activeTabId ? " active" : "") + (tab.running ? " running" : "") + (tab.needsInput ? " needs-input" : "");
+      el.className = "doc-tab" + (tab.id === state.activeTabId ? " active" : "");
       el.dataset.tabId = tab.id;
-      el.tabIndex = 0;
-      el.draggable = true;
       el.setAttribute("role", "tab");
       el.setAttribute("aria-selected", tab.id === state.activeTabId ? "true" : "false");
-      el.title = tab.path + (tab.running ? "\nrunning" : "") + (tab.needsInput ? "\nwaiting for your answer" : "");
-      el.setAttribute(
-        "aria-label",
-        tab.name + (tab.running ? " \u2014 running" : "") + (tab.needsInput ? " \u2014 waiting for input" : "")
-      );
+      el.title = tab.path;
       const label = document.createElement("span");
       label.className = "doc-tab-label";
       label.textContent = tab.name;
@@ -7131,18 +6552,6 @@
         const dot = document.createElement("span");
         dot.className = "doc-tab-dirty";
         dot.setAttribute("aria-label", "unsaved");
-        el.appendChild(dot);
-      }
-      if (tab.running) {
-        const dot = document.createElement("span");
-        dot.className = "doc-tab-run";
-        dot.setAttribute("aria-hidden", "true");
-        el.appendChild(dot);
-      }
-      if (tab.needsInput) {
-        const dot = document.createElement("span");
-        dot.className = "doc-tab-ask";
-        dot.setAttribute("aria-hidden", "true");
         el.appendChild(dot);
       }
       const closeBtn = document.createElement("button");
@@ -7155,306 +6564,72 @@
       });
       el.appendChild(closeBtn);
       el.addEventListener("click", () => tabActivate(tab.id));
-      el.addEventListener("auxclick", (e) => {
-        if (e.button !== 1) return;
-        e.preventDefault();
-        tabClose(tab.id);
-      });
-      el.addEventListener("keydown", (e) => {
-        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-        e.preventDefault();
-        const idx = state.tabs.findIndex((t) => t.id === tab.id);
-        if (idx < 0) return;
-        const next = state.tabs[(idx + (e.key === "ArrowRight" ? 1 : -1) + state.tabs.length) % state.tabs.length];
-        if (next) tabActivate(next.id);
-      });
-      el.addEventListener("dragstart", (e) => {
-        draggingId = tab.id;
-        if (e.dataTransfer) {
-          e.dataTransfer.effectAllowed = "move";
-          try {
-            e.dataTransfer.setData("text/plain", tab.id);
-          } catch (err) {
-          }
-        }
-      });
-      el.addEventListener("dragover", (e) => {
-        if (draggingId && draggingId !== tab.id) e.preventDefault();
-      });
-      el.addEventListener("drop", (e) => {
-        e.preventDefault();
-        const from = state.tabs.findIndex((t) => t.id === draggingId);
-        const to = state.tabs.findIndex((t) => t.id === tab.id);
-        draggingId = null;
-        if (from < 0 || to < 0 || from === to) return;
-        const [moved] = state.tabs.splice(from, 1);
-        state.tabs.splice(to, 0, moved);
-        saveTabs();
-        renderTabBar();
-      });
-      el.addEventListener("dragend", () => {
-        draggingId = null;
-      });
       if (newBtn) bar.insertBefore(el, newBtn);
       else bar.appendChild(el);
     }
-    const active = state.tabs.find((t) => t.id === state.activeTabId);
-    document.title = active ? `${active.running ? "\u25CF " : ""}${active.name} \u2014 Clutch` : "Clutch";
   }
   function tabOpen(path, name) {
-    if (!path) return;
-    let tab = findTabByPath(path);
-    if (!tab) {
-      tab = ensureTab(path, name);
-    } else if (name) {
-      tab.name = name;
+    const existing = state.tabs.find((t) => t.path === path);
+    if (existing) {
+      if (existing.id === state.activeTabId) return;
+      state.activeTabId = existing.id;
+      renderTabBar();
+      saveTabs();
+      return;
     }
-    tab.path = path;
-    tab.projectKey = path;
-    state.activeTabId = tab.id;
-    noteMru(tab.id);
+    const id = newTabId();
+    state.tabs.push({ id, path, name, dirty: false });
+    state.activeTabId = id;
     renderTabBar();
     saveTabs();
   }
-  async function tabClose(id) {
+  function tabClose(id) {
     const idx = state.tabs.findIndex((t) => t.id === id);
     if (idx < 0) return;
-    const tab = state.tabs[idx];
-    const running = !!tab.running || tab.id === state.activeTabId && busy;
-    if (running) {
-      const yes = await askConfirm({
-        title: "Stop this task and close the tab?",
-        text: `${tab.name} is still running.
-Closing its tab stops the task and writes an aborted ending to the project log.`,
-        ok: "Stop and close",
-        cancel: "Keep it"
-      });
-      if (!yes) return;
-      if (window.clutchRun && window.clutchRun.stop) {
-        try {
-          await window.clutchRun.stop(tab.id);
-        } catch (e) {
-        }
+    state.tabs.splice(idx, 1);
+    if (state.activeTabId === id) {
+      const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
+      if (next) {
+        state.activeTabId = next.id;
+        document.dispatchEvent(
+          new CustomEvent("clutch:tab-activate", { detail: { path: next.path } })
+        );
+      } else {
+        state.activeTabId = null;
       }
     }
-    unwatchTab(id);
-    await releaseTab(tab);
-    forgetMemento(id);
-    state.tabs.splice(idx, 1);
-    if (tab.path) {
-      closedStack.push({ path: tab.path, name: tab.name });
-      if (closedStack.length > 20) closedStack.shift();
-    }
-    mru = mru.filter((x) => x !== id);
-    const wasActive = state.activeTabId === id;
-    if (wasActive) state.activeTabId = null;
     renderTabBar();
     saveTabs();
-    if (!wasActive) return;
-    const next = state.tabs[idx] ?? state.tabs[idx - 1] ?? null;
-    if (next) {
-      await tabActivate(next.id);
-    } else {
-      showWelcome();
-    }
   }
-  async function tabActivate(id) {
+  function tabActivate(id) {
     const tab = state.tabs.find((t) => t.id === id);
-    if (!tab) return;
-    noteMru(tab.id);
-    await activateTab(tab);
-  }
-  async function tabCloseOthers() {
-    const keep = state.activeTabId;
-    for (const t of [...state.tabs]) {
-      if (keep && t.id === keep) continue;
-      await tabClose(t.id);
-    }
-  }
-  async function tabCloseAll() {
-    for (const t of [...state.tabs]) await tabClose(t.id);
-  }
-  async function tabReopen() {
-    const last = closedStack.pop();
-    if (!last) return;
-    const tab = ensureTab(last.path, last.name);
-    await tabActivate(tab.id);
+    if (!tab || tab.id === state.activeTabId) return;
+    state.activeTabId = id;
+    renderTabBar();
+    saveTabs();
+    document.dispatchEvent(
+      new CustomEvent("clutch:tab-activate", { detail: { path: tab.path } })
+    );
   }
   document.addEventListener("keydown", (e) => {
     if (!e.ctrlKey || e.key !== "Tab" || state.tabs.length < 2) return;
     e.preventDefault();
-    if (!e.shiftKey) {
-      const prior = mru.find((id) => id !== state.activeTabId && state.tabs.some((t) => t.id === id));
-      if (prior) tabActivate(prior);
-      return;
-    }
     const idx = state.tabs.findIndex((t) => t.id === state.activeTabId);
     if (idx < 0) return;
     const len = state.tabs.length;
-    const next = state.tabs[(idx - 1 + len) % len];
+    const next = e.shiftKey ? state.tabs[(idx - 1 + len) % len] : state.tabs[(idx + 1) % len];
     tabActivate(next.id);
   });
   document.getElementById("tab-new-btn")?.addEventListener("click", () => {
-    execute("tab-new");
+    const welcome = document.getElementById("welcome");
+    if (welcome) welcome.classList.remove("hidden");
   });
   document.addEventListener("clutch:project-info", (ev) => {
     const { project, name } = ev.detail ?? {};
     if (project) tabOpen(project, name || project.split("/").pop() || project);
   });
-  document.addEventListener("clutch:tab-state", () => renderTabBar());
   loadTabs();
   renderTabBar();
-
-  // src/renderer/titlebar.ts
-  var menu = $("#tb-menu");
-  var openItem = null;
-  var hasProject = () => !!currentProject;
-  var tabCount = () => state.tabs.length;
-  var activeId = () => state.activeTabId || "";
-  var activeRunning = () => !!busy;
-  function closeMenu() {
-    if (!openItem) return;
-    openItem.classList.remove("open");
-    openItem = null;
-  }
-  register({ id: "open", key: "mod+o", run: () => openFsBrowser("open") });
-  register({ id: "new", key: "mod+n", run: () => openFsBrowser("new") });
-  register({ id: "settings", run: () => openSettings() });
-  register({ id: "about", run: () => openSettings().then(() => showSettingsTab("about")) });
-  register({ id: "run", enabled: () => hasProject() && !activeRunning(), run: () => run() });
-  register({ id: "stop", enabled: () => activeRunning(), run: () => stop() });
-  register({ id: "mode-work", run: () => setMode("work") });
-  register({ id: "mode-chat", run: () => setMode("chat") });
-  register({ id: "trust", run: () => setTrustArmed(!trustArmed()) });
-  register({
-    id: "toggle-right",
-    // desktop: collapse/show the aside; phone: the aside IS the drawer
-    run: () => {
-      if (NARROW_Q.matches) setShellPanel(!shellPanel.classList.contains("drawer-open"));
-      else shellPanel.classList.toggle("panel-hidden");
-    }
-  });
-  register({ id: "toggle-statusbar", run: () => $("#statusbar")?.classList.toggle("hidden") });
-  register({ id: "toggle-hidden", run: () => toggleHidden() });
-  register({ id: "tab-new", run: () => openFsBrowser("open") });
-  register({ id: "tab-close", key: "mod+w", enabled: () => tabCount() > 0, run: () => tabClose(activeId()) });
-  register({ id: "tab-close-others", enabled: () => tabCount() > 1, run: () => tabCloseOthers() });
-  register({ id: "tab-close-all", enabled: () => tabCount() > 0, run: () => tabCloseAll() });
-  register({ id: "tab-reopen", key: "mod+shift+t", enabled: () => closedTabCount() > 0, run: () => tabReopen() });
-  register({ id: "activate-tab", run: ({ tab }) => tab && tabActivate(tab) });
-  register({ id: "open-recent", run: ({ path }) => path && openProject(path) });
-  var RECENT_KEY = "clutch_recent";
-  function recentList() {
-    try {
-      const raw = localStorage.getItem(RECENT_KEY);
-      const list = raw ? JSON.parse(raw) : [];
-      return Array.isArray(list) ? list.filter((r) => r && typeof r.path === "string") : [];
-    } catch (e) {
-      return [];
-    }
-  }
-  function recordRecent(project, name) {
-    if (!project) return;
-    const list = recentList().filter((r) => r.path !== project);
-    list.unshift({ path: project, name: name || project.split("/").pop() || project });
-    if (list.length > 8) list.length = 8;
-    try {
-      localStorage.setItem(RECENT_KEY, JSON.stringify(list));
-    } catch (e) {
-    }
-  }
-  function ddItem(action, text, attrs = {}) {
-    const el = document.createElement("div");
-    el.className = "tb-dd-item";
-    el.dataset.action = action;
-    el.textContent = text;
-    for (const [k, v] of Object.entries(attrs)) el.dataset[k] = v;
-    return el;
-  }
-  function renderRecent() {
-    const box = document.getElementById("tb-recent");
-    if (!box) return;
-    box.textContent = "";
-    const list = recentList();
-    if (!list.length) {
-      const empty = ddItem("", "No recent projects");
-      empty.classList.add("disabled");
-      box.appendChild(empty);
-      return;
-    }
-    for (const r of list) {
-      const item = ddItem("open-recent", r.name || r.path, { path: r.path });
-      item.title = r.path;
-      box.appendChild(item);
-    }
-  }
-  function renderOpenTabs() {
-    const box = document.getElementById("tb-tabs");
-    if (!box) return;
-    box.textContent = "";
-    if (!state.tabs.length) {
-      const empty = ddItem("", "No open tabs");
-      empty.classList.add("disabled");
-      box.appendChild(empty);
-      return;
-    }
-    for (const tab of state.tabs) {
-      const mark = tab.id === state.activeTabId ? "\u2713 " : "";
-      const dot = tab.needsInput ? "  \u25CF" : tab.running ? "  \u25D0" : "";
-      const item = ddItem("activate-tab", mark + tab.name + dot, { tab: tab.id });
-      item.title = tab.path;
-      if (tab.id === state.activeTabId) item.classList.add("active-tab");
-      box.appendChild(item);
-    }
-  }
-  function refreshMenu() {
-    menu?.querySelectorAll("[data-action]").forEach((el) => {
-      const id = el.dataset.action || "";
-      if (!id || !has(id)) return;
-      el.classList.toggle("disabled", !isEnabled(id));
-    });
-    renderRecent();
-    renderOpenTabs();
-  }
-  menu?.addEventListener("click", (e) => {
-    const target = e.target;
-    const action = target.closest("[data-action]");
-    if (action && action.dataset.action) {
-      e.stopPropagation();
-      if (action.classList.contains("disabled")) return;
-      closeMenu();
-      execute(action.dataset.action, { path: action.dataset.path, tab: action.dataset.tab });
-      return;
-    }
-    const item = target.closest(".tb-menu-item");
-    if (!item) return;
-    if (item === openItem) {
-      closeMenu();
-      return;
-    }
-    closeMenu();
-    item.classList.add("open");
-    openItem = item;
-    refreshMenu();
-  });
-  document.addEventListener("click", (e) => {
-    const target = e.target;
-    if (!target || !target.closest("#tb-menu")) closeMenu();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeMenu();
-  });
-  document.addEventListener("clutch:project-info", (ev) => {
-    const { project, name } = ev.detail ?? {};
-    recordRecent(project, name);
-    refreshMenu();
-  });
-  document.addEventListener("clutch:tab-state", () => refreshMenu());
-  document.addEventListener("clutch:status-changed", () => refreshMenu());
-  document.addEventListener("clutch:backend-changed", () => refreshMenu());
-  onChange(refreshMenu);
-  bindKeys();
-  refreshMenu();
 
   // src/renderer/boot.ts
   function storedLlmConfig() {
@@ -7505,20 +6680,12 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     }
   }
   (async () => {
-    const restoredTabs = state.tabs.length > 0 && !connLostExitPending();
-    if (!restoredTabs) await resolveApiBase();
+    await resolveApiBase();
     await loadHostDefaults();
     healSettingsMirror();
-    if (restoredTabs) return;
     const url = await reconciledBackendUrl();
     if (url) switchBackend(url);
     connectSSE();
     resumeTurn();
   })();
-  if (typeof window.clutchWin !== "undefined") {
-    const cw = window.clutchWin;
-    document.querySelector(".tb-winbtn.minimize")?.addEventListener("click", () => cw.minimize());
-    document.querySelector(".tb-winbtn.maximize")?.addEventListener("click", () => cw.maximize());
-    document.querySelector(".tb-winbtn.close")?.addEventListener("click", () => cw.close());
-  }
 })();
