@@ -81,6 +81,12 @@ export const plugState = {
   versions: null, // {name, rows, error} — the one open version list, as just read
   versionsPending: null, // name whose version list is being read right now
   versionsSeq: 0, // which version-list read is the current one (closing bumps it)
+  // the one open settings form: the schema its declaration carries, the values
+  // this machine holds, the key a write is in flight for, and what the host said
+  // about the last one. Never a copy of anything the page decided itself.
+  form: null, // {name, schema, values, busy, error, saved}
+  formPending: null, // name whose settings are being read right now
+  formSeq: 0, // which settings read is the current one (closing bumps it)
   filter: "all", // which slice of the ONE list is on screen (never persisted)
   query: "", // the name filter, as typed (never persisted)
 };
@@ -640,6 +646,11 @@ export function plugItemActions(item) {
 export function plugItemMenuItems(item, lead) {
   const items = [];
   if (!item.held) return items; // a component neither place holds has nothing else to offer
+  // what the component's declaration lets a user set comes first, because it is
+  // the one item here that changes how the component BEHAVES rather than whether
+  // it is on this machine — the same door an editor's "Extension Settings" opens,
+  // drawn in place because this page has no settings editor to navigate to
+  items.push(plugSettingsButton(item.held));
   if (lead !== "switch") items.push(plugSwitchButton(item.held));
   if (item.entry && lead !== "install" && lead !== "update") items.push(plugInstallButton(item.entry));
   items.push(plugVersionsButton(item.held), plugRemoveButton(item.held));
@@ -742,7 +753,7 @@ export function plugItemRow(item) {
     chips: plugItemChips(item),
     desc: plugItemDesc(item),
     actions: plugItemActions(item),
-    extra: item.held ? plugVersionRows(item.held) : null,
+    extra: plugItemExtra(item.held),
     state: plugItemState(item),
     // every fact the row no longer DRAWS is still answered, one hover away: the
     // list is for choosing, the tooltip for confirming (U-10)
@@ -1196,6 +1207,295 @@ export function plugVersionRows(held) {
     );
   }
   return box;
+}
+
+// What a row opens UNDER itself. A row can have two disclosures — the versions
+// this place holds, and the settings the component declares — and both hang off
+// the same row, because both are about it. One disclosure is that box; two are a
+// stack of them, and the row's own gap is what spaces them.
+export function plugItemExtra(held) {
+  if (!held) return null;
+  const boxes = [plugVersionRows(held), plugSettingsRows(held)].filter(Boolean);
+  if (!boxes.length) return null;
+  if (boxes.length === 1) return boxes[0];
+  const wrap = document.createElement("div");
+  wrap.className = "plug-row-extra";
+  for (const box of boxes) wrap.appendChild(box);
+  return wrap;
+}
+
+// The settings a component declares, drawn from what the MACHINE serves and from
+// nothing else (`components:settings` → the declaration's `schema` + this
+// machine's `values`). The page knows no knob of anybody, the way an editor draws
+// an extension's contributed configuration without knowing what it configures:
+// one row per setting, the key on the left, the control on the right, the
+// declaration's own sentence under both, and a mark when what is set is not what
+// the declaration defaults to. A write goes back through the machine that owns
+// the file, and the form redraws from what it then HOLDS — never from what this
+// page sent.
+export function plugSettingsButton(held) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  const open = Boolean(plugState.form && plugState.form.name === held.name);
+  btn.className = "plug-settings" + (open ? " open" : "");
+  btn.textContent = "Settings…";
+  const refuse = plugPlaceReady(held.place);
+  if (refuse) {
+    btn.disabled = true;
+    btn.title = refuse;
+  } else if (!window.clutchComponents || !window.clutchComponents.settings) {
+    // a shell whose bridge predates the verb must not draw a control that looks
+    // like one
+    btn.disabled = true;
+    btn.title = "this shell cannot read component settings at all";
+  } else if (open) {
+    btn.title = "close what " + held.name + " lets you set";
+  } else {
+    btn.title =
+      `what ${held.name} lets you set on ${plugPlace(held)} — the values live with ` +
+      "the component, on the machine that runs it";
+  }
+  btn.addEventListener("click", () => plugSettingsToggle(held.name));
+  return btn;
+}
+
+export function plugSettingsToggle(name) {
+  if (plugState.form && plugState.form.name === name) {
+    plugState.form = null;
+    plugState.formPending = null;
+    plugState.formSeq++; // a read still in flight is no longer wanted
+    renderPlugins();
+    return;
+  }
+  plugState.form = null;
+  plugReadSettings(name);
+}
+
+export function plugReadSettings(name) {
+  const api = window.clutchComponents;
+  if (!api || !api.settings) return;
+  const seq = ++plugState.formSeq;
+  plugState.form = null;
+  plugState.formPending = name;
+  renderPlugins();
+  api
+    .settings(name)
+    .then((r) => {
+      if (seq !== plugState.formSeq) return; // closed, or another row asked since
+      plugState.formPending = null;
+      plugState.form =
+        r && r.ok
+          ? { name, schema: r.schema || {}, values: r.values || {}, busy: null, error: null, saved: null }
+          : { name, schema: {}, values: {}, busy: null, error: (r && r.error) || "the machine gave no answer", saved: null };
+    })
+    .catch((e) => {
+      if (seq !== plugState.formSeq) return;
+      plugState.formPending = null;
+      plugState.form = { name, schema: {}, values: {}, busy: null, error: (e && e.message) || String(e), saved: null };
+    })
+    .then(() => {
+      if (seq === plugState.formSeq) renderPlugins();
+    });
+}
+
+// ONE value written back. The form holds the key a write is in flight for, so
+// every control of that form is dead until the machine answers — one write at a
+// time, like every other write on this page. A refusal is the host's sentence,
+// drawn under the form, and it changes nothing.
+export function plugWriteSetting(name, key, value) {
+  const api = window.clutchComponents;
+  const form = plugState.form;
+  if (!api || !api.setSetting || !form || form.name !== name || form.busy) return;
+  const seq = plugState.formSeq;
+  form.busy = key;
+  form.error = null;
+  form.saved = null;
+  renderPlugins();
+  api
+    .setSetting(name, { [key]: value })
+    .then((r) => {
+      if (seq !== plugState.formSeq) return; // the form was closed while it flew
+      form.busy = null;
+      if (r && r.ok) {
+        form.values = r.values || form.values; // what the machine NOW holds
+        form.saved = key;
+      } else {
+        form.error = (r && r.error) || "the machine gave no answer";
+      }
+      renderPlugins();
+    })
+    .catch((e) => {
+      if (seq !== plugState.formSeq) return;
+      form.busy = null;
+      form.error = (e && e.message) || String(e);
+      renderPlugins();
+    });
+}
+
+function plugSettingSame(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function plugSettingsRows(held) {
+  const reading = plugState.formPending === held.name;
+  const form = plugState.form && plugState.form.name === held.name ? plugState.form : null;
+  if (!reading && !form) return null;
+  const box = document.createElement("div");
+  box.className = "plug-settings-box";
+  const line = (text, cls = "") => {
+    const el = document.createElement("div");
+    el.className = "plug-line" + (cls ? " " + cls : "");
+    el.textContent = text;
+    box.appendChild(el);
+  };
+  if (reading) {
+    line("reading the settings it declares…");
+    return box;
+  }
+  const keys = Object.keys(form.schema || {}).sort();
+  if (!keys.length) {
+    // a read that failed is a reason, never "it has no settings": the two look
+    // alike in an empty form and are not the same answer
+    line(
+      form.error
+        ? "could not be read — " + form.error
+        : "it declares no settings — there is nothing here to set",
+      form.error ? "error" : ""
+    );
+    return box;
+  }
+  for (const key of keys) {
+    const spec = form.schema[key] && typeof form.schema[key] === "object" ? form.schema[key] : {};
+    box.appendChild(plugSettingRow(held, key, spec, form));
+  }
+  if (form.error) line(form.error, "error");
+  else if (form.saved)
+    line(`${form.saved} is set — it takes effect the next time ${held.name} runs`, "saved");
+  return box;
+}
+
+// ONE setting, in the shape an editor's settings page gives one: the key, the
+// declaration's sentence under it, the control at the right end, and — only when
+// what is set is not what was declared — the mark that says so beside a way back.
+export function plugSettingRow(held, key, spec, form) {
+  const row = document.createElement("div");
+  const modified = !plugSettingSame(form.values[key], spec.default);
+  row.className = "plug-setting" + (modified ? " modified" : "");
+  const main = document.createElement("div");
+  main.className = "plug-setting-main";
+  const head = document.createElement("div");
+  head.className = "plug-setting-head";
+  const label = document.createElement("label");
+  label.className = "plug-setting-label";
+  label.textContent = key;
+  label.htmlFor = "plug-setting-" + held.name + "-" + ++plugIdSeq;
+  head.appendChild(label);
+  if (modified) head.appendChild(plugChip("set", "accent"));
+  main.appendChild(head);
+  // the declaration's own sentence, when it wrote one: nothing is described here
+  // that the declaration did not say
+  const desc = document.createElement("div");
+  desc.className = "plug-setting-desc";
+  desc.textContent = String(spec.description || "");
+  if (desc.textContent) main.appendChild(desc);
+  row.appendChild(main);
+  const ctl = document.createElement("div");
+  ctl.className = "plug-setting-ctl";
+  ctl.appendChild(plugSettingControl(held, key, spec, form, label.htmlFor));
+  if (modified) ctl.appendChild(plugSettingResetButton(held, key, spec, form));
+  row.appendChild(ctl);
+  return row;
+}
+
+// The control for one setting, chosen by the type the declaration names — the
+// same six types the host reads (`catalog.SETTING_TYPES`), so there is no seventh
+// shape a form could invent. A value is written when the control SETTLES (a
+// checkbox or a list change, a box on Enter or on leaving it), never per
+// keystroke: a settings file is not a buffer.
+export function plugSettingControl(held, key, spec, form, id) {
+  const dead = Boolean(form.busy);
+  const write = (value) => plugWriteSetting(held.name, key, value);
+  const kind = String(spec.type || "string");
+  const value = form.values[key];
+  if (kind === "boolean") {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.className = "plug-setting-check";
+    input.id = id;
+    input.checked = value === true;
+    input.disabled = dead;
+    input.addEventListener("change", () => write(input.checked));
+    return input;
+  }
+  if (kind === "enum") {
+    const options = Array.isArray(spec.enum) ? spec.enum : [];
+    const sel = document.createElement("select");
+    sel.className = "plug-setting-select";
+    sel.id = id;
+    sel.disabled = dead;
+    for (const option of options) {
+      const el = document.createElement("option");
+      el.value = String(option);
+      el.textContent = String(option);
+      if (String(option) === String(value)) el.selected = true;
+      sel.appendChild(el);
+    }
+    sel.addEventListener("change", () => write(sel.value));
+    return sel;
+  }
+  const input = document.createElement("input");
+  input.id = id;
+  input.className = "plug-setting-input";
+  input.disabled = dead;
+  if (kind === "number" || kind === "integer") {
+    input.type = "number";
+    input.step = kind === "integer" ? "1" : "any";
+    input.value = value === undefined || value === null ? "" : String(value);
+    input.addEventListener("change", () => {
+      const n = Number(input.value);
+      if (input.value.trim() === "" || Number.isNaN(n)) {
+        input.value = value === undefined || value === null ? "" : String(value);
+        return;
+      }
+      write(n);
+    });
+    return input;
+  }
+  input.type = "text";
+  if (kind === "array") {
+    // a box of comma-separated words: the declaration says `items` is a string
+    // and the store keeps a list of them, so the comma is the form's, not a
+    // second wire shape
+    input.className += " plug-setting-list";
+    input.value = Array.isArray(value) ? value.join(", ") : "";
+    input.title = "separate words with commas";
+    input.addEventListener("change", () =>
+      write(
+        input.value
+          .split(",")
+          .map((word) => word.trim())
+          .filter(Boolean)
+      )
+    );
+    return input;
+  }
+  input.value = typeof value === "string" ? value : value === undefined || value === null ? "" : String(value);
+  input.addEventListener("change", () => write(input.value));
+  return input;
+}
+
+// The way back to what the declaration defaulted to — offered only on a setting
+// that is somewhere else. Writing the default IS the reset: the store holds the
+// effective document, so "unset" would be a second meaning for an absent key.
+export function plugSettingResetButton(held, key, spec, form) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "plug-setting-reset";
+  btn.textContent = "Reset";
+  btn.disabled = Boolean(form.busy);
+  btn.title = `set ${key} back to ${JSON.stringify(spec.default)}`;
+  btn.addEventListener("click", () => plugWriteSetting(held.name, key, spec.default));
+  return btn;
 }
 
 // The removal of ONE version. Same discipline as the whole-component one — dead

@@ -1838,6 +1838,45 @@ mjx-container[display="true"] {
    its own whatever the two columns above it measure (`flex-basis: 100%`); the
    row's own row-gap is what spaces it from them. */
 .plug-versions-box { flex: 1 1 100%; margin: 0 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
+/* a row can open two disclosures at once — the versions this place holds and the
+   settings the component declares — so the stack takes a line of its own and the
+   two boxes keep the spacing they have when they are alone */
+.plug-row-extra { flex: 1 1 100%; display: flex; flex-direction: column; gap: var(--s2); }
+/* the settings a component declares, drawn under its row: one row per setting in
+   the shape an editor's settings page gives one — the key and the declaration's
+   own sentence down the left, the control at the right end, and a mark on a
+   setting that is no longer what the declaration defaulted to. Set in from the
+   row behind a hairline, like the version list: it is a disclosure OF that row and
+   never a second component. */
+.plug-settings-box { flex: 1 1 100%; margin: 0 0 var(--s1) var(--s3); padding-left: var(--s3); border-left: 1px solid var(--border); }
+.plug-setting { display: flex; align-items: flex-start; gap: var(--s3); padding: var(--s2) 0; }
+.plug-setting + .plug-setting { border-top: 1px solid var(--border); }
+/* the words yield the width, the control never does: a key and its sentence can
+   wrap, a box a value is typed into cannot */
+.plug-setting-main { flex: 1 1 auto; min-width: 0; }
+.plug-setting-head { display: flex; align-items: center; gap: var(--s2); }
+.plug-setting-label { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text); }
+.plug-setting-desc { margin-top: 2px; font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+.plug-setting-ctl { flex: none; display: flex; align-items: center; gap: var(--s2); }
+/* the same field every other box on this page is (the filter name box): one
+   hairline, the mono face, and the lit border on focus — no ring, no new size */
+.plug-setting-input, .plug-setting-select {
+  width: 12em;
+  height: var(--ctl-h-sm);
+  padding: 3px var(--s2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+/* a list of words is the one value that needs room to be read as a list */
+.plug-setting-input.plug-setting-list { width: 18em; }
+.plug-setting-select { width: auto; }
+.plug-setting-input:focus, .plug-setting-select:focus { outline: none; border-color: var(--accent); }
+.plug-setting-check { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.plug-setting-reset { padding: 2px var(--s2); min-height: var(--ctl-h-sm); font-size: var(--fs-xs); background: transparent; color: var(--muted); }
 .plug-caution { margin: var(--s2) 0 0; font-size: var(--fs-xs); color: var(--muted); }
 /* what the automatic pass at connect did to this machine: a name it let go of is
    not a row any more, so this is the only place a removal is stated on the page.

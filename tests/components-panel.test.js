@@ -170,6 +170,54 @@ function stateOf(body, name) {
   return walk(row).find((c) => /(^| )plug-state( |$)/.test(c.className)) || null;
 }
 
+// ONE declared setting, by the key the declaration names — the label IS the key,
+// word for word, the way an editor's settings page prints the setting's id
+function settingRowIn(body, key) {
+  return (
+    walk(body).find((n) => {
+      if (!/(^| )plug-setting( |$)/.test(n.className)) return false;
+      const label = walk(n).find((c) => /(^| )plug-setting-label( |$)/.test(c.className));
+      return Boolean(label) && label.textContent === key;
+    }) || null
+  );
+}
+
+// the control at a setting's right end, whatever the type chose to draw there
+function settingCtlIn(row) {
+  if (!row) return null;
+  return walk(row).find((n) => /(^| )plug-setting-(check|select|input|list)( |$)/.test(n.className)) || null;
+}
+
+// the way back to the declared default, drawn only on a setting that left it
+function settingResetIn(row) {
+  if (!row) return null;
+  return walk(row).find((n) => /(^| )plug-setting-reset( |$)/.test(n.className)) || null;
+}
+
+// ONE declared setting, by the key the declaration names — the label IS the key,
+// word for word, the way an editor's settings page prints the setting's id
+function settingRowIn(body, key) {
+  return (
+    walk(body).find((n) => {
+      if (!/(^| )plug-setting( |$)/.test(n.className)) return false;
+      const label = walk(n).find((c) => /(^| )plug-setting-label( |$)/.test(c.className));
+      return Boolean(label) && label.textContent === key;
+    }) || null
+  );
+}
+
+// the control at a setting's right end, whatever the type chose to draw there
+function settingCtlIn(row) {
+  if (!row) return null;
+  return walk(row).find((n) => /(^| )plug-setting-(check|select|input|list)( |$)/.test(n.className)) || null;
+}
+
+// the way back to the declared default, drawn only on a setting that left it
+function settingResetIn(row) {
+  if (!row) return null;
+  return walk(row).find((n) => /(^| )plug-setting-reset( |$)/.test(n.className)) || null;
+}
+
 const IDS = [
   "plug-body",
   "plug-note",
@@ -208,7 +256,7 @@ const COMPONENTS = [
 // `pass` is the fake of what the connect's automatic components pass did
 // (ui/components-view.js `list()` -> `pass`). Omitted, this machine has had no
 // pass yet, which is a different fact from "a pass that did nothing".
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", pass = null } = {}) {
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", pass = null, settings = null } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -292,6 +340,64 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       return world.switchReply;
     },
   };
+  // the settings channel (ui/components-view.js `settings` / `setSetting`): the
+  // declaration's schema, the values this machine holds, and one write per call.
+  // Passed, this page HAS the verb; omitted, it is a shell that predates it and
+  // must not draw a control that looks like one — the reason the default is null.
+  // The write answers the values AS THEY NOW ARE (the store holds the effective
+  // document), which is what the form draws: never what the page sent.
+  if (settings) {
+    const doc = { schema: settings.schema || {}, values: { ...(settings.values || {}) } };
+    world.settingsReads = [];
+    world.settingWrites = [];
+    world.settingsDoc = doc;
+    api.settings = async (name) => {
+      world.settingsReads.push(name);
+      if (world.settingsControl) return world.settingsControl.promise;
+      if (settings.readError) return { ok: false, name, error: settings.readError };
+      return { ok: true, name, schema: doc.schema, values: { ...doc.values } };
+    };
+    api.setSetting = async (name, patch) => {
+      world.settingWrites.push([name, patch]);
+      if (world.settingWriteControl) return world.settingWriteControl.promise;
+      if (settings.writeError) return { ok: false, name, error: settings.writeError };
+      for (const [key, value] of Object.entries(patch || {})) doc.values[key] = value;
+      const values = {};
+      for (const [key, spec] of Object.entries(doc.schema)) {
+        values[key] = key in doc.values ? doc.values[key] : (spec || {}).default;
+      }
+      return { ok: true, name, values };
+    };
+  }
+  // the settings channel (ui/components-view.js `settings` / `setSetting`): the
+  // declaration's schema, the values this machine holds, and one write per call.
+  // Passed, this page HAS the verb; omitted, it is a shell that predates it and
+  // must not draw a control that looks like one — the reason the default is null.
+  // The write answers the values AS THEY NOW ARE (the store holds the effective
+  // document), which is what the form draws: never what the page sent.
+  if (settings) {
+    const doc = { schema: settings.schema || {}, values: { ...(settings.values || {}) } };
+    world.settingsReads = [];
+    world.settingWrites = [];
+    world.settingsDoc = doc;
+    api.settings = async (name) => {
+      world.settingsReads.push(name);
+      if (world.settingsControl) return world.settingsControl.promise;
+      if (settings.readError) return { ok: false, name, error: settings.readError };
+      return { ok: true, name, schema: doc.schema, values: { ...doc.values } };
+    };
+    api.setSetting = async (name, patch) => {
+      world.settingWrites.push([name, patch]);
+      if (world.settingWriteControl) return world.settingWriteControl.promise;
+      if (settings.writeError) return { ok: false, name, error: settings.writeError };
+      for (const [key, value] of Object.entries(patch || {})) doc.values[key] = value;
+      const values = {};
+      for (const [key, spec] of Object.entries(doc.schema)) {
+        values[key] = key in doc.values ? doc.values[key] : (spec || {}).default;
+      }
+      return { ok: true, name, values };
+    };
+  }
   // the mirror channel, when this page is given one: a mutable list the fake
   // answers from, in the shape ui/mirrors.js speaks — every write answers with
   // the list AS IT NOW IS, and a refusal is a sentence rather than a rejection
@@ -383,6 +489,26 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       return box && box.children.length ? box.children[0] : null;
     },
     menus: () => walk(dom.byId.get("#plug-body")).filter((n) => /plug-menu/.test(n.className)),
+    // what a component DECLARES, as drawn: the menu item, the box it opens, and
+    // one row per key — asked of the page, never of a stored copy
+    settingsBtns: () =>
+      walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /(^| )plug-settings( |$)/.test(n.className)),
+    settingsBox: () =>
+      walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-settings-box( |$)/.test(n.className)) || null,
+    settingRows: () => walk(dom.byId.get("#plug-body")).filter((n) => /(^| )plug-setting( |$)/.test(n.className)),
+    settingRow: (key) => settingRowIn(dom.byId.get("#plug-body"), key),
+    settingCtl: (key) => settingCtlIn(settingRowIn(dom.byId.get("#plug-body"), key)),
+    settingReset: (key) => settingResetIn(settingRowIn(dom.byId.get("#plug-body"), key)),
+    // what a component DECLARES, as drawn: the menu item, the box it opens, and
+    // one row per key — asked of the page, never of a stored copy
+    settingsBtns: () =>
+      walk(dom.byId.get("#plug-body")).filter((n) => n.tag === "button" && /(^| )plug-settings( |$)/.test(n.className)),
+    settingsBox: () =>
+      walk(dom.byId.get("#plug-body")).find((n) => /(^| )plug-settings-box( |$)/.test(n.className)) || null,
+    settingRows: () => walk(dom.byId.get("#plug-body")).filter((n) => /(^| )plug-setting( |$)/.test(n.className)),
+    settingRow: (key) => settingRowIn(dom.byId.get("#plug-body"), key),
+    settingCtl: (key) => settingCtlIn(settingRowIn(dom.byId.get("#plug-body"), key)),
+    settingReset: (key) => settingResetIn(settingRowIn(dom.byId.get("#plug-body"), key)),
     chips: () => walk(dom.byId.get("#plug-filter")).filter((n) => n.tag === "button" && /plug-filter-chip/.test(n.className)),
     // the number behind each chip, as drawn: one entry per chip, "" when the view
     // holds nothing (a zero is not drawn — the empty message under it says why)
@@ -1165,8 +1291,8 @@ const CODE = mod ? rendererScript("components-panel") : "";
     check(p.menus().length === 1, "and holds one menu");
     check(p.menus()[0].classList.contains("open") === false, "closed on the first draw");
     check(
-      p.menus()[0].children.length === 3 && p.menus()[0].children.every((c) => c.tag === "button"),
-      "while the items are already in it: the write this client can still make, the versions, the removal"
+      p.menus()[0].children.length === 4 && p.menus()[0].children.every((c) => c.tag === "button"),
+      "while the items are already in it: the settings it declares, the write this client can still make, the versions, the removal"
     );
     check(p.buttons()[0].textContent === "Reinstall", "the write kept beside the switch is the same release again");
     check(p.mores()[0].getAttribute("aria-expanded") === "false", "the '…' answers for the menu it holds before it is opened");
@@ -1219,7 +1345,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
       "and its title says what happens to the release it replaces"
     );
     check(older.switches()[0].textContent === "Disable", "with the switch drawn in the menu beside it");
-    check(older.menus()[0].children.length === 3, "which is how many items the menu carries once the update leads");
+    check(older.menus()[0].children.length === 4, "which is how many items the menu carries once the update leads");
 
     // a component only this machine holds has nothing to install: the switch is
     // the write that leads, and the menu carries the read and the removal
@@ -1227,7 +1353,7 @@ const CODE = mod ? rendererScript("components-panel") : "";
     await alone.open();
     check(alone.switches()[0].textContent === "Disable", "a held row nothing offers leads with the switch");
     check(ownerName(alone.mores()[0]) === "solo", "and still carries its own menu");
-    check(alone.menus()[0].children.length === 2, "holding the versions and the removal — no second switch beside the one that leads");
+    check(alone.menus()[0].children.length === 3, "holding the settings, the versions and the removal — no second switch beside the one that leads");
   }
 
   // 32. the filter row is a way of LOOKING at the one list, never a second one:
@@ -1878,6 +2004,141 @@ const CODE = mod ? rendererScript("components-panel") : "";
       /color: var\(--muted\)/.test(rule[1]) && /font-size: var\(--fs-xs\)/.test(rule[1]),
       "small and muted: a removal is a fact to read, not a failure to chase"
     );
+  }
+
+  // 40. the settings a component DECLARES: the schema is the component's, the form
+  //     is this page's, and the values are the machine's. That is an editor's
+  //     extension settings narrowed to where a plugin lives — one row per declared
+  //     key, the control its declared TYPE calls for, a mark (and a way back) only
+  //     on a value that left its default, and a write that redraws from what the
+  //     machine ANSWERS rather than from what the page sent. The page knows no
+  //     knob of anybody, so nothing here can be true of one component and false of
+  //     the next.
+  {
+    const SKILLS = {
+      schema: {
+        "library.enabled": { type: "boolean", default: true, description: "Offer this library to the model." },
+        "library.root": { type: "string", default: "", description: "Directory to serve instead of this machine's own library." },
+      },
+      values: { "library.enabled": true, "library.root": "/home/u/.agents/skills" },
+    };
+    const held = [{ name: "clutch-skills", version: "0.1.2", digest: "69159b6c00000000" }];
+    const labelOf = (row) => walk(row).find((n) => /(^| )plug-setting-label( |$)/.test(n.className));
+
+    // the item lives in the row's own menu, FIRST: it is the one item there about
+    // how the component BEHAVES, beside the ones about whether it is here at all
+    const p = page({ held, entries: [], settings: SKILLS });
+    await p.open();
+    check(p.menus()[0].children[0] === p.settingsBtns()[0], "the menu leads with what this component lets a user set");
+    check(p.settingsBtns()[0].textContent === "Settings…", "and the item says what it opens");
+
+    // a shell whose bridge predates the verb draws that item DEAD, not missing: a
+    // control that only appears on a click is a control the page cannot be asked
+    // about, and a live one would be a promise this page cannot keep
+    const old = page({ held, entries: [] });
+    await old.open();
+    check(old.settingsBtns().length === 1 && old.settingsBtns()[0].disabled, "a shell that cannot read settings draws the item dead");
+    check(/cannot read component settings/.test(old.settingsBtns()[0].title), "and says why, instead of opening nothing");
+
+    // opening it is a READ of the row it belongs to, and the box says so plainly
+    // until the machine answers
+    p.world.settingsControl = defer();
+    p.settingsBtns()[0].click();
+    await settle();
+    check(p.world.settingsReads.join(",") === "clutch-skills", "opening it reads the settings of the row it belongs to");
+    check(/reading the settings/.test(p.text()), "and the box says it is reading while it does");
+    p.world.settingsControl.res({ ok: true, name: "clutch-skills", schema: SKILLS.schema, values: SKILLS.values });
+    await settle();
+
+    // one row per key the declaration names, each carrying the declaration's own
+    // sentence — the page adds no word of its own about what a setting means
+    check(
+      p.settingRows().map((r) => labelOf(r).textContent).join(",") === "library.enabled,library.root",
+      "one row per declared key"
+    );
+    check(ownerName(p.settingsBox()) === "clutch-skills", "and the form hangs inside the row of the component it is about");
+    check(
+      walk(p.settingRow("library.enabled")).find((n) => /(^| )plug-setting-desc( |$)/.test(n.className)).textContent ===
+        "Offer this library to the model.",
+      "with the declaration's own sentence under the key"
+    );
+
+    // the CONTROL is the declared type, never a box for everything
+    const enabled = p.settingCtl("library.enabled");
+    check(enabled.tag === "input" && enabled.type === "checkbox" && enabled.checked, "a `boolean` is a checkbox, checked because that is what the machine holds");
+    check(
+      p.settingCtl("library.root").tag === "input" &&
+        p.settingCtl("library.root").type === "text" &&
+        p.settingCtl("library.root").value === "/home/u/.agents/skills",
+      "a `string` is a text box holding the value the machine answered"
+    );
+
+    // a value at its declared default is drawn as nothing special; one that left it
+    // says so, and says how to come back
+    check(p.settingReset("library.enabled") === null, "a value still at its declared default carries no mark and no way back");
+    check(
+      Boolean(walk(p.settingRow("library.enabled")).find((n) => /(^| )plug-chip( |$)/.test(n.className))) === false,
+      "and is not marked as set"
+    );
+    check(
+      p.settingReset("library.root") !== null && /set library\.root back to ""/.test(p.settingReset("library.root").title),
+      "a value that left it carries both, and the way back names the default"
+    );
+
+    // a write names the ONE key the control settled on, and the form then draws the
+    // answer — which is the machine's document, not the page's memory of a click
+    enabled.checked = false;
+    enabled.handlers.change[0]();
+    await settle();
+    check(
+      JSON.stringify(p.world.settingWrites) === JSON.stringify([["clutch-skills", { "library.enabled": false }]]),
+      "a write names the one key the control settled on"
+    );
+    check(/library\.enabled is set — it takes effect the next time clutch-skills runs/.test(p.text()), "and the form says the write landed, and when it happens");
+    check(p.settingReset("library.enabled") !== null, "the key that left its default now offers the way back");
+
+    // the answer is what is drawn: a machine that stores something else than what
+    // was sent is not a page that keeps its own copy
+    const w = defer();
+    p.world.settingWriteControl = w;
+    p.settingCtl("library.root").value = "/tmp/other";
+    p.settingCtl("library.root").handlers.change[0]();
+    await settle();
+    check(p.settingCtl("library.root").disabled && p.settingCtl("library.enabled").disabled, "one write at a time: every control of that form is dead until it answers");
+    w.res({ ok: true, name: "clutch-skills", values: { "library.enabled": false, "library.root": "~/.agents/skills" } });
+    await settle();
+    check(p.settingCtl("library.root").value === "~/.agents/skills", "when it answers, the form draws what the machine now HOLDS, not what the page sent");
+    p.world.settingWriteControl = null;
+
+    // the way back writes the declaration's default — the store holds the effective
+    // document, so "unset" would be a second meaning for an absent key
+    p.settingReset("library.root").click();
+    await settle();
+    const back = p.world.settingWrites[p.world.settingWrites.length - 1];
+    check(back[1] && back[1]["library.root"] === "", "the way back writes the declared default");
+
+    // a refusal is the machine's sentence under the form, and the values did not move
+    const refused = page({ held, entries: [], settings: { ...SKILLS, writeError: "library.root must be a directory" } });
+    await refused.open();
+    refused.settingsBtns()[0].click();
+    await settle();
+    refused.settingCtl("library.root").value = "/nope";
+    refused.settingCtl("library.root").handlers.change[0]();
+    await settle();
+    check(/library\.root must be a directory/.test(refused.text()), "a refusal is quoted as the machine said it");
+    check(refused.settingCtl("library.root").value === "/home/u/.agents/skills", "and nothing moved: the form still draws what the machine holds");
+
+    // nothing declared, and a read that failed, are two different answers
+    const none = page({ held, entries: [], settings: { schema: {}, values: {} } });
+    await none.open();
+    none.settingsBtns()[0].click();
+    await settle();
+    check(/declares no settings/.test(none.text()), "a component that declares nothing says exactly that");
+    const broke = page({ held, entries: [], settings: { ...SKILLS, readError: "the supervisor did not answer" } });
+    await broke.open();
+    broke.settingsBtns()[0].click();
+    await settle();
+    check(/could not be read — the supervisor did not answer/.test(broke.text()), "a read that failed is a reason, not an empty form");
   }
 
   summary("components-panel: the plugin tab's writes (destination, confirm text, verdicts, re-read)");
