@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/components-view.ts and run `npm run build:host`.
-// source sha256: 767ee23332df20cfb383b6e84263c63c37d2bfed63e61490fdfe19be8cc200c9
+// source sha256: bfc2688537b30179028b5a554cbbc7a7da0cd29644435eef5e90de6e5a9e7efc
 
 // the plugin page's backend: what each component's declaration puts where, what
 // those places hold, what this client could give them, and the writes that move
@@ -58,6 +58,10 @@ const MARKET_TTL_MS = 5 * 60_000;
 // page's own reload button is the retry.)
 const MARKET_ERROR_TTL_MS = 30_000;
 const NO_CLIENT = "this shell has no client plugin domain, and that component is one: a plugin is held by the app process itself";
+// A client-held component's settings live on the machine that would run it, and
+// the store (agent/tools/settings.py) is that machine's. Said as a sentence, not
+// as a silent empty form: a page showing blanks would look like defaults.
+const NO_CLIENT_STORE = "its settings live on the machine that runs it, and this one is held by the client — there is nowhere here to store them";
 function createComponentsView(deps) {
     const { supervisorBase, tunnelStatus = () => ({}), plugins = null, // a function: this client plugin domain, or null where it has none
     windowKind = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, 
@@ -702,6 +706,68 @@ function createComponentsView(deps) {
             return { ok: false, name, error: (e && e.message) || String(e) };
         }
     }
+    // One component's settings: the schema its declaration carries and the values
+    // this machine holds. Answered by the machine that would RUN it — the store and
+    // the `host.settings` value it hands a statement are both the host's
+    // (agent/tools/settings.py) — so a component the client itself holds has none
+    // here. That is an answer rather than a failure, and the page draws the reason
+    // the same way it draws any other refusal.
+    async function settings(name, win = null) {
+        const there = await placeOf(name);
+        if (there.error)
+            return { ok: false, name, error: there.error };
+        if (there.place === rule.PLACE_CLIENT) {
+            return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_STORE };
+        }
+        const t = target(win);
+        const problem = trouble(t);
+        if (problem)
+            return { ok: false, name, error: problem };
+        try {
+            const res = await lib.hostSettings(t.base, name);
+            return {
+                ok: true,
+                name,
+                place: rule.PLACE_SESSION,
+                target: t,
+                schema: res && res.schema && typeof res.schema === "object" ? res.schema : {},
+                values: res && res.values && typeof res.values === "object" ? res.values : {},
+            };
+        }
+        catch (e) {
+            return { ok: false, name, error: (e && e.message) || String(e) };
+        }
+    }
+    // Write SOME of one component's settings and answer the whole document back, so
+    // a form redraws from what the machine now holds rather than from what it sent.
+    // The verdict is the host's: a key it does not declare, or a value its schema
+    // cannot take, comes back as its own sentence in `error` and writes nothing.
+    async function setSetting(name, values, win = null) {
+        const there = await placeOf(name);
+        if (there.error)
+            return { ok: false, name, error: there.error };
+        if (there.place === rule.PLACE_CLIENT) {
+            return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_STORE };
+        }
+        const t = target(win);
+        const problem = trouble(t);
+        if (problem)
+            return { ok: false, name, error: problem };
+        try {
+            const res = await lib.hostSetSetting(t.base, name, values && typeof values === "object" ? values : {});
+            return {
+                ok: true,
+                name,
+                place: rule.PLACE_SESSION,
+                target: t,
+                status: (res && res.status) || "saved",
+                values: res && res.values && typeof res.values === "object" ? res.values : {},
+            };
+        }
+        catch (e) {
+            return { ok: false, name, error: (e && e.message) || String(e) };
+        }
+    }
     // The mirrors this machine retries a failed fetch through: the shipped list
     // (ui/components.mirrors.json, inside the app bundle) merged with the user's own
     // (ui/mirrors.js `entries()`), each row saying which it is — a user entry can be
@@ -755,6 +821,8 @@ function createComponentsView(deps) {
         versions,
         remove,
         setDisabled,
+        settings,
+        setSetting,
         mirrors: mirrorList,
         addMirror,
         removeMirror,

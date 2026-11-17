@@ -1,7 +1,9 @@
 // ui/components-view.js is what the plugin tab is served by: which machine a
 // request is about, what that machine holds, what this client could give it, and
 // the three writes (an install onto it, a removal off it, and the switch that
-// stops it being driven or starts it again). It is injectable on purpose, so this
+// stops it being driven or starts it again) — plus the knobs a component's own
+// declaration exposes, read and written on the machine that would RUN it. It is
+// injectable on purpose, so this
 // runner drives the REAL view against a fake install layer — no Electron, no
 // supervisor, no network — and asserts the four answers, the far-side/local
 // target rule, the market cache and every install verdict path, in both shapes an
@@ -31,8 +33,23 @@ function fakeLib(opts = {}) {
     removeError = null,
     switchVerdict = { status: "disabled", name: "clutch-memory", disabled: true },
     switchError = null,
+    settingsDoc = { schema: {}, values: {} },
+    settingsError = null,
+    writeVerdict = { status: "saved", values: {} },
+    writeError = null,
   } = opts;
-  const calls = { specReads: 0, inventories: 0, artifacts: [], uploads: [], fetches: [], versionReads: [], removals: [], switches: [] };
+  const calls = {
+    specReads: 0,
+    inventories: 0,
+    artifacts: [],
+    uploads: [],
+    fetches: [],
+    versionReads: [],
+    removals: [],
+    switches: [],
+    settingReads: [],
+    settingWrites: [],
+  };
   return {
     calls,
     REQUEST_TIMEOUT_MS: 120000,
@@ -61,6 +78,16 @@ function fakeLib(opts = {}) {
       calls.switches.push({ base, name, disabled });
       if (switchError) throw new Error(switchError);
       return switchVerdict;
+    },
+    hostSettings: async (base, name) => {
+      calls.settingReads.push({ base, name });
+      if (settingsError) throw new Error(settingsError);
+      return settingsDoc;
+    },
+    hostSetSetting: async (base, name, values) => {
+      calls.settingWrites.push({ base, name, values });
+      if (writeError) throw new Error(writeError);
+      return writeVerdict;
     },
     artifactFor: async (spec) => {
       calls.artifacts.push(spec.name);
@@ -499,6 +526,53 @@ async function main() {
     check(!n.ok && unreachable.lib.calls.switches.length === 0, "a machine with no supervisor URL is refused before anything is sent");
   }
 
+  // ---- 9b. the knobs a component declares: the schema its declaration carries
+  //          and the values this machine holds. A form is generated from this
+  //          answer, so it must hand back the host's document verbatim — never a
+  //          blank this side invented — and a write must carry ONLY the keys it
+  //          was given, so two windows on one machine cannot undo each other.
+  {
+    const schema = {
+      "library.enabled": { type: "boolean", default: true, description: "let the skills be offered" },
+      "library.root": { type: "string", default: "", description: "where the skills live" },
+    };
+    const doc = { schema, values: { "library.enabled": true, "library.root": "" } };
+    const { api, lib } = view({ lib: fakeLib({ settingsDoc: doc }) });
+    const r = await api.settings("clutch-memory", EMPTY_WIN);
+    check(r.ok && r.schema["library.enabled"].type === "boolean", "the schema comes back as the declaration wrote it");
+    check(r.values["library.enabled"] === true && r.values["library.root"] === "", "and the values are the effective document, the declaration's defaults laid in");
+    check(
+      lib.calls.settingReads[0].name === "clutch-memory" && lib.calls.settingReads[0].base === "http://127.0.0.1:8890",
+      "asked of the machine that would run it, by name"
+    );
+    check(r.place === "session" && r.target && r.target.base === "http://127.0.0.1:8890", "and the answer says which place and which machine it is about");
+
+    // a write carries the keys it was given and nothing else
+    const written = view({ lib: fakeLib({ writeVerdict: { status: "saved", values: { "library.enabled": false, "library.root": "" } } }) });
+    const w = await written.api.setSetting("clutch-memory", { "library.enabled": false }, EMPTY_WIN);
+    check(w.ok && w.status === "saved", "a write reports the host's verdict");
+    check(
+      JSON.stringify(written.lib.calls.settingWrites[0].values) === JSON.stringify({ "library.enabled": false }),
+      "and what went out is only the key the form touched, not a copy of the whole document"
+    );
+    check(
+      w.values["library.enabled"] === false && w.values["library.root"] === "",
+      "the answer is the document as the machine NOW holds it, so the form redraws from that"
+    );
+
+    // a value the declaration cannot take is the host's refusal: nothing is
+    // invented on this side, and its sentence is the one to draw
+    const refused = view({ lib: fakeLib({ writeError: "bad value for library.enabled: expected a boolean" }) });
+    const bad = await refused.api.setSetting("clutch-memory", { "library.enabled": "yes" }, EMPTY_WIN);
+    check(!bad.ok && /expected a boolean/.test(bad.error || ""), "a refusal surfaces with the host's own words");
+    check(bad.values === undefined, "with no values, so the page cannot draw a document no machine ever answered");
+
+    // a machine with no supervisor URL is refused before anything is sent
+    const unreachable = view({ deps: { tunnelStatus: () => ({ active: false, url: null }), windowKind: () => "tunnel" } });
+    const n = await unreachable.api.settings("clutch-memory", { id: 1 });
+    check(!n.ok && unreachable.lib.calls.settingReads.length === 0, "a machine with no supervisor URL is refused before anything is sent");
+  }
+
   // ---- 10. the view's default install layer is the real one, and complete ----
   {
     check(
@@ -508,6 +582,10 @@ async function main() {
     check(
       typeof components.hostVersions === "function" && typeof components.hostRemove === "function" && typeof components.hostSetDisabled === "function",
       "and the three reverse calls (list one component's versions, let one go, stop or start driving it)"
+    );
+    check(
+      typeof components.hostSettings === "function" && typeof components.hostSetSetting === "function",
+      "and the two the form needs: the knobs a component declares, read and written"
     );
     check(
       Number.isFinite(components.REQUEST_TIMEOUT_MS) && components.REQUEST_TIMEOUT_MS > 0,
@@ -849,9 +927,19 @@ async function main() {
     const none = await bare.api.install("clutch-websearch", EMPTY_WIN, {});
     check(none.ok === false && /no client plugin domain/.test(none.error), "no domain is a sentence, not a write to somewhere else");
     check(bare.lib.calls.artifacts.length === 0, "and no bytes were prepared for a place that is not there");
+
+    // 6. a plugin's knobs are the store's of the machine that RUNS it, and this
+    //    client is not that machine: showing a form here would draw defaults the
+    //    component would never read, so the answer is the reason, said out loud,
+    //    and nothing is asked of the session machine about it
+    const readsBefore = lib.calls.settingReads.length;
+    const knobs = await api.settings("clutch-websearch", EMPTY_WIN);
+    check(knobs.ok === false && /nowhere here to store them/.test(knobs.error || ""), "a client-held component's settings are refused in words that say why");
+    check(knobs.place === "client", "and the answer names the place that cannot hold them");
+    check(lib.calls.settingReads.length === readsBefore, "with nothing asked of the session machine about it");
   }
 
-  summary("components-view", "all passed (the two places, inventory, market cache, install + remove + switch verdicts, mirror list + retry)");
+  summary("components-view", "all passed (the two places, inventory, market cache, install + remove + switch verdicts, the knobs a declaration exposes, mirror list + retry)");
 }
 
 main().catch((e) => {

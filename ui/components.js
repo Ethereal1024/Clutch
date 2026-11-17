@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/components.ts and run `npm run build:host`.
-// source sha256: c903e4aaee45507b31252376d5f85215681f671fe6b55f2f363d38bec1c618e9
+// source sha256: 81e7a43fa03fc29a00f159583c9422811c69cb791cdd878f9826781c52e90e66
 
 // The install layer's SENDING half: getting a component's artifact onto the
 // machine whose server will run it.
@@ -809,11 +809,11 @@ async function localArtifact(file) {
 // (`{"error": …}`, the shape every component endpoint refuses with): "that
 // version is not installed" and "a daemon is running it" are outcomes a page has
 // to be able to quote, and a bare status code would leave it guessing which.
-async function hostJSON(url, { method = "GET", timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+async function hostJSON(url, { method = "GET", timeoutMs = REQUEST_TIMEOUT_MS, payload = undefined, headers = undefined } = {}) {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), timeoutMs);
     try {
-        const r = await fetch(url, { method, signal: ctl.signal });
+        const r = await fetch(url, { method, signal: ctl.signal, body: payload, headers });
         const text = await r.text();
         let body = {};
         try {
@@ -866,6 +866,29 @@ async function hostRemove(base, name, version = "", timeoutMs = REQUEST_TIMEOUT_
 async function hostSetDisabled(base, name, disabled, timeoutMs = REQUEST_TIMEOUT_MS) {
     const verb = disabled ? "disable" : "enable";
     return hostJSON(`${base}/api/components/${encodeURIComponent(name)}/${verb}`, { method: "POST", timeoutMs });
+}
+// One component's settings: the SCHEMA it declares and the values this machine
+// holds. The host answers both — the schema out of the declaration, the values
+// out of its own store — so a client draws a form without knowing a single
+// setting by name, the way an editor draws one from an extension's
+// `contributes.configuration`. `values` is the EFFECTIVE document: the
+// declaration's defaults with whatever was stored laid over them, so a form never
+// has to invent a blank.
+async function hostSettings(base, name, timeoutMs = REQUEST_TIMEOUT_MS) {
+    return hostJSON(`${base}/api/components/settings?name=${encodeURIComponent(name)}`, { timeoutMs });
+}
+// Write SOME of a component's settings: the keys given, nothing else, so two
+// windows open on one machine cannot overwrite each other's work with a stale
+// copy of the rest. The host validates each value against the schema it published
+// — a value the declaration cannot accept comes back as its own refusal, thrown —
+// and answers the whole effective document, which is what the form then draws.
+async function hostSetSetting(base, name, values, timeoutMs = REQUEST_TIMEOUT_MS) {
+    return hostJSON(`${base}/api/components/settings`, {
+        method: "POST",
+        timeoutMs,
+        headers: { "content-type": "application/json" },
+        payload: JSON.stringify({ name, values }),
+    });
 }
 // The manifest ONE install request carries: the component's own declaration with
 // the install facts on top — a host that never saw the checkout still receives a
@@ -1247,6 +1270,8 @@ module.exports = {
     hostVersions,
     hostRemove,
     hostSetDisabled,
+    hostSettings,
+    hostSetSetting,
     upload,
     fetchInstall,
     CACHE,
