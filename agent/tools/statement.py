@@ -52,7 +52,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import catalog, channel, inst, modules, rendezvous
+from . import catalog, channel, inst, modules, rendezvous, settings
 from .envelope import Envelope
 from .localshell import shq
 from .transport import LocalTransport
@@ -63,9 +63,11 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     names (catalog.Component.vars: "host.port_url" -> {base}).
 
     These are the values only the host knows and only a particular component
-    needs: the project file's content service. The prefix of a one-process line is
-    NOT here — that is the artifact's own launch, rendered by launch_prefix() so a
-    checkout, a package and an installed onefile all drive the same declaration.
+    needs: the project file's content service, and the document holding the
+    values a person set in the component's own settings form. The prefix of a
+    one-process line is NOT here — that is the artifact's own launch, rendered by
+    launch_prefix() so a checkout, a package and an installed onefile all drive
+    the same declaration.
     """
     # NB: a key here must never be one of a tool's own argument names — the
     # renderer fills {name} from the CALL's arguments, and a host var of the
@@ -73,6 +75,7 @@ def host_vars(mod: catalog.Component, config) -> dict[str, str]:
     # statement takes `{name}` as the model's own argument is exactly that).
     facts = {
         "host.port_url": lambda: f"http://127.0.0.1:{config.port}",
+        "host.settings": lambda: settings.materialize(mod.name, mod),
     }
     out: dict[str, str] = {}
     for name, fact in mod.vars.items():
@@ -274,8 +277,8 @@ def _artifact(mod: catalog.Component, config) -> Statement:
     The component is one process per call — an installed onefile is one word, a
     checkout is `PYTHONPATH=… {py} {script}`, a package is `PYTHONPATH=… {py} -m …`
     — and the line runs on the APP HOST's machine, because the subject of such a
-    component is the app's own project file, the network or the skill library, none
-    of which belongs to a workspace.
+    component is the app's own project file, the network or a library of its own,
+    none of which belongs to a workspace.
 
     A component with no artifact on this host has no such line at all, and
     `launch_prefix` says so in the component's own terms

@@ -118,6 +118,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -240,6 +241,66 @@ HOST_TOOL_NAMES: tuple[str, ...] = ("run_command", "grep_memory", "read_memory")
 # — the list this host used to scan for itself.
 FACT_TOKENS: tuple[str, ...] = ("skills",)
 
+# settings: the knobs a component lets a PERSON set (catalog.Component.settings).
+# The host draws the form and stores the values from the declaration alone
+# (tools/settings.py), the way an editor draws an extension's contributed
+# configuration — it knows no specific knob of anybody. One entry is
+#
+#     "library.root": {"type": "string", "default": "", "description": "..."}
+#
+# `type` is one of SETTING_TYPES, `default` is where the control starts and what
+# a per-setting reset returns to, `description` is the sentence under it. An
+# `enum` adds `enum` (its options), an `array` adds `items` (always "string": a
+# box of comma-separated words). The values come back to the component through
+# the interface it already has for host facts — a `vars` entry naming
+# `host.settings` is the path of the document holding them (statement.host_vars).
+SETTING_TYPES: tuple[str, ...] = ("boolean", "string", "number", "integer", "array", "enum")
+# A sectioned key (`library.root`) is the shape VS Code users read a setting by,
+# and the dot costs nothing anywhere else: it is one word in a JSON object.
+_SETTING_NAME = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*\Z")
+
+
+def setting_value(spec: Mapping[str, Any], value: Any) -> tuple[Any, bool]:
+    """One value read as the setting's type: (the value, whether it fit).
+
+    The single place a setting's type MEANS something, so the form (what to
+    draw), the store (what to keep) and the diagnostics (what a default must be)
+    cannot disagree — and a value a client sends is judged by the same rule the
+    declaration was read by. `enum` is a string that must be one of its options.
+    """
+    kind = str(spec.get("type", ""))
+    if kind == "boolean":
+        fit = isinstance(value, bool)
+        return (value, True) if fit else (False, False)
+    if kind == "string":
+        fit = isinstance(value, str)
+        return (value, True) if fit else ("", False)
+    if kind in ("number", "integer"):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0, False
+        if kind == "integer":
+            return (int(value), True) if value == int(value) else (0, False)
+        return value, True
+    if kind == "array":
+        fit = isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value)
+        return (list(value), True) if fit else ([], False)
+    if kind == "enum":
+        options = spec.get("enum")
+        allowed = [o for o in options if isinstance(o, str)] if isinstance(options, list) else []
+        fit = isinstance(value, str) and value in allowed
+        return (value, True) if fit else (allowed[0] if allowed else "", False)
+    return None, False
+
+
+def setting_defaults(component: Component) -> dict[str, Any]:
+    """Where every setting of one component starts, in declaration order."""
+    out: dict[str, Any] = {}
+    for key, spec in component.settings.items():
+        value, ok = setting_value(spec, spec.get("default")) if isinstance(spec, Mapping) else (None, False)
+        if ok:
+            out[key] = value
+    return out
+
 
 @dataclass(frozen=True)
 class Diagnostic:
@@ -292,6 +353,56 @@ def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
                     component, spec.name, f"unknown ui key {key!r} (renderer knows {_known(UI_KEYS)})", fatal=False
                 )
             )
+    return out
+
+
+def settings_diagnostics(component: Component) -> list[Diagnostic]:
+    """The `settings` block, read as the form the host will draw.
+
+    A declaration the host cannot draw is refused rather than drawn as a plain
+    text box: a `type` outside SETTING_TYPES, an `enum` with no options, an
+    `array` of something that is not a string, or a `default` that is not a value
+    of the type it claims all leave a control that would send the component
+    something it cannot read. The DESCRIPTION is the one non-fatal miss — the
+    form still works without a sentence beside it, it just explains nothing.
+    """
+    out: list[Diagnostic] = []
+    for key, spec in component.settings.items():
+        what = f"setting {key!r}"
+        if not _SETTING_NAME.match(key):
+            out.append(
+                Diagnostic(
+                    component.name,
+                    "",
+                    f"{what} is not a name (a dotted word: [a-z][a-z0-9_]*, like `library.root`)",
+                )
+            )
+            continue
+        if not isinstance(spec, Mapping):
+            out.append(Diagnostic(component.name, "", f"{what} must be an object with at least a `type`"))
+            continue
+        if not str(spec.get("description", "")).strip():
+            out.append(
+                Diagnostic(component.name, "", f"{what} says nothing about itself (no `description`)", fatal=False)
+            )
+        kind = str(spec.get("type", ""))
+        if kind not in SETTING_TYPES:
+            out.append(
+                Diagnostic(component.name, "", f"{what} has unknown type {kind!r} (host draws {_known(SETTING_TYPES)})")
+            )
+            continue
+        if kind == "enum" and not (isinstance(spec.get("enum"), list) and spec["enum"]):
+            out.append(Diagnostic(component.name, "", f"{what} is an enum with no `enum` list to pick from"))
+        if kind == "array" and spec.get("items", "string") != "string":
+            out.append(
+                Diagnostic(component.name, "", f"{what} is an array of {spec.get('items')!r}: the host draws strings only")
+            )
+        if "default" not in spec:
+            # Not cosmetic: the control starts at its default and a per-setting
+            # reset returns to it, so a setting without one has nowhere to start.
+            out.append(Diagnostic(component.name, "", f"{what} declares no default (a setting says where it starts)"))
+        elif not setting_value(spec, spec["default"])[1]:
+            out.append(Diagnostic(component.name, "", f"{what} declares a default that is not a {kind}"))
     return out
 
 
@@ -383,6 +494,7 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
                     f"its statements run there, and a host fact is answered here",
                 )
             )
+    out.extend(settings_diagnostics(component))
     for spec in component.tools:
         declared = spec.parameters.get("properties", {}) if isinstance(spec.parameters, Mapping) else {}
         for key in component.vars:
@@ -590,6 +702,13 @@ class Component:
     own `--json` contract looks like. Only a component whose statement stands ALONE
     may publish one: a service's statements are spoken to one workspace, and a host
     fact belongs to none (see tools/facts.py).
+
+    `settings` is the form this component lets a PERSON fill in — one entry per
+    knob, `{"type", "default", "description", ...}` — drawn and stored by the host
+    (tools/settings.py) from nothing but this declaration, the way an editor draws
+    an extension's contributed configuration. The values come back to the component
+    through the one interface it already has for host facts: a `vars` entry naming
+    `host.settings` (statement.host_vars) is the path of the document holding them.
     """
 
     name: str
@@ -609,6 +728,7 @@ class Component:
     requires: tuple[str, ...] = ()
     vars: Mapping[str, str] = field(default_factory=dict)
     facts: Mapping[str, str] = field(default_factory=dict)  # host fact -> the statement that answers it
+    settings: Mapping[str, Any] = field(default_factory=dict)  # the knobs this component lets a person set
     ui: Mapping[str, Any] = field(default_factory=dict)
     tools: tuple[Tool, ...] = ()
     directory: str = ""  # explicit code directory (a registration, not a checkout)
@@ -755,6 +875,13 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
         requires=tuple(str(r) for r in data.get("requires", ()) or ()),
         vars={str(k): str(v) for k, v in (data.get("vars") or {}).items()},
         facts={str(k): str(v or "").strip() for k, v in raw_facts.items() if str(v or "").strip()},
+        # A setting whose spec is not an object is kept as it stands — the
+        # diagnostics say what is wrong with it (settings_diagnostics) and the
+        # form skips it; dropping it here would hide the mistake from the author.
+        settings={
+            str(k): dict(v) if isinstance(v, Mapping) else v
+            for k, v in (data.get("settings") if isinstance(data.get("settings"), Mapping) else {}).items()
+        },
         ui=ui,
         tools=tuple(tools),
         directory=str(data.get("directory", "") or ""),

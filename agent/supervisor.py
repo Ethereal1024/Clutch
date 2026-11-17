@@ -35,6 +35,16 @@ installs ONTO, whether it is this desktop or a device behind a tunnel):
                                        it the component goes whole
                                        -> {status: "removed"|"absent", ...}
 
+Component settings (the knobs a component declares for a PERSON to set — the
+declaration is the form, so the host serves it as data and draws nothing):
+
+    GET  /api/components/settings  -> ?name= -> {name, schema, values}
+    POST /api/components/settings  -> {name, values: {key: value}} ->
+                                      {status: "saved", values: {...}} — the
+                                      whole document; a key or a value the
+                                      declaration does not carry is refused as
+                                      error-as-data
+
 The removal verbs are the install endpoint's reverse, and answer the same way: a
 verdict, or the host's own sentence as error-as-data. They refuse while a daemon
 of the component is running that this process did not start (rendezvous.
@@ -82,6 +92,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -100,7 +111,7 @@ from agent.procmgr.supervise import (
     ProcessSupervisor,
     SpawnSpec,
 )
-from agent.tools import components, rendezvous
+from agent.tools import catalog, components, rendezvous, settings
 
 DEFAULT_PORT = 8890
 PORT_BANNER_RE = re.compile(r"\[clutch-server\] http://127\.0\.0\.1:(\d+)")
@@ -432,6 +443,8 @@ class _Handler(BaseHTTPRequestHandler):
             # answer plus the holder's own record. Read-only: a scan never takes
             # a lock it would keep and never signals anything.
             self._json({"locks": [state.as_dict() for state in lock_reconcile.scan()]})
+        elif path == "/api/components/settings":
+            self._component_settings(query.get("name", ""))
         elif path == "/api/components/versions":
             name = query.get("name", "")
             if not name:
@@ -568,6 +581,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             verdict = lock_reconcile.reclaim(project, log=log)
             self._json(verdict)
+        elif path == "/api/components/settings":
+            self._save_component_settings()
         elif path == "/api/components/install":
             self._install_component()
         elif path.startswith("/api/components/") and path.endswith("/disable"):
@@ -581,6 +596,55 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"status": "ok"})
         else:
             self._json({"error": "not found"}, 404)
+
+    def _component_settings(self, name: str) -> None:
+        """The knobs one component lets a person set, and where each one stands.
+
+        The DECLARATION is the form: the host serves it as data (`schema`) beside
+        the current values and draws nothing itself — the way an editor draws an
+        extension's contributed configuration, knowing no setting of its own. The
+        values come from the same store the component's own statement reads
+        (tools/settings.py), so the form and the component can never disagree
+        about what a knob is set to.
+        """
+        if not name:
+            self._json({"error": "name is required"}, 400)
+            return
+        component = catalog.table().get(name)
+        if component is None:
+            self._json({"error": f"no component named {name!r} on this host"}, 404)
+            return
+        schema = {key: dict(spec) for key, spec in component.settings.items() if isinstance(spec, Mapping)}
+        self._json({"name": name, "schema": schema, "values": settings.values(name, component)})
+
+    def _save_component_settings(self) -> None:
+        """Set the knobs a person touched; answer the whole document back.
+
+        PARTIAL on purpose (tools/settings.py: write): a form sends what changed,
+        so two windows open on one machine cannot overwrite each other's work with
+        a stale copy of the rest. A key or a value the declaration does not carry
+        is refused as error-as-data like every other verb here, and nothing is
+        written when it is.
+        """
+        body = self._read_body()
+        name = body.get("name") if isinstance(body, dict) else None
+        updates = body.get("values") if isinstance(body, dict) else None
+        if not isinstance(name, str) or not name:
+            self._json({"error": "name is required"}, 400)
+            return
+        if not isinstance(updates, dict):
+            self._json({"error": "values must be an object"}, 400)
+            return
+        component = catalog.table().get(name)
+        if component is None:
+            self._json({"error": f"no component named {name!r} on this host"}, 404)
+            return
+        try:
+            saved = settings.write(name, component, updates)
+        except settings.BadSetting as err:
+            self._json({"error": str(err)}, 400)
+            return
+        self._json({"status": "saved", "values": saved})
 
     def _toggle_component(self, path: str, suffix: str, disabled: bool) -> None:
         """`/api/components/<name>/disable|enable`: the switch, not the bytes.
