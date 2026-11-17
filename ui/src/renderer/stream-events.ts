@@ -18,7 +18,7 @@ import { SSE_RUN_LOST } from "./sse-stream";
 import { state } from "./state";
 import {
   appendThinkingRow, buildThinkingBlock, createAgentTextBlock,
-  flushTextRender, flushThinkingRender, scheduleTextRender,
+  flushTextRender, flushThinkingRender, renderTextBlock, scheduleTextRender,
   scheduleThinkingRender,
 } from "./stream-text";
 import { eventsEl, stream } from "./els";
@@ -85,6 +85,7 @@ export function discardLivePartial() {
   if (state.thinkingRenderRaf) { cancelAnimationFrame(state.thinkingRenderRaf); state.thinkingRenderRaf = 0; }
   if (state.lastTextEl) { state.lastTextEl.remove(); state.lastTextEl = null; }
   state.lastTextContent = "";
+  state.textSealed = false; // the block that held the durable text is gone
   if (state.thinkingEl) { state.thinkingEl.remove(); state.thinkingEl = null; }
   state.thinkingContent = "";
   clearStreamPreviews();
@@ -179,7 +180,11 @@ export function addEvent(ev) {
     // the record of what happened to the run before it.
     if (state.sseRunLostPending) announceRunLost();
     state.runSettled = false;
-    // a task opens a NEW run: every ask id the run before it handed out is dead
+    // a task opens a NEW run: nothing of the run before it may keep collecting
+    // text — its durable copy is on the log and its block is final (stream-events'
+    // assistant_message seals a block once it holds the record)
+    state.textSealed = false;
+    // ...and every ask id the run before it handed out is dead
     forgetAnsweredPerm();
   } else if (ev && ev.type === "final") {
     state.runSettled = true;
@@ -320,8 +325,30 @@ export function applyStreamEvent(ev) {
   }
   if (ev.type === "assistant_message") {
     state.toolGroupEl = null;
-    // stored sessions render the final message once (no delta stream)
+    // Stored sessions render the final message once (no delta stream). The LIVE
+    // case is not that simple: this record rides the log's own feed (POST
+    // /api/log → broadcast → SSE) while its step's deltas ride the run's IPC
+    // feed, and the two are unordered — the record can land between two deltas
+    // of its own step. Dropping the pointer there (what this did) left the
+    // block holding the text up to its last delta and let the leftover tail
+    // open a SECOND block underneath: one answer painted as two, its closing
+    // sentence cut in half ("…所以我没替你" / "改 App 的安装目录。").
     if (state.lastTextEl && state.lastTextEl.isConnected) {
+      const live = state.lastTextContent || "";
+      // the record is that step's complete text and it EXTENDS what the block
+      // streamed: adopt it in place — the block keeps its node, its position and
+      // its scroll — and seal it, because the deltas still in flight for this
+      // step are the text it already says. A later step_start opens a new block
+      // (and clears the seal); a delta cannot, while this one is sealed.
+      if (ev.content && ev.content.startsWith(live)) {
+        state.lastTextContent = ev.content;
+        state.textSealed = true;
+        renderTextBlock(true);
+        return true;
+      }
+      // not this step's text at all (this record arrived after the NEXT step had
+      // opened its block — the same two feeds, lagging by a whole step): leave
+      // that block to its own deltas and stop owning this one, as before
       state.lastTextEl = null;
       state.lastTextContent = "";
       return true;
@@ -405,6 +432,11 @@ export function applyStreamEvent(ev) {
   // accumulate text and render once per frame (a full re-parse per token is O(n²))
   if (ev.type === "text_delta" && ev.content) {
     clearRetryNote(); // text is flowing again: the reconnect landed
+    // This step's durable record already adopted the text (assistant_message
+    // above): a delta that arrives afterwards is part of what the block says,
+    // so appending it would repeat the tail and opening a block would be the
+    // split answer again. The seal is per model step — step_start clears it.
+    if (state.textSealed) return true;
     if (!state.lastTextEl) {
       state.lastTextEl = createAgentTextBlock();
       (pageSink || eventsEl).appendChild(state.lastTextEl);
@@ -438,6 +470,7 @@ export function applyStreamEvent(ev) {
     // so no node) after the reset
     state.lastTextEl = null;
     state.lastTextContent = "";
+    state.textSealed = false; // a new step's deltas are its own text, not the last one's
     state.thinkingEl = null;
     state.thinkingContent = "";
     clearRetryNote();

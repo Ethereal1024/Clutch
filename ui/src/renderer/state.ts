@@ -12,8 +12,23 @@
 // where the reasoning lives (each comment travelled with its variable).
 
 export const state = {
-  // ---- tab-bar.ts ----
-  tabs: [] as Array<{ id: string; path: string; name: string; dirty: boolean }>,
+  // ---- tab-bar.ts / slots.ts ----
+  // One entry per tab. `id` is ALSO the tab's session slot: the host claims one
+  // supervisor session per id, which is what lets two tabs run at once.
+  tabs: [] as Array<{
+    id: string;
+    path: string;
+    name: string;
+    dirty: boolean;
+    // this tab's session URL (null until claimed / after release)
+    base?: string | null;
+    // the host-canonical path once the tab is open (the resource identity)
+    projectKey?: string;
+    // this tab's own run is in flight (whether or not the tab is visible)
+    running?: boolean;
+    // a permission/confirm ask is waiting in this tab (badge, never focus steal)
+    needsInput?: boolean;
+  }>,
   activeTabId: null as string | null,
 
   // ---- app.ts ----
@@ -66,6 +81,11 @@ export const state = {
   // the most recent agent text block (created by streaming text_delta)
   lastTextEl: null,
   lastTextContent: "",
+  // that block holds a durable assistant_message's text, which is the whole of
+  // that model step's prose: a text_delta still arriving for the same step is a
+  // copy of what the block already says and must not be appended (nor open a
+  // second block) — the delta feed and the log's own SSE feed are unordered
+  textSealed: false,
   // the thinking (reasoning) block
   thinkingEl: null,
   thinkingContent: "",
