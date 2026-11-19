@@ -33,8 +33,10 @@ stub: the workspace daemon over loopback HTTP and clutch-skills' CLI (which
 lazily spawns its own daemon). The live section is opt-in because it needs
 checkouts, a POSIX shell and curl.
 
-Isolation: every daemon lives in a temp workspace and every discovery directory
-is repointed at a temp dir, so the run never sees or leaks a user's daemon.
+Isolation: every daemon lives in a temp workspace, every discovery directory and
+the component install root are repointed at temp dirs, so the run never sees or
+leaks a user's daemon, and a component installed on this machine decides nothing
+about the table this test pins.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
 import sys
@@ -49,7 +52,7 @@ import tempfile
 from pathlib import Path
 
 from agent.config import Config
-from agent.tools import catalog, components, modules, rendezvous, statement
+from agent.tools import catalog, components, modules, rendezvous, settings, statement
 from agent.tools.registry import ToolRegistry, build_tools
 from agent.tools.transport import CommandResult, Transport, TransportError
 from agent.tools.workspace import LocalWorkspace
@@ -246,7 +249,16 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # dir; here it is whatever this machine has, and either spelling drives the
     # same declaration.
     declared = catalog.table()
-    skills = shell_words(statement.launch_prefix(declared[modules.SKILLS]))
+    skills_decl = declared[modules.SKILLS]
+    skills = shell_words(statement.launch_prefix(skills_decl))
+    # `--settings <document>` is the declaration's own `vars.settings` group: the
+    # component keeps its knobs in a file the HOST writes, so the path is asked of
+    # the real code (and lands in this run's temp install root) while the flags
+    # around it stay pinned. A declaration that stopped naming one would drop the
+    # group whole, and this assert would say so before the line drifted silently.
+    settings_doc = statement.host_vars(skills_decl, cfg)["settings"]
+    assert settings_doc, "the skills declaration names a settings document"
+    settings_flag = ["--settings", settings_doc]
     # The `[--root {root}]` group this declaration once carried is gone, together
     # with the host var that filled it (config.skills_dir): the COMPONENT owns its
     # library root, so the line names no root at all and the CLI serves its own
@@ -254,17 +266,18 @@ def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # to name a root, which is the point.
 
     cases = [
-        # clutch-skills: the line names no root — the component's own library is
-        # the only library this host has an opinion about
+        # clutch-skills: the line names no library root — the component's own
+        # library is the only library this host has an opinion about — and its
+        # settings document rides in front, where the declaration puts it
         (
             "load_skill",
             {"name": "some-skill"},
-            [*skills, "--envelope", "show", "some-skill"],
+            [*skills, *settings_flag, "--envelope", "show", "some-skill"],
         ),
         (
             "load_skill",
             {"name": "some-skill", "file": "resources/t.html"},
-            [*skills, "--envelope", "show", "some-skill", "--file", "resources/t.html"],
+            [*skills, *settings_flag, "--envelope", "show", "some-skill", "--file", "resources/t.html"],
         ),
     ]
     for name, args, expected in cases:
@@ -477,60 +490,70 @@ def _skill_name(path: Path) -> str:
 
 
 def live_skills(cfg: Config) -> None:
-    """clutch-skills: the CLI spawns its own daemon for the root it serves.
+    """clutch-skills: the CLI spawns its own daemon for the library it serves.
 
-    The root is the COMPONENT's own library — the host has no root to name, so the
-    library is wherever this machine's copy of the component keeps it.
+    The library is the COMPONENT's own: `library.root` unset means this machine's
+    (`~/.clutch/skills`, seeded once from the skills the component ships). The
+    live section pins it through that same knob rather than reading the person's
+    home library — one bundled skill is copied into a temp root, `library.root`
+    names it, and the daemon's published root then has to be exactly that.
     """
-    root = (modules.component_dir(modules.SKILLS) / "skills").resolve()
-    files = sorted(root.glob("*/SKILL.md"))
-    if not files:
-        print(f"SKIP: no skills under {root}")
+    bundle = (modules.component_dir(modules.SKILLS) / "skills").resolve()
+    bundled = sorted(bundle.glob("*/SKILL.md"))
+    if not bundled:
+        print(f"SKIP: no skills under {bundle}")
         return
-    skill_file = files[0]
-    first = _skill_name(skill_file)
-    offered = ToolRegistry(build_tools(cfg)).tool("load_skill")
-    assert offered is not None  # rendezvous.available(modules.SKILLS) was checked
-    check(
-        first in offered.parameters["properties"]["name"]["enum"],
-        "live: the name this file is served under is in the enum the model picks from",
-    )
-    state = tempfile.mkdtemp(prefix="clutch-inst-skills-")
-    os.environ["CLUTCH_SKILLS_DISCOVERY_DIR"] = state
-    daemon_pid = 0
-    try:
-        with tempfile.TemporaryDirectory(prefix="clutch-inst-ws-") as tmp:
-            ws = LocalWorkspace(tmp)
-            reg = ToolRegistry(build_tools(cfg))
-            r = reg.execute(ws, cfg, "load_skill", {"name": first})
-            served = skill_file.read_text(encoding="utf-8")
-            check(not r.error and r.content == served, "live: load_skill serves the skill file byte for byte")
+    declared = catalog.table()[modules.SKILLS]
+    with tempfile.TemporaryDirectory(prefix="clutch-inst-library-") as lib:
+        library = Path(lib).resolve()
+        shutil.copytree(bundled[0].parent, library / bundled[0].parent.name)
+        # the knob is the declaration's own, written the way the settings form
+        # writes it (and into this run's temp install root, not the user's)
+        settings.write(modules.SKILLS, declared, {"library.root": str(library)})
+        skill_file = library / bundled[0].parent.name / "SKILL.md"
+        first = _skill_name(skill_file)
+        offered = ToolRegistry(build_tools(cfg)).tool("load_skill")
+        assert offered is not None  # rendezvous.available(modules.SKILLS) was checked
+        check(
+            first in offered.parameters["properties"]["name"]["enum"],
+            "live: the name this file is served under is in the enum the model picks from",
+        )
+        state = tempfile.mkdtemp(prefix="clutch-inst-skills-")
+        os.environ["CLUTCH_SKILLS_DISCOVERY_DIR"] = state
+        daemon_pid = 0
+        try:
+            with tempfile.TemporaryDirectory(prefix="clutch-inst-ws-") as tmp:
+                ws = LocalWorkspace(tmp)
+                reg = ToolRegistry(build_tools(cfg))
+                r = reg.execute(ws, cfg, "load_skill", {"name": first})
+                served = skill_file.read_text(encoding="utf-8")
+                check(not r.error and r.content == served, "live: load_skill serves the skill file byte for byte")
 
-            # the CLI lazily started a daemon for the root and published it
-            record = None
-            for f in Path(state).glob("s-*.json"):
-                record = json.loads(f.read_text(encoding="utf-8"))
-            check(
-                record is not None and rendezvous._pid_alive(record["pid"]),
-                "live: the skills CLI started its daemon",
-            )
-            check(
-                record is not None and record["root"] == str(root),
-                "live: it serves this session's root",
-            )
-            daemon_pid = int(record["pid"]) if record else 0
+                # the CLI lazily started a daemon for the root and published it
+                record = None
+                for f in Path(state).glob("s-*.json"):
+                    record = json.loads(f.read_text(encoding="utf-8"))
+                check(
+                    record is not None and rendezvous._pid_alive(record["pid"]),
+                    "live: the skills CLI started its daemon",
+                )
+                check(
+                    record is not None and record["root"] == str(library),
+                    "live: it serves the library this host pointed it at",
+                )
+                daemon_pid = int(record["pid"]) if record else 0
 
-            r = reg.execute(ws, cfg, "load_skill", {"name": "no-such-skill-xyz"})
-            check(r.error and "no-such-skill-xyz" in r.content, "live: an unknown skill comes back as a refusal")
-            r = reg.execute(ws, cfg, "load_skill", {"name": first, "file": "SKILL.md"})
-            check(not r.error and r.content == served, "live: an explicit --file reads the same file")
-    finally:
-        # SIGTERM is the daemon's graceful exit (it unpublishes on the way out)
-        if daemon_pid:
-            with contextlib.suppress(OSError):
-                os.kill(daemon_pid, signal.SIGTERM)
-            check(wait_gone(daemon_pid, 10.0), "live: the skills daemon exits on SIGTERM (no leak)")
-        os.environ.pop("CLUTCH_SKILLS_DISCOVERY_DIR", None)
+                r = reg.execute(ws, cfg, "load_skill", {"name": "no-such-skill-xyz"})
+                check(r.error and "no-such-skill-xyz" in r.content, "live: an unknown skill comes back as a refusal")
+                r = reg.execute(ws, cfg, "load_skill", {"name": first, "file": "SKILL.md"})
+                check(not r.error and r.content == served, "live: an explicit --file reads the same file")
+        finally:
+            # SIGTERM is the daemon's graceful exit (it unpublishes on the way out)
+            if daemon_pid:
+                with contextlib.suppress(OSError):
+                    os.kill(daemon_pid, signal.SIGTERM)
+                check(wait_gone(daemon_pid, 10.0), "live: the skills daemon exits on SIGTERM (no leak)")
+            os.environ.pop("CLUTCH_SKILLS_DISCOVERY_DIR", None)
 
 
 def live(cfg: Config) -> None:
@@ -547,19 +570,32 @@ def live(cfg: Config) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     cfg = Config()
-    with tempfile.TemporaryDirectory() as tmp:
-        # no project log: the host's own log readers are gated on one, so this is
-        # exactly the surface of a session that opened nothing (run_command only)
-        reg = ToolRegistry(build_tools(cfg))
-        ws = LocalWorkspace(tmp)
-        check_table(reg, cfg)
-        check_daemon_lines(reg, ws, cfg)
-        check_cli_lines(reg, ws, cfg)
-        check_envelopes(reg, ws, cfg)
-        check_guards(reg, cfg)
-        check_arguments(reg, ws, cfg)
-        if "--live" in argv:
-            live(cfg)
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as installed:
+        # The pinned table is a fact about the CHECKOUTS beside this repo, so the
+        # install root is repointed at an empty directory for the run: what a
+        # machine happens to have installed is not a regression here, and a
+        # retired component nobody has uninstalled yet (P0-7's `retireComponents`
+        # is the client's job, not this test's) must not turn the pin red.
+        previous = os.environ.get(components.ROOT_ENV)
+        os.environ[components.ROOT_ENV] = installed
+        try:
+            # no project log: the host's own log readers are gated on one, so this is
+            # exactly the surface of a session that opened nothing (run_command only)
+            reg = ToolRegistry(build_tools(cfg))
+            ws = LocalWorkspace(tmp)
+            check_table(reg, cfg)
+            check_daemon_lines(reg, ws, cfg)
+            check_cli_lines(reg, ws, cfg)
+            check_envelopes(reg, ws, cfg)
+            check_guards(reg, cfg)
+            check_arguments(reg, ws, cfg)
+            if "--live" in argv:
+                live(cfg)
+        finally:
+            if previous is None:
+                os.environ.pop(components.ROOT_ENV, None)
+            else:
+                os.environ[components.ROOT_ENV] = previous
     print("\nall passed")
     return 0
 
