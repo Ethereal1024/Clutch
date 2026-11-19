@@ -430,9 +430,8 @@ def settings_diagnostics(component: Component) -> list[Diagnostic]:
         if kind == "enum" and not (isinstance(spec.get("enum"), list) and spec["enum"]):
             out.append(Diagnostic(component.name, "", f"{what} is an enum with no `enum` list to pick from"))
         if kind == "array" and spec.get("items", "string") != "string":
-            out.append(
-                Diagnostic(component.name, "", f"{what} is an array of {spec.get('items')!r}: the host draws strings only")
-            )
+            detail = f"{what} is an array of {spec.get('items')!r}: the host draws strings only"
+            out.append(Diagnostic(component.name, "", detail))
         if "default" not in spec:
             # Not cosmetic: the control starts at its default and a per-setting
             # reset returns to it, so a setting without one has nowhere to start.
