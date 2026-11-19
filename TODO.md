@@ -271,7 +271,8 @@ flowchart TD
   - 全量：`tests/*_test.py` 现在 24 个，**23 绿**，唯一红仍是 `tests/tools_inst_test.py`（P0-6 那笔 WIP 的同一条根因，见 P4-3）。
   - **补记（P-C 之后）：24/24 全绿**。`tests/tools_inst_test.py` 不再是红——它 pin 的 `web_search` / `web_fetch` 随 `clutch-websearch` 整体转前端退出工具面，用例迁到 `load_skill` / `read_file`（清单见 P0-6）。
   - **补记（组件设置那笔之后）：`tests/*_test.py` 现在 25 个**——新增 `tests/settings_test.py`（声明里的 `settings` 表、`host.settings` 的投递、`GET`/`POST /api/components/settings` 两条路由）。本轮实测 **22 绿、3 红**，三条都与这块无关：`tests/tools_inst_test.py`（P0-6 的老账）、`tests/exec_layer_test.py`（工作区里**未跟踪**的 `scripts/stream_probe.py` 仍 `import agent.llm.proxy`，扫描照实报它）、`tests/rendezvous_test.py`（`clutch-ssh-workspace` 子模块的当前状态）。后两条要清也是清工作区/子模块，不是改代码。
-  - **补记（清完工作区之后）：`tests/*_test.py` 现在 26 个，实测 24 绿、2 红**——新增的第五个是 `tests/picker_api_test.py`（picker/create 那两笔：`ProjectExists` 的 409 `code:"project_exists"`、`fs_mkdir` 的 `valid_name` 拒绝面）。删掉工作区里那坨未跟踪的垃圾（`scripts/stream_probe.py`、14 个 `.e2e-ssh-workspace-*`、`.tmp-probe/`、`backup-ui-20261117-232432/`、`tools/` 的两个跑测试脚本）之后，`tests/exec_layer_test.py` **自己就转绿了**——它报的从来是工作区，不是代码，这条正好反证它扫得没错。剩下两条红与这一轮无关：`tests/tools_inst_test.py` pin 6 个工具而登记表现在发 8 个，因为 `clutch-websearch` 的 `plugin/component.json` 仍声明 `web_search` / `web_fetch`（把 `2ebd1af` 拉进一个 worktree、接上同一份组件 checkout 跑同一段代码，结果一模一样：**不是这轮改出来的**）；`tests/rendezvous_test.py` 仍是 `clutch-ssh-workspace` 的当前状态（`the ssh plugin serves a foreign filesystem`）。
+  - **补记（清完工作区之后）：`tests/*_test.py` 现在 26 个，实测 24 绿、2 红**——新增的第五个是 `tests/picker_api_test.py`（picker/create 那两笔：`ProjectExists` 的 409 `code:"project_exists"`、`fs_mkdir` 的 `valid_name` 拒绝面）。删掉工作区里那坨未跟踪的垃圾（`scripts/stream_probe.py`、14 个 `.e2e-ssh-workspace-*`、`.tmp-probe/`、`backup-ui-20261117-232432/`、`tools/` 的两个跑测试脚本）之后，`tests/exec_layer_test.py` **自己就转绿了**——它报的从来是工作区，不是代码，这条正好反证它扫得没错。剩下两条红与这一轮无关：`tests/tools_inst_test.py` pin 6 个工具而登记表现在发 8 个，因为 `clutch-websearch` 的 `plugin/component.json` 仍声明 `web_search` / `web_fetch`（把 `2ebd1af` 拉进一个 worktree、接上同一份组件 checkout 跑同一段代码，结果一模一样：**不是这轮改出来的**）；`tests/rendezvous_test.py` 仍是 `clutch-ssh-workspace` 的当前状态（`the ssh plugin serves a foreign filesystem`）。**更正（见 §13 M5-b）**：`tools_inst_test` 那 8 个工具的真实来源不是 `clutch-websearch/plugin/component.json`，而是本机残留的已退役 cli 形态安装 `~/.clutch/components/clutch-websearch/0.1.0+75ffbfe0`（`build_tools` 也读安装根）；用例改成自己 repoint 安装根之后转绿，同时露出两条被 fail-fast 挡住的真过期（`load_skill` 的 `--settings` 组、`--live` 的库根），也一并修了。
+  - **补记（§13 M5 之后）：26 个用例里 25 绿、1 红**——`tests/tools_inst_test.py` 已转绿（M5-b），唯一剩下的红是 `tests/rendezvous_test.py`，它卡在 `clutch-ssh-workspace` 的 0.2.0 WIP 上（M5-c，不是本仓的债，子模块不动）。
   - **遗留（不是本阶段能做的，与 P0-6 同一阻塞）**：`agent/core/context.py` 的**删除**——`derive_messages` 被四个测试引用（`tests/lazy_check.py` / `selfcheck.py` / `local_shell_test.py` / `catalog_test.py`，最后一个是用户的 WIP），删它要重写 `lazy_check` 的等价断言；`agent/prompts/` 顶层模板的删除同理。这两块清掉之后 `agent/` 约 **14,970 行**。
   - **补记（P-C 之后，两条遗留都已清完）**：`agent/core/context.py` 删除，等价覆盖搬成 `tests/context.test.js`（D4）；`agent/prompts/` 顶层 15 个模板删除，执行层只剩下 `unknown_tool.md`、`errors/`、`tools/` 这些真正的机器文本（D1–D3）。实测 `agent/` = **14,995 行 / 59 个模块，孤儿 0**（`tests/exec_layer_test.py` 的 `ORPHANS` 现在是空表）。
 - [x] **P3-3 权限唯一实现**：`agent/core/permission.py`(484) 留下并只回答 `allow` / `deny` / `ask` + 那一次调用的身份；`routing.py:78-81` 折进执行端点。
@@ -525,9 +526,21 @@ flowchart TD
 - [x] **M2** `save_memory` / `search_memory` 报 `GET /api/clc → 404`（`clutch-memory` 退役后没人服务 `/api/clc`）——所以本轮的决定只存在于对话与本文里。—— **已收口**：`save_memory|search_memory|clutch-memory|/api/clc` 全仓 0 引用（工具面与端点都没有了，所以这条不再是“下一轮要修的 404”）。本轮的记录靠这份 `TODO.md` 与项目日志，不靠 `/api/clc`。
 - [x] **M3** 既有 ruff 基线：`E501 scripts/market_index.py:187`。—— 已把那句三段式 f-string 折成“先算 `declared` 再抛”（与文件下面 version 那段同一个写法），报错文本一字未改；`ruff check scripts/market_index.py` 现在全绿。
   - **补记（全仓基线是 3 条，不是 1 条；“全绿”只对那一个文件成立）**：`ruff check agent scripts` 今天报 3 条，全是**既有**、与本次重构无关的：`agent/config.py:11 F401`（`from pathlib import Path` 从未使用）、`agent/tools/answers.py:24 I001`（import 块顺序）、`scripts/ui-render-bench/run.py:20 F401`（`os` 未使用）。后两个文件在本次重构里**逐字节未改**（`git status` 里根本不出现），`pyproject.toml` 的 `select` 一直是 `E,F,W,B,I`、没被改过——所以这三条是 HEAD 里就有的，不是本轮弄红的。按“py 只删循环那一半”的规矩**不动它们**（清 import 顺序属于整理，不是这次的任务）。CI 不跑 ruff（`.github/workflows/` 里没有这一步），所以它不挡发布；§14 那条命令的诚实读法是“3 条既有告警”。
+  - **补记（§13 M5 那一轮跑门时又看见第 4 条，是我们自己的）**：`ruff check agent scripts` 报出 `agent/tools/catalog.py:434:121 E501 (123 > 120)`；`git log -L 430,436` 指到 `8894d60`（“feat(settings)”那笔，本分支未推送的提交），所以它不是既有告警，而是那一笔把一行折得太长。既然 §14 的注释把基线写成“3 条既有”，就把这一行折回去（`detail = f"…"` + `Diagnostic(component.name, "", detail)`，与相邻几句同一个写法；报错文本一字未改），`ruff check agent scripts` 回到那 3 条、`tests/catalog_test.py` 仍 `all passed`。**教训**：M3 那句“3 条”是当时的快照，重跑门之前不能当常量用。
 - [ ] **M4** `scripts/market_index.py --check` 要读 github 上的 4 个 release manifest，而本开发环境到 github.com（以及 pypi.org）不通——`curl` 20 s 超时，`example.com` 却是 200——所以 §14 的市场门禁在本环境只能标为“跑不了”，不是被改坏了。同理 `tests/remote-bootstrap-e2e.js`。
   - **补记（网络已通，“不通”这条不成立了）**：`https://api.github.com/` → 200、`https://pypi.org/simple/` → 200、`example.com` → 200，`ssh -T git@github.com` → `Hi Ethereal1024!`；`scripts/market_index.py --check` 在本环境 rc=0（P6-1 已收口），§14 的市场门禁是真跑了、不是“跑不了”。
   - M4 剩下的只有后半句：`tests/remote-bootstrap-e2e.js` 要 `CLUTCH_E2E_HOST` / `CLUTCH_E2E_USER` / `CLUTCH_E2E_PASS` 指向一台真的、能被 SSH 进去并装 `~/.clutch-server` 的主机——**这三个变量在本机没有**（`env` 里无、`tests/` 里也不留默认值，脚本缺变量直接 `exit 2`）。这是 M4 唯一的阻塞。
+
+- [x] **M5 清完工作区、跑全量时冒出来的四个异常**（记账 + 实测证据；能修的都修了，修不了的写清为什么）
+  - **a. 工具调用偶尔被执行两次**（调用方的派发层，不在本仓，无代码可改）。形状很具体：**追加型 `edit_file` 会重放**——`new_string` 里含 `old_string` 前缀的写法不是幂等的，于是同一条 TODO 被追加成两份（逐字节相同）；后台 `nohup … &` 也会起两份（两个 `/tmp/pysweep.sh`、两个 `python3 /tmp/pysweep2.py` 同时在跑，日志交错、`EXIT` 记录重复，`tests/server_test.py` 因端口被占报假红 `OSError: [Errno 98] Address already in use`）。反面证据同样清楚：`echo one >> /tmp/dup-test.txt` 只追加一次、`git commit` 一次都没重放过——所以不是每一次调用都这样。规避办法（本轮一直照做）：追加型编辑之后 `grep -c` 复查；后台任务用 `ps -eo pid,args | awk` 找 PID 再按 PID `kill`（**别用 `pkill -f <脚本>`**：它会把工具自己的 shell 一起杀掉，退出码 `-15`）；每次跑用唯一的日志路径；慢用例一次一条、前台跑。
+    - **复现（就在 M5 这一段里，两处）**：① §13 的 M5 整块（9 行）被逐字节追加了第二份、§7 那条“更正”句也是两份——判据是“逐字节相同”，摘掉重复的那份，没有手工重打内容；② 后台全量 sweep 起了**两个** `sh -c` 循环（PID 92514 / 92561 同时跑 `tests/*_test.py`），`tests/server_test.py` 又是端口被占的假红。两个循环按 PID 杀掉、连同被孤立的 `lock_reconcile_test --ghost` 子进程，之后给 sweep 脚本加了**单实例锁**（`mkdir /tmp/…lock || exit 0` + `trap rmdir EXIT`）：派发层再重放一次，第二次立刻退出，不会并发，红也就是真的红了。
+  - **b. `tests/tools_inst_test.py` 红**（pin 6 个工具，登记表现在发 8 个）。两条根因，都不是"这轮改出来的"，也都修了。
+    - **第一条（本机残留）**：多出来的 `web_search` / `web_fetch` **不是**来自 `clutch-websearch/plugin/component.json`（那是客户端插件形态、`command: "web_search {*}"`，根本不是这两个工具渲染出来的样子），而是来自本机装着的**已退役 cli 形态** `~/.clutch/components/clutch-websearch/0.1.0+75ffbfe0`——它的 `component.json` 还写着 `launch.entry: websearch.py` 与 `command: "search --envelope …"`，而 `build_tools` 会把**本机安装**一起读进表（`catalog.registrations()` 的第二个来源：checkout → 安装根 → 用户目录）。这正是 P0-7 那条"等 P6-3 发前端 manifest 才会被 `retireComponents()` 撤掉"的活证据，所以不能靠"删掉它"来修。修法是让用例自己控制这个变量：`main()` 把 `components.ROOT_ENV` 指向一个空临时目录（`check_table` 里那段"什么都没装"的块早就是这么干的），于是 pin 描述的是**仓边 checkout 的工具面**，不是"这台机器装了什么"；顺带一个副作用也一起没了——以前这段渲染 `{settings}` 会写进用户家目录（`~/.clutch/components/settings/clutch-skills.json`，内容是默认值），现在落进临时根。
+    - **第二条（真的过期，换台干净机器照样红）**：表检查一旦不再 fail-fast，`check_cli_lines` 的 `load_skill` 契约就红——`clutch-skills` 的声明现在带 `vars: {"settings": "host.settings"}` 和 `[--settings {settings}]` 组，冻结的期望还是 `… --envelope show <name>`，少了 `--settings <文档>`。**这条一直是红的，只是被前面那条 fail-fast 挡住了**（`tests/testsupport.check` 第一处失败就 `sys.exit(1)`，旧版本跑出 0 条 `ok:` 就退出）。修法照同一函数里 prefix 的老规矩"问真代码、pin 顺序"：期望里插入 `settings_flag = ["--settings", statement.host_vars(声明, cfg)["settings"]]`，并断言声明确实还在 name 一个文档——哪天这个组没了，先红在断言上，而不是悄悄漂。
+    - 同一段 `--live` 也连着两处同样的过期（同样被挡着）：`record["root"] == <checkout>/skills` 已不成立——CLI 服务的是**组件自己的库**（`library.root` 缺省 = `~/.clutch/skills`，首次从捆绑的 skills 种一份），不是 checkout 里那份捆绑目录。修法是不去读用户家目录：把捆绑的第一个 skill 拷进临时库，用组件自己的旋钮 `library.root`（`settings.write`，走声明的校验）指向它，再断言守护进程发布的 root **正好**是它。
+    - 实测：`python3 -m tests.tools_inst_test` → **75 条 ok、rc=0**；加 `--live` → **88 条 ok、rc=0**（真起 workspace 与 skills 两个守护进程，两者都按 SIGTERM 干净退出、无泄漏）。
+  - **c. `tests/rendezvous_test.py` 红（`the ssh plugin serves a foreign filesystem`）**：**不能在本仓修，也不必修**——子模块的**提交态**（gitlink `4848fca` = `clutch-ssh-workspace 0.1.1`）声明的就是 `subject: "foreign-fs"`，用例钉的正是它，干净 checkout / CI 上是绿的；红的只是用户本地那份 0.2.0 的 WIP（`subject` 改成 `workspace-fs`，`lib/remote.js` 删掉、换成 `lib/{diff,fs,tools}.js`），与 `tests/ssh-workspace-e2e.js` 那批红同一个根因。**不动那个子模块**：等它的 WIP 落地，这条自然转绿。
+  - **d. 仓根越攒越多的 `.e2e-ssh-workspace-*`**：不是"忘了 `rm -rf`"——`tests/ssh-workspace-e2e.js:177` 在仓根建 `<repo>/.e2e-ssh-workspace-<pid>`，`finally`（约 314 行）**故意**在失败时留着它（"a failure leaves its evidence and a pass leaves nothing"），本轮清掉的那 14 个正是失败留下的证据。真正的缺陷是它们**没被 gitignore**（在 `git status` 里是 `??`，离被 `git add` 只差一次手滑）。修法：`.gitignore` 加 `/.e2e-ssh-workspace-*/`（锚在仓根，正是脚本的建法）。
 
 ---
 
@@ -536,7 +549,7 @@ flowchart TD
 ```bash
 # 不降级
 node tests/no-local-fallback-test.js            # P0-3/P0-4 之后必须 0 FAIL
-# 执行层全量（26 个用例文件；红的两条见 §7 P3-2 的后两条补记）：没有 pytest——以 `-m` 逐个跑
+# 执行层全量（26 个用例文件；25 绿、1 红，唯一红见 §13 M5-c）：没有 pytest——以 `-m` 逐个跑
 # （脚本方式 `python3 tests/x_test.py` 只把 tests/ 放进 sys.path，只有本机 .venv
 #  里的 editable .pth 兜住了仓库根；`-m` 在哪台机器上都对）
 for t in tests/*_test.py; do python3 -m "tests.$(basename "${t%.py}")" >/dev/null || echo "FAIL $t"; done
@@ -547,7 +560,7 @@ python3 -m ruff check agent scripts --output-format concise   # 3 条既有告�
 (cd ui && npm run typecheck)
 
 # 渲染器 bundle 与源码逐字节保鲜（不依赖 esbuild，Android 发布 job 也能跑）
-node ui/build-renderer.js --check               # "up to date — 29 modules, 6233 lines"
+node ui/build-renderer.js --check               # "up to date — 34 modules, 7660 lines"
 
 # 插件（子模块 clutch-websearch）：三个动词一个脚本
 (cd clutch-websearch && node scripts/build-plugin.js --typecheck)  # tsc --noEmit，rc=0
