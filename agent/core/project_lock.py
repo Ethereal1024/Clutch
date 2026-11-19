@@ -277,6 +277,16 @@ class ProjectLock:
         return handle
 
     @classmethod
+    def held(cls, clc_path: str) -> bool:
+        """Does THIS process already hold the path's lock?
+
+        The answer `acquire` does not give: a caller that must hand back a lock
+        when an operation fails needs to know whether it took one or was handed
+        the window's own live handle (the reuse branch above). Releasing that
+        would drop the write lock of a project that is still open."""
+        return os.path.abspath(clc_path) in cls._held
+
+    @classmethod
     def annotate(cls, handle: LockHandle | None, **fields) -> None:
         """Add facts to a HELD lock's record (the window that claimed this
         session, the port it listens on). Callers use this when the fact is

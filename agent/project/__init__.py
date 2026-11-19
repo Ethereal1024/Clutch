@@ -86,6 +86,38 @@ def _acquire_lock(path: Path, read_only: bool) -> LockHandle | None:
     return lock
 
 
+class ProjectExists(Exception):
+    """Create refused: a file is already at the target path.
+
+    A create must never truncate a project. The file it would write over is a
+    whole conversation, and both ways into a create reach this — the picker's
+    Create button (a typed name, no stat) and the typed-path offer — so the
+    existence answer has to come from the one place that writes: here, under
+    the lock, before a byte is written."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(str(path))
+        self.path = str(path)
+
+
+def _refuse_existing(path: Path, workspace) -> None:
+    """Raise ProjectExists when `path` is already a file in the backend that
+    will be written to.
+
+    The probe has to be the WRITER's own: a local create stats the path, a
+    remote one asks the far shell (`size` is `wc -c`/getsize, O(1) metadata —
+    no content moves), and "not there" is that backend's FileNotFoundError."""
+    if workspace is None:
+        if path.exists():
+            raise ProjectExists(str(path))
+        return
+    try:
+        workspace.size(str(path))
+    except FileNotFoundError:
+        return
+    raise ProjectExists(str(path))
+
+
 def create_project(path: Path, name: str, model: str = "", workspace=None) -> Project:
     """Create a new .clc file and return the Project. With a workspace (SSH
     degradation layer) the file is written on the remote host.
@@ -96,13 +128,22 @@ def create_project(path: Path, name: str, model: str = "", workspace=None) -> Pr
     is a writable project nobody claims, and a second window opening it for write
     would append to it concurrently with its creator (the one writer the lock
     exists to prevent). Raises ProjectOpenConflict when another window already
-    holds the path (it has that .clc open, or created it first)."""
+    holds the path (it has that .clc open, or created it first), and
+    ProjectExists when the path is already a file nobody holds — a create opens
+    a new conversation, it never overwrites one."""
     path = path.with_suffix(".clc")
+    # A path this window already holds comes back as the SAME handle (ProjectLock's
+    # reuse branch), so "release what this create took" must not release that one:
+    # the .clc being refused below may be the project this session has open, and
+    # handing its lock to nobody is worse than the create failing.
+    reused = ProjectLock.held(str(path))
     lock = _acquire_lock(path, read_only=False)
     try:
+        _refuse_existing(path, workspace)
         return _create_project_locked(path, name, model, workspace, lock)
     except Exception:
-        ProjectLock.release(lock)
+        if not reused:
+            ProjectLock.release(lock)
         raise
 
 
@@ -217,6 +258,9 @@ __all__ = [
     # the lifecycle
     "create_project",
     "open_project_lazy",
+    # a create's refusal of a path already taken (the one write that must not
+    # happen: an existing .clc is a conversation, not a spare filename)
+    "ProjectExists",
     # format.py's own, re-exported because agent/core/lazy.py imports it by this
     # name (a late import inside the open, so the module-level cycle
     # project -> core.lazy -> project never closes)

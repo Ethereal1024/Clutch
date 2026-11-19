@@ -1,5 +1,10 @@
 """Project lifecycle over HTTP: create, open (with progress), and read history.
 
+A new project is made in a directory the user picked (/api/project/new): the
+.clc's parent is the session's working directory, so where a project lives is a
+decision the user makes once, at creation, rather than something a scratch
+directory can defer.
+
 Opening a project replays its durable log; the NDJSON body of /api/project/open
 is the same progress a local open prints, and `_history` hands the UI the window
 the log resolved to.
@@ -8,12 +13,12 @@ the log resolved to.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, urlparse
 
 from ..core.project_lock import ProjectLock, ProjectOpenConflict, owner_summary
 from ..events import event_to_json
-from ..project import create_project, open_project_lazy
+from ..project import ProjectExists, create_project, open_project_lazy
 
 
 class ProjectMixin:
@@ -38,6 +43,21 @@ class ProjectMixin:
                 project = create_project(root / name, name, model=self._cfg.model, workspace=ws)
             else:
                 project = create_project(Path(dirname) / name, name, model=self._cfg.model)
+        except ProjectExists as e:
+            # the name is taken by a file this create would have truncated: the
+            # picker asked to MAKE a project, and one is already there — say
+            # which, so the UI can point at opening it instead
+            return self._json(
+                {
+                    # a sentence about the CONFLICT, like the code beside it (the
+                    # UI prefixes its own "Failed to create project:"): the name
+                    # is taken, and opening it is the way that answer becomes an
+                    # answer
+                    "error": f"{PurePosixPath(e.path).name} already exists — open it instead",
+                    "code": "project_exists",
+                },
+                status=409,
+            )
         except ProjectOpenConflict as e:
             # the file this create would write is another window's project: same
             # answer as an open conflict, so the UI can say what actually happened

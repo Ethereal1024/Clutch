@@ -44,7 +44,7 @@
 // The lexical POSIX dirname and the two error classes are fs.js's own: the API
 // layer catches `error instanceof ValueError` against THAT class, so a second
 // copy here would make an escape or a bad event look like a crash.
-const { dirname, ValueError, OSError } = require("./fs");
+const { dirname, ValueError, OSError, FileNotFoundError } = require("./fs");
 
 // The field order of every event (agent/events.py), and its defaults. Order is
 // contract: `json.dumps(asdict(event))` writes the dataclass's field order, so
@@ -657,9 +657,34 @@ function wrapProgress(rawRead, total, onProgress) {
   };
 }
 
+// `agent/project/__init__.py: ProjectExists` — a create refused because a file
+// is already at the path. The create is the one write that must never happen
+// over an existing .clc: the file it would land on is a whole conversation.
+class ProjectExists extends Error {
+  constructor(path) {
+    super(String(path));
+    this.name = "ProjectExists";
+    this.path = String(path);
+  }
+}
+
+// `_refuse_existing`: ask the backend that is about to be written to, in its own
+// currency (`size` is `wc -c` far-side / a stat locally), and treat that
+// backend's FileNotFoundError as "the name is free".
+async function refuseExisting(path, workspace) {
+  try {
+    await workspace.size(path);
+  } catch (e) {
+    if (e instanceof FileNotFoundError) return;
+    throw e;
+  }
+  throw new ProjectExists(path);
+}
+
 async function createProject(options = {}) {
   const path = withSuffix(String(options.path), ".clc");
   const workspace = requireWorkspace(options.workspace);
+  await refuseExisting(path, workspace);
   const meta = { name: String(options.name || ""), model: String(options.model || "") };
   await workspace.write(path, headerText(meta));
   const read = (lo, hi) => workspace.readRange(path, lo, hi);
@@ -741,6 +766,7 @@ module.exports = {
   LazyEventLog,
   // the lifecycle
   createProject,
+  ProjectExists,
   openProject,
   streamOpen,
   withSuffix,

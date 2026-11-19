@@ -33,7 +33,7 @@
 "use strict";
 
 const { ValueError, dirname } = require("./fs");
-const { createProject, streamOpen, eventToJson } = require("./clc");
+const { createProject, streamOpen, eventToJson, ProjectExists } = require("./clc");
 
 // A route the host does not answer (yet) and a route that does not exist are the
 // same answer, because the renderer's only question is "did this work".
@@ -225,6 +225,19 @@ function createApi(state = {}) {
         workspace: ws,
       });
     } catch (e) {
+      // a name already taken by a file: a create never truncates a project, so
+      // the answer is the same 409 + code the Python host gives
+      if (e instanceof ProjectExists) {
+        const base = String(e.path).replace(/\/+$/, "");
+        const slash = base.lastIndexOf("/");
+        return json(
+          {
+            error: `${slash >= 0 ? base.slice(slash + 1) : base} already exists — open it instead`,
+            code: "project_exists",
+          },
+          409
+        );
+      }
       return json({ error: `cannot create project: ${(e && e.message) || e}` }, 400);
     }
     if (typeof state.setProject === "function") state.setProject(project, ws);

@@ -18,7 +18,7 @@ import re
 import unittest.mock as mock
 from pathlib import Path, PosixPath, PurePosixPath
 
-from agent.project import create_project
+from agent.project import ProjectExists, create_project
 from agent.tools.transport import CommandResult
 from agent.tools.workspace import RemoteWorkspace
 from tests.testsupport import check
@@ -150,6 +150,37 @@ def test_create_project_sends_remote_paths() -> None:
         check(all("/System" not in c for c in bridge.commands), "create_project sends no /System")
 
 
+def test_create_refuses_an_existing_remote_file() -> None:
+    """The refusal has to be the remote backend's answer, not the app host's.
+
+    A create over ssh stats through the workspace (`wc -c` on the far side), so
+    the file that decides "already exists" is the one the remote write would
+    truncate: an app host that has no such local file still refuses, and the
+    remote bytes are untouched."""
+    ws, bridge = _remote_ws("/home/u/proj")
+    remote = "/home/u/proj/kept.clc"
+    original = "# clutch project v1\nname: kept\n---\n"
+    bridge.files[remote] = original
+    try:
+        create_project(PurePosixPath("/home/u/proj/kept"), "kept", model="m", workspace=ws)
+        check(False, "an existing remote .clc is refused")
+    except ProjectExists as e:
+        check(e.path == remote, f"the refusal names the remote path: {e.path}")
+    check(bridge.files[remote] == original, "the refused create left the remote .clc alone")
+    check(not any("> '/home/u/proj/kept.clc'" in c for c in bridge.commands), "nothing was written over it")
+    # and the lock a refusal took is handed back: the next attempt still says
+    # "already exists" rather than "open in another window"
+    try:
+        create_project(PurePosixPath("/home/u/proj/kept"), "kept", model="m", workspace=ws)
+        check(False, "a repeated refusal is still the existence one")
+    except ProjectExists:
+        check(True, "a repeated refusal is still the existence one")
+
+    project = create_project(PurePosixPath("/home/u/proj/fresh"), "fresh", model="m", workspace=ws)
+    check(bridge.files["/home/u/proj/fresh.clc"], "a free remote name still creates")
+    check(str(project.path) == "/home/u/proj/fresh.clc", "and keeps the remote spelling")
+
+
 def test_lexical_behavior_needs_no_rewrite_to_kick_in() -> None:
     """No monkeypatch (plain Linux box): same verdicts — the lexical rule is
     unconditional, not a macOS-only special case."""
@@ -192,6 +223,7 @@ if __name__ == "__main__":
     test_remote_paths_ignore_the_local_filesystem()
     test_remote_home_is_the_remote_user()
     test_create_project_sends_remote_paths()
+    test_create_refuses_an_existing_remote_file()
     test_lexical_behavior_needs_no_rewrite_to_kick_in()
     test_remote_paths_stay_in_posix_flavor()
     print("remote_path_test: all checks passed")
