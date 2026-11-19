@@ -270,6 +270,8 @@ flowchart TD
   - **接进发布门**：`.github/workflows/release.yml` 的 `verify` 加了一步 `Verify the execution layer`（`python3 -m tests.exec_layer_test`，离线、纯标准库——门自己不会因为依赖失败，与门里其它几个扫描同一个理由），`tests/release_graph_check.py` 的 `SCANS` 同步加上它，于是“release graph 原子”这条检查同时钉住“这个扫描真的在门里”；`verify` 上那句 “the three scans” 改成 “the scans below”。
   - 全量：`tests/*_test.py` 现在 24 个，**23 绿**，唯一红仍是 `tests/tools_inst_test.py`（P0-6 那笔 WIP 的同一条根因，见 P4-3）。
   - **补记（P-C 之后）：24/24 全绿**。`tests/tools_inst_test.py` 不再是红——它 pin 的 `web_search` / `web_fetch` 随 `clutch-websearch` 整体转前端退出工具面，用例迁到 `load_skill` / `read_file`（清单见 P0-6）。
+  - **补记（组件设置那笔之后）：`tests/*_test.py` 现在 25 个**——新增 `tests/settings_test.py`（声明里的 `settings` 表、`host.settings` 的投递、`GET`/`POST /api/components/settings` 两条路由）。本轮实测 **22 绿、3 红**，三条都与这块无关：`tests/tools_inst_test.py`（P0-6 的老账）、`tests/exec_layer_test.py`（工作区里**未跟踪**的 `scripts/stream_probe.py` 仍 `import agent.llm.proxy`，扫描照实报它）、`tests/rendezvous_test.py`（`clutch-ssh-workspace` 子模块的当前状态）。后两条要清也是清工作区/子模块，不是改代码。
+  - **补记（清完工作区之后）：`tests/*_test.py` 现在 26 个，实测 24 绿、2 红**——新增的第五个是 `tests/picker_api_test.py`（picker/create 那两笔：`ProjectExists` 的 409 `code:"project_exists"`、`fs_mkdir` 的 `valid_name` 拒绝面）。删掉工作区里那坨未跟踪的垃圾（`scripts/stream_probe.py`、14 个 `.e2e-ssh-workspace-*`、`.tmp-probe/`、`backup-ui-20261117-232432/`、`tools/` 的两个跑测试脚本）之后，`tests/exec_layer_test.py` **自己就转绿了**——它报的从来是工作区，不是代码，这条正好反证它扫得没错。剩下两条红与这一轮无关：`tests/tools_inst_test.py` pin 6 个工具而登记表现在发 8 个，因为 `clutch-websearch` 的 `plugin/component.json` 仍声明 `web_search` / `web_fetch`（把 `2ebd1af` 拉进一个 worktree、接上同一份组件 checkout 跑同一段代码，结果一模一样：**不是这轮改出来的**）；`tests/rendezvous_test.py` 仍是 `clutch-ssh-workspace` 的当前状态（`the ssh plugin serves a foreign filesystem`）。
   - **遗留（不是本阶段能做的，与 P0-6 同一阻塞）**：`agent/core/context.py` 的**删除**——`derive_messages` 被四个测试引用（`tests/lazy_check.py` / `selfcheck.py` / `local_shell_test.py` / `catalog_test.py`，最后一个是用户的 WIP），删它要重写 `lazy_check` 的等价断言；`agent/prompts/` 顶层模板的删除同理。这两块清掉之后 `agent/` 约 **14,970 行**。
   - **补记（P-C 之后，两条遗留都已清完）**：`agent/core/context.py` 删除，等价覆盖搬成 `tests/context.test.js`（D4）；`agent/prompts/` 顶层 15 个模板删除，执行层只剩下 `unknown_tool.md`、`errors/`、`tools/` 这些真正的机器文本（D1–D3）。实测 `agent/` = **14,995 行 / 59 个模块，孤儿 0**（`tests/exec_layer_test.py` 的 `ORPHANS` 现在是空表）。
 - [x] **P3-3 权限唯一实现**：`agent/core/permission.py`(484) 留下并只回答 `allow` / `deny` / `ask` + 那一次调用的身份；`routing.py:78-81` 折进执行端点。
@@ -534,7 +536,7 @@ flowchart TD
 ```bash
 # 不降级
 node tests/no-local-fallback-test.js            # P0-3/P0-4 之后必须 0 FAIL
-# 执行层全量（24 个用例文件，全绿）：没有 pytest——以 `-m` 逐个跑
+# 执行层全量（26 个用例文件；红的两条见 §7 P3-2 的后两条补记）：没有 pytest——以 `-m` 逐个跑
 # （脚本方式 `python3 tests/x_test.py` 只把 tests/ 放进 sys.path，只有本机 .venv
 #  里的 editable .pth 兜住了仓库根；`-m` 在哪台机器上都对）
 for t in tests/*_test.py; do python3 -m "tests.$(basename "${t%.py}")" >/dev/null || echo "FAIL $t"; done
