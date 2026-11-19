@@ -28,6 +28,8 @@ Endpoints (all JSON except SSE/NDJSON):
   GET  /api/workspace/checkpoints  log offsets a whole-task rollback can undo
   POST /api/workspace/rollback {offset} undo every file change from that task on
   GET  /api/fs/list           server-side directory browser (one level)
+  POST /api/fs/mkdir {dir, name}  one new folder inside the shown directory
+  POST /api/fs/mkdir {dir, name}  one new folder inside the shown directory
   POST /api/channel {port, token, components}  the client's plugin declarations
   GET  /api/channel        what this session holds (never the token)
   DELETE /api/channel      forget them (the client went away)

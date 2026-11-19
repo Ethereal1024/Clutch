@@ -128,3 +128,21 @@ class WorkspaceMixin:
         raw = (qs.get("path") or [""])[0]
         show_hidden = qs.get("hidden", ["0"])[0] == "1"
         self._json(browsing.fs_list(self._state, raw, show_hidden))
+
+    def _fs_mkdir(self) -> None:
+        """New folder, inside the directory the picker is showing.
+
+        A bad name is the client's mistake (400); a name that is already taken
+        is an answer the row shows in place (200 + error), the same split
+        /api/project/new uses for a create it could not perform.
+        """
+        body = self._read_body()
+        if body is None:
+            return self._json({"error": "bad json body"}, status=400)
+        raw_dir = str(body.get("dir") or "").strip()
+        name = str(body.get("name") or "")
+        result = browsing.fs_mkdir(self._state, raw_dir, name)
+        if result["path"] is None:
+            return self._json({"error": result["error"]}, status=400)
+        self._json(result)
+

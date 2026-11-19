@@ -101,6 +101,9 @@ class RoutingMixin:
             self._permission_trust()
         elif parsed.path == "/api/workspace/revert":
             self._workspace_revert()
+        elif parsed.path == "/api/fs/mkdir":
+            # the picker's "+ Folder": one folder, in the directory on screen
+            self._fs_mkdir()
         elif parsed.path == "/api/workspace/rollback":
             self._workspace_rollback()
         elif parsed.path == "/api/backend":

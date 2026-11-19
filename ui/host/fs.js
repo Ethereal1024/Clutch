@@ -174,6 +174,24 @@ function visible(name, showHidden) {
   return Boolean(showHidden) || !String(name).startsWith(".");
 }
 
+// `agent/browsing.py: valid_name` — why `name` cannot be ONE file or folder
+// name, or null when it can. One policy for the picker's create row and mkdir,
+// so what the UI accepts is exactly what the host accepts: one path segment, no
+// separator, no control character (a newline would end an `ls -1` line early and
+// split one remote entry into two), and neither "." nor "..".
+function validName(name) {
+  const text = String(name == null ? "" : name);
+  if (!text.trim()) return "a name is required";
+  if (text === "." || text === "..") return "that name is reserved";
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (ch === "/" || ch === "\\" || ch === "\u0000" || code < 32 || code === 127) {
+      return "a name cannot contain a path separator or a control character";
+    }
+  }
+  return null;
+}
+
 // The listing order A/C have always used: directories first, then by lowercased
 // name. The final code-point tiebreak is this port's own (Python's sort was
 // stable over the OS's arbitrary iteration order, so `Alpha` vs `alpha` was
@@ -229,9 +247,11 @@ function createBrowser(options = {}) {
     return remoteHome;
   }
 
-  // One-level directory listing. The payload envelope is built in exactly one
-  // place (here) so a listing cannot drift from the tree.
-  async function fsList(raw = "", showHidden = false) {
+  // The directory a picker request names: empty = the browse root, absolute =
+  // as spelled, relative = under the root, and a leading `~` expanded by the
+  // remote's own shell (one cached echo). Shared by the listing and by mkdir so
+  // a folder created from what is on screen lands in exactly that directory.
+  async function dirFor(raw) {
     const base = remoteRoot || (await home());
     let target;
     if (raw) target = String(raw).startsWith("/") ? normalise(String(raw).replace(/\\/g, "/")) : realpath(`${base}/${raw}`);
@@ -240,6 +260,13 @@ function createBrowser(options = {}) {
       const at = await home();
       target = target === "~" ? at : at + target.slice(1);
     }
+    return target;
+  }
+
+  // One-level directory listing. The payload envelope is built in exactly one
+  // place (here) so a listing cannot drift from the tree.
+  async function fsList(raw = "", showHidden = false) {
+    const target = await dirFor(raw);
     // `test -d` first: `ls` on a FILE exits 0 and prints the name, which would
     // render a file as a one-entry directory. The local host answers this case
     // with its own is_dir() guard; the two hosts must agree on the answer.
@@ -269,10 +296,49 @@ function createBrowser(options = {}) {
     return normalise(String(path).replace(/\\/g, "/"));
   }
 
+  // ---- the picker's write side: one folder ----
+
+  // Create ONE folder inside the directory on screen. `mkdir` without `-p` is
+  // the point, not an accident: the browser names a directory that is visible,
+  // so a missing parent is a stale listing, not an instruction to build a tree.
+  // A name already taken is an ANSWER (`{path, error}`) and not a throw — the
+  // create row shows the sentence in place and the picker stays usable.
+  async function fsMkdir(rawDir = "", name = "") {
+    const reason = validName(name);
+    if (reason !== null) return { path: null, error: reason };
+    const parent = await dirFor(rawDir);
+    const target = `${parent.replace(/\/$/, "")}/${name}`;
+    const answer = await shell.run(`mkdir ${shq(target)}`, { timeout: FS_LIST_TIMEOUT });
+    if (answer.code === 0) return { path: target, error: null };
+    // busybox/GNU/BSD all say "File exists" for the one case the UI words
+    // itself; anything else is the remote's own sentence, passed through
+    const msg = String(answer.stderr || answer.stdout || "").trim();
+    if (msg.toLowerCase().includes("exists")) return { path: target, error: `already exists: ${name}` };
+    const lines = msg.split("\n").filter((line) => line.trim());
+    return { path: target, error: lines.length ? lines[lines.length - 1] : "cannot create folder" };
+  }
+
+  // Stat a path: does it exist, and is it a directory, a file, or nothing?
+  // The UI uses this to route an address-bar input: a directory → navigate,
+  // a .clc file → open, absent → offer to create. One `test` pipeline so the
+  // round trip is a single exec.
+  async function fsStat(raw = "") {
+    const target = await dirFor(raw);
+    // test -d → directory; test -f → regular file; else → absent (or special)
+    const answer = await shell.run(
+      `if test -d ${shq(target)}; then echo dir; elif test -f ${shq(target)}; then echo file; else echo none; fi`,
+      { timeout: FS_LIST_TIMEOUT }
+    );
+    const kind = answer.code === 0 ? String(answer.stdout).trim() : "none";
+    return { path: target, type: kind === "dir" || kind === "file" ? kind : "none", error: null };
+  }
+
   return {
     shell,
     home,
     fsList,
+    fsMkdir,
+    fsStat,
     exec: shell.run,
     get remoteRoot() {
       return remoteRoot;
@@ -668,6 +734,7 @@ module.exports = {
   parseEntries,
   compareEntries,
   visible,
+  validName,
   repr,
   POSIX_SCRATCH_DIRS,
   IO_TIMEOUT,

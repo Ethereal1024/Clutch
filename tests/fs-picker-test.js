@@ -150,6 +150,7 @@ async function main() {
   const fsTitle = node({ textContent: "" });
   const fsCreate = node({});
   const fsNameInput = node({ value: "" });
+  const fsFilenameInput = node({ value: "", focus() {} });
   const fsUp = node({});
   const fsGo = node({});
   const fsModal = node({});
@@ -167,6 +168,7 @@ async function main() {
       "#fs-title": fsTitle,
       "#fs-create": fsCreate,
       "#fs-name-input": fsNameInput,
+      "#fs-filename-input": fsFilenameInput,
       "#fs-up": fsUp,
       "#fs-go": fsGo,
       "#fs-modal": fsModal,

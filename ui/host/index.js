@@ -100,12 +100,17 @@ function createBHost(options = {}) {
   // `buildWorkspace` and `setProject` are the two mutating operations.
   //
   // `fsList` is wired to the browser so `/api/fs/list` works before any project
-  // is opened (the directory picker needs it to list the far home).
+  // is opened (the directory picker needs it to list the far home).  The two
+  // write-side calls go with it, so "+ Folder" works at the same point in the
+  // session — before a workspace exists.
   const state = {
     workspace: null,
     project: null,
     busy: false,
     fsList: browser.fsList,
+    fsMkdir: browser.fsMkdir,
+    fsStat: browser.fsStat,
+    browser,
     config,
 
     // Build a workspace rooted at `root` over the far shell.  Every call

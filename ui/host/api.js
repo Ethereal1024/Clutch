@@ -26,6 +26,9 @@
 //     state.buildWorkspace(root) -> workspace  (injected by index.js)
 //     state.setProject(project, ws)            (injected by index.js)
 //     state.config                             (host config; model name for createProject)
+//   the picker's write side reads the browser itself, so it works before a
+//   project (and therefore a workspace) exists — same fallback as fsList:
+//     state.fsMkdir(dir, name) -> {path, error}   (+ Folder)
 
 "use strict";
 
@@ -172,6 +175,33 @@ function createApi(state = {}) {
       return json({ error: "no workspace open" }, 400);
     }
     return json(await listing(raw, showHidden));
+  });
+
+  // Stat a path: type is "dir", "file", or "none". Used by the address bar to
+  // route an input — navigate into a directory, open a .clc file, or offer to
+  // create when nothing is there yet.
+  route("GET", "/api/fs/stat", async (api, req) => {
+    const qs = query(req.route);
+    const raw = qs.get("path") || "";
+    const stat = state.fsStat || (state.browser && state.browser.fsStat);
+    if (typeof stat !== "function") return json({ error: "no workspace open" }, 400);
+    return json(await stat(raw));
+  });
+
+  // One new folder inside the directory on screen — the picker's "+ Folder".
+  // A bad name is the client's mistake (400); a name already taken is an answer
+  // the row shows in place (200 + error), the same split /api/project/new uses
+  // for a create it could not perform.
+  route("POST", "/api/fs/mkdir", async (api, req) => {
+    const body = readBody(req.body);
+    if (body === null) return json({ error: "bad json body" }, 400);
+    const mkdir = state.fsMkdir || (state.browser && state.browser.fsMkdir);
+    if (typeof mkdir !== "function") return json({ error: "no workspace open" }, 400);
+    const rawDir = String(body.dir == null ? "" : body.dir).trim();
+    const name = String(body.name == null ? "" : body.name);
+    const result = await mkdir(rawDir, name);
+    if (result.path === null || result.path === undefined) return json({ error: result.error }, 400);
+    return json(result);
   });
 
   // ---- project lifecycle -------------------------------------------------

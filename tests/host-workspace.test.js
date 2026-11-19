@@ -215,6 +215,7 @@ async function main() {
     project: null,
     busy: false,
     fsList: browser.fsList,
+    fsMkdir: browser.fsMkdir,
     config: {},
   };
   mainState.buildWorkspace = (r) => createWorkspace({ root: r, browser });
@@ -465,6 +466,49 @@ async function main() {
   const nested = await workspace.listMany(["sub"]);
   check(nested.sub.includes(`${PROJECT_NAME}.clc`), "listMany: the protected filter is per directory, not per file name");
   fs.unlinkSync(path.join(root, "sub", `${PROJECT_NAME}.clc`));
+
+  // ---- the picker's write side: mkdir -------------------------------------
+  //
+  // No goldens cover these (they are new on both hosts, so the capture has
+  // nothing to freeze yet), so this section states the contract directly — the
+  // same statuses and sentences `agent/api/workspace.py` answers, which
+  // `tests/picker_api_test.py` pins on the Python side.
+
+  await api.handle("POST", "/api/fs/mkdir", JSON.stringify({ dir: root, name: "fresh" }));
+  check(fs.existsSync(path.join(root, "fresh")) && fs.statSync(path.join(root, "fresh")).isDirectory(), "mkdir: creates the folder the row names");
+  let mk = await api.handle("POST", "/api/fs/mkdir", JSON.stringify({ dir: root, name: "fresh" }));
+  check(mk.status === 200 && mk.body.error === "already exists: fresh", "mkdir: a taken name is 200 data, not an error status");
+  mk = await api.handle("POST", "/api/fs/mkdir", JSON.stringify({ dir: root, name: "a/b" }));
+  check(mk.status === 400 && mk.body.error === "a name cannot contain a path separator or a control character", "mkdir: a separator is the client's 400");
+  mk = await api.handle("POST", "/api/fs/mkdir", JSON.stringify({ dir: root, name: ".." }));
+  check(mk.status === 400 && mk.body.error === "that name is reserved", "mkdir: .. names a directory, not a new entry");
+  mk = await api.handle("POST", "/api/fs/mkdir", "not json");
+  check(mk.status === 400 && mk.body.error === "bad json body", "mkdir: a body that is not an object is 400");
+
+  // ---- the create's one refusal: a file is already there ------------------
+  //
+  // The write that must never happen: `POST /api/project/new` over an existing
+  // .clc would truncate a whole conversation. Both hosts answer it the same way
+  // — 409 + `project_exists`, the same sentence — and the file keeps every byte
+  // it had. (Not a golden yet: the capture has no such case to freeze, so this
+  // states the contract the way the mkdir section above does.)
+
+  const kept = "# clutch project v1\nname: kept\n---\n";
+  fs.writeFileSync(path.join(root, "kept.clc"), kept, "utf8");
+  api.state.busy = false;
+  let create = await api.handle("POST", "/api/project/new", JSON.stringify({ dir: root, name: "kept" }));
+  check(create.status === 409, `new: an existing .clc is a 409 (got ${create.status})`);
+  check(create.body.code === "project_exists", `new: the refusal carries the code (got ${create.body.code})`);
+  check(create.body.error === "kept.clc already exists — open it instead", `new: and says what to do: ${create.body.error}`);
+  check(fs.readFileSync(path.join(root, "kept.clc"), "utf8") === kept, "new: the refused create left the .clc byte-for-byte alone");
+  // `withSuffix` is the path the create WRITES: a typed "kept.txt" is kept.clc
+  create = await api.handle("POST", "/api/project/new", JSON.stringify({ dir: root, name: "kept.txt" }));
+  check(create.status === 409 && create.body.code === "project_exists", "new: a name that only differs in extension maps to the same .clc");
+  check(fs.readFileSync(path.join(root, "kept.clc"), "utf8") === kept, "new: and nothing was truncated for it either");
+  // the guard refuses a file, not a name: a free one still creates
+  create = await api.handle("POST", "/api/project/new", JSON.stringify({ dir: root, name: "fresh-one" }));
+  check(create.status === 200, `new: a free name still creates (got ${create.status}: ${JSON.stringify(create.body)})`);
+  check(fs.existsSync(path.join(root, "fresh-one.clc")), "new: and the file is on the far side");
 
   // ---- every case the marker claims was actually replayed ----------------
   for (const [cid, entry] of cases) check(entry.seen, `${cid}: replayed`);
