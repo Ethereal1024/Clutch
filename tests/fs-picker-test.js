@@ -827,6 +827,13 @@ async function main() {
     "folding is what retires a listing still in flight");
   check(/openFsBrowser\(mode\) \{[\s\S]*?hidePickerBody\(\);/.test(fnBody("openFsBrowser")),
     "the picker opens folded: nothing is browsed before a backend answers");
+  // A run in flight is not a reason to refuse: another project is another TAB, and
+  // a tab claims its own session (project.ts), so nothing here has to make way for
+  // it. What the run does change is the base reconcile below — switching this
+  // window to its default-slot URL would move the base out from under the run.
+  check(!/a run is active/.test(fnBody("openFsBrowser")) &&
+    /const settled = busy\s*\?\s*Promise\.resolve\(null\)/.test(fnBody("openFsBrowser")),
+    "and a run does not refuse it, only skip the base reconcile: the base streaming that run is alive");
   check(!/showPickerBody\(\)/.test(fnBody("refreshPicker")),
     "and no other path unfolds it: the picker resets its connect chrome and the listing decides");
   check(/resetConnChrome\(\)/.test(fnBody("showPickerBody")) &&

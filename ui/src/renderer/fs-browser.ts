@@ -26,10 +26,6 @@ export let fsPath = "";
 export let fsParent = null;
 
 export function openFsBrowser(mode) {
-  if (busy) {
-    notice("a run is active — stop it before opening another project");
-    return;
-  }
   fsMode = mode;
   fsPath = "";
   fsParent = null;
@@ -55,20 +51,28 @@ export function openFsBrowser(mode) {
   $("#fs-go").disabled = false;
   $("#fs-path-input").disabled = false;
   fsModal.classList.remove("hidden", "closing");
-  // settle the stored URL against the tunnel's real state first, then list once
-  reconciledBackendUrl()
-    .catch((e) => {
-      // an unreachable bridge must not leave the dialog empty with no word: say
-      // so and fall through, so the local listing still has a chance to appear
-      notice("could not reach the backend: " + (e && e.message ? e.message : e));
-      return null;
-    })
-    .then((url) => {
-      if (url) switchBackend(url);
-      renderConnSelector();
-      // reopen where the user last left the browser instead of the home directory
-      loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
-    });
+  // Settle the stored URL against the tunnel's real state first, then list once —
+  // except while a run is in flight. Opening another project is another TAB, and
+  // a tab is its own session (project.ts's openProject / createProject claim one
+  // for it), so this picker only browses: no project has to make way for it. The
+  // base it browses through is the one streaming the run, which is as alive as a
+  // base gets; reconciling would ask the host for THIS WINDOW's default-slot URL
+  // and switch to it, i.e. move the base out from under a run still using it. So
+  // the reconcile is what a run skips, never the picker.
+  const settled = busy
+    ? Promise.resolve(null)
+    : reconciledBackendUrl().catch((e) => {
+        // an unreachable bridge must not leave the dialog empty with no word: say
+        // so and fall through, so the local listing still has a chance to appear
+        notice("could not reach the backend: " + (e && e.message ? e.message : e));
+        return null;
+      });
+  settled.then((url) => {
+    if (url) switchBackend(url);
+    renderConnSelector();
+    // reopen where the user last left the browser instead of the home directory
+    loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
+  });
 }
 
 export function closeFsBrowser() {

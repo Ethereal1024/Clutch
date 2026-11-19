@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 974a5a50f77e1a9913927d5b801c28cac9614498cab6e2966dbc0b694207d338
+// sources sha256: c54d4bcc4163ebc6fe17d3696981addba702f6963ae9cb3cd3642473f9cb6b05
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -472,10 +472,6 @@
   var fsPath = "";
   var fsParent = null;
   function openFsBrowser(mode) {
-    if (busy) {
-      notice("a run is active \u2014 stop it before opening another project");
-      return;
-    }
     fsMode = mode;
     fsPath = "";
     fsParent = null;
@@ -494,10 +490,11 @@
     $("#fs-go").disabled = false;
     $("#fs-path-input").disabled = false;
     fsModal.classList.remove("hidden", "closing");
-    reconciledBackendUrl().catch((e) => {
+    const settled = busy ? Promise.resolve(null) : reconciledBackendUrl().catch((e) => {
       notice("could not reach the backend: " + (e && e.message ? e.message : e));
       return null;
-    }).then((url) => {
+    });
+    settled.then((url) => {
       if (url) switchBackend(url);
       renderConnSelector();
       loadDir(localStorage.getItem("clutch_fs_last_dir") || "");
@@ -3376,6 +3373,11 @@
     await activateTab(tab, readOnly);
   }
   async function createProject(dir, name) {
+    const prev = activeTab();
+    if (prev) {
+      saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
+      if (prev.running) watchTab(prev);
+    }
     const seq = supersedeOpen();
     closeSSE();
     const tab = ensureTab("", name);

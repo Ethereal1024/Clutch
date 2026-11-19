@@ -679,7 +679,7 @@ async function main() {
   check(statuses[statuses.length - 1] === "idle",
   "the badge is settled honestly: no session means nothing to show and nothing to stop");
   check(global.busy === false,
-  "and the picker's own Connect is reachable again: openFsBrowser refuses while a run is active");
+  "and no stale run is left to make Stop raise this dialog again");
   check(closes === closesBefore + 1 && connLostModal.classList.contains("hidden"),
   "and the dialog comes down — this is the second and last place that closes it");
   check(connLostStatusEl.textContent === "" && connLostWhyEl.textContent === "",

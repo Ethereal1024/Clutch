@@ -104,6 +104,11 @@ const { fnBody } = slicer(project);
   check(/workdir: extra\.workdir \|\| ""/.test(slots), "and the workdir the tree showed");
   check(/saveMemento\(prev\.id, \{ older: olderRemaining, workdir: els\.workspace\.textContent \|\| "" \}\)/.test(fnBody("activateTab")),
     "activation saves that range when leaving a tab");
+  // the other way out of a tab is creating a project in a new one, and it leaves
+  // the same tab behind: the memento AND the badge watcher that keeps a run
+  // behind it honest (nothing else is listening to that session any more)
+  check(/const prev = activeTab\(\);[\s\S]*?if \(prev\.running\) watchTab\(prev\);/.test(fnBody("createProject")),
+    "and creating a project in a new tab leaves the old one the same way — its memento, and its run's watcher");
   check(/localStorage\.setItem\(MEMENTO_KEY\(slotId\)/.test(slots) &&
     /return mementos\.get\(slotId\) \|\| readStoredMemento\(slotId\);/.test(slots),
     "the range is persisted per tab id, so a page reload can restore the tail too (guarded by /api/session)");

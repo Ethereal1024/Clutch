@@ -219,9 +219,8 @@ export function connLostNeedsUser() {
 //     checks connLost before it reports a verdict or arms the next one);
 //   * the badge is settled to idle, and it is NOT the invented idle sseDegrade
 //     refuses to paint: with no session this window has nothing to show and
-//     nothing to stop, and leaving a stale "running" would be worse than a lie —
-//     it would block the picker (openFsBrowser refuses while a run is active)
-//     and make Stop raise this very dialog again. The run's real fate is not
+//     nothing to stop, and leaving a stale "running" would be worse than a lie
+//     that also makes Stop raise this very dialog again. The run's real fate is not
 //     guessed here: sseRunAtRisk is already set, so the next session's own
 //     history settles it (see stream-events.ts);
 //   * the picker stops claiming a connection, the dialog comes down — and then the

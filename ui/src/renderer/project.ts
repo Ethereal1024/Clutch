@@ -669,6 +669,16 @@ export async function openProject(path, readOnly = false) {
 export async function createProject(dir, name) {
   // A new project is a new tab with its own session: it can be created while
   // another tab is running.
+  //
+  // Leaving the current tab is then the same act activateTab() performs: its
+  // view goes into a memento, and a run still behind it keeps a badge watcher.
+  // Without that watcher the tab we leave reads "running" for as long as it stays
+  // in the background, because nothing is listening to its session any more.
+  const prev = activeTab();
+  if (prev) {
+    saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
+    if (prev.running) watchTab(prev);
+  }
   // the new project needs a session before it has a path: claim the tab's slot
   // first, then create the file on THAT session.
   const seq = supersedeOpen();
