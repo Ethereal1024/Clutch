@@ -171,6 +171,18 @@ class RunState:
         # through the same event, the permission prompt the call may be blocked
         # on instead (api/exec._CallCancel)
         self.exec_cancels: dict[str, threading.Event] = {}
+        # tool_call_id -> (name, arguments, the answer that id already got). The
+        # id is the call's identity on the wire, so TWO requests carrying the
+        # same id and the same request are one call — and the side effect must
+        # happen once. Without this memo the endpoint could only refuse a
+        # duplicate while it was still in flight; once answered, the id was
+        # forgotten (api/exec.py popped the cancel entry in `finally`) and the
+        # repeat ran the tool a second time: an appending edit appended twice,
+        # a background command started twice, byte for byte. The arguments ride
+        # along because a client that reuses an id for a DIFFERENT call is a
+        # client bug, not a replay: that one runs. Bounded by api/exec.DONE_KEEP
+        # (oldest evicted), so the memo cannot grow with the session.
+        self.exec_answered: dict[str, tuple[str, str, dict]] = {}
         # trust mode (agent/core/permission.py TRUST_COUNTDOWN_S): the window's
         # armed flag, mirrored here by POST /api/permission/trust so the
         # countdown can run on THIS side. The page's own clock is a frozen
@@ -289,6 +301,10 @@ class RunState:
             if workspace is None:
                 workspace = self.build_workspace(str(project.workdir))
             self.workspace = workspace
+            # an answer is only the answer to a call IN THIS workspace: the same
+            # id arriving after a project switch is not the same call, and its
+            # memo would describe files this project never had
+            self.exec_answered.clear()
             self._retire_lock(prev, keep=project.lock)
             return self.workspace
 

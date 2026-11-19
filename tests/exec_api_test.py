@@ -30,6 +30,13 @@ HTTP request instead of a Python frame. What this suite pins:
   6. Nothing leaks: the call's cancel entry and gate are gone when the request
      answers, whatever the answer was. A gate left behind is a session that can
      never be answered again.
+  7. A call that arrives twice is ONE call: the same tool_call_id with the same
+     name and arguments is answered with the answer it already got and the tool
+     does not run again (the side effect happens once). It is not a 409 — that
+     would be recorded as a failure and the model would redo the edit. A reused
+     id with different arguments is a different call and runs; the memo is
+     bounded (agent.api.exec.DONE_KEEP), so the oldest id is honestly forgotten
+     and would run again.
 """
 
 from __future__ import annotations
@@ -44,6 +51,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from agent.api.exec import DONE_KEEP
+from agent.api.exec import DONE_KEEP
 from agent.base import Broadcaster, RunState
 from agent.config import Config
 from agent.events import PermissionRequestEvent
@@ -484,6 +493,84 @@ def read_only_check(tmp: Path) -> None:
     check(broadcaster.count(str(project.path)) == 0, "nothing was published for a refused call")
 
 
+# ---- 6. one call, one side effect: an answered call is answered, not run ------
+
+
+def replay_check(tmp: Path) -> None:
+    """The reported anomaly: an appending edit appended twice, byte for byte.
+
+    The endpoint used to forget a call the moment it answered it (its `finally`
+    popped the cancel entry), so a request that arrived twice ran the tool
+    twice; past `/api/exec` the call was anonymous, so nothing downstream could
+    tell the two apart. The id is the caller's own identity for the call, so the
+    second arrival is answered with the first one's answer — this is the layer
+    that makes one id mean one side effect, whatever replayed the request.
+    """
+    base, _broadcaster, state, project, _srv = open_server(tmp, "replay")
+    root = project.workdir
+    log = root / "replay.txt"
+    body = {
+        "name": "run_command",
+        "arguments": json.dumps({"command": "echo done >> replay.txt"}),
+        "tool_call_id": "r1",
+    }
+
+    status, first = exec_call(base, body)
+    check(status == 200 and first["is_error"] is False, "the first arrival runs and answers")
+    check(log.read_text(encoding="utf-8").count("done") == 1, "the first arrival's side effect happened once")
+
+    status, second = exec_call(base, body)
+    check(status == 200, "the same call arriving twice is answered, not refused")
+    check(second == first, "the repeat gets the first answer, byte for byte")
+    check(log.read_text(encoding="utf-8").count("done") == 1, "the repeat ran nothing: one call, one append")
+    check(state.exec_cancels == {}, "the answered repeat registered no in-flight entry")
+
+    # the id is not the whole identity: a reused id with different arguments is
+    # a DIFFERENT call (a client bug, not a replay), so it runs
+    other = {**body, "arguments": json.dumps({"command": "echo again >> replay.txt"})}
+    status, second_args = exec_call(base, other)
+    check(status == 200 and second_args["is_error"] is False, "a reused id with different arguments runs")
+    check("again" in log.read_text(encoding="utf-8"), "and its side effect is real")
+    status, third = exec_call(base, other)
+    check(
+        third == second_args and log.read_text(encoding="utf-8").count("again") == 1,
+        "that call is remembered in its own right, not under the first one's answer",
+    )
+
+    # a reused id naming another tool is not the same call either
+    status, third_name = exec_call(
+        base, {"name": "no_such_tool", "arguments": "{}", "tool_call_id": "r1"}
+    )
+    check(
+        status == 200 and third_name["is_error"] is True and "no_such_tool" in third_name["content"],
+        "a reused id naming another tool is answered by that tool, not from the old memo",
+    )
+
+    # the memo is a BOUND, not a promise: after DONE_KEEP answers the oldest is
+    # honestly forgotten, so a much later replay runs instead of being handed an
+    # answer from an hour ago
+    old = {
+        "name": "run_command",
+        "arguments": json.dumps({"command": "echo aged >> aged.txt"}),
+        "tool_call_id": "aged",
+    }
+    status, _answer = exec_call(base, old)
+    check(status == 200 and "aged" in state.exec_answered, "the call that will be evicted is remembered first")
+    for i in range(DONE_KEEP):
+        status, _answer = exec_call(base, {"name": "no_such_tool", "arguments": "{}", "tool_call_id": f"f{i}"})
+        check(status == 200, f"filler call {i} answered")
+    check(len(state.exec_answered) == DONE_KEEP, "the memo stops growing at DONE_KEEP")
+    check("aged" not in state.exec_answered, "the oldest answer is evicted, not kept for the session")
+    check(state.exec_cancels == {} and state.gates == [], "no cancel entry or gate outlived any of these calls")
+
+    status, again = exec_call(base, old)
+    check(status == 200 and again["is_error"] is False, "the evicted call runs again instead of replaying an old answer")
+    check(
+        (root / "aged.txt").read_text(encoding="utf-8").count("aged") == 2,
+        "and the tree shows it: inside the window one side effect, outside it the call runs",
+    )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -493,6 +580,7 @@ def main() -> None:
         attachment_check(tmp)
         cancel_check(tmp)
         read_only_check(tmp)
+        replay_check(tmp)
     print("exec_api: ok")
 
 

@@ -25,6 +25,17 @@ tool, a denied permission, a tool that threw — is a 200 with `is_error: true`:
 that is what the model has to read, and turning it into an HTTP error would hide
 it behind the host's own retry logic.
 
+A call that arrives AGAIN — the same `tool_call_id` with the same `name` and the
+same `arguments` — is the same call, not a new one. The endpoint remembers the
+last `DONE_KEEP` answers (`state.exec_answered`) and hands the repeat the answer
+it already gave, without running the tool: the caller chose the id, so one id is
+one side effect, whichever layer replayed the request. The repeat is answered 200
+with the original envelope, deliberately NOT a 409 — a refusal would be recorded
+as a failed call and the model would make the same edit again, which is the
+duplicate this exists to stop. A reused id with DIFFERENT arguments is a client
+bug, not a replay, so that one runs: the memo only claims to recognise the same
+call.
+
 `POST /api/exec/cancel` is the same call's interrupt: a tool that runs a command
 polls the event this endpoint registers, so Stop reaches the tree that is still
 attached to it (a client that walks away from a socket cannot kill a process
@@ -43,6 +54,12 @@ from ..core.parse import ParseError, parse_arguments
 from ..core.permission import PermissionEvaluator, PermissionGate, PermissionRequired
 from ..events import PermissionRequestEvent
 from ..tools.envelope import Envelope
+
+# How many answered calls this session remembers, newest kept. The window in
+# which a duplicate can arrive is one request's flight, so this only has to cover
+# the calls a single turn (or a retry of it) can produce — and it must not grow
+# with a session that runs for hours.
+DONE_KEEP = 64
 
 
 class _CallCancel(threading.Event):
@@ -121,7 +138,14 @@ class ExecMixin:
                 return self._json(
                     {"error": "a call with this tool_call_id is already in flight"}, status=409
                 )
-            self._state.exec_cancels[tool_call_id] = cancel
+            answered = self._answered(tool_call_id, name, arguments)
+            if answered is None:
+                self._state.exec_cancels[tool_call_id] = cancel
+        if answered is not None:
+            # the answer goes out after the lock is released: writing to the
+            # socket is the one thing here that can block, and the session's
+            # bookkeeping is not the socket's
+            return self._json(answered)
 
         def _on_ask(request_id: str, tool: str, args_repr: str, reason: str) -> bool:
             # publish the prompt to whatever window watches THIS project; with
@@ -154,17 +178,51 @@ class ExecMixin:
         cancel.deny = lambda: [gate.resolve(rid, False) for rid in gate.pending_ids()]
         with self._state.lock:
             self._state.gates.append(gate)
+        answer: dict | None = None
         try:
-            return self._json(
-                self._exec_call(project, workspace, cfg, gate, cancel, name, arguments, tool_call_id)
-            )
+            answer = self._exec_call(project, workspace, cfg, gate, cancel, name, arguments, tool_call_id)
         finally:
+            # the memo is written in the SAME lock that releases the in-flight
+            # entry, and before the answer leaves this process: a repeat sees
+            # either "in flight" (409) or "already answered" (the memo), never a
+            # gap in which the tool would run a second time
             with self._state.lock:
                 self._state.exec_cancels.pop(tool_call_id, None)
+                if answer is not None:
+                    self._remember_answer(tool_call_id, name, arguments, answer)
                 if gate in self._state.gates:
                     self._state.gates.remove(gate)
             # a user-approved escape is scoped to the one call it was granted for
             workspace.clear_allowed()
+        assert answer is not None  # _exec_call answers or raises; nothing else gets here
+        return self._json(answer)
+
+    def _answered(self, tool_call_id: str, name: str, arguments: str) -> dict | None:
+        """The answer this exact call already got, or None if it has not run.
+
+        "Exact" is the whole point: the id alone would let a caller that reuses
+        an id for a different call be handed the old answer — a silent lie about
+        work that never happened. Same id, same name, same raw arguments is the
+        same request. The caller holds state.lock.
+        """
+        done = self._state.exec_answered.get(tool_call_id)
+        if done is None or done[0] != name or done[1] != arguments:
+            return None
+        return done[2]
+
+    def _remember_answer(self, tool_call_id: str, name: str, arguments: str, answer: dict) -> None:
+        """Remember what this id was answered, so a second arrival is answered, not run.
+
+        A bounded ring (DONE_KEEP): re-inserting moves the id to the newest end,
+        so eviction is by the time it was answered, not by when it was first
+        seen. The caller holds state.lock, next to the pop of the in-flight
+        entry, so the two are one visible state change.
+        """
+        done = self._state.exec_answered
+        done.pop(tool_call_id, None)
+        done[tool_call_id] = (name, arguments, answer)
+        while len(done) > DONE_KEEP:
+            done.pop(next(iter(done)))
 
     def _exec_call(
         self,
