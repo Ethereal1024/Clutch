@@ -41,19 +41,12 @@ updateHiddenToggles();
 
 // ---- phone shell (device reports #2/#3): ONE slide-over panel ----
 // 主流 phone clients keep the conversation column clean and park the shell
-// behind a single trigger. That panel is #right with a project section on top:
-// the three project actions and the workspace tree stack in one drawer instead
-// of the project actions sitting alone in a mostly-empty second one. The
-// dismissal is a square ✕ at the panel's top edge, so it can never land in the
-// middle of a row.
-// The project buttons are NOT duplicated: they are MOVED between #topbar and
-// #shell-project-actions, so there is exactly one node, one handler and one
-// disabled state per action — and a rotation back to the desktop layout moves
-// the same nodes home.
+// behind a single trigger. That panel is #right, carrying the workspace tree.
+// The dismissal is a square ✕ at the panel's top edge, so it can never land in
+// the middle of a row. The project actions live in the titlebar's File menu on
+// both desktop and phone, so this panel does not duplicate them.
 export const shellBackdrop = $("#shell-backdrop");
 export const shellPanel = $("#right");
-export const shellActions = $("#shell-project-actions");
-export const SHELL_ACTIONS = ["#open-project-btn", "#new-project-btn", "#settings-btn"];
 export const NARROW_Q = window.matchMedia("(max-width: 640px)");
 
 // paintShellPanel only moves the classes; setShellPanel also owns the history
@@ -112,25 +105,19 @@ window.addEventListener("popstate", () => {
 $("#shell-ws-btn").addEventListener("click", () =>
   setShellPanel(!shellPanel.classList.contains("drawer-open"))
 );
-$("#shell-close-btn").addEventListener("click", closeShellPanel);
-shellBackdrop.addEventListener("click", closeShellPanel);
-// a panel action opens a modal: step aside as soon as one is clicked (the
-// button's own handler runs first, this bubbling listener right after)
-shellActions.addEventListener("click", (e) => {
-  if (e.target.closest && e.target.closest("button")) closeShellPanel();
+// close button: on desktop it collapses the panel (panel-hidden); on mobile it
+// goes through the drawer/history path (closeShellPanel).
+$("#shell-close-btn").addEventListener("click", () => {
+  if (NARROW_Q.matches) closeShellPanel();
+  else shellPanel.classList.add("panel-hidden");
 });
+shellBackdrop.addEventListener("click", closeShellPanel);
 
 export function layoutShell() {
-  const narrow = NARROW_Q.matches;
-  for (const sel of SHELL_ACTIONS) {
-    const btn = $(sel);
-    if (!btn) continue;
-    // back into the topbar BEFORE the ▤ trigger, so the desktop order stays
-    // exactly what index.html declares
-    if (narrow) shellActions.appendChild(btn);
-    else $("#topbar").insertBefore(btn, $("#shell-ws-btn"));
-  }
-  if (!narrow) closeShellPanel(); // a rotation to the desktop layout drops the panel
+  // Buttons now live permanently in the titlebar dropdown menus on both
+  // desktop and mobile — no DOM moves needed. Just close the panel when
+  // rotating back to desktop width.
+  if (!NARROW_Q.matches) closeShellPanel();
 }
 NARROW_Q.addEventListener("change", layoutShell);
 layoutShell();

@@ -10,7 +10,7 @@
 
 import { agentMode, setMode } from "./env";
 import { els } from "./els";
-import { switchBackendResolved } from "./backend-lifecycle";
+import { switchBackendActiveSlot, switchBackendResolved } from "./backend-lifecycle";
 import { connectionLost } from "./conn-lost";
 import { openPerm } from "./permissions";
 import { currentProject, pageSink } from "./project";
@@ -22,8 +22,14 @@ import {
   autoScroll, busy, gliding, setJumpVisible, setStatus, toolCalls,
 } from "./stream-view";
 import { recordSentTask } from "./task-input";
+import { activeSlotId, noteTabEvent, setTabRunning } from "./slots";
 import { buildResultBlock, buildResultRowBlock, uiOfResult } from "./tool-render";
 import { scheduleTreeRefresh } from "./workspace-panel";
+
+// One drive at a time per slot. Switching away and back can call resumeTurn
+// while the drive started before the switch is still in flight; the host runs
+// ONE loop, so a second drive would race the first.
+const driving = new Set<string>();
 
 export function appendCompletion(status, summary) {
   const div = document.createElement("div");
@@ -67,15 +73,34 @@ export function renderEvent(ev) {
 
   switch (ev.type) {
     case "user_message": {
+      const said = String(ev.content == null ? "" : ev.content);
+      // The loop's own retry notes are durable user_messages (the fold needs
+      // them), but they are not tasks the user typed. Painting them as task
+      // rows is the reported "a paragraph I never wrote shows up in my task
+      // list" — show the fact, quietly, and keep it out of the rollback path.
+      if (/^Your previous reply contained no visible text/.test(said)) {
+        wrap.className = "event internal-note";
+        wrap.innerHTML = '<div class="hdr">retry</div>';
+        body.className = "body";
+        body.textContent = "the model returned no visible text — asking again";
+        break;
+      }
+      if (/^ERROR: The previous response hit the max_tokens limit/.test(said)) {
+        wrap.className = "event internal-note";
+        wrap.innerHTML = '<div class="hdr">retry</div>';
+        body.className = "body";
+        body.textContent = "the response hit max_tokens — asking again, more concisely";
+        break;
+      }
       wrap.className = "event user";
       // what the user actually typed, verbatim, kept on the row: the rendered
       // DOM is markdown and cannot be turned back into the message, and the
       // roll-back gesture has to put the message back in the box (task-rollback.ts)
-      wrap._taskText = String(ev.content == null ? "" : ev.content);
+      wrap._taskText = said;
       wrap.innerHTML = '<div class="hdr">task</div>';
       body.className = "body";
       // hard-wrapped markdown (breaks: true): WYSIWYG line breaks
-      body.innerHTML = renderMarkdown(ev.content, true);
+      body.innerHTML = renderMarkdown(said, true);
       break;
     }
     case "tool_result": {
@@ -228,14 +253,23 @@ export async function run() {
   // (ui/run-session.js): a run that would land in another window's log is
   // refused, never written.
   const payload = { task, mode: agentMode, project: currentProject };
+  // The slot helpers are read defensively: unit tests pull one function body
+  // out of this module and run it with only the globals they stub.
+  const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
   let opened = false; // did a turn actually open on disk?
   setStatus("running"); // the click is the user's claim; the host's frames confirm it
+  if (typeof setTabRunning === "function") setTabRunning(slotId, true);
   try {
-    await hostCall(host.start(payload));
+    await hostCall(host.start(slotId, payload));
     opened = true;
     // Drive to the end. The turn's own ending is a durable `final` the loop
     // writes and the log stream paints, so nothing here fabricates one.
-    await hostCall(host.drive());
+    driving.add(slotId);
+    try {
+      await hostCall(host.drive(slotId));
+    } finally {
+      driving.delete(slotId);
+    }
   } catch (e) {
     const msg = (e && e.message) || e;
     // No code: the call never reached a host at all (a dead IPC channel, an
@@ -251,7 +285,10 @@ export async function run() {
     // A turn that never opened leaves nothing to drive: the button belongs to
     // the user again. A turn that opened stays the host's to describe — its
     // failure frame already said "error", and driving again continues it.
-    if (!opened) setStatus("idle");
+    if (!opened) {
+      setStatus("idle");
+      if (typeof setTabRunning === "function") setTabRunning(slotId, false);
+    }
   }
 }
 
@@ -267,7 +304,9 @@ export async function stop() {
     // never writes one it did not watch happen. `busy` is refreshed by the
     // host's status frames, not by this answer, so when the stop cannot be
     // delivered the window must stop pretending that it was.
-    await hostCall(host.stop());
+    const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
+    await hostCall(host.stop(slotId));
+    if (typeof setTabRunning === "function") setTabRunning(slotId, false);
   } catch (e) {
     const msg = (e && e.message) || e;
     if (!e || !e.code || e.code === "no_session") {
@@ -279,9 +318,12 @@ export async function stop() {
       notice("the backend refused to stop the task (" + msg + ") — it may still be running");
     }
     setStatus("idle"); // the button belongs to the user again: retry Stop, or Run
-    // the link itself may be recoverable: re-resolve the session of this
-    // window (the tunnel or the supervisor may have re-claimed one under us)
-    await switchBackendResolved();
+    // the link itself may be recoverable: re-resolve the session behind the
+    // visible tab (the host re-binds it after a hop), or the window's own when
+    // there is no tab. The guard is for unit harnesses that drive one function
+    // body with only the globals they stub.
+    if (typeof switchBackendActiveSlot === "function") await switchBackendActiveSlot();
+    else await switchBackendResolved();
   }
 }
 
@@ -308,12 +350,14 @@ export async function stop() {
 export async function resumeTurn() {
   const host = window.clutchRun;
   if (!host || typeof host.state !== "function" || typeof host.drive !== "function") return;
+  const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
   if (!currentProject || busy) return; // no log to resume, or a turn already ours
+  if (driving.has(slotId)) return; // its own drive is still in flight
   let answer;
   try {
     // the payload run:start takes; `project` is the CLAIM the host checks, so a
     // page looking at another file cannot continue somebody else's turn
-    answer = await hostCall(host.state({ mode: agentMode, project: currentProject }));
+    answer = await hostCall(host.state(slotId, { mode: agentMode, project: currentProject }));
   } catch (e) {
     // no fold to read: a host with no session, or a log that refused. Neither is
     // a turn this page may invent — stay on what the log stream replayed, and
@@ -323,8 +367,14 @@ export async function resumeTurn() {
   }
   if (!answer || !answer.result || answer.result.phase !== "open") return;
   setStatus("running");
+  if (typeof setTabRunning === "function") setTabRunning(slotId, true);
   try {
-    await hostCall(host.drive());
+    driving.add(slotId);
+    try {
+      await hostCall(host.drive(slotId));
+    } finally {
+      driving.delete(slotId);
+    }
   } catch (e) {
     const msg = (e && e.message) || e;
     if (e && e.code === "run_active") {
@@ -337,6 +387,7 @@ export async function resumeTurn() {
       notice("could not resume the turn (" + msg + ")");
     }
     setStatus("idle");
+    if (typeof setTabRunning === "function") setTabRunning(slotId, false);
   }
 }
 
@@ -347,8 +398,21 @@ export async function resumeTurn() {
 // addEvent takes both shapes, so a live frame lands exactly as the stream's own
 // would (and a status frame is a status frame whichever door it came through).
 if (window.clutchRun && typeof window.clutchRun.onEvent === "function") {
-  window.clutchRun.onEvent((ev) => {
-    if (ev && typeof ev === "object") addEvent(ev);
+  window.clutchRun.onEvent((payload) => {
+    // main/bridge tag live frames with the slot (tab) they belong to. A frame
+    // from a background tab updates its badge only: its transcript is replayed
+    // when the reader returns, and painting it here would draw one tab's run
+    // into another tab's stream.
+    const wrapped =
+      payload && typeof payload === "object" && typeof payload.slotId === "string" && "event" in payload;
+    const slotId = wrapped ? payload.slotId : activeSlotId();
+    const ev = wrapped ? payload.event : payload;
+    if (!ev || typeof ev !== "object") return;
+    if (slotId && slotId !== activeSlotId()) {
+      noteTabEvent(slotId, ev);
+      return;
+    }
+    addEvent(ev);
   });
 }
 

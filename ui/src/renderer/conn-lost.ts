@@ -48,7 +48,7 @@
 // whose imports are the old page order) into ui/renderer.js, because Electron
 // loads the page over file://, where Chromium refuses module scripts.
 
-import { dropStaleBackend, switchBackendResolved } from "./backend-lifecycle";
+import { dropStaleBackend, switchBackendActiveSlot, switchBackendResolved } from "./backend-lifecycle";
 import { connBarWaiting, handleSshConnect } from "./conn-flow";
 import { connBusy, renderConnSelector } from "./conn-store";
 import { $ } from "./dom";
@@ -477,7 +477,11 @@ export async function connLostRecover() {
 
 // the host's own session for this window, if it holds or can claim one
 export async function connLostAskHost() {
-  if (!(await switchBackendResolved())) return false; // no session: it said so
+  // Tabs own their sessions: reconnect the visible one (the host re-binds it if
+  // the hop is still the same far-side session). With no tab this is the old
+  // window-level resolve.
+  const reconnected = (await switchBackendActiveSlot()) || (await switchBackendResolved());
+  if (!reconnected) return false; // no session: it said so
   return connLostAwaitAnswer();
 }
 

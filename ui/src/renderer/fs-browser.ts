@@ -33,9 +33,15 @@ export function openFsBrowser(mode) {
   fsMode = mode;
   fsPath = "";
   fsParent = null;
-  $("#fs-title").textContent = mode === "new" ? "New project" : "Open project";
-  $("#fs-create").classList.toggle("hidden", mode !== "new");
-  $("#fs-name-input").value = "";
+  if (mode === "new") {
+    $("#fs-title").textContent = "New project";
+    $("#fs-create").textContent = "Create";
+    $("#fs-create").classList.remove("hidden");
+  } else {
+    $("#fs-title").textContent = "Open project";
+    $("#fs-create").classList.add("hidden");
+  }
+  ($("#fs-filename-input") as HTMLInputElement).value = "";
   // Nothing is browsed until a backend answers: open with the body folded, the
   // conn bar showing what there is to connect to and the user's Connect as the
   // only door (report #1: the file list must never carry connection chatter or
@@ -135,6 +141,9 @@ $("#fs-list").addEventListener("pointercancel", () => {
 export async function loadDir(path, remember = true, refetched = false) {
   const listEl = $("#fs-list");
   const token = ++state.fsListToken; // latest listing request: a stale answer must not paint
+  // any pending create offer belongs to the previous path: clear it
+  pendingCreate = "";
+  lastStatInput = "";
   if (!state.apiBase) {
     // no session, so nothing to browse: the body stays folded and the file list
     // stays empty (report #1 — a status line about the connection was drawn as if
@@ -200,6 +209,9 @@ export async function loadDir(path, remember = true, refetched = false) {
     // there IS something to browse: the body (path bar + list + actions) is the
     // picker now
     showPickerBody();
+    // clear the filename bar and focus it so the user can type immediately
+    $("#fs-filename-input").value = "";
+    $("#fs-filename-input").focus();
   } catch (e) {
     if (token !== state.fsListToken) return;
     // a remembered last directory may be gone: forget it and retry from home once
@@ -253,20 +265,132 @@ $("#fs-cancel").addEventListener("click", closeFsBrowser);
 $("#fs-up").addEventListener("click", () => {
   if (fsParent) loadDir(fsParent);
 });
-$("#fs-go").addEventListener("click", () => loadDir($("#fs-path-input").value.trim()));
-$("#fs-path-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") loadDir($("#fs-path-input").value.trim());
+
+// The address bar is the single surface for navigation, opening, and creation.
+// A path that is a directory is navigated into; an existing .clc is opened; a
+// path that does not exist yet is offered as a new file the user confirms with a
+// second Enter (or a click on the offer row). No separate "new file" button.
+let pendingCreate = "";   // "dir\x00name" while a create offer is on screen
+let lastStatInput = "";   // the input that produced the current offer
+function clearCreateOffer() {
+  const offer = $("#fs-list").querySelector(".fs-create-offer");
+  if (offer) offer.remove();
+}
+function showCreateOffer(dir: string, name: string) {
+  clearCreateOffer();
+  const label = "→ New: " + name;
+  const row = fsRow(label, "create-offer", () => confirmCreate(dir, name));
+  $("#fs-list").insertBefore(row, $("#fs-list").firstChild);
+}
+function confirmCreate(dir: string, name: string) {
+  pendingCreate = "";
+  lastStatInput = "";
+  closeFsBrowser();
+  createProject(dir, name);
+}
+async function resolvePathInput() {
+  const value = ($("#fs-filename-input") as HTMLInputElement).value.trim();
+  if (!value) return;
+  // A second Enter on the same input that produced a create offer confirms it
+  if (pendingCreate && value === lastStatInput) {
+    const [dir, name] = pendingCreate.split("\x00");
+    confirmCreate(dir, name);
+    return;
+  }
+  lastStatInput = value;
+  pendingCreate = "";
+  clearCreateOffer();
+  // Resolve relative paths against the currently browsed directory so typing
+  // "foo.clc" means "foo.clc here", not "foo.clc at the browse root"
+  const input = value.startsWith("/") || value.startsWith("~")
+    ? value
+    : (fsPath ? fsPath.replace(/\/$/, "") + "/" + value : value);
+  try {
+    const data = await apiFetch("/api/fs/stat?path=" + encodeURIComponent(input));
+    if (data && data.error) { notice(data.error); return; }
+    if (data.type === "dir") {
+      loadDir(data.path);
+    } else if (data.type === "file") {
+      if (data.path.endsWith(".clc") && (fsMode === "open" || fsMode === "new")) {
+        closeFsBrowser();
+        openProject(data.path);
+      } else {
+        // A non-.clc file, or save mode: navigate to the containing directory
+        const slash = data.path.lastIndexOf("/");
+        const parent = slash >= 0 ? data.path.slice(0, slash) || "/" : fsPath;
+        if (parent) loadDir(parent);
+      }
+    } else {
+      // "none" — nothing there yet. Offer to create.
+      const slash = data.path.lastIndexOf("/");
+      const dir = slash >= 0 ? data.path.slice(0, slash) || "/" : fsPath;
+      const name = slash >= 0 ? data.path.slice(slash + 1) : data.path;
+      if (dir && name) {
+        pendingCreate = dir + "\x00" + name;
+        showCreateOffer(dir, name);
+      }
+    }
+  } catch (e) {
+    notice("Could not check path: " + (e && e.message ? e.message : e));
+  }
+}
+$("#fs-filename-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") resolvePathInput();
+});
+$("#fs-filename-input").addEventListener("input", () => {
+  pendingCreate = "";
+  lastStatInput = "";
+  clearCreateOffer();
 });
 $("#fs-create").addEventListener("click", () => {
-  const name = $("#fs-name-input").value.trim();
+  const name = ($("#fs-filename-input") as HTMLInputElement).value.trim();
   if (!name || !fsPath) return;
   closeFsBrowser();
   createProject(fsPath, name);
 });
+
+// +Folder: reveal the inline mkdir row
+$("#fs-mkdir-btn").addEventListener("click", () => {
+  const row = $("#fs-mkdir-row");
+  row.classList.remove("hidden");
+  const input = $("#fs-mkdir-input") as HTMLInputElement;
+  input.value = "";
+  input.focus();
+});
+function hideMkdirRow() {
+  $("#fs-mkdir-row").classList.add("hidden");
+  ($("#fs-mkdir-input") as HTMLInputElement).value = "";
+}
+async function commitMkdir() {
+  const name = ($("#fs-mkdir-input") as HTMLInputElement).value.trim();
+  if (!name || !fsPath) { hideMkdirRow(); return; }
+  hideMkdirRow();
+  try {
+    const data = await apiFetch("/api/fs/mkdir", { method: "POST", body: { dir: fsPath, name } });
+    // re-list the current directory so the new folder appears immediately
+    await loadDir(fsPath, false);
+    // then navigate into it so the user can drop their project there
+    if (data && data.path) await loadDir(data.path);
+  } catch (e) {
+    notice("Could not create folder: " + (e && e.message ? e.message : e));
+  }
+}
+$("#fs-mkdir-ok").addEventListener("click", commitMkdir);
+$("#fs-mkdir-cancel").addEventListener("click", hideMkdirRow);
+$("#fs-mkdir-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") commitMkdir();
+  if (e.key === "Escape") hideMkdirRow();
+});
+
 dismissOnOverlayPress(fsModal, closeFsBrowser);
 
-$("#new-project-btn").addEventListener("click", () => openFsBrowser("new"));
-$("#open-project-btn").addEventListener("click", () => openFsBrowser("open"));
+// The welcome screen's two doors are the menu's two doors: "New project" asks
+// WHERE first (`new` mode: pick the folder the session will work in, type the
+// name, Create), "Open project" browses for an existing .clc. A project's
+// working directory is the directory holding its .clc, so the location is part
+// of creating one — there is no scratch project to relocate later.
+// #open-project-btn / #new-project-btn are menu commands in titlebar.ts; their
+// elements carry no second listener — one action, one handler.
 $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
 $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
 

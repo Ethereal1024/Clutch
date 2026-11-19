@@ -139,12 +139,21 @@ export function trustArmed() {
 // being replaced) costs nothing, because the page's own clock still answers a
 // visible prompt and the next (re)connect pushes again (sse-stream.ts).
 export async function pushTrustArmed() {
-  if (!state.apiBase) return; // no session to arm: the connect below pushes it
-  try {
-    await apiFetch("/api/permission/trust", { method: "POST", body: { armed: trustArmed() } });
-  } catch (e) {
-    console.warn("[trust] could not mirror the armed flag to the backend", e);
-  }
+  // Every claimed session counts down its own prompts, so an arm applies to all
+  // of them — a background tab's ask must not auto-allow because only the
+  // visible tab was told. (The active base is included even before it is on a
+  // tab: the welcome screen claims the default slot.)
+  const bases = new Set<string>();
+  if (state.apiBase) bases.add(state.apiBase);
+  for (const t of state.tabs) if (t.base) bases.add(t.base);
+  if (!bases.size) return; // no session to arm: the connect below pushes it
+  await Promise.all(
+    [...bases].map((base) =>
+      apiFetch("/api/permission/trust", { method: "POST", body: { armed: trustArmed() }, base }).catch(
+        (e) => console.warn("[trust] could not mirror the armed flag to the backend", e)
+      )
+    )
+  );
 }
 
 export function paintTrustBtn() {

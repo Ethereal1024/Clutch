@@ -597,14 +597,12 @@ export async function pushSettings() {
   };
   if (key) payload.api_key = key;
   try {
-    await apiFetch("/api/settings", { method: "POST", body: payload });
+    // The LOOP reads the mirror file (settings-mirror), not the session. Save it
+    // FIRST: a window with no session yet (the welcome screen, a tab whose
+    // session died) must still be able to change the model for its next run —
+    // posting to a session that is not there used to fail the whole save.
     if (key) localStorage.setItem("clutch_api_key", key);
     localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
-    // keep the client-side LLM proxy in sync (it reads the local settings file).
-    // The knobs ride along with the model here too: this mirror is what a
-    // session claim reads back (host-core remoteLlmKnobs), and an omitted knob
-    // means "keep the stored one", so a save without them would leave a remote
-    // claim forwarding nothing.
     if (window.clutchSettings && window.clutchSettings.save) {
       await window.clutchSettings.save({
         api_key: key,
@@ -614,13 +612,25 @@ export async function pushSettings() {
         api_protocol: payload.api_protocol,
       });
     }
+    // ...then tell the LIVE session (its tool surface/prompt section), best
+    // effort: a session that cannot answer is not a failed save, because the
+    // next run is built from the file that was just written.
+    try {
+      await apiFetch("/api/settings", { method: "POST", body: payload });
+    } catch (e) {
+      console.warn("[settings] the session did not take the update; the next run will:", e);
+    }
+    // the status bar paints the active model from localStorage; storage events
+    // do not fire in the tab that wrote it, so the save announces itself
+    document.dispatchEvent(new CustomEvent("clutch:settings-saved"));
     return true;
   } catch (e) {
     addEvent({ type: "final", status: "error", summary: "save settings failed: " + e.message });
     return false;
   }
 }
-$("#settings-btn").addEventListener("click", openSettings);
+// #settings-btn is the Help menu's command (titlebar.ts): the element keeps its
+// id, the command owns the action.
 $("#settings-close").addEventListener("click", closeSettings);
 dismissOnOverlayPress(modal, closeSettings);
 

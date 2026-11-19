@@ -268,3 +268,16 @@ export function reconnectSSE() {
   connectSSE();
 }
 
+// Close the live stream outright (the last tab closed / a tab's session was
+// released). A reconnect heals it again; a page with no session must not keep
+// an EventSource pointed at a port nobody serves.
+export function closeSSE() {
+  if (!es) return;
+  try {
+    es.close();
+  } catch (e) {
+    /* already closed */
+  }
+  es = null;
+}
+

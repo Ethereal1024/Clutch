@@ -24,23 +24,103 @@
   <link rel="preload" href="vendor/fonts/clutch-icons.woff2" as="font" type="font/woff2" crossorigin />
 </head>
 <body>
-  <header id="topbar">
-    <!-- phone shell (device reports #2/#4): on a narrow screen the topbar keeps
-         ONE trigger — ▤ opens the shell panel, which carries the project
-         actions as well as the workspace tree. style.css hides it on the
-         desktop; mobile.css shows it. -->
-    <div class="brand"><span class="logo">▣</span> Clutch</div>
-    <div id="project-label" class="project-label muted" title="active project"></div>
+  <div id="titlebar">
+
+    <!-- app icon (VS Code style: leftmost, no-drag) -->
+    <div class="tb-icon">▣</div>
+
+    <!-- menu bar -->
+    <nav class="tb-menu" id="tb-menu">
+
+      <div class="tb-menu-item" data-menu="file">
+        File
+        <div class="tb-dropdown">
+          <div class="tb-dd-item" id="open-project-btn" data-action="open">Open Project… <kbd>Ctrl O</kbd></div>
+          <div class="tb-dd-item" id="new-project-btn" data-action="new">New Project… <kbd>Ctrl N</kbd></div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-label">Recent</div>
+          <div id="tb-recent"></div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-item" data-action="tab-close">Close Project <kbd>Ctrl W</kbd></div>
+        </div>
+      </div>
+
+      <div class="tb-menu-item" data-menu="run">
+        Run
+        <div class="tb-dropdown">
+          <div class="tb-dd-item" data-action="run">&#x25B6; Run Task <kbd>Ctrl &#x23CE;</kbd></div>
+          <div class="tb-dd-item" data-action="stop">&#x25A0; Stop</div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-item" data-action="mode-work">Mode: Work (full access)</div>
+          <div class="tb-dd-item" data-action="mode-chat">Mode: Chat (read-only)</div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-item" data-action="trust">&#x1F6E1; Trust Mode</div>
+        </div>
+      </div>
+
+      <div class="tb-menu-item" data-menu="view">
+        View
+        <div class="tb-dropdown">
+          <div class="tb-dd-item" data-action="toggle-right">Workspace Panel</div>
+          <div class="tb-dd-item" data-action="toggle-statusbar">Status Bar</div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-item" data-action="toggle-hidden">Show Hidden Files</div>
+        </div>
+      </div>
+
+      <div class="tb-menu-item" data-menu="window">
+        Window
+        <div class="tb-dropdown">
+          <div class="tb-dd-item" data-action="tab-new">New Tab</div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-label">Open Tabs</div>
+          <div id="tb-tabs"></div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-item" data-action="tab-close">Close Current Tab</div>
+          <div class="tb-dd-item" data-action="tab-close-others">Close Other Tabs</div>
+          <div class="tb-dd-item" data-action="tab-close-all">Close All Tabs</div>
+          <div class="tb-dd-item" data-action="tab-reopen">Reopen Closed Tab <kbd>Ctrl Shift T</kbd></div>
+        </div>
+      </div>
+
+      <div class="tb-menu-item" data-menu="help">
+        Help
+        <div class="tb-dropdown">
+          <div class="tb-dd-item" id="settings-btn" data-action="settings">&#x2699; Model Settings…</div>
+          <div class="tb-dd-sep"></div>
+          <div class="tb-dd-item" data-action="about">About Clutch</div>
+        </div>
+      </div>
+
+    </nav>
+
+    <!-- drag region -->
+    <div class="tb-drag">Clutch</div>
+
+    <!-- hidden badges referenced by els.ts -->
     <span id="readonly-badge" class="readonly-badge hidden" title="opened read-only: another window holds the write lock">read-only</span>
     <div id="status" class="badge idle">idle</div>
-    <div class="spacer"></div>
-    <!-- the three project actions live here on the desktop; workspace-panel.js
-         MOVES these same nodes into #shell-project-actions on a phone (device report #2) -->
-    <button id="open-project-btn" title="open a project">▦ Open</button>
-    <button id="new-project-btn" title="create a new project">＋ New</button>
-    <button id="settings-btn" title="API settings">⚙</button>
-    <button id="shell-ws-btn" class="shell-btn" title="project actions and workspace files" aria-label="project actions and workspace files">▤</button>
-  </header>
+
+    <!-- phone: single panel trigger (mobile.css shows it; style.css hides it) -->
+    <button id="shell-ws-btn" class="shell-btn tb-phone-only" title="project actions and workspace files" aria-label="project actions and workspace files">&#x25A4;</button>
+
+    <!-- window controls -->
+    <div class="tb-winctrl">
+      <button class="tb-winbtn minimize" title="Minimize" aria-label="Minimize">
+        <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+      </button>
+      <button class="tb-winbtn maximize" title="Maximize" aria-label="Maximize">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor"/></svg>
+      </button>
+      <button class="tb-winbtn close" title="Close" aria-label="Close">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/>
+          <line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+      </button>
+    </div>
+
+  </div>
 
   <!-- phone shell backdrop: inert on the desktop (style.css display:none),
        revealed by mobile.css while the panel is open -->
@@ -258,16 +338,26 @@
       <div id="fs-body">
         <div id="fs-toolbar" class="fs-toolbar">
           <button id="fs-up" title="up one level">..</button>
-          <input id="fs-path-input" type="text" placeholder="/home/user" autocomplete="off" />
-          <button id="fs-go">Go</button>
+          <input id="fs-path-input" type="text" readonly tabindex="-1" autocomplete="off" />
+          <button id="fs-go" class="hidden" tabindex="-1">Go</button>
           <label class="hidden-toggle" title="show hidden (dot) files">
             <input type="checkbox" id="fs-hidden-toggle" /> show hidden
           </label>
+          <button id="fs-mkdir-btn" title="create a folder in the current directory">＋ Folder</button>
+        </div>
+        <div id="fs-mkdir-row" class="hidden">
+          <input id="fs-mkdir-input" type="text" placeholder="folder-name" autocomplete="off" />
+          <button id="fs-mkdir-ok">Create folder</button>
+          <button id="fs-mkdir-cancel">✕</button>
         </div>
         <div id="fs-list" class="scroll"></div>
+        <div id="fs-filename-bar">
+          <label for="fs-filename-input">File name</label>
+          <input id="fs-filename-input" type="text" placeholder="name.clc or sub/path.clc" autocomplete="off" spellcheck="false" />
+        </div>
+        <!-- kept as hidden stubs: test suite queries these nodes -->
         <div id="fs-new" class="hidden">
-          <label for="fs-name-input">Project name</label>
-          <input id="fs-name-input" type="text" placeholder="my-project" autocomplete="off" />
+          <input id="fs-name-input" type="text" autocomplete="off" />
         </div>
         <div id="fs-actions" class="modal-actions">
           <button id="fs-cancel">Cancel</button>
@@ -346,15 +436,6 @@
 
   <main>
     <section id="left">
-      <div id="taskbar">
-        <textarea id="task-input" rows="3"
-          placeholder="What should I do? e.g. fix the failing test, explain this module"></textarea>
-        <div class="run-actions">
-          <button id="run-btn" class="primary" title="run the task — Cmd/Ctrl+Enter in the box">▶ Run</button>
-          <button id="mode-btn" title="chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.">work</button>
-          <button id="trust-btn" title="trust mode OFF — every prompt waits. Click to auto-allow after 10s.">🛡 Trust</button>
-        </div>
-      </div>
       <div class="stream-wrap">
         <div id="stream" class="scroll">
           <div id="open-progress" class="open-progress hidden">
@@ -376,29 +457,29 @@
           </svg>
         </button>
       </div>
+      <div id="taskbar">
+        <textarea id="task-input" rows="3"
+          placeholder="What should I do? e.g. fix the failing test, explain this module"></textarea>
+        <div class="run-actions">
+          <button id="run-btn" class="primary" title="run the task — Cmd/Ctrl+Enter in the box">▶ Run</button>
+          <button id="mode-btn" title="chat: read-only analysis · work: full access (write/edit/any command). Applies to the next run.">work</button>
+          <button id="trust-btn" title="trust mode OFF — every prompt waits. Click to auto-allow after 10s.">🛡 Trust</button>
+        </div>
+      </div>
     </section>
 
     <aside id="right">
-      <!-- device report #2: on a phone the three project actions live in this
-           same slide-over, as a section ABOVE the workspace tree — one panel,
-           one trigger, nothing stranded in a second drawer. style.css keeps
-           this section display:none on the desktop, where workspace-panel.js
-           moves the buttons back into #topbar and the panel stays the workspace column
-           it has always been. -->
-      <section id="shell-project" class="shell-project" aria-label="project">
-        <div class="panel-head">
-          <span>project</span>
-          <!-- the panel's dismissal: at the top edge of the panel it closes
-               (device report #3), never mid-row -->
+      <!-- device report #2/#3: the panel's dismissal is a bare ✕ at the head's
+           right edge — never mid-row, never boxed. The project actions live in
+           the titlebar's File menu, so the panel carries the tree alone. -->
+      <div class="panel-head">
+        <span class="panel-title">workspace</span>
+        <div class="panel-tools">
+          <label class="hidden-toggle" title="show hidden (dot) files">
+            <input type="checkbox" id="tree-hidden-toggle" /> show hidden
+          </label>
           <button id="shell-close-btn" class="shell-close-btn" title="close the panel" aria-label="close the panel">✕</button>
         </div>
-        <div id="shell-project-actions"></div>
-      </section>
-      <div class="panel-head">
-        <span>workspace</span>
-        <label class="hidden-toggle" title="show hidden (dot) files">
-          <input type="checkbox" id="tree-hidden-toggle" /> show hidden
-        </label>
       </div>
       <div id="tree" class="scroll"></div>
     </aside>

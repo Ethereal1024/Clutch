@@ -35,11 +35,13 @@ import "./auto-fold";
 import "./task-rollback";
 import "./status-bar";
 import "./tab-bar";
+import "./titlebar";
 import { apiFetch, resolveApiBase } from "./app";
 import { reconciledBackendUrl, switchBackend } from "./backend-lifecycle";
+import { state } from "./state";
 import { resumeTurn } from "./render-events";
 import { connectSSE } from "./sse-stream";
-import { state } from "./state";
+import { connLostExitPending } from "./conn-lost";
 
 // the flat LLM config this UI would mirror to ~/.clutch/settings.json, read
 // from localStorage (the UI's own source of truth); null when nothing stored.
@@ -101,9 +103,14 @@ export async function loadHostDefaults() {
 // switch inside reconciledBackendUrl (stale-SSH fallback, tunnel target) plus
 // the trailing call still leaves exactly one live stream
 (async () => {
-  await resolveApiBase(); // learn this window's session port (IPC) first
+  // Restored tabs own their sessions. Claiming the window's default slot too
+  // would spawn a session nobody is looking at; the first activation claims the
+  // tab's own slot instead (project.ts activateTab).
+  const restoredTabs = state.tabs.length > 0 && !connLostExitPending();
+  if (!restoredTabs) await resolveApiBase(); // learn this window's session port (IPC) first
   await loadHostDefaults(); // the host's own ui block, before any row is drawn
   healSettingsMirror();
+  if (restoredTabs) return; // nothing is open until a tab is clicked
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
@@ -114,3 +121,13 @@ export async function loadHostDefaults() {
   // Nothing dials a host on startup: a remembered remote stays a PRESELECTION in
   // the picker (conn-store.ts) until the user presses Connect there.
 })();
+
+// ---- custom titlebar window controls ----------------------------------------
+// Only wire up when running inside Electron (clutchWin is not exposed in the
+// Android WebView or a plain browser).
+if (typeof (window as any).clutchWin !== "undefined") {
+  const cw = (window as any).clutchWin;
+  document.querySelector(".tb-winbtn.minimize")?.addEventListener("click", () => cw.minimize());
+  document.querySelector(".tb-winbtn.maximize")?.addEventListener("click", () => cw.maximize());
+  document.querySelector(".tb-winbtn.close")   ?.addEventListener("click", () => cw.close());
+}

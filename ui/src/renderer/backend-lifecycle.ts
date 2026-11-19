@@ -23,6 +23,7 @@ import { reconnectSSE } from "./sse-stream";
 import { state } from "./state";
 import { busy } from "./stream-view";
 import { eventsEl } from "./els";
+import { activeTab, adoptBase, claimTab, rewatchTab, tabForSlot, unwatchAll } from "./slots";
 
 // Switch the active backend in place without a full page reload. The
 // supervisor's lifecycle port is refused: it is not a backend, and letting it
@@ -62,6 +63,22 @@ export function switchBackend(url) {
 // the host announces a real URL when it has one (backend:base-changed).
 export async function switchBackendResolved() {
   if (!switchBackend(await hostSessionUrl())) return false;
+  await reapplyDegradeIfNeeded();
+  return true;
+}
+
+// The reconnect door for a page with TABS: there is no window-level session to
+// re-resolve — the visible tab owns one, and after a hop the host is the one
+// that can re-bind its far-side session (heartbeat-first, never a replacement).
+// The session still has the .clc open, so a reconnect with the tab's watermark
+// is enough; if it was provably gone, the SSE subscription adopts the project.
+export async function switchBackendActiveSlot() {
+  const tab = activeTab();
+  if (!tab) return switchBackendResolved();
+  const base = await claimTab(tab);
+  if (!base) return false;
+  adoptBase(base);
+  reconnectSSE();
   await reapplyDegradeIfNeeded();
   return true;
 }
@@ -221,6 +238,10 @@ if (window.clutchTunnel) {
     // the host's verdict for THIS window: false = its session was never on the
     // hop, so there is no lost session here to announce
     if (info && info.lost === false) return;
+    // every slot forward died with the hop (main releases them before this
+    // broadcast); a badge watcher on one would retry a dead port in silence —
+    // activation re-claims the slot and re-opens its stream
+    if (typeof unwatchAll === "function") unwatchAll();
     // no flag = the user's own disconnect (the picker's Cancel/Disconnect):
     // they left the remote on purpose, so there is no lost session to announce
     if (!localStorage.getItem("clutch_ssh_connected")) return;
@@ -233,14 +254,26 @@ if (window.clutchTunnel) {
   });
 }
 
-// the main process re-established this window's session: point the app at the new URL
+// the main process re-established a session: point the app at the new URL.
+// A bare string is the pre-tabs shape (the window's default slot); the object
+// names the TAB whose session moved, so a background tab's re-bind is stored and
+// used when it is activated instead of replacing the visible tab's stream.
 if (window.clutchApi && window.clutchApi.onBaseChanged) {
-  window.clutchApi.onBaseChanged((url) => {
-    // the host's answer: a URL is this window's session, and null is an answer
-    // too — the honest one, meaning the host looked and this window has no
-    // session (no tunnel, and no local one either). Staying on the dead URL was
-    // the reported "Connected: http://127.0.0.1:4xxxx" that answered nothing, so
-    // the dialog the announcement raises is what replaces it.
+  window.clutchApi.onBaseChanged((change) => {
+    const slotId = change && typeof change === "object" ? change.slotId || "" : "";
+    const url = change && typeof change === "object" ? change.url : change;
+    if (slotId) {
+      const tab = tabForSlot(slotId);
+      if (tab) tab.base = url ? String(url) : null;
+      if (slotId !== state.activeTabId) {
+        if (tab) rewatchTab(tab); // its badge keeps following its own session
+        return;
+      }
+    }
+    // the host's answer: a URL is this session, and null is an answer too — the
+    // honest one, meaning the host looked and there is no session. Staying on the
+    // dead URL was the reported "Connected: http://127.0.0.1:4xxxx" that answered
+    // nothing, so the dialog the announcement raises is what replaces it.
     if (url) {
       switchBackend(url);
       // A picker that is already open lists the backend it is pointed at: this

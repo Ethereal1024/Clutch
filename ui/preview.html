@@ -11,7 +11,7 @@
 :root {
   --bg:      #0F0F10;
   --bg2:     #161618;
-  --bg3:     #1e1e20;
+  --bg3:     #1D1D20;
   --border:  #26262A;
   --text:    #F2F2F4;
   --muted:   #8b8b92;
@@ -22,6 +22,10 @@
   --fs-xs:11px; --fs-sm:12px; --fs-md:13px;
   --scroll-thumb: #2b2b31;
   --quick:.15s;
+
+  /* ---- window spec v1 ---- */
+  --head-h: 30px;      /* every surface that labels itself = the titlebar row */
+  --close-size: 24px;  /* every dismissal = a bare glyph, floored at the tap target */
 }
 *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
 html,body { height:100%; background:var(--bg); color:var(--text);
@@ -218,18 +222,72 @@ body { display:flex; flex-direction:column; user-select:none; }
 main { display:flex; flex:1; min-height:0; }
 #left  { flex:1; display:flex; flex-direction:column; min-width:0; }
 #right {
-  width:220px; flex-shrink:0;
+  width:300px; flex-shrink:0;
   border-left:1px solid var(--border);
   display:flex; flex-direction:column;
-  background:var(--bg);
+  background:var(--bg2);
 }
+
+/* ---- WINDOW SPEC v1: the panel head ----
+   One height for every surface that labels itself (--head-h, the titlebar's own
+   row), one bare glyph for every dismissal (--close-size). The 4px red left
+   border and the uppercase micro-label are identity, not decoration: they stay.
+   4px border + 8px padding = the tree's 12px row inset, so the title sits on
+   the same optical line as the rows under it — before this, the head's padding
+   and the base button box made it ~47px tall against a 30px titlebar. */
 .panel-head {
-  display:flex; align-items:center; justify-content:space-between;
-  padding:0 var(--s3); height:26px;
+  display:flex; align-items:center; gap:var(--s2);
+  height:var(--head-h); padding:0 var(--s2);
   border-bottom:1px solid var(--border);
-  font-size:var(--fs-xs); text-transform:uppercase;
-  letter-spacing:.06em; color:var(--muted); flex-shrink:0;
+  border-left:4px solid var(--accent);
+  font-family:var(--font-display); font-weight:600;
+  font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:.08em;
+  color:var(--muted); flex-shrink:0; line-height:1;
 }
+/* the row contract every head shares: a label on the left, its tools pushed to
+   the right edge. Unscoped on purpose — a head that reuses this markup gets the
+   alignment for free instead of re-deriving it (the spec card's head below is
+   the same `.panel-head`, not a look-alike: scoping these two rules under
+   `.panel-head .` is exactly what left that card's ✕ sitting next to its title). */
+.panel-title { flex:none; }
+.panel-tools { margin-left:auto; display:flex; align-items:center; gap:var(--s2); }
+
+/* the dismissal is a glyph, not a control: no border, no fill, no radius. It
+   reads as punctuation until the pointer is on it, and it is next to the tool
+   it shares the row with instead of floating mid-row. */
+.panel-close {
+  flex:none; display:inline-flex; align-items:center; justify-content:center;
+  width:var(--close-size); height:var(--close-size);
+  min-width:var(--close-size); min-height:var(--close-size);
+  padding:0; margin:0; border:0; background:none;
+  color:var(--muted); font-size:13px; line-height:1; cursor:pointer;
+}
+.panel-close:hover { background:var(--bg3); color:var(--text); }
+.panel-close:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
+
+/* show-hidden switch: mono, lowercase — one step quieter than the head label */
+label.hidden-toggle {
+  display:inline-flex; align-items:center; gap:5px;
+  font-family:var(--font-mono); font-size:11px; letter-spacing:0;
+  text-transform:none; color:var(--muted); cursor:pointer; user-select:none;
+  line-height:1; white-space:nowrap;
+}
+label.hidden-toggle:hover { color:var(--text); }
+label.hidden-toggle input[type="checkbox"] {
+  appearance:none; -webkit-appearance:none;
+  width:14px; height:14px; margin:0; flex:none; border-radius:0;
+  border:1px solid var(--border); background:var(--bg);
+  cursor:pointer; position:relative;
+  transition:background-color var(--quick), border-color var(--quick);
+}
+label.hidden-toggle input[type="checkbox"]:checked { background:var(--accent); border-color:var(--accent); }
+label.hidden-toggle input[type="checkbox"]:checked::after {
+  content:"✓"; position:absolute; inset:0;
+  display:flex; align-items:center; justify-content:center;
+  color:var(--bg); font-size:11px; font-weight:700; line-height:1;
+}
+#tree-body .tree-item.hidden-file { display:none; }
+#tree-body.show-hidden .tree-item.hidden-file { display:flex; }
 
 /* ============================================================
    TASKBAR
@@ -295,10 +353,86 @@ main { display:flex; flex:1; min-height:0; }
    ============================================================ */
 .tree-item {
   display:flex; align-items:center; gap:6px;
-  padding:3px var(--s3); font-size:var(--fs-sm); color:var(--muted); cursor:pointer;
+  padding:3px 6px; font-family:var(--font-mono); font-size:13px;
+  color:var(--muted); cursor:pointer;
 }
-.tree-item:hover { color:var(--text); background:var(--bg2); }
+.tree-item:hover { color:var(--text); background:rgba(255,255,255,.04); }
 .tree-item.dir { color:var(--text); }
+.sb-spec {
+  border:0; background:none; padding:0 var(--s2); margin:0; height:100%;
+  font-family:var(--font-mono); font-size:10px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted); line-height:1; cursor:pointer;
+}
+.sb-spec:hover { color:var(--accent); }
+
+/* ============================================================
+   WINDOW SPEC CARD — review overlay, not app furniture
+   ============================================================ */
+#spec {
+  position:fixed; left:var(--s3); top:74px; width:308px; z-index:200;
+  max-height:calc(100vh - 108px); overflow-y:auto;
+  background:var(--bg2); border:1px solid var(--border);
+  font-size:var(--fs-sm); color:var(--muted);
+}
+#spec.hidden { display:none; }
+.spec-ver {
+  font-family:var(--font-mono); font-weight:400; font-size:10px;
+  letter-spacing:.06em; color:var(--accent);
+}
+.spec-body { padding:var(--s3); }
+.spec-lede { line-height:1.6; margin-bottom:var(--s3); }
+.spec-lede b { color:var(--text); font-weight:600; }
+.spec-lede em { color:var(--text); font-style:normal; }
+
+/* before / after at 1:1 — the head as it was, the head as it is */
+.spec-demo { margin-bottom:var(--s3); }
+.spec-demo-row { display:flex; align-items:center; gap:var(--s2); }
+.spec-demo-row + .spec-demo-row { margin-top:6px; }
+.spec-demo-tag { flex:none; width:44px; font-family:var(--font-mono); font-size:10px; line-height:1.35; color:var(--muted); }
+.spec-demo-tag b { display:block; color:var(--text); font-weight:600; }
+.spec-demo-head {
+  flex:1; display:flex; align-items:center; justify-content:space-between;
+  padding:0 var(--s2); background:var(--bg);
+  border:1px solid var(--border); border-left:4px solid var(--accent);
+  font-family:var(--font-display); font-weight:600;
+  text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+}
+.spec-demo-head.before { height:47px; font-size:12px; padding:0 var(--s3); }
+.spec-demo-head.after  { height:30px; font-size:11px; letter-spacing:.08em; }
+.spec-demo-head .x {
+  flex:none; display:flex; align-items:center; justify-content:center;
+  font-size:13px; line-height:1;
+}
+.spec-demo-head.before .x { width:30px; height:30px; border:1px solid var(--border); background:var(--bg2); color:var(--text); }
+.spec-demo-head.after  .x { width:24px; height:24px; color:var(--muted); }
+
+/* the ladder: one row per surface that labels itself */
+.spec-table { width:100%; border-collapse:collapse; font-size:11px; }
+.spec-table th {
+  text-align:left; font-weight:400; font-size:10px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted);
+  padding:0 0 4px; border-bottom:1px solid var(--border);
+}
+.spec-table th + th, .spec-table td + td { text-align:right; padding-left:var(--s2); white-space:nowrap; }
+.spec-table td { padding:4px 0; border-bottom:1px solid var(--border); color:var(--muted); }
+.spec-table tr:last-child td { border-bottom:0; }
+.spec-table td:first-child { color:var(--text); }
+.spec-table .num { font-family:var(--font-mono); }
+.spec-table tr.now td { color:var(--text); }
+.spec-table tr.now td:first-child::after {
+  content:"new"; margin-left:6px; color:var(--accent);
+  font-size:9px; letter-spacing:.1em;
+}
+.spec-tokens { display:flex; flex-wrap:wrap; gap:6px; margin-top:var(--s3); }
+.spec-token {
+  font-family:var(--font-mono); font-size:10px; color:var(--text);
+  background:var(--bg); border:1px solid var(--border); padding:3px 6px;
+}
+.spec-token i { color:var(--accent); font-style:normal; }
+.spec-note {
+  margin-top:var(--s3); padding-top:var(--s3);
+  border-top:1px solid var(--border); font-size:11px; line-height:1.6;
+}
 </style>
 </head>
 <body>
@@ -331,7 +465,7 @@ main { display:flex; flex:1; min-height:0; }
     <div class="tb-menu-item" data-menu="run">
       运行
       <div class="tb-dropdown">
-        <div class="tb-dd-item" data-action="run">▶ 执行任务 <kbd>Ctrl ↵</kbd></div>
+        <div class="tb-dd-item" data-action="run">▶ 执行任务 <kbd>Ctrl+Enter</kbd></div>
         <div class="tb-dd-item disabled">■ 停止</div>
         <div class="tb-dd-sep"></div>
         <div class="tb-dd-item" data-action="mode-work">模式：Work（全权限）</div>
@@ -452,17 +586,75 @@ main { display:flex; flex:1; min-height:0; }
   </section>
 
   <aside id="right">
-    <div class="panel-head"><span>workspace</span></div>
-    <div style="overflow-y:auto;flex:1;padding-top:4px;">
+    <div class="panel-head">
+      <span class="panel-title">workspace</span>
+      <div class="panel-tools">
+        <label class="hidden-toggle" title="show hidden (dot) files">
+          <input type="checkbox" id="tree-hidden-toggle" /> show hidden
+        </label>
+        <button class="panel-close" id="panel-close" title="关闭面板" aria-label="关闭面板">✕</button>
+      </div>
+    </div>
+    <div id="tree-body" style="overflow-y:auto;flex:1;padding:8px 12px;">
       <div class="tree-item dir">▾ src</div>
       <div class="tree-item" style="padding-left:22px;">▾ auth</div>
       <div class="tree-item" style="padding-left:38px;">index.ts</div>
       <div class="tree-item" style="padding-left:38px;">middleware.ts</div>
       <div class="tree-item" style="padding-left:22px;">app.ts</div>
       <div class="tree-item">package.json</div>
+      <div class="tree-item hidden-file">.gitignore</div>
+      <div class="tree-item hidden-file">.env.local</div>
     </div>
   </aside>
 </main>
+
+<!-- =========================================================
+     WINDOW SPEC CARD — answers "is there one window spec?"
+     ========================================================= -->
+<aside id="spec">
+  <div class="panel-head">
+    <span class="panel-title">window spec</span>
+    <span class="spec-ver">v1</span>
+    <div class="panel-tools">
+      <button class="panel-close" id="spec-close" title="收起说明" aria-label="收起说明">✕</button>
+    </div>
+  </div>
+  <div class="spec-body">
+    <p class="spec-lede">
+      之前没有窗口规范：标题栏 30px、页签条 32px、面板头 <b>47px</b>，关闭键有<em>三种</em>画法。
+      现在一条高度线、一个关闭键。
+    </p>
+
+    <div class="spec-demo">
+      <div class="spec-demo-row">
+        <span class="spec-demo-tag"><b>before</b>47px</span>
+        <div class="spec-demo-head before"><span>workspace</span><span class="x">✕</span></div>
+      </div>
+      <div class="spec-demo-row">
+        <span class="spec-demo-tag"><b>after</b>30px</span>
+        <div class="spec-demo-head after"><span>workspace</span><span class="x">✕</span></div>
+      </div>
+    </div>
+
+    <table class="spec-table">
+      <thead><tr><th>表面</th><th>高度</th><th>关闭</th></tr></thead>
+      <tbody>
+        <tr><td>标题栏</td><td class="num">30px</td><td class="num">46×30 系统键</td></tr>
+        <tr><td>页签条</td><td class="num">32px</td><td class="num">16px 裸字</td></tr>
+        <tr class="now"><td>面板头</td><td class="num">30px</td><td class="num">24px 裸字</td></tr>
+        <tr><td>对话框</td><td class="num">—</td><td class="num">本轮不动</td></tr>
+      </tbody>
+    </table>
+
+    <div class="spec-tokens">
+      <code class="spec-token"><i>--head-h</i> 30px</code>
+      <code class="spec-token"><i>--close-size</i> 24px</code>
+    </div>
+
+    <p class="spec-note">保留：4px 红色左边条、11px 大写 .08em 标签。面板变窄时标签先截断，关闭键不动。</p>
+  </div>
+</aside>
+
 
 <!-- STATUS BAR -->
 <footer class="statusbar" id="statusbar">
@@ -475,6 +667,8 @@ main { display:flex; flex:1; min-height:0; }
   <span class="sb-item sb-workdir" title="workdir">~/projects/my-app</span>
   <span class="sb-sep">|</span>
   <span class="sb-item sb-project" title="project">my-project.clc</span>
+  <span class="sb-sep">|</span>
+  <button class="sb-spec" id="spec-btn" title="窗口规范说明">window spec</button>
 </footer>
 
 <!-- =========================================================
@@ -559,8 +753,30 @@ document.getElementById("tb-menu").addEventListener("click", e => {
     activateTab(tabs[tabs.length-1].id);
   }
   else if (action === "tab-close") closeTab(activeId);
+  else if (action === "toggle-hidden") {
+    const c = document.getElementById("tree-hidden-toggle");
+    c.checked = !c.checked;
+    c.dispatchEvent(new Event("change"));
+  }
   if (openItem) { openItem.classList.remove("open"); openItem = null; }
 });
+
+// ---- panel head: the bare ✕ closes the panel; the View menu reopens it ----
+document.getElementById("panel-close").addEventListener("click", () => {
+  document.getElementById("right").style.display = "none";
+});
+
+// ---- show hidden: one control, reachable from the head and the View menu ----
+const hiddenToggle = document.getElementById("tree-hidden-toggle");
+const treeBody = document.getElementById("tree-body");
+hiddenToggle.addEventListener("change", () => {
+  treeBody.classList.toggle("show-hidden", hiddenToggle.checked);
+});
+
+// ---- window spec card ----
+const specCard = document.getElementById("spec");
+document.getElementById("spec-close").addEventListener("click", () => specCard.classList.add("hidden"));
+document.getElementById("spec-btn").addEventListener("click", () => specCard.classList.toggle("hidden"));
 
 // keyboard: Escape closes menu
 document.addEventListener("keydown", e => {

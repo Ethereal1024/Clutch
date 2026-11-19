@@ -51,31 +51,30 @@
   ::-webkit-scrollbar { width: 4px; height: 4px; }
 
   /* ---- topbar: brand + status + the single panel trigger (report #4) ---- */
-  #topbar {
+  #titlebar {
     flex-wrap: nowrap;
     gap: 8px;
     padding: 8px 10px;
   }
-  #topbar button {
+  #titlebar button {
     padding: 6px 10px;
     font-size: 12px;
   }
-  /* the project actions are not hidden — ui/js/workspace-panel.js has moved them
-     into #shell-project-actions by the time this applies (the panel is the only
-     place they exist on a phone) */
-  /* the one remaining trigger is the phone's only door into the shell, so it
-     gets a real tap target instead of the compact desktop pill's box */
-  #shell-ws-btn {
+  /* the project actions live in the titlebar's File menu now, so the phone's
+     only door into the shell is the ▤ trigger. Give it a real tap target
+     instead of the compact desktop pill's box. */
+  .tb-phone-only {
     display: inline-flex; align-items: center; justify-content: center;
     min-width: 38px; min-height: 34px; padding: 0 8px; font-size: 14px;
   }
-  #project-label { max-width: 110px; }
+  /* the custom titlebar's window controls are Electron-only: the Android
+     WebView has no window to minimize */
+  .tb-winctrl { display: none; }
 
   /* ---- the panel (reports #2/#4) ----
      #right is the one slide-over: moved out of the column flow onto the right
-     edge, it carries the project section above the workspace tree. Closed =
-     pushed off-canvas; the backdrop both dims the stream and takes the close
-     tap. */
+     edge, it carries the workspace tree. Closed = pushed off-canvas; the
+     backdrop both dims the stream and takes the close tap. */
   .shell-backdrop {
     display: block;
     position: fixed; inset: 0; z-index: 55;
@@ -86,15 +85,13 @@
     transition: opacity var(--move);
   }
   .shell-backdrop.open { opacity: 1; pointer-events: auto; }
-  /* the project section only exists in the phone panel (report #2) */
-  .shell-project { display: block; }
   /* section heads double as touch rows here, so both are the same height and
      the ✕ gets a real target instead of the 2px of chrome a desktop row needs */
   #right .panel-head {
     padding: 6px 10px;
     min-height: 44px;
   }
-  .shell-close-btn { min-width: 32px; min-height: 32px; font-size: 15px; }
+  .shell-close-btn { --close-size: 32px; font-size: 15px; }
 
   /* ---- column layout: input bar on top, stream below ---- */
 

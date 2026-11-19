@@ -63,6 +63,7 @@
   /* swiss dark: near-black base, white text, one red accent, sharp corners */
   --bg: #0F0F10;
   --bg2: #161618;
+  --bg3: #1D1D20; /* one step above --bg2: hover on the titlebar's chrome */
   --border: #26262A;
   --text: #F2F2F4;
   --muted: #8b8b92;
@@ -136,6 +137,15 @@
   --ctl-h: 32px;    /* a form control: select, icon button */
   --ctl-h-sm: 26px; /* a control that lives inside a list row */
   --tap: 24px;
+  /* the WINDOW SPEC — one head height for every surface that labels itself (the
+     titlebar's own row) and one size for every dismissal. The workspace panel
+     answered neither: a 12px label + 8px padding + a 30px bordered button made a
+     ~47px band beside a 30px titlebar and a 32px tab strip, and its ✕ was the
+     only boxed one in the app, so the lightest panel wore the heaviest chrome.
+     The 4px accent bar and the uppercase micro-label are that panel's identity,
+     not the excess — they stay, at the height the rest of the window uses. */
+  --head-h: 30px;
+  --close-size: var(--tap);
   /* the type scale: five steps and no 0.5px steps. The sheet had EIGHT sizes in
      one modal (11/11.5/12/12.5/13/14/15/16), which is how two rules on the same
      line stop reading as a pair. */
@@ -225,16 +235,138 @@ pre, code, kbd, samp, tt {
   font-family: var(--font-mono);
 }
 
-body { display: flex; flex-direction: column; }
+body { display: flex; flex-direction: column; height: 100%; }
 
-#topbar {
+/* ============================================================
+   TITLEBAR  (VS Code style: single 30px row, drag region)
+   ============================================================ */
+#titlebar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
+  height: 30px;
   background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+  position: relative;
+  z-index: 100;
 }
+
+/* ---- app icon ---- */
+.tb-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 100%;
+  color: var(--accent);
+  font-size: 14px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+/* ---- menu bar ---- */
+.tb-menu {
+  display: flex; align-items: stretch;
+  height: 100%;
+  gap: 0;
+  -webkit-app-region: no-drag;
+}
+.tb-menu-item {
+  position: relative;
+  display: flex; align-items: center;
+  padding: 0 8px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  cursor: pointer;
+  height: 100%;
+  white-space: nowrap;
+  transition: background var(--quick), color var(--quick);
+  border-radius: 3px;
+}
+.tb-menu-item:hover,
+.tb-menu-item.open { background: var(--bg3); color: var(--text); }
+
+/* dropdown panel */
+.tb-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 200px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  z-index: 999;
+  padding: 4px 0;
+}
+.tb-menu-item.open .tb-dropdown { display: block; }
+
+.tb-dd-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 16px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  cursor: pointer;
+  gap: 32px;
+  white-space: nowrap;
+}
+.tb-dd-item:hover { background: var(--accent); color: #fff; }
+.tb-dd-item.disabled { color: var(--muted); cursor: default; }
+.tb-dd-item.active-tab { color: var(--accent); }
+.tb-dd-item.disabled:hover { background: transparent; color: var(--muted); }
+.tb-dd-item kbd {
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--muted); background: none; border: none;
+}
+.tb-dd-item:hover kbd { color: rgba(255,255,255,.6); }
+.tb-dd-sep {
+  height: 1px; background: var(--border);
+  margin: 4px 0;
+}
+.tb-dd-label {
+  padding: 3px 16px 1px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  cursor: default;
+}
+
+/* ---- drag region (title text) ---- */
+.tb-drag {
+  flex: 1;
+  display: flex; align-items: center; justify-content: center;
+  height: 100%;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  letter-spacing: .02em;
+  -webkit-app-region: drag;
+  pointer-events: none;
+}
+
+/* ---- hidden status/badge refs — keep in DOM for els.ts ---- */
+#titlebar #status,
+#titlebar .readonly-badge { display: none; }
+
+/* ---- phone-only trigger (shown by mobile.css) ---- */
+.tb-phone-only { display: none; }
+
+/* ---- window controls (VS Code style) ---- */
+.tb-winctrl {
+  display: flex; align-items: stretch;
+  height: 100%;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+.tb-winbtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 46px; height: 100%;
+  border: none; background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--quick), color var(--quick);
+}
+.tb-winbtn:hover { background: var(--bg3); color: var(--text); }
+.tb-winbtn.close:hover { background: #c42b1c; color: #fff; }
 
 /* ---- project tab bar ---- */
 .tab-bar {
@@ -284,6 +416,22 @@ body { display: flex; flex-direction: column; }
 /* dirty mark (•): accent dot when the project has unsaved state */
 .doc-tab-dirty { color: var(--accent); font-size: 10px; flex-shrink: 0; display: none; }
 .doc-tab.dirty .doc-tab-dirty { display: block; }
+/* a tab whose OWN run is in flight, and one waiting for the user's answer */
+.doc-tab-run,
+.doc-tab-ask {
+  width: 6px; height: 6px; border-radius: 50%;
+  flex-shrink: 0; display: block;
+}
+.doc-tab-run { background: var(--accent); animation: tab-run-pulse 1.2s ease-in-out infinite; }
+.doc-tab-ask { background: var(--green); }
+.doc-tab.running { color: var(--text); }
+@keyframes tab-run-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .doc-tab-run { animation: none; opacity: 1; }
+}
 /* close ✕ button inside each tab */
 .doc-tab-close {
   flex-shrink: 0;
@@ -315,50 +463,46 @@ body { display: flex; flex-direction: column; }
 .tab-new:hover { color: var(--text); background: var(--bg2); }
 
 
-.brand {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 15px;
-  letter-spacing: 0.02em;
-  line-height: 1; /* tight boxes so the flex row's align-items:center lines them up */
-}
-.brand .logo { color: var(--accent); }
-
-.project-label:empty { display: none; }
+/* .brand and .project-label removed (titlebar migration) */
 
 .spacer { flex: 1; }
 
 /* ---- phone shell furniture (device reports #2/#4) ------------------------
    On a narrow screen the shell collapses into ONE slide-over panel: the topbar
-   keeps a single ▤ trigger, and that panel carries the project actions as a
-   section ABOVE the workspace tree, with its dismissal at the panel's top edge.
-   Everything below is INERT on the desktop: style.css hides the trigger, the
-   panel's project section and the backdrop, and mobile.css (loaded under
-   max-width:640px) is the only place that reveals and positions them — the
-   desktop keeps exactly the layout it had. The buttons themselves are not
-   duplicated: ui/js/workspace-panel.js MOVES #open-project-btn / #new-project-btn / #settings-btn
-   into #shell-project-actions on a phone, so their handlers, disabled state and
-   DOM identity stay single-sourced. */
-#shell-ws-btn, .shell-project, .shell-backdrop { display: none; }
+   keeps a single ▤ trigger, and that panel carries the workspace tree with its
+   dismissal at the panel's top edge. Everything below is INERT on the desktop:
+   style.css hides the trigger, the panel's close button and the backdrop, and
+   mobile.css (loaded under max-width:640px) is the only place that reveals and
+   positions them. The project actions live in the titlebar's File menu, so
+   there is exactly one copy of each. */
+#shell-ws-btn, .shell-backdrop { display: none; }
 
-/* the phone panel's project row: three equal-width pills spanning the panel,
-   not the topbar's right-packed cluster (same nodes, phone shape) */
-#shell-project-actions { display: flex; align-items: center; gap: 8px; padding: 12px; }
-#shell-project-actions button { flex: 1; min-width: 0; text-align: center; padding: 10px 6px; }
-
-/* the phone panel's dismissal: a square tap target at the section head's right
-   edge (device report #3 — it used to be a ▾ wedged between the "workspace"
-   title and the "show hidden" switch, i.e. floating in the middle of the row) */
+/* the head's dismissal (device report #3 — it used to be a ▾ wedged between the
+   "workspace" title and the "show hidden" switch, i.e. floating in the middle of
+   the row; it now sits in the head's tool group, at the edge it dismisses).
+   A GLYPH, not a control: no border, no fill, no radius, so it reads as
+   punctuation until the pointer is on it. --close-size is the tap floor —
+   mobile.css raises it where a finger needs more than a pointer does. */
 .shell-close-btn {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 30px;
-  min-height: 30px;
+  width: var(--close-size);
+  height: var(--close-size);
+  min-width: var(--close-size);
+  min-height: var(--close-size);
   padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
   line-height: 1;
+  cursor: pointer;
 }
+.shell-close-btn:hover { background: var(--bg3); color: var(--text); }
+.shell-close-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* status: rectangle badge (kept as a box, not a dot), vertically centered with
    the title via the topbar's align-items:center + matching line-height */
@@ -490,7 +634,7 @@ button.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--te
 }
 
 /* mode toggle sits next to Run */
-.run-actions { display: flex; align-items: center; gap: 8px; margin-top: var(--s3); }
+.run-actions { display: flex; align-items: center; gap: 8px; margin-top: var(--s3); justify-content: flex-end; }
 #mode-btn {
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -622,7 +766,7 @@ main { display: flex; flex: 1; min-height: 0; }
 /* the input bar's own padding is the --s4 step on all four sides: the textarea
    inside it carries the same step, so the bar's box reads as one frame around the
    field rather than as four different gaps (the bottom used to be the only 16). */
-#taskbar { padding: var(--s4); border-bottom: 1px solid var(--border); }
+#taskbar { padding: var(--s4); border-top: 1px solid var(--border); flex-shrink: 0; }
 #task-input {
   width: 100%;
   background: var(--bg2);
@@ -962,6 +1106,11 @@ mjx-container[display="true"] {
 .event.user::before { background: var(--accent); }
 .event.user .hdr { color: var(--accent); }
 .event.user .body { font-weight: 500; }
+/* the loop's own retry notes (empty reply, max_tokens): facts about the turn,
+   not tasks the user typed — quiet, and outside the task/rollback styling */
+.event.internal-note::before { background: var(--border); }
+.event.internal-note .hdr { color: var(--muted); }
+.event.internal-note .body { color: var(--muted); font-style: italic; }
 .event.text::before { background: var(--muted); }
 .event.text .hdr { color: var(--muted); }
 .event.tool_group::before { background: var(--border); }
@@ -1341,15 +1490,28 @@ mjx-container[display="true"] {
   display: flex;
   flex-direction: column;
   background: var(--bg2);
+  transition: width var(--quick);
 }
+/* desktop panel collapsed: hide the aside entirely */
+#right.panel-hidden { display: none; }
 .panel-head {
-  padding: var(--s2) var(--s3); border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: var(--head-h);
+  padding: 0 var(--s2);
+  border-bottom: 1px solid var(--border);
   border-left: 4px solid var(--accent);
   font-family: var(--font-display); font-weight: 600;
-  font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--muted);
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); flex-shrink: 0; line-height: 1;
 }
+/* the row contract every head shares: a label on the left, its tools pushed to
+   the right edge. Unscoped on purpose — a head that reuses this markup inherits
+   the alignment instead of re-deriving it, which is how a ✕ ends up sitting next
+   to its title instead of at the edge it dismisses. */
+.panel-title { flex: none; }
+.panel-tools { margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
 #tree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 12px; }
 .tree-node {
   font-family: var(--font-mono); font-size: 13px;
@@ -2121,6 +2283,35 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 .fs-row.action { color: var(--accent); cursor: pointer; }
 .fs-row.action:hover { background: var(--bg2); }
 #fs-new { margin-top: var(--s4); }
+/* read-only path display bar — no interaction chrome */
+#fs-path-input[readonly] {
+  color: var(--muted); background: transparent; border-color: transparent;
+  cursor: default; pointer-events: none;
+  font-family: var(--font-mono); font-size: 12px;
+}
+#fs-path-input[readonly]:focus { outline: none; box-shadow: none; }
+/* filename entry bar — label + full-width input below the list */
+#fs-filename-bar {
+  display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3);
+}
+#fs-filename-bar label {
+  flex-shrink: 0; font-size: 12px; color: var(--muted);
+  margin: 0; letter-spacing: 0; text-transform: none; font-weight: normal;
+  white-space: nowrap;
+}
+#fs-filename-bar input { flex: 1; }
+/* +Folder inline creation row */
+#fs-mkdir-btn { flex-shrink: 0; }
+#fs-mkdir-row {
+  display: flex; gap: var(--s2); align-items: center; margin-bottom: var(--s3);
+}
+#fs-mkdir-row input { flex: 1; }
+#fs-mkdir-row button { flex-shrink: 0; }
+/* create offer row in the file list (shown when the typed path doesn't exist) */
+.fs-row.create-offer { color: var(--accent); font-style: italic; }
+.fs-row.create-offer:hover { background: var(--bg2); }
+/* Don't Save is between Cancel and the primary action */
+#fs-dont-save { margin-left: auto; }
 
 /* project label */
 .project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }

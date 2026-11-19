@@ -29,7 +29,6 @@ export const els = {
   status: $("#status"),
   tree: $("#tree"),
   workspace: $("#sb-workdir"),
-  projectLabel: $("#project-label"),
 };
 
 // the pane every record is painted into, and the list it is painted into

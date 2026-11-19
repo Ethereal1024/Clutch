@@ -112,7 +112,6 @@ export function hidePickerBody() {
 }
 export function showPickerBody() {
   $("#fs-body").classList.remove("collapsed");
-  $("#fs-new").classList.toggle("hidden", fsMode !== "new");
   resetConnChrome();
 }
 // the connect chrome on the conn bar (progress, Retry/Cancel) belongs to an attempt

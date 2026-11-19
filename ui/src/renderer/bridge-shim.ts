@@ -41,13 +41,22 @@
   }
   const base = resolveBase();
 
+  // A trailing undefined is "this caller named no slot": drop it so a legacy
+  // call keeps the exact wire shape it always had ([] for no arguments).
+  function argsOf(args) {
+    const out = args || [];
+    let n = out.length;
+    while (n > 0 && out[n - 1] === undefined) n--;
+    return out.slice(0, n);
+  }
+
   async function call(ns, method, args = []) {
     let r, d;
     try {
       r = await fetch(base + "api/" + ns + "/" + method, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(args || []),
+        body: JSON.stringify(argsOf(args)),
       });
       d = await r.json();
     } catch (e) {
@@ -97,11 +106,14 @@
   }
 
   expose("clutchApi", {
-    baseUrl: () => call("clutchApi", "baseUrl"),
+    // the slotId names one tab's session (absent = the window's default slot)
+    baseUrl: (slotId) => call("clutchApi", "baseUrl", [slotId]),
+    slotStatus: (slotId) => call("clutchApi", "slotStatus", [slotId]),
     // this window leaving its session (the conn-lost dialog's Cancel). The host
     // knows which window is asking — on the phone there is exactly one — so the
     // bridge route takes no window id and the renderer cannot name another one.
-    releaseSession: () => call("clutchApi", "releaseSession"),
+    // The slotId only names WHICH of this page's sessions is leaving.
+    releaseSession: (slotId) => call("clutchApi", "releaseSession", [slotId]),
     onBaseChanged: (cb) => subscribe("backend:base-changed", cb),
   });
 
@@ -118,9 +130,16 @@
   // A claim made by THIS device is unverifiable from the far side of a tunnel,
   // so the host reports it rather than acting, and its answer is returned whole.
   expose("clutchLocks", {
-    list: () => call("clutchLocks", "list"),
-    reclaim: (project) => call("clutchLocks", "reclaim", [project]),
+    list: (slotId) => call("clutchLocks", "list", [slotId]),
+    reclaim: (project, slotId) => call("clutchLocks", "reclaim", [project, slotId]),
   });
+
+  // The two-argument verbs also accept the pre-tabs spelling, start(payload):
+  // a first argument that is not a slot string IS the payload.
+  function runArgs(slotOrPayload, maybePayload) {
+    if (typeof slotOrPayload === "string") return [slotOrPayload, maybePayload];
+    return ["", slotOrPayload];
+  }
 
   // the host-side run loop (P1-4): the page is a view only — it calls
   // start/stop/step/drive/state and subscribes to run:event pushes. The loop
@@ -129,11 +148,11 @@
   // state takes the same {mode, project} pair, because that is the question a
   // page that was not there when the turn opened has to ask (P2-3 resume).
   expose("clutchRun", {
-    start: (payload) => call("clutchRun", "start", [payload]),
-    stop: () => call("clutchRun", "stop"),
-    step: () => call("clutchRun", "step"),
-    drive: () => call("clutchRun", "drive"),
-    state: (payload) => call("clutchRun", "state", [payload]),
+    start: (slotId, payload) => call("clutchRun", "start", runArgs(slotId, payload)),
+    stop: (slotId) => call("clutchRun", "stop", [slotId]),
+    step: (slotId) => call("clutchRun", "step", [slotId]),
+    drive: (slotId) => call("clutchRun", "drive", [slotId]),
+    state: (slotId, payload) => call("clutchRun", "state", runArgs(slotId, payload)),
     onEvent: (cb) => subscribe("run:event", cb),
   });
 
@@ -144,6 +163,8 @@
     versions: (name) => call("clutchComponents", "versions", [name]),
     remove: (name, opts) => call("clutchComponents", "remove", [name, opts]),
     setDisabled: (name, disabled) => call("clutchComponents", "setDisabled", [name, disabled]),
+    settings: (name) => call("clutchComponents", "settings", [name]),
+    setSetting: (name, values) => call("clutchComponents", "setSetting", [name, values]),
     mirrors: () => call("clutchComponents", "mirrors"),
     addMirror: (url) => call("clutchComponents", "addMirror", [url]),
     removeMirror: (url) => call("clutchComponents", "removeMirror", [url]),

@@ -67,7 +67,7 @@ export function foldLabel(n) {
 // opening a new one.
 export function turnEnded(status) {
   const s = String(status || "").trim();
-  return s === "completed" || s === "aborted";
+  return s === "completed" || s === "aborted" || s === "released";
 }
 
 // Where the turn that ends at `turnEnd` really begins: its own region, widened
