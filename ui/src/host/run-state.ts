@@ -82,9 +82,17 @@ function durableEvents(events) {
 // → results), then one record per call. The record wins where both exist: it is
 // the line the tool actually ran from, and it carries what the assistant turn
 // does not (`ui`, `path_arg`).
+//
+// The call's id is the MODEL's id, which a `tool_call` record carries in
+// `tool_call_id` — never its own `id`. Every durable line has an `id` of its own
+// (agent/events.py mints one per event), so reading `id` first turns one model
+// call into two entries with different ids: the loop then runs the call a second
+// time under the line's id, and a `write_file`/`edit_file` lands twice. The
+// assistant turn's entries are the other shape — they have only `id`, which IS
+// the call there.
 function callOf(tc) {
   return {
-    id: String((tc && tc.id) || (tc && tc.tool_call_id) || ""),
+    id: String((tc && tc.tool_call_id) || (tc && tc.id) || ""),
     name: String((tc && tc.name) || ""),
     arguments: String((tc && tc.arguments) || ""),
   };

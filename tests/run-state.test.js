@@ -8,12 +8,13 @@
 const { check, summary } = require("./harness.js");
 const { DURABLE_TYPES, durableEvents, foldRun } = require("../ui/run-state.js");
 
-// one durable event as the log writes it (agent/events.py); only the fields this
-// fold reads are spelled out, and `id`/`timestamp` are dropped because nothing
-// here may depend on them
+// one durable event as the log writes it (agent/events.py); the fields this fold
+// reads are spelled out. `timestamp` is dropped (nothing may depend on it) but a
+// `tool_call` record keeps its own line `id`: every line has one, and a fold that
+// mistook it for the call's id would hand the same call out twice.
 const user = (content) => ({ type: "user_message", content });
 const said = (content, tool_calls = [], reasoning = "") => ({ type: "assistant_message", content, tool_calls, reasoning });
-const call = (id, name, args = "{}") => ({ type: "tool_call", name, arguments: args, tool_call_id: id, ui: {}, path_arg: "" });
+const call = (id, name, args = "{}") => ({ id: `line-${id}`, type: "tool_call", name, arguments: args, tool_call_id: id, ui: {}, path_arg: "" });
 const result = (id, content = "ok") => ({ type: "tool_result", tool_call_id: id, content, is_error: false, diff: "" });
 const final = (status = "completed", summary = "") => ({ type: "final", status, summary });
 const compaction = (s = "…") => ({ type: "compaction", summary: s });
@@ -118,6 +119,9 @@ function main() {
     ]);
     check(both.calls.length === 1 && both.calls[0].name === "read_file", "one call is one entry, even when both records exist");
     check(both.calls[0].arguments === '{"p":"x"}', "and the record's own arguments are the ones kept");
+    // the record's own line id is not a call: two entries here would be one
+    // `edit_file` run twice — the duplicate edit this check exists to prevent
+    check(both.calls[0].id === "t1", "and the entry it hands out carries the MODEL's call id, not the line's own id");
   }
 
   // ---- 5. an answer that never got its final ----
