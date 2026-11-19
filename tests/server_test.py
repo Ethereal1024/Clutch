@@ -332,6 +332,30 @@ def _file_browser(base_url, proj_dir) -> None:
     st, body = http_get(f"{base_url}/api/fs/list?path=/nonexistent_clutch_xyz")
     data = json.loads(body)
     check(data.get("error"), "fs list reports a bad path")
+    # 3c-bis. the address bar's one question (/api/fs/stat): navigate, open, or
+    # offer a create. An ABSENT path is an answer, not an error — while this route
+    # was missing from this host, the picker's answer to a typed new filename was
+    # a 404 {"error": "not found"}, shown as "could not check path: not found",
+    # and no new .clc could be created from the filename bar at all.
+    st, body = http_get(f"{base_url}/api/fs/stat?path={quote(str(proj_dir))}")
+    data = json.loads(body)
+    check(st == 200 and data.get("type") == "dir", "fs stat: a directory is a directory")
+    check(data.get("path") == str(proj_dir), "fs stat answers the path it resolved")
+    st, body = http_get(f"{base_url}/api/fs/stat?path={quote(str(proj_dir / 'demo.clc'))}")
+    data = json.loads(body)
+    check(st == 200 and data.get("type") == "file", "fs stat: a project file is a file")
+    fresh = proj_dir / "not-yet.clc"
+    st, body = http_get(f"{base_url}/api/fs/stat?path={quote(str(fresh))}")
+    data = json.loads(body)
+    check(st == 200, "fs stat: an absent path is 200, never 404 (the create offer)")
+    check(data.get("type") == "none" and data.get("error") is None, "fs stat: absent is data, not an error")
+    check(data.get("path") == str(fresh), "fs stat names the path a create would produce")
+    st, body = http_get(f"{base_url}/api/fs/stat?path=clutch-not-here.clc")
+    data = json.loads(body)
+    check(
+        data.get("type") == "none" and data.get("path") == str(Path.home() / "clutch-not-here.clc"),
+        "fs stat: a relative name means under home, the same root the listing starts from",
+    )
 
 
 def _symlink_marking(base_url, proj_dir, clc) -> None:

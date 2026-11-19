@@ -62,6 +62,10 @@ class RoutingMixin:
             self._workspace_checkpoints()
         elif path == "/api/fs/list":
             self._fs_list()
+        elif path == "/api/fs/stat":
+            # the address bar's one question: dir, file, or nothing yet (the
+            # create offer). Absent is data here, never a 404.
+            self._fs_stat()
         elif path == "/api/settings":
             self._settings_get()
         elif path == "/api/host":

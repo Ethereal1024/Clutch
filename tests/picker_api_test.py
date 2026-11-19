@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -34,7 +35,7 @@ from agent.browsing import valid_name
 from agent.config import Config
 from agent.core.project_lock import ProjectLock
 from agent.server import build
-from tests.testsupport import check, http_post
+from tests.testsupport import check, http_get, http_post
 
 
 def _serve() -> tuple[str, object]:
@@ -47,6 +48,14 @@ def _serve() -> tuple[str, object]:
 
 def _post(base: str, url: str, body: dict | None = None) -> tuple[int, dict]:
     st, out = http_post(base + url, body)
+    try:
+        return st, json.loads(out)
+    except ValueError:
+        return st, {"raw": out}
+
+
+def _get(base: str, url: str) -> tuple[int, dict]:
+    st, out = http_get(base + url)
     try:
         return st, json.loads(out)
     except ValueError:
@@ -88,6 +97,53 @@ def mkdir_route(base: str) -> None:
     st, got = _post(base, "/api/fs/mkdir", {"dir": str(tmp / "nope"), "name": "x"})
     check(st == 200, f"a directory that is not there is 200 (got {st})")
     check("no such directory" in (got["error"] or ""), f"with its own sentence: {got}")
+
+
+def stat_route(base: str) -> None:
+    """GET /api/fs/stat — the address bar's one question.
+
+    The bar routes a typed path three ways (navigate / open / offer a create), so
+    it asks the host what is there before it does any of them. An ABSENT path is
+    the third answer, not a failure: while this route was missing from this host,
+    typing a new .clc and pressing Enter answered 404 {"error": "not found"},
+    which the picker showed as "Could not check path: not found" — and the create
+    offer never appeared, so no new file could be made from the bar at all.
+    """
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "here.clc").write_text("x", encoding="utf-8")
+
+    st, got = _get(base, "/api/fs/stat?path=" + quote(str(tmp)))
+    check(st == 200, f"a directory is 200 (got {st}: {got})")
+    check(got.get("type") == "dir", f"and says it is one: {got}")
+
+    st, got = _get(base, "/api/fs/stat?path=" + quote(str(tmp / "here.clc")))
+    check(st == 200 and got.get("type") == "file", f"an existing file is a file: {got}")
+
+    fresh = tmp / "not-yet.clc"
+    st, got = _get(base, "/api/fs/stat?path=" + quote(str(fresh)))
+    check(st == 200, f"an absent path is 200, never 404: the create offer ({got})")
+    check(
+        got.get("type") == "none" and got.get("error") is None,
+        f"and absent is data in `type`, not an error: {got}",
+    )
+    check(
+        got.get("path") == str(fresh),
+        f"naming the path a create would produce (the offer splits it): {got}",
+    )
+
+    # a relative name means "under home", the same root the listing starts from —
+    # so the answer a typed name gets and the directory it lands in cannot disagree
+    st, got = _get(base, "/api/fs/stat?path=clutch-not-here-yet.clc")
+    check(
+        got.get("type") == "none" and got.get("path") == str(Path.home() / "clutch-not-here-yet.clc"),
+        f"a relative name resolves under home: {got}",
+    )
+
+    # the create the offer leads to still works in that directory, and the answer
+    # the bar was given names exactly the file the create writes
+    st, got = _post(base, "/api/project/new", {"dir": str(tmp), "name": "not-yet.clc"})
+    check(st == 200 and got.get("project") == str(fresh), f"the offered path is created: {got}")
+    check(fresh.is_file(), "and the file is on disk where the offer said it would be")
 
 
 def create_route(base: str) -> None:
@@ -140,11 +196,69 @@ def create_route(base: str) -> None:
     check(ProjectLock.inspect(str(fresh))["held"], "the refusal left the live project's write lock in place")
 
 
+def stat_remote_transport() -> None:
+    """The same three answers over the SSH bridge — about the REMOTE filesystem.
+
+    A remote picker that answered from the app host's own disk would offer to
+    create a file on the wrong machine, so the stat has to be one exec over the
+    bridge, exactly like the listing it sits beside.
+    """
+    import re
+
+    import agent.browsing as browsing
+    from agent.tools.transport import CommandResult
+
+    state = RunState()
+    state.backend_mode = "ssh"
+    state.bridge_url = "http://127.0.0.1:1"  # never dialled: the transport is faked
+    state.remote_root = "/home/u/proj"
+    seen: list[str] = []
+
+    class FakeTransport:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def run(self, command: str, timeout: float, cancel=None, *, binary: bool = False):
+            seen.append(command)
+            found = re.search(r"'([^']*)'", command)
+            target = (found.group(1) if found else "").rstrip("/")
+            if target == "/home/u/proj":
+                return CommandResult(code=0, stdout="dir\n", stderr="")
+            if target == "/home/u/proj/notes.clc":
+                return CommandResult(code=0, stdout="file\n", stderr="")
+            return CommandResult(code=0, stdout="none\n", stderr="")
+
+    real = browsing.SshTransport
+    browsing.SshTransport = FakeTransport  # type: ignore[assignment]
+    try:
+        got = browsing.fs_stat(state, "")
+        check(got == {"path": "/home/u/proj", "type": "dir", "error": None}, f"remote: the browse root is a dir: {got}")
+        got = browsing.fs_stat(state, "notes.clc")
+        check(
+            got == {"path": "/home/u/proj/notes.clc", "type": "file", "error": None},
+            f"remote: a relative name lands under the remote root: {got}",
+        )
+        got = browsing.fs_stat(state, "brand-new.clc")
+        check(
+            got == {"path": "/home/u/proj/brand-new.clc", "type": "none", "error": None},
+            f"remote: an absent file is the create offer, not a failure: {got}",
+        )
+    finally:
+        browsing.SshTransport = real  # type: ignore[assignment]
+    check(len(seen) == 3, f"each stat is ONE exec over the bridge (got {len(seen)})")
+    check(
+        all("test -d" in c and "test -f" in c for c in seen),
+        f"and that exec asks both questions in one round trip: {seen}",
+    )
+
+
 def main() -> None:
     name_policy()
+    stat_remote_transport()
     base, srv = _serve()
     try:
         mkdir_route(base)
+        stat_route(base)
         create_route(base)
     finally:
         srv.shutdown()

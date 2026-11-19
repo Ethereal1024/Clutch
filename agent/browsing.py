@@ -6,6 +6,7 @@ The JSON shapes here are the UI's interface contract and are built in exactly
 one place per shape, so the local and remote implementations cannot drift:
 
   dir listing   {path, parent, entries: [{name, path, dir, link}], error}
+  stat result   {path, type: "dir"|"file"|"none", error}
   tree node     {name, path, dir, link, children?}
   mkdir result  {path, error}                (error null on success)
 
@@ -136,6 +137,61 @@ def _fs_list_remote(state: RunState, raw: str, show_hidden: bool) -> dict[str, A
     ]
     parent = target.rsplit("/", 1)[0] if target != "/" else None
     return dir_payload(target, parent, entries)
+
+
+# ---- the path bar's one question (/api/fs/stat) ----
+
+
+def stat_payload(path: str, kind: str) -> dict[str, Any]:
+    """The one stat envelope both transports return.
+
+    `type` is the whole answer the picker routes on, and it has exactly three
+    values — the same three the JS host answers (ui/host/fs.js `fsStat`): a
+    directory, a regular file, or `none`. Anything that is neither (a fifo, a
+    socket, a broken symlink: what a local `test -f` would not match either)
+    reads as `none`, because the picker can only open a project from a file.
+    """
+    return {"path": path, "type": kind if kind in ("dir", "file") else "none", "error": None}
+
+
+def fs_stat(state: RunState, raw: str) -> dict[str, Any]:
+    """What is at this path: a directory, a regular file, or nothing yet?
+
+    The address bar is the picker's single surface (navigate / open / create), so
+    this is the one question it asks before doing any of them. A path that is not
+    there is NOT an error and never a 404: absent is the create offer, i.e. data
+    in `type`. Answering 404 for it is indistinguishable from "this host has no
+    such route" — which is exactly how typing a new filename came back as
+    "could not check path: not found" and no file could be created.
+    """
+    if state.backend_mode == "ssh" and state.bridge_url:
+        return _fs_stat_remote(state, raw)
+    return _fs_stat_local(raw)
+
+
+def _fs_stat_local(raw: str) -> dict[str, Any]:
+    # `_local_dir` resolves the parent chain without requiring the leaf to exist
+    # (Path.resolve is non-strict), so the answer names the path a create would
+    # produce — and the listing and the offer cannot disagree about it.
+    target = _local_dir(raw)
+    if target.is_dir():
+        return stat_payload(str(target), "dir")
+    if target.is_file():
+        return stat_payload(str(target), "file")
+    return stat_payload(str(target), "none")
+
+
+def _fs_stat_remote(state: RunState, raw: str) -> dict[str, Any]:
+    """One `test` pipeline over the bridge, so a stat is a single exec."""
+    transport = SshTransport(state.bridge_url)
+    target = _remote_dir(state, transport, raw)
+    command = (
+        f"if test -d {shq(target)}; then echo dir; "
+        f"elif test -f {shq(target)}; then echo file; else echo none; fi"
+    )
+    r = transport.run(command, _FS_LIST_TIMEOUT)
+    kind = r.stdout.strip() if r.code == 0 else "none"
+    return stat_payload(target, kind)
 
 
 # ---- the picker's write side: one folder ----

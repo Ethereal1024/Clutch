@@ -129,6 +129,18 @@ class WorkspaceMixin:
         show_hidden = qs.get("hidden", ["0"])[0] == "1"
         self._json(browsing.fs_list(self._state, raw, show_hidden))
 
+    def _fs_stat(self) -> None:
+        """What is at this path: a directory, a regular file, or nothing yet.
+
+        The address bar asks this before it navigates, opens, or offers a create,
+        so an absent path is an ANSWER (`type: none`) and not a 404 — a 404 here
+        is what "this host has no such route" answers, and the picker reported it
+        as "could not check path: not found" instead of offering the new file.
+        """
+        qs = parse_qs(urlparse(self.path).query)
+        raw = (qs.get("path") or [""])[0]
+        self._json(browsing.fs_stat(self._state, raw))
+
     def _fs_mkdir(self) -> None:
         """New folder, inside the directory the picker is showing.
 
