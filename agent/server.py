@@ -29,7 +29,6 @@ Endpoints (all JSON except SSE/NDJSON):
   POST /api/workspace/rollback {offset} undo every file change from that task on
   GET  /api/fs/list           server-side directory browser (one level)
   POST /api/fs/mkdir {dir, name}  one new folder inside the shown directory
-  POST /api/fs/mkdir {dir, name}  one new folder inside the shown directory
   POST /api/channel {port, token, components}  the client's plugin declarations
   GET  /api/channel        what this session holds (never the token)
   DELETE /api/channel      forget them (the client went away)
@@ -315,6 +314,33 @@ _release_guard = threading.Lock()
 _release_recorded = False
 
 
+def has_open_turn(project: Project) -> bool:
+    """Return True iff the .clc log currently holds an open (un-finalled) turn.
+
+    This is the Python equivalent of ui/src/host/run-state.ts:foldRun. A turn
+    is open iff the durable events after the last ``final`` contain at least one
+    ``user_message``. The log is the source of truth (run-state.ts:1-10), not
+    the in-memory lease flag: a lease can expire or be skipped during shutdown
+    while the log correctly shows an open turn, and vice-versa.
+
+    Uses the resident window (project.log.events()), which always covers the
+    tail — only pre-window history might be compacted away, and a compaction
+    boundary is itself a durable event that resets the region.
+    """
+    try:
+        events = project.log.events()
+        # Walk backwards to find the last final; everything after it is the region.
+        last_final_idx = -1
+        for i in range(len(events) - 1, -1, -1):
+            if events[i].type == "final":
+                last_final_idx = i
+                break
+        region = events[last_final_idx + 1 :]
+        return any(ev.type == "user_message" for ev in region)
+    except Exception:  # noqa: BLE001 - defensive: a broken log is not an open turn
+        return False
+
+
 def record_release(state: RunState) -> None:
     """Write the ending a run in flight could not write for itself.
 
@@ -325,25 +351,28 @@ def record_release(state: RunState) -> None:
 
     Deliberately not the cancel path. /api/stop means the user asked, and the
     loop answers that itself with a cancelled-flavoured final; a release is
-    something only the departing process can report, and it is an ERROR — the
-    work stopped for a reason that had nothing to do with the task.
+    something only the departing process can report, and it is a status of its
+    own — `released`, not `completed` (the task never finished) and not `error`
+    (a live loop's word for a turn it is still there to continue). The work
+    stopped for a reason that had nothing to do with the task, and the turn is
+    over, so the window must fold it closed rather than offer a continuation
+    into a session that is no longer serving.
 
-    The run slot is read without the lock (a signal handler must never block on
-    a lock some worker holds). It cannot change hands underneath us: POST
-    /api/run refuses to replace the active project while busy, so during a run
-    ``state.project`` IS the running project, and ``busy`` only ever goes
-    True -> False.
+    The guard against writing twice is here, not in has_open_turn, so the
+    check is single-shot even if two signal deliveries race. has_open_turn
+    reads the log (not the lease) so it stays correct across shutdown races,
+    lease expiry, and the client's release POST arriving before or after.
     """
     global _release_recorded
     with _release_guard:
         if _release_recorded:
             return
         project = state.project
-        if project is None or not state.busy:
+        if project is None or not has_open_turn(project):
             return
         _release_recorded = True
         try:
-            project.log.append(FinalEvent(status="error", summary=RELEASED_SUMMARY))
+            project.log.append(FinalEvent(status="released", summary=RELEASED_SUMMARY))
             print(f"[clutch-server] {RELEASED_SUMMARY}", flush=True)
         except Exception as e:  # noqa: BLE001 - already going down: never mask why
             print(f"[clutch-server] cannot record the release: {e}", file=sys.stderr)

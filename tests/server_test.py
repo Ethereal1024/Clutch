@@ -1624,7 +1624,10 @@ def _session_release_is_recorded() -> None:
 
                 final = events_in(clc)[-1]
                 check(final["type"] == "final", "the released run's last durable line is a final")
-                check(final.get("status") == "error", "the release is recorded as an error, not a completion")
+                check(
+                    final.get("status") == "released",
+                    "the release is recorded as released — neither a completion nor an in-session error",
+                )
                 check(
                     final.get("summary") == server_mod.RELEASED_SUMMARY,
                     "the final names the release: the host took the session while the run was in flight",
@@ -1658,6 +1661,7 @@ def _session_release_is_recorded() -> None:
         # once per delivery, so a second SIGTERM would append a second final to a
         # .clc whose tail holds exactly one ending.
         with tempfile.TemporaryDirectory() as gdir:
+            from agent.events import UserMessageEvent
             from agent.project import create_project
             from agent.tools.workspace import LocalWorkspace
 
@@ -1666,6 +1670,10 @@ def _session_release_is_recorded() -> None:
             gstate = server_mod.RunState()
             gstate.set_project(gproject, workspace=gws)
             gstate.claim_run(str(gproject.path))
+            # the run's shape: an open turn in the log (record_release reads the
+            # log, not the lease — a run whose turn is already finalled has
+            # nothing to report and correctly writes no second ending)
+            gproject.log.append(UserMessageEvent(content="hold the line"))
             server_mod.record_release(gstate)
             server_mod.record_release(gstate)  # the second delivery
             finals = [ev for ev in events_in(Path(gproject.path)) if ev["type"] == "final"]
