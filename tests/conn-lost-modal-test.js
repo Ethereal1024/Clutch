@@ -713,8 +713,8 @@ async function main() {
   check((await reconciledBackendUrl()) === null,
   "the note is not what makes that null: with the intent gone the stale-remote branch has nothing to dial either");
   const hideCalls = APP.match(/(?<!function )hideWelcome\(\)/g) || [];
-  check(/id="welcome" class="welcome">/.test(HTML) && hideCalls.length === 2,
-  "and the welcome page is what that is: it ships visible in the markup, and the only two calls that hide it are the two ways a project gets opened (js/project.js)");
+  check(/id="welcome" class="welcome">/.test(HTML) && hideCalls.length === 3,
+  "and the welcome page is what that is: it ships visible in the markup, and the only calls that hide it are the ways a project gets opened (full open, create, tail restore; project.ts)");
   check(/function hideWelcome\(\) \{\n  document\.getElementById\("welcome"\)\.classList\.add\("hidden"\);/.test(APP),
   "no boot path, no reload path and no restore hides it: the window the user lands on is the fresh one");
 

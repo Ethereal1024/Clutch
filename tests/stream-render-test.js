@@ -181,7 +181,7 @@ global.window = { matchMedia: () => ({ matches: true }), addEventListener: () =>
   check(Number(src.match(/TEXT_RENDER_MIN_MS = (\d+)/)[1]) >= 100, "throttle window is at least ~100ms");
   check(/HL_STREAM_MAX = \d+/.test(src), "streaming fence size cap present");
   check(/_mathDone/.test(src), "math idempotence guard present");
-  check(/if \(!state\.apiBase\) throw noBackend\(\)/.test(src),
+  check(/if \(!base\) throw noBackend\(\)/.test(src),
         "the raw NDJSON stream in openProject guards its base too");
   check(/timeout = \d+/.test(fnBody("apiFetch").slice(0, 200)), "apiFetch has a default timeout");
 

@@ -30,6 +30,11 @@ delete require.cache[require.resolve("../ui/preload")];
 require("../ui/preload");
 Module._load = origLoad;
 
+// clutchWin is window chrome (minimize/maximize/close), not a host call: the
+// phone WebView has no window to control and mobile.css hides the buttons, so
+// there is deliberately no bridge route to compare against.
+delete exposed.clutchWin;
+
 // ---- load the shim the way a browser would, with a pinned bridge base ----
 const BRIDGE = "http://127.0.0.1:9999/";
 globalThis.CLUTCH_BRIDGE_BASE = BRIDGE;

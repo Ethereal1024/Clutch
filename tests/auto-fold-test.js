@@ -703,6 +703,41 @@ check(folds9h().length === 1 && folds9h()[0] === f9h && f9h.dataset.turnOpen ===
       p.children[p.children.length - 2] === a9h && p.children[p.children.length - 1] === d9h,
       "and the answer that closes the turn closes that one block, directly above itself");
 
+// 9i) a clean-restart released session: `status="released"` is a FINISHED turn.
+// The fold it makes is CLOSED (turnEnded returns true for "released"), so a fresh
+// task the user sends after reopening the project opens its own fold — the
+// released-session block does not swallow it.
+const t9i = row("event user", "do something");
+const w9i = row("event tool_group", "read_file …");
+const e9i = row("completion", "released");
+const n9i = row("completion-note", "the host released this session while the run was in flight");
+p = pane([t9i, w9i, e9i, n9i]);
+ctx.eventsEl = p;
+ctx.autoFoldTurn();
+const f9i = foldOf(p);
+check(f9i !== undefined && p.children.length === 4 && p.children[1] === f9i &&
+      p.children[2] === e9i && p.children[3] === n9i,
+      "a released-session ending folds the work it drew, under the instruction that started it; " +
+      "the divider and reason stay in plain sight");
+check(f9i !== undefined && f9i.dataset.turnOpen === undefined,
+      "the fold is CLOSED: a released session is a finished turn, not an interruption — the " +
+      "next task the user sends must open its own block, not be swallowed by this one");
+
+// 9i-b) a fresh task after the released fold opens its own fold, unaffected
+const t9i2 = row("event user", "start fresh");
+const w9i2 = row("event tool_group", "bash …");
+const a9i2 = row("event text", "done");
+const d9i2 = row("completion", "completed");
+for (const el of [t9i2, w9i2, a9i2, d9i2]) p.appendChild(el);
+ctx.autoFoldTurn();
+const folds9i = p.children.filter((c) => c.matches(".turn-fold"));
+check(folds9i.length === 2 && folds9i[0] === f9i,
+      "the new task opens a SECOND fold of its own: two turns, two separate blocks");
+check(folds9i[1] !== undefined && folds9i[1].dataset.turnOpen === undefined &&
+      p.children[p.children.length - 2] === a9i2 &&
+      p.children[p.children.length - 1] === d9i2,
+      "the new fold is closed and the answer lands directly under it");
+
 // ---- 10) the turn still running: foldable WHILE it runs, and the ring that says
 // so on a block the reader folded ----
 // The block is made by the run's first process row, and the rows go into it as they

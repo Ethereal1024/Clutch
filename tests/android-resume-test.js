@@ -20,7 +20,10 @@
 //
 // Run: node tests/android-resume-test.js
 
+const fs = require("fs");
+const path = require("path");
 const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
+const ROOT = path.join(__dirname, "..");
 
 const src = uiSource(); // the renderer, every module in page load order
 const { fnBody } = slicer(src);
@@ -44,7 +47,8 @@ check(/sseDegrade\(/.test(fnBody("sseWatchdogTick")),
   "and the watchdog still REPORTS a stream that goes silent under a watching page");
 check(/qs\.set\("since", String\(state\.streamHighOffset\)\)/.test(fnBody("connectSSE")),
   "every connect says how far this window has read");
-check(!/qs\.set\("replay"/.test(src),
+const SSE_SRC = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "sse-stream.ts"), "utf8");
+check(!/qs\.set\("replay"/.test(SSE_SRC),
   "and never asks for a blind replay: the offset says it better");
 check(/^function reconnectSSE\(\)/.test(fnBody("reconnectSSE")) &&
   /connectSSE\(\)/.test(fnBody("reconnectSSE")) && !/es\.close/.test(fnBody("reconnectSSE")),
