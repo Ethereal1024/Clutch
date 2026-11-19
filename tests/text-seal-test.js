@@ -98,6 +98,18 @@ global.setOlderPill = () => {};
 global.beginCatchUp = () => {};
 global.endCatchUp = () => {};
 global.clearStream = () => {};
+// the replay bracket (stream-view.ts) and the block a reconnect kept
+// (stream-events.ts): the evals below run as classic scripts, so the real
+// functions resolve these free names against the global scope
+global.catchUp = false;
+global.carriedTextEl = null;
+global.carriedText = "";
+// the replay bracket (stream-view.ts) and the block a reconnect kept
+// (stream-events.ts): the evals below run as classic scripts, so the real
+// functions resolve these free names against the global scope
+global.catchUp = false;
+global.carriedTextEl = null;
+global.carriedText = "";
 
 // ---- load the real code ----
 // the coalesced text render (stream-text.ts): renderTextBlock is what paints the
@@ -130,6 +142,10 @@ function freshPane() {
   state.retryNoteEl = null;
   state.runSettled = false;
   state.sseRunLostPending = false;
+  // what a reconnect would have carried out of the previous pane
+  global.catchUp = false;
+  global.carriedTextEl = null;
+  global.carriedText = "";
 }
 
 // ---- 1. the reported sequence: the record lands between two deltas ----
@@ -205,7 +221,97 @@ addEvent({ type: "text_delta", content: "the answer" }); // an echo, not a secon
 check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, "the answer") === 1,
   "a delta echoing the finished answer does not paint it again");
 
-// ---- 8. source-level guards: the state the fix lives in ----
+// ---- 8. the reconnect: a settled answer is kept, an unfinished block is not ----
+//
+// The reported loss this pins: the window's own socket reconnects (minimize, a
+// phone returning from the background, the stale watchdog), es.onopen drops the
+// live partial, and the block it deleted held the DURABLE closing prose — a
+// record the replay can never re-deliver, because addEvent drops every record at
+// or below the offset this window already painted. The pane then ended at a
+// `completed` divider with no answer above it ("git output → completed") while
+// the .clc held the answer all along.
+(0, eval)(runnableSnippet(fnBody("dropOrphanLive")));
+
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+addEvent({ type: "assistant_message", content: OPEN + TAIL }); // the step's record adopted it
+check(state.textSealed === true, "the block holds its step's durable record");
+dropOrphanLive(); // ...and then the socket comes back
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "a reconnect KEEPS a block that holds the durable record: the closing prose is not lost");
+check(state.lastTextEl === null && state.lastTextContent === "",
+  "…while releasing the live pointer, so a record the outage made it miss can still open its own block");
+check(state.textSealed === true,
+  "…and the seal keeps the step's straggling deltas from repeating what the block says");
+
+freshPane();
+addEvent({ type: "text_delta", content: OPEN }); // still streaming: no record for it yet
+check(state.textSealed === false, "an unfinished block is not sealed");
+dropOrphanLive();
+check(textBlocks().length === 0,
+  "an unfinished block is still dropped on reconnect: the dead attempt's deltas are never stored");
+
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+addEvent({ type: "assistant_message", content: OPEN + TAIL });
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(state.runSettled === true, "the run is settled once its final landed");
+dropOrphanLive();
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "the closing prose of a finished run also survives a reconnect (runSettled, not the seal, is what keeps it)");
+
+// ---- 9. a live `completed` final puts its answer back when the pane lost it ----
+//
+// The final is the last record that can notice the answer is missing: foldRun
+// (run-state.ts) closes a turn by writing its last assistant_message AS the
+// completed summary, so the text is right there — and appendCompletion itself
+// prints nothing for `completed`, which is why nothing else can fall back.
+freshPane();
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "no block on the page: the final's own text is painted above the divider");
+
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+addEvent({ type: "assistant_message", content: OPEN + TAIL });
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "the answer is already on the page: the final adds the divider, never a second copy of it");
+
+freshPane();
+global.catchUp = true; // a replayed window: the records themselves draw the turn
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(textBlocks().length === 0,
+  "a REPLAYED final paints nothing: the replayed assistant_message is what draws the answer");
+global.catchUp = false;
+
+freshPane();
+addEvent({ type: "final", status: "completed", summary: "" }); // a run with no answer to restore
+check(textBlocks().length === 0, "an empty completed summary paints nothing");
+
+freshPane();
+addEvent({ type: "final", status: "aborted", summary: "the reason" });
+check(textBlocks().length === 0,
+  "only `completed` falls back: an aborted run's summary is the reason, shown by the divider");
+
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+addEvent({ type: "assistant_message", content: OPEN + TAIL });
+dropOrphanLive(); // the reconnect keeps the sealed answer and releases the pointer
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL }); // ...the final lands after it
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "a final that follows the keep does not paint the kept answer a second time");
+
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+addEvent({ type: "assistant_message", content: OPEN + TAIL });
+dropOrphanLive();
+addEvent({ type: "user_message", content: "next task" });
+addEvent({ type: "final", status: "completed", summary: "a different answer" });
+check(textBlocks().length === 2 && occurrences(textBlocks()[1]._body.innerHTML, "a different answer") === 1,
+  "a new task ends the carry: its own answer is drawn even though the last one was kept");
+
+// ---- 10. source-level guards: the state the fix lives in ----
 const STATE = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "state.ts"), "utf8");
 const PROJECT = moduleOf("project.ts");
 check(/^\s*textSealed: false,$/m.test(STATE),

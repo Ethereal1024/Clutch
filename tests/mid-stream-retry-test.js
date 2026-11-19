@@ -45,6 +45,8 @@ function fakeNode(tag) {
     textContent: "",
     children: [],
     removed: false,
+    // a node on the page: dropOrphanLive keeps only what is still connected
+    isConnected: true,
     appendChild(c) { this.children.push(c); return c; },
     remove() { this.removed = true; },
   };
@@ -149,5 +151,50 @@ check(onopenBody.includes("dropOrphanLive();"),
   "es.onopen drops the live partial instead of leaving it on the page");
 check(!/lastTextEl = null|thinkingEl = null/.test(onopenBody),
   "…and does not reset the references alone, which left the frozen nodes behind");
+
+// ---- 5) a reconnect KEEPS what the log already says ----
+//
+// The other side of the same teardown, and the reported loss. A block whose text
+// a step's durable assistant_message has taken over (textSealed), or one that
+// belongs to a run whose final has landed (runSettled), is not a partial: the
+// replay a reconnect starts is filtered at this window's watermark, so the record
+// that drew it is never re-delivered and removing the node is permanent. The pane
+// then ends at a `completed` divider with the closing prose gone — "git output →
+// completed" — while the .clc has held the answer all along.
+const sealedEl = fakeNode("div");
+const think3 = fakeNode("div");
+global.state.lastTextEl = sealedEl;
+global.state.lastTextContent = "the closing report";
+global.state.textSealed = true; // its step's record adopted this text
+global.state.runSettled = false;
+global.state.thinkingEl = think3;
+global.state.retryNoteEl = null;
+global.carriedTextEl = null;
+global.carriedText = "";
+dropOrphanLive();
+check(!sealedEl.removed, "a reconnect keeps a block that holds a durable record's text");
+check(global.state.lastTextEl === null && global.state.lastTextContent === "",
+  "…while releasing the live pointer (a record the outage made it miss must open its own block)");
+check(global.state.textSealed === true, "…and keeping the seal, so the step's straggling deltas are dropped");
+check(global.carriedTextEl === sealedEl && global.carriedText === "the closing report",
+  "…and remembering it, so the run's final does not paint the same answer twice");
+check(think3.removed, "the reasoning block is still a partial and still goes");
+
+const settledEl = fakeNode("div");
+global.state.lastTextEl = settledEl;
+global.state.lastTextContent = "the closing report";
+global.state.textSealed = false;
+global.state.runSettled = true; // the run's final already landed
+global.carriedTextEl = null;
+global.carriedText = "";
+dropOrphanLive();
+check(!settledEl.removed,
+  "…and the closing prose of a finished run survives too (runSettled, not the seal, keeps it)");
+
+global.state.lastTextEl = null;
+global.state.textSealed = false;
+global.state.runSettled = false;
+global.carriedTextEl = null;
+global.carriedText = "";
 
 summary("mid-stream-retry-test", "discard semantics hold on the UI side");

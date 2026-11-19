@@ -23,7 +23,7 @@ import {
 } from "./stream-text";
 import { eventsEl, stream } from "./els";
 import {
-  autoScroll, beginCatchUp, endCatchUp, toolCallGroups, toolCalls,
+  autoScroll, beginCatchUp, catchUp, endCatchUp, toolCallGroups, toolCalls,
 } from "./stream-view";
 import { refreshRollbackAnchors } from "./task-rollback";
 import {
@@ -80,10 +80,16 @@ export function clearStreamPreviews() {
 // go, or it would sit above the retried answer as a stale copy. The retry
 // notice announces it (discard=true); none of that partial output is durable
 // (stream deltas are never stored), so nothing is lost by dropping it here.
-export function discardLivePartial() {
+//
+// `keepText` is the one exception, and it is not a retry: a block that holds a
+// durable assistant_message's text (textSealed) or that of a run already closed
+// (runSettled) is the log's own copy of an answer, not a partial. A reconnect
+// must still release the pointer — a record the outage made this window miss has
+// to be able to open its own block — but it must not delete what the log says.
+export function discardLivePartial(keepText = false) {
   if (state.textRenderRaf) { cancelAnimationFrame(state.textRenderRaf); state.textRenderRaf = 0; }
   if (state.thinkingRenderRaf) { cancelAnimationFrame(state.thinkingRenderRaf); state.thinkingRenderRaf = 0; }
-  if (state.lastTextEl) { state.lastTextEl.remove(); state.lastTextEl = null; }
+  if (state.lastTextEl) { if (!keepText) state.lastTextEl.remove(); state.lastTextEl = null; }
   state.lastTextContent = "";
   state.textSealed = false; // the block that held the durable text is gone
   if (state.thinkingEl) { state.thinkingEl.remove(); state.thinkingEl = null; }
@@ -92,20 +98,48 @@ export function discardLivePartial() {
 }
 
 // The same teardown, asked for by the WINDOW's own socket instead of by a
-// `discard` notice: a reconnect (sse-stream.ts es.onopen) restarts the
-// streaming state, and the attempt whose deltas it can no longer receive is as
-// dead to this view as a retried one is — a delta is never stored (agent/events.py
-// keeps finals), so the window cannot continue that block, only abandon it. The
-// agent's own answer to the same failure is to reissue the request and re-stream
-// the turn from its start, and the log replays whatever this window never painted;
-// both draw the turn again, complete.
+// `discard` notice: a reconnect (sse-stream.ts es.onopen) restarts the streaming
+// state, and an UNFINISHED block is as dead to this view as a retried one is — a
+// delta is never stored (agent/events.py keeps finals), so the window cannot
+// continue that block, only abandon it. The agent's own answer to the same
+// failure is to reissue the request and re-stream the turn from its start, and
+// the log replays whatever this window never painted; both draw the turn again,
+// complete.
 //
-// Keeping the nodes instead is the reported freeze: "thinking… 412 chars" left on
-// screen for good under a run that is no longer thinking, a second live block
-// opening beside it, and the turn's own assistant_message rendering a duplicate
-// of the text under the stale first half.
+// Keeping an unfinished block instead is the reported freeze: "thinking… 412
+// chars" left on screen for good under a run that is no longer thinking, a
+// second live block opening beside it, and the turn's own assistant_message
+// rendering a duplicate of the text under the stale first half. But the rule is
+// about the DELTAS, not the block: once a step's durable record has adopted the
+// text (textSealed) or the run's final has landed (runSettled), there is no
+// delta this window is owed — only a record it already painted. Dropping that
+// node is the other reported loss, an answer the log has and the pane does not.
+//
+// So a KEPT block is remembered here (carriedTextEl/carriedText): the live
+// pointer is still released below, but the run's `final` can then recognise its
+// own answer already on the page instead of painting a second copy of it.
+let carriedTextEl = null;
+let carriedText = "";
+
 export function dropOrphanLive() {
-  discardLivePartial();
+  // A sealed block (its step's assistant_message adopted its text) or one that
+  // belongs to a run already closed (its final landed) is NOT a partial. The
+  // deltas it might still be owed are never stored, and the record that drew it
+  // is never re-delivered — addEvent's watermark drops every replay at or below
+  // what this window has already painted — so removing the node is a permanent
+  // loss: the pane ends at a `completed` divider with the closing prose gone
+  // ("git output → completed") while the .clc has held the answer all along.
+  // Only an unsealed block mid-step is as dead as a retried one, and only that
+  // one may go.
+  const keepText = Boolean(state.lastTextEl && state.lastTextEl.isConnected &&
+    (state.textSealed || state.runSettled));
+  carriedTextEl = keepText ? state.lastTextEl : null;
+  carriedText = keepText ? (state.lastTextContent || "") : "";
+  discardLivePartial(keepText);
+  // the pointer is released either way (a record the outage made this window miss
+  // has to be able to open its own block); the seal still says the step's deltas
+  // would only repeat what the kept block already shows
+  if (keepText) state.textSealed = true;
   state.toolGroupEl = null;
   clearRetryNote(); // a reconnect may have skipped the event that would clear it
 }
@@ -184,6 +218,9 @@ export function addEvent(ev) {
     // text — its durable copy is on the log and its block is final (stream-events'
     // assistant_message seals a block once it holds the record)
     state.textSealed = false;
+    // ...and a block a reconnect carried out of that run is not this run's answer
+    carriedTextEl = null;
+    carriedText = "";
     // ...and every ask id the run before it handed out is dead
     forgetAnsweredPerm();
   } else if (ev && ev.type === "final") {
@@ -372,6 +409,42 @@ export function applyStreamEvent(ev) {
     forgetAnsweredPerm();
     clearStreamPreviews(); // an aborted turn may have left half-streamed calls
     clearRetryNote(); // a lost stream that never recovered leaves no chip behind
+    // The divider below says "completed" and nothing else (render-events.ts
+    // appendCompletion), so the answer it closes has to be on the page already.
+    // It is — unless something took the block off (dropOrphanLive's discard, a
+    // replayed pane, a step the outage swallowed), and the log's replay starts at
+    // this window's watermark, so the assistant_message that drew it is never
+    // re-delivered. That is the reported ending: "git output → completed", the
+    // closing prose gone, while the .clc holds it. The final carries that text
+    // itself (run-state.ts foldRun closes a turn by writing its last
+    // assistant_message as the completed summary), so this is the one record that
+    // can put the answer back — and the last place that can notice it is missing.
+    if (!pageSink && !catchUp && ev.status === "completed" && String(ev.summary || "").trim()) {
+      const want = String(ev.summary || "");
+      const live = state.lastTextEl && state.lastTextEl.isConnected ? (state.lastTextContent || "") : "";
+      if (live) {
+        // the block on the page is already drawing this answer (its step's record
+        // adopted the same text). Complete it if the outage cut it short, but never
+        // paint a second copy: a doubled answer is the other reported bug.
+        if (live !== want && want.startsWith(live)) {
+          state.lastTextContent = want;
+          state.textSealed = true;
+          renderTextBlock(true);
+        }
+      } else if (!(carriedTextEl && carriedTextEl.isConnected && want.startsWith(carriedText))) {
+        // no live block owns the answer, and no reconnect kept a copy of it either
+        const wrap = createAgentTextBlock();
+        wrap.querySelector(".body").innerHTML = renderMarkdown(want);
+        highlightCode(wrap);
+        (pageSink || eventsEl).appendChild(wrap);
+        state.lastTextEl = wrap;
+        state.lastTextContent = want;
+        state.textSealed = true;
+        autoScroll();
+      }
+    }
+    carriedTextEl = null; // the run is over: nothing carries past its final
+    carriedText = "";
     // fences may have closed since the last delta: one final render pass
     if (state.lastTextEl && state.lastTextEl.isConnected) highlightCode(state.lastTextEl);
     // completion divider; for non-completed runs the summary carries the reason
