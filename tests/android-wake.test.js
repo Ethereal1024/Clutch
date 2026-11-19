@@ -79,10 +79,10 @@ function main() {
 
   // ---- 3. the host derives it from the loop's busy edges, and clears it at boot ----
   {
-    check(/onBusy:\s*writeRunMarker\b/.test(HOST), "the android host hands the loop's busy edges to the marker writer");
+    check(/onBusy:\s*\(b\) =>/.test(HOST) && /writeRunMarker\(busySlots\.size > 0\)/.test(HOST), "the android host hands the loop's busy edges to the marker writer (any busy slot keeps it awake)");
     check(!/onBusy/.test(DESKTOP), "the desktop shell passes no onBusy: there is no native service there");
     const run = jsBody(HOST, "ensureRun");
-    check(/onBusy:\s*writeRunMarker\b/.test(run), "and it does so on the ONE instance-building path");
+    check(/onBusy:\s*\(b\) =>/.test(run) && /busySlots/.test(run), "and it does so on the ONE instance-building path");
 
     const boot = jsBody(HOST, "start");
     check(Boolean(boot), "the host has a start() body");

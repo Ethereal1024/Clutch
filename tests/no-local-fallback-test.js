@@ -69,6 +69,9 @@ global.reapplyDegradeIfNeeded = async () => {
   degradeReapplies++;
 };
 global.window = {};
+// switchBackend announces the base to the status bar; the runner drives it
+// without a DOM, so the one event call it makes is stubbed here.
+global.document = { dispatchEvent() {} };
 
 // the one ask (app.js hostSessionUrl) and the two stubs it reaches: switchBackendResolved
 // is driven below, and it must go through that door — not around it
@@ -135,21 +138,21 @@ function handlerBody(source, marker) {
   if (start < 0) throw new Error("missing handler: " + marker);
   return source.slice(start, slicer(source).bodyEnd(source.indexOf("{", start)));
 }
-const HOST_BASE = handlerBody(HOST, "baseUrl: async () => {");
-const MAIN_BASE = handlerBody(MAIN, 'ipcMain.handle("api:base", async (e) => {');
+const HOST_BASE = handlerBody(HOST, "baseUrl: async (slotId) => {");
+const MAIN_BASE = handlerBody(MAIN, 'ipcMain.handle("api:base", async (e, slotId) => {');
 check(!/DEFAULT_API_BASE/.test(HOST),
   "the Android host has no placeholder base to hand out");
-check(/const base = \(await hostCore\.ensureWindowBackend\(window\)\) \|\| null;/.test(HOST_BASE),
+check(/const base = \(await hostCore\.ensureSlotBackend\(window, slot\)\) \|\| null;/.test(HOST_BASE),
   "it asks for this window's session and turns every 'nothing' into null");
-check(/announcePlugins\(base\);/.test(HOST_BASE) && /return base;/.test(HOST_BASE),
+check(/announcePlugins\(base, slot\);/.test(HOST_BASE) && /return base;/.test(HOST_BASE),
   "and the URL it announces to the session is the one it returns: one local, no second lookup");
 check(!/["']http:\/\/127\.0\.0\.1:[\d]+["']/.test(HOST_BASE),
   "no literal local base is invented anywhere in the answer");
 check(!/DEFAULT_API_BASE/.test(MAIN),
   "the desktop shell has no placeholder base either");
-check(/const base = \(await hostCore\.ensureWindowBackend\(e\.sender\)\) \|\| null;/.test(MAIN_BASE),
+check(/const base = \(await hostCore\.ensureSlotBackend\(e\.sender, slot\)\) \|\| null;/.test(MAIN_BASE),
   "it asks for this window's (e.sender's) session and turns 'nothing' into null");
-check(/announcePlugins\(e\.sender\.id, base\);/.test(MAIN_BASE) && /return base;/.test(MAIN_BASE),
+check(/announcePlugins\(e\.sender\.id, slot, base\);/.test(MAIN_BASE) && /return base;/.test(MAIN_BASE),
   "and the desktop announces and returns that same local, one lookup per claim");
 check(!/["']http:\/\/127\.0\.0\.1:[\d]+["']/.test(MAIN_BASE),
   "no literal local base is invented anywhere in the desktop answer");
@@ -283,8 +286,12 @@ async function main() {
     "and there is no phone/desktop split in the door: one window, one door");
   check(/return connLostRedial\(remote\);/.test(recover),
     "the remembered remote is the door, whenever its hop is down");
-  check(/if \(!\(await switchBackendResolved\(\)\)\) return false;/.test(fnBody("connLostAskHost")),
-    "a host that has nothing to offer is not a recovery (it said so)");
+  check(
+    /const reconnected = \(await switchBackendActiveSlot\(\)\) \|\| \(await switchBackendResolved\(\)\);/.test(
+      fnBody("connLostAskHost")
+    ) && /if \(!reconnected\) return false;/.test(fnBody("connLostAskHost")),
+    "a host that has nothing to offer is not a recovery (it said so); with tabs the visible one is asked first"
+  );
 
   // the phone's picker never claims a backend it does not have
   check(/"Not connected — no backend"/.test(APP),

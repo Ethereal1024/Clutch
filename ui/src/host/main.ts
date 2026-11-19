@@ -31,7 +31,7 @@ const {
 } = require("./transport_defaults.json");
 // the composition root for one session's run loop (P1-4): fetches the session's
 // declarations + session facts and wires all five ports into createRunHost.
-const { createSessionRun } = require("./run-session");
+const { createSessionRun, llmSettingsRev } = require("./run-session");
 
 function tunnelLog(...args) {
   tunnel.tunnelLog(...args);
@@ -114,8 +114,20 @@ function redeclare(res) {
   return res;
 }
 
-function announcePlugins(winId, base) {
-  if (!base || hostCore.backendKind(winId) !== "tunnel") return;
+// A slot is ONE TAB's session; an empty slotId is the window's default slot, so
+// call sites that predate tabs (and the first tab of every window) keep working.
+const slotKey = (winId, slotId = "") => (slotId ? `${winId}::${slotId}` : String(winId));
+
+// run:start / run:state take a slotId AND the page's payload. Keep the old
+// one-argument spelling working: `run:start(payload)` means the default slot.
+function slotArgs(first, second) {
+  return typeof first === "string"
+    ? { slotId: first, payload: second }
+    : { slotId: "", payload: first };
+}
+
+function announcePlugins(winId, slotId, base) {
+  if (!base || hostCore.backendKind(winId, slotId) !== "tunnel") return;
   pluginLink
     .offer(base)
     .catch((e) => tunnelLog(`[plugin] declaring to ${base} failed: ${(e && e.message) || e}`));
@@ -127,7 +139,7 @@ function announcePlugins(winId, base) {
 // phone in another app, so the renderer's own redial ladder is parked while
 // nobody is looking, and the main process keeps its timers). Exactly as on the
 // phone, nothing here dials a host nobody was on: a connect the user WON arms it.
-let lostWindowIds = new Set(); // the windows the last hop owned (webContents ids)
+let lostSlots = []; // the {winId, slotId} claims the last hop owned
 
 const ladder = createTunnelLadder({
   connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress),
@@ -138,12 +150,17 @@ const ladder = createTunnelLadder({
   // still holds on the far side (host-core's heartbeat-first re-bind), so a
   // window nobody is looking at is working again when somebody does
   onUp: async () => {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (w.isDestroyed() || !lostWindowIds.has(w.webContents.id)) continue;
-      const url = await hostCore.ensureWindowBackend(w.webContents, true);
+    for (const slot of lostSlots) {
+      const w = BrowserWindow.getAllWindows().find(
+        (x) => !x.isDestroyed() && x.webContents.id === slot.winId
+      );
+      if (!w) continue;
+      const url = await hostCore.ensureSlotBackend(w.webContents, slot.slotId, true);
       // the same session claimed from a fresh hop: its channel moved with the hop
-      announcePlugins(w.webContents.id, url);
-      tunnelLog(`[tunnel] hop back; window ${w.webContents.id} re-claimed ${url || "(parked)"}`);
+      announcePlugins(slot.winId, slot.slotId, url);
+      tunnelLog(
+        `[tunnel] hop back; slot ${slot.winId}::${slot.slotId || "(default)"} re-claimed ${url || "(parked)"}`
+      );
     }
   },
   log: tunnelLog,
@@ -214,6 +231,7 @@ function createWindow() {
     width: 1280,
     height: 820,
     title: "Clutch",
+    frame: false,          // remove the native OS titlebar; we draw our own
     autoHideMenuBar: true,
     backgroundColor: "#0F0F10", // match the app theme: no white flash while booting
     webPreferences: {
@@ -243,15 +261,14 @@ function createWindow() {
   });
   // release the session as soon as the window closes/crashes so its lock frees
   const winId = win.webContents.id;
-  function releaseWindow() {
-    hostCore.releaseWindowBackend(winId);
-    // stop any in-flight run loop for this window and clear its instance; the
-    // aborted final is written as a best-effort (stopAndFlush does not throw)
-    const inst = runInstances.get(winId);
-    if (inst) {
-      runInstances.delete(winId);
-      stopAndFlush(inst.run).catch(() => {});
-    }
+  async function releaseWindow() {
+    // stop every in-flight run loop this window owns and clear its instances;
+    // the aborted final is written as a best-effort (stopAndFlush does not throw).
+    // Awaited: the flush POSTs the aborted final to the Python server, and
+    // releaseWindowBackends below stops that server — an un-awaited flush
+    // races the stop and the server writes "released" instead of "aborted".
+    await flushWindowRuns(winId);
+    hostCore.releaseWindowBackends(winId);
   }
   win.on("closed", releaseWindow);
   win.webContents.on("destroyed", releaseWindow);
@@ -259,11 +276,40 @@ function createWindow() {
   return win;
 }
 
-// One run-loop instance per window: keyed by webContents.id so a second window
-// has its own loop and a window reload replaces the old one cleanly (the old
-// instance's references die when nobody calls into it anymore). The map is
-// populated lazily on the first run:start and cleared when the window closes.
-const runInstances = new Map(); // winId -> {run, base}
+// One run-loop instance per SLOT (one tab): two tabs drive two turns in
+// parallel, and a window reload replaces the old instances cleanly (the old
+// references die when nobody calls into them anymore). The map is populated
+// lazily on the first run:start and cleared when the slot or window closes.
+const runInstances = new Map(); // slotKey -> {run, base, mode, project, winId, slotId}
+
+function flushSlotRun(winId, slotId = "") {
+  const key = slotKey(winId, slotId);
+  const inst = runInstances.get(key);
+  if (!inst) return Promise.resolve();
+  runInstances.delete(key);
+  return stopAndFlush(inst.run).catch(() => {});
+}
+
+function flushWindowRuns(winId) {
+  const work = [];
+  for (const [key, inst] of [...runInstances]) {
+    if (inst.winId !== winId) continue;
+    runInstances.delete(key);
+    work.push(stopAndFlush(inst.run).catch(() => {}));
+  }
+  return Promise.all(work);
+}
+
+// App shutdown: every slot's open turn gets its aborted final before the
+// sessions are stopped (a quit is not proof the work was abandoned).
+function flushAllRuns() {
+  const work = [];
+  for (const [key, inst] of [...runInstances]) {
+    runInstances.delete(key);
+    work.push(stopAndFlush(inst.run).catch(() => {}));
+  }
+  return Promise.all(work);
+}
 
 // Stop flush: when the caller asks run:stop and then drive() rejects because
 // the loop was stopped, call step() once more so the loop can write the
@@ -303,20 +349,41 @@ if (!app.requestSingleInstanceLock()) {
     // IPC handlers registered ONCE, before the first window loads; they address
     // windows via e.sender / BrowserWindow.getAllWindows(), so every window
     // (first and second-instance ones) shares them
-    ipcMain.handle("api:base", async (e) => {
+
+    // ---- custom titlebar window controls ----
+    ipcMain.on("win:minimize", (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());
+    ipcMain.on("win:maximize", (e) => {
+      const w = BrowserWindow.fromWebContents(e.sender);
+      if (!w) return;
+      w.isMaximized() ? w.unmaximize() : w.maximize();
+    });
+    ipcMain.on("win:close", (e) => BrowserWindow.fromWebContents(e.sender)?.close());
+
+    ipcMain.handle("api:base", async (e, slotId) => {
+      const slot = typeof slotId === "string" ? slotId : "";
       try {
-        // null = this window has no session (no tunnel, and no local one
-        // either): the renderer stays on "not running" and waits for
+        // null = this slot has no session (no tunnel, and no local one either):
+        // the renderer stays on "not running" and waits for
         // backend:base-changed. Never the supervisor's port as a stand-in.
-        const base = (await hostCore.ensureWindowBackend(e.sender)) || null;
+        const base = (await hostCore.ensureSlotBackend(e.sender, slot)) || null;
         // the claim is also the one moment this session may be told what this
         // client runs — a push, never a gate (see announcePlugins)
-        announcePlugins(e.sender.id, base);
+        announcePlugins(e.sender.id, slot, base);
         return base;
       } catch (err) {
-        tunnelLog(`[backend] api:base failed: ${err && err.message}`);
+        tunnelLog(`[backend] api:base failed for slot ${slotKey(e.sender.id, slot)}: ${err && err.message}`);
         return null;
       }
+    });
+
+    // What one tab's slot holds: claimed or not, which machine, and whether its
+    // loop is running. A page reload asks this to re-attach instead of
+    // spawning a second session for the same tab.
+    ipcMain.handle("slot:status", async (e, slotId) => {
+      const slot = typeof slotId === "string" ? slotId : "";
+      const status = hostCore.slotStatus(e.sender.id, slot);
+      const inst = runInstances.get(slotKey(e.sender.id, slot));
+      return { ...status, running: !!inst };
     });
 
     // settings.json mirror logic lives in ui/settings-mirror.js — shared with
@@ -443,8 +510,16 @@ if (!app.requestSingleInstanceLock()) {
     // renderer cannot name another one — and stop the tunnel only when nobody is
     // left on it. Stopping it unconditionally is what made one window's Cancel
     // tear the other windows' claims down with it.
-    ipcMain.handle("session:release", async (e) => {
-      await hostCore.releaseWindowBackend(e.sender.id);
+    ipcMain.handle("session:release", async (e, slotId) => {
+      if (typeof slotId === "string" && slotId) {
+        // one tab leaving: flush ITS turn, release ITS session, leave the
+        // window's other tabs working
+        flushSlotRun(e.sender.id, slotId);
+        await hostCore.releaseSlot(e.sender.id, slotId);
+      } else {
+        flushWindowRuns(e.sender.id);
+        await hostCore.releaseWindowBackends(e.sender.id);
+      }
       if (!hostCore.anyTunnelWindow()) {
         // the outage's Cancel: this was the last window on the hop and the user
         // is done with it, so nothing may redial this host behind them
@@ -464,14 +539,14 @@ if (!app.requestSingleInstanceLock()) {
     // ever unlinks a lock file, and reclaim refuses every state but a PROVEN
     // orphan — the host's verdict is returned verbatim so the page can say what
     // actually happened.
-    ipcMain.handle("locks:list", async (e) => {
-      const base = hostCore.supervisorBaseFor(e.sender.id);
+    ipcMain.handle("locks:list", async (e, slotId) => {
+      const base = hostCore.supervisorBaseFor(e.sender.id, typeof slotId === "string" ? slotId : "");
       if (!base) return { error: "this window has no session host" };
       return sessions.supervisorLocks(base);
     });
 
-    ipcMain.handle("locks:reclaim", async (e, project) => {
-      const base = hostCore.supervisorBaseFor(e.sender.id);
+    ipcMain.handle("locks:reclaim", async (e, project, slotId) => {
+      const base = hostCore.supervisorBaseFor(e.sender.id, typeof slotId === "string" ? slotId : "");
       if (!base) return { revoked: false, why: "this window has no session host" };
       return sessions.supervisorLockReclaim(base, String(project || ""));
     });
@@ -503,25 +578,34 @@ if (!app.requestSingleInstanceLock()) {
     // Answers `{inst}` or `{error, code}`. The code rides on the refusal so the
     // page can tell "another window is driving this turn" (run_active) from
     // "this window has no session" (no_session) — two very different next steps.
-    async function ensureRunInstance(wc, payload) {
+    async function ensureRunInstance(wc, slotId, payload) {
       const winId = wc.id;
+      const key = slotKey(winId, slotId);
       const mode = payload && (payload.mode === "chat" || payload.mode === "work") ? payload.mode : "";
       const project = String((payload && payload.project) || "");
-      // resolve the current session base for this window — null if not claimed
+      // resolve the current session base for this SLOT — null if not claimed
       let currentBase;
       try {
-        currentBase = await hostCore.ensureWindowBackend(wc);
+        currentBase = await hostCore.ensureSlotBackend(wc, slotId);
       } catch (err) {
-        tunnelLog(`[run] base lookup failed for window ${winId}: ${err && err.message}`);
+        tunnelLog(`[run] base lookup failed for slot ${key}: ${err && err.message}`);
         return { error: String((err && err.message) || err), code: (err && err.code) || null };
       }
       if (!currentBase) {
         // the one failure the page must treat as a lost session (it lands in
-        // the outage dialog, not in the transcript): this window has no host
+        // the outage dialog, not in the transcript): this slot has no host
         return { error: "no session — the backend is not running", code: "no_session" };
       }
-      const inst = runInstances.get(winId);
-      if (inst && inst.base === currentBase && inst.mode === mode && inst.project === project) {
+      const inst = runInstances.get(key);
+      const rev = typeof llmSettingsRev === "function" ? llmSettingsRev() : "";
+      // A settings save changes the model/endpoint/protocol the loop is built
+      // with. Reuse only an instance built from the CURRENT settings — never
+      // replace one that is mid-drive (that would be two loops on one turn).
+      if (
+        inst &&
+        (inst.driving ||
+          (inst.base === currentBase && inst.mode === mode && inst.project === project && inst.rev === rev))
+      ) {
         return { inst };
       }
       try {
@@ -529,17 +613,19 @@ if (!app.requestSingleInstanceLock()) {
           base: currentBase,
           mode: mode || undefined,
           project: project || undefined,
-          // live events go straight to the renderer that holds this window
+          // live events go straight to the renderer, tagged with the slot they
+          // belong to: a background tab's frames must not paint into the active
+          // tab's stream
           onEvent: (ev) => {
-            if (!wc.isDestroyed()) wc.send("run:event", ev);
+            if (!wc.isDestroyed()) wc.send("run:event", { slotId, event: ev });
           },
-          warn: (msg) => tunnelLog(`[run] window ${winId}: ${msg}`),
+          warn: (msg) => tunnelLog(`[run] slot ${key}: ${msg}`),
         });
-        const fresh = { run, base: currentBase, mode, project };
-        runInstances.set(winId, fresh);
+        const fresh = { run, base: currentBase, mode, project, winId, slotId, rev, driving: false };
+        runInstances.set(key, fresh);
         return { inst: fresh };
       } catch (err) {
-        tunnelLog(`[run] createSessionRun failed for window ${winId}: ${err && err.message}`);
+        tunnelLog(`[run] createSessionRun failed for slot ${key}: ${err && err.message}`);
         return { error: String((err && err.message) || err), code: (err && err.code) || null };
       }
     }
@@ -550,20 +636,24 @@ if (!app.requestSingleInstanceLock()) {
     // not a destination: the session has one open project and that is where the
     // loop appends, so a mismatch is refused (ui/run-session.js) instead of
     // writing this turn into another window's log.
-    ipcMain.handle("run:start", async (e, payload) => {
+    ipcMain.handle("run:start", async (e, first, second) => {
+      const { slotId, payload } = slotArgs(first, second);
       const task = String((payload && payload.task) || "");
-      const got = await ensureRunInstance(e.sender, payload);
+      const got = await ensureRunInstance(e.sender, slotId, payload);
       if (got.error) return { ok: false, error: got.error, code: got.code || null };
       try {
+        got.inst.driving = true;
         await got.inst.run.start(task);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+      } finally {
+        got.inst.driving = false;
       }
     });
 
-    ipcMain.handle("run:stop", async (e) => {
-      const inst = runInstances.get(e.sender.id);
+    ipcMain.handle("run:stop", async (e, slotId) => {
+      const inst = runInstances.get(slotKey(e.sender.id, typeof slotId === "string" ? slotId : ""));
       if (!inst) return { ok: true }; // nothing running
       try {
         await stopAndFlush(inst.run);
@@ -573,25 +663,31 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    ipcMain.handle("run:step", async (e) => {
-      const inst = runInstances.get(e.sender.id);
-      if (!inst) return { ok: false, error: "no run instance for this window" };
+    ipcMain.handle("run:step", async (e, slotId) => {
+      const inst = runInstances.get(slotKey(e.sender.id, typeof slotId === "string" ? slotId : ""));
+      if (!inst) return { ok: false, error: "no run instance for this slot" };
       try {
+        inst.driving = true;
         const result = await inst.run.step();
         return { ok: true, result };
       } catch (err) {
         return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+      } finally {
+        inst.driving = false;
       }
     });
 
-    ipcMain.handle("run:drive", async (e) => {
-      const inst = runInstances.get(e.sender.id);
-      if (!inst) return { ok: false, error: "no run instance for this window" };
+    ipcMain.handle("run:drive", async (e, slotId) => {
+      const inst = runInstances.get(slotKey(e.sender.id, typeof slotId === "string" ? slotId : ""));
+      if (!inst) return { ok: false, error: "no run instance for this slot" };
       try {
+        inst.driving = true;
         const result = await inst.run.drive();
         return { ok: true, result };
       } catch (err) {
         return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+      } finally {
+        inst.driving = false;
       }
     });
 
@@ -602,8 +698,9 @@ if (!app.requestSingleInstanceLock()) {
     // answerable at all — before the page's first run:start there was no
     // instance, and answering "idle" for that absence is the one wrong answer:
     // it means "nothing to do" about a turn that is still on the log.
-    ipcMain.handle("run:state", async (e, payload) => {
-      const got = await ensureRunInstance(e.sender, payload);
+    ipcMain.handle("run:state", async (e, first, second) => {
+      const { slotId, payload } = slotArgs(first, second);
+      const got = await ensureRunInstance(e.sender, slotId, payload);
       if (got.error) return { ok: false, error: got.error, code: got.code || null };
       try {
         const result = await got.inst.run.state();
@@ -627,16 +724,19 @@ if (!app.requestSingleInstanceLock()) {
       const affected = await hostCore.releaseTunnelBackends();
       // the plugin port this hop carried died with it (plugin-link.js hopLost)
       pluginLink.hopLost();
-      // remember whose session the hop was carrying, for the ladder's re-claim
-      lostWindowIds = new Set(affected);
+      // remember which slots the hop was carrying, for the ladder's re-claim
+      lostSlots = affected;
       // and the ENGINE acts on it: a window that is minimized/backgrounded is
       // throttled by the platform, so its own renderer-side redial ladder is
       // parked (ui/js/conn-lost.js connLostArm) — this notification alone used to
       // leave the hop dead until somebody looked at the window
       ladder.hopLost();
-      const lost = new Set(affected);
+      const lost = new Set(affected.map((s) => s.winId));
       for (const w of BrowserWindow.getAllWindows()) {
-        if (!w.isDestroyed()) w.webContents.send("tunnel:ended", { lost: lost.has(w.webContents.id) });
+        if (w.isDestroyed()) continue;
+        const id = w.webContents.id;
+        const slots = affected.filter((s) => s.winId === id);
+        w.webContents.send("tunnel:ended", { lost: lost.has(id), slots });
       }
     });
 
@@ -650,12 +750,21 @@ if (!app.requestSingleInstanceLock()) {
     // DELETEs are a courtesy the far side may never read — not awaited, or one
     // quiet session would hold the quit for its own timeout (ui/plugin-link.js)
     pluginLink.stop();
+    // every open turn gets its aborted final before its session goes away;
+    // must be awaited so the HTTP append lands before stopAllBackends kills
+    // the Python server — an un-awaited flush races the shutdown and the
+    // server writes a spurious "released" final instead of "aborted"
+    await flushAllRuns();
     // stop sessions + ask the supervisors to exit while the tunnel is still up
     await hostCore.stopAllBackends();
     tunnel.stopTunnel();
     app.quit();
   });
 
-  // final safety net: a session child must never outlive the app
-  app.on("before-quit", () => hostCore.stopAllBackends());
+  // final safety net: a session child must never outlive the app; async so
+  // the flush can complete before the process exits
+  app.on("before-quit", async () => {
+    await flushAllRuns();
+    await hostCore.stopAllBackends();
+  });
 }

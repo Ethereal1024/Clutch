@@ -285,8 +285,8 @@ async function main() {
     });
     const w = fakeWin(12);
     const first = await core.ensureWindowBackend(w);
-    assert.deepStrictEqual(await core.releaseTunnelBackends(), [12],
-      "the end drops the window's forward, and names the window it dropped");
+    assert.deepStrictEqual(await core.releaseTunnelBackends(), [{ winId: 12, slotId: "" }],
+      "the end drops the window's forward, and names the slot it dropped");
     assert.strictEqual(closedForwards, 1, "and the forward is closed exactly once: a detach is idempotent");
     assert.strictEqual(core.backendCount(), 1, "the CLAIM survives the hop: it names the far-side process, not the dead forward");
     assert.deepStrictEqual(sessions.calls.stopped, [],
@@ -355,7 +355,7 @@ async function main() {
     tunnel.url = "http://127.0.0.1:8891";
     await core.ensureWindowBackend(theirs); // and this window went over the hop
     assert.strictEqual(core.backendCount(), 2, "two windows, two sessions");
-    assert.deepStrictEqual(await core.releaseTunnelBackends(), [22],
+    assert.deepStrictEqual(await core.releaseTunnelBackends(), [{ winId: 22, slotId: "" }],
       "the hop names the window it owned — the local one is not in the list");
     assert.strictEqual(core.backendCount(), 2, "and that window's claim outlives its forward");
     assert.strictEqual(core.backendKind(mine.id), "local",
@@ -588,6 +588,37 @@ async function main() {
     const { core: core2, state: state2 } = makeCore();
     assert.ok(await core2.ensureWindowBackend(fakeWin(24)), "a handle without getOSProcessId still claims");
     assert.strictEqual(state2.localClaims[0], null, "and claims namelessly (no invented pid)");
+  }
+
+  // 24. one window, two SLOTS: each tab claims its own session child, releases
+  //     independently, and every notification names the slot it is about —
+  //     the whole point of the tab refactor (old windows = old sessions).
+  {
+    const { core, sessions, state } = makeCore();
+    const w = fakeWin(25);
+    const a = await core.ensureSlotBackend(w, "tab-a", true);
+    const b = await core.ensureSlotBackend(w, "tab-b", true);
+    assert.notStrictEqual(a, b, "two tabs are two sessions");
+    assert.strictEqual(state.localStarts.length, 2, "each claim spawned its own child");
+    assert.strictEqual(core.backendCount(), 2, "the window holds both");
+    assert.deepStrictEqual(
+      w.sent,
+      [
+        ["backend:base-changed", { slotId: "tab-a", url: a }],
+        ["backend:base-changed", { slotId: "tab-b", url: b }],
+      ],
+      "a named slot's notification names the slot (a bare URL stays the default slot's shape)",
+    );
+    assert.deepStrictEqual(core.slotStatus(w.id, "tab-a"), { claimed: true, kind: "local", url: a });
+    assert.strictEqual(await core.ensureSlotBackend(w, "tab-a"), a, "re-asking a slot reuses its session");
+    assert.strictEqual(state.localStarts.length, 2, "no second child for the same tab");
+    await core.releaseSlot(w.id, "tab-a");
+    assert.deepStrictEqual(core.slotStatus(w.id, "tab-a"), { claimed: false, kind: null, url: null });
+    assert.strictEqual(core.slotStatus(w.id, "tab-b").claimed, true, "the other tab is untouched");
+    assert.strictEqual(state.localStops.length, 1, "only the released tab's child was stopped");
+    await core.releaseWindowBackends(w.id);
+    assert.strictEqual(core.backendCount(), 0, "closing the window releases the rest");
+    assert.strictEqual(state.localStops.length, 2, "each stop is per session");
   }
 
   console.log("host-core: all checks passed");

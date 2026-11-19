@@ -65,12 +65,12 @@ const {
 //
 // NOTE: intentionally NOT called through useUI() so tests/android-assets.test.js
 // does not demand run-session.js be in UI_NODE before the phone is ready for it.
-function loadSessionRun() {
+function loadSessionModule() {
   try {
     const local = path.join(__dirname, "ui", "run-session.js");
     const fallback = path.join(__dirname, "..", "..", "ui", "run-session.js");
     const resolved = require("fs").existsSync(local) ? local : fallback;
-    return require(resolved).createSessionRun;
+    return require(resolved);
   } catch (e) {
     return null;
   }
@@ -182,8 +182,8 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
   // (ui/plugin-link.js offer). Never awaited: a declaration landing a heartbeat
   // later is a plugin appearing in a session that is already running, not a reason
   // to keep the window waiting on a push.
-  function announcePlugins(base) {
-    if (!base || hostCore.backendKind(window.id) !== "tunnel") return;
+  function announcePlugins(base, slotId = "") {
+    if (!base || hostCore.backendKind(window.id, slotId) !== "tunnel") return;
     pluginLink.offer(base).catch((e) => log(`[plugin] declaring to ${base} failed: ${(e && e.message) || e}`));
   }
 
@@ -280,6 +280,8 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
     writeMarker(runMarker, busy ? "busy" : "idle");
   }
 
+  let lostSlots = []; // the slots the last hop owned
+
   const ladder = createTunnelLadder({
     connect: (cfg, onProgress) => tunnel.connectTunnel(cfg, onProgress),
     status: () => tunnel.tunnelStatus(),
@@ -292,19 +294,41 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
     // which is also how the session's window contract is re-armed on the far
     // side while the phone is still in the background
     onUp: async () => {
-      const url = await hostCore.ensureWindowBackend(window, true);
-      // the same session claimed from a fresh hop: its channel moved with the hop
-      announcePlugins(url);
-      log(`[ladder] claim re-bound: ${url || "parked (the far session is not provably there yet)"}`);
+      for (const slot of lostSlots) {
+        const url = await hostCore.ensureSlotBackend(window, slot.slotId, true);
+        // the same session claimed from a fresh hop: its channel moved with the hop
+        announcePlugins(url, slot.slotId);
+        log(
+          `[ladder] slot ${slot.slotId || "(default)"} re-bound: ${url || "parked (the far session is not provably there yet)"}`
+        );
+      }
     },
     log,
   });
 
-  // One run-loop instance per app life: the phone IS one window (N5), so there
-  // is no per-window map — just one slot that is replaced when the base URL,
-  // the mode or the project changes (a new tunnel hop, a mode toggle, another
-  // .clc open) and cleared when the session ends.
-  let runInst = null; // {run, base, mode, project} | null
+  // One run-loop instance per SLOT (tab). The phone is one window, but a window
+  // can now hold several tabs, each with its own session — two turns run in
+  // parallel exactly as two desktop windows did. Instances are replaced when the
+  // base URL, the mode or the project changes, and cleared when the slot ends.
+  const runInsts = new Map(); // slotId -> {run, base, mode, project}
+  const busySlots = new Set(); // slots whose loop is busy right now
+
+  function slotKey(slotId = "") {
+    return slotId || "(default)";
+  }
+
+  function flushSlot(slotId = "") {
+    const inst = runInsts.get(slotId);
+    if (!inst) return;
+    runInsts.delete(slotId);
+    busySlots.delete(slotId);
+    stopAndFlush(inst.run).catch(() => {});
+  }
+
+  function flushAllRuns() {
+    for (const id of [...runInsts.keys()]) flushSlot(id);
+    writeRunMarker(false);
+  }
 
   // Stop flush: same logic as ui/main.js stopAndFlush — write the aborted final
   // before the loop is abandoned, so a cold restart sees a closed turn.
@@ -324,51 +348,76 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
   // One instance-building path for start and state, exactly as ui/main.js's
   // ensureRunInstance: built when absent, rebuilt when the base, the mode or the
   // project changed. Answers {run} or {error, code}.
-  async function ensureRun(payload) {
+  async function ensureRun(slotId, payload) {
     const mode = payload && (payload.mode === "chat" || payload.mode === "work") ? payload.mode : "";
     const project = String((payload && payload.project) || "");
-    const base = (await hostCore.ensureWindowBackend(window)) || null;
+    const base = (await hostCore.ensureSlotBackend(window, slotId)) || null;
     if (!base) return { error: "no session — the backend is not running", code: "no_session" };
-    if (runInst && runInst.base === base && runInst.mode === mode && runInst.project === project) {
-      return { run: runInst.run };
-    }
-    const createSessionRun = loadSessionRun();
+    const mod = loadSessionModule();
+    const createSessionRun = mod && mod.createSessionRun;
     if (!createSessionRun) return { error: "the run loop is not available in this build" };
+    const rev = typeof mod.llmSettingsRev === "function" ? mod.llmSettingsRev() : "";
+    const inst = runInsts.get(slotId);
+    // a settings save must reach the NEXT turn of an existing tab; never replace
+    // an instance that is mid-drive (two loops on one turn)
+    if (
+      inst &&
+      (inst.driving || (inst.base === base && inst.mode === mode && inst.project === project && inst.rev === rev))
+    ) {
+      return { run: inst.run };
+    }
     const run = await createSessionRun({
       base,
       mode: mode || undefined,
       project: project || undefined,
-      onEvent: (ev) => window.send("run:event", ev),
-      onBusy: writeRunMarker,
-      warn: (msg) => log(`[run] ${msg}`),
+      onEvent: (ev) => window.send("run:event", { slotId, event: ev }),
+      // the CPU-awake marker is about the DEVICE, not one tab: any slot busy
+      // keeps it, and it goes idle only when the last one returns
+      onBusy: (b) => {
+        if (b) busySlots.add(slotId);
+        else busySlots.delete(slotId);
+        writeRunMarker(busySlots.size > 0);
+      },
+      warn: (msg) => log(`[run] slot ${slotKey(slotId)}: ${msg}`),
     });
-    runInst = { run, base, mode, project };
+    runInsts.set(slotId, { run, base, mode, project, rev, driving: false });
     return { run };
   }
 
   // the bridge surface: ui/main.js's ipcMain handlers, one for one
   const handlers = {
     clutchApi: {
-      baseUrl: async () => {
+      baseUrl: async (slotId) => {
+        const slot = typeof slotId === "string" ? slotId : "";
         try {
           // null = no session (no tunnel, and no local mode to fall back to):
           // the renderer shows "not running" and waits for backend:base-changed
-          const base = (await hostCore.ensureWindowBackend(window)) || null;
+          const base = (await hostCore.ensureSlotBackend(window, slot)) || null;
           // the claim is also the one moment this session may be told what this
           // client runs — a push, never a gate (announcePlugins)
-          announcePlugins(base);
+          announcePlugins(base, slot);
           return base;
         } catch (err) {
-          log(`[backend] api:base failed: ${err && err.message}`);
+          log(`[backend] api:base failed for slot ${slotKey(slot)}: ${err && err.message}`);
           return null;
         }
       },
-      // the window leaving its session (the conn-lost dialog's Cancel). One
-      // window, so there is no one else to spare — but the same rule as the
-      // desktop shell: release the claim first, stop the tunnel only when no
-      // window is left on it (ui/main.js `session:release`, one for one).
-      releaseSession: async () => {
-        await hostCore.releaseWindowBackend(window.id);
+      slotStatus: async (slotId) => {
+        const slot = typeof slotId === "string" ? slotId : "";
+        const status = hostCore.slotStatus(window.id, slot);
+        return { ...status, running: runInsts.has(slot) };
+      },
+      // the renderer leaving a session (the conn-lost dialog's Cancel, or one
+      // tab closing). A named slot releases only that tab; no slot releases
+      // every claim this window holds. The tunnel goes only when nobody is left.
+      releaseSession: async (slotId) => {
+        if (typeof slotId === "string" && slotId) {
+          flushSlot(slotId);
+          await hostCore.releaseSlot(window.id, slotId);
+        } else {
+          flushAllRuns();
+          await hostCore.releaseWindowBackends(window.id);
+        }
         if (!hostCore.anyTunnelWindow()) {
           // the outage's Cancel: this window was the last one on the hop and the
           // user is done with it, so nothing may redial this host behind them
@@ -403,13 +452,13 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
     // device made is unverifiable from over there, so the host reports it instead
     // of acting; its answer is returned verbatim and the page says what happened.
     clutchLocks: {
-      list: async () => {
-        const base = hostCore.supervisorBaseFor(window.id);
+      list: async (slotId) => {
+        const base = hostCore.supervisorBaseFor(window.id, typeof slotId === "string" ? slotId : "");
         if (!base) return { error: "this window has no session host" };
         return sessions.supervisorLocks(base);
       },
-      reclaim: async (project) => {
-        const base = hostCore.supervisorBaseFor(window.id);
+      reclaim: async (project, slotId) => {
+        const base = hostCore.supervisorBaseFor(window.id, typeof slotId === "string" ? slotId : "");
         if (!base) return { revoked: false, why: "this window has no session host" };
         return sessions.supervisorLockReclaim(base, String(project || ""));
       },
@@ -429,6 +478,7 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
         // awaited, or one quiet session would hold the disconnect for its own
         // timeout (ui/plugin-link.js)
         pluginLink.stop();
+        flushAllRuns();
         await hostCore.releaseAllBackends();
         await tunnel.stopTunnel();
         return { ok: true };
@@ -489,51 +539,71 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
     // and `state` builds it too — that is the resume question the page asks
     // when it comes up with a project (P2-3).
     clutchRun: {
-      start: async (payload) => {
+      start: async (first, second) => {
+        const slotId = typeof first === "string" ? first : "";
+        const payload = typeof first === "string" ? second : first;
         try {
           const task = String((payload && payload.task) || "");
-          const got = await ensureRun(payload);
+          const got = await ensureRun(slotId, payload);
           if (got.error) return { ok: false, error: got.error, code: got.code || null };
-          await got.run.start(task);
-          return { ok: true };
+          const inst = runInsts.get(slotId);
+          if (inst) inst.driving = true;
+          try {
+            await got.run.start(task);
+            return { ok: true };
+          } finally {
+            if (inst) inst.driving = false;
+          }
         } catch (err) {
           log(`[run] start failed: ${(err && err.message) || err}`);
           return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
         }
       },
-      stop: async () => {
-        if (!runInst) return { ok: true };
+      stop: async (slotId) => {
+        const slot = typeof slotId === "string" ? slotId : "";
+        const inst = runInsts.get(slot);
+        if (!inst) return { ok: true };
         try {
-          await stopAndFlush(runInst.run);
+          await stopAndFlush(inst.run);
           return { ok: true };
         } catch (err) {
           return { ok: false, error: String((err && err.message) || err) };
         }
       },
-      step: async () => {
-        if (!runInst) return { ok: false, error: "no run instance" };
+      step: async (slotId) => {
+        const inst = runInsts.get(typeof slotId === "string" ? slotId : "");
+        if (!inst) return { ok: false, error: "no run instance for this slot" };
         try {
-          const result = await runInst.run.step();
+          inst.driving = true;
+          const result = await inst.run.step();
           return { ok: true, result };
         } catch (err) {
           return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+        } finally {
+          inst.driving = false;
         }
       },
-      drive: async () => {
-        if (!runInst) return { ok: false, error: "no run instance" };
+      drive: async (slotId) => {
+        const inst = runInsts.get(typeof slotId === "string" ? slotId : "");
+        if (!inst) return { ok: false, error: "no run instance for this slot" };
         try {
-          const result = await runInst.run.drive();
+          inst.driving = true;
+          const result = await inst.run.drive();
           return { ok: true, result };
         } catch (err) {
           return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+        } finally {
+          inst.driving = false;
         }
       },
       // the RESUME question (P2-3): takes the same {mode, project} payload start
       // does, and builds the instance when the page asks before any start —
       // "there is no instance" is not an answer to "is a turn open?".
-      state: async (payload) => {
+      state: async (first, second) => {
+        const slotId = typeof first === "string" ? first : "";
+        const payload = typeof first === "string" ? second || {} : first || {};
         try {
-          const got = await ensureRun(payload || {});
+          const got = await ensureRun(slotId, payload);
           if (got.error) return { ok: false, error: got.error, code: got.code || null };
           const result = await got.run.state();
           return { ok: true, result };
@@ -560,7 +630,9 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
     // this notification alone used to leave the hop dead until the user came
     // back and looked at it
     ladder.hopLost();
-    bus.broadcast("tunnel:ended", { lost: affected.includes(window.id) });
+    const slots = affected.filter((s) => s.winId === window.id);
+    lostSlots = slots;
+    bus.broadcast("tunnel:ended", { lost: slots.length > 0, slots });
   });
 
   async function start() {

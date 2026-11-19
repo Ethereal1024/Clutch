@@ -138,7 +138,7 @@ global.setStatus = (s) => {
   statuses.push(s);
   global.busy = s === "running" || s === "waiting";
 };
-global.document = { createElement: (tag) => fakeEl(tag) };
+global.document = { createElement: (tag) => fakeEl(tag), dispatchEvent() {} };
 // the events a window announces on the pane itself (js/backend-lifecycle.js
 // announces the lost run so js/auto-fold.js can fold the turn it was in)
 const dispatched = [];

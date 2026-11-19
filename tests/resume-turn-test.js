@@ -51,14 +51,14 @@ function handlerBody(src, name) {
     "it asks only when there is a log to look at and no turn is already this page's"
   );
   check(
-    /host\.state\(\{ mode: agentMode, project: currentProject \}\)/.test(body),
+    /host\.state\(slotId, \{ mode: agentMode, project: currentProject \}\)/.test(body),
     "it asks the host with run:start's own {mode, project}: resume uses the same claim, not a second one"
   );
   check(
     /answer\.result\.phase !== "open"\) return;/.test(body),
     "an idle fold does nothing at all — a turn is continued, never invented"
   );
-  check(/host\.drive\(\)/.test(body), "an open fold is driven by the host: the SAME call the Run button makes");
+  check(/host\.drive\(slotId\)/.test(body), "an open fold is driven by the host: the SAME call the Run button makes");
   check(!/fetch\(|apiFetch\(/.test(body), "the page reads no log of its own: the fold is the host's answer");
   check(!/type: *"final"/.test(body), "and it writes nothing: the turn's ending is the loop's own line");
   check(
@@ -77,7 +77,7 @@ function handlerBody(src, name) {
 
   const project = read("ui/src/renderer/project.ts");
   check(count(project, /resumeTurn\(\)/g) === 1, "opening a project asks once — and not on create: there is nothing to resume");
-  const open = project.slice(project.indexOf("async function openProject("));
+  const open = project.slice(project.indexOf("async function openInTab("));
   const atReplay = open.indexOf("refreshRollbackAnchors()");
   const atResume = open.indexOf("resumeTurn()");
   check(atReplay > 0 && atResume > atReplay, "asked AFTER the log was replayed: the rows are on screen before the turn moves");
@@ -102,8 +102,8 @@ function handlerBody(src, name) {
   const start = handlerBody(src, "run:start");
   const state = handlerBody(src, "run:state");
 
-  check(/ensureRunInstance\(e\.sender, payload\)/.test(start), "run:start builds through the shared ensure path");
-  check(/ensureRunInstance\(e\.sender, payload\)/.test(state), "run:state builds through the SAME path");
+  check(/ensureRunInstance\(e\.sender, slotId, payload\)/.test(start), "run:start builds through the shared ensure path");
+  check(/ensureRunInstance\(e\.sender, slotId, payload\)/.test(state), "run:state builds through the SAME path");
   check(
     count(src, /createSessionRun\(/g) === 1,
     `one construction site in ui/main.js (got ${count(src, /createSessionRun\(/g)}) — a second one is a second loop`
@@ -121,9 +121,9 @@ function handlerBody(src, name) {
   check(count(src, /createSessionRun\(/g) === 1, "one construction site on the phone too");
   const ensure = slicer(src).fnBody("ensureRun");
   check(/createSessionRun\(/.test(ensure), "the ensure path is where the instance is built");
-  check(/runInst\.base === base/.test(ensure) && /runInst\.mode === mode/.test(ensure) && /runInst\.project === project/.test(ensure),
+  check(/inst\.base === base/.test(ensure) && /inst\.mode === mode/.test(ensure) && /inst\.project === project/.test(ensure),
     "rebuilt when the base, the mode or the project changed — the same three facts as the desktop");
-  check(/state: async \(payload\)[^]*ensureRun\(payload \|\| \{\}\)/.test(src), "the phone's state() builds on demand and takes the payload");
+  check(/state: async \(first, second\)[^]*ensureRun\(slotId, payload\)/.test(src), "the phone's state() builds on demand and takes the payload");
   check(!/result: \{ phase: "idle" \}/.test(src), "and it no longer answers idle for a missing instance");
 }
 
@@ -131,8 +131,8 @@ function handlerBody(src, name) {
 {
   const preload = read("ui/preload.js");
   const shim = read("ui/src/renderer/bridge-shim.ts");
-  check(/state: \(payload\) => ipcRenderer\.invoke\("run:state", payload\)/.test(preload), "preload passes the payload to run:state");
-  check(/state: \(payload\) => call\("clutchRun", "state", \[payload\]\)/.test(shim), "the phone's shim passes it in the args array");
+  check(/state: \(slotId, payload\) => ipcRenderer\.invoke\("run:state", \.\.\.runArgs\(slotId, payload\)\)/.test(preload), "preload passes the payload to run:state");
+  check(/state: \(slotId, payload\) => call\("clutchRun", "state", runArgs\(slotId, payload\)\)/.test(shim), "the phone's shim passes it in the args array");
 }
 
 summary("resume-turn-test.js");

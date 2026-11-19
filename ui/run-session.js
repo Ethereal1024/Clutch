@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-session.ts and run `npm run build:host`.
-// source sha256: 2e61321791a6f676ae77ddf1c3b65f6d79fbfcc294e067248397813641e86a97
+// source sha256: a4a222583f5da292d5299e8109105a804765e0dfff19f8f46bbe71471f8a99ec
 
 // Composition root for one session's run loop (P3-2 wiring).
 //
@@ -467,4 +467,17 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
     }
     return { start, stop, step, drive, state };
 }
-module.exports = { createSessionRun, FETCH_TIMEOUT_MS };
+// The LLM facts a run instance is BUILT from. A settings save must reach the
+// next turn of an existing tab, so callers compare this before reusing a cached
+// instance; the key is part of the fingerprint but never logged.
+function llmSettingsRev() {
+    const s = readSettings() || {};
+    return JSON.stringify({
+        upstream: getUpstream(),
+        key: getApiKey(),
+        model: s.model || "",
+        protocol: s.api_protocol || "",
+        effort: s.reasoning_effort || "",
+    });
+}
+module.exports = { createSessionRun, FETCH_TIMEOUT_MS, llmSettingsRev };

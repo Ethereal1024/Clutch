@@ -795,7 +795,7 @@ async function main() {
       !/could not be given a listener/.test(CONNECT_SRC),
     "a far side that never gets its listener can no longer hold the connect open, let alone fail it"
   );
-  const claimSrc = HOST_CORE_SRC.split("await releaseWindowBackend(wc.id); // drop any local session first")[1] || "";
+  const claimSrc = HOST_CORE_SRC.split("await releaseSlot(wc.id, slotId); // drop any local session first")[1] || "";
   check(
     claimSrc.indexOf("await modelPathState()") > -1 &&
       claimSrc.indexOf("await modelPathState()") < claimSrc.indexOf("supervisorSessionStart("),

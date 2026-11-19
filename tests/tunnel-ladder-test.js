@@ -432,10 +432,10 @@ async function main() {
         `${what} arms the redial on the hop's own end — after the release, before the page hears about it`);
     }
 
-    check(/onUp:[\s\S]{0,300}hostCore\.ensureWindowBackend\(window, true\)/.test(host),
-      "the phone's ladder re-claims its one window through host-core's own verdict");
-    check(/onUp:[\s\S]{0,400}hostCore\.ensureWindowBackend\(w\.webContents, true\)/.test(main),
-      "the desktop's ladder re-claims each window the hop owned, through the same verdict");
+    check(/onUp:[\s\S]{0,500}hostCore\.ensureSlotBackend\(window, slot\.slotId, true\)/.test(host),
+      "the phone's ladder re-claims every slot the hop owned through host-core's own verdict");
+    check(/onUp:[\s\S]{0,600}hostCore\.ensureSlotBackend\(w\.webContents, slot\.slotId, true\)/.test(main),
+      "the desktop's ladder re-claims each slot the hop owned, through the same verdict");
 
     // the wake marker (M4): the phone's foreground service polls $HOME/tunnel.state
     // and keeps the CPU awake on it — so its writer must hang off the LADDER's own

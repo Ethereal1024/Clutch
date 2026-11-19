@@ -3,13 +3,19 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("clutchApi", {
-  baseUrl: () => ipcRenderer.invoke("api:base"),
-  // this window leaving its session, named by the window itself: a renderer can
-  // only ever release what it holds (the main process reads e.sender), so the
-  // dialog's Cancel cannot take another window's session down with it
-  releaseSession: () => ipcRenderer.invoke("session:release"),
+  // one tab's session, named by that tab's stable slotId (an absent slotId is
+  // the window's default slot, which is every pre-tab call site)
+  baseUrl: (slotId) => ipcRenderer.invoke("api:base", slotId),
+  // claimed? which machine? is its run loop busy? — what a page reload asks
+  // before re-attaching to a slot instead of spawning a second session
+  slotStatus: (slotId) => ipcRenderer.invoke("slot:status", slotId),
+  // this window/slot leaving its session, named by the renderer itself: a
+  // renderer can only ever release what this window holds (the main process
+  // reads e.sender), so the dialog's Cancel cannot take another window's
+  // session down with it. No slotId = every slot this window holds.
+  releaseSession: (slotId) => ipcRenderer.invoke("session:release", slotId),
   onBaseChanged: (cb) => {
-    const wrap = (_e, url) => cb(url);
+    const wrap = (_e, change) => cb(change); // { slotId, url }
     ipcRenderer.on("backend:base-changed", wrap);
     return () => ipcRenderer.removeListener("backend:base-changed", wrap);
   },
@@ -21,8 +27,8 @@ contextBridge.exposeInMainWorld("clutchApi", {
 // there, this machine otherwise — so the page never guesses and never frees a
 // live window's project. Both are read/act on a peer, never a local file write.
 contextBridge.exposeInMainWorld("clutchLocks", {
-  list: () => ipcRenderer.invoke("locks:list"),
-  reclaim: (project) => ipcRenderer.invoke("locks:reclaim", project),
+  list: (slotId) => ipcRenderer.invoke("locks:list", slotId),
+  reclaim: (project, slotId) => ipcRenderer.invoke("locks:reclaim", project, slotId),
 });
 
 contextBridge.exposeInMainWorld("clutchSettings", {
@@ -87,6 +93,16 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
   },
 });
 
+// custom titlebar: minimize / maximize / close — fire-and-forget (no return value).
+// Exposed ONCE: a second exposeInMainWorld("clutchWin") throws "Cannot bind an
+// API on top of an existing property", which aborts this preload and leaves
+// every later bridge (clutchRun!) undefined.
+contextBridge.exposeInMainWorld("clutchWin", {
+  minimize: () => ipcRenderer.send("win:minimize"),
+  maximize: () => ipcRenderer.send("win:maximize"),
+  close:    () => ipcRenderer.send("win:close"),
+});
+
 // the host-side run loop (P1-4): the renderer is a view only — it calls
 // start/stop/step/drive/state and subscribes to run:event pushes. The loop
 // survives a page reload: the main process owns it, so a closed window does
@@ -98,14 +114,24 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
 // state takes that same {mode, project} pair (no task: it asks instead of
 // writes) — it is how a page that was not there when the turn opened learns
 // whether a turn is still open, and it builds the loop when there is none yet.
+// The two-argument verbs also accept the pre-tabs spelling, start(payload):
+// a first argument that is not a slot string IS the payload.
+function runArgs(slotOrPayload, maybePayload) {
+  return typeof slotOrPayload === "string"
+    ? [slotOrPayload, maybePayload]
+    : ["", slotOrPayload];
+}
+
 contextBridge.exposeInMainWorld("clutchRun", {
-  start: (payload) => ipcRenderer.invoke("run:start", payload),
-  stop: () => ipcRenderer.invoke("run:stop"),
-  step: () => ipcRenderer.invoke("run:step"),
-  drive: () => ipcRenderer.invoke("run:drive"),
-  state: (payload) => ipcRenderer.invoke("run:state", payload),
+  // every verb names the slot (one tab) it belongs to: two tabs run two turns
+  // in parallel, and a background tab's event must never drive the active one.
+  start: (slotId, payload) => ipcRenderer.invoke("run:start", ...runArgs(slotId, payload)),
+  stop: (slotId) => ipcRenderer.invoke("run:stop", slotId),
+  step: (slotId) => ipcRenderer.invoke("run:step", slotId),
+  drive: (slotId) => ipcRenderer.invoke("run:drive", slotId),
+  state: (slotId, payload) => ipcRenderer.invoke("run:state", ...runArgs(slotId, payload)),
   onEvent: (cb) => {
-    const wrap = (_e, ev) => cb(ev);
+    const wrap = (_e, ev) => cb(ev); // { slotId, event }
     ipcRenderer.on("run:event", wrap);
     return () => ipcRenderer.removeListener("run:event", wrap);
   },

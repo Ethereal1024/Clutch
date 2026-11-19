@@ -128,14 +128,14 @@ const reclaimOf = (win, notice) =>
   check(/e\.owner = err\.owner/.test(PROJECT), "the 409's owner reaches the dialog");
   check(/e\.project = err\.project/.test(PROJECT), "and the exact file the host locked");
   check(/owner/.test(APP) && /e\.owner = data\.owner/.test(APP), "apiFetch carries the owner for every caller");
-  const open = PROJECT.slice(PROJECT.indexOf("async function openProject("));
+  const open = PROJECT.slice(PROJECT.indexOf("async function openInTab("));
   const conflict = open.slice(open.indexOf('e.code === "project_open_conflict"'));
   check(
     conflict.indexOf("provenOrphan") > -1 && conflict.indexOf("provenOrphan") < conflict.indexOf("Open read-only"),
     "the takeover is offered BEFORE the read-only fallback (and only when the host proves it)",
   );
   check(/await reclaimLock\(e\.project\)/.test(conflict), "and taking it back goes through the host's reclaim");
-  check(/await openProject\(path, readOnly\)/.test(conflict), "a successful reclaim reopens the project it was asked for");
+  check(/await openInTab\(tab, base, readOnly, seq\)/.test(conflict), "a successful reclaim reopens the project it was asked for");
 
   const preload = fs.readFileSync(path.join(ROOT, "ui", "preload.js"), "utf8");
   check(/exposeInMainWorld\("clutchLocks"/.test(preload), "the page gets the lock API through the preload bridge");
@@ -143,7 +143,7 @@ const reclaimOf = (win, notice) =>
   check(/ipcMain\.handle\("locks:list"/.test(main), "locks:list is served by the shell");
   check(/ipcMain\.handle\("locks:reclaim"/.test(main), "so is the reclaim");
   check(
-    /supervisorBaseFor\(e\.sender\.id\)/.test(main),
+    /supervisorBaseFor\(e\.sender\.id,/.test(main),
     "and both ask the supervisor that owns THIS window's session (local or far side), never a file",
   );
 

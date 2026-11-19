@@ -32,7 +32,7 @@ Module._load = function (request, ...rest) {
         quit: () => {},
       },
       BrowserWindow,
-      ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
+      ipcMain: { handle: (name, fn) => handlers.set(name, fn), on: () => {} },
       session: { defaultSession: { clearCache: async () => {} } },
     };
   }

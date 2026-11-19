@@ -434,8 +434,8 @@ async function main() {
 
   // 5. tunnel:ended broadcast — with the host's per-window verdict
   tunnel.state.endCbs.forEach((cb) => cb());
-  await eventually(() => assert.deepStrictEqual(got.ended, [{ lost: true }],
-    "tunnel:ended via real SSE, carrying this window's own verdict"));
+  await eventually(() => assert.deepStrictEqual(got.ended, [{ lost: true, slots: [{ winId: 1, slotId: "" }] }],
+    "tunnel:ended via real SSE, carrying this window's own verdict and the slots it owned"));
 
   // 5b. one window leaving its session (the conn-lost Cancel's verb, `session:release`
   //     in the shells): over the bridge it is `releaseSession`, it names no window

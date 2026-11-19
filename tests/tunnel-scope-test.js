@@ -52,20 +52,21 @@ const LIBS = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "backend-l
 // ---- 1. the host answers per window, and says so in the message ----
 const sendAt = MAIN.indexOf('tunnel.onTunnelEnd');
 const sendEnd = MAIN.indexOf("// the main process re-established", sendAt);
-const notify = sendAt < 0 ? "" : MAIN.slice(sendAt, sendEnd < sendAt ? sendAt + 1200 : sendEnd);
+const notify = sendAt < 0 ? "" : MAIN.slice(sendAt, sendEnd < sendAt ? sendAt + 2000 : sendEnd);
 check(/const affected = await hostCore\.releaseTunnelBackends\(\);/.test(notify) &&
-  /send\("tunnel:ended", \{ lost: lost\.has\(w\.webContents\.id\) \}\)/.test(notify),
-  "the desktop shell tells every window about the hop — each one with its OWN verdict, computed from the windows the hop owned");
+  /send\("tunnel:ended", \{ lost: lost\.has\(id\), slots \}\)/.test(notify),
+  "the desktop shell tells every window about the hop — each one with its OWN verdict, computed from the slots the hop owned");
 check(!/send\("tunnel:ended"\)/.test(MAIN) && !/broadcast\("tunnel:ended"\)/.test(HOST),
   "and no shell sends a bare tunnel end any more: the message says whose loss it is");
 check(/const affected = await hostCore\.releaseTunnelBackends\(\);/.test(HOST) &&
-  /bus\.broadcast\("tunnel:ended", \{ lost: affected\.includes\(window\.id\) \}\)/.test(HOST),
+  /bus\.broadcast\("tunnel:ended", \{ lost: slots\.length > 0, slots \}\)/.test(HOST),
   "the phone asks the same question of the same core (one window there, so the answer is its own claim)");
 
 // ---- 2. leaving an outage is a WINDOW act; the machine-wide release is the picker ----
 const releaseAt = MAIN.indexOf('ipcMain.handle("session:release"');
 const releaseHandler = releaseAt < 0 ? "" : MAIN.slice(releaseAt, releaseAt + 1000);
-check(/hostCore\.releaseWindowBackend\(e\.sender\.id\)/.test(releaseHandler),
+check(/hostCore\.releaseSlot\(e\.sender\.id, slotId\)/.test(releaseHandler) &&
+  /hostCore\.releaseWindowBackends\(e\.sender\.id\)/.test(releaseHandler),
   "one window's exit releases THAT window's claim — the shell names it from e.sender, so a renderer cannot release another window's session");
 check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,400}await tunnel\.stopTunnel\(\)/.test(releaseHandler),
   "and the shared hop is stopped only when no window is left on it: one window's Cancel is not another window's shutdown");
@@ -73,11 +74,12 @@ check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,200}ladder\.noteUserLeft
   "…and that exit disarms the standing reconnect intent too (ui/tunnel-ladder.js): nothing may redial a host the user is done with");
 check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,400}releaseAllBackends\(\)/.test(MAIN),
   "releasing EVERY window's claim stays where it belongs: the picker's own Disconnect, which is the user leaving the machine");
-check(/releaseSession: async \(\) => \{\s*\n\s*await hostCore\.releaseWindowBackend\(window\.id\);/.test(HOST) &&
-  /releaseSession: async \(\) => \{[\s\S]{0,300}anyTunnelWindow\(\)/.test(HOST),
+check(/releaseSession: async \(slotId\) => \{[\s\S]{0,500}hostCore\.releaseSlot\(window\.id, slotId\)/.test(HOST) &&
+  /releaseSession: async \(slotId\) => \{[\s\S]{0,700}hostCore\.releaseWindowBackends\(window\.id\)/.test(HOST) &&
+  /releaseSession: async \(slotId\) => \{[\s\S]{0,900}anyTunnelWindow\(\)/.test(HOST),
   "the phone's handler is the same rule, one for one");
-check(/releaseSession: \(\) => ipcRenderer\.invoke\("session:release"\)/.test(PRELOAD) &&
-  /releaseSession: \(\) => call\("clutchApi", "releaseSession"\)/.test(SHIM),
+check(/releaseSession: \(slotId\) => ipcRenderer\.invoke\("session:release", slotId\)/.test(PRELOAD) &&
+  /releaseSession: \(slotId\) => call\("clutchApi", "releaseSession", \[slotId\]\)/.test(SHIM),
   "both renderer surfaces carry the verb and no window id (parity is asserted in bridge-shim.test.js)");
 
 // ---- 3. the renderer's tunnel-end handler reads the verdict ----
@@ -187,7 +189,7 @@ async function main() {
 
   // the hop dies, and the shell notifies each window with its own verdict —
   // this is ui/main.js's own loop, driven
-  const affected = new Set(await core.releaseTunnelBackends());
+  const affected = new Set((await core.releaseTunnelBackends()).map((s) => s.winId));
   for (const w of [mine, theirs]) w.send("tunnel:ended", { lost: affected.has(w.id) });
   check(mine.sent.length === 1 && mine.sent[0][1].lost === false,
     "the window that was never on the hop is told so");

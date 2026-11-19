@@ -55,8 +55,25 @@ function createHostCore(deps) {
     sessions = defaultSessions,
   } = deps;
 
-  // per-window backend state: windowId -> {kind, sessionId, url, stop()}
+  // per-SLOT backend state: `${winId}::${slotId}` -> {kind, sessionId, url, winId, slotId, stop()}
+  //
+  // A slot is ONE TAB's session. The supervisor already spawns one agent child
+  // per claim, so a second tab is a second process with its own open project and
+  // its own run lease — the old multi-window parallelism, keyed by tab instead
+  // of by window. An empty slotId is the window's default slot, which keeps
+  // single-tab clients (and every call site that predates tabs) working
+  // unchanged.
   const windowBackends = new Map();
+  const slotKey = (winId, slotId) => (slotId ? `${winId}::${slotId}` : String(winId));
+
+  // The default slot's notification keeps its pre-tabs shape (a bare URL): the
+  // renderer that predates tabs reads it as a string. A named slot gets the
+  // { slotId, url } pair, because a window can now hold several sessions and the
+  // page has to know which one moved.
+  function notifyBase(wc, slotId, url) {
+    if (!wc || wc.isDestroyed()) return;
+    wc.send(BASE_CHANGED, slotId ? { slotId, url } : url);
+  }
 
   // Where the far side's model path is, as a value this machine can log and act
   // on. Never throws: a claim must not fail because the tunnel could not answer
@@ -82,14 +99,29 @@ function createHostCore(deps) {
     }
   }
 
-  async function releaseWindowBackend(winId) {
-    const wb = windowBackends.get(winId);
+  async function releaseSlot(winId, slotId = "") {
+    const key = slotKey(winId, slotId);
+    const wb = windowBackends.get(key);
     if (!wb) return;
-    windowBackends.delete(winId);
+    windowBackends.delete(key);
     try {
       wb.stop();
     } catch (e) {
       /* best effort */
+    }
+  }
+
+  // every slot the window claimed (window close, window crash). A window's slots
+  // are independent sessions; one leaving must not touch another window's.
+  async function releaseWindowBackends(winId) {
+    for (const [key, wb] of [...windowBackends]) {
+      if (wb.winId !== winId) continue;
+      windowBackends.delete(key);
+      try {
+        wb.stop();
+      } catch (e) {
+        /* best effort */
+      }
     }
   }
 
@@ -100,34 +132,35 @@ function createHostCore(deps) {
   // gone. Silence is not that proof: when the supervisor cannot be ASKED (the
   // hop is down — this beat failing is usually the hop's dying breath), the
   // claim is kept, parked, for the next hop to re-bind.
-  function tunnelClaimOnFail(wc, supBase, sessionId) {
+  function tunnelClaimOnFail(wc, slotId, supBase, sessionId) {
+    const key = slotKey(wc.id, slotId);
     return () => {
-      log(`[backend] window ${wc.id} session heartbeat failed; re-establishing`);
+      log(`[backend] slot ${key} session heartbeat failed; re-establishing`);
       (async () => {
-        const cur = windowBackends.get(wc.id);
+        const cur = windowBackends.get(key);
         if (!cur || cur.sessionId !== sessionId) return; // superseded / closed
         // ask through the hop that is up NOW: the failing beat was the OLD
         // hop's, and a question asked into a dead hop can only say "unreachable"
         const ts = tunnelStatus();
         const hop = ts.active && ts.url ? ts.url : supBase;
-        const verdict = await rebindTunnelBackend(wc, hop, cur);
+        const verdict = await rebindTunnelBackend(wc, slotId, hop, cur);
         if (verdict.verdict === "kept") {
-          if (!wc.isDestroyed()) wc.send(BASE_CHANGED, verdict.url);
+          if (!wc.isDestroyed()) notifyBase(wc, slotId, verdict.url);
           return;
         }
-        if (windowBackends.get(wc.id) !== cur) return; // the claim changed hands while we were asking: replacing now would spawn a session nobody is waiting for
+        if (windowBackends.get(key) !== cur) return; // the claim changed hands while we were asking: replacing now would spawn a session nobody is waiting for
         if (verdict.verdict !== "gone") {
           // doubt (no route to the supervisor): NOT provably gone, so the
           // claim stays — its forward and heartbeat are already dropped — and
           // the next claim (the reconnect's api:base) re-binds it. Replacing it
           // here would start a second session over the first one's work, which
           // the far host reports as "this project is already open in another window"
-          log(`[backend] window ${wc.id} session ${sessionId} not provably gone; keeping the claim for the next hop`);
+          log(`[backend] slot ${key} session ${sessionId} not provably gone; keeping the claim for the next hop`);
           return;
         }
-        await releaseWindowBackend(wc.id);
-        const url = await ensureWindowBackend(wc);
-        if (!wc.isDestroyed()) wc.send(BASE_CHANGED, url);
+        await releaseSlot(wc.id, slotId);
+        const url = await ensureSlotBackend(wc, slotId);
+        if (!wc.isDestroyed()) notifyBase(wc, slotId, url);
       })();
     };
   }
@@ -138,10 +171,12 @@ function createHostCore(deps) {
   // heartbeat). `detach` drops exactly that half, ONCE: a detached claim is
   // detached again when it is stopped or re-bound, and one close is all a
   // forward needs.
-  function tunnelClaim(supBase, sessionId, sessionPort, fwd, hb) {
+  function tunnelClaim(wc, slotId, supBase, sessionId, sessionPort, fwd, hb) {
     let dropped = false;
     const wb = {
       kind: "tunnel",
+      winId: wc.id,
+      slotId,
       sessionId,
       // the REMOTE port the session listens on: the session is a process on
       // the far host and outlives any hop to it, so a bounced tunnel re-opens
@@ -169,20 +204,20 @@ function createHostCore(deps) {
     return wb;
   }
 
-  async function registerTunnelBackend(wc, supBase, res) {
+  async function registerTunnelBackend(wc, slotId, supBase, res) {
     const fwd = await openSessionForward(res.port);
     const hb = sessions.startSupervisorHeartbeat(
       supBase,
       res.sessionId,
-      tunnelClaimOnFail(wc, supBase, res.sessionId),
+      tunnelClaimOnFail(wc, slotId, supBase, res.sessionId),
       // where this client serves the model right now: the session's endpoint
       // follows it when a hop lands the far-side forward on another port (a
       // session's --base-url was frozen at spawn and the run inside it outlives
       // every hop, so a frozen base is a run that can never recover)
       llmTarget
     );
-    const wb = tunnelClaim(supBase, res.sessionId, res.port, fwd, hb);
-    windowBackends.set(wc.id, wb);
+    const wb = tunnelClaim(wc, slotId, supBase, res.sessionId, res.port, fwd, hb);
+    windowBackends.set(slotKey(wc.id, slotId), wb);
     return wb.url;
   }
 
@@ -203,7 +238,7 @@ function createHostCore(deps) {
   //                              supervisor, a forward that would not open, a
   //                              claim that changed hands mid-ask): the claim
   //                              is kept, detached, for the next hop
-  async function rebindTunnelBackend(wc, supBase, existing) {
+  async function rebindTunnelBackend(wc, slotId, supBase, existing) {
     if (!existing || existing.kind !== "tunnel" || !existing.sessionId || !existing.sessionPort) {
       return { verdict: "gone" };
     }
@@ -226,26 +261,27 @@ function createHostCore(deps) {
     const hb = sessions.startSupervisorHeartbeat(
       supBase,
       existing.sessionId,
-      tunnelClaimOnFail(wc, supBase, existing.sessionId),
+      tunnelClaimOnFail(wc, slotId, supBase, existing.sessionId),
       llmTarget
     );
-    const wb = tunnelClaim(supBase, existing.sessionId, existing.sessionPort, fwd, hb);
-    if (windowBackends.get(wc.id) !== existing) {
+    const wb = tunnelClaim(wc, slotId, supBase, existing.sessionId, existing.sessionPort, fwd, hb);
+    if (windowBackends.get(slotKey(wc.id, slotId)) !== existing) {
       // superseded while we worked (a newer claim, or the window closed):
       // what we opened serves nobody, and what changed hands is not replaced
       // behind the new holder's back
       wb.detach();
       return { verdict: "doubt" };
     }
-    windowBackends.set(wc.id, wb);
+    windowBackends.set(slotKey(wc.id, slotId), wb);
     return { verdict: "kept", url: wb.url };
   }
 
   // Decide (and, if needed, re-create) this window's backend URL.
-  async function claimWindowBackend(wc, notify = false) {
+  async function claimSlotBackend(wc, slotId = "", notify = false) {
+    const key = slotKey(wc.id, slotId);
     const ts = tunnelStatus();
     if (ts.active && ts.url) {
-      const existing = windowBackends.get(wc.id);
+      const existing = windowBackends.get(key);
       if (existing && existing.kind === "tunnel") {
         // reuse only a forward opened through THIS tunnel: the forward an earlier
         // tunnel opened died with it, and handing its port out again points the
@@ -257,9 +293,9 @@ function createHostCore(deps) {
         // a different hop (or a claim whose forward went with the last one):
         // the far-side session outlives every hop, so re-open its forward —
         // never stop + start, which is what killed runs in flight
-        const kept = await rebindTunnelBackend(wc, ts.url, existing);
+        const kept = await rebindTunnelBackend(wc, slotId, ts.url, existing);
         if (kept.verdict === "kept") {
-          if (notify && !wc.isDestroyed()) wc.send(BASE_CHANGED, kept.url);
+          if (notify && !wc.isDestroyed()) notifyBase(wc, slotId, kept.url);
           return kept.url;
         }
         if (kept.verdict !== "gone") {
@@ -269,7 +305,7 @@ function createHostCore(deps) {
           return null;
         }
       }
-      await releaseWindowBackend(wc.id); // drop any local session first
+      await releaseSlot(wc.id, slotId); // drop any local session first
       // The far side's model path is installed beside the connect, not inside it
       // (ui/tunnel-connect.js startModelPath): a far side that is silent about
       // global requests must not be able to hold "Starting tunnel…" open. What it
@@ -305,8 +341,8 @@ function createHostCore(deps) {
         }
       }
       if (!res.error) {
-        const url = await registerTunnelBackend(wc, ts.url, res);
-        if (notify && !wc.isDestroyed()) wc.send(BASE_CHANGED, url);
+        const url = await registerTunnelBackend(wc, slotId, ts.url, res);
+        if (notify && !wc.isDestroyed()) notifyBase(wc, slotId, url);
         return url;
       }
       // tunnel alive but supervisorless (degraded host or remote died): fall back to a local session
@@ -320,7 +356,7 @@ function createHostCore(deps) {
       return null;
     }
 
-    const existing = windowBackends.get(wc.id);
+    const existing = windowBackends.get(key);
     if (existing && existing.kind === "local") return existing.url;
     if (existing && existing.kind === "tunnel") {
       // a parked tunnel claim is not provably gone (its hop died mid-ask, and
@@ -330,17 +366,17 @@ function createHostCore(deps) {
       // reconnect's claim re-binds this one
       return null;
     }
-    await releaseWindowBackend(wc.id);
+    await releaseSlot(wc.id, slotId);
     let s;
     const onFail = () => {
       // self-heal: the local supervisor died (idle exit, crash, stale reap);
       // re-claim and point the renderer at the new URL — same as the tunnel path
-      log(`[backend] window ${wc.id} local session heartbeat failed; re-establishing`);
+      log(`[backend] slot ${key} local session heartbeat failed; re-establishing`);
       (async () => {
-        const cur = windowBackends.get(wc.id);
+        const cur = windowBackends.get(key);
         if (!cur || cur.sessionId !== s.sessionId) return; // superseded / closed
-        await releaseWindowBackend(wc.id);
-        await ensureWindowBackend(wc, true);
+        await releaseSlot(wc.id, slotId);
+        await ensureSlotBackend(wc, slotId, true);
       })();
     };
     // The LOCAL session is claimed by an OS process this host can see, so name
@@ -361,26 +397,27 @@ function createHostCore(deps) {
       log(`[backend] local session failed: ${s.reason}`);
       return null;
     }
-    const wb = { kind: "local", sessionId: s.sessionId, url: s.url, stop: s.stop };
-    windowBackends.set(wc.id, wb);
-    if (notify && !wc.isDestroyed()) wc.send(BASE_CHANGED, wb.url);
+    const wb = { kind: "local", winId: wc.id, slotId, sessionId: s.sessionId, url: s.url, stop: s.stop };
+    windowBackends.set(key, wb);
+    if (notify && !wc.isDestroyed()) notifyBase(wc, slotId, wb.url);
     return wb.url;
   }
 
-  // one in-flight claim per window: overlapping api:base calls (renderer boot,
+  // one in-flight claim per SLOT: overlapping api:base calls (renderer boot,
   // retries) must share a single session claim, not spawn two session children
-  const backendClaims = new Map(); // windowId -> Promise<url|null>
-  function ensureWindowBackend(wc, notify = false) {
-    const inflight = backendClaims.get(wc.id);
+  const backendClaims = new Map(); // slotKey -> Promise<url|null>
+  function ensureSlotBackend(wc, slotId = "", notify = false) {
+    const key = slotKey(wc.id, slotId);
+    const inflight = backendClaims.get(key);
     if (inflight) return inflight;
     const p = (async () => {
       try {
-        return await claimWindowBackend(wc, notify);
+        return await claimSlotBackend(wc, slotId, notify);
       } finally {
-        backendClaims.delete(wc.id);
+        backendClaims.delete(key);
       }
     })();
-    backendClaims.set(wc.id, p);
+    backendClaims.set(key, p);
     return p;
   }
 
@@ -392,7 +429,14 @@ function createHostCore(deps) {
   // dropping every window's session because one of them pressed Cancel is how a
   // disconnect in one window used to take the other windows' work down with it.
   async function releaseAllBackends() {
-    for (const id of [...windowBackends.keys()]) await releaseWindowBackend(id);
+    for (const [key, wb] of [...windowBackends]) {
+      windowBackends.delete(key);
+      try {
+        wb.stop();
+      } catch (e) {
+        /* best effort */
+      }
+    }
   }
 
   // A tunnel is gone. Every window's forward through it died with it (stopTunnel
@@ -406,18 +450,25 @@ function createHostCore(deps) {
   // after the reconnect re-opens its forward instead of starting a new session
   // over the old one's work.
   //
-  // Returns the WINDOW IDS whose forward it dropped — not a count. The tunnel is
-  // one process-wide resource and the session is not: a shell's tunnel-end
-  // notification has to name the windows the hop actually owned, or every other
-  // window is told it lost a session that is still running fine (see the
-  // `lost` flag the shells compute from this list).
+  // Returns the SLOTS whose forward it dropped — {winId, slotId} records, not a
+  // count. The tunnel is one process-wide resource and the sessions are not: a
+  // shell's tunnel-end notification has to name the slots the hop actually
+  // owned, or every other tab is told it lost a session that is still running
+  // fine (see the `lost` flag the shells compute from this list).
   async function releaseTunnelBackends() {
     const affected = [];
-    for (const [id, wb] of [...windowBackends]) {
+    for (const [key, wb] of [...windowBackends]) {
       if (wb.kind !== "tunnel") continue;
       if (typeof wb.detach === "function") wb.detach();
-      else await releaseWindowBackend(id); // no detach on this claim: full stop
-      affected.push(id);
+      else {
+        windowBackends.delete(key);
+        try {
+          wb.stop();
+        } catch (e) {
+          /* best effort */
+        }
+      }
+      affected.push({ winId: wb.winId, slotId: wb.slotId });
     }
     return affected;
   }
@@ -453,9 +504,18 @@ function createHostCore(deps) {
   // machine's supervisor, so "install where this window works" means the far
   // side of a tunnel, and a tunnel being up is not the same claim — a window
   // that fell back to a local session is working HERE.
-  function backendKind(winId) {
-    const wb = windowBackends.get(winId);
+  function backendKind(winId, slotId = "") {
+    const wb = windowBackends.get(slotKey(winId, slotId));
     return wb ? wb.kind : null;
+  }
+
+  // What the renderer needs to know about one slot without claiming it: whether
+  // a session exists (a page reload re-attaches instead of spawning a second
+  // one), where it is, and which machine it runs on.
+  function slotStatus(winId, slotId = "") {
+    const wb = windowBackends.get(slotKey(winId, slotId));
+    if (!wb) return { claimed: false, kind: null, url: null };
+    return { claimed: true, kind: wb.kind, url: wb.url || null };
   }
 
   // The SUPERVISOR that owns this window's session — and therefore the only
@@ -463,8 +523,8 @@ function createHostCore(deps) {
   // lock is freed by the host that holds it, never by the client. A tunnel
   // claim means the far host's supervisor (through the same tunnel base); a
   // local claim (or no claim yet) means this machine's.
-  function supervisorBaseFor(winId) {
-    const wb = windowBackends.get(winId);
+  function supervisorBaseFor(winId, slotId = "") {
+    const wb = windowBackends.get(slotKey(winId, slotId));
     if (wb && wb.kind === "tunnel") {
       const ts = tunnelStatus() || {};
       return ts.active && ts.url ? ts.url : null;
@@ -473,13 +533,21 @@ function createHostCore(deps) {
   }
 
   return {
-    ensureWindowBackend,
-    releaseWindowBackend,
+    // slot API
+    ensureSlotBackend,
+    releaseSlot,
+    releaseWindowBackends,
+    // pre-tabs spelling: the default slot of that window (kept for every call
+    // site and test that predates tabs)
+    ensureWindowBackend: (wc, notify = false) => ensureSlotBackend(wc, "", notify),
+    claimWindowBackend: (wc, notify = false) => claimSlotBackend(wc, "", notify),
+    releaseWindowBackend: (winId) => releaseSlot(winId, ""),
     releaseAllBackends,
     releaseTunnelBackends,
     anyTunnelWindow,
     stopAllBackends,
-    claimWindowBackend,
+    claimSlotBackend,
+    slotStatus,
     backendKind,
     supervisorBaseFor,
     backendCount: () => windowBackends.size,

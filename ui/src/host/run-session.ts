@@ -495,4 +495,18 @@ async function createSessionRun({
   return { start, stop, step, drive, state };
 }
 
-module.exports = { createSessionRun, FETCH_TIMEOUT_MS };
+// The LLM facts a run instance is BUILT from. A settings save must reach the
+// next turn of an existing tab, so callers compare this before reusing a cached
+// instance; the key is part of the fingerprint but never logged.
+function llmSettingsRev() {
+  const s = readSettings() || {};
+  return JSON.stringify({
+    upstream: getUpstream(),
+    key: getApiKey(),
+    model: s.model || "",
+    protocol: s.api_protocol || "",
+    effort: s.reasoning_effort || "",
+  });
+}
+
+module.exports = { createSessionRun, FETCH_TIMEOUT_MS, llmSettingsRev };
