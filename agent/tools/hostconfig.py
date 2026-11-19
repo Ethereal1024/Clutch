@@ -11,7 +11,7 @@ file-driven about). So one document may name them:
 
     {
       "access":   {"read": {"guard": "guard_read", "arg": "path"}},
-      "gates":    {"project": "project", "skills": "skills"},
+      "gates":    {"project": "project"},
       "ui":       {"chip": "name"},
       "backends": [{"name": "tavily", "field": "tavily_api_key"}]
     }

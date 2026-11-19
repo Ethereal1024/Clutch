@@ -21,7 +21,7 @@ So this endpoint is DATA and nothing else:
                  `$config.<field>`, and only those (see below)
   backends       the configured search chain, for `$backends`
   facts          {token: names} — each published host fact, already answered
-                 (`$skills`), so the frontend never runs a component's statement
+                 (`$<fact>`), so the frontend never runs a component's statement
   host           {ui, access, gates} — the machine's own tables, the document
                  over the built-ins (catalog.DEFAULTS / ACCESS_WORDS / GATE_WORDS)
   project        whether a project log is open (the `project` gate)
@@ -67,14 +67,14 @@ def _strings(node: Any) -> Iterator[str]:
 def _config(cfg: Any, declarations: list[Mapping[str, Any]]) -> dict[str, Any]:
     """The knobs these declarations name, as values this host may hand out.
 
-    The token reading is the schema's own (answers._PLACEHOLDER), not a second
+    The token reading is the schema's own (answers.placeholder), not a second
     regex: if `$config.<field>` means something to the reading, it means the
     same field here. The type test is what keeps credentials out; `bool` is
     tested first only because it is also an `int`.
     """
     named: set[str] = set()
     for text in _strings(declarations):
-        for token in answers._PLACEHOLDER.findall(text):
+        for token in answers.placeholder().findall(text):
             if token.startswith("config."):
                 named.add(token[len("config.") :])
     fields = catalog.BACKEND_FIELDS  # Config's own field list, read off the dataclass
@@ -106,7 +106,7 @@ class DeclsMixin:
                 "available": {name: rendezvous.available(name) for name in catalog.table()},
                 "config": _config(cfg, declarations),
                 "backends": list(catalog.available_backends(cfg)),
-                "facts": {token: list(answers._names(token, cfg)) for token in catalog.FACT_TOKENS},
+                "facts": {token: list(answers._names(token, cfg)) for token in catalog.published()},
                 "host": {
                     "ui": dict(catalog.DEFAULTS),
                     "access": {word: {"arg": rec.arg} for word, rec in catalog.ACCESS_WORDS.items()},

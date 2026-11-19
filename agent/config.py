@@ -87,7 +87,7 @@ class Config:
             os.environ.get("CLUTCH_SEARXNG_URL") or os.environ.get("SEARXNG_URL") or ""
         ).rstrip("/")
     )
-    # Agent mode: "work" = full toolset, "chat" = read-only (whitelist + memory + skills)
+    # Agent mode: "work" = full toolset, "chat" = read-only (whitelist + memory)
     mode: str = "work"
 
     # Commands that hang in a non-TTY pipe

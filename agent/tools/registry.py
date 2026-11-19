@@ -67,7 +67,6 @@ from .gates import (
     _check_vocabulary,
     _gate_ok,
     gate_project,
-    gate_skills,
 )
 from .inst import InstError
 from .prompt import components_unavailable, module_blocked_reason, prompt_section
@@ -201,7 +200,7 @@ def _wire(
     """One declaration -> the tool the model sees and the host runs.
 
     The description and the schema alike are run through `_resolve`, so a
-    manifest's `$config.<field>` / `$backends` / published-fact (`$skills`) tokens
+    manifest's `$config.<field>` / `$backends` / published-fact (`$<fact>`) tokens
     become the host facts they name — the component says WHAT it wants to know
     about this host, the host answers with its own values (and, for a published
     fact, with the answer of the component that declares it).
@@ -650,7 +649,6 @@ __all__ = [
     "ToolImpl",
     "GuardImpl",
     "gate_project",
-    "gate_skills",
     "_GUARD_IMPLS",
     "_GATE_IMPLS",
     "_check_vocabulary",

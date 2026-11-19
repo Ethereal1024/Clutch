@@ -26,7 +26,7 @@
 //                            the one thing a declaration cannot say itself
 //     config,                this machine's values, for `$config.<field>`
 //     backends,              the configured search-backend chain, for `$backends`
-//     facts,                 published host facts already answered, for `$skills`
+//     facts,                 published host facts already answered, for `$<fact>`
 //     project,               whether a project log is open (the `project` gate)
 //     mode,                  "work" / "chat"
 //     host,                  {ui, access, gates} — the machine's own tables
@@ -85,10 +85,9 @@ const WATCHED_ACCESS = new Set(["read", "write"]);
 
 // `gate` -> the condition behind it. "" and "always" are structural (no
 // condition) and are therefore never in a table.
-const DEFAULT_GATES = { project: "project", skills: "skills" };
+const DEFAULT_GATES = { project: "project" };
 const MODES = ["work", "chat"];
 const FACILITIES = ["python", "posix-shell", "curl"];
-const FACT_TOKENS = ["skills"];
 
 // The words a declaration used before "where a statement runs" became a
 // DERIVATION from what it contributes. Nothing reads them for meaning; a manifest
@@ -345,9 +344,11 @@ function toolDiagnostics(component, spec, host) {
       diagnostic(component, spec.name, `unknown access '${spec.access}' (host knows ${known(Object.keys(host.access))})`)
     );
   }
-  if (!host.gates.has(spec.gate)) {
-    // "" is a valid gate (no gate) and never worth naming back at the tool
-    const words = known([...host.gates].filter(Boolean));
+  if (!host.gates.has(spec.gate) && !host.facts.has(spec.gate)) {
+    // "" is a valid gate (no gate) and never worth naming back at the tool. A
+    // published fact is a gate too: "that fact has something in it" is a
+    // condition the declaration defines and the host can answer.
+    const words = known([...host.gates, ...host.facts].filter(Boolean));
     out.push(diagnostic(component, spec.name, `unknown gate '${spec.gate}' (host knows ${words})`));
   }
   for (const mode of spec.modes) {
@@ -374,6 +375,18 @@ function diagnostic(component, tool, message, fatal = true) {
 
 function known(words) {
   return words.map((w) => `'${w}'`).join(", ");
+}
+
+// A `facts` token is a word this host can carry: a bare name, and not one it
+// already means — the two words a placeholder spends itself, and the gates this
+// machine honors. Whether anyone ANSWERS it is a question about the table, not
+// about the word, so a supplier may still be installed later.
+const FACT_NAME = /^[a-z][a-z0-9_]*$/;
+function reserved(host) {
+  return ["backends", ...host.gates].filter(Boolean);
+}
+function publishable(token, host) {
+  return FACT_NAME.test(token) && !reserved(host).includes(token);
 }
 
 // Every host word a component's declaration read wrongly, its tools' too.
@@ -412,10 +425,19 @@ function componentDiagnostics(c, host) {
   }
   const hostsFact = new Set();
   for (const token of Object.keys(c.facts)) {
+    if (!publishable(token, host)) {
+      out.push(
+        diagnostic(
+          c.name,
+          "",
+          `illegal fact '${token}': a published host fact is a bare name ([a-z][a-z0-9_]*) and not a word this ` +
+            `host already means (${known(reserved(host))})`
+        )
+      );
+      continue;
+    }
     hostsFact.add(token);
-    if (!FACT_TOKENS.includes(token)) {
-      out.push(diagnostic(c.name, "", `unknown fact '${token}' (this host publishes ${known(FACT_TOKENS)})`));
-    } else if (resident(c)) {
+    if (resident(c)) {
       out.push(
         diagnostic(
           c.name,
@@ -480,18 +502,24 @@ function componentDiagnostics(c, host) {
 // ------------------------------------------------------- the host's answers ---
 //
 // A declaration never carries this machine's own values: it NAMES what it wants to
-// know (`$config.<field>`, `$backends`, and a published fact such as `$skills`)
-// and the host answers while the schema is built. A value that IS one of them
-// keeps its own shape (an enum stays a list, a knob keeps its type); the same
-// token inside a sentence is spelled out.
+// know (`$config.<field>`, `$backends`, and any fact a component publishes) and the
+// host answers while the schema is built. Reading a placeholder is SYNTAX — a `$`
+// and a name — and what the name means is settled where it is answered, so a fact
+// published tomorrow needs no edit here. A value that IS a fact keeps its own shape
+// (an enum stays a list, a knob keeps its type); the same token inside a sentence
+// is spelled out.
 
-const PLACEHOLDER = new RegExp("\\$(config\\.[a-z_]+|backends|" + FACT_TOKENS.join("|") + ")\\b", "g");
-const WHOLE = new RegExp("^\\$(" + FACT_TOKENS.join("|") + ")$");
+const PLACEHOLDER = /\$([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)/g;
+const WHOLE = /^\$([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)$/;
 
 function resolve(value, answers) {
   if (typeof value === "string") {
     const whole = WHOLE.exec(value);
-    if (whole) return factNames(whole[1], answers).slice();
+    // A whole `$<name>` names a published fact — except the host's own two words,
+    // which answer with their own shape just below.
+    if (whole && whole[1] !== "backends" && !whole[1].startsWith("config.")) {
+      return factNames(whole[1], answers).slice();
+    }
     if (value.startsWith("$config.")) {
       const key = value.slice("$config.".length);
       return Object.prototype.hasOwnProperty.call(answers.config, key) ? answers.config[key] : "";
@@ -509,13 +537,15 @@ function resolve(value, answers) {
 
 // One placeholder read INSIDE a sentence: the fact as prose, never a list.
 function factText(token, answers) {
-  if (FACT_TOKENS.includes(token)) {
-    const names = factNames(token, answers);
-    return names.length ? names.join(", ") : "none";
+  if (token.startsWith("config.")) {
+    const key = token.slice("config.".length);
+    return Object.prototype.hasOwnProperty.call(answers.config, key) ? String(answers.config[key]) : "";
   }
   if (token === "backends") return answers.backends.length ? answers.backends.join(" or ") : "none";
-  const key = token.slice("config.".length);
-  return Object.prototype.hasOwnProperty.call(answers.config, key) ? String(answers.config[key]) : "";
+  // anything else names a published fact, or no value at all: a name nobody
+  // publishes is never a guess, and never a `$` left standing in the text.
+  const names = factNames(token, answers);
+  return names.length ? names.join(", ") : "none";
 }
 
 // The names a published fact offers right now. No answer (a fact this machine
@@ -571,10 +601,19 @@ function createTools(input) {
     facts: opts.facts && typeof opts.facts === "object" ? opts.facts : {},
   };
   const machine = opts.host && typeof opts.host === "object" ? opts.host : {};
+  // The table once: what the gate vocabulary is read from below is the same table
+  // the surface is built out of, so the two can never disagree about a fact.
+  const table = tableOf(declarations);
+  const published = new Set();
+  for (const component of table) for (const token of Object.keys(component.facts)) published.add(token);
   const host = {
     ui: machine.ui && typeof machine.ui === "object" ? machine.ui : DEFAULT_UI,
     access: machine.access && typeof machine.access === "object" ? machine.access : DEFAULT_ACCESS,
     gates: new Set(["", "always", ...(machine.gates === undefined ? Object.keys(DEFAULT_GATES) : Object.keys(machine.gates))]),
+    // A published fact is a condition a declaration defines: "that fact has
+    // something in it". The host knows one condition of its own and inherits
+    // every other one from the table.
+    facts: published,
   };
   const mode = opts.mode === undefined ? "work" : String(opts.mode);
   const project = Boolean(opts.project);
@@ -595,14 +634,15 @@ function createTools(input) {
     }
   }
 
-  // The host-side condition a named `gate` stands behind. A word this machine
-  // does not honor shuts the gate: an unreadable condition is not "always true".
+  // A word this machine does not honor shuts the gate: an unreadable condition is
+  // not "always true". A word that is not one of the machine's own gates but IS a
+  // published fact is answered by that fact — open while it offers a name, shut
+  // when it is empty, which is how a component's own off switch reaches the tools
+  // and the prompt it carries.
   function gateOk(word) {
     if (word === "" || word === "always") return true;
-    if (!host.gates.has(word)) return false;
-    if (word === "project") return project;
-    if (word === "skills") return factNames("skills", answers).length > 0;
-    return false;
+    if (host.gates.has(word)) return word === "project" ? project : false;
+    return host.facts.has(word) && factNames(word, answers).length > 0;
   }
 
   // Wire one declaration: the model-facing text and schema with this machine's
@@ -646,7 +686,7 @@ function createTools(input) {
   // component whose code is not here. Every diagnostic is kept — fatal ones for
   // what is withheld, cosmetic ones so a manifest that targets a newer renderer
   // is a sentence someone can read rather than a tool that quietly looks plainer.
-  for (const component of tableOf(declarations)) {
+  for (const component of table) {
     const diags = componentDiagnostics(component, host);
     diagnostics.push(...diags);
     say(diags);
@@ -705,7 +745,6 @@ module.exports = {
   UI_KEYS,
   MODES,
   FACILITIES,
-  FACT_TOKENS,
   RETIRED_WORDS,
   WATCHED_ACCESS,
 };

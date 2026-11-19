@@ -1075,17 +1075,19 @@ def check_a_component_publishes_the_host_fact() -> None:
             "and the host says which two, instead of quietly serving one of them",
         )
 
-    # a word the host does not publish is a fatal word; so is a fact declared by a
-    # component that cannot answer one (a daemon's statement belongs to one
-    # workspace, and a host fact belongs to none)
+    # a word the host already MEANS is not a component's to publish: `project` is a
+    # gate this host honors, so a fact of that name would leave the gate reading two
+    # ways depending on who answered. So is a fact declared by a component that
+    # cannot answer one (a daemon's statement belongs to one workspace, and a host
+    # fact belongs to none)
     with isolated_host() as root:
         code = root / "bogus-code"
         code.mkdir()
-        _publisher("clutch-bogus", code, _answers([("alpha", "d")]), facts={"colour": "--facts list"})
+        _publisher("clutch-bogus", code, _answers([("alpha", "d")]), facts={"project": "--facts list"})
         messages = [d.message for d in catalog.diagnostics()]
         check(
-            any(d.fatal and "unknown fact 'colour'" in d.message for d in catalog.diagnostics() if d.tool == ""),
-            f"a fact token the host does not publish is refused ({messages})",
+            any(d.fatal and "illegal fact 'project'" in d.message for d in catalog.diagnostics() if d.tool == ""),
+            f"a fact token the host already means is refused ({messages})",
         )
         check("load_thing" not in [t.name for t in build_tools(Config())], "and the component contributes nothing")
 

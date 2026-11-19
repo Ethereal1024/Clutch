@@ -492,10 +492,13 @@ def _tool_facts(tool) -> dict:
     The other kind's slots are null rather than absent, so the fixture has one
     key set to compare instead of two.
     """
-    system = isinstance(tool, registry.SystemTool)
-    extension = isinstance(tool, registry.ExtensionTool)
-    if not (system or extension):  # `Tool` itself: not a tool a call can be made of
-        raise TypeError(f"{type(tool).__name__} is neither SystemTool nor ExtensionTool")
+    if not isinstance(tool, registry.Tool):
+        raise TypeError(f"{type(tool).__name__} is not a wired Tool")
+    # One class, two kinds: `inst` is the component's statement (an extension
+    # tool), `host` the host's own implementation (a system tool). The wiring
+    # refuses a tool with neither (build_tools), so this split is total.
+    extension = tool.inst is not None
+    system = not extension
     return {
         "name": tool.name,
         "description": tool.description,
@@ -508,9 +511,9 @@ def _tool_facts(tool) -> dict:
         "guard": tool.guard.__name__ if tool.guard is not None else None,
         "kind": "system" if system else "extension",
         "needs_log": tool.needs_log if system else None,
-        "owner": tool.owner if extension else None,
-        "template": tool.template if extension else None,
-        "defaults": dict(tool.defaults) if extension else None,
+        "owner": (tool.module or "") if extension else None,
+        "template": tool.inst if extension else None,
+        "defaults": dict(tool.defaults or {}) if extension else None,
         "ui": dict(tool.ui),
     }
 

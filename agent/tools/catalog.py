@@ -148,7 +148,6 @@ WORKSPACE_FS = "workspace-fs"
 FOREIGN_FS = "foreign-fs"
 NETWORK = "network"
 PROJECT_FILE = "project-file"
-SKILL_LIB = "skill-library"
 
 # What the UI does with a tool that declares no `ui` block: a plain block, its
 # name as the row's chip, its arguments streamed, its result shown whole. Any
@@ -196,8 +195,13 @@ UI_KEYS = tuple(DEFAULTS) + ("mutates",)
 # nothing implements would otherwise be a policy word with no policy behind it.
 GUARD_IMPLS: tuple[str, ...] = ("guard_read", "guard_grep", "guard_write")
 # The gate conditions this host has, likewise named (registry._GATE_IMPLS
-# implements them; the same check keeps the lists equal).
-GATE_IMPLS: tuple[str, ...] = ("project", "skills")
+# implements them; the same check keeps the lists equal). A gate word may ALSO be
+# the name of a fact a component publishes (see `published`): the condition is
+# then "that fact has something in it", which is a question only the publishing
+# component can answer, and the only condition a declaration needs in order to
+# offer a tool over its own catalog. The host therefore knows exactly one
+# condition of its own, and inherits every other one from a declaration.
+GATE_IMPLS: tuple[str, ...] = ("project",)
 
 # access: the policy a tool is put under, with the argument that policy judges by
 # default. A declaration may RENAME that argument (`Tool.access_arg`) — a path
@@ -216,7 +220,7 @@ ACCESS_ARGS: dict[str, str] = {word: rec.arg for word, rec in ACCESS_WORDS.items
 # gate: a host-side condition that must hold for the tool to be offered at all
 # (registry._gate_ok). "" / "always" = no condition, and are structural rather
 # than declared: only the NAMED conditions are the document's to add or drop.
-DEFAULT_GATES: dict[str, str] = {"project": "project", "skills": "skills"}
+DEFAULT_GATES: dict[str, str] = {"project": "project"}
 GATE_WORDS: dict[str, str] = hostconfig.gates(DEFAULT_GATES, GATE_IMPLS)
 GATES: tuple[str, ...] = ("", "always", *GATE_WORDS)
 # modes: the agent modes a tool is offered in (config.Config.mode).
@@ -235,11 +239,40 @@ HOST_TOOL_NAMES: tuple[str, ...] = ("run_command", "grep_memory", "read_memory")
 # compute them. `vars` is the other direction (what a component consumes from the
 # host); a `facts` key is a host fact a component ANSWERS — a component declares
 # the statement that produces it, and the host asks that statement when it needs
-# the value (tools/facts.py). The token is the host's, the answer shape is the
-# host's, and a word absent from here is refused rather than guessed at. One
-# token so far: `skills`, the catalog of the library the skills component serves
-# — the list this host used to scan for itself.
-FACT_TOKENS: tuple[str, ...] = ("skills",)
+# the value (tools/facts.py).
+#
+# The vocabulary is the DECLARATIONS'. This host keeps no list of its own: a
+# token exists because a component says it answers it, and what the host
+# guarantees is the SHAPE of the answer (one JSON array of `{"name",
+# "description"}` — facts.py) and that exactly ONE component answers it
+# (component_diagnostics: two suppliers would be two truth sources behind one name
+# the model picks a value from). `published()` is that list, read off the merged
+# table — so a component that is absent publishes nothing, a component that is
+# installed is the whole of what can be asked, and a new fact costs the host no
+# edit at all.
+_FACT_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+# Names the host already MEANS: the words it spends inside a placeholder
+# (answers.placeholder) and the gates it honors (GATE_WORDS). A fact may not take
+# one, or `$backends` / a gate `project` would read two ways depending on who
+# answered. Read off the host's own vocabulary, so a word this machine's document
+# adds is reserved without a second edit.
+def _reserved() -> tuple[str, ...]:
+    return ("backends", *GATE_WORDS)
+
+
+def _publishable(token: str) -> bool:
+    """Whether a `facts` token is a word this host can carry at all: a bare name,
+    and not one it already means."""
+    return bool(_FACT_NAME.match(token)) and token not in _reserved()
+
+
+def published(table_: Mapping[str, Component] | None = None) -> tuple[str, ...]:
+    """Every host fact the components on this table publish, in table order."""
+    known = table() if table_ is None else table_
+    return tuple(dict.fromkeys(token for component in known.values() for token in component.facts))
+
 
 # settings: the knobs a component lets a PERSON set (catalog.Component.settings).
 # The host draws the form and stores the values from the declaration alone
@@ -334,9 +367,12 @@ def tool_diagnostics(component: str, spec: Tool) -> list[Diagnostic]:
         out.append(
             Diagnostic(component, spec.name, f"unknown access {spec.access!r} (host knows {_known(ACCESS_ARGS)})")
         )
-    if spec.gate not in GATES:
-        # "" is a valid gate (no gate) and never worth naming back at the tool
-        named = _known([g for g in GATES if g])
+    if spec.gate not in GATES and spec.gate not in published():
+        # "" is a valid gate (no gate) and never worth naming back at the tool.
+        # A published fact is a gate too: the condition is "that fact has
+        # something in it" (gates._gate_ok), and only the component publishing it
+        # can answer.
+        named = _known([g for g in GATES if g] + [t for t in published() if t not in GATES])
         out.append(Diagnostic(component, spec.name, f"unknown gate {spec.gate!r} (host knows {named})"))
     for mode in spec.modes:
         if mode not in MODES:
@@ -468,12 +504,16 @@ def component_diagnostics(component: Component) -> list[Diagnostic]:
             )
         )
     for token in component.facts:
-        if token not in FACT_TOKENS:
+        if not _publishable(token):
+            # Failure is only about the WORD: whether anyone answers it, and
+            # whether exactly one does, is a question about the table
+            # (diagnostics), because a supplier may be installed later.
             out.append(
                 Diagnostic(
                     component.name,
                     "",
-                    f"unknown fact {token!r} (this host publishes {_known(FACT_TOKENS)})",
+                    f"illegal fact {token!r}: a published host fact is a bare name ([a-z][a-z0-9_]*) and not "
+                    f"a word this host already means ({_known(_reserved())})",
                 )
             )
         elif component.resident:
@@ -541,6 +581,26 @@ def diagnostics(table_: Mapping[str, Component] | None = None) -> list[Diagnosti
     out: list[Diagnostic] = []
     for component in known.values():
         out.extend(component_diagnostics(component))
+    # A fact is a question the host asks and exactly ONE component answers: two
+    # suppliers would be two truth sources behind a name the model picks a value
+    # from, and which one it reached would depend on table order. Whether anyone
+    # answers, and whether one does, is a question about the TABLE and never about
+    # one declaration — a supplier may be installed later — so it is asked here,
+    # over the whole of it, and not in component_diagnostics.
+    suppliers: dict[str, list[str]] = {}
+    for component in known.values():
+        for token in filter(_publishable, component.facts):
+            suppliers.setdefault(token, []).append(component.name)
+    for token, names in suppliers.items():
+        if len(names) > 1:
+            out.append(
+                Diagnostic(
+                    names[-1],
+                    "",
+                    f"host fact {token!r} is published by {_known(names)}: a fact has one supplier, or the host "
+                    f"would ask whichever of them the table happened to name first",
+                )
+            )
     return out
 
 
@@ -577,8 +637,8 @@ class Tool:
 
     `description` is the model-facing text. `parameters` is JSON Schema; a
     string value anywhere in the declaration may carry the host-fact
-    placeholders `$config.<field>`, a fact some component publishes (`$skills` —
-    catalog.FACT_TOKENS) and `$backends`, resolved by the registry from what only
+    placeholders `$config.<field>`, `$<fact>` for any fact a component publishes
+    (catalog.published) and `$backends`, resolved by the registry from what only
     the host knows.
 
     `command` is the statement template `inst.render` fills — the part of the
@@ -605,10 +665,10 @@ class Tool:
     host's); `snapshot_arg` names the argument that holds that path (default:
     `access_arg`, else "path"). `modes` are the agent modes the tool is offered
     in. `gate` names a host-side condition that must hold — "project" (this
-    session has a project log to read) or "skills" (the skills library has
-    something to load)
-    — and a shut gate means the tool is simply not offered
-    (registry._gate_ok).
+    session has a project log to read), or the name of a fact some component
+    publishes, in which case the condition is "that fact has something in it"
+    (registry._gate_ok, catalog.published) — and a shut gate means the tool is
+    simply not offered, not offered-with-an-error.
     """
 
     name: str
@@ -694,12 +754,13 @@ class Component:
     registry.prompt_section — the host writes no such word itself.
 
     `facts` maps a HOST fact this component PUBLISHES to the statement that
-    answers it: `{"skills": "--facts list"}`. It is the reverse of `vars` — there
+    answers it: `{"catalog": "--facts list"}`. It is the reverse of `vars` — there
     a component asks the host for something only the host knows, here it offers
     something only the component can compute (its own catalog, its own scan). The
-    tokens are the host's vocabulary (FACT_TOKENS) and so is the ANSWER SHAPE: one
-    JSON array of `{"name", "description"}` on stdout, whatever the component's
-    own `--json` contract looks like. Only a component whose statement stands ALONE
+    tokens are the DECLARATIONS' vocabulary (catalog.published) — the host keeps no
+    list of its own — and so is the ANSWER SHAPE: one JSON array of `{"name",
+    "description"}` on stdout, whatever the component's own `--json` contract looks
+    like. One fact has one supplier. Only a component whose statement stands ALONE
     may publish one: a service's statements are spoken to one workspace, and a host
     fact belongs to none (see tools/facts.py).
 
@@ -770,7 +831,7 @@ RETIRED_WORDS: tuple[str, ...] = ("interface", "runs_on")
 # order, with the config field that enables each ("" = always available). This
 # is a HOST fact — which knobs this machine's config has — not a declaration:
 # any component may spend `$backends` in its schema text and the host renders
-# what it knows, exactly as it does `$config.<field>` and `$skills`.
+# what it knows, exactly as it does `$config.<field>` and any published fact.
 #
 # The chain the document may replace whole (a chain is ordered, so there is no
 # key to merge on): `DEFAULT_BACKENDS` is the built-in one, `_BACKENDS` what the

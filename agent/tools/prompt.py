@@ -36,9 +36,9 @@ def prompt_section(config: Config) -> str:
     describing tools that are not here.
 
     A fragment is resolved exactly like a tool description, so a component may
-    spend `$config.<field>` / `$backends` / a published fact (`$skills`) in it
-    too — and one fact gets a second reading, because a catalog is not a word in
-    a sentence: a LINE that is exactly `$skills` becomes the block
+    spend `$config.<field>` / `$backends` / a fact it publishes itself in it too
+    — and one fact gets a second reading, because a catalog is not a word in a
+    sentence: a LINE that is exactly `$<fact>` becomes the block
     `- name: description` per entry (_prose), which is how a component writes
     "here is my catalog" without knowing a single entry of it. A fragment that
     spends a fact nobody here can answer is NOT appended (the calls it describes
@@ -84,10 +84,10 @@ def _prose(text: str, config: Config) -> str:
 
     A line that is exactly one published fact is a BLOCK: one `- name:
     description` line per entry, in the shape the component's own human `list`
-    renders — the component writes the header in its own words and says `$skills`
-    under it, and knows no entry of the library it is describing. Anywhere else
-    (a token inside a sentence) the fact reads as the list of names, exactly as
-    it does in a tool description (_resolve).
+    renders — the component writes the header in its own words and puts the
+    token on a line of its own, and knows no entry of the catalog it is
+    describing. Anywhere else (a token inside a sentence) the fact reads as the
+    list of names, exactly as it does in a tool description (_resolve).
     """
     out: list[str] = []
     for line in text.splitlines():
@@ -138,7 +138,7 @@ def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
 
     Both questions are the same one — is this workspace local? — asked in opposite
     directions, which is why one `isinstance` answers them. A component serving
-    anything else (the project file, the network, the skill library) is unaffected
+    anything else (the project file, the network, a library of its own) is unaffected
     by where the workspace lives.
     """
     if module is None:

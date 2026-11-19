@@ -95,23 +95,14 @@ def gate_project(config: Config, log: LazyEventLog | None) -> bool:
     return log is not None and bool(str(log.path))
 
 
-def gate_skills(config: Config, log: LazyEventLog | None) -> bool:
-    """`skills`: the library the `skills` fact publishes has something in it.
-
-    Nothing to load: an enum over an empty library is a schema that offers the
-    model nothing to pick. The gate word is also the fact token, so a library the
-    host cannot read shuts this gate too.
-    """
-    return bool(_entries("skills", config))
-
-
 # The host-side condition a NAMED `gate` word stands behind, by the name the
 # host's document calls it (catalog.GATE_IMPLS lists the ones that exist —
 # _check_vocabulary keeps the two lists equal — and "" / "always" are structural,
-# no condition at all, so they are not here).
+# no condition at all, so they are not here). Only conditions the HOST computes
+# live here: a condition over a component's own catalog is the name of that
+# component's fact, and _gate_ok reads it there.
 _GATE_IMPLS: dict[str, Callable[[Config, LazyEventLog | None], bool]] = {
     "project": gate_project,
-    "skills": gate_skills,
 }
 
 
@@ -120,15 +111,23 @@ def _gate_ok(gate: str, config: Config, log: LazyEventLog | None) -> bool:
     catalog.Tool.gate). A tool whose gate is shut is not offered — it is not
     offered-with-an-error, because the model would only learn to stop trying.
 
-    The word is looked up in the host's table (catalog.GATE_WORDS: the built-in
-    conditions with this machine's document merged over them), and a word whose
-    condition this host does not have shuts the gate: an unreadable condition is
-    not "always true" (a declaration naming one the host cannot answer is refused
-    by tool_diagnostics anyway, so this is the second lock on the same door)."""
+    A word is one of two things, and both are read from the DECLARATION's
+    vocabulary rather than from a list here: a condition this host implements
+    (catalog.GATE_WORDS: the built-in conditions with this machine's document
+    merged over them), or the name of a fact some component publishes. The second
+    is the whole of what a component brings to the vocabulary — "that fact has
+    something in it", answered by the component that owns the value and never
+    guessed at here (answers._entries) — so a component can offer a tool over its
+    own catalog with no host edit, and the host owns exactly one condition of its
+    own. A word that is neither shuts the gate: an unreadable condition is not
+    "always true" (a declaration naming one is refused by tool_diagnostics anyway,
+    so this is the second lock on the same door)."""
     if gate in ("", "always"):
         return True
     impl = _GATE_IMPLS.get(catalog.GATE_WORDS.get(gate, ""))
-    return bool(impl(config, log)) if impl else False
+    if impl:
+        return bool(impl(config, log))
+    return gate in catalog.published() and bool(_entries(gate, config))
 
 
 def _check_vocabulary() -> None:

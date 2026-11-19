@@ -312,8 +312,8 @@ def serves_workspace_fs(module: str) -> bool:
 
     Its subject is the machine the root lives on, so a statement may only be
     spoken to it while the workspace IS that machine (registry.module_blocked_reason); a
-    component serving anything else — the app's project file, the network, the
-    skill library — is unaffected by where the workspace lives. Keyed on the
+    component serving anything else — the app's project file, the network, a
+    library of its own — is unaffected by where the workspace lives. Keyed on the
     subject and not on how the statement is spoken: a service serving a foreign
     filesystem over a channel it owns is a service too, and it is not this.
     """

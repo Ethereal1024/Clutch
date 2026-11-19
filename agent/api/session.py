@@ -67,7 +67,7 @@ class SessionMixin:
                 "mode": cfg.mode,
                 "shell": local_shell().name,
                 # registry.prompt_section(cfg) reads each drivable component's
-                # `prompt` file and resolves $config / $backends / $skills tokens
+                # `prompt` file and resolves $config / $backends / published-fact tokens
                 # exactly as it does for a Python run; serving the resolved text
                 # avoids duplicating that resolution on the host side.
                 "components": prompt_section(cfg),

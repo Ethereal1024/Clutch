@@ -205,7 +205,7 @@ def check_gate_merges() -> None:
 
     doc = {"gates": {"cachedir": "project"}}
     merged = hostconfig.gates(built_in, impls, doc=doc)
-    check(merged["cachedir"] == "project" and merged["skills"] == "skills",
+    check(merged["cachedir"] == "project" and merged["project"] == "project",
           "a new gate word maps to a condition the host has")
 
     doc = {"gates": {"cachedir": "etc"}}
@@ -213,13 +213,13 @@ def check_gate_merges() -> None:
     check("cachedir" not in merged, "a condition the host has not got is not offered")
     check("'etc'" in hostconfig.said()[0], "and the unknown condition is said")
 
-    doc = {"gates": {"skills": "etc"}}
+    doc = {"gates": {"project": "etc"}}
     merged = hostconfig.gates(built_in, impls, doc=doc)
-    check(merged["skills"] == "skills", "a bad condition on a built-in gate leaves it standing")
+    check(merged["project"] == "project", "a bad condition on a built-in gate leaves it standing")
 
-    doc = {"gates": {"skills": None}}
+    doc = {"gates": {"project": None}}
     merged = hostconfig.gates(built_in, impls, doc=doc)
-    check("skills" not in merged and "project" in merged, "a gate named null stops existing")
+    check(merged == {}, "a gate named null stops existing")
 
     doc = {"gates": {"": "project", "x": 5}}
     before = len(hostconfig.said())
@@ -310,7 +310,7 @@ def check_backend_merges() -> None:
 
 DOC = """{
   "access": {"read": {"arg": "file"}, "mode": {"guard": "guard_write", "arg": "dir"}},
-  "gates": {"cachedir": "project", "skills": null},
+  "gates": {"cachedir": "project", "project": null},
   "ui": {"chip": "none", "group": "host"},
   "backends": [{"name": "tavily", "field": "tavily_api_key"},
                {"name": "ghost", "field": "no_such_field"}]
@@ -338,7 +338,7 @@ print(json.dumps({
         registry.ACCESS["mode"].guard is filesystem.guard_write if "mode" in registry.ACCESS else False
     ),
     "cachedir_open": registry._gate_ok("cachedir", config, sentinel),
-    "skills_shut": registry._gate_ok("skills", config, sentinel),
+    "project_shut": registry._gate_ok("project", config, sentinel),
     "stranger_shut": registry._gate_ok("no_such_gate", config, sentinel),
     "guarded_arg_read": permission.GUARDED_ARG.get("read"),
 }))
@@ -374,10 +374,10 @@ def check_subprocess(tmp: Path) -> None:
         )
         check(data["read_guard_bound"] and data["mode_guard_bound"],
               "the taught words bind to the guards the host already had")
-        check(data["gates"] == ["", "always", "project", "cachedir"],
-              "the gate table gains a word and loses `skills` (named null)")
+        check(data["gates"] == ["", "always", "cachedir"],
+              "the gate table gains a word and loses `project` (named null)")
         check(data["cachedir_open"] is True, "the taught gate word answers with the condition it named")
-        check(data["skills_shut"] is False, "the removed gate word shuts: an unknown word is never always-true")
+        check(data["project_shut"] is False, "the removed gate word shuts: an unknown word is never always-true")
         check(data["stranger_shut"] is False, "a gate word nobody taught the host shuts too")
         check(data["chip"] == "none" and data["group"] == "host", "the ui table reaches catalog.DEFAULTS as written")
         check(data["backends"] == [["tavily", "tavily_api_key"]], "the chain was replaced whole; the ghost was dropped")

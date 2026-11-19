@@ -3,15 +3,15 @@
 `vars` is what a component CONSUMES from the host: it names
 one of the host's own facts and the host fills the placeholder. A `facts` entry
 is the reverse — a host fact the component PUBLISHES, because only its own code
-can compute it. `skills` is the one this host has: the catalog of the library
-the skills component serves, a list that changes whenever the user drops a
-directory in, and that the component's own `list` — its scan, its frontmatter,
-its root — already knows how to produce. The host keeps no copy of that work.
+can compute it. A catalog is the shape this was built for: a list that changes
+whenever the user drops a directory in, and that the component's own `list` —
+its scan, its frontmatter, its root — already knows how to produce. The host
+keeps no copy of that work, and no list of what may be asked (catalog.published).
 
-So the host asks, in its own words. The token is the host's vocabulary
-(catalog.FACT_TOKENS), spent wherever the host spends facts (registry._resolve,
-registry._gate_ok); the statement is the component's declared way to answer it;
-and the ANSWER SHAPE is the host's too, never the component's own wire format:
+So the host asks, in its own words. The token is the DECLARATION's vocabulary,
+spent wherever the host spends facts (answers.placeholder, registry._gate_ok);
+the statement is the component's declared way to answer it; and the ANSWER SHAPE
+is the host's too, never the component's own wire format:
 
     [{"name": "refactor", "description": "..."}, ...]
 
@@ -62,8 +62,8 @@ class Answer(NamedTuple):
     problem: str = ""
 
 
-# The one thing a component's answer may carry the host's tokens in: `$skills` in
-# the prose of a declaration. `$config.<field>` / `$backends` are the host's own
+# The thing a component's answer may carry the host's tokens in: `$<fact>` in the
+# prose of a declaration. `$config.<field>` / `$backends` are the host's own
 # facts, computed here, so they are not "spent" in this sense.
 _NAMED = re.compile(r"\$([a-z_]+)")
 
@@ -76,7 +76,7 @@ def spent(text: str) -> tuple[str, ...]:
     either (the same gate), and a prompt must not promise a call the model cannot
     make.
     """
-    return tuple(t for t in dict.fromkeys(_NAMED.findall(text)) if t in catalog.FACT_TOKENS)
+    return tuple(t for t in dict.fromkeys(_NAMED.findall(text)) if t in catalog.published())
 
 
 def ask(component: catalog.Component, token: str, config: Config) -> Answer:

@@ -212,7 +212,8 @@ function behavior() {
 
   // ---- gates --------------------------------------------------------------
   const gated = [
-    manifest("c-gated", { gate: "skills" }),
+    // the component that gates on a fact is the one that publishes it
+    manifest("c-gated", { gate: "skills" }, { facts: { skills: "list them" } }),
     {
       name: "c-gated2",
       launch: { argv: ["x"] },

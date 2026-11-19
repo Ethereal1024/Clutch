@@ -121,7 +121,7 @@ def machine_check(tmp: Path) -> None:
     check(body["backends"] == list(catalog.available_backends(cfg)), "backends are the configured chain, in order")
     check("tavily" not in body["backends"], "a backend whose key is unset does not exist here")
     check(
-        body["facts"] == {token: list(answers._names(token, cfg)) for token in catalog.FACT_TOKENS},
+        body["facts"] == {token: list(answers._names(token, cfg)) for token in catalog.published()},
         "facts are answered here, not by the page",
     )
     check(isinstance(body["facts"].get("skills"), list), "the skills fact is published as a list of names")

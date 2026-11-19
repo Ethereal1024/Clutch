@@ -2,7 +2,7 @@
 
 A declaration never carries this host's own values: it NAMES what it wants to
 know — `$config.<field>`, `$backends`, and any fact a component publishes
-(catalog.FACT_TOKENS) — and the host answers while the schema, the description or
+(catalog.published) — and the host answers while the schema, the description or
 the prompt fragment is built. This module is that answer, and it is the only
 place a fact is spent or read:
 
@@ -33,20 +33,46 @@ from . import catalog, facts, rendezvous
 # -- declaration -> the schema the model sees ---------------------------------
 
 
-# The host facts a declaration may spend in its prose, built from the vocabulary
-# rather than written out: `$config.<field>` and `$backends` are values this host
-# computes itself, and every word of catalog.FACT_TOKENS names a fact a component
-# publishes (asked of that component — _entries). Publishing a new fact therefore
-# adds a word here with no second edit.
-_PLACEHOLDER = re.compile(r"\$(config\.[a-z_]+|backends|" + "|".join(catalog.FACT_TOKENS) + r")\b")
-# A string value that is EXACTLY one published fact, and nothing else.
-_WHOLE = re.compile(r"\$(" + "|".join(catalog.FACT_TOKENS) + r")\Z")
+# A placeholder is a `$` and a name. Reading one is SYNTAX, not a lookup: what
+# the name means is decided when it is answered (_fact / _resolve), where
+# `config.<field>` and `backends` are values this host computes itself and every
+# other name is a host fact some component publishes (catalog.published, asked of
+# the component that declares it — _entries). A name nobody publishes is
+# therefore read and answered as NO VALUE, instead of surviving as a literal `$`
+# in the text the model reads. Syntax here has a second use: the reading cannot
+# drift from the table, and a fact published tomorrow needs no edit at all.
+_PLACEHOLDER = re.compile(r"\$([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)")
+
+
+def _vocabulary() -> tuple[str, ...]:
+    """The published facts a placeholder may name, as of now.
+
+    Asked of the table every time and never cached: this module is imported long
+    before anything is installed, and the table is what a component installs into.
+    """
+    return tuple(filter(catalog._publishable, catalog.published()))
+
+
+def placeholder() -> re.Pattern[str]:
+    """The pattern a declaration's text is read with: `$` and a name, with the
+    meaning settled where it is answered. The reading is the schema's own, so a
+    caller that wants to know which words a text spends asks here rather than
+    writing a second regex that could drift from this one (api/decls.py)."""
+    return _PLACEHOLDER
 
 
 def _whole_fact(value: str) -> str:
-    """The published fact a whole value names, or "" when the value is not one."""
-    match = _WHOLE.fullmatch(value)
-    return match.group(1) if match else ""
+    """The host fact a whole value names, or "" when the value is not one.
+
+    A whole `$<name>` names a fact — not one of the host's own words, which a
+    whole value answers with its own type (`$config.<field>`) or its own list
+    (`$backends`). Whether anything publishes the name is settled where every
+    fact is (no supplier, no entries), so this stays a reading of the syntax.
+    """
+    token = value[1:] if value.startswith("$") else ""
+    if not token or token == "backends" or token.startswith("config."):
+        return ""
+    return token if _PLACEHOLDER.fullmatch(value) else ""
 
 
 def _resolve(value: Any, config: Config) -> Any:
@@ -55,7 +81,7 @@ def _resolve(value: Any, config: Config) -> Any:
     Three placeholders, all of them things only this host knows when it builds
     the schema: `$config.<field>` (a knob the user set), `$backends` (the search
     backends this machine is configured for) and any fact a component publishes
-    (`$skills` — catalog.FACT_TOKENS, answered by the component that declares it;
+    (`$<fact>` — catalog.published, answered by the component that declares it;
     see _entries). A value that IS a fact stays a list — an enum — while the same
     token inside a sentence reads as the list of names; likewise a value that IS
     `$config.<field>` keeps the knob's own type (a default of
@@ -68,7 +94,7 @@ def _resolve(value: Any, config: Config) -> Any:
             return list(_names(token, config))
         if value.startswith("$config."):  # a whole value: the host's own type
             return getattr(config, value.split(".", 1)[1], "")
-        return _PLACEHOLDER.sub(lambda m: _fact(m.group(1), config), value)
+        return placeholder().sub(lambda m: _fact(m.group(1), config), value)
     if isinstance(value, list):
         return [_resolve(v, config) for v in value]
     if isinstance(value, dict):
@@ -78,11 +104,14 @@ def _resolve(value: Any, config: Config) -> Any:
 
 def _fact(token: str, config: Config) -> str:
     """One placeholder read INSIDE a sentence: the fact as prose, never a list."""
-    if token in catalog.FACT_TOKENS:
-        return ", ".join(_names(token, config)) or "none"
+    if token.startswith("config."):
+        return str(getattr(config, token.split(".", 1)[1], ""))
     if token == "backends":
         return " or ".join(catalog.available_backends(config)) or "none"
-    return str(getattr(config, token.split(".", 1)[1], ""))
+    # anything else names a host fact: answered by the component that publishes
+    # it, or no value at all — a name nobody publishes is never a guess, and never
+    # a `$` left standing in the text the model reads.
+    return ", ".join(_names(token, config)) or "none"
 
 
 def _names(token: str, config: Config) -> tuple[str, ...]:
