@@ -127,6 +127,41 @@ function main() {
       { role: "tool", tool_call_id: "a", content: "1" },
     ]);
     check(halfAnswered.length === 1 && halfAnswered[0].content === "calling two", "half a batch is not a block: the calls go, the text stays");
+
+    // The reported HTTP 400: a complete block followed by results whose ids do
+    // not belong to it (the retired double-loop era wrote the same tool result
+    // twice under two id schemes). The block used to be kept "as-is", orphan
+    // results included, and the provider refused the request.
+    const duplicatedIds = repairDangling([
+      { role: "user", content: "q" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "real", type: "function", function: { name: "t", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "real", content: "the real result" },
+      { role: "tool", tool_call_id: "stale-1", content: "a duplicate from another loop" },
+      { role: "tool", tool_call_id: "real", content: "a duplicate of the real id" },
+    ]);
+    check(
+      duplicatedIds.length === 3 && duplicatedIds[2].tool_call_id === "real" && duplicatedIds[2].content === "the real result",
+      "a complete block keeps only its own results, once each (orphan/duplicate tool messages are dropped)"
+    );
+
+    const staleThenNext = repairDangling([
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "a", type: "function", function: { name: "t", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "a", content: "ok" },
+      { role: "tool", tool_call_id: "stale", content: "old" },
+      { role: "assistant", content: "next" },
+    ]);
+    check(
+      staleThenNext.length === 3 && staleThenNext[1].tool_call_id === "a" && staleThenNext[2].content === "next",
+      "the stale result after a block is dropped, and the following assistant turn survives"
+    );
   }
 
   // ---- 4. the files a compaction rolled away ----

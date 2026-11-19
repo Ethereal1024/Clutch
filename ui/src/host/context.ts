@@ -132,7 +132,21 @@ function repairDangling(msgs) {
         j += 1;
       }
       if (ids.every((id) => responded.has(id))) {
-        for (let k = i; k < j; k++) out.push(msgs[k]); // complete block: keep as-is
+        // Complete block: keep the assistant and only the results that belong
+        // to ITS calls. Logs written by the retired double-loop era carry
+        // duplicate results under other ids (the same tool ran twice, with two
+        // id schemes); forwarding those is an orphan tool message and providers
+        // reject the whole request ("Messages with role 'tool' must be a
+        // response to a preceding message with 'tool_calls'"). Keep the FIRST
+        // answer per id, too: a duplicate response is not a second result.
+        out.push(m);
+        const seen = new Set<string>();
+        for (let k = i + 1; k < j; k++) {
+          const cid = msgs[k].tool_call_id;
+          if (!ids.includes(cid) || seen.has(cid)) continue;
+          seen.add(cid);
+          out.push(msgs[k]);
+        }
       } else {
         // interrupted block: drop tool_calls; only real text can stand alone
         const cleaned: any = {};
@@ -167,9 +181,9 @@ function systemMessage({ mode, components, shell, memory }) {
   if (typeof components === "string" && components) {
     // the components' own words about their own tools, assembled by the side
     // that knows what is installed and drivable. This module places it and names
-    // no tool itself, so the prompt cannot describe tools that are gone. The
-    // skill catalog arrives this way too: the component that serves the library
-    // publishes it.
+    // no tool itself, so the prompt cannot describe tools that are gone. A
+    // component's own catalog — a skill library, a snippet book — arrives this
+    // way too: the component that serves it publishes it as a host fact.
     system += "\n\n" + components;
   }
   if (shell === "bash") {
