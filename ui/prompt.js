@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/prompt.ts and run `npm run build:host`.
-// source sha256: b4fc69cffd56bd962c43226315a912462345af316d5a78ff02087cad02912561
+// source sha256: 6f8d32934a0efb405208be9766de3d1289597ceceef0fa31afefcaee3d48857f
 
 "use strict";
 // The loop's own words, loaded from files instead of embedded in code.
@@ -163,6 +163,7 @@ const SAY = {
     budget_exceeded: "budget_exceeded.md",
     cancelled: "cancelled.md",
     doom_loop: "doom_loop.md",
+    empty_reply_limit: "empty_reply_limit.md",
     empty_response: "empty_response.md",
     max_tokens: "max_tokens.md",
 };

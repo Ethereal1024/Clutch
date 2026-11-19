@@ -97,6 +97,65 @@ async function main() {
     );
   }
 
+  // ---- 2a. relay shapes: the answer is not always in `delta.content` ----
+  //
+  // The reported "pika" config kept producing empty replies: a non-streaming
+  // relay (or one that repeats the message in its last chunk) puts the text in
+  // `message.content`, and block-shaped content is a list, not a string. Both
+  // used to reach the loop as an empty answer, which then retried forever.
+  {
+    const finalMessage = await serve(({ res }) => {
+      head(res);
+      chunk(res, { choices: [{ message: { role: "assistant", content: "hello there" }, finish_reason: "stop" }] });
+      end(res);
+    });
+    const blockContent = await serve(({ res }) => {
+      head(res);
+      chunk(res, say([{ type: "text", text: "a" }, { type: "text", text: "b" }]));
+      chunk(res, stop("stop"));
+      end(res);
+    });
+    const legacyText = await serve(({ res }) => {
+      head(res);
+      chunk(res, { choices: [{ text: "legacy completion", finish_reason: "stop" }] });
+      end(res);
+    });
+    const both = await serve(({ res }) => {
+      head(res);
+      chunk(res, say("hello"));
+      chunk(res, { choices: [{ message: { content: "hello FULL" }, finish_reason: "stop" }] });
+      end(res);
+    });
+    try {
+      const mk = (base) => createLlmClient({ baseUrl: base, model: "test-model", apiKey: "sk-test" });
+      {
+        const events = await collect(mk(finalMessage.base));
+        const fin = events[events.length - 1];
+        check(fin.content === "hello there", "a final chunk's `message.content` is the answer");
+      }
+      {
+        const events = await collect(mk(blockContent.base));
+        const fin = events[events.length - 1];
+        check(fin.content === "ab", "block-shaped content is joined as text, never emptied");
+      }
+      {
+        const events = await collect(mk(legacyText.base));
+        const fin = events[events.length - 1];
+        check(fin.content === "legacy completion", "a legacy `choice.text` answer is accepted");
+      }
+      {
+        const events = await collect(mk(both.base));
+        const fin = events[events.length - 1];
+        check(fin.content === "hello", "when deltas streamed, the repeated message is not appended twice");
+      }
+    } finally {
+      await finalMessage.close();
+      await blockContent.close();
+      await legacyText.close();
+      await both.close();
+    }
+  }
+
   // ---- 2. one whole turn: reasoning, text, two calls split across chunks ----
   {
     const peer = await serve(({ res }) => {

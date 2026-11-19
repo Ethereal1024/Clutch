@@ -325,19 +325,36 @@ async function* attempt({ url, headers, body, signal, readTimeoutMs, stallMs, pr
 // One provider chunk -> our events, exactly agent/llm/llm_clients/chunk_handle's
 // four handlers. State is the caller's accumulators: content, reasoning, and the
 // tool calls by index (the provider streams one call as many fragments).
+// Text out of the shapes providers actually put in `content`: a string, a list
+// of `{type:"text", text}` blocks, or a single block. A relay that only speaks
+// blocks used to yield an EMPTY answer (the text was truthy but joined as
+// objects), which the loop then retried forever.
+function textOfContent(v) {
+  if (!v) return "";
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) {
+    return v
+      .map((b) => (typeof b === "string" ? b : b && typeof b.text === "string" ? b.text : ""))
+      .join("");
+  }
+  if (typeof v === "object" && typeof (v as any).text === "string") return (v as any).text;
+  return "";
+}
+
 function translateChat(obj, state) {
   const out = [];
   const choice = obj && Array.isArray(obj.choices) ? obj.choices[0] : null;
   const delta = choice && choice.delta;
   if (delta) {
-    const reasoning = delta.reasoning_content || delta.reasoning;
+    const reasoning = textOfContent(delta.reasoning_content || delta.reasoning);
     if (reasoning) {
       state.reasoning.push(reasoning);
       out.push({ type: "reasoning", delta: reasoning });
     }
-    if (delta.content) {
-      state.content.push(delta.content);
-      out.push({ type: "text", delta: delta.content });
+    const content = textOfContent(delta.content);
+    if (content) {
+      state.content.push(content);
+      out.push({ type: "text", delta: content });
     }
     for (const tc of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
       const idx = tc.index;
@@ -355,6 +372,40 @@ function translateChat(obj, state) {
           out.push({ type: "tool_call_delta", index: idx, delta: tc.function.arguments });
         }
       }
+    }
+  }
+  // A non-streaming relay (or one that repeats the whole message in its final
+  // chunk) puts the answer in `message` instead of a delta, and some legacy
+  // completions servers put it in `choice.text`. Take those ONLY when no delta
+  // text arrived, so a provider that sends both cannot duplicate a sentence.
+  if (choice) {
+    const msg = choice.message;
+    if (!state.content.length) {
+      const fromMessage = msg ? textOfContent(msg.content) : "";
+      const legacy = typeof choice.text === "string" ? choice.text : "";
+      const text = fromMessage || legacy;
+      if (text) {
+        state.content.push(text);
+        out.push({ type: "text", delta: text });
+      }
+    }
+    if (!state.reasoning.length && msg) {
+      const reasoning = textOfContent(msg.reasoning_content || msg.reasoning);
+      if (reasoning) {
+        state.reasoning.push(reasoning);
+        out.push({ type: "reasoning", delta: reasoning });
+      }
+    }
+    // the same for a whole tool call list delivered at the end (no deltas)
+    if (!state.toolArgs.size && msg && Array.isArray(msg.tool_calls)) {
+      msg.tool_calls.forEach((tc, i) => {
+        const id = (tc && tc.id) || "";
+        const name = (tc && tc.function && tc.function.name) || "";
+        const args = (tc && tc.function && tc.function.arguments) || "";
+        if (!name) return;
+        state.toolArgs.set(i, { id, name, args: typeof args === "string" ? args : JSON.stringify(args) });
+        out.push({ type: "tool_call_start", index: i, id, name });
+      });
     }
   }
   if (choice && choice.finish_reason) {

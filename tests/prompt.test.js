@@ -27,6 +27,7 @@ const SLOTS = {
   "compaction_files.md": ["files"],
   "compaction_head.md": ["summary"],
   "doom_loop.md": ["tool"],
+  "empty_reply_limit.md": ["count"],
   "empty_response.md": [],
   "env_windows_bash.md": [],
   "env_windows_cmd.md": ["HOME"],
@@ -220,6 +221,11 @@ function main() {
   {
     check(say("cancelled") === load("cancelled.md"), "say(cancelled) is the cancelled note");
     check(say("empty_response").includes("no visible text"), "say(empty_response) tells the model to answer visibly");
+    check(
+      say("empty_reply_limit", { count: "3" }).includes("3 times in a row"),
+      "say(empty_reply_limit) states how many empty replies ended the turn"
+    );
+    check(!say("empty_reply_limit", { count: "3" }).includes("$count"), "and leaves no slot behind");
     check(say("max_tokens").includes("max_tokens limit"), "say(max_tokens) explains the truncation");
     // the two guard notes are the ones with slots: the loop passes what it ended
     // the turn for, so these are the only SAY entries a caller fills (P4-3)
@@ -231,7 +237,7 @@ function main() {
     );
     check(!say("budget_exceeded", { max_turns: 3 }).includes("$max_turns"), "and leaves no slot behind");
     check(
-      Object.keys(SAY).join(",") === "budget_exceeded,cancelled,doom_loop,empty_response,max_tokens",
+      Object.keys(SAY).join(",") === "budget_exceeded,cancelled,doom_loop,empty_reply_limit,empty_response,max_tokens",
       "the loop's five notes are the map"
     );
     let threw = null;

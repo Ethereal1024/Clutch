@@ -102,6 +102,39 @@ function requiredPort(ports, name) {
 // "both off" rather than inventing numbers the session never chose.
 const NO_LIMITS = { maxTurns: 0, doomLoopLimit: 0, abortOnDoomLoop: false };
 
+// A model that keeps returning no visible text is not a turn: the note the loop
+// feeds back is a retry, not progress. Without a bound the two reinforce each
+// other forever (a relay sending an unreadable shape, a reasoning-only reply),
+// filling the log with retry rows the user never asked for. Three is enough to
+// tell a hiccup from a format the client cannot read.
+const EMPTY_REPLY_LIMIT = 3;
+
+// How many EMPTY assistant turns the current turn already holds, counting back
+// over the loop's own notes. Stops at the task that opened the turn, at a real
+// answer, at a tool result, or at the final that would have closed it.
+function consecutiveEmptyReplies(events, note) {
+  const wanted = String(note || "").trim();
+  let count = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (!ev || typeof ev !== "object") continue;
+    if (ev.type === "assistant_message") {
+      if (!String(ev.content || "").trim()) {
+        count += 1;
+        continue;
+      }
+      break;
+    }
+    if (ev.type === "user_message") {
+      if (String(ev.content || "").trim() === wanted) continue;
+      break;
+    }
+    if (ev.type === "tool_call" || ev.type === "tool_result" || ev.type === "final") break;
+    // compaction (and any display-only line) does not change the turn
+  }
+  return count;
+}
+
 function readLimits(ports) {
   const given = ports && ports.limits;
   if (given === undefined || given === null) return NO_LIMITS;
@@ -314,14 +347,20 @@ function createRun(ports) {
       return { did: "model", calls: recorded.length };
     }
 
-    await put({ type: "assistant_message", content, tool_calls: [], reasoning });
     if (!content.trim()) {
-      // An empty reply is NOT a completion: it is fed back as a note and the
-      // model is asked again (agent/loop.py). The assistant line stays durable —
-      // the log says it said nothing, which is a fact about the turn.
-      await put({ type: "user_message", content: prose("empty_response") });
+      // An empty reply is NOT a completion: the assistant line stays durable
+      // (the log says it said nothing), the model is asked again with a note —
+      // but only while the run is not repeating itself.
+      const note = prose("empty_response");
+      const prior = consecutiveEmptyReplies(events, note);
+      await put({ type: "assistant_message", content, tool_calls: [], reasoning });
+      if (prior + 1 >= EMPTY_REPLY_LIMIT) {
+        return await finish("error", "empty_reply_limit", { count: String(EMPTY_REPLY_LIMIT) });
+      }
+      await put({ type: "user_message", content: note });
       return { did: "model", emptyReply: true };
     }
+    await put({ type: "assistant_message", content, tool_calls: [], reasoning });
     // The sentence is now on the log. The next step reads a tail that already
     // answers the turn and closes it with that same sentence, rather than asking
     // the model the same question a second time.

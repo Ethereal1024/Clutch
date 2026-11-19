@@ -190,6 +190,36 @@ async function main() {
     check(out.status === "completed" && out.summary === "here it is", "the turn ends on the real answer");
   }
 
+  // ---- 4b. a model that never answers visibly is stopped, not looped ----
+  {
+    const s = store();
+    let asked = 0;
+    const run = createRun(
+      ports(s, {
+        model: async () => {
+          asked += 1;
+          return { content: "", toolCalls: [], finishReason: "stop" };
+        },
+        text: (key, vars) =>
+          key === "empty_response"
+            ? "you said nothing"
+            : key === "empty_reply_limit"
+              ? `${vars.count} times in a row`
+              : `note:${key}`,
+      })
+    );
+    await run.start("q");
+    const out = await run.drive();
+    check(asked === 3, "an always-empty model is asked three times, then the loop stops");
+    check(out.did === "final" && out.status === "error", "the turn ends with an error, not an endless retry");
+    check(out.summary.includes("3 times in a row"), "the ending says how many empty replies it saw");
+    check(
+      s.types().join(",") ===
+        "user_message,assistant_message,user_message,assistant_message,user_message,assistant_message,final",
+      "three empty assistant lines are durable, the last one closed by the final (no third nudge)"
+    );
+  }
+
   // ---- 5. a truncated turn is not an answer and its calls do not run ----
   {
     const s = store();

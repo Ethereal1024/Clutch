@@ -167,6 +167,7 @@ const SAY = {
   budget_exceeded: "budget_exceeded.md",
   cancelled: "cancelled.md",
   doom_loop: "doom_loop.md",
+  empty_reply_limit: "empty_reply_limit.md",
   empty_response: "empty_response.md",
   max_tokens: "max_tokens.md",
 };
