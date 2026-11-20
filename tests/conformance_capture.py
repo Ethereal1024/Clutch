@@ -331,12 +331,15 @@ def _journal_cases(cap: Capture, state: RunState, root: Path, clc: Path) -> None
     # guards: the journal is left untouched by both refusals
     ws.begin_turn(ANCHOR_B)
     ws.record_mutation(alpha, True, "x")
-    state.busy = True
+    # a run in flight: the slot is a LEASE, claimed through the call the host's
+    # own POST /api/run/state uses (there is no settable flag to fake it with)
+    claimed = state.claim_run(str(state.project.path))
+    assert claimed == "", f"the run slot is free here, not {claimed}"
     try:
         cap.call("workspace.rollback", "rollback.run-active", "POST", "/api/workspace/rollback",
                  body={"offset": ANCHOR_B})
     finally:
-        state.busy = False
+        state.release_run(str(state.project.path))
 
     cap.bind(root=root, clc=clc)
     cap.call("project.lifecycle", "project.open.read-only", "POST", "/api/project/open",

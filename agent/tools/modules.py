@@ -1,22 +1,24 @@
 """Where the standalone tool modules live, and which interpreter runs them.
 
-Each decoupled component has its own repository, checked out next to the host
+Each decoupled component has its own repository, checked out inside the host
 repo in the dev layout: clutch-workspace and clutch-skills are tool modules the
 host runs, clutch-websearch is a CLIENT plugin the client runs. The host never
 imports any of them, and — since the host ships no built-in component — the
-RUNTIME never names them either: a component is discovered through its own
-manifest (tools/catalog.py), and these names are kept in one place for the
-consumers that are allowed to point — the tests, and the UI's list of what to
-ship on install (ui/components.js).
+RUNTIME never names them either: a component is discovered through the manifest
+its install laid down (tools/catalog.py), and these names are kept in one place
+for the consumers that are allowed to point — the tests, config's default, and
+the UI's list of what to build an artifact from (ui/components.js).
 
 Three things every consumer of a module needs, kept in one place:
 
-  module_dir(name)    the dev CHECKOUT of a module, next to the host repo
-  component_dir(name) where this host actually finds the module it may run: an
-                      installed component first (tools/components.py — a host
-                      installs what it runs, on its own machine), then the
-                      checkout. Every host-side lookup goes through this one,
-                      so "installed" and "checked out" can never disagree
+  module_dir(name)    the CHECKOUT of a module, inside the host repo. A place to
+                      BUILD an artifact from, never a place the host runs from:
+                      a checkout the host wants to drive is installed first
+                      (scripts/install-component.py)
+  component_dir(name) where this host finds the module it runs: the installed
+                      version directory (tools/components.py), and nothing else.
+                      None when this host does not hold it — an absent install
+                      is absent, not a checkout standing in for one
   python_exe()        the interpreter that runs it. Under a frozen build
                       sys.executable is the app bundle, not a Python, so it must
                       never be handed a `-m module` command line; CLUTCH_PYTHON
@@ -48,23 +50,25 @@ def repo_root() -> Path:
 
 
 def module_dir(name: str) -> Path:
-    """The checkout directory of a standalone module (the dev layout)."""
+    """The checkout directory of a standalone module (the dev layout).
+
+    This is a SOURCE TO BUILD FROM and nothing more. Two consumers, both of them
+    builders: the tests that lay a component down to exercise it, and
+    scripts/install-component.py, which archives a checkout into an artifact.
+    The host itself never reads a directory this returns.
+    """
     return repo_root() / name
 
 
-def component_dir(name: str) -> Path:
-    """Where THIS host finds `name`: its installed component first, then the
-    dev checkout next to the host repo.
+def component_dir(name: str) -> Path | None:
+    """Where THIS host finds `name` when it runs it: the installed version
+    directory, or None when it does not hold the component.
 
-    The two are interchangeable here on purpose: a host may be a desktop process
-    in a source checkout or a remote machine where the client uploaded the
-    component's artifact, and what the host runs is in both cases "the code of
-    this component on this machine" — one thing, one accessor. Only a RESOLVABLE
-    install shadows the checkout (tools/components.installed requires a valid
-    manifest naming this component), so a half-written version directory cannot
-    hide a working checkout.
+    One path, because a component is one thing: what a host holds is what it
+    runs. A checkout beside the repo is not an alternative spelling of an
+    install — see module_dir.
     """
-    return components.installed(name) or module_dir(name)
+    return components.installed(name)
 
 
 def python_exe() -> str:

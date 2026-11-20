@@ -1,28 +1,25 @@
-"""The declaration table: discovery, merge, the UI protocol, the host's facts.
+"""The declaration table: one source, the UI protocol, the host's facts.
 
 Run: .venv/bin/python -m tests.catalog_test
 
-The host ships NO component: what it can drive is whatever its
-three registration sources hold — a dev checkout beside the repo, an installed
-artifact, a file in the user's catalog directory — merged by name, a later
-source overriding only the fields it names. This suite pins that pipeline with
-declarations it writes itself, plus the components this repo develops where the
-fact is about what ships:
+The host ships NO component and reads NO second place. What it can drive is what
+its install root holds — one version directory per component, plus the table that
+says this host holds it (tools/components.py) — and a declaration reaches the
+table no other way. This suite pins that single path with declarations it installs
+itself, plus the components this host holds where the fact is about what ships:
 
-  * a bare host (no checkout, nothing installed, empty catalog) offers
-    run_command and NOTHING else — there is no host-side implementation of any
-    component's tool, so an absent component takes its tools with it;
+  * a bare host (nothing installed) offers run_command and NOTHING else — there
+    is no host-side implementation of any component's tool, so an absent
+    component takes its tools with it;
   * the one tool that is not a component's is declared like one all the same:
     run_command's name, prose, schema, policy word and UI block are data in the
     same vocabulary (tools/host.py), validated by the same diagnostics, and its
     name is vocabulary the catalog holds — a component that publishes it is
     refused rather than shadowing the tool the host's own policy is wired around;
-  * a checkout is discovered by its manifest, and a manifest that names no
-    component is not one;
-  * merge precedence: an installed manifest refines the checkout's declaration
-    field by field, and a catalog registration is the last word — where "refines"
-    means "named means override", at every level (a field an empty list names is
-    cleared, a launch is merged field by field);
+  * one source, and one only: a component directory beside the host repo is not a
+    declaration (a checkout is a place to BUILD an artifact from), and a
+    manifest's own `directory` field has no say in where its code is — that is
+    the version directory its install landed;
   * how a tool looks in the UI is the component's declaration, read through one
     place (catalog.ui_of) and completed with the two facts only the host knows
     (registry.ui: `mutates`, `undo`) — a write declares its own folding diff
@@ -48,10 +45,10 @@ fact is about what ships:
     prompt only while that component is drivable, and the host's own prompt
     files name no tool that is not the host's.
 
-Isolation: isolated_host() repoints the install root (CLUTCH_COMPONENTS_DIR),
-the catalog directory (CLUTCH_COMPONENTS_CATALOG) and modules.repo_root at a
-temp tree, so the run never touches the components installed for the user
-running it.
+Isolation: isolated_host() repoints the install root (CLUTCH_COMPONENTS_DIR) at a
+temp directory and hands back a separate scratch directory, so nothing a check
+writes for a fixture can be mistaken for a component, and the run never touches
+the components installed for the user running it.
 """
 
 from __future__ import annotations
@@ -60,6 +57,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import stat
 import tempfile
 from collections.abc import Iterator, Mapping
@@ -79,55 +77,55 @@ from tests.testsupport import check
 
 
 @contextlib.contextmanager
-def isolated_host(checkouts: Mapping[str, Mapping | None] | None = None) -> Iterator[Path]:
-    """A host of one's own: temp install root and catalog, repo_root repointed
-    at a temp tree holding `checkouts` (directory name -> manifest; None lays
-    the directory down without one).
+def isolated_host() -> Iterator[Path]:
+    """A host of one's own: a temp install root, and a scratch directory beside it.
 
-    Yields the temp root, for callers that need to put an artifact or a code
-    directory somewhere the isolated host can see.
+    Yields the SCRATCH directory — where a check writes the code it wants a
+    component to have, or an artifact to install — while the install root stays
+    out of sight, exactly as a fresh host's would be. `_declare` is what puts a
+    component into it.
     """
     with tempfile.TemporaryDirectory() as root:
-        saved = (
-            os.environ.get(components.ROOT_ENV),
-            os.environ.get("CLUTCH_COMPONENTS_CATALOG"),
-            modules.repo_root,
-        )
-        base = Path(root) / "repo"
-        base.mkdir()
-        for name, data in (checkouts or {}).items():
-            directory = base / name
-            directory.mkdir()
-            if data is not None:
-                (directory / components.MANIFEST).write_text(json.dumps(data), encoding="utf-8")
-        os.environ[components.ROOT_ENV] = root
-        os.environ["CLUTCH_COMPONENTS_CATALOG"] = str(Path(root) / "catalog.d")
-        modules.repo_root = lambda: base  # type: ignore[method-assign]
+        saved = os.environ.get(components.ROOT_ENV)
+        os.environ[components.ROOT_ENV] = str(Path(root) / "components")
         try:
             yield Path(root)
         finally:
-            modules.repo_root = saved[2]  # type: ignore[method-assign]
-            for key, previous in ((components.ROOT_ENV, saved[0]), ("CLUTCH_COMPONENTS_CATALOG", saved[1])):
-                if previous is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = previous
+            if saved is None:
+                os.environ.pop(components.ROOT_ENV, None)
+            else:
+                os.environ[components.ROOT_ENV] = saved
+            catalog.invalidate()
 
 
-def _write_registration(data: Mapping) -> None:
-    """One registration in the (isolated) user's catalog directory."""
-    directory = catalog.catalog_dir()
+def _declare(data: Mapping, *, code: Path | str | None = None, version: str = "1.0.0") -> Path:
+    """Install ONE component for the isolated host, the way an artifact lands.
+
+    A declaration with no install is nothing at all (catalog.registrations reads
+    the install root and no other place), so a fixture that wants its declaration
+    to be live lays down what the installer would: one version directory holding
+    the manifest and the code the component runs — `code` is copied INTO it,
+    because the version directory IS the component's directory — plus the table
+    entry that says this host holds it. Answers that directory, for the checks
+    that have to reach into the code they just installed.
+    """
+    name = str(data["name"])
+    directory = components.root() / name / version
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{data['name']}.json").write_text(json.dumps(data), encoding="utf-8")
+    if code is not None:
+        shutil.copytree(code, directory, dirs_exist_ok=True)
+    declaration = {**data, "version": str(data.get("version", version))}
+    (directory / components.MANIFEST).write_text(json.dumps(declaration), encoding="utf-8")
+    components.reindex()  # the table learns what the disk now holds
+    return directory
 
 
-def _third_party(name: str, *, tool: str = "say_hello", directory: str = "") -> dict:
+def _third_party(name: str, *, tool: str = "say_hello") -> dict:
     """A component declared the way a third party writes one: its own tools,
     its own command template, its own UI block — and nothing the host named."""
     return {
         "name": name,
         "subject": "network",
-        "directory": directory,
         "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
         "requires": ["python"],
         "ui": {"label": "hello", "status": True},
@@ -203,7 +201,6 @@ def _publisher(
     (directory / entry).write_text(body, encoding="utf-8")
     declaration: dict[str, Any] = {
         "name": name,
-        "directory": str(directory),
         "launch": {"argv": ["{py}", "{script}"], "entry": entry},
         "requires": ["python"],
         "facts": {"skills": "--facts list"},
@@ -223,7 +220,7 @@ def _publisher(
         ],
     }
     declaration.update(extra)
-    _write_registration(declaration)
+    _declare(declaration, code=directory)
     return declaration
 
 
@@ -272,8 +269,8 @@ def check_the_host_declares_its_own_tool() -> None:
         (code / "tool.py").write_text(
             "import json\nprint(json.dumps({'content': 'the component ran', 'code': 0}))\n", encoding="utf-8"
         )
-        twin = _third_party("clutch-twin", tool="run_command", directory=str(code))
-        _write_registration(twin)
+        twin = _third_party("clutch-twin", tool="run_command")
+        _declare(twin, code=code)
 
         declared = catalog.table()["clutch-twin"].tools[0]
         refusal = [d for d in catalog.component_diagnostics(catalog.table()["clutch-twin"]) if d.fatal]
@@ -315,99 +312,57 @@ def check_bare_host_is_chat_only() -> None:
         check(not rendezvous.available(modules.WORKSPACE), "the workspace component is not available on a bare host")
 
 
-def check_checkout_discovery_and_precedence() -> None:
-    """A checkout is its own registration; an install refines it; a catalog
-    file is the last word."""
-    declaration = _third_party("clutch-x", tool="x_tool")
-    with isolated_host(
-        {
-            "clutch-x": declaration,
-            # a manifest that names nothing at all: the retired `interface` word
-            # beside it is not a declaration of anything
-            "clutch-nameless": {"interface": "cli"},
-        }
-    ) as root:
-        table = catalog.table()
-        check("clutch-x" in table, "a checkout with a usable manifest enters the table")
-        check("clutch-nameless" not in table, "a manifest that names no component is not a component")
-        check(table["clutch-x"].subject == catalog.NETWORK, "the checkout declares its own subject")
-        check(table["clutch-x"].tools[0].name == "x_tool", "the checkout's tools are the table's")
+def check_one_source_and_one_place_for_its_code() -> None:
+    """An install is the only declaration, and it is also where the code is.
 
-        # an install refines: a thin manifest names only the install facts, and
-        # every field it leaves out carries over from the checkout. It has to name
-        # a contribution of its own — `launch` is what makes it a component this
-        # host can start, and the install gate reads that off the record, never a
-        # word beside it
-        artifact = root / "artifact"
-        artifact.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        components.install(
-            artifact,
-            {
-                "name": "clutch-x",
-                "version": "9.9.9",
-                "prompt": "PROMPT.md",
-                "launch": {"binary": "clutch-x"},
-            },
-        )
-        merged = catalog.table()["clutch-x"]
-        check(merged.prompt == "PROMPT.md", "the install's own field overrides the checkout's")
-        check(
-            merged.launch.binary == "clutch-x" and merged.launch.argv == ("{py}", "{script}"),
-            "and its launch refines field by field: the binary it names, the argv it does not",
-        )
-        check(merged.subject == catalog.NETWORK, "a field the install leaves out carries")
-        check(merged.tools[0].name == "x_tool", "a thin install rides on the checkout's declaration")
-
-        # a catalog registration is the last word, field by field
-        _write_registration({**declaration, "subject": "workspace-fs"})
-        final = catalog.table()["clutch-x"]
-        check(
-            final.subject == catalog.WORKSPACE_FS and final.launch.binary == "clutch-x",
-            "a catalog registration overrides the field it names and leaves the rest",
-        )
-
-
-def check_merge_is_named_means_override() -> None:
-    """A later declaration overrides exactly the fields it NAMES, at every level.
-
-    The rule used to be three rules in one function: some fields were read off
-    the raw JSON, some off the parsed object, and `vars`/`ui` were deep-merged
-    while everything else was replaced whole. Two consequences it could not
-    express: a field could not be CLEARED (an empty list read as "not
-    mentioned"), and `launch` could only be replaced whole (a thin manifest that
-    knew the binary still had to restate the argv). Both are named here.
+    Two things used to be spelled separately and are one thing now. A checkout
+    beside the host repo registered itself, so what the host ran could be a
+    working tree; and a manifest could carry a `directory` field, so a declaration
+    had a say in where its code lived. Both are gone: the host reads the install
+    root and nothing else, and a component's code is the version directory its
+    install landed.
     """
-    checkout = {
-        "name": "clutch-m",
-        "subject": "network",
-        "launch": {"argv": ["{py}", "{script}"], "entry": "tool.py"},
-        "requires": ["python", "curl"],
-        "vars": {"base": "host.port_url", "token": "config.token"},
-        "ui": {"label": "before", "status": True},
-    }
-    with isolated_host({"clutch-m": checkout}):
-        _write_registration(
-            {
-                "name": "clutch-m",
-                "requires": [],  # NAMED and empty: none, not "as before"
-                "launch": {"binary": "clutch-m"},  # one launch field, not the whole shape
-                "vars": {"token": "config.other"},  # named: the block, not a key-by-key merge
-                "ui": {"label": "after"},  # named: the block whole, like every other field
-            }
+    declaration = _third_party("clutch-x", tool="x_tool")
+    with isolated_host() as root:
+        # a checkout beside the host repo: a manifest and code, and nothing here
+        # reads it — a checkout is a place to BUILD an artifact from
+        checkout = root / "repo" / "clutch-x"
+        checkout.mkdir(parents=True)
+        (checkout / components.MANIFEST).write_text(
+            json.dumps({**declaration, "version": "0.1.0"}), encoding="utf-8"
         )
-        merged = catalog.table()["clutch-m"]
-        check(merged.requires == (), "an empty list names the field and clears it")
+        (checkout / "tool.py").write_text("print('[]')\n", encoding="utf-8")
+        check("clutch-x" not in catalog.table(), "a checkout beside the repo is not a declaration")
+
+        # the install IS the declaration and the code; a `directory` field in it
+        # has no say in where that code is
+        elsewhere = root / "elsewhere"
+        elsewhere.mkdir()
+        installed = _declare({**declaration, "directory": str(elsewhere)}, code=checkout)
+        mod = catalog.table()["clutch-x"]
+        check(mod.tools[0].name == "x_tool", "an installed declaration enters the table")
+        check(mod.subject == catalog.NETWORK, "with the subject its own manifest names")
+        resolved = rendezvous.resolve("clutch-x")
         check(
-            merged.launch.binary == "clutch-m" and merged.launch.argv == ("{py}", "{script}"),
-            "launch refines field by field: the binary it names wins, the argv it does not carries",
+            resolved is not None and resolved.directory == installed,
+            "and its code is the version directory the install landed, not a field's say-so",
         )
-        check(merged.launch.entry == "tool.py", "and the entry the later manifest never mentions carries too")
+        check(rendezvous.available("clutch-x"), "so the component is drivable from there")
         check(
-            not merged.resident and merged.subject == catalog.NETWORK,
-            "a field the later declaration leaves out still carries, and a `launch` is still not a service",
+            catalog.registrations() == catalog.installed_registrations(),
+            "the install root is the whole of what the table reads",
         )
-        check(merged.ui == {"label": "after"}, "ui is replaced whole, not deep-merged")
-        check(merged.vars == {"token": "config.other"}, "vars is replaced whole too — one merge semantic")
+
+        # a directory whose manifest names no component is not an install, table
+        # or no table: read_manifest refuses it and the scan skips it
+        nameless = components.root() / "clutch-nameless" / "1.0.0"
+        nameless.mkdir(parents=True)
+        (nameless / components.MANIFEST).write_text(json.dumps({"interface": "cli"}), encoding="utf-8")
+        components.reindex()
+        check(
+            "clutch-nameless" not in catalog.table(),
+            "a manifest that names no component is not one, whatever else it declares",
+        )
 
 
 def check_prompt_travels_with_the_declaration() -> None:
@@ -429,9 +384,9 @@ def check_prompt_travels_with_the_declaration() -> None:
         (code / "SAY.md").write_text(
             "## hello\n\nsay_hello is this component's, up to $config.read_max_chars chars.\n", encoding="utf-8"
         )
-        declaration = _third_party("clutch-hello", directory=str(code))
+        declaration = _third_party("clutch-hello")
         declaration["prompt"] = "SAY.md"
-        _write_registration(declaration)
+        installed = _declare(declaration, code=code)
 
         cfg = Config()
         section = prompt_section(cfg)
@@ -443,17 +398,18 @@ def check_prompt_travels_with_the_declaration() -> None:
         check("say_hello" in ToolRegistry(build_tools(cfg)).names(), "and names a tool that is really here")
 
         # a component the host cannot drive says nothing: the same filter that
-        # withholds its tools withholds its words
-        gone = _third_party("clutch-gone", tool="gone_tool", directory=str(root / "not-there"))
+        # withholds its tools withholds its words. No code at all is the plainest
+        # case — the launch it names has nothing to start.
+        gone = _third_party("clutch-gone", tool="gone_tool")
         gone["prompt"] = "SAY.md"
-        _write_registration(gone)
+        _declare(gone)
         cfg = Config()
         check("gone_tool" not in [t.name for t in build_tools(cfg)], "a component with no code offers no tool")
         check(prompt_section(cfg) == section, "and adds nothing to the prompt either")
 
         # a fragment that cannot be read appends nothing, and is reported once
         # rather than refusing the component: its tools never needed the prose
-        (code / "SAY.md").unlink()
+        (installed / "SAY.md").unlink()
         reported: list[catalog.Diagnostic] = []
         real_report = registry._report
         registry._report = reported.extend  # type: ignore[assignment]
@@ -483,7 +439,7 @@ def check_host_prompt_names_no_component_tool() -> None:
     """
     owned = {spec.name for mod in catalog.table().values() for spec in mod.tools}
     if not owned:
-        print("SKIP: no component checkout beside the repo")
+        print("SKIP: nothing installed for this host")
         return
     prompts = Path(__file__).resolve().parent.parent / "ui" / "prompts"
     for name in ("system.md", "mode_work.md", "mode_chat.md"):
@@ -519,7 +475,7 @@ def check_host_prompt_offers_recall() -> None:
 def check_ui_protocol() -> None:
     """The tool's presentation is its declaration, with defaults filled in."""
     if modules.WORKSPACE not in catalog.table():
-        print("SKIP: no clutch-workspace checkout beside the repo")
+        print("SKIP: clutch-workspace is not installed for this host")
         return
     # a batch of reads: same group, folded body, no live preview
     read = catalog.ui_of(_spec(modules.WORKSPACE, "read_file"))
@@ -617,7 +573,7 @@ def check_declared_access() -> None:
     they need, and nothing names one the engine does not know.
     """
     if modules.WORKSPACE not in catalog.table():
-        print("SKIP: no clutch-workspace checkout beside the repo")
+        print("SKIP: clutch-workspace is not installed for this host")
         return
     for component, tool, access in (
         (modules.WORKSPACE, "read_file", "read"),
@@ -660,9 +616,9 @@ def check_unknown_words_are_refused() -> None:
         )
 
         def register(name: str, tool: str, patch: Mapping) -> None:
-            data = _third_party(name, tool=tool, directory=str(code))
+            data = _third_party(name, tool=tool)
             data["tools"][0].update(patch)
-            _write_registration(data)
+            _declare(data, code=code)
 
         cfg = Config()
 
@@ -688,9 +644,9 @@ def check_unknown_words_are_refused() -> None:
         register("clutch-typo-arg", "say_arg", {"access": "read", "access_arg": "file"})
         check("say_arg" not in offered("say_arg"), "an access_arg the tool does not declare is not offered")
 
-        data = _third_party("clutch-facility", tool="say_facility", directory=str(code))
+        data = _third_party("clutch-facility", tool="say_facility")
         data["requires"] = ["python", "bash-frobnicator"]
-        _write_registration(data)
+        _declare(data, code=code)
         check("say_facility" not in offered("say_facility"), "an unknown facility takes the component's tools out")
         check(
             [d.fatal for d in diagnostic("clutch-facility", "")] == [True],
@@ -700,18 +656,18 @@ def check_unknown_words_are_refused() -> None:
         # a `vars` key that is also one of the tool's arguments: the host's value
         # shadows the model's when the statement renders, so the declaration is
         # refused rather than quietly dropping the argument the model passed
-        data = _third_party("clutch-shadow", tool="say_shadow", directory=str(code))
+        data = _third_party("clutch-shadow", tool="say_shadow")
         data["vars"] = {"who": "host.port_url"}
-        _write_registration(data)
+        _declare(data, code=code)
         check("say_shadow" not in offered("say_shadow"), "a vars key that names an argument refuses the tool")
         check(
             [d.fatal for d in diagnostic("clutch-shadow", "say_shadow")] == [True],
             "and the host names the collision instead of shadowing with it",
         )
 
-        data = _third_party("clutch-shadow-ok", tool="say_unshadowed", directory=str(code))
+        data = _third_party("clutch-shadow-ok", tool="say_unshadowed")
         data["vars"] = {"root": "host.port_url"}
-        _write_registration(data)
+        _declare(data, code=code)
         check("say_unshadowed" in offered("say_unshadowed"), "a vars key no argument names is wired as before")
 
         # the accepted spellings, so the refusals above are about the WORD
@@ -796,9 +752,9 @@ def check_a_renamed_argument_is_still_policy() -> None:
         )
 
         def register(name: str, tool: str, patch: Mapping) -> None:
-            data = _third_party(name, tool=tool, directory=str(code))
+            data = _third_party(name, tool=tool)
             data["tools"][0].update(patch)
-            _write_registration(data)
+            _declare(data, code=code)
 
         shape = {"parameters": {"properties": {"who": {"type": "string"}}, "required": ["who"]}}
         register("clutch-renamed", "peek", {**shape, "command": "--envelope {who}", "access": "read",
@@ -838,11 +794,11 @@ def check_one_name_serves_one_tool() -> None:
     """Two components may declare one tool name; the model still sees exactly one.
 
     A tool name is what the model calls, so the registry holds one wiring per name
-    ({t.name: t}, registry.py) — and which one wins is decided by source order,
-    which this suite's other checks already pin (checkouts, then installs, then
-    the catalog directory, each sorted). What is NOT there yet is a voice: the
+    ({t.name: t}, registry.py) — and which one wins is decided by the order the
+    table is read in, which is the install root's own scan order (component names
+    sorted, one version directory each). What is NOT there yet is a voice: the
     losing declaration disappears without a word, which is what
-    COMPONENTS_REVIEW P1-7 asks for. This pins today's answer — the later source
+    COMPONENTS_REVIEW P1-7 asks for. This pins today's answer — the later entry
     wins, deterministically — so giving the collision a voice is a deliberate
     change with this test in the diff.
     """
@@ -853,9 +809,9 @@ def check_one_name_serves_one_tool() -> None:
             "import json\nprint(json.dumps({'content': 'x', 'code': 0}))\n", encoding="utf-8"
         )
         for name, word in (("clutch-first", "first"), ("clutch-second", "second")):
-            data = _third_party(name, tool="dup", directory=str(code))
+            data = _third_party(name, tool="dup")
             data["tools"][0]["command"] = f"--envelope {word}"
-            _write_registration(data)  # clutch-first.json sorts before clutch-second.json
+            _declare(data, code=code)  # the table's order is the install root's scan order
         cfg = Config()
         tools = build_tools(cfg)
         check([t.name for t in tools].count("dup") == 2, "both declarations are built (nothing is dropped here yet)")
@@ -894,7 +850,7 @@ def check_table_is_memoized() -> None:
                 catalog.table()
             check(scans["n"] == 0, "a lookup that changes nothing re-reads nothing")
 
-            _write_registration(_third_party("clutch-late"))
+            _declare(_third_party("clutch-late"))
             check("clutch-late" in catalog.table(), "a registration landing IS picked up, without an invalidate")
             check(scans["n"] == 1, "and it cost exactly one re-read")
 
@@ -933,7 +889,7 @@ def check_host_facts_in_schema() -> None:
         code = root / "facts-code"
         code.mkdir()
         (code / "tool.py").write_text("print('facts')\n", encoding="utf-8")  # resolve() wants the entry point
-        _write_registration({**declaration, "directory": str(code)})
+        _declare(declaration, code=code)
         cfg = Config()
         reg = ToolRegistry(build_tools(cfg))
         tool = reg.tool("fact_tool")
@@ -981,7 +937,7 @@ def check_a_component_publishes_the_host_fact() -> None:
         (code / "PROMPT.md").write_text(
             "Available things (call load_thing to read one when relevant):\n$skills\n", encoding="utf-8"
         )
-        log = code / "runs.log"
+        log = root / "runs.log"
         _publisher(
             "clutch-pub",
             code,
@@ -1094,14 +1050,14 @@ def check_a_component_publishes_the_host_fact() -> None:
         daemon = root / "daemon-code"
         daemon.mkdir()
         (daemon / "tool.py").write_text("print('[]')\n", encoding="utf-8")
-        _write_registration(
+        _declare(
             {
                 "name": "clutch-daemon",
                 "service": {},  # where its record would go: the home directory
-                "directory": str(daemon),
                 "facts": {"skills": "--envelope list"},
                 "tools": [],
-            }
+            },
+            code=daemon,
         )
         check(
             any(d.fatal and "cannot publish the host fact" in d.message for d in catalog.diagnostics()),
@@ -1111,7 +1067,7 @@ def check_a_component_publishes_the_host_fact() -> None:
 
 
 def check_registration() -> None:
-    """A declaration in the user's catalog directory becomes a live tool."""
+    """A component installed for this host becomes a live tool."""
     with isolated_host() as root:
         code = root / "hello-code"
         code.mkdir()
@@ -1119,7 +1075,7 @@ def check_registration() -> None:
             "import json, sys\nprint(json.dumps({'content': 'echo:' + sys.argv[-1], 'code': 0}))\n",
             encoding="utf-8",
         )
-        _write_registration(_third_party("clutch-hello", directory=str(code)))
+        _declare(_third_party("clutch-hello"), code=code)
 
         check("clutch-hello" in catalog.table(), "a registration with a new name enters the table")
         check(rendezvous.unavailable_reason("clutch-hello") == "", "and is available through its own directory")
@@ -1140,10 +1096,10 @@ def check_registration() -> None:
         # answer — running it here because a word beside it was read as a kind —
         # would search the wrong network from the wrong machine and look like a
         # success, so the refusal is a sentence.
-        elsewhere = _third_party("clutch-elsewhere", tool="say_elsewhere", directory=str(code))
+        elsewhere = _third_party("clutch-elsewhere", tool="say_elsewhere")
         del elsewhere["launch"]
         elsewhere["entry"] = "index.js"
-        _write_registration(elsewhere)
+        _declare(elsewhere, code=code)
         check(
             "runs on the client" in rendezvous.unavailable_reason("clutch-elsewhere"),
             "a declaration with no process here says this host has no channel to that client, "
@@ -1156,9 +1112,9 @@ def check_registration() -> None:
 
         # the contradiction is `entry` BESIDE a process here: one declaration
         # speaking two languages, refused rather than half-read
-        both = _third_party("clutch-both", tool="say_both", directory=str(code))
+        both = _third_party("clutch-both", tool="say_both")
         both["entry"] = "index.js"
-        _write_registration(both)
+        _declare(both, code=code)
         fatal = [d.message for d in catalog.diagnostics() if d.fatal]
         check(
             any("declares `entry` and `launch`" in message for message in fatal),
@@ -1172,9 +1128,9 @@ def check_registration() -> None:
         # the retired words are REFUSED, not read: `interface`/`runs_on` say what
         # a contribution already says, and this host keeps one reading of a
         # declaration (invariant I3 — no second path, not even for an old release)
-        legacy = _third_party("clutch-legacy", tool="say_legacy", directory=str(code))
+        legacy = _third_party("clutch-legacy", tool="say_legacy")
         legacy.update({"interface": "cli", "runs_on": "self"})
-        _write_registration(legacy)
+        _declare(legacy, code=code)
         check(
             "say_legacy" not in [t.name for t in build_tools(Config())],
             "a manifest still carrying `interface`/`runs_on` contributes nothing",
@@ -1242,8 +1198,7 @@ def main() -> int:
     check_table_is_memoized()
     check_the_host_declares_its_own_tool()
     check_bare_host_is_chat_only()
-    check_checkout_discovery_and_precedence()
-    check_merge_is_named_means_override()
+    check_one_source_and_one_place_for_its_code()
     check_prompt_travels_with_the_declaration()
     check_host_prompt_names_no_component_tool()
     check_host_prompt_offers_recall()

@@ -33,10 +33,11 @@ stub: the workspace daemon over loopback HTTP and clutch-skills' CLI (which
 lazily spawns its own daemon). The live section is opt-in because it needs
 checkouts, a POSIX shell and curl.
 
-Isolation: every daemon lives in a temp workspace, every discovery directory and
-the component install root are repointed at temp dirs, so the run never sees or
-leaks a user's daemon, and a component installed on this machine decides nothing
-about the table this test pins.
+Isolation: every daemon lives in a temp workspace, its discovery directory is
+repointed at a temp dir, and the components this suite pins are installed into a
+temp install root through `scripts/install-component.py`, so the run never sees or
+leaks a user's daemon, and what a machine happens to have installed decides
+nothing about the table this test pins.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ import os
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -161,19 +163,16 @@ def check_table(reg: ToolRegistry, cfg: Config) -> None:
         check(tool.host is None, f"{name}: no host-side stand-in (the component IS the implementation)")
     check(reg.tool("nope") is None, "an unknown tool has no definition")
 
-    # The absence of a fallback, as a whole-surface fact: point the host at a
-    # tree with no component checkouts and an empty install root, and the tool
-    # set collapses to the host's one command — not to a stand-in per missing
-    # tool. A host with nothing installed can chat and run commands, nothing more.
+    # The absence of a fallback, as a whole-surface fact: point the host at an
+    # empty install root, and the tool set collapses to the host's one command —
+    # not to a stand-in per missing tool. A host with nothing installed can chat
+    # and run commands, nothing more.
     with tempfile.TemporaryDirectory() as empty:
-        real_root = modules.repo_root
         previous = os.environ.get(components.ROOT_ENV)
-        modules.repo_root = lambda: Path(empty)
         os.environ[components.ROOT_ENV] = empty
         try:
             bare = ToolRegistry(build_tools(Config()))
         finally:
-            modules.repo_root = real_root
             if previous is None:
                 os.environ.pop(components.ROOT_ENV, None)
             else:
@@ -242,12 +241,12 @@ def check_daemon_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
 
 def check_cli_lines(reg: ToolRegistry, ws, cfg: Config) -> None:
     # The launch PREFIX is this host's own resolution of the artifact (an
-    # installed onefile, an installed package, or the dev checkout) — asked of the
-    # real code rather than restated, so this check stays about the flags the
-    # declaration puts after it. What the prefix resolves TO is pinned in
-    # tests/rendezvous_test.py (_install_probe), where the install root is a temp
-    # dir; here it is whatever this machine has, and either spelling drives the
-    # same declaration.
+    # installed onefile, an installed package, or an installed entry-point
+    # script) — asked of the real code rather than restated, so this check stays
+    # about the flags the declaration puts after it. What the prefix resolves TO
+    # is pinned in tests/rendezvous_test.py (_install_probe), where the install
+    # root is a temp dir; here the components were installed into this run's own
+    # temp root, and the same declaration drives either spelling.
     declared = catalog.table()
     skills_decl = declared[modules.SKILLS]
     skills = shell_words(statement.launch_prefix(skills_decl))
@@ -567,18 +566,39 @@ def live(cfg: Config) -> None:
         print("SKIP: live skills module unavailable")
 
 
+def _install_pinned(root: str) -> None:
+    """Install the components this suite pins, the way a person does.
+
+    The declaration and the code come from one place — the install root — so the
+    checkouts beside this repo reach it only through the installer that a
+    release's artifact would go through too (`scripts/install-component.py`
+    builds the archive, digests it and lands it in a version directory). Nothing
+    here trusts the user's own install root: it is repointed at `root` first, so
+    what this machine happens to hold decides nothing.
+    """
+    script = Path(__file__).resolve().parents[1] / "scripts" / "install-component.py"
+    done = subprocess.run(
+        [sys.executable, str(script), modules.WORKSPACE, modules.SKILLS],
+        env={**os.environ, components.ROOT_ENV: root},
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        raise SystemExit(f"installing the pinned components failed:\n{done.stdout}\n{done.stderr}")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     cfg = Config()
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as installed:
-        # The pinned table is a fact about the CHECKOUTS beside this repo, so the
-        # install root is repointed at an empty directory for the run: what a
-        # machine happens to have installed is not a regression here, and a
-        # retired component nobody has uninstalled yet (P0-7's `retireComponents`
-        # is the client's job, not this test's) must not turn the pin red.
+        # A host of one's own: the pinned components are installed into a temp
+        # root, so neither the user's install root nor a retired component nobody
+        # has uninstalled yet (P0-7's `retireComponents` is the client's job, not
+        # this test's) can turn the pin red.
         previous = os.environ.get(components.ROOT_ENV)
         os.environ[components.ROOT_ENV] = installed
         try:
+            _install_pinned(installed)
             # no project log: the host's own log readers are gated on one, so this is
             # exactly the surface of a session that opened nothing (run_command only)
             reg = ToolRegistry(build_tools(cfg))

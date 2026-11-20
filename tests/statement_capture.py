@@ -198,7 +198,7 @@ def envelope_of(env: Envelope) -> dict:
 def resolved(argv, directory="/opt/clutch/components/probe", importable=False, name="clutch-probe"):
     component = catalog.Component(name=name, run=catalog.PerCall(start=catalog.Launch(importable=importable)))
     return rendezvous.Resolved(
-        module=component, directory=Path(directory), argv=tuple(argv), installed=True, template=False
+        module=component, directory=Path(directory), argv=tuple(argv), template=False
     )
 
 

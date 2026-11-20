@@ -351,10 +351,8 @@ def disabled(name: str) -> bool:
 
     Here but not driven (see `set_disabled`): the bytes are untouched and the
     component stays listed, and the ONE thing this decides is whether its tools
-    exist. `rendezvous.unavailable_reason` is where it bites, which is also what
-    keeps a dev checkout from standing in for a component the user stopped —
-    otherwise the worst pair there is: "disabled" in the page, and the tool still
-    there because what ran was the checkout.
+    exist. `rendezvous.unavailable_reason` is where it bites — so a component the
+    user stopped has no tools, and there is no second place to launch it from.
     """
     return any(str(record["name"]) == name and bool(record.get(DISABLED_FIELD)) for record in entries())
 
@@ -527,8 +525,8 @@ def current(name: str, version: str, digest: str) -> bool:
     The version gate, keyed on CONTENT and not on the version string: the
     version is the client's claim, the digest is the bytes it would send, and
     only the pair means "nothing to upload". A component re-installed under the
-    same version but different bytes (a rebuilt 0.2.0, a dev checkout that
-    changed) is not current, so a stale install is replaced rather than kept.
+    same version string but with other bytes (a rebuilt 0.2.0) is not current,
+    so a stale install is replaced rather than kept.
     """
     if not digest:
         return False
@@ -780,7 +778,7 @@ def accept(artifact: Path | str, manifest: dict[str, Any]) -> dict[str, Any]:
       - this version + digest is already installed -> "current" (the version
         gate, so a reconnect does not re-upload 30 MB)
       - otherwise -> "installed", and the host resolves the component to it from
-        now on (modules.component_dir prefers a resolvable install)
+        now on (this install IS where modules.component_dir sends it)
 
     The digest is checked FIRST and against the received bytes, because the
     manifest is what the host later resolves the component BY: installing bytes

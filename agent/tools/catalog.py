@@ -22,21 +22,34 @@ the project's own log, `grep_memory` / `read_memory`. They live in tools/host.py
 in this very vocabulary, and no component may publish their names
 (HOST_TOOL_NAMES below).
 
-Zero built-ins, three sources
------------------------------
+Zero built-ins, one source
+--------------------------
 The host ships NO component declaration — not even for the components its own
 repo develops. A component is declared by the component, in a `component.json`
 manifest that travels WITH it (the same shape at every stop, like an editor
-extension's package manifest), and this module only DISCOVERS and MERGES:
+extension's package manifest), and this module DISCOVERS it in exactly one
+place:
 
-  * a dev CHECKOUT beside the host repo — any sibling directory carrying a
-    component.json (the whole of the development path: edit the manifest, the
-    host picks it up, nothing to install);
   * an INSTALLED artifact — the manifest tools/components.py laid down in this
     host's install root, which is the package's own manifest plus the install
-    facts (version, digest);
-  * a REGISTRATION in the user's catalog directory — the out-of-tree escape
-    hatch, one JSON file per component, and the last word.
+    facts (version, digest).
+
+ONE PATH, AND IT IS THE INSTALL. There is no second reading and no precedence:
+a name is either held by this host, with the version directory that IS its
+code and the manifest inside it that IS its declaration, or it does not exist
+here at all. A dev checkout beside the host repo is NOT a source — it is
+nothing but a directory to BUILD an artifact from, and a host that wants to run
+what a checkout contains installs it (scripts/install-component.py does exactly
+the two steps a release does: archive, then `components.install`). That is why
+nothing here merges two declarations of one name field by field any more: the
+"which half came from where" question cannot be asked of a record that has one
+origin, and an installed artifact can no longer shadow — or be shadowed by —
+code that happened to sit next to the repo.
+
+The one other declaration that can reach this table is not a registration: the
+components a CLIENT says IT runs (tools/channel.py). Those have no bytes here
+at all. Their declaration and their code are the client's own install, which is
+what keeps a client plugin on the same rule from the client's side.
 
 The declaration is data. Nothing here executes a tool; `registry` turns a
 declaration into the Tool the model sees, `rendezvous` turns its coordinates
@@ -120,12 +133,12 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 from ..config import Config
-from . import components, hostconfig, modules
+from . import components, hostconfig
 
 # How a component is spoken to is not a word in the declaration: the declaration
 # already says what it CONTRIBUTES, and that is the answer. A `service`
@@ -731,10 +744,11 @@ class Service:
 class Component:
     """A component's published coordinates (the host's side of R4).
 
-    `name` is the component's identity: the install name of its artifact, and by
-    convention the directory name of its dev checkout beside the repo (one
-    string, so a rename is one edit). `directory` overrides where a
-    registration says its code lives (a component registered out-of-tree).
+    `name` is the component's identity: the install name of its artifact, and
+    with it the directory name under this host's install root. Where its code
+    is, is not a field — it is the version directory the install resolved to
+    (rendezvous.resolve); a declaration has no say in it, so two declarations
+    of one name cannot point at two directories.
 
     `subject` is whose resources it serves, and what it CONTRIBUTES is the whole
     answer to where its statements run — the declaration says that
@@ -791,7 +805,6 @@ class Component:
     settings: Mapping[str, Any] = field(default_factory=dict)  # the knobs this component lets a person set
     ui: Mapping[str, Any] = field(default_factory=dict)
     tools: tuple[Tool, ...] = ()
-    directory: str = ""  # explicit code directory (a registration, not a checkout)
     prompt: str = ""  # fragment of model-facing prose, inside this component's directory
 
     @property
@@ -856,21 +869,6 @@ def available_backends(config) -> tuple[str, ...]:
 # --------------------------------------------------------- registration -------
 
 
-def catalog_dir() -> Path:
-    """The user's catalog directory: registrations that are not installs.
-
-    A component whose code lives somewhere out-of-tree (a checkout under work, a
-    locally built onefile) is registered by dropping its declaration in here —
-    one JSON file per component, the same manifest shape a package carries. The
-    whole directory is machine-local bookkeeping, like the install root, and
-    CLUTCH_COMPONENTS_CATALOG repoints it (tests, unusual layouts).
-    """
-    override = os.environ.get("CLUTCH_COMPONENTS_CATALOG")
-    if override:
-        return Path(override)
-    return components.root() / "catalog.d"
-
-
 _LEGACY_SERVICE_KEYS = ("discovery_env", "app_dir", "prefix")
 
 
@@ -898,12 +896,12 @@ def _service_of(data: Mapping[str, Any]) -> Service | None:
 def _component_of(data: Mapping[str, Any]) -> Component | None:
     """One declaration dict -> a Component, or None when it is not one.
 
-    This is the protocol all three registration sources speak — a checkout's
-    manifest, an installed manifest, a catalog file. A declaration the host
+    This is the protocol one declaration speaks: the manifest an install laid
+    down in this host's install root. A declaration the host
     cannot drive AT ALL (nothing that could name it) is refused HERE rather than
     half-registered and mysteriously broken later; everything narrower than that
     (what the declaration contributes, and whether one machine could satisfy it)
-    is component_diagnostics' business, because those refusals need the merged
+    is component_diagnostics' business, because those refusals need the
     table's words to say something useful.
     """
     name = str(data.get("name", ""))
@@ -944,7 +942,6 @@ def _component_of(data: Mapping[str, Any]) -> Component | None:
         },
         ui=ui,
         tools=tuple(tools),
-        directory=str(data.get("directory", "") or ""),
         prompt=str(data.get("prompt", "") or ""),
     )
 
@@ -990,29 +987,6 @@ def _read_json(path: Path) -> Mapping[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def checkout_registrations() -> list[Mapping[str, Any]]:
-    """The declarations of the dev checkouts beside the host repo.
-
-    Any sibling directory of the repo that carries a component.json IS a
-    component, in exactly the shape an installed one declares — this is the
-    whole development path (edit the manifest, restart, nothing to install) and
-    it is how the components this repo develops are registered without the host
-    naming a single one of them. Sorted by directory name, so the merge stays
-    deterministic; a malformed manifest is simply not a component.
-    """
-    found: list[Mapping[str, Any]] = []
-    base = modules.repo_root()
-    if not base.is_dir():
-        return found
-    for path in sorted(base.iterdir()):
-        if not path.is_dir():
-            continue
-        data = _read_json(path / components.MANIFEST)
-        if data is not None:
-            found.append(data)
-    return found
-
-
 def installed_registrations() -> list[Mapping[str, Any]]:
     """The declarations of the components installed for THIS host, in install
     order.
@@ -1025,24 +999,13 @@ def installed_registrations() -> list[Mapping[str, Any]]:
 
 
 def registrations() -> list[Mapping[str, Any]]:
-    """Every declaration this host knows, in merge order (lowest precedence
-    first).
+    """Every declaration this host knows: one per installed component.
 
-    Three sources, all machine-local: a dev checkout beside the repo, the
-    manifest of each component installed for THIS host (tools/components.py's
-    landing dir), and the user's catalog directory. Order is stable (checkouts
-    by name, then the install root, then the catalog files by name) so a later
-    entry wins deterministically when two declare the same component — an
-    installed artifact over its checkout, a catalog file over both.
+    The install root is the only source (see the module docstring). There is no
+    second registration of a name and therefore no order to get right: a name
+    appears once, or not at all.
     """
-    found: list[Mapping[str, Any]] = [*checkout_registrations(), *installed_registrations()]
-    base = catalog_dir()
-    if base.is_dir():
-        for path in sorted(base.glob("*.json")):
-            data = _read_json(path)
-            if data is not None:
-                found.append(data)
-    return found
+    return installed_registrations()
 
 
 def _stamp(path: str | Path) -> tuple[int, int] | None:
@@ -1066,49 +1029,35 @@ def _scan(directory: Path) -> list[os.DirEntry]:
 
 
 def source_signature() -> tuple:
-    """What the three registration sources look like RIGHT NOW, cheaply.
+    """What the one registration source looks like RIGHT NOW, cheaply.
 
-    Only the SHAPE is read — the files and directories a registration is read
-    FROM, by mtime and size — never a manifest, so a table built from them can
-    be reused while nothing has changed. It covers everything the loaders look
-    at: a checkout directory appearing (or its component.json being edited), an
+    Only the SHAPE is read — the directories a registration is read FROM, by
+    mtime and size — never a manifest, so a table built from them can be reused
+    while nothing has changed. It covers everything the loader looks at: an
     install landing or a version being pruned (both touch the component's own
-    directory), a registration file in the catalog directory, and the two
-    environment variables that repoint the roots. Cheap enough to ask on every
-    lookup, which is what makes the memoization safe rather than stale.
+    directory) and the environment variable that repoints the root. Cheap enough
+    to ask on every lookup, which is what makes the memoization safe rather than
+    stale.
 
     Out of reach, deliberately: a file EDITED in place inside an installed
     component's version directory (a hand-patched manifest) does not move any
     directory's mtime — `catalog.invalidate()` is how a caller says so.
     """
-    repo = modules.repo_root()
-    checkouts = [
-        (entry.name, _stamp(entry.path + os.sep + components.MANIFEST))
-        for entry in _scan(repo)
-        if entry.is_dir()
-    ]
     install_root = components.root()
     installs = [
         (entry.name, _stamp(entry.path))
         for entry in _scan(install_root)
         if entry.is_dir() and entry.name != components.SCRATCH
     ]
-    directory = catalog_dir()
-    registrations = [(entry.name, _stamp(entry.path)) for entry in _scan(directory) if entry.name.endswith(".json")]
     # A push over the client's channel is an ARRIVAL the disk will never show
     # (tools/channel.py keeps it in memory), and it changes the table as surely as
     # a manifest appearing does. Its generation is the shape of that source.
     from . import channel  # late: channel imports this module at import time
 
     return (
-        str(repo),
-        tuple(checkouts),
         str(install_root),
         tuple(installs),
-        str(directory),
-        tuple(registrations),
         os.environ.get(components.ROOT_ENV, ""),
-        os.environ.get("CLUTCH_COMPONENTS_CATALOG", ""),
         channel.generation(),
     )
 
@@ -1131,70 +1080,17 @@ def invalidate() -> None:
     _TABLE = None
 
 
-# The merge reads these off the dataclasses rather than repeating them: a field
-# added to Component or Launch later is merged (or carried) by the same rule.
-_COMPONENT_FIELDS = frozenset(f.name for f in fields(Component))
-_LAUNCH_FIELDS = frozenset(f.name for f in fields(Launch))
-
-
-def _named(data: Mapping[str, Any], names: frozenset[str]) -> set[str]:
-    """Which of `names` the declaration actually writes down.
-
-    Judged on the raw JSON, never on the parsed object: the proposal is "named
-    means override", so `requires: []` and `service: {}` are a declaration
-    saying "none" — a value the `or`-chained merge could not express, because it
-    read every false-y field as "not mentioned" and carried the earlier one.
-    """
-    return {k for k in data if k in names}
-
-
-def _refine(known: Component, declared: Component, data: Mapping[str, Any]) -> Component:
-    """One later registration merged over the component it refines.
-
-    Every field the later declaration NAMES wins, with the value `_component_of`
-    already normalised for it; every field it leaves out carries from `known`
-    untouched. `launch` is merged at ITS field level for the same reason one
-    level up — a thin manifest that names only `binary` (or only `importable`)
-    keeps the earlier `argv` and `entry` instead of restating them.
-
-    Built with dataclasses.replace over the named fields, not a hand-written
-    constructor: the old one silently reset any field it did not know about, so
-    adding a field to Component meant remembering this function too.
-    """
-    named = {f: getattr(declared, f) for f in _named(data, _COMPONENT_FIELDS) if f != "name"}
-    # A retired word is a fact about the SOURCE it was written in, so it accumulates
-    # across the merge instead of being overridden: a checkout that still spells
-    # `interface` stays refused even after an installed manifest refines it.
-    named["retired"] = tuple(dict.fromkeys(known.retired + declared.retired))
-    if "service" not in named and any(key in data for key in _LEGACY_SERVICE_KEYS):
-        # The old spelling names the same block one key at a time, and that is still
-        # a declaration of a service: read it whole, not as three unrelated fields.
-        named["service"] = declared.service
-    if "launch" in named:
-        raw = data.get("launch")
-        inner = _named(raw, _LAUNCH_FIELDS) if isinstance(raw, Mapping) else set()
-        named["launch"] = replace(known.launch, **{f: getattr(declared.launch, f) for f in inner})
-    return replace(known, **named)
-
-
 def _build_table() -> dict[str, Component]:
     out: dict[str, Component] = {}
     for data in registrations():
         declared = _component_of(data)
-        if declared is None:
-            continue
-        known = out.get(declared.name)
-        if known is None:
+        if declared is not None:
             out[declared.name] = declared
-            continue
-        out[declared.name] = _refine(known, declared, data)
-    # The client's push is the LAST word, and it REPLACES rather than refines. The
-    # merge above is about one component declared by several sources ("named means
-    # override") — a checkout refined by what was installed from it. A pushed
-    # declaration is not another view of that artifact: it describes a process the
-    # CLIENT runs, and its fields are read from the client's own manifest, so
-    # carrying a disk declaration's `launch` or arguments into it would invent a
-    # component neither side declared.
+    # The client's push is a DIFFERENT machine's install, not a second
+    # declaration of one of this host's: it describes a process the CLIENT runs,
+    # with the fields read from the client's own manifest. So it is added to the
+    # table whole and replaces a name outright — there is no field-level merge
+    # between two machines, because a component is one install on one machine.
     from . import channel  # late: channel imports this module at import time
 
     for name, component in channel.declarations().items():
@@ -1203,29 +1099,24 @@ def _build_table() -> dict[str, Component]:
 
 
 def table() -> dict[str, Component]:
-    """The components this host may drive: every registration, merged by name.
+    """The components this host may drive: one entry per install, plus what a
+    client runs.
 
-    There is no base catalog — a host with no registrations drives nothing. Each
-    later registration (see registrations() for the order) refines the one it
-    agrees with by name, and the rule is "named means override": a field the
-    later declaration writes down wins (its normalised value), a field it leaves
-    out carries from before, and inside `launch` the same rule applies field by
-    field. Naming a field is therefore also how a declaration CLEARS it —
-    `requires: []` means none, not "as before" — and there is one merge semantic
-    for the whole record instead of a deep-merge here and an overwrite there.
-    That is what makes a thin install manifest (how the artifact starts, at which
-    digest) ride on the declaration its checkout or package carries, and a
-    third-party component simply has no earlier declaration and enters whole.
+    There is no base catalog — a host with nothing installed drives nothing.
+    Every name comes from ONE declaration of ONE installed component (see
+    registrations()), so nothing is merged and nothing is shadowed: what is in
+    the table is what this host holds, at the version it holds.
 
-    The result is MEMOIZED on the shape of the sources (source_signature): the
+    The result is MEMOIZED on the shape of the source (source_signature): the
     table is the host's view of what is installed, and asking for it dozens of
     times in one turn must cost one scan, not dozens. Returned as a copy —
     callers keep it, nobody owns it.
 
-    One source is not a registration at all: the components the CLIENT says it
-    runs, pushed over its channel (tools/channel.py). They are folded in last and
-    replace by name rather than refine, and their arrival is part of the
-    signature, so a push is picked up exactly like a manifest that appeared."""
+    One entry is not an install here at all: the components the CLIENT says it
+    runs, pushed over its channel (tools/channel.py). They are the client's own
+    install — declared by the client's manifest, run by the client's code — and
+    their arrival is part of the signature, so a push is picked up exactly like
+    an install that landed."""
     global _TABLE
     signature = source_signature()
     if _TABLE is None or _TABLE[0] != signature:

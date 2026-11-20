@@ -6,7 +6,7 @@ The derivation moved to the frontend (TODO.md D1/P3-1, `ui/tool-decl.js`), so
 what is left here is data — and this suite pins that it really is data. What it
 checks:
 
-  1. The files, verbatim, in merge order: `declarations` is `catalog.registrations()`
+  1. The files, verbatim, in install order: `declarations` is `catalog.registrations()`
      itself, so a `$config` token is still a token and no derived field (`schema`,
      `mutates`, a resolved description) has crept in. A second reading here is the
      bug the frontend is removing.
@@ -75,15 +75,15 @@ def files_check(tmp: Path) -> None:
     )
     check(
         body["declarations"] == catalog.registrations(),
-        "declarations are catalog.registrations() itself, in merge order",
+        "declarations are catalog.registrations() itself, in install order",
     )
     check(
         body["declarations"] == json.loads(json.dumps(catalog.registrations())),
         "declarations survive the wire unchanged (JSON round trip is a no-op)",
     )
     names = [d.get("name") for d in body["declarations"]]
-    check("clutch-workspace" in names, "the checkout manifests this repo ships are in the list")
-    check(len(names) >= 5, f"every registration is here, not one per component ({len(names)} entries)")
+    check("clutch-workspace" in names, "the components this host installed are in the list")
+    check(len(names) == len(set(names)), f"one declaration per component, never two ({len(names)} entries)")
     by_name = {}
     for d in body["declarations"]:
         by_name.setdefault(d.get("name"), []).append(d)

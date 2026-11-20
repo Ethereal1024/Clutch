@@ -31,7 +31,7 @@ a branch to a tool.
 
 Where a component's artifact comes from is a different question again, and
 tools/components.py answers it: the host runs the component installed on ITS own
-machine, falling back to the dev checkout next to the repo.
+machine, and nowhere else.
 
 Lifecycle: a daemon started from here is fenced with the workspace's protected
 paths at spawn time (the module's fence IS spawn-time policy — its own docs say
@@ -88,39 +88,30 @@ class Resolved:
     catalog.Component."""
 
     module: catalog.Component
-    directory: Path
+    directory: Path  # the installed version directory — the component's code, and the only place it is read from
     argv: tuple[str, ...]  # the words to execute, before the component's own flags
-    installed: bool  # a real install for this host, not the dev checkout
     template: bool  # argv came from the declaration's template, not the artifact's own executable
 
 
 def resolve(module: str) -> Resolved | None:
     """This host's copy of `module`, or None when it has none it could run.
 
-    One lookup for every consumer (`available`, `launch_prefix`, `_start`), so
-    "installed" and "checked out" can never be read two different ways: the host
-    runs the artifact installed on ITS own machine, and falls back to the dev
-    checkout beside the host repo (modules.component_dir, components.installed).
-    A registration may name the code's own directory for an out-of-tree
-    component, and that is used instead.
-
-    `installed` is a fact about the LAYER, not about the manifest: a checkout
-    carries a component.json of its own now, so "has a manifest" no longer
-    separates the two — "is the directory the install root resolves to" does.
+    One lookup for every consumer (`available`, `launch_prefix`, `_start`), and
+    one answer: the directory is the version directory the install resolved to.
+    A component that is not installed here is not here — there is no checkout to
+    fall back to and no declaration that could name another directory, which is
+    what makes "what the host runs" and "what the host holds" the same fact.
     """
     mod = catalog.table().get(module)
     if mod is None:
         return None
     resolved_install = components.resolve(mod.name)
-    install_dir = resolved_install[0] if resolved_install else None
-    directory = Path(mod.directory) if mod.directory else (install_dir or modules.module_dir(mod.name))
+    if resolved_install is None:
+        return None
+    directory, manifest = resolved_install
     if not directory.is_dir():
         return None
-    installed_here = install_dir is not None and directory == install_dir
-    # the manifest the install resolved BY is already in hand; only an
-    # out-of-tree or checked-out directory has to be read here
-    manifest = resolved_install[1] if installed_here else components.read_manifest(directory)
-    rendered = render_launch(mod, directory, manifest, installed=installed_here)
+    rendered = render_launch(mod, directory, manifest)
     if rendered is None:
         return None
     argv, template = rendered
@@ -128,7 +119,6 @@ def resolve(module: str) -> Resolved | None:
         module=mod,
         directory=directory,
         argv=argv,
-        installed=installed_here,
         template=template,
     )
 
@@ -137,19 +127,16 @@ def render_launch(
     mod: catalog.Component,
     directory: Path,
     manifest: dict | None = None,
-    *,
-    installed: bool = False,
 ) -> tuple[tuple[str, ...], bool] | None:
     """(argv words, they came from the declaration's template) for one process of
     `mod` inside `directory`, or None when nothing there can be started.
 
-    An INSTALLED component may ship its own executable, and that supersedes the
-    template — the artifact's shape is the installer's business, and this is how
-    a onefile needs neither interpreter nor checkout. Two names are honoured:
-    the one its manifest declares, then the one its declaration declares, then —
-    for an install only — the install layer's own convention, an executable
-    named after the component (components.install lays a single-file artifact
-    down exactly so).
+    A component may ship its own executable, and that supersedes the template —
+    the artifact's shape is the installer's business, and this is how a onefile
+    needs neither interpreter nor checkout. Three names are honoured, in this
+    order: the one its manifest declares, the one its declaration declares, then
+    the install layer's own convention, an executable named after the component
+    (components.install lays a single-file artifact down exactly so).
 
     Otherwise the declaration's TEMPLATE is rendered with what only the host
     knows: `{py}` the interpreter, `{dir}` this directory, `{name}` the
@@ -163,7 +150,7 @@ def render_launch(
     names = [
         declared.get("binary") if isinstance(declared, dict) else "",
         mod.launch.binary,
-        mod.name if installed else "",
+        mod.name,
     ]
     for candidate in names:
         if not isinstance(candidate, str) or not candidate:
@@ -261,11 +248,10 @@ def unavailable_reason(module: str) -> str:
 
     `disabled` is asked HERE rather than in `resolve()`, and that placement is
     the whole point: the switch is about the COMPONENT, not about one copy of it,
-    so a stopped component's tools are gone even when the code that would run is
-    the dev checkout beside the repo. Left to resolve(), a disabled component on
-    a dev machine would still hand the model its tools — "disabled in the page,
-    and the tool is still there" — which is the one reading the flag exists to
-    prevent.
+    so a stopped component's tools are gone even while its bytes sit on the disk.
+    Left to resolve(), a stopped component would still hand the model its tools —
+    "disabled in the page, and the tool is still there" — which is the one
+    reading the flag exists to prevent.
     """
     mod = catalog.table().get(module)
     if mod is None:

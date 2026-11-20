@@ -7,6 +7,10 @@ Python answer: it builds the surface through the REAL pipeline (catalog table ->
 build_tools -> ToolRegistry) over the manifests this repo ships, and prints the
 result.
 
+Each declaration is INSTALLED into a throwaway root before the surface is built:
+an install is the only way this host knows a component at all, so a checkout
+beside the repo contributes nothing on its own.
+
 Two seams are patched, and both are facts about a machine rather than about a
 declaration:
 
@@ -14,12 +18,13 @@ declaration:
     is the machine's answer, not the declaration's. The dump answers "here" for
     every component whose declaration the host can READ (the fatal diagnostics
     are still catalog's own, the same filter the real _drivable applies), so the
-    comparison is about the declarations and not about what is installed.
+    comparison is about the declarations and not about whether their payload
+    came along with the manifest.
   * `answers._fact_answer` — a published host fact (`$skills`) is answered by
     running the component's own statement. The dump answers a fixed one instead,
     so the check does not need that component's code on the machine.
 
-Everything else (merge, diagnostics, defaults, `$config`/`$backends`/`$skills`,
+Everything else (diagnostics, defaults, `$config`/`$backends`/`$skills`,
 mode/gate, the derived `mutates`/`undo`, `path_arg`) is the real code. The
 components the host REFUSES are printed too (`refused`), so the JS reading can
 be held to the same refusals.
@@ -38,8 +43,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The components this repo develops: a dev checkout beside the repo IS a
-# registration, and these are the manifests the frontend must read identically.
+# The components this repo develops: each one's declared surface, installed into
+# the throwaway root so the host recognises it. A name whose checkout is not
+# here is simply not part of this machine's surface.
 CHECKOUTS = (
     "clutch-memory",
     "clutch-skills",
@@ -60,26 +66,25 @@ class _Log:
 
 def surface() -> dict:
     from agent.config import Config
-    from agent.tools import answers, catalog, components, facts, modules, registry
+    from agent.tools import answers, catalog, components, facts, registry
 
     with tempfile.TemporaryDirectory() as root:
-        repo = Path(root) / "repo"
-        repo.mkdir()
+        install_root = Path(root) / "install"
+        os.environ[components.ROOT_ENV] = str(install_root)
         for name in CHECKOUTS:
             source = REPO / name / components.MANIFEST
             if not source.is_file():
                 continue
-            directory = repo / name
-            directory.mkdir()
+            manifest = json.loads(source.read_text(encoding="utf-8"))
+            version = str(manifest.get("version") or "0.0.0")
+            directory = install_root / str(manifest.get("name", name)) / version
+            directory.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, directory / components.MANIFEST)
-        os.environ[components.ROOT_ENV] = str(Path(root) / "install")
-        os.environ["CLUTCH_COMPONENTS_CATALOG"] = str(Path(root) / "catalog.d")
+        components.reindex()
+        catalog.invalidate()
 
-        saved_root = modules.repo_root
         saved_fact = answers._fact_answer
         saved_drivable = registry._drivable
-        modules.repo_root = lambda: repo  # type: ignore[method-assign]
-        catalog.invalidate()
         answers._fact_answer = lambda token, config: facts.Answer(  # type: ignore[method-assign]
             tuple(facts.Entry(name, f"{name} skill") for name in SKILLS), owner="clutch-skills"
         )
@@ -141,7 +146,6 @@ def surface() -> dict:
                 },
             }
         finally:
-            modules.repo_root = saved_root  # type: ignore[method-assign]
             answers._fact_answer = saved_fact  # type: ignore[method-assign]
             registry._drivable = saved_drivable  # type: ignore[method-assign]
 

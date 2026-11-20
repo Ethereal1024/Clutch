@@ -19,9 +19,9 @@ A write is PARTIAL (the form sends the knob a person touched) and a key or value
 the declaration does not carry is refused, never dropped: the caller believed
 something false about the component.
 
-Isolation: CLUTCH_COMPONENTS_DIR and CLUTCH_COMPONENTS_CATALOG point at a temp
-tree, and modules.repo_root is repointed, so this run never reads or writes the
-components installed for the user running it.
+Isolation: isolated_host() repoints the install root (CLUTCH_COMPONENTS_DIR) at a
+temp directory and installs its declarations into it, so this run never reads or
+writes the components installed for the user running it.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.supervisor import Supervisor, build_server
-from agent.tools import catalog, components, modules, settings, statement
+from agent.tools import catalog, components, settings, statement
 from tests.testsupport import check, http_get, http_post
 
 DECLARED = {
@@ -71,33 +71,43 @@ def _declaration(name: str) -> dict:
     }
 
 
+def _declare(data: Mapping[str, dict], *, version: str = "1.0.0") -> Path:
+    """Install one declaration the way an artifact lands.
+
+    A declaration reaches the table only as part of an install: one version
+    directory holding the manifest, plus the table entry that says this host
+    holds it. A component whose whole contribution is a prompt and a form needs
+    no code, so the version directory holds nothing else.
+    """
+    name = str(data["name"])
+    directory = components.root() / name / version
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / components.MANIFEST).write_text(json.dumps({**data, "version": version}), encoding="utf-8")
+    components.reindex()  # the table learns what the disk now holds
+    return directory
+
+
 @contextlib.contextmanager
 def isolated_host(declarations: Mapping[str, dict]) -> Iterator[Path]:
-    """A host of one's own: temp install root and catalog, no checkouts."""
+    """A host of one's own: a temp install root holding exactly these components.
+
+    Yields that root, which is also where the settings documents are kept, so a
+    check can read back the file the host wrote.
+    """
     with tempfile.TemporaryDirectory() as root:
-        base = Path(root) / "repo"
-        base.mkdir()
-        saved = (
-            os.environ.get(components.ROOT_ENV),
-            os.environ.get("CLUTCH_COMPONENTS_CATALOG"),
-            modules.repo_root,
-        )
+        saved = os.environ.get(components.ROOT_ENV)
         os.environ[components.ROOT_ENV] = root
-        os.environ["CLUTCH_COMPONENTS_CATALOG"] = str(Path(root) / "catalog.d")
-        modules.repo_root = lambda: base  # type: ignore[method-assign]
-        directory = catalog.catalog_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        for name, data in declarations.items():
-            (directory / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
         try:
+            for data in declarations.values():
+                _declare(data)
             yield Path(root)
         finally:
-            modules.repo_root = saved[2]  # type: ignore[method-assign]
-            for key, previous in ((components.ROOT_ENV, saved[0]), ("CLUTCH_COMPONENTS_CATALOG", saved[1])):
-                if previous is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = previous
+            if saved is None:
+                os.environ.pop(components.ROOT_ENV, None)
+            else:
+                os.environ[components.ROOT_ENV] = saved
+            catalog.invalidate()
+
 
 
 def _stored(root: Path, name: str) -> dict:

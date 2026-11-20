@@ -11,9 +11,9 @@ serves the `ui` table for the same reason.
 
 So this endpoint is DATA and nothing else:
 
-  declarations   every raw manifest this machine holds, in merge order (the
-                 files verbatim — checkouts, then the install root, then the
-                 user's catalog directory; catalog.registrations)
+  declarations   every raw manifest this machine holds (the files verbatim, in
+                 install order — the install root is the only source;
+                 catalog.registrations)
   available      {component: true|false} — could this host drive it at all
                  (rendezvous.available: its code is here, its `requires` hold,
                  it is not disabled, a client-side one has a live channel)

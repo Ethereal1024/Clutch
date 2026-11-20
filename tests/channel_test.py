@@ -23,9 +23,8 @@ useful:
     host renders nothing — the client's argv is the client's), the token rides
     along, and a failure the plugin reports is a failure the model sees.
 
-Isolation: the fixture is catalog_test's isolated_host — a temp install root, a
-temp catalog directory and a temp repo root — so the run never sees the user's
-components, and the fake client listener is a real loopback HTTP server, because
+Isolation: the fixture is catalog_test's isolated_host — a temp install root —
+so the run never sees the user's components, and the fake client listener is a real loopback HTTP server, because
 the point of the channel is the socket, not the shape of a patched urlopen.
 
 The endpoint is exercised through agent.server's own handler (POST / GET / DELETE
@@ -50,7 +49,7 @@ from agent.server import build
 from agent.tools import catalog, channel, rendezvous
 from agent.tools.registry import ToolRegistry, build_tools, module_blocked_reason
 from agent.tools.workspace import LocalWorkspace, RemoteWorkspace
-from tests.catalog_test import _third_party, _write_registration, isolated_host
+from tests.catalog_test import _declare, _third_party, isolated_host
 from tests.testsupport import check, http_get
 
 TOKEN = "channel-token-4f2a9c0d7e"  # a push's token: >= 16 chars, no spaces
@@ -507,9 +506,9 @@ def check_the_machine_a_component_serves() -> None:
         code = root / "local-fs"
         code.mkdir()
         (code / "tool.py").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-        local = _third_party("clutch-workspace", tool="read_file", directory=str(code))
+        local = _third_party("clutch-workspace", tool="read_file")
         local["subject"] = "workspace-fs"
-        _write_registration(local)
+        _declare(local, code=code)
         try:
             cfg = Config()
             check(

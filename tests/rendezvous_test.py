@@ -12,9 +12,9 @@ It then drives the same statements through the registry, so the executor's path
 (guard -> the component's statement, and nothing else) is pinned too: with the
 component gone the host has no tool, only the component's name in a refusal.
 The switch is pinned the same way, and in the one place it can bite: a component
-this host has STOPPED offers no tools, even when the code that would run is the
-dev checkout beside the repo (which is the whole reason the check is asked
-before resolution, not inside it).
+this host has STOPPED offers no tools, and nothing else on the machine can stand
+in for it (which is the whole reason the check is asked before resolution, not
+inside it).
 
 Isolation: CLUTCH_WORKSPACE_DISCOVERY_DIR points at a temp dir, so the run
 never reads or writes the user's ~/.clutch-workspace, and
@@ -61,15 +61,21 @@ def _call(root: str, template: str, args: dict, defaults: dict | None = None) ->
 
 
 def _install_probe() -> None:
-    """2b. A component INSTALLED for this host wins over the dev checkout, and
-    its own executable wins over the table's argv template.
+    """2b. A component is run from THIS host's install root, and its own
+    executable wins over the table's argv template.
 
     The install layer (tools/components.py) lays an artifact in this host's own
-    root; resolution must then run THAT, whatever shape it has — an executable
-    needs neither interpreter nor checkout. Driven with a fake `#!/bin/sh` daemon
-    so the words the host hands the process are observable instead of assumed
-    (the flags a daemon gets are part of the launch contract, not a convention).
+    root, and the record it lands is the whole declaration: an executable needs
+    neither interpreter nor checkout, and there is no other directory a launch
+    could come from. Driven with a fake `#!/bin/sh` daemon so the words the host
+    hands the process are observable instead of assumed (the flags a daemon gets
+    are part of the launch contract, not a convention).
     """
+    # the declaration the probe installs is the one this host already runs: a
+    # component's shape is read out of the install it holds, and nowhere else
+    held = components.resolve(modules.WORKSPACE)
+    assert held is not None, "the caller checked the workspace component is available here"
+    declared = {key: value for key, value in held[1].items() if key not in ("version", components.DIGEST_FIELD)}
     with tempfile.TemporaryDirectory() as host_root:
         previous = os.environ.get(components.ROOT_ENV)
         os.environ[components.ROOT_ENV] = host_root
@@ -82,13 +88,18 @@ def _install_probe() -> None:
             )
             version = components.install(
                 artifact,
-                {"name": modules.WORKSPACE, "version": "9.9.9", "launch": {"binary": modules.WORKSPACE}},
+                {
+                    **declared,
+                    "name": modules.WORKSPACE,
+                    "version": "9.9.9",
+                    "launch": {**declared.get("launch", {}), "binary": modules.WORKSPACE},
+                },
             )
             check(components.installed(modules.WORKSPACE) == version, "the install layer finds what it just laid down")
             resolved = rendezvous.resolve(modules.WORKSPACE)
             check(
-                resolved is not None and resolved.installed and not resolved.template,
-                "an installed component supersedes the checkout",
+                resolved is not None and not resolved.template,
+                "an installed component is what this host runs, and its artifact needs no template",
             )
             check(
                 resolved.argv == (str(version / modules.WORKSPACE),),
@@ -116,8 +127,8 @@ def _install_probe() -> None:
             )
             resolved_cli = rendezvous.resolve(modules.WEBSEARCH)
             check(
-                resolved_cli is not None and resolved_cli.installed and not resolved_cli.template,
-                "an installed CLI onefile supersedes the checkout template",
+                resolved_cli is not None and not resolved_cli.template,
+                "an installed CLI onefile is run as itself, not through a template",
             )
             check(
                 resolved_cli is not None and resolved_cli.argv == (str(clidir / modules.WEBSEARCH),),
@@ -143,16 +154,14 @@ def _install_probe() -> None:
             os.environ.pop("CLUTCH_PROBE_ARGV", None)
     # the override is an env var, so it scoped resolution to the temp root: once
     # it is unset the probe's version is invisible. What is left is THIS host's
-    # own copy — its install root, or the checkout when it has no install (a dev
-    # box with the module installed resolves to the install, and must not be read
-    # as a failure of the checkout).
+    # own install root and nothing else — a component this host has not installed
+    # is not here, whatever sits beside the repo.
     own = components.installed(modules.WORKSPACE)
     check(own != version, "the install root is host-scoped: the probe install is gone once the env is unset")
-    if own is None:
-        check(
-            modules.component_dir(modules.WORKSPACE) == modules.module_dir(modules.WORKSPACE),
-            "and with no install of its own, resolution is the dev checkout",
-        )
+    check(
+        modules.component_dir(modules.WORKSPACE) == own,
+        "and where a module is run from is the install this host holds, or nowhere at all",
+    )
 
 
 def _disabled_probe() -> None:
@@ -160,10 +169,11 @@ def _disabled_probe() -> None:
 
     The bit lives in the host's own table (components.set_disabled) and is asked
     BEFORE resolution picks a copy to run (rendezvous.unavailable_reason), which
-    is the whole point of the placement: a stopped component has no tools even
-    when the code that would run is the dev checkout beside the repo. Asked
-    after resolution instead, a dev box would go on handing the model a tool the
-    page says is stopped — the one reading the flag exists to prevent.
+    is the whole point of the placement: a stopped component has no tools while
+    its bytes are still on the host, and a call that arrives anyway is answered
+    with the reason rather than driven. Asked after resolution instead, a host
+    would go on handing the model a tool the page says is stopped — the one
+    reading the flag exists to prevent.
 
     Nothing here is destroyed and nothing is confirmed: the payload is checked
     byte for byte across a stop and a start, because the switch is reversible,
@@ -224,26 +234,26 @@ def _disabled_probe() -> None:
             )
 
             # the copy a host would run is decided AFTER the switch, so taking
-            # the payload away (a hand-deleted install root, the state nothing
-            # in Clutch creates but nothing guards against either) does not send
-            # resolution off to the checkout of a component the user stopped —
-            # and the workspace component is the one checkout this suite knows is
-            # on the host, because it skips itself when there is none.
+            # the payload away (a hand-deleted install root, the state nothing in
+            # Clutch creates but nothing guards against either) must leave
+            # NOTHING to resolve: the install root is the only place a launch
+            # comes from, so there is no checkout to fall back to — least of all
+            # one of a component the user stopped.
             ws_artifact = Path(host_root) / "daemon-artifact"
             ws_artifact.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             ws_payload = components.install(
                 ws_artifact, {"name": modules.WORKSPACE, "version": "9.9.9", "launch": {"binary": modules.WORKSPACE}}
             )
+            check(rendezvous.resolve(modules.WORKSPACE) is not None, "a component this host holds is what it would run")
             components.set_disabled(modules.WORKSPACE)
             shutil.rmtree(ws_payload)
             check(
-                rendezvous.resolve(modules.WORKSPACE) is not None,
-                "with the payload gone, the copy left to run is the checkout beside the repo",
+                rendezvous.resolve(modules.WORKSPACE) is None,
+                "with the payload gone there is nothing left to run, checkout or not",
             )
             check(
-                rendezvous.unavailable_reason(modules.WORKSPACE)
-                == f"{modules.WORKSPACE} is disabled on this host (its tools are off; the bytes stay)",
-                "and a stopped component is not driven through the checkout either",
+                rendezvous.unavailable_reason(modules.WORKSPACE) == f"unknown component: {modules.WORKSPACE}",
+                "and a component whose bytes are gone is not here at all — not merely stopped",
             )
         finally:
             if previous is None:
@@ -254,7 +264,7 @@ def _disabled_probe() -> None:
 
 def main() -> int:
     if not rendezvous.available(modules.WORKSPACE):
-        print("SKIP: no clutch-workspace checkout / POSIX shell / curl on this host")
+        print("SKIP: clutch-workspace is not installed for this host / no POSIX shell or curl")
         return 0
 
     # 1. the fence translation: the module matches several spellings of a path,
@@ -305,11 +315,12 @@ def main() -> int:
     )
     check(rendezvous.unavailable_reason(modules.WORKSPACE) == "", "the workspace component is available here")
 
-    # 2c. the two launch shapes resolution chooses between, and which one THIS
-    #     host gets. An install shadows the checkout (components.resolve), so the
-    #     checkout's own shape is asked of the checkout DIRECTORY rather than of
-    #     whatever resolve() prefers on this machine — a dev box with the module
-    #     installed would otherwise be asserting the install's shape here.
+    # 2c. the two launch shapes one declaration can produce, and which one THIS
+    #     host gets. Every resolution comes out of the install root now, so the
+    #     TEMPLATE shape is asked of a checkout directory directly (a checkout is
+    #     a place to build an artifact from, and its shape is what the artifact
+    #     will have) — a dev box with the component installed would otherwise be
+    #     asserting the install's shape here.
     skills_mod = catalog.table()[modules.SKILLS]
     checkout_dir = modules.module_dir(modules.SKILLS)
     if checkout_dir.is_dir():  # the skills checkout may be absent on a bare host
@@ -322,10 +333,10 @@ def main() -> int:
             "the template is the interpreter plus the component's own module",
         )
     resolved_checkout = rendezvous.resolve(modules.SKILLS)
-    if resolved_checkout is not None:  # absent on a host that has neither an install nor the checkout
+    if resolved_checkout is not None:  # absent on a host with nothing installed
         check(
-            resolved_checkout.installed or resolved_checkout.template,
-            "a resolved module is an install or a template, never neither",
+            resolved_checkout.directory == components.installed(modules.SKILLS),
+            "what the host runs is the version directory its install holds",
         )
         check(
             rendezvous.unavailable_reason(modules.SKILLS) == "",
@@ -518,10 +529,8 @@ def main() -> int:
         #     has no read_file AT ALL — not a degraded one: build_tools drops the
         #     schema, and a call that still arrives is answered with the
         #     component's own name, never with a host-side stand-in.
-        real_dir = modules.module_dir
-        modules.module_dir = lambda name: Path(workspace) / "no-such-module" / name
         real_installed, real_resolve = components.installed, components.resolve
-        components.installed = lambda name: None  # gone in BOTH forms: no install here either
+        components.installed = lambda name: None  # gone means gone: no install, nothing to run
         components.resolve = lambda name: None
         try:
             check(not rendezvous.available(modules.WORKSPACE), "a deleted component is not available")
@@ -531,7 +540,6 @@ def main() -> int:
             check(gone.error and modules.WORKSPACE in gone.content,
                   "the call is answered with the component's name, never a stand-in")
         finally:
-            modules.module_dir = real_dir
             components.installed = real_installed
             components.resolve = real_resolve
 

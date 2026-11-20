@@ -15,9 +15,9 @@ cd "$ROOT"
 # The bundle carries the HOST and nothing of any module: no component's code, no
 # component's skills library, no roster of either. A component is a separate
 # artifact that belongs to the machine its server runs on — the client installs
-# it from the module's own release (ui/components.js) or the host finds a
-# checkout beside this repo (agent/tools/catalog.py) — so this build neither
-# needs a module checked out nor knows that any of them exist. It used to embed
+# it from the module's own release (ui/components.js), and that upload is the
+# only way a host comes to hold one — so this build neither needs a module
+# checked out nor knows that any of them exist. It used to embed
 # the clutch-skills library here; that copy was a full-fidelity lie (the library
 # without the module's code runs nothing), and the guard that kept it complete
 # made every release depend on a submodule.

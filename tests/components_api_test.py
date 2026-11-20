@@ -391,8 +391,8 @@ def main() -> int:
         check(result["status"] == "installed", "an archived checkout installs too")
         resolved = rendezvous.resolve(modules.SKILLS)
         check(
-            resolved is not None and resolved.installed and resolved.directory == Path(result["path"]),
-            "the host resolves the component to the installed artifact, not to a checkout",
+            resolved is not None and resolved.directory == Path(result["path"]),
+            "the host resolves the component to the version directory its install landed",
         )
         check(
             resolved.argv == (modules.python_exe(), "-m", "clutch_skills"),
@@ -675,6 +675,16 @@ def main() -> int:
         #     refusal, and its bytes stay. The discovery directory is repointed so
         #     this suite can neither see nor disturb the daemons of the machine it
         #     runs on.
+        #
+        #     The daemon component is installed first, the way 6 lands a checkout:
+        #     a declaration is readable only where an install put it, so there is
+        #     no checkout of it to read one out of.
+        ws_tar = _tar_checkout(modules.WORKSPACE, Path(root))
+        ws_digest = components.digest(ws_tar)
+        components.accept(
+            ws_tar,
+            {"name": modules.WORKSPACE, "version": ws_digest[:16], "digest": ws_digest, "artifact": ws_tar.name},
+        )
         workspace_mod = catalog.table()[modules.WORKSPACE]
         discovery_env = workspace_mod.service.discovery_env
         check(
