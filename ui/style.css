@@ -2607,8 +2607,10 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .fs-row.create-offer::before { content: "＋"; color: var(--accent); font-weight: 600; }
+/* the trailing hint is a baked glyph: the icon font carries ✓, and an ↵ the
+   subset does not carry would be drawn by the OS face (tests/ui_fonts_check) */
 .fs-row.create-offer::after {
-  content: "↵ create";
+  content: "✓ create";
   flex-shrink: 0;
   font-size: 11px;
   color: var(--dim);
