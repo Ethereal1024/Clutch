@@ -231,8 +231,18 @@ function createRunHost(ports) {
     }
   }
 
+  async function runUnified(task) {
+    try {
+      return await run.run(task);
+    } catch (e) {
+      status("error");
+      throw e;
+    }
+  }
+
   return {
     start: (task) => run.start(task),
+    run: runUnified,
     stop: () => run.stop(),
     step,
     drive,

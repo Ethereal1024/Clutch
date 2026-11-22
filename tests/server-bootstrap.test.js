@@ -77,7 +77,8 @@ async function cleanup() {
   }
   for (const w of windows) {
     try {
-      w.stop();
+      // the app is leaving: say so, or a nameless claim keeps its session
+      await w.stop({ leaving: true });
     } catch {
       /* already gone */
     }
@@ -88,8 +89,10 @@ async function main() {
   // start clean: a previous run's supervisor must be gone before we test
   // "first window spawns it"
   if (await supervisorUp()) {
-    // politely ask it to exit: stop any sessions, then wait for idle-exit
-    await post(`http://127.0.0.1:${SUPERVISOR_PORT}/api/session/stop`, {}); // unknown sid: safe no-op
+    // a previous run may have left sessions behind (its children postpone the
+    // idle exit for the reaper's window). /api/shutdown is the door the app's
+    // own quit gate uses: kill what still runs, then arm the exit.
+    await post(`http://127.0.0.1:${SUPERVISOR_PORT}/api/shutdown`, {});
     await waitFor("previous supervisor exits", async () => !(await supervisorUp()), 8000);
   }
 
@@ -134,18 +137,31 @@ async function main() {
   assert(stOpen2.status === 409, `window 2 gets kernel 409 on the same .clc (got ${stOpen2.status})`);
   assert(stOpen2.body.includes("project_open_conflict"), "409 carries the conflict code");
 
-  // ---- window 1 closes: session killed, lock freed WITHOUT any TTL ----
-  s1.stop();
+  // ---- window 1 closes: {leaving:true} -> session killed, lock freed WITHOUT
+  // any TTL. This is the quit gate's POST: the app says it is going for good,
+  // so the supervisor stops the child through its SIGTERM ladder.
+  await s1.stop({ leaving: true });
   await sleep(700);
   assert(!(await healthy(p1)), "window 1's session died with its window");
   assert(await healthy(p2), "window 2's session survives window 1's close");
   const stReopen = await post(`${p2}/api/project/open`, { path: clc });
   assert(stReopen.status === 200, "lock freed on process exit, no TTL needed");
 
-  // ---- last window closes -> supervisor self-exits (idle) ----
-  s2.stop();
+  // ---- a release WITHOUT `leaving` is not "the app is gone": with a run in
+  // flight the child must survive it (a hop loss, a slot re-claim, one tab
+  // closed). This session has no claim pid at all here, so the host cannot
+  // prove its client is gone either — doubt must keep the child (and its lock)
+  // for a re-bind, never start a second session over the same work
+  const runState = await post(`${p2}/api/run/state`, { busy: true, project: clc });
+  assert(runState.status === 200, "the client claims the run slot");
+  await s2.stop();
   await sleep(700);
-  assert(!(await healthy(p2)), "window 2's session died with its window");
+  assert(await healthy(p2), "a plain release keeps a session whose run is in flight");
+
+  // ---- last window closes -> its session stops, supervisor self-exits (idle) ----
+  await s2.stop({ leaving: true });
+  await sleep(700);
+  assert(!(await healthy(p2)), "window 2's session died with its app");
   await waitFor("supervisor idle-exit after last window", async () => !(await supervisorUp()), 20000);
 
   // ---- next window pulls the supervisor up again ----
@@ -154,7 +170,7 @@ async function main() {
   const res3 = s3;
   assert(res3.mode === "spawned", "window 3 re-spawns the supervisor + session");
   assert(await healthy(res3.url), "window 3's session healthy");
-  s3.stop();
+  await s3.stop({ leaving: true });
   await waitFor("supervisor exits after cleanup", async () => !(await supervisorUp()), 20000);
 
   // ---- the plugin tab's wake: a write aimed at THIS machine starts its

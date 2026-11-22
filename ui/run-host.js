@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-host.ts and run `npm run build:host`.
-// source sha256: 44a7d53eac9186d26c2fcce2b5e3b712d77b8f2d25fdf7fd55aeb6282d705658
+// source sha256: f1224dc535ec2cf391050e52b1fe6864a842f6283b5159d3a6408c220b42ca37
 
 "use strict";
 // The host's run: every piece the loop talks to, wired once.
@@ -236,8 +236,18 @@ function createRunHost(ports) {
             throw e;
         }
     }
+    async function runUnified(task) {
+        try {
+            return await run.run(task);
+        }
+        catch (e) {
+            status("error");
+            throw e;
+        }
+    }
     return {
         start: (task) => run.start(task),
+        run: runUnified,
         stop: () => run.stop(),
         step,
         drive,

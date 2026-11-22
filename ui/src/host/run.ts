@@ -436,6 +436,23 @@ function createRun(ports) {
     return await state();
   }
 
+  // Unified run interface: start a new turn if idle, continue an open one.
+  // This is the ONE entry point for user-initiated actions — no distinction
+  // between "new task" and "resume after interruption" at the caller's level.
+  // The fold answers what to do; this function does it.
+  async function run(task) {
+    const current = await state();
+    if (current.phase === "idle") {
+      // No turn open: validate and open one, then fall through to drive.
+      if (typeof task !== "string" || !task.trim()) {
+        throw new TypeError("run.run: a task is required when no turn is open");
+      }
+      await start(task);
+    }
+    // Drive to completion: covers both "just opened" and "already open" cases.
+    return await drive();
+  }
+
   // Ask the open turn to stop. Only the intent is recorded here; the turn closes
   // at the next step, which is also the only place a final is written.
   function stop() {
@@ -502,7 +519,17 @@ function createRun(ports) {
   }
 
   async function step() {
-    if (busy) throw new Error("run.step: a step is already running");
+    if (busy) {
+      // Two wheels on one turn is the one thing this loop must refuse, and the
+      // session's lease cannot catch it: claim_run only refuses a DIFFERENT
+      // project (agent/base.py), so a second driver of the same project would
+      // be let in and both would write the turn. The refusal therefore has to
+      // carry a code the page can act on — "run_active" means "somebody is
+      // already driving this", which is a fact, not a failure.
+      const err = new Error("run.step: a step is already running") as Error & { code?: string };
+      err.code = "run_active";
+      throw err;
+    }
     busy = true;
     let result;
     try {
@@ -527,7 +554,7 @@ function createRun(ports) {
     }
   }
 
-  return { start, stop, step, drive, state };
+  return { start, run, stop, step, drive, state };
 }
 
 module.exports = { createRun, Stopped };

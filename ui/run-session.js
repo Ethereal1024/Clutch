@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-session.ts and run `npm run build:host`.
-// source sha256: a4a222583f5da292d5299e8109105a804765e0dfff19f8f46bbe71471f8a99ec
+// source sha256: 6e8e966ece3efd5ae984b82a56f51bea8fa44765212491d2bac8018fe5bdf457
 
 // Composition root for one session's run loop (P3-2 wiring).
 //
@@ -455,6 +455,24 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
             noteBusy(-1);
         }
     }
+    async function run(task) {
+        noteBusy(1);
+        try {
+            await hold();
+            try {
+                const out = await loop.run(task);
+                await settle();
+                return out;
+            }
+            catch (e) {
+                await release();
+                throw e;
+            }
+        }
+        finally {
+            noteBusy(-1);
+        }
+    }
     // Stop stays SYNCHRONOUS: ui/main.js's stopAndFlush() calls it and then steps,
     // which is where the aborted final is written and settle() sees idle. A stop
     // that never gets that step leaves the turn open on disk and lets the lease
@@ -465,7 +483,7 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
     async function state() {
         return loop.state();
     }
-    return { start, stop, step, drive, state };
+    return { start, stop, step, drive, run, state };
 }
 // The LLM facts a run instance is BUILT from. A settings save must reach the
 // next turn of an existing tab, so callers compare this before reusing a cached

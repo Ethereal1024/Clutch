@@ -156,7 +156,7 @@ async function main() {
     "the command reads the tar from where installServer uploads it"
   );
   check(
-    BOOTSTRAP_SRC.includes("uploadFile(artifact, `${dir}/pylibs.tar.gz`)"),
+    BOOTSTRAP_SRC.includes("uploadFile(artifact, `${dir}/pylibs.tar.gz`"),
     "…which is the path the production upload names (asserted on the source, so the two cannot drift)"
   );
   check(

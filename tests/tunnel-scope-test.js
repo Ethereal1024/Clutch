@@ -72,7 +72,7 @@ check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,400}await tunnel\.stopTu
   "and the shared hop is stopped only when no window is left on it: one window's Cancel is not another window's shutdown");
 check(/if \(!hostCore\.anyTunnelWindow\(\)\) \{[\s\S]{0,200}ladder\.noteUserLeft\(\)/.test(releaseHandler),
   "…and that exit disarms the standing reconnect intent too (ui/tunnel-ladder.js): nothing may redial a host the user is done with");
-check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,400}releaseAllBackends\(\)/.test(MAIN),
+check(/ipcMain\.handle\("tunnel:disconnect"[\s\S]{0,1200}releaseAllBackends\(\{ leaving: true \}\)/.test(MAIN),
   "releasing EVERY window's claim stays where it belongs: the picker's own Disconnect, which is the user leaving the machine");
 check(/releaseSession: async \(slotId\) => \{[\s\S]{0,500}hostCore\.releaseSlot\(window\.id, slotId\)/.test(HOST) &&
   /releaseSession: async \(slotId\) => \{[\s\S]{0,700}hostCore\.releaseWindowBackends\(window\.id\)/.test(HOST) &&
@@ -180,10 +180,10 @@ async function main() {
   const core = makeCore(tunnel);
   const mine = fakeWin(7); // this window: this machine's own session
   const theirs = fakeWin(8); // the other window: the one over the hop
-  await core.ensureWindowBackend(mine);
+  await core.ensureSlotBackend(mine);
   tunnel.active = true;
   tunnel.url = "http://127.0.0.1:8891";
-  await core.ensureWindowBackend(theirs);
+  await core.ensureSlotBackend(theirs);
   check(core.backendKind(mine.id) === "local" && core.backendKind(theirs.id) === "tunnel",
     "two windows, one app: one on its own local session, one over the shared hop");
 

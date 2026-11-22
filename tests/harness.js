@@ -55,9 +55,35 @@ function slicer(src) {
     for (let i = start; i < src.length; i++) {
       if (src[i] === "(") { paren++; seen = true; }
       else if (src[i] === ")") paren--;
+      else if (seen && paren === 0 && src[i] === ":") return typeEnd(i); // an annotated return type
       else if (seen && paren === 0 && src[i] === "{") return i;
     }
     throw new Error("no function body found at offset " + start);
+  }
+
+  // The body brace of a signature that carries a TypeScript return type
+  // (`: Promise<{ active: boolean }> {`): the type may hold braces of its own, so
+  // the body is the first `{` that no `<`, `(`, `[` or `{` is still open over. A
+  // type that IS a literal (`: { ok: boolean } {`) is one balanced block, and the
+  // body is the brace after it.
+  function typeEnd(colon) {
+    let angle = 0, brace = 0, bracket = 0, paren = 0, i = colon + 1;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] === "{") i = bodyEnd(i); // a type that IS a literal: skip the block, the body follows
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (c === "<") angle++;
+      else if (c === ">") angle--;
+      else if (c === "(") paren++;
+      else if (c === ")") paren--;
+      else if (c === "[") bracket++;
+      else if (c === "]") bracket--;
+      else if (c === "{") {
+        if (angle === 0 && brace === 0 && bracket === 0 && paren === 0) return i;
+        brace++;
+      } else if (c === "}") brace--;
+    }
+    throw new Error("no function body found after return type at offset " + colon);
   }
 
   function fnBody(name) {
@@ -172,8 +198,28 @@ function loadRendererModule(name) {
   require("vm").runInThisContext(rendererScript(name), { filename: "ui/src/renderer/" + name.replace(/\.ts$/, "") + ".ts" });
 }
 
+// The closed-block ledger (stream-events.ts): `awaiting` is the list of blocks a
+// cut closed that the log still owes text to. It is module-level state, so a
+// runner that evals only the functions it drives has to give those functions the
+// name. This installs the REAL ledger — not a stub — because the behaviour it
+// encodes is exactly what a reconnect regression looks like: the block stays on
+// the page, its continuation is dropped instead of appended, and the step's own
+// record (or the run's final) writes it whole.
+function installRecordLedger() {
+  const src = fs.readFileSync(sourcePath("stream-events"), "utf8");
+  const text = fs.readFileSync(sourcePath("stream-text"), "utf8");
+  const { fnBody } = slicer(src);
+  globalThis.awaiting = [];
+  // a block's text is painted by stream-text.ts, shared with the streaming pass
+  (0, eval)(runnableSnippet(slicer(text).fnBody("paintTextBlock")));
+  for (const fn of ["awaitRecord", "unawait", "awaitingFor", "completeRecord"]) {
+    (0, eval)(runnableSnippet(fnBody(fn)));
+  }
+}
+
 module.exports = {
   check, summary, slicer, uiSource, uiModules,
   rendererScript, loadRendererModule, stripModuleSyntax, runnableSnippet, stateStub,
+  installRecordLedger,
   get failures() { return failures; },
 };

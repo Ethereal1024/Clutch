@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/context.ts and run `npm run build:host`.
-// source sha256: cfafd028ada47cf5319a0537f3cbdca65935a359ccb6402a46769d8235993618
+// source sha256: a01409f7975fd1ea28d022326b77d63b01635afddea3f7cec76e42423bb94301
 
 "use strict";
 // The messages the model is asked with, derived from the event log.
@@ -273,7 +273,7 @@ function deriveMessages(options) {
         }
         events = tail;
     }
-    if (rawTask !== null && events.length && events[0] === rawTask && rawTask.content === task) {
+    if (rawTask !== null && events.length && events[0]?.type === "user_message" && events[0].content === task) {
         events = events.slice(1);
     }
     return [

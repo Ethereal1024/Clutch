@@ -20,11 +20,12 @@
 //                            this claim does — see ui/tunnel-connect.js)
 //   restartRemoteServer() => Promise<bool>                  (reboot an idle-exited remote supervisor)
 //   openSessionForward(port) => Promise<{ localPort, close() }>
-//   startLocalSession(onFail, claimPid) => Promise<{mode, sessionId, url, stop}> | null
+//   startLocalSession(onFail) => Promise<{mode, sessionId, url, stop}> | null
 //                           (spawns the LOCAL supervisor + session; absent on Android.
-//                            claimPid is this window's OS process, recorded by the
-//                            supervisor so a lock it leaves behind can be proven
-//                            orphaned instead of timed out)
+//                            The claim that names this window's OS process rides with
+//                            every session start — the supervisor client attaches it —
+//                            so a lock it leaves behind can be proven orphaned by the
+//                            kernel instead of timed out)
 //   log(...args)          => sink (tunnelLog on desktop)
 //   sessions              => pure supervisor HTTP client (supervisor-client.js;
 //                            injectable so tests can run the machine hermetically)
@@ -44,7 +45,16 @@ function createHostCore(deps) {
     remoteLlmTarget = () => null,
     remoteLlmModel = () => "",
     remoteLlmKnobs = () => ({}),
+    // Global (primary) tunnel status — used when a slot has no pinned target
     tunnelStatus,
+    // Per-tunnel ops: (tunnelId) => <op>. Provided by hosts that support multiple
+    // simultaneous tunnels; absent on Android and in tests that inject fakes.
+    tunnelStatusFor = undefined,
+    openSessionForwardFor = undefined,
+    awaitModelPathFor = undefined,
+    restartRemoteServerFor = undefined,
+    remoteLlmBaseFor = undefined,
+    // Single-tunnel ops — still required for backward compat and for the global tunnel
     restartRemoteServer,
     openSessionForward,
     // no tunnel at all (a host with no tunnel dep, a hermetic test): "none" says
@@ -66,6 +76,88 @@ function createHostCore(deps) {
   const windowBackends = new Map();
   const slotKey = (winId, slotId) => (slotId ? `${winId}::${slotId}` : String(winId));
 
+  // per-SLOT tunnel target:
+  //   slotKey -> { kind: "local" }
+  //            | { kind: "tunnel", tunnelId: string }
+  //
+  // A slot with no entry uses the global tunnel (backward compat). "local" forces
+  // the slot onto the local supervisor even when a tunnel is active. "tunnel" pins
+  // the slot to a specific tunnel by its id (host:user:port canonical form).
+  const slotTargets = new Map();
+
+  // Resolve the tunnel-specific operations for a given slot. Returns a small
+  // object with the ops that `claimSlotBackend` and its helpers call. If the
+  // slot is pinned to a specific tunnel (via `slotTargets`) and the host supplied
+  // per-tunnel ops, those are used; otherwise the global ops apply.
+  function resolveSlotTunnelDeps(winId, slotId = "") {
+    const key = slotKey(winId, slotId);
+    const slotTarget = slotTargets.get(key);
+
+    // Slot pinned to a specific tunnel and the host knows how to serve it
+    if (
+      slotTarget &&
+      slotTarget.kind === "tunnel" &&
+      slotTarget.tunnelId &&
+      typeof tunnelStatusFor === "function"
+    ) {
+      const tid = slotTarget.tunnelId;
+      return {
+        tunnelSt: () => tunnelStatusFor(tid) || {},
+        openFwd: typeof openSessionForwardFor === "function"
+          ? (port) => openSessionForwardFor(tid, port)
+          : openSessionForward,
+        awaitPath: typeof awaitModelPathFor === "function"
+          ? () => awaitModelPathFor(tid)
+          : awaitModelPath,
+        restartRemote: typeof restartRemoteServerFor === "function"
+          ? () => restartRemoteServerFor(tid)
+          : restartRemoteServer,
+        remoteLlm: typeof remoteLlmBaseFor === "function"
+          ? () => remoteLlmBaseFor(tid)
+          : remoteLlmBase,
+      };
+    }
+
+    // Slot pinned to local: return inactive tunnel status so claimSlotBackend
+    // skips the tunnel path and goes straight to the local session.
+    if (slotTarget && slotTarget.kind === "local") {
+      return {
+        tunnelSt: () => ({ active: false }),
+        openFwd: openSessionForward,
+        awaitPath: awaitModelPath,
+        restartRemote: restartRemoteServer,
+        remoteLlm: remoteLlmBase,
+      };
+    }
+
+    // No pin — use the global (primary) tunnel ops unchanged
+    return {
+      tunnelSt: tunnelStatus || (() => ({})),
+      openFwd: openSessionForward,
+      awaitPath: awaitModelPath,
+      restartRemote: restartRemoteServer,
+      remoteLlm: remoteLlmBase,
+    };
+  }
+
+  // Set target for a specific slot. target may be:
+  //   { kind: "local" }                        — force local regardless of tunnel
+  //   { kind: "tunnel", tunnelId: string }      — pin to a specific tunnel
+  //   null | undefined                          — clear (use global default)
+  function setSlotTarget(winId, slotId = "", target) {
+    const key = slotKey(winId, slotId);
+    if (target === null || target === undefined) {
+      slotTargets.delete(key);
+    } else {
+      slotTargets.set(key, target);
+    }
+  }
+
+  // Returns the recorded target for a slot, or null for the global default.
+  function getSlotTarget(winId, slotId = "") {
+    return slotTargets.get(slotKey(winId, slotId)) || null;
+  }
+
   // The default slot's notification keeps its pre-tabs shape (a bare URL): the
   // renderer that predates tabs reads it as a string. A named slot gets the
   // { slotId, url } pair, because a window can now hold several sessions and the
@@ -73,17 +165,6 @@ function createHostCore(deps) {
   function notifyBase(wc, slotId, url) {
     if (!wc || wc.isDestroyed()) return;
     wc.send(BASE_CHANGED, slotId ? { slotId, url } : url);
-  }
-
-  // Where the far side's model path is, as a value this machine can log and act
-  // on. Never throws: a claim must not fail because the tunnel could not answer
-  // about a port, and "unknown" is the honest word for that.
-  async function modelPathState() {
-    try {
-      return (await awaitModelPath()) || "unknown";
-    } catch (e) {
-      return "unknown (" + ((e && e.message) || e) + ")";
-    }
   }
 
   // Where this client serves the far side's model right now, as a re-point target
@@ -99,29 +180,66 @@ function createHostCore(deps) {
     }
   }
 
-  async function releaseSlot(winId, slotId = "") {
+  // A release the supervisor did not confirm is not a stopped session.
+  //
+  // The far side is a process, not a socket: it outlives the hop and it keeps
+  // the .clc it opened for write LOCKED (agent/core/project_lock.py — the lock is
+  // the kernel's, and it is held until that process dies). Dropping the local
+  // record on a `stop` that could not reach it — the exact situation a release
+  // runs in during an outage, since the hop is down — is what makes the NEXT claim
+  // start a second session over the first one's project. The far host answers
+  // that with `project_open_conflict`, and the page turns it into "Already open
+  // elsewhere — open it read-only?": a tab that was open for write comes back
+  // read-only. That is the reported read-only offer after a successful reconnect.
+  //
+  // So the claim is PARKED: detached (its heartbeat and forward died with the hop)
+  // but still re-bindable, because session id + remote port name a process that is
+  // still there. `parked` is the fact that says "no window depends on this any
+  // more" — anyTunnelWindow ignores it, so the picker's Disconnect and the outage's
+  // Cancel still end the hop (a session nobody watches is the reaper's, not the
+  // window's). The next claim for this slot adopts it instead of starting a second
+  // session (claimSlotBackend's rebind path).
+  function parkIfUnconfirmed(key, wb, stopped, opts) {
+    if (!wb || wb.kind !== "tunnel" || !wb.sessionId) return;
+    if (opts && opts.leaving) return; // the app is leaving: nothing will re-bind
+    if (!stopped || stopped.ok !== false) return; // the supervisor stopped it
+    if (windowBackends.has(key)) return; // a newer claim owns the slot
+    wb.parked = true;
+    windowBackends.set(key, wb);
+    log(`[backend] slot ${key} session ${wb.sessionId} release was not confirmed; keeping the claim for the next hop`);
+  }
+
+  // Drop one claim. `opts.leaving` says the APP is quitting (not just this
+  // slot): the release then tells the supervisor to stop the session through
+  // its SIGTERM ladder, so a `released` final is written. Awaitable so the quit
+  // gate can wait for the answer instead of exiting first.
+  async function releaseSlot(winId, slotId = "", opts = {}) {
     const key = slotKey(winId, slotId);
     const wb = windowBackends.get(key);
     if (!wb) return;
     windowBackends.delete(key);
+    let stopped;
     try {
-      wb.stop();
+      stopped = await wb.stop(opts);
     } catch (e) {
-      /* best effort */
+      stopped = { ok: false };
     }
+    parkIfUnconfirmed(key, wb, stopped, opts);
   }
 
   // every slot the window claimed (window close, window crash). A window's slots
   // are independent sessions; one leaving must not touch another window's.
-  async function releaseWindowBackends(winId) {
+  async function releaseWindowBackends(winId, opts = {}) {
     for (const [key, wb] of [...windowBackends]) {
       if (wb.winId !== winId) continue;
       windowBackends.delete(key);
+      let stopped;
       try {
-        wb.stop();
+        stopped = await wb.stop(opts);
       } catch (e) {
-        /* best effort */
+        stopped = { ok: false };
       }
+      parkIfUnconfirmed(key, wb, stopped, opts);
     }
   }
 
@@ -139,11 +257,12 @@ function createHostCore(deps) {
       (async () => {
         const cur = windowBackends.get(key);
         if (!cur || cur.sessionId !== sessionId) return; // superseded / closed
-        // ask through the hop that is up NOW: the failing beat was the OLD
-        // hop's, and a question asked into a dead hop can only say "unreachable"
-        const ts = tunnelStatus();
+        // ask through the hop that is up NOW: use the slot's tunnel status
+        // (may be a specific per-slot tunnel or the global one)
+        const { tunnelSt, openFwd } = resolveSlotTunnelDeps(wc.id, slotId);
+        const ts = tunnelSt();
         const hop = ts.active && ts.url ? ts.url : supBase;
-        const verdict = await rebindTunnelBackend(wc, slotId, hop, cur);
+        const verdict = await rebindTunnelBackend(wc, slotId, hop, cur, openFwd);
         if (verdict.verdict === "kept") {
           if (!wc.isDestroyed()) notifyBase(wc, slotId, verdict.url);
           return;
@@ -196,16 +315,16 @@ function createHostCore(deps) {
         fwd.close();
         wb.url = null; // never hand out a port whose forward is gone
       },
-      stop: () => {
+      stop: (opts: { leaving?: boolean } = {}) => {
         wb.detach();
-        sessions.supervisorSessionStop(supBase, sessionId);
+        return sessions.supervisorSessionStop(supBase, sessionId, { leaving: !!(opts && opts.leaving) });
       },
     };
     return wb;
   }
 
-  async function registerTunnelBackend(wc, slotId, supBase, res) {
-    const fwd = await openSessionForward(res.port);
+  async function registerTunnelBackend(wc, slotId, supBase, res, openFwd = openSessionForward) {
+    const fwd = await openFwd(res.port);
     const hb = sessions.startSupervisorHeartbeat(
       supBase,
       res.sessionId,
@@ -238,7 +357,7 @@ function createHostCore(deps) {
   //                              supervisor, a forward that would not open, a
   //                              claim that changed hands mid-ask): the claim
   //                              is kept, detached, for the next hop
-  async function rebindTunnelBackend(wc, slotId, supBase, existing) {
+  async function rebindTunnelBackend(wc, slotId, supBase, existing, openFwd = openSessionForward) {
     if (!existing || existing.kind !== "tunnel" || !existing.sessionId || !existing.sessionPort) {
       return { verdict: "gone" };
     }
@@ -251,7 +370,7 @@ function createHostCore(deps) {
     if (!alive) return { verdict: "gone" };
     let fwd;
     try {
-      fwd = await openSessionForward(existing.sessionPort);
+      fwd = await openFwd(existing.sessionPort);
     } catch (e) {
       log(`[backend] session ${existing.sessionId} forward failed: ${(e && e.message) || e}`);
       // the session PROVED itself alive above; a forward that will not open is
@@ -276,10 +395,25 @@ function createHostCore(deps) {
     return { verdict: "kept", url: wb.url };
   }
 
-  // Decide (and, if needed, re-create) this window's backend URL.
+  // Decide (and, if needed, re-create) this slot's backend URL. Uses per-slot
+  // tunnel targeting when available; routes through the global tunnel or local
+  // session otherwise.
   async function claimSlotBackend(wc, slotId = "", notify = false) {
     const key = slotKey(wc.id, slotId);
-    const ts = tunnelStatus();
+    
+    // Resolve tunnel deps for this slot
+    const { tunnelSt, openFwd, awaitPath, restartRemote, remoteLlm } = resolveSlotTunnelDeps(wc.id, slotId);
+    const ts = tunnelSt();
+    // Is this slot's file known to live on a MACHINE? slots.ts pins
+    // {kind:"tunnel"} for a tab whose file is out there, and the pin is the
+    // difference between a slot that merely happens to be claimed while a hop is
+    // up and one that cannot be served here at all. For that slot no answer below
+    // may be this machine's session: a local session cannot have the path, and
+    // its answer — "not a .clc project file" (agent/api/project.py) — names
+    // neither the machine nor the way back, which is the dead end the user hit.
+    const pin = slotTargets.get(key);
+    const onMachine = !!(pin && pin.kind === "tunnel");
+
     if (ts.active && ts.url) {
       const existing = windowBackends.get(key);
       if (existing && existing.kind === "tunnel") {
@@ -293,7 +427,7 @@ function createHostCore(deps) {
         // a different hop (or a claim whose forward went with the last one):
         // the far-side session outlives every hop, so re-open its forward —
         // never stop + start, which is what killed runs in flight
-        const kept = await rebindTunnelBackend(wc, slotId, ts.url, existing);
+        const kept = await rebindTunnelBackend(wc, slotId, ts.url, existing, openFwd);
         if (kept.verdict === "kept") {
           if (notify && !wc.isDestroyed()) notifyBase(wc, slotId, kept.url);
           return kept.url;
@@ -315,25 +449,32 @@ function createHostCore(deps) {
       // ("only Stop moved it"). So the wait happens HERE: once, at the one moment
       // the answer is actually needed, and bounded by the installer's own clocks.
       // A path that is not up is not a reason to refuse the session — a run whose
-      // model does not answer beats no run — but the log says which it is.
-      const path = await modelPathState();
+      // model does not answer beats no run — but the log says which it is. A dep
+      // that THROWS is "unknown", never a failed claim: the tunnel not answering
+      // about a port says nothing about whether a run may start.
+      let path: string;
+      try {
+        path = await awaitPath();
+      } catch (e) {
+        path = "unknown (" + ((e && e.message) || e) + ")";
+      }
       if (path !== "listening") {
         log(`[backend] the far side's model path is ${path}; starting the session anyway`);
       }
       let res = await sessions.supervisorSessionStart(
         ts.url,
-        remoteLlmBase(),
+        remoteLlm(),
         remoteLlmModel(),
         remoteLlmKnobs(),
       );
       if (res.error) {
         // the remote supervisor may have idle-exited: restart it through the tunnel and retry once
         log(`[backend] tunnel session start failed (${res.error}); restarting remote supervisor`);
-        const ok = await restartRemoteServer();
+        const ok = await restartRemote();
         if (ok) {
           res = await sessions.supervisorSessionStart(
             ts.url,
-            remoteLlmBase(),
+            remoteLlm(),
             remoteLlmModel(),
             remoteLlmKnobs(),
           );
@@ -341,12 +482,27 @@ function createHostCore(deps) {
         }
       }
       if (!res.error) {
-        const url = await registerTunnelBackend(wc, slotId, ts.url, res);
+        const url = await registerTunnelBackend(wc, slotId, ts.url, res, openFwd);
         if (notify && !wc.isDestroyed()) notifyBase(wc, slotId, url);
         return url;
       }
+      if (onMachine) {
+        // a session that will not start on the far side is a FAILURE of this
+        // claim, never a reason to pretend the file is here
+        log(`[backend] slot ${key} is on a machine and no tunnel session could be started; not claiming a local session`);
+        return null;
+      }
       // tunnel alive but supervisorless (degraded host or remote died): fall back to a local session
       log("[backend] no tunnel session; falling back to a local session");
+    }
+
+    if (onMachine) {
+      // the hop is not serving this slot (no tunnel, or one that is up without a
+      // URL — the window it spends re-binding a forward): waiting for the next
+      // claim is the honest answer, because a local session would be the wrong
+      // machine for a path that lives out there
+      log(`[backend] slot ${key} is on a machine and the hop is not serving it (${ts.active ? "up, no url" : "no tunnel"}); no local session for it`);
+      return null;
     }
 
     if (typeof startLocalSession !== "function") {
@@ -379,19 +535,20 @@ function createHostCore(deps) {
         await ensureSlotBackend(wc, slotId, true);
       })();
     };
-    // The LOCAL session is claimed by an OS process this host can see, so name
-    // it: the supervisor pins (pid, start tick) into the session and into every
-    // .clc that session opens, and that pair is how a lock left by a dead window
-    // is PROVEN orphaned later (agent/core/lock_reconcile.py) instead of guessed
-    // at by a timer. A handle with no OS process id (the Android bridge) claims
-    // namelessly: the record then says "unclaimed" and the host never touches it.
-    const claimPid = typeof wc.getOSProcessId === "function" ? wc.getOSProcessId() : null;
-    s = await startLocalSession(onFail, claimPid);
+    // The claiming window is named in ONE place — the supervisor client, which
+    // sends (host, pid, start tick) with every session start, local or tunnelled
+    // — so this state machine hands the claim nothing and cannot get it wrong.
+    // The pid there is the host process (the Electron main / Android host), never
+    // the renderer: a reload or a crash recovery replaces the renderer while the
+    // app lives, and the session's watchdog polls that pid once a second
+    // (agent/core/claim_watch.py). Naming the renderer would make those routine
+    // events look exactly like "the app is gone" and end a live session.
+    s = await startLocalSession(onFail);
     if (s.mode === "failed") {
       // a window booting mid-spawn can transiently fail; retry once
       log(`[backend] local session retry: ${s.reason}`);
       await new Promise((r) => setTimeout(r, 600));
-      s = await startLocalSession(onFail, claimPid); // the retry session heals itself too
+      s = await startLocalSession(onFail); // the retry session heals itself too
     }
     if (s.mode === "failed") {
       log(`[backend] local session failed: ${s.reason}`);
@@ -428,11 +585,11 @@ function createHostCore(deps) {
   // claim instead (releaseWindowBackend, through the `session:release` handler):
   // dropping every window's session because one of them pressed Cancel is how a
   // disconnect in one window used to take the other windows' work down with it.
-  async function releaseAllBackends() {
+  async function releaseAllBackends(opts = {}) {
     for (const [key, wb] of [...windowBackends]) {
       windowBackends.delete(key);
       try {
-        wb.stop();
+        await wb.stop(opts);
       } catch (e) {
         /* best effort */
       }
@@ -455,10 +612,17 @@ function createHostCore(deps) {
   // shell's tunnel-end notification has to name the slots the hop actually
   // owned, or every other tab is told it lost a session that is still running
   // fine (see the `lost` flag the shells compute from this list).
-  async function releaseTunnelBackends() {
+  //
+  // `tunnelUrl` (optional): when given, only releases backends whose forward
+  // was opened through that tunnel. Slots on a different tunnel are untouched.
+  // Omit to release ALL tunnel backends (app shutdown, single-tunnel teardown).
+  async function releaseTunnelBackends(tunnelUrl?: string) {
     const affected = [];
     for (const [key, wb] of [...windowBackends]) {
       if (wb.kind !== "tunnel") continue;
+      // With per-tunnel routing a slot may be on a different tunnel than the one
+      // that just ended. Only detach the forwards that actually died.
+      if (tunnelUrl && wb.tunnelUrl && wb.tunnelUrl !== tunnelUrl) continue;
       if (typeof wb.detach === "function") wb.detach();
       else {
         windowBackends.delete(key);
@@ -476,27 +640,80 @@ function createHostCore(deps) {
   // Is any window still working over the tunnel? The tunnel is a shared resource
   // and stopping it is a machine-wide act, so only a caller that is about to
   // release the LAST window on it may stop it (ui/main.js `session:release`).
-  function anyTunnelWindow() {
+  // `tunnelUrl` (optional): when given, checks only windows on that tunnel.
+  function anyTunnelWindow(tunnelUrl?: string) {
     for (const wb of windowBackends.values()) {
-      if (wb.kind === "tunnel") return true;
+      if (wb.kind !== "tunnel") continue;
+      // a PARKED claim is a memory of a far-side session nobody is looking at
+      // any more (its release could not be confirmed): keeping the hop up for it
+      // would make the outage's Cancel — and the picker's Disconnect — unable to
+      // end a connection no window is using
+      if (wb.parked) continue;
+      if (tunnelUrl && wb.tunnelUrl && wb.tunnelUrl !== tunnelUrl) continue;
+      return true;
     }
     return false;
   }
 
-  async function stopAllBackends() {
-    await releaseAllBackends();
-    // Normal close: tell every supervisor to exit once their sessions are gone
-    requestSupervisorShutdown();
+  // The app is leaving: release every claim and then tell every supervisor to
+  // die. `opts.leaving` must be true here — this IS the quit gate, and it is
+  // the only place allowed to say so.
+  async function stopAllBackends(opts = {}) {
+    const bases = supervisorBases(); // before the claims (and their bases) go
+    await releaseAllBackends(opts);
+    await requestSupervisorShutdown(bases);
   }
 
-  function requestSupervisorShutdown() {
-    // supervisorShutdown() appends /api/shutdown itself — hand it bases, not URLs
-    const local = supervisorBase ? supervisorBase() : null;
-    const ts = tunnelStatus();
-    const remote = ts.active && ts.url ? ts.url : null;
-    for (const base of [local, remote]) {
-      if (base) sessions.supervisorShutdown(base);
+  // The SUPERVISOR that owns this window's session — and therefore the only
+  // process that can speak about locks on the machine the work happens on: a
+  // lock is freed by the host that holds it, never by the client. A tunnel
+  // claim means the far host's supervisor (through the same tunnel base); a
+  // local claim (or no claim yet) means this machine's.
+  //
+  // With per-slot tunnel routing, `wb.tunnelUrl` records which tunnel URL the
+  // claim was opened through — that is the supervisor to use, not the current
+  // global tunnel status (which may be a different device entirely).
+  function supervisorBaseFor(winId, slotId = "") {
+    const wb = windowBackends.get(slotKey(winId, slotId));
+    if (wb && wb.kind === "tunnel") {
+      // The claim already knows its tunnel; use it directly
+      if (wb.tunnelUrl) return wb.tunnelUrl;
+      // Fall back to the slot's current tunnel if the claim is unrooted
+      const { tunnelSt } = resolveSlotTunnelDeps(winId, slotId);
+      const ts = tunnelSt() || {};
+      return ts.active && ts.url ? ts.url : null;
     }
+    return supervisorBase ? supervisorBase() : null;
+  }
+
+  // The supervisors this client has to tell when it leaves. Read BEFORE the
+  // claims are dropped: a tunnel backend's `tunnelUrl` is the only record of the
+  // base it was opened through, and releaseAllBackends deletes that record.
+  function supervisorBases() {
+    const local = supervisorBase ? supervisorBase() : null;
+    // A multi-tunnel session may hold backends on several remote supervisors and
+    // all of them need to know the client is leaving.
+    const remote = new Set<string>();
+    for (const wb of windowBackends.values()) {
+      if (wb.kind === "tunnel" && wb.tunnelUrl) remote.add(wb.tunnelUrl);
+    }
+    // Also include the global (primary) tunnel for any slots on the default one
+    if (typeof tunnelStatus === "function") {
+      const ts = tunnelStatus() || {};
+      if (ts.active && ts.url) remote.add(ts.url);
+    }
+    return [local, ...remote].filter(Boolean);
+  }
+
+  // Machine-wide half: arm the supervisor's own exit. It is NOT a kill switch —
+  // a machine-wide supervisor may serve windows other than this one, so what
+  // this client's sessions get is the explicit per-session {leaving:true}
+  // release above; arming only makes the supervisor process itself go once its
+  // sessions are gone. AWAITED so the POST leaves before the process exits.
+  async function requestSupervisorShutdown(bases?) {
+    const list = bases || supervisorBases();
+    // supervisorShutdown() appends /api/shutdown itself — hand it bases, not URLs
+    await Promise.all(list.map((base) => sessions.supervisorShutdown(base)));
   }
 
   // which machine a window's session runs on ("local" | "tunnel" | null when it
@@ -518,39 +735,21 @@ function createHostCore(deps) {
     return { claimed: true, kind: wb.kind, url: wb.url || null };
   }
 
-  // The SUPERVISOR that owns this window's session — and therefore the only
-  // process that can speak about locks on the machine the work happens on: a
-  // lock is freed by the host that holds it, never by the client. A tunnel
-  // claim means the far host's supervisor (through the same tunnel base); a
-  // local claim (or no claim yet) means this machine's.
-  function supervisorBaseFor(winId, slotId = "") {
-    const wb = windowBackends.get(slotKey(winId, slotId));
-    if (wb && wb.kind === "tunnel") {
-      const ts = tunnelStatus() || {};
-      return ts.active && ts.url ? ts.url : null;
-    }
-    return supervisorBase ? supervisorBase() : null;
-  }
-
   return {
-    // slot API
     ensureSlotBackend,
     releaseSlot,
     releaseWindowBackends,
-    // pre-tabs spelling: the default slot of that window (kept for every call
-    // site and test that predates tabs)
-    ensureWindowBackend: (wc, notify = false) => ensureSlotBackend(wc, "", notify),
-    claimWindowBackend: (wc, notify = false) => claimSlotBackend(wc, "", notify),
-    releaseWindowBackend: (winId) => releaseSlot(winId, ""),
     releaseAllBackends,
     releaseTunnelBackends,
-    anyTunnelWindow,
     stopAllBackends,
-    claimSlotBackend,
-    slotStatus,
+    anyTunnelWindow,
     backendKind,
-    supervisorBaseFor,
+    slotStatus,
+    // how many live claims this host holds (diagnostics and tests)
     backendCount: () => windowBackends.size,
+    supervisorBaseFor,
+    setSlotTarget,
+    getSlotTarget,
   };
 }
 

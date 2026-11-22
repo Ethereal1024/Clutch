@@ -22,6 +22,25 @@ const {
   restartRemoteServer,
 } = require("./tunnel-lifecycle");
 
+// List all active tunnels: currently just the primary tunnel. In a multi-tunnel
+// future this would return all instances in the registry.
+function listTunnels() {
+  const list = [];
+  const primary = tunnelStatus();
+  // Only include tunnels that have a target (i.e., are connected or have been connected)
+  if (primary.target) {
+    const tunnelId = `${primary.target.host}:${primary.target.user}:${primary.target.port}`;
+    list.push({
+      tunnelId,
+      active: primary.active,
+      url: primary.url,
+      target: primary.target,
+      modelPath: primary.modelPath,
+    });
+  }
+  return list;
+}
+
 module.exports = {
   connectTunnel,
   stopTunnel,
@@ -42,4 +61,5 @@ module.exports = {
   openSessionForward,
   restartRemoteServer,
   chooseStrategy,
+  listTunnels,
 };

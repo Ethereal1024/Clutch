@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit android/host/src/android-host.ts and run `node android/build-host.js`.
-// source sha256: 517d25cf37a2768fd5f8edddfdf6de1c2532fe168c2efb098c5c3f7ed0cbcfcb
+// source sha256: ae7dfc5c439999c76f271a3535d2cd0f74099ba6db01ac4a4623591d2d52a15e
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -363,6 +363,17 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
         runInsts.set(slotId, { run, base, mode, project, rev, driving: false });
         return { run };
     }
+    // ONE wheel per turn, the same refusal the desktop host makes (ui/src/host/
+    // main.ts refuseIfDriving): a start/step/drive/run for a slot whose instance is
+    // already driving is answered before it can touch the loop. Two drivers of one
+    // turn are not stopped by the session's lease — claim_run refuses only a
+    // DIFFERENT project (agent/base.py) — and the `finally` of the second entry
+    // clears the flag the REAL driver set, so the next state() rebuilds the
+    // instance under a live turn and the rebuilt one takes the slot over. The page
+    // treats `run_active` as a fact, not a failure (render-events.ts resumeTurn).
+    const refuseIfDriving = (inst) => inst && inst.driving
+        ? { ok: false, error: "this window is already driving this turn", code: "run_active" }
+        : null;
     // the bridge surface: ui/main.js's ipcMain handlers, one for one
     const handlers = {
         clutchApi: {
@@ -432,20 +443,29 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
         // two verbs as the desktop's `locks:*` handlers (ui/main.js). The base comes
         // from THIS window's own claim, so a window working through a tunnel asks the
         // far supervisor, which is the machine that holds the lock. A claim this
-        // device made is unverifiable from over there, so the host reports it instead
-        // of acting; its answer is returned verbatim and the page says what happened.
+        // device made cannot be checked over there (its kernel has never heard of the
+        // pid), so the far side records it and waits for the claimant's own machine
+        // to speak — this one. Hence the same split as the desktop: the list carries
+        // this kernel's verdict per lock, and the reclaim relays it as a witness, so
+        // a page cannot talk the host into freeing a live window's project.
         clutchLocks: {
             list: async (slotId) => {
                 const base = hostCore.supervisorBaseFor(window.id, typeof slotId === "string" ? slotId : "");
                 if (!base)
                     return { error: "this window has no session host" };
-                return sessions.supervisorLocks(base);
+                const listed = await sessions.supervisorLocks(base);
+                if (!listed || !Array.isArray(listed.locks))
+                    return listed;
+                return { locks: listed.locks.map(sessions.annotateClaimLiveness) };
             },
             reclaim: async (project, slotId) => {
                 const base = hostCore.supervisorBaseFor(window.id, typeof slotId === "string" ? slotId : "");
                 if (!base)
                     return { revoked: false, why: "this window has no session host" };
-                return sessions.supervisorLockReclaim(base, String(project || ""));
+                const key = String(project || "");
+                const listed = await sessions.supervisorLocks(base);
+                const witness = sessions.claimWitness(listed && listed.locks, key);
+                return sessions.supervisorLockReclaim(base, key, witness);
             },
         },
         clutchTunnel: {
@@ -527,6 +547,9 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                     if (got.error)
                         return { ok: false, error: got.error, code: got.code || null };
                     const inst = runInsts.get(slotId);
+                    const taken = refuseIfDriving(inst);
+                    if (taken)
+                        return taken;
                     if (inst)
                         inst.driving = true;
                     try {
@@ -560,6 +583,9 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                 const inst = runInsts.get(typeof slotId === "string" ? slotId : "");
                 if (!inst)
                     return { ok: false, error: "no run instance for this slot" };
+                const taken = refuseIfDriving(inst);
+                if (taken)
+                    return taken;
                 try {
                     inst.driving = true;
                     const result = await inst.run.step();
@@ -576,6 +602,9 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                 const inst = runInsts.get(typeof slotId === "string" ? slotId : "");
                 if (!inst)
                     return { ok: false, error: "no run instance for this slot" };
+                const taken = refuseIfDriving(inst);
+                if (taken)
+                    return taken;
                 try {
                     inst.driving = true;
                     const result = await inst.run.drive();
@@ -586,6 +615,38 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                 }
                 finally {
                     inst.driving = false;
+                }
+            },
+            // run is the unified interface: start a new turn if idle, continue an
+            // open one if the log has an interrupted turn. This is the ONE entry point
+            // for user-initiated actions — when the user types "继续" and presses Run,
+            // this handles both the "new task" and "resume" cases transparently.
+            run: async (first, second) => {
+                const slotId = typeof first === "string" ? first : "";
+                const payload = typeof first === "string" ? second : first;
+                try {
+                    const task = String((payload && payload.task) || "");
+                    const got = await ensureRun(slotId, payload);
+                    if (got.error)
+                        return { ok: false, error: got.error, code: got.code || null };
+                    const inst = runInsts.get(slotId);
+                    const taken = refuseIfDriving(inst);
+                    if (taken)
+                        return taken;
+                    if (inst)
+                        inst.driving = true;
+                    try {
+                        const result = await got.run.run(task);
+                        return { ok: true, result };
+                    }
+                    finally {
+                        if (inst)
+                            inst.driving = false;
+                    }
+                }
+                catch (err) {
+                    log(`[run] run failed: ${(err && err.message) || err}`);
+                    return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
                 }
             },
             // the RESUME question (P2-3): takes the same {mode, project} payload start
@@ -599,7 +660,13 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 } = {}) {
                     if (got.error)
                         return { ok: false, error: got.error, code: got.code || null };
                     const result = await got.run.state();
-                    return { ok: true, result };
+                    // `driven` is the half of the answer the fold cannot carry: a turn is
+                    // open, AND this window already has a wheel on it. The page resumes
+                    // only what nobody is driving (render-events.ts resumeTurn) — a
+                    // second drive of one turn is the "a step is already running" the
+                    // reader saw on every tab switch.
+                    const inst = runInsts.get(slotId);
+                    return { ok: true, result, driven: !!(inst && inst.driving) };
                 }
                 catch (err) {
                     return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };

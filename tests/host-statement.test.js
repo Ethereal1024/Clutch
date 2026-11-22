@@ -22,11 +22,15 @@
 //   * `run` — one statement carried: the runner sees the rendered line, an
 //     envelope passes through, a non-zero exit is framed, and a transport verdict
 //     (timeout / Stop / unreachable) is RAISED for the caller to word;
-//   * `resident` / `per_call` / `client` — the three builders: which facts each
-//     one reads (`rendezvous.service` for a service, the artifact for a per-call
-//     component, the live channel for a client's), that a client with no channel
-//     has NO statement and is refused in the channel's own words, and that a
-//     client statement carries the root and the fence;
+//   * `resident` / `per_call` / `client` — what `statement.prepare` dispatches on:
+//     which facts each shape reads (`rendezvous.service` for a service, the
+//     artifact for a one-process component, the live channel for a client's), and
+//     that a client with no channel has NO statement — refused in the channel's
+//     own words. A client statement is the component's name and nothing else: the
+//     root and the fence that this JS builder hands the client WITH the call are
+//     deployment B's own protocol (the client's plugin cannot derive them on its
+//     side of the wire), so they are checked against the case's INPUTS and not
+//     against the golden, which the Python no longer carries;
 //   * `client_run` — the template sent VERBATIM (never rendered, `defaults`
 //     ignored) with the model's arguments, and `ChannelError` → `ERROR: …`.
 //
@@ -82,7 +86,11 @@ function runnerOf(answer, trace) {
 }
 
 function componentOf(entry) {
-  return { name: "clutch-probe", run: { kind: entry.kind } };
+  // The fixture names the DECLARATION's shape (`service`: it publishes a process
+  // that stays, or it does not); this host's `run.kind` is deployment B's own word
+  // for the same thing, so the translation is written here rather than in the
+  // golden.
+  return { name: "clutch-probe", run: { kind: entry.service ? "resident" : "perCall" } };
 }
 
 // ---- host facts -----------------------------------------------------------
@@ -222,6 +230,7 @@ function replayResident() {
   check(ready.prefix === entry.prefix, "resident: a service contributes no prefix");
   check(ready.module === entry.module, "resident: a failure names the component");
   check(ready.runner === workspace, "resident: the workspace's own transport carries the loopback call");
+  check(ready.local === true, "resident: a statement this host runs owns its undo record");
   check(ready.line(entry.template, entry.args, {}) === entry.line, "resident: prefix + rendered template");
 }
 
@@ -246,6 +255,7 @@ function replayPerCall() {
   check(ready.prefix === entry.prefix, "per_call: the artifact's own launch is the prefix");
   check(ready.module === entry.module, "per_call: a failure names the component");
   check(ready.runner === transport, "per_call: the app host's transport carries the line");
+  check(ready.local === true, "per_call: a statement this host runs owns its undo record");
   check(ready.line(entry.template, entry.args, {}) === entry.line, "per_call: prefix + rendered template");
 }
 
@@ -259,7 +269,17 @@ function replayClient() {
     let got;
     try {
       const ready = statement.client({ name: "clutch-probe", run: { kind: "clientRun" } }, workspace, host);
-      got = { module: ready.module, root: ready.root, fence: ready.fence };
+      got = { module: ready.module, local: ready.local };
+      // The two facts the client's plugin cannot work out on its own side of the
+      // wire, and the reason this builder still reads a workspace: the root the
+      // call is about and the globs of what the host protects under it. They are
+      // the case's own inputs — the Python's client statement carries neither, so
+      // the golden pins none.
+      check(ready.root === entry.root, `client: ${entry.name} names the root the call is about`);
+      check(
+        same(ready.fence, statement.fenceGlobs(entry.protected, entry.root)),
+        `client: ${entry.name} carries the fence of what that workspace protects`
+      );
     } catch (error) {
       check(error instanceof statement.RendezvousError, `client: ${entry.name} refuses with RendezvousError`);
       got = { error: error.message };
@@ -274,33 +294,35 @@ function replayClient() {
 async function replayClientRun() {
   for (const entry of fixture.client_run) {
     const calls = [];
-    const send = async (module, template, args, timeout, options) => {
-      calls.push([module, template, args, timeout, options.root, options.fence]);
+    const send = async (module, template, args, timeout) => {
+      calls.push([module, template, args, timeout]);
       if (entry.reply.channel_error) throw new statement.ChannelError(entry.reply.channel_error);
       return { content: entry.reply.content, error: entry.reply.error };
     };
-    const ready = statement.clientStatement({
-      module: entry.module,
-      root: entry.root,
-      fence: entry.fence,
-      send,
-    });
+    const ready = statement.clientStatement({ module: entry.module, send });
+    check(ready.local === entry.local, `client_run: ${entry.name} (where the statement runs)`);
     const env = await ready.run(entry.template, entry.args, entry.defaults, { timeout: entry.timeout });
     check(same({ content: env.content, error: env.error }, entry.expect), `client_run: ${entry.name}`);
     check(same(calls, entry.calls), `client_run: ${entry.name} (what the channel saw)`);
   }
   // `defaults` are the HOST's rendering and this statement is the client's, so
-  // they are accepted and ignored — the template goes as it was declared.
+  // they are accepted and ignored — the template goes as it was declared — and the
+  // two facts the client cannot derive travel WITH it: the root and the fence.
   const sent = [];
   const ready = statement.clientStatement({
     module: "clutch-probe",
-    send: async (_module, template, args) => {
-      sent.push([template, args]);
+    root: "/home/u/proj",
+    fence: ["/home/u/proj/demo.clc"],
+    send: async (_module, template, args, _timeout, options) => {
+      sent.push([template, args, options.root, options.fence]);
       return { content: "ok", error: false };
     },
   });
   await ready.run("read_file {*}", { path: "a.txt" }, { max_bytes: 100 }, { timeout: 30 });
-  check(same(sent, [["read_file {*}", { path: "a.txt" }]]), "client_run: the template is sent verbatim, defaults ignored");
+  check(
+    same(sent, [["read_file {*}", { path: "a.txt" }, "/home/u/proj", ["/home/u/proj/demo.clc"]]]),
+    "client_run: the template is sent verbatim, defaults ignored, root/fence carried with it"
+  );
 }
 
 // ---- the wiring refusals --------------------------------------------------

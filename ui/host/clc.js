@@ -58,7 +58,7 @@ const EVENT_DEFAULTS = {
   tool_call: { name: "", arguments: "", tool_call_id: "", ui: {}, path_arg: "" },
   tool_call_delta: { tool_call_id: "", name: "", delta: "", ui: {} },
   tool_result: { tool_call_id: "", content: "", is_error: false, diff: "" },
-  state_update: { key: "execution_status", value: "" },
+  state_update: { key: "execution_status", value: "", read_only: null },
   final: { status: "", summary: "" },
   permission_request: { request_id: "", tool: "", args_repr: "", reason: "" },
   compaction: { summary: "" },

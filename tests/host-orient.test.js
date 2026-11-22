@@ -14,7 +14,9 @@
 //     blocked reasons (the component's, and a name no declaration answers to), a
 //     service's loopback call, the client's answer and its refusal, and six
 //     shapes of the undo record (replaced, created, failed run, escaping path,
-//     renamed argument, and a CLIENT's write — which keeps its record);
+//     renamed argument, and a CLIENT's write — which keeps NO record here: the
+//     file it overwrites is on the client's machine, so this host has nothing to
+//     read and nothing to restore);
 //   * `moduleBlockedReason` — the one question this host asks where the Python
 //     asks three, and why the two it drops are the same verdict (plan §1: this
 //     host serves a FAR root only, so a component with a process here could never
@@ -207,8 +209,9 @@ async function runExecuteCase(entry) {
   };
 
   const engine = orient.createOrient({ render, components, host, client });
+  const toolName = entry.tool === undefined ? "read_file" : entry.tool;
   const spec = {
-    name: entry.tool === undefined ? "read_file" : entry.tool,
+    name: toolName,
     description: "",
     parameters: { properties: {}, required: [] },
     access: "",
@@ -223,11 +226,33 @@ async function runExecuteCase(entry) {
 
   const got = { content: envelope.content, error: envelope.error };
   const saw = [...trace, ...transportTrace, ...sends];
-  const want = collapsed ? { content: `ERROR: ${unavailable}`, error: true } : entry.expect;
+  // WHICH reason answers is the host's question (§ moduleBlockedReason above), and
+  // the fixture names it in one of three fields: the gate the capture measured
+  // (`blocked`), or — where the capture had to silence the gate to measure the
+  // layer BELOW it — the sentence that layer refused with (`unavailable` for a
+  // component with no artifact here, `channel_reason` for a client with no live
+  // channel), which is the same verdict `unavailable_reason` would have handed the
+  // gate. Neither is a different ENVELOPE: a blocked call is `registry._invoke`'s
+  // one sentence either way, and it is never prepared.
+  const gateReason = collapsed
+    ? unavailable
+    : entry.blocked || entry.unavailable || entry.channel_reason || "";
+  const want = gateReason
+    ? {
+        content: `ERROR: ${toolName} is not available in this session (${gateReason}); do not call it again — use the tools this request offers.`,
+        error: true,
+      }
+    : entry.expect;
   check(same(got, want), `execute: ${entry.name}`);
   if (!same(got, want)) console.log(`  want ${JSON.stringify(want)}\n  got  ${JSON.stringify(got)}`);
   check(same(saw, entry.trace), `execute: ${entry.name} (what the workspace/transport/channel saw)`);
   if (!same(saw, entry.trace)) console.log(`  want ${JSON.stringify(entry.trace)}\n  got  ${JSON.stringify(saw)}`);
+  // ... and the reason this host's gate answers with is the one the fixture named
+  // (a gate that answered something else would still build a matching `want`).
+  check(
+    engine.moduleBlockedReason(entry.component) === gateReason,
+    `execute: ${entry.name} (the reason the blocked gate answers with)`
+  );
   return { got, saw, tool };
 }
 

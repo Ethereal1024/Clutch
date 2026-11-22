@@ -156,9 +156,9 @@ function keepalive() {
     ping !== null && ping[1].replace(/\\n/g, "\n") === events.SSE_PING_FRAME,
     "the host's ping frame is the named event the renderer listens for"
   );
-  const renderer = fs.readFileSync(path.join(ROOT, "ui", "js", "sse-stream.js"), "utf8");
+  const renderer = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "sse-stream.ts"), "utf8");
   const ms = /const SSE_KEEPALIVE_MS = (\d+);/.exec(renderer);
-  check(ms !== null, "ui/js/sse-stream.js declares SSE_KEEPALIVE_MS");
+  check(ms !== null, "ui/src/renderer/sse-stream.ts declares SSE_KEEPALIVE_MS");
   check(
     ms !== null && Number(ms[1]) === events.SSE_KEEPALIVE_SEC * 1000,
     "the renderer's keepalive and the host's are the same interval (a cache that can only be refreshed by the stream)"

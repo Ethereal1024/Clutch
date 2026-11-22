@@ -25,9 +25,12 @@
 //     truncation, an empty reply, and Stop — each with its own terminating text.
 //
 // The prompts are the real ones: `render` here is `string.Template`'s
-// safe_substitute over `agent/prompts/*.md` (the Python renderer's contract), so
-// a renamed variable in a template — or a wrong variable in this module — shows
-// up as a literal `$name` in a system prompt instead of passing quietly.
+// safe_substitute over the files the loop actually loads — the loop's own prose
+// in `ui/prompts/*.md` (system, the modes, the task, the terminating notes) and
+// the machine text the tool layer still keeps in `agent/prompts/`
+// (`unknown_tool.md`; see TODO.md P3-2). A renamed variable in a template — or a
+// wrong variable in this module — shows up as a literal `$name` in a system
+// prompt instead of passing quietly.
 //
 // Run: node tests/host-loop.test.js
 
@@ -37,7 +40,8 @@ const path = require("path");
 const { check, summary } = require("./harness");
 
 const HOST = path.resolve(__dirname, "..", "ui", "host");
-const PROMPTS = path.resolve(__dirname, "..", "agent", "prompts");
+const PROMPTS = path.resolve(__dirname, "..", "ui", "prompts");
+const MACHINE_PROMPTS = path.resolve(__dirname, "..", "agent", "prompts");
 
 const clc = require(path.join(HOST, "clc.js"));
 const loop = require(path.join(HOST, "loop.js"));
@@ -62,7 +66,9 @@ function substitute(text, vars) {
 }
 
 function render(name, vars = {}) {
-  return substitute(fs.readFileSync(path.join(PROMPTS, name), "utf8"), vars);
+  const own = path.join(PROMPTS, name);
+  const text = fs.readFileSync(fs.existsSync(own) ? own : path.join(MACHINE_PROMPTS, name), "utf8");
+  return substitute(text, vars);
 }
 
 // The one `$name` a template carries as SHELL TEXT rather than as a placeholder:

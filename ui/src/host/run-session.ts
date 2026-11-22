@@ -480,6 +480,23 @@ async function createSessionRun({
     }
   }
 
+  async function run(task) {
+    noteBusy(1);
+    try {
+      await hold();
+      try {
+        const out = await loop.run(task);
+        await settle();
+        return out;
+      } catch (e) {
+        await release();
+        throw e;
+      }
+    } finally {
+      noteBusy(-1);
+    }
+  }
+
   // Stop stays SYNCHRONOUS: ui/main.js's stopAndFlush() calls it and then steps,
   // which is where the aborted final is written and settle() sees idle. A stop
   // that never gets that step leaves the turn open on disk and lets the lease
@@ -492,7 +509,7 @@ async function createSessionRun({
     return loop.state();
   }
 
-  return { start, stop, step, drive, state };
+  return { start, stop, step, drive, run, state };
 }
 
 // The LLM facts a run instance is BUILT from. A settings save must reach the

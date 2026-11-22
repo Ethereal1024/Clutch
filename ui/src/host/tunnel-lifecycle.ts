@@ -14,7 +14,7 @@
 
 const net = require("net");
 const { state, tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunnel-core");
-const { freePort, listen, waitForServer } = require("./tunnel-net");
+const { freePort, listen, waitForServer, probeServer } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
 const { startCommand, stopServer, remoteServingState } = require("./tunnel-bootstrap");
 const { stopLlmProxy } = require("./llm-proxy");
@@ -211,6 +211,27 @@ function openSessionForward(remotePort) {
 
 // ---- dead-backend self-healing ----
 // Health-check the forward, restart the backend via the tunnel, else tear down.
+
+// The clocks of one heal round, all of them wider than the connect's, because
+// this is not a cold dial: it is a QUESTION to a far side that was serving until
+// a moment ago, on a wire that just failed to carry an answer. Measured through
+// the live forward, a healthy /api/health on the field's mobile link took 0.35 s
+// to 0.72 s — and one lost retransmission is seconds, not milliseconds. The old
+// 3 s deadline with a 2 s per-request timeout read such a wire as a dead far side
+// and closed the listener under it, which the window saw as "Connection lost".
+const HEAL_PROBE_MS = 5000;
+const HEAL_REQUEST_MS = 4000;
+// The re-ask that stands between a failed poll and a CLOSED listener. It is
+// deliberately longer than the poll that failed: everything that failed with
+// "timeout" is asked again with time to answer, and only a listener that is not
+// there at all (a refusal: nothing is bound) is re-opened without waiting.
+const HEAL_PATIENT_MS = 7000;
+const HEAL_PATIENT_REQUEST_MS = 5000;
+// The far side's own verdict travels over exec. It must not outlast the tick
+// that asked it: an exec on a dead wire used to sit on remoteExec's 60 s default
+// (two of them = the 2 minutes the field log shows between "backend unreachable"
+// and the teardown it caused).
+const HEAL_EXEC_MS = 12000;
 async function collectRemoteDiagnostics() {
   try {
     const r = await remoteExec(
@@ -248,10 +269,28 @@ async function restartRemoteServer() {
 // forward, on the SAME local port (state.currentUrl names it, and every window
 // claim names state.currentUrl), and never touch the far side: a restart there
 // is a pkill of every session child with it, which ends runs in flight.
-async function reopenForward() {
+//
+// `ask` is the poll that got us here, and its KIND decides whether the listener
+// may be closed at all. Closing it is destructive in a way the old code took for
+// granted: every connection in flight (the window's event stream, its Stop
+// button, a fetch mid-reply) is speaking through this listener, and a rebind to
+// the same port is only safe because nothing alive is using it. So:
+//
+//   * "refused" — nothing is bound on this port. There is no listener to
+//     preserve and no connection to break: re-open at once.
+//   * anything else — a listener answered nothing, or the attempt failed some
+//     other way. That is a QUESTION, not a verdict on the listener: ask once
+//     more, patiently, and only close what is demonstrably not answering.
+async function reopenForward(ask?) {
   const m = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(state.currentUrl || "");
   const localPort = m ? Number(m[1]) : 0;
   if (!localPort || !state.sshClient) return false;
+  if (!(ask && ask.kind === "refused")) {
+    if (await waitForServer(state.currentUrl + "/api/health", HEAL_PATIENT_MS, HEAL_PATIENT_REQUEST_MS)) {
+      tunnelLog("[heal] the forward answered a patient ask; nothing to rebind");
+      return true;
+    }
+  }
   const old = state.localSrv;
   state.localSrv = null;
   if (old) {
@@ -270,7 +309,10 @@ async function reopenForward() {
     return false;
   }
   tunnelLog(`[phase] local forward rebound 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);
-  return waitForServer(state.currentUrl + "/api/health", 3000);
+  // the same patience after the rebind: the fresh listener has to dial the far
+  // side through the same wire, and a 3 s verdict on it re-opened the very
+  // "cannot reach a far side that is still serving" teardown this exists to end
+  return waitForServer(state.currentUrl + "/api/health", HEAL_PATIENT_MS, HEAL_PATIENT_REQUEST_MS);
 }
 
 // One heal tick: a failed poll is a QUESTION, not a verdict. It travels this
@@ -303,23 +345,49 @@ const HEAL_RETRY_MS = 1000;
 
 async function healOnce() {
   if (!state.sshClient || !state.currentUrl) return;
-  let round = await healRound();
-  if (round.why && !round.remoteTouched) {
-    tunnelLog(`[heal] ${round.why}; one more tick in ${HEAL_RETRY_MS}ms`);
-    await new Promise((r) => setTimeout(r, HEAL_RETRY_MS));
-    // the wait may have outlived the tunnel (a teardown, or a fresh connect that
-    // took over): there is nothing left to heal and nothing to announce
-    if (!state.sshClient || !state.currentUrl) return;
-    round = await healRound();
+  // ONE round at a time. A round is several questions over a wire that is
+  // already suspect, so it can easily outlive HEAL_INTERVAL_MS and the timer
+  // ticks into a round that is still asking. Two rounds then judge the same
+  // forward, both find it bad, both bounce it — and the loser tears down the hop
+  // the winner just repaired. The field log shows exactly that: duplicated
+  // "[heal] far side reports SERVING" 3 ms apart, duplicated ssh exec probes, and
+  // a teardown that reached a window whose streams were healthy.
+  if (state.healing) {
+    tunnelLog("[heal] a round is still asking; this tick is skipped");
+    return;
   }
-  if (!round.why) return;
-  tunnelLog("[heal] " + round.why + "; collecting diagnostics + tearing down");
-  await collectRemoteDiagnostics();
-  // notify: this teardown is not the renderer's own. stopTunnel nulls
-  // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
-  // currency guard and would never tell anyone: without the flag the
-  // renderer keeps a dead session URL and its Stop button posts into it.
-  await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
+  const ticket = { hop: state.sshClient };
+  state.healing = ticket;
+  try {
+    let round = await healRound();
+    if (round.why && !round.remoteTouched) {
+      tunnelLog(`[heal] ${round.why}; one more tick in ${HEAL_RETRY_MS}ms`);
+      await new Promise((r) => setTimeout(r, HEAL_RETRY_MS));
+      // the wait may have outlived the tunnel (a teardown, or a fresh connect that
+      // took over): there is nothing left to heal and nothing to announce
+      if (!state.sshClient || !state.currentUrl) return;
+      round = await healRound();
+    }
+    if (!round.why) return;
+    // Whatever this round judged, it judged THIS hop. A different client here is
+    // a hop that was replaced while the round was asking (a teardown, a fresh
+    // connect): its verdict is about a wire nobody is using, and acting on it
+    // would tear down the connection the user just got back.
+    if (state.sshClient !== ticket.hop) {
+      tunnelLog("[heal] the hop changed while this round was asking; verdict dropped");
+      return;
+    }
+    tunnelLog("[heal] " + round.why + "; collecting diagnostics + tearing down");
+    await collectRemoteDiagnostics();
+    if (state.sshClient !== ticket.hop || !state.currentUrl) return;
+    // notify: this teardown is not the renderer's own. stopTunnel nulls
+    // state.sshClient before end(), so the ssh 'end' handler is suppressed by its
+    // currency guard and would never tell anyone: without the flag the
+    // renderer keeps a dead session URL and its Stop button posts into it.
+    await stopTunnel(true); // onEnd -> renderer raises the reconnect dialog
+  } finally {
+    if (state.healing === ticket) state.healing = null;
+  }
 }
 
 // One round of the question above, with its own verdict: `why` is null when the
@@ -331,19 +399,21 @@ async function healRound() {
   let why = null;
   let remoteTouched = false;
   try {
-    const up = await waitForServer(state.currentUrl + "/api/health", 3000);
-    if (up) return { why: null, remoteTouched };
-    tunnelLog("[heal] backend unreachable through the live tunnel");
+    const ask = await probeServer(state.currentUrl + "/api/health", HEAL_PROBE_MS, HEAL_REQUEST_MS);
+    if (ask.up) return { why: null, remoteTouched };
+    tunnelLog(`[heal] backend unreachable through the live tunnel (${ask.kind})`);
     // the far host's own verdict about its port: DOWN (nobody), WEDGED (bound,
     // silent), SERVING (answers) or UNMEASURABLE (no way to look) — asked
-    // over exec, never over the forward that just failed
-    const verdict = await remoteServingState(state.lastProbe || {});
+    // over exec, never over the forward that just failed. Bounded: the far side
+    // may be unreachable precisely because the wire is, and an exec with no clock
+    // of its own held this round open for minutes.
+    const verdict = await remoteServingState(state.lastProbe || {}, HEAL_EXEC_MS);
     tunnelLog(`[heal] far side reports ${verdict}`);
     if (verdict === "SERVING" || verdict === "UNMEASURABLE") {
       // answering (or unaskable — a far host whose answer we cannot hear is
       // not a dead one, and only a proven-dead one justifies replacing): the
       // forward is the dead thing
-      const ok = await reopenForward();
+      const ok = await reopenForward(ask);
       if (ok) {
         tunnelLog("[heal] forward rebound; backend recovered");
         return { why: null, remoteTouched };
@@ -370,6 +440,10 @@ async function healRound() {
 
 function startHealing() {
   stopHealing();
+  // A new hop is a new question: a round still asking about the previous wire
+  // must not hold this hop's healing back for the length of its own clocks. Its
+  // verdict is dropped by healOnce's hop check, so abandoning it here is safe.
+  state.healing = null;
   state.healTimer = setInterval(() => {
     // the timer is the caller of last resort: a rejection here has no one else
     healOnce().catch((e) => tunnelLog("[heal] tick failed: " + ((e && e.message) || e)));

@@ -19,6 +19,13 @@ contextBridge.exposeInMainWorld("clutchApi", {
     ipcRenderer.on("backend:base-changed", wrap);
     return () => ipcRenderer.removeListener("backend:base-changed", wrap);
   },
+  // per-slot backend target: pin this tab to a specific tunnel or to local.
+  //   { kind: "local" }                          — always local supervisor
+  //   { kind: "tunnel", tunnelId: string }        — route through this tunnel
+  //   null                                        — clear (use the global default)
+  // A change affects the NEXT claim, not the current session.
+  setSlotTarget: (slotId, target) => ipcRenderer.invoke("slot:set-target", slotId, target),
+  getSlotTarget: (slotId) => ipcRenderer.invoke("slot:get-target", slotId),
 });
 
 // the project locks the HOST can see (GET /api/locks) and the one action a user
@@ -82,6 +89,8 @@ contextBridge.exposeInMainWorld("clutchTunnel", {
   connect: (cfg) => ipcRenderer.invoke("tunnel:connect", cfg),
   status: () => ipcRenderer.invoke("tunnel:status"),
   disconnect: () => ipcRenderer.invoke("tunnel:disconnect"),
+  // list active/recently-active tunnels for the backend picker
+  list: () => ipcRenderer.invoke("tunnel:list"),
   onEnd: (cb) => {
     ipcRenderer.on("tunnel:ended", cb);
     return () => ipcRenderer.removeListener("tunnel:ended", cb);
@@ -126,6 +135,7 @@ contextBridge.exposeInMainWorld("clutchRun", {
   // every verb names the slot (one tab) it belongs to: two tabs run two turns
   // in parallel, and a background tab's event must never drive the active one.
   start: (slotId, payload) => ipcRenderer.invoke("run:start", ...runArgs(slotId, payload)),
+  run: (slotId, payload) => ipcRenderer.invoke("run:run", ...runArgs(slotId, payload)),
   stop: (slotId) => ipcRenderer.invoke("run:stop", slotId),
   step: (slotId) => ipcRenderer.invoke("run:step", slotId),
   drive: (slotId) => ipcRenderer.invoke("run:drive", slotId),

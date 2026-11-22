@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/plugin-link.ts and run `npm run build:host`.
-// source sha256: db84f375cd20176fe3ce763c9bdf1ad5d34b6c3c9d20306edc4453ba0ef0c170
+// source sha256: 760568e0a4ab748e9d9040002b40d91021e2d41c1bf6ab36efe2cd6ad2b612e2
 
 // The client's plugin PATH: the listener, the reverse channel it answers on, and
 // the push that tells a session what this client runs.
@@ -21,8 +21,8 @@
 //   * NOTHING is pushed before the forward is installed. A session told to dial a
 //     port nobody serves fails every call with "the channel is not answering",
 //     which is a worse lie than "this host has no channel".
-//   * A declaration ABOUT another machine (`subject: foreign-fs` — the far side's
-//     filesystem, clutch-ssh-workspace) is only offered while a hop is live
+//   * A declaration ABOUT another machine — the root's filesystem reached over a
+//     channel (clutch-ssh-workspace) — is only offered while a hop is live
 //     (snapshot): its tools are only meaningful where the tunnel reaches, and on
 //     this side the same names belong to the local component.
 //   * A push is the WHOLE set (agent/tools/channel.py refuses a partial one), so
@@ -124,20 +124,41 @@ function session(method, base, payload) {
 // What a session should be told right now, as the exact bytes that would be
 // pushed. Compared as JSON because the push is a replacement: "the same set" has
 // to mean the same bytes, or every sync would be a new generation.
-// A `foreign-fs` declaration (clutch-ssh-workspace, catalog.FOREIGN_FS) is a
-// promise about ANOTHER machine: its tools arrive over this client's reverse
-// channel and run on the far side of the hop that carries it. Without a live hop
-// there is nothing to run them on, and the session's own `workspace-fs`
-// component is the one that works for those names — so a declaration pushed then
-// would shadow working tools with ones that can only answer "no tunnel". The hop
-// is `state.client`: set when a forward is installed for a live ssh client,
-// cleared by stop() and by the tunnel's own hopLost().
+//
+// A declaration that reaches ANOTHER machine is a promise about the far side of a
+// hop: its tools arrive over this client's reverse channel and run on the machine
+// at the other end of it. Without a live hop there is nothing to run them on, and
+// the session's own filesystem component is the one that works for those names —
+// so a declaration pushed then would shadow working tools with ones that can only
+// answer "no tunnel". The hop is `state.client`: set when a forward is installed
+// for a live ssh client, cleared by stop() and by the tunnel's own hopLost().
+//
+// Two declaration shapes say "another machine", and both are read here because
+// both are in the wild (agent/tools/rendezvous.py `reaches_another_machine` is
+// the same rule on the host's side): `subject: foreign-fs` is 0.1.x's word for
+// it, and since 0.2.0 the ssh plugin declares the workspace's own `workspace-fs`
+// with nothing but an `entry` — a frontend half, whose code the client runs and
+// whose commands travel the tunnel.
+const WORKSPACE_FS = "workspace-fs";
 const FOREIGN_FS = "foreign-fs";
+function runsHere(component) {
+    if (component && component.service)
+        return true;
+    const launch = component && component.launch;
+    return Boolean(launch && (launch.argv || launch.entry || launch.binary || launch.importable));
+}
+function reachesAnotherMachine(component) {
+    if (!component)
+        return false;
+    if (component.subject === FOREIGN_FS)
+        return true;
+    return component.subject === WORKSPACE_FS && !runsHere(component);
+}
 function snapshot() {
     const components = state.server ? state.server.declarations() : [];
     if (state.client)
         return components;
-    return components.filter((c) => c.subject !== FOREIGN_FS);
+    return components.filter((c) => !reachesAnotherMachine(c));
 }
 async function pushTo(base) {
     const components = snapshot();

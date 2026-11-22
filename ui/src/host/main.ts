@@ -386,6 +386,34 @@ if (!app.requestSingleInstanceLock()) {
       return { ...status, running: !!inst };
     });
 
+    // Pin a slot to a specific backend target:
+    //   { kind: "local" }                       — always use local supervisor
+    //   { kind: "tunnel", tunnelId: string }     — always route through this tunnel
+    //   null                                     — clear: use global default
+    // A new claim (api:base) is needed after changing this for the slot to actually
+    // move; changing the target alone only affects the NEXT claim, not the current one.
+    ipcMain.handle("slot:set-target", async (e, slotId, target) => {
+      const slot = typeof slotId === "string" ? slotId : "";
+      try {
+        hostCore.setSlotTarget(e.sender.id, slot, target || null);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    });
+
+    // Current pinned target for the slot, or null for the global default.
+    ipcMain.handle("slot:get-target", async (e, slotId) => {
+      const slot = typeof slotId === "string" ? slotId : "";
+      return hostCore.getSlotTarget(e.sender.id, slot);
+    });
+
+    // Enumerate connected and recently-connected tunnels. Used by the backend
+    // picker to let the user choose which device a tab's session should run on.
+    ipcMain.handle("tunnel:list", async () => {
+      return tunnel.listTunnels();
+    });
+
     // settings.json mirror logic lives in ui/settings-mirror.js — shared with
     // the Android host's bridge handlers (single implementation, both shells).
     ipcMain.handle("settings:save", async (_e, data) => {
@@ -490,8 +518,25 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("tunnel:connect", async (e, cfg) =>
       // every connect goes through the ladder: the user's own dial owns the wire,
       // and a connect that WINS is the standing intent it may redial on the next
-      // hop loss (ui/tunnel-ladder.js)
-      ladder.userConnect(cfg, (stage) => e.sender.send("tunnel:progress", stage))
+      // hop loss (ui/tunnel-ladder.js). A stage that carries a fraction (the
+      // upload's own bytes) is sent as an object — with the rate and the time
+      // left when the transfer measured them, because a 78 MB upload on a
+      // throttled host is the one stage where "how fast" is the difference
+      // between waiting and giving up; a bare stage stays a string, so a window
+      // that only knows stage names keeps working.
+      ladder.userConnect(cfg, (stage, frac, info) =>
+        e.sender.send(
+          "tunnel:progress",
+          typeof frac === "number"
+            ? {
+                stage,
+                frac,
+                bps: info && typeof info.bps === "number" ? info.bps : 0,
+                eta: info && typeof info.eta === "number" ? info.eta : 0,
+              }
+            : stage
+        )
+      )
     );
 
     ipcMain.handle("tunnel:status", async () => tunnel.tunnelStatus());
@@ -500,7 +545,12 @@ if (!app.requestSingleInstanceLock()) {
       // this machine. Every window's claim goes, because every window was on the
       // tunnel the user just dropped — and the standing intent goes with them.
       ladder.noteUserLeft();
-      await hostCore.releaseAllBackends();
+      // `leaving` here too: the user is leaving this MACHINE, not just losing a
+      // hop — the supervisor is told so it stops these sessions through its
+      // SIGTERM ladder (a `released` final) instead of keeping them for a claim
+      // that will never come back. A tab closing, by contrast, releases without
+      // it: the window is still here and may re-bind (session:release below).
+      await hostCore.releaseAllBackends({ leaving: true });
       await tunnel.stopTunnel();
       return { ok: true };
     });
@@ -538,17 +588,47 @@ if (!app.requestSingleInstanceLock()) {
     // tunnel when the window works there, this machine otherwise. Nothing here
     // ever unlinks a lock file, and reclaim refuses every state but a PROVEN
     // orphan — the host's verdict is returned verbatim so the page can say what
-    // actually happened.
+    // actually happened. A claim that names ANOTHER machine (a remote project
+    // claimed from a window here) is one of those refusals, and it is the case
+    // that left a reopened window staring at "open read-only" for five minutes:
+    // the far kernel cannot check our pids, so it keeps the claim until the
+    // claimant's own machine speaks. That is what these two do together — one
+    // reads each lock's verdict on THIS kernel, the other relays it as a witness.
+    //
+    // `slotId` is load-bearing, not a convenience: it is the only thing that says
+    // WHICH machine to ask, because a slot's claim is what holds the machine. An
+    // empty one resolves to the window's default session and, with no such claim,
+    // to this machine's supervisor — so a project on a far host came back as "no
+    // lock of that name", and the page offered "open read-only?" for a project
+    // nothing had open (the fix-train report). Both handlers below are therefore
+    // always called with the tab's own slot (ui/src/renderer/project.ts).
     ipcMain.handle("locks:list", async (e, slotId) => {
       const base = hostCore.supervisorBaseFor(e.sender.id, typeof slotId === "string" ? slotId : "");
       if (!base) return { error: "this window has no session host" };
-      return sessions.supervisorLocks(base);
+      const listed = await sessions.supervisorLocks(base);
+      if (!listed || !Array.isArray(listed.locks)) return listed;
+      // The host says who holds each lock; whether the WINDOW that claimed it
+      // still exists is a question only the machine it runs on can answer, and
+      // that is this one exactly when the record names this host. So each lock
+      // carries this kernel's verdict as `claim_liveness` (absent when the claim
+      // lives elsewhere: doubt is not painted as life).
+      return { locks: listed.locks.map(sessions.annotateClaimLiveness) };
     });
 
     ipcMain.handle("locks:reclaim", async (e, project, slotId) => {
       const base = hostCore.supervisorBaseFor(e.sender.id, typeof slotId === "string" ? slotId : "");
       if (!base) return { revoked: false, why: "this window has no session host" };
-      return sessions.supervisorLockReclaim(base, String(project || ""));
+      const key = String(project || "");
+      // The page asks; whether anything is PROVABLE is decided here. A claim on
+      // another machine cannot be checked by the host that holds the lock (its
+      // kernel has never heard of that pid), so the host records the claim and
+      // waits for the claimant's own machine to speak — this one, when the
+      // record names it. Read the host's list again, take THIS kernel's verdict,
+      // and relay a witness only when the claiming window is positively gone: a
+      // page cannot talk this host into freeing a live window's project.
+      const listed = await sessions.supervisorLocks(base);
+      const witness = sessions.claimWitness(listed && listed.locks, key);
+      return sessions.supervisorLockReclaim(base, key, witness);
     });
 
     // ---- run:* — the host-side run loop (P1-4) --------------------------------
@@ -630,6 +710,27 @@ if (!app.requestSingleInstanceLock()) {
       }
     }
 
+    // ONE wheel per turn. A start/step/drive for a slot whose instance is
+    // already driving is refused here, before it can touch the loop — and the
+    // refusal is not a courtesy, it is the fix for two failures seen together:
+    //
+    //   * a second driver steps the same turn. The session's lease cannot stop
+    //     it: claim_run refuses only a DIFFERENT project (agent/base.py), so two
+    //     drivers of one project are both "allowed" and both write the log;
+    //   * the `finally` below clears the flag the REAL driver set, while it is
+    //     still working. The next run:state then sees `driving === false` and
+    //     REBUILDS the instance under a live turn (ensureRunInstance's reuse
+    //     test) — and the rebuilt one claims the slot, which is the
+    //     "the run slot was no longer ours when the turn ended" in the log while
+    //     a turn was in flight.
+    //
+    // `run_active` is the code the page treats as "somebody is driving this":
+    // a fact, not a failure (render-events.ts resumeTurn).
+    const refuseIfDriving = (inst) =>
+      inst && inst.driving
+        ? { ok: false, error: "this window is already driving this turn", code: "run_active" }
+        : null;
+
     // run:start takes the page's payload {task, mode, project} — the same shape
     // /api/run took, because it is the same request: a task, the mode it runs
     // in, and the .clc the page believes it is showing. `project` is a CLAIM,
@@ -641,6 +742,8 @@ if (!app.requestSingleInstanceLock()) {
       const task = String((payload && payload.task) || "");
       const got = await ensureRunInstance(e.sender, slotId, payload);
       if (got.error) return { ok: false, error: got.error, code: got.code || null };
+      const taken = refuseIfDriving(got.inst);
+      if (taken) return taken;
       try {
         got.inst.driving = true;
         await got.inst.run.start(task);
@@ -666,6 +769,8 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("run:step", async (e, slotId) => {
       const inst = runInstances.get(slotKey(e.sender.id, typeof slotId === "string" ? slotId : ""));
       if (!inst) return { ok: false, error: "no run instance for this slot" };
+      const taken = refuseIfDriving(inst);
+      if (taken) return taken;
       try {
         inst.driving = true;
         const result = await inst.run.step();
@@ -680,6 +785,8 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle("run:drive", async (e, slotId) => {
       const inst = runInstances.get(slotKey(e.sender.id, typeof slotId === "string" ? slotId : ""));
       if (!inst) return { ok: false, error: "no run instance for this slot" };
+      const taken = refuseIfDriving(inst);
+      if (taken) return taken;
       try {
         inst.driving = true;
         const result = await inst.run.drive();
@@ -688,6 +795,31 @@ if (!app.requestSingleInstanceLock()) {
         return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
       } finally {
         inst.driving = false;
+      }
+    });
+
+    // run:run is the unified interface: start a new turn if idle, continue an
+    // open one if the log has an interrupted turn. This is the ONE entry point
+    // for user-initiated actions — when the user types "继续" and presses Run,
+    // this handles both the "new task" and "resume" cases transparently.
+    //
+    // The payload is the same as run:start: {task, mode, project}. If the turn
+    // is open, the task is ignored and the log's own user_message is honored.
+    ipcMain.handle("run:run", async (e, first, second) => {
+      const { slotId, payload } = slotArgs(first, second);
+      const task = String((payload && payload.task) || "");
+      const got = await ensureRunInstance(e.sender, slotId, payload);
+      if (got.error) return { ok: false, error: got.error, code: got.code || null };
+      const taken = refuseIfDriving(got.inst);
+      if (taken) return taken;
+      try {
+        got.inst.driving = true;
+        const result = await got.inst.run.run(task);
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
+      } finally {
+        got.inst.driving = false;
       }
     });
 
@@ -704,7 +836,12 @@ if (!app.requestSingleInstanceLock()) {
       if (got.error) return { ok: false, error: got.error, code: got.code || null };
       try {
         const result = await got.inst.run.state();
-        return { ok: true, result };
+        // `driven` is the other half of the answer, and the half the page
+        // cannot get anywhere else: the fold says a turn is OPEN, and this
+        // says whether THIS window is the one already driving it. They are
+        // different facts — resuming a turn somebody is stepping is how a
+        // second wheel got on it.
+        return { ok: true, result, driven: !!got.inst.driving };
       } catch (err) {
         return { ok: false, error: String((err && err.message) || err), code: (err && err.code) || null };
       }
@@ -743,28 +880,59 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
   });
 
-  app.on("window-all-closed", async () => {
+  // ---- the quit gate ----------------------------------------------------
+  // Every close path ends up here — window-all-closed below, Cmd+Q, a menu
+  // Quit, a logout — because Electron runs `before-quit` for all of them. This
+  // is the only place the app may say "leaving" to its sessions: a session's
+  // claim (this process's pid) is still ALIVE while this runs, so a supervisor
+  // that was told nothing would keep the session — and its .clc write lock.
+  //
+  // preventDefault is what makes the awaits real: Electron does not wait for an
+  // async `before-quit` handler, so the old code exited in the middle of the
+  // release. The work is BOUNDED (a dying tunnel or a silent supervisor must
+  // cost a timeout, never an un-quittable app), and the hard guarantee does not
+  // depend on it: if this process is SIGKILLed mid-quit, every session's own
+  // watchdog ends it within a second (agent/core/claim_watch.py).
+  const FLUSH_DEADLINE_MS = 4000; // one open turn's aborted final, appended
+  const RELEASE_DEADLINE_MS = 4000; // every session released + supervisors told
+  let quitWork = null; // the cleanup, once started (a second Quit rides it out)
+  let quitReady = false; // our own app.quit(): the one that may go through
+  const withDeadline = (p, ms) =>
+    Promise.race([
+      Promise.resolve(p).catch(() => {}),
+      new Promise((r) => setTimeout(r, ms)),
+    ]);
+  async function closeEverything() {
     // the app is going away: the standing intent goes with it
     ladder.stop();
-    // the sessions this client served are stopped on the next line, so these
-    // DELETEs are a courtesy the far side may never read — not awaited, or one
-    // quiet session would hold the quit for its own timeout (ui/plugin-link.js)
+    // the sessions this client served are stopped below, so these DELETEs are a
+    // courtesy the far side may never read — not awaited, or one quiet session
+    // would hold the quit for its own timeout (ui/plugin-link.js)
     pluginLink.stop();
-    // every open turn gets its aborted final before its session goes away;
-    // must be awaited so the HTTP append lands before stopAllBackends kills
-    // the Python server — an un-awaited flush races the shutdown and the
-    // server writes a spurious "released" final instead of "aborted"
-    await flushAllRuns();
-    // stop sessions + ask the supervisors to exit while the tunnel is still up
-    await hostCore.stopAllBackends();
+    // every open turn gets its aborted final before its session goes away; must
+    // be awaited so the HTTP append lands before stopAllBackends kills the
+    // Python server — an un-awaited flush races the shutdown and the server
+    // writes a spurious "released" final instead of "aborted"
+    await withDeadline(flushAllRuns(), FLUSH_DEADLINE_MS);
+    // release every claim with {leaving:true} and tell every supervisor to die
+    // while the tunnel that reaches them is still up
+    await withDeadline(hostCore.stopAllBackends({ leaving: true }), RELEASE_DEADLINE_MS);
     tunnel.stopTunnel();
-    app.quit();
+  }
+
+  app.on("before-quit", (e) => {
+    if (quitReady) return;
+    e.preventDefault(); // hold the quit for the bounded work below
+    if (quitWork) return; // a second Cmd+Q must not race the cleanup
+    quitWork = closeEverything().finally(() => {
+      quitReady = true;
+      app.quit();
+    });
   });
 
-  // final safety net: a session child must never outlive the app; async so
-  // the flush can complete before the process exits
-  app.on("before-quit", async () => {
-    await flushAllRuns();
-    await hostCore.stopAllBackends();
+  app.on("window-all-closed", () => {
+    // the gate above does the work; quitting is how it starts (every platform:
+    // this app has no stay-in-the-dock mode)
+    app.quit();
   });
 }

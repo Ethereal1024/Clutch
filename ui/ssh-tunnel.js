@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/ssh-tunnel.ts and run `npm run build:host`.
-// source sha256: 6c4c23cefdaf6fbb8d7acf9f99df4d168b0127b119fce5d0dd49fa08000d7730
+// source sha256: 6f308e2d7f68cd77cdd366de2690456c5d3ae70899aa33580bce41d42c42b771
 
 "use strict";
 // SSH tunnel (ssh2) to a remote clutch-server, embedded in the Electron main
@@ -19,6 +19,24 @@ const { remoteExec, uploadFileViaExec } = require("./tunnel-remote");
 const { chooseStrategy } = require("./tunnel-bootstrap");
 const { connectTunnel, startModelPath, awaitModelPath } = require("./tunnel-connect");
 const { stopTunnel, onTunnelEnd, tunnelStatus, openSessionForward, restartRemoteServer, } = require("./tunnel-lifecycle");
+// List all active tunnels: currently just the primary tunnel. In a multi-tunnel
+// future this would return all instances in the registry.
+function listTunnels() {
+    const list = [];
+    const primary = tunnelStatus();
+    // Only include tunnels that have a target (i.e., are connected or have been connected)
+    if (primary.target) {
+        const tunnelId = `${primary.target.host}:${primary.target.user}:${primary.target.port}`;
+        list.push({
+            tunnelId,
+            active: primary.active,
+            url: primary.url,
+            target: primary.target,
+            modelPath: primary.modelPath,
+        });
+    }
+    return list;
+}
 module.exports = {
     connectTunnel,
     stopTunnel,
@@ -39,4 +57,5 @@ module.exports = {
     openSessionForward,
     restartRemoteServer,
     chooseStrategy,
+    listTunnels,
 };

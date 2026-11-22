@@ -209,6 +209,11 @@ function hostStatement(fields = {}) {
     runner,
     prefix,
     module,
+    // `Statement.local`: this statement runs on THIS host's machine, so the undo
+    // record a write would need is a file this process can read and restore. Not a
+    // question about kinds — it is about whose bookkeeping the call touches — which
+    // is why the client's statement below answers false.
+    local: true,
     line,
     // Carry out one statement: the line is rendered here, run through this host's
     // transport, and its output unwrapped. A transport failure is deliberately
@@ -255,6 +260,10 @@ function clientStatement(fields = {}) {
     module,
     root,
     fence,
+    // `Statement.local` is false: the write lands in the CLIENT's filesystem, where
+    // this host can neither read the old content nor restore it — so no undo record
+    // is taken here (the client keeps its own).
+    local: false,
     // Send the template as it stands; the answer is the client's. `cancel` is not
     // used here either: a client call is bounded by its own deadline (the client
     // kills the fork), which is the same contract `channel.call` has.

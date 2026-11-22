@@ -119,12 +119,22 @@ async function releaseResets() {
 
   const b = connectTunnel({ host: "race.example", user: "alice", port: 22 });
   b.catch(() => {});
+  // B decides about A in a moment, not inside its own call any more: the reuse
+  // branch ASKS the live tunnel first (probeServer), and only then — the ask
+  // having failed, because A's client is still mid-handshake and its exec channel
+  // answers nothing — resets what it found. So wait for the fact under test
+  // instead of assuming it is synchronous.
+  waited = 0;
+  while (clientA.ended === false && waited < 2000) {
+    await sleep(5);
+    waited += 5;
+  }
+  check(clientA.ended === true, "the second dial resets the first: the in-flight client is ended");
   waited = 0;
   while (tunnelStatus().active === false && waited < 2000) {
     await sleep(5);
     waited += 5;
   }
-  check(clientA.ended === true, "the second dial resets the first: the in-flight client is ended");
   check(FakeClient.last !== clientA, "and installs its own client in its place");
 
   // now the reset's close reaches the loser — the moment the bug lived in

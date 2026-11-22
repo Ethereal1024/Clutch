@@ -6,6 +6,11 @@
 // reached through the SSH tunnel. Consumed by server-bootstrap.js (desktop
 // spawn path), host-core.js (the session-claim state machine) and ui/main.js
 // (the lock panel).
+const os = require("os");
+// the client's half of agent/core/procstat.py: the kernel's word on whether the
+// window that claimed a project is still there
+const procstat = require("./procstat");
+
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
 // session/start boots a onefile child: cover the supervisor's start timeout
 const SESSION_START_TIMEOUT_MS = 35_000;
@@ -92,13 +97,28 @@ async function supervisorSessionStart(base, baseUrl, model, knobs: any = {}) {
   // instead of the levels this client chose (empty = child default)
   if (knobs.reasoning_effort) payload.reasoning_effort = knobs.reasoning_effort;
   if (knobs.api_protocol) payload.api_protocol = knobs.api_protocol;
-  // The LOCAL window that is claiming, as its OS process id. The supervisor pins
-  // it to a start tick and records both in the session and in the .clc's owner
-  // record, which is what lets this host PROVE later that the window is gone
-  // (agent/core/lock_reconcile.py) instead of waiting out a timer. A remote
-  // claim sends nothing: that pid lives on the client's machine and the far host
-  // could never check it — the record then says unverifiable and no more.
-  if (Number.isInteger(knobs.claim_pid) && knobs.claim_pid > 0) payload.claim_pid = knobs.claim_pid;
+  // The window that is CLAIMING, in the only terms the machine it runs on can be
+  // asked about later: (host, pid, start tick). EVERY claim names them, locally
+  // and through a tunnel alike — the machine that RECORDS a claim may be another
+  // one, but the pid lives on the client's machine, and that is the kernel that
+  // will later prove the window gone (ui/main.ts relays that answer as the
+  // witness a far side accepts, agent/core/lock_reconcile.py witnessed). A claim
+  // that named nothing would be recorded "unclaimed", which nothing may ever
+  // free — the 300 s dead end this contract exists to end.
+  //
+  // It is THIS process (the Electron main / Android host process), not the
+  // renderer behind the window: a reload, a crash recovery or a navigation
+  // replaces the renderer while the app that owns the session lives on, and the
+  // session's watchdog polls this pid once a second (agent/core/claim_watch.py).
+  // Naming the renderer would make those routine events look exactly like "the
+  // app is gone" and end a live session.
+  const me = procstat.identity(process.pid);
+  const host = os.hostname();
+  if (me && host) {
+    payload.claim_host = host;
+    payload.claim_pid = me.pid;
+    if (me.start) payload.claim_start = me.start; // no tick on Windows/macOS: pid+host is what there is
+  }
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), SESSION_START_TIMEOUT_MS);
   try {
@@ -121,15 +141,34 @@ async function supervisorSessionStart(base, baseUrl, model, knobs: any = {}) {
   }
 }
 
-function supervisorSessionStop(base, sid) {
-  if (!sid) return;
+// Release one session. AWAITED by callers that are leaving: the quit gate has
+// one bounded moment to say "leaving", and a fire-and-forget fetch inside a
+// process that is about to exit usually never leaves the queue — the session
+// then waits out the claim watchdog (≈1 s, still fine) or, for a remote claim
+// nobody can check, the reaper's 300 s.
+//
+// `leaving: true` is the accelerator, not the judge: the supervisor stops the
+// session through its normal SIGTERM ladder so a `released` final gets written.
+// Without it the supervisor only ever stops a session whose claiming process the
+// kernel PROVES is gone; a live claim (a window that lost one hop, a phone) keeps
+// its session. Never rejects: the supervisor may already be gone.
+async function supervisorSessionStop(base, sid, { leaving = false, timeoutMs = 2000 } = {}) {
+  if (!sid) return { ok: true };
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    fetch(`${base}/api/session/stop`, {
+    const r = await fetch(`${base}/api/session/stop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sid }),
-    }).catch(() => {});
-  } catch { /* supervisor already gone: nothing to tell */ }
+      body: JSON.stringify({ session_id: sid, leaving: !!leaving }),
+      signal: ctl.signal,
+    });
+    return { ok: r.ok };
+  } catch (e) {
+    return { ok: false, error: e && e.message }; /* supervisor already gone: nothing to tell */
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // One heartbeat, AWAITED: "does this supervisor still hold this session?" —
@@ -253,12 +292,22 @@ function startSupervisorHeartbeat(base, sid, onFail, target) {
   };
 }
 
-// Ask a supervisor to exit once its sessions are gone (fire-and-forget: it may
-// already be gone, and there is nobody left to tell).
-function supervisorShutdown(base) {
+// Ask a supervisor to exit once its sessions are gone. AWAITED where it matters
+// (the quit gate): the supervisor kills what is still running before arming its
+// idle exit, so this POST is the last chance for a session the client could not
+// release per-session to stop holding its .clc lock. Never rejects: it may
+// already be gone, and there is nobody left to tell.
+async function supervisorShutdown(base, { timeoutMs = 2000 } = {}) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    fetch(`${base}/api/shutdown`, { method: "POST" }).catch(() => {});
-  } catch { /* best effort */ }
+    const r = await fetch(`${base}/api/shutdown`, { method: "POST", signal: ctl.signal });
+    return { ok: r.ok };
+  } catch (e) {
+    return { ok: false, error: e && e.message }; /* best effort */
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // The locks a supervisor can see, each classified by the KERNEL on ITS machine:
@@ -284,18 +333,65 @@ async function supervisorLocks(base) {
   }
 }
 
+// The one machine that can answer "is the window that claimed this project still
+// there?" is the machine the claim names, and that is this one exactly when the
+// record's claim_host is this host. `claim_liveness` is that answer, and it is
+// ABSENT whenever the record names another machine (doubt is never painted as
+// life), names no window at all (a build before claims), or cannot be read at
+// all: the page decides on a positive verdict and nothing else.
+//
+// The record's `boot_id` is the HOLDER's boot (the session child that wrote the
+// lock), never the claimant's — a claim made from another machine carries a tick
+// read on THAT machine's kernel, so handing the holder's boot to procstat.state
+// made every cross-machine claim compare a tick against a stranger's boot and
+// come back "dead": a positive verdict about a LIVE window, which is the one
+// answer that must never be wrong here (it is what lets the page take a project
+// away from a live window). The tick is compared on its own, and the boot is
+// left out because nothing in the record speaks about the claimant's kernel.
+function annotateClaimLiveness(lock) {
+  if (!lock || typeof lock !== "object") return lock;
+  const owner = lock.owner;
+  if (!owner || typeof owner !== "object") return lock;
+  if (!os.hostname() || owner.claim_host !== os.hostname()) return lock;
+  if (!Number.isInteger(owner.claim_pid) || owner.claim_pid <= 0) return lock;
+  const started = typeof owner.claim_start === "string" ? owner.claim_start : "";
+  return { ...lock, claim_liveness: procstat.state(owner.claim_pid, started) };
+}
+
+// The witness a holding machine accepts: THIS machine's kernel answered "the
+// window named (host, pid, start) is gone", to be compared field by field with
+// the record it belongs to (agent/core/lock_reconcile.py witnessed()). Built
+// here, from the host's own list, so the reclaim path never has to trust a
+// page's opinion about what died — and null unless the record names this host
+// AND its window is positively gone.
+function claimWitness(locks, project) {
+  const list = Array.isArray(locks) ? locks : [];
+  const held = list.find((lk) => lk && lk.project === project);
+  if (!held || annotateClaimLiveness(held).claim_liveness !== "dead") return null;
+  const owner = held.owner;
+  return {
+    host: owner.claim_host,
+    pid: owner.claim_pid,
+    ...(owner.claim_start ? { start: owner.claim_start } : {}),
+  };
+}
+
 // The user's hand on a project the host can PROVE is orphaned. The host refuses
 // a live window and says why; the verdict is returned so the page reports what
-// actually happened instead of assuming it worked.
-async function supervisorLockReclaim(base, project) {
+// actually happened instead of assuming it worked. `witness` is this client's
+// kernel speaking about a claim that lives on this machine (claimWitness); it is
+// sent only then, and the host ignores one that does not name its recorded claim.
+async function supervisorLockReclaim(base, project, witness = null) {
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), LOCK_RECLAIM_TIMEOUT_MS);
     try {
+      const body: Record<string, any> = { project };
+      if (witness) body.witness = witness;
       const r = await fetch(`${base}/api/locks/reclaim`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project }),
+        body: JSON.stringify(body),
         signal: ctl.signal,
       });
       const d = await (r.json() as any).catch(() => ({}));
@@ -318,5 +414,7 @@ module.exports = {
   startSupervisorHeartbeat,
   supervisorShutdown,
   supervisorLocks,
+  annotateClaimLiveness,
+  claimWitness,
   supervisorLockReclaim,
 };

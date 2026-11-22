@@ -1,36 +1,52 @@
-// The ssh-workspace plugin: argv translation, the payload that has to survive a
-// channel with no stdin, and the envelope that comes back.
+// The ssh workspace plugin (0.2.0): the four file tools computed HERE, spoken to
+// the far side as plain POSIX sh over the client's exec bridge.
 //
-// What is faked and what is real: the ONLY thing stubbed is the app's exec bridge
-// (a loopback HTTP server that records the command it was handed and answers with
-// a canned {"code","stdout","stderr"} — exactly ui/exec-bridge.js's shape). The
-// plugin, its planning, its quoting and its envelope handling are the real files
-// from clutch-ssh-workspace/. Nothing here needs ssh, a network or the far side;
-// the far side's own component is verified by tests/rendezvous_test.py and by the
-// live check in tests/ssh-workspace-e2e.js.
+// What is faked and what is real: the far side is a real `/bin/sh` in a temp
+// directory (the one thing a stock sshd guarantees), reached through a real
+// loopback HTTP server that speaks `ui/exec-bridge.js`'s contract
+// (`POST /exec {command, timeout}` -> `{code, stdout, stderr}`). The plugin, its
+// quoting, its chunking, its parsers and its envelope are the real files from
+// `clutch-ssh-workspace/`. Nothing here needs ssh, a network or a far machine.
+//
+// What this file pins that `tests/conform.test.js` does not: conform pins the
+// OUTPUT CONTRACT against the Python component's (39 frozen cases). This one
+// pins the transport-side promises of the rewrite — nothing has to be installed
+// on the far side (`sh`, `cat`, `ls`, `grep`, `find`, `mkdir`, `printf` only), a
+// path or a pattern given by the model cannot expand into a command, a payload
+// never rides the argv of a tool call and is split to fit the channel, and a
+// failure of the channel is a sentence about the tunnel rather than a tool
+// failure of the file.
 //
 // Run: node tests/ssh-workspace.test.js
 
 "use strict";
 
-const http = require("http");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const http = require("http");
+const { execFile } = require("child_process");
 
 const { check, summary } = require("./harness");
 const PLUGIN = require(path.join(__dirname, "..", "clutch-ssh-workspace", "index.js"));
 
-const ENVELOPE = (fields) => JSON.stringify({ content: "", error: false, diff: "", ...fields });
+// ---- the far side --------------------------------------------------------
+//
+// One bridge, one shell, one directory: `sh -c <command>` with the workspace
+// root as its cwd answers exactly like the app's own bridge does on the other
+// end of a tunnel (`{code, stdout, stderr}`), except that the bytes it reads and
+// writes are a temp directory this file can inspect.
 
-// One bridge: records every command, answers with whatever `reply` says.
-// `reply(command, index)` -> { status?, body } ; the default is a clean run whose
-// stdout is `stdout`.
-function bridge() {
+function farSide() {
   return new Promise((resolve) => {
     const api = {
       url: "",
       seen: [],
-      // each case states its own answer; a case that does not care gets "ran fine"
+      root: fs.mkdtempSync(path.join(os.tmpdir(), "ssh-ws-")),
       reply: null,
+      reset() {
+        api.seen.length = 0;
+      },
     };
     const server = http.createServer((request, response) => {
       let raw = "";
@@ -44,53 +60,65 @@ function bridge() {
         }
         const command = String(body.command || "");
         api.seen.push(command);
-        const answer = (api.reply ? api.reply(command, api.seen.length - 1) : null) || {
-          body: { code: 0, stdout: "", stderr: "" },
-        };
-        response.writeHead(answer.status || 200, { "Content-Type": "application/json" });
-        response.end(JSON.stringify(answer.body || {}));
+        const answer = api.reply ? api.reply(command, api.seen.length - 1) : null;
+        if (answer) {
+          response.writeHead(answer.status || 200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify(answer.body || {}));
+          return;
+        }
+        execFile(
+          "/bin/sh",
+          ["-c", command],
+          { cwd: api.root, env: { PATH: process.env.PATH, HOME: api.root }, timeout: 10000 },
+          (error, stdout, stderr) => {
+            const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
+            response.writeHead(200, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ code, stdout, stderr }));
+          }
+        );
       });
     });
     server.listen(0, "127.0.0.1", () => {
       api.url = `http://127.0.0.1:${server.address().port}`;
-      api.reset = () => {
-        api.seen.length = 0;
+      api.close = () => {
+        server.close();
+        fs.rmSync(api.root, { recursive: true, force: true });
       };
-      api.close = () => server.close();
       resolve(api);
     });
   });
 }
 
 // The environment a call sees. Every case states it whole, because the plugin
-// reads the host's variables at call time on purpose.
+// reads the host's variables at call time on purpose (settings.js).
 function configure(url, extra = {}) {
   for (const name of [
     "CLUTCH_EXEC_BRIDGE",
     "CLUTCH_EXEC_CHUNK_BYTES",
     "CLUTCH_EXEC_MAX_COMMAND_BYTES",
+    "CLUTCH_WORKSPACE_ROOT",
+    "CLUTCH_WORKSPACE_FENCE",
     "CLUTCH_SSH_WORKSPACE",
-    "CLUTCH_SSH_PYTHON",
+    "CLUTCH_SSH_TIMEOUT_MS",
   ]) {
     delete process.env[name];
   }
-  process.env.CLUTCH_EXEC_BRIDGE = url;
-  process.env.CLUTCH_SSH_WORKSPACE = "/srv/app";
+  if (url) process.env.CLUTCH_EXEC_BRIDGE = url;
   Object.assign(process.env, extra);
 }
 
-function base64Of(text) {
-  return Buffer.from(text, "utf8").toString("base64");
+function put(far, rel, text) {
+  const file = path.join(far.root, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
 }
 
-// Every `printf %s '<b64>' ...` step, in order, is the payload of a chunked call.
-function chunkedPayload(commands) {
-  const parts = [];
-  for (const command of commands) {
-    const match = command.match(/^printf %s '([A-Za-z0-9+/=]*)' >> "\$HOME\/\.clutch-ssh-workspace"\/p-[0-9a-f]+\.b64$/);
-    if (match) parts.push(match[1]);
-  }
-  return Buffer.from(parts.join(""), "base64").toString("utf8");
+function read(far, rel) {
+  return fs.readFileSync(path.join(far.root, rel), "utf8");
+}
+
+function exists(far, rel) {
+  return fs.existsSync(path.join(far.root, rel));
 }
 
 async function main() {
@@ -102,189 +130,183 @@ async function main() {
     check(/tunnel/i.test(answer.content), "no bridge: the sentence names the missing tunnel, so it can be acted on");
   }
 
-  const far = await bridge();
+  const far = await farSide();
 
   // -------------------------------------------------------------- read_file
   {
-    configure(far.url);
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    put(far, "VERSION", "1.2.3\n");
     far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "1\tVERSION" }), stderr: "" } });
-    const answer = await PLUGIN.call("read_file", { path: "VERSION", offset: 1, limit: 20 });
-    check(far.seen.length === 1, "read_file: one ssh command for one call");
+    const answer = await PLUGIN.call("read_file", { path: "VERSION" });
+    check(answer.error !== true && answer.content === "1.2.3\n", "read_file: a file's bytes come back unchanged (no line numbers on a plain read)");
+    check(far.seen.length === 1, "read_file: one far-side command for one call");
     const command = far.seen[0];
-    check(command.includes("cd '/srv/app'"), "read_file: the command cd's into the far side's workspace root");
-    check(command.includes("$PWD/clutch-workspace/clutch_workspace"), "read_file: a checkout on the far side wins over an installed copy");
-    check(command.includes("$HOME/.clutch/components/clutch-workspace"), "read_file: an installed component is the fallback");
-    check(
-      command.trim().endsWith("read_file --path 'VERSION' --offset 1 --limit 20"),
-      "read_file: the argv is the component's own, in the component's own order"
-    );
-    check(command.includes(`PY='python3'`), "read_file: the interpreter defaults to python3");
-    check(answer.content === "1\tVERSION" && answer.error === false, "read_file: the envelope's content comes back as the answer");
+    check(command.includes(`cd '${far.root}'`), "read_file: the command enters the workspace root the call is about");
+    check(command.includes("export LC_ALL=C"), "read_file: and states a locale, so `ls`/`grep` order bytes like the program the contract was frozen from");
+    check(/if \[ -d "\$p" \]/.test(command) && /ls -1AF/.test(command), "read_file: a directory is listed with ls -1AF (the marker that matters is `/`)");
+    check(/if \[ -f "\$p" \]/.test(command) && /cat "\$p"/.test(command), "read_file: a file is cat'ed, and only a file");
+    check(!/\bpython/i.test(command), "the far side needs nothing installed: the command is sh, ls and cat, never an interpreter");
+    check(!command.includes("--offset") && !command.includes("--limit"), "a line range is answered from the bytes that arrived, not by a flag on the far side");
   }
 
-  // ------------------------------------------------------------------ grep
   {
-    configure(far.url);
-    far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "(no matches)" }), stderr: "" } });
-    const answer = await PLUGIN.call("grep", { pattern: "def build_\\w+", include: "*.py" });
-    const command = far.seen[0];
-    check(command.trim().endsWith("grep --pattern 'def build_\\w+' --include '*.py'"),
-      "grep: pattern and include are translated, and an omitted path stays omitted (the CLI defaults to the root)");
-    check(answer.content === "(no matches)" && answer.error === false, "grep: no matches is an answer, not a failure");
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    put(far, "many.txt", "one\ntwo\nthree\nfour\n");
+    const range = await PLUGIN.call("read_file", { path: "many.txt", offset: 2, limit: 2 });
+    check(range.content === "2: two\n3: three\n... (showing lines 2-3 of 4; use offset=4 to continue)", "a line range is numbered, and says how to continue");
+    const whole = await PLUGIN.call("read_file", { path: "many.txt" });
+    check(whole.content === "one\ntwo\nthree\nfour\n", "the same file read whole is its own bytes, unnumbered");
+    const narrow = await PLUGIN.call("read_file", { path: "many.txt", max_chars: 8 });
+    check(/truncated, file is \d+ chars; use offset=/.test(narrow.content), "a file over the read budget is cut in the middle and says where to resume");
   }
 
-  // ---------------------------------------------------- payload quoting, small
   {
-    configure(far.url);
-    far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "OK: wrote a'b", diff: "" }), stderr: "" } });
-    const body = "line 'one'\n$HOME `echo` \u00e9\u00e8\nno trailing newline";
-    await PLUGIN.call("write_file", { path: "a'b.txt", content: body });
-    check(far.seen.length === 1, "write_file: a small body still costs one command");
-    const command = far.seen[0];
-    check(command.includes("--path 'a'\\''b.txt'"), "write_file: a quote in the path is single-quoted the POSIX way");
-    check(command.includes(`printf %s '${base64Of(body)}'`), "write_file: the body rides base64, so quotes/backticks/$ cannot expand");
-    check(command.includes("--content '-'"), "write_file: the CLI reads the body from stdin, not argv");
-    check(!command.includes(body.split("\n")[0]), "write_file: the raw body is nowhere on the command line");
-    check(/rm -f "\$HOME\/\.clutch-ssh-workspace"\/p-[0-9a-f]+\.payload/.test(command),
-      "write_file: the staged payload is removed by the same command that used it");
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    put(far, "folder/inner.txt", "x\n");
+    const listing = await PLUGIN.call("read_file", { path: "folder" });
+    check(listing.content === "inner.txt", "read_file: a directory answers its entries, sorted");
+    put(far, "empty-dir/.keep", "");
+    fs.rmSync(path.join(far.root, "empty-dir", ".keep"));
+    const empty = await PLUGIN.call("read_file", { path: "empty-dir" });
+    check(empty.content === "(empty directory)", "an empty directory is said out loud, not answered with nothing");
+    const missing = await PLUGIN.call("read_file", { path: "nope.txt" });
+    check(missing.error === true && missing.content.includes("file not found: nope.txt"), "a missing file is a sentence the model can act on");
+    const noPath = await PLUGIN.call("read_file", {});
+    check(noPath.error === true && noPath.content.includes("needs a path"), "a missing path is answered here, not by the far side");
   }
 
-  // ---------------------------------------------------- a body past the budget
+  // ------------------------------------------------------- quoting, one door
+  //
+  // The model names a path; the far side runs a shell. A path that carries a
+  // quote, a `$( )`, a backtick or a `$` must stay a WORD in the command, which
+  // is the whole job of the single-quoting in lib/fs.js.
   {
-    configure(far.url, { CLUTCH_EXEC_MAX_COMMAND_BYTES: "2000", CLUTCH_EXEC_CHUNK_BYTES: "1200" });
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    const hostile = "it's a $(touch pwned).txt";
+    put(far, hostile, "safe\n");
+    const answer = await PLUGIN.call("read_file", { path: hostile });
+    check(answer.error !== true && answer.content === "safe\n", "a path with a quote and a command substitution is a path, not a command");
+    check(!exists(far, "pwned"), "and nothing in the path was executed (no file was created by reading a file)");
+
+    const pattern = "$(touch pwned2)";
+    const searched = await PLUGIN.call("grep", { pattern });
+    check(searched.content === "(no matches)", "a grep pattern that looks like a substitution is a pattern (and finds nothing)");
+    check(!exists(far, "pwned2"), "and it is not executed either");
+  }
+
+  // ------------------------------------------------------------- write_file
+  //
+  // A write answers with a diff, so it reads the previous content first (the
+  // same `cat` the edit path uses) and then writes. What these cases pin is the
+  // WRITE half: the body rides `printf '%s'` in the command and never the argv
+  // of the call, and one command carries it whenever it fits.
+  const writes = () => far.seen.filter((command) => /printf '%s' /.test(command));
+  {
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
     far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "OK: wrote big.txt" }), stderr: "" } });
-    const body = "# a big file\n" + "0123456789abcdef\n".repeat(4096); // 64 KB, ends with a newline
-    await PLUGIN.call("write_file", { path: "big.txt", content: body });
-    const commands = far.seen.slice();
-    check(commands.length > 3, "big write: the payload is split across several ssh commands");
-    check(commands.every((c) => Buffer.byteLength(c, "utf8") <= 2000),
-      "big write: not one command exceeds the budget the host stated");
-    check(commands[0].includes(`: > "$HOME/.clutch-ssh-workspace"/`), "big write: the first step truncates the staging file");
-    check(commands[commands.length - 2].includes("-m base64 -d <"), "big write: the chunks are decoded once, on the far side");
-    check(commands[commands.length - 1].includes("--content '-'") && commands[commands.length - 1].includes('< "$HOME/.clutch-ssh-workspace"/p-'),
-      "big write: the CLI reads the decoded payload from a file");
-    check(chunkedPayload(commands) === body, "big write: the bytes that arrive are the bytes that were sent (64 KB, byte for byte)");
+    const body = 'he said "no"; $HOME and `date` stay literal\nsecond line\n';
+    const answer = await PLUGIN.call("write_file", { path: "notes/a.txt", content: body });
+    check(answer.error !== true, "write_file: a small body succeeds");
+    check(answer.content.startsWith("OK: wrote notes/a.txt ("), "write_file: the summary names the path AS GIVEN and the size");
+    check(answer.content.includes("\n\n@@") || answer.content.includes("\n\n---"), "write_file: the diff is appended, because a plugin's answer is one string");
+    check(read(far, "notes/a.txt") === body, "write_file: the bytes that arrive are the bytes that were sent (quotes, $, backticks and newlines included)");
+    const written = writes();
+    check(written.length === 1 && far.seen[far.seen.length - 1] === written[0], "write_file: one command for a body that fits, and it is the write itself");
+    check(written[0].includes("mkdir -p 'notes'"), "write_file: the parent directory is made by the same command that writes the file");
+    check(/printf '%s' /.test(written[0]) && !written[0].includes("--content"), "write_file: the body rides printf, never the argv of a tool call");
+  }
+
+  {
+    // the large write: several commands, each under the channel's agreed size,
+    // the first truncating and the rest appending
+    configure(far.url, {
+      CLUTCH_SSH_WORKSPACE: far.root,
+      CLUTCH_EXEC_MAX_COMMAND_BYTES: "3000",
+      CLUTCH_EXEC_CHUNK_BYTES: "1500",
+    });
+    far.reset();
+    const body = Array.from({ length: 2200 }, (_, at) => `line ${at}: it's $HOME \`x\` 中文\n`).join("");
+    const answer = await PLUGIN.call("write_file", { path: "big.txt", content: body });
+    check(answer.error !== true, "big write: a 60 KB body succeeds");
+    const chunked = writes();
+    check(chunked.length > 1, `big write: the body is split across commands (${chunked.length})`);
+    const over = far.seen.filter((command) => Buffer.byteLength(command, "utf8") > 3000);
+    check(over.length === 0, "big write: every command fits the channel's maximum, measured in bytes");
+    check(/printf '%s' [\s\S]* > '/.test(chunked[0]), "big write: the first chunk TRUNCATES the file (a write, not an append)");
+    const rest = chunked.slice(1).filter((command) => !/printf '%s' [\s\S]* >> '/.test(command));
+    check(rest.length === 0, "big write: every later chunk appends");
+    check(read(far, "big.txt") === body, "big write: the bytes that arrive are the bytes that were sent (64 KB, byte for byte)");
   }
 
   // -------------------------------------------------------------- edit_file
   {
-    configure(far.url);
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    put(far, "edit.txt", "alpha\nbeta\n");
     far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "OK: edited x.py", diff: "--- a/x.py\n+++ b/x.py" }), stderr: "" } });
-    const answer = await PLUGIN.call("edit_file", { path: "x.py", old_string: "a = 1", new_string: "a = 2" });
-    const command = far.seen[0];
-    check(command.includes("--old-string 'a = 1' --new-string 'a = 2'"),
-      "edit_file: two short strings ride argv (the cheapest form)");
-    check(answer.content === "OK: edited x.py\n\n--- a/x.py\n+++ b/x.py",
-      "edit_file: the unified diff is appended to the answer, because a plugin's answer is one string");
+    const answer = await PLUGIN.call("edit_file", { path: "edit.txt", old_string: "beta", new_string: "gamma $& `now`" });
+    check(answer.error !== true && answer.content.startsWith("OK: edited edit.txt (+1 -1 lines)"), "edit_file: the summary counts the change");
+    check(read(far, "edit.txt") === "alpha\ngamma $& `now`\n", "edit_file: `$&` and backticks in the new text are literal (a replacement is text, not a pattern)");
+    check(far.seen[0].includes("cat"), "edit_file: the previous content is read first, for the diff and for the count");
+    check(!far.seen[0].includes("--old-string") && !far.seen[0].includes("--new-string"), "edit_file: the strings ride printf, not the argv of a tool call");
+
+    const ambiguous = await PLUGIN.call("edit_file", { path: "edit.txt", old_string: "a", new_string: "b" });
+    check(ambiguous.error === true && ambiguous.content.includes("appears"), "edit_file: an ambiguous old_string is refused, with the count");
+    const missing = await PLUGIN.call("edit_file", { path: "gone.txt", old_string: "a", new_string: "b" });
+    check(missing.error === true && missing.content.includes("use write_file"), "edit_file: a file that is not there points at write_file");
   }
 
+  // ------------------------------------------------------------------ grep
   {
-    configure(far.url, { CLUTCH_EXEC_MAX_COMMAND_BYTES: "2000", CLUTCH_EXEC_CHUNK_BYTES: "1200" });
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    put(far, "src/a.js", "const needle = 1;\n");
+    put(far, "src/b.js", "// needle\n");
+    put(far, "src/c.py", "needle = 2\n");
     far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "OK: edited y.py" }), stderr: "" } });
-    const replacement = "replacement line\n".repeat(2000); // 34 KB
-    await PLUGIN.call("edit_file", { path: "y.py", old_string: "needle", new_string: replacement });
-    const commands = far.seen.slice();
-    const last = commands[commands.length - 1];
-    check(last.includes("--old-string 'needle' --new-string '-'"),
-      "edit_file: the long side goes to stdin and the short side stays in argv");
-    check((last.match(/'-'/g) || []).length === 1, "edit_file: only ONE flag may read stdin (a second would drain the same stream twice)");
-    check((last.match(/--old-string/g) || []).length === 1 && (last.match(/--new-string/g) || []).length === 1,
-      "edit_file: the flag is not duplicated when the string moves to stdin");
-    check(chunkedPayload(commands) === replacement, "edit_file: the replacement arrives byte for byte");
+    const answer = await PLUGIN.call("grep", { pattern: "needle", path: "src", include: "*.js" });
+    check(answer.error !== true, "grep: a sweep succeeds");
+    check(answer.content.includes("src/a.js:\n  Line 1: const needle = 1;"), "grep: hits are grouped under the workspace-relative path");
+    check(!answer.content.includes("c.py"), "grep: the include glob is applied here, to the paths that came back");
+    check(far.seen.length === 1 && /grep -HnEI -e /.test(far.seen[0]), "grep: one POSIX grep -E command, with the pattern after -e");
+    check(far.seen[0].includes("LC_ALL=C"), "grep: the same locale as the read, so the order matches the contract");
+    const none = await PLUGIN.call("grep", { pattern: "absent-thing" });
+    check(none.content === "(no matches)", "grep: no matches is an answer, not a failure");
   }
 
-  // ------------------------------------------------------------- envelopes
+  // -------------------------------------------------------------- transport
   {
-    configure(far.url);
-    far.reset();
-    far.reply = () => ({
-      body: {
-        code: 1,
-        stdout: ENVELOPE({ content: "no such file: VERSION (the workspace root may have moved)", error: true }),
-        stderr: "",
-      },
-    });
-    const answer = await PLUGIN.call("read_file", { path: "VERSION" });
-    check(answer.error === true, "envelope: a far-side failure is a failure here, not text that happens to say so");
-    check(answer.content.startsWith("ERROR: "), "envelope: the failure reads as an error the model can act on");
-    check(answer.content.includes("no such file"), "envelope: and it keeps the far side's own words");
-  }
-
-  {
-    configure(far.url);
-    far.reset();
-    far.reply = () => ({ body: { code: 74, stdout: "", stderr: "ssh-workspace: no clutch-workspace component on the far side" } });
-    const answer = await PLUGIN.call("read_file", { path: "VERSION" });
-    check(answer.error === true && answer.content.includes("did not answer with a clutch-workspace envelope"),
-      "no component on the far side: reported as such instead of falling back to this machine");
-    check(answer.content.includes("no clutch-workspace component"), "no component: the far side's stderr is carried through");
-  }
-
-  {
-    configure(far.url);
-    far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: "Traceback (most recent call last):\n  File ...", stderr: "" } });
-    const answer = await PLUGIN.call("read_file", { path: "VERSION" });
-    check(answer.error === true && answer.content.includes("did not answer with a clutch-workspace envelope"),
-      "prose on stdout is not mistaken for the CLI's envelope");
-    check(answer.content.includes("Traceback"), "and the far side's own output is carried through for whoever reads it");
-  }
-
-  {
-    // the chunked form stages in SEVERAL commands, so a staging failure is its
-    // own step and the tool must not run after it
-    configure(far.url, { CLUTCH_EXEC_MAX_COMMAND_BYTES: "2000", CLUTCH_EXEC_CHUNK_BYTES: "1200" });
-    far.reset();
-    far.reply = (command) =>
-      command.startsWith("printf %s")
-        ? { body: { code: 1, stdout: "", stderr: "no space left on device" } }
-        : { body: { code: 0, stdout: "", stderr: "" } };
-    const answer = await PLUGIN.call("write_file", { path: "z.txt", content: "y".repeat(5000) });
-    check(answer.error === true && answer.content.includes("staging the payload on the far side failed"),
-      "a staging step that fails stops the call there, with the step named");
-    check(answer.content.includes("no space left on device"), "a staging failure keeps the far side's reason");
-    check(far.seen.length === 2, "a failed staging step does not go on to run the tool");
-  }
-
-  // --------------------------------------------------------------- transport
-  {
-    configure(far.url);
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
     far.reply = () => ({ status: 503, body: { error: "not connected" } });
     const answer = await PLUGIN.call("read_file", { path: "VERSION" });
-    check(answer.error === true && /tunnel is not connected/i.test(answer.content),
-      "a bridge whose tunnel dropped says so, instead of reporting a tool failure");
+    check(answer.error === true && /tunnel is not connected/i.test(answer.content), "a bridge whose tunnel dropped says so, instead of reporting a tool failure");
+    far.reply = null;
   }
 
   {
     configure("http://example.com:80");
     const answer = await PLUGIN.call("read_file", { path: "VERSION" });
-    check(answer.error === true && /loopback/i.test(answer.content),
-      "a bridge address that is not loopback is refused (the value is a capability, not a hint)");
+    check(answer.error === true && /loopback/i.test(answer.content), "a bridge address that is not loopback is refused (the value is a capability, not a hint)");
   }
 
   {
-    configure(far.url);
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    const other = path.join(far.root, "from-the-session");
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(other, "only-here.txt"), "ok\n");
+    far.reset();
+    // the SESSION's root wins over the operator's standing default
+    process.env.CLUTCH_WORKSPACE_ROOT = other;
+    const answer = await PLUGIN.call("read_file", { path: "only-here.txt" });
+    check(answer.error !== true && answer.content === "ok\n", "the root the session named is the root the call is about");
+    check(far.seen[0].includes(`cd '${other}'`), "and it wins over the operator's CLUTCH_SSH_WORKSPACE default");
+    delete process.env.CLUTCH_WORKSPACE_ROOT;
+  }
+
+  {
+    configure(far.url, { CLUTCH_SSH_WORKSPACE: far.root });
+    far.reset();
     const answer = await PLUGIN.call("list_dir", { path: "." });
     check(answer.error === true && answer.content.includes("unknown tool"), "an unpublished tool is refused by name, without a command");
-    const noPath = await PLUGIN.call("read_file", {});
-    check(noPath.error === true && noPath.content.includes("needs a path"), "a missing path is answered here, not by the far side");
-  }
-
-  {
-    configure(far.url);
-    far.reset();
-    far.reply = () => ({ body: { code: 0, stdout: ENVELOPE({ content: "ok" }), stderr: "" } });
-    // an operator override: a different interpreter on that machine
-    process.env.CLUTCH_SSH_PYTHON = "/opt/py310/bin/python3";
-    await PLUGIN.call("read_file", { path: "VERSION" });
-    check(far.seen[0].includes(`PY='/opt/py310/bin/python3'`), "CLUTCH_SSH_PYTHON picks the far side's interpreter");
-    delete process.env.CLUTCH_SSH_PYTHON;
+    check(far.seen.length === 0, "and nothing was sent to the far side");
   }
 
   far.close();

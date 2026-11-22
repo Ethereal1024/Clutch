@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-bootstrap.ts and run `npm run build:host`.
-// source sha256: 987de53c74bfd63401ed4329612f2a293776cf622f79dea27d1e245e05a8a071
+// source sha256: 0df7930922149d4dd62f43c8d1f5b73e9dd2d9cc67af31a573dfa86d40550e5b
 
 "use strict";
 // make the far side exist — probe, choose a strategy, install, start
@@ -12,6 +12,7 @@
 // the connect must not wait on the upload.
 Object.defineProperty(exports, "__esModule", { value: true });
 const path = require("path");
+const fs = require("fs");
 const { state, tunnelLog, REMOTE_API_PORT } = require("./tunnel-core");
 const { remoteExec, uploadFile } = require("./tunnel-remote");
 const { platformTag, ensureBundle, ensurePyLibsTar, resolvePyLibsVersion, hasLocalBundle } = require("./server-bundle");
@@ -21,6 +22,17 @@ const components = require("./components");
 // (SIGKILL) and, past even that, report the process that is still holding it.
 // The env override keeps the test suite from spending the grace twice per case.
 const STOP_GRACE_MS = Number(process.env.CLUTCH_TUNNEL_STOP_GRACE_MS || 5000);
+// The bytes an artifact will put on the wire — what the upload's fraction is
+// measured against. A file we cannot stat is counted as zero, which costs the
+// fraction, never the transfer.
+function fileSize(p) {
+    try {
+        return fs.statSync(p).size;
+    }
+    catch (e) {
+        return 0;
+    }
+}
 // Does the far side's tree still vouch for itself? A file WE wrote cannot: the
 // field's broken remote held a VERSION that matched ours exactly (so every
 // reconnect skipped the install — the gate is "the marker equals our hash") over
@@ -148,11 +160,18 @@ function remoteHealthCmd(probe) {
 // What is on the far side's port: DOWN (nobody), WEDGED (bound, silent),
 // SERVING (answers), UNMEASURABLE (no python3 and no curl to ask with — a
 // remote whose answer we cannot hear must not be mistaken for a dead one).
-async function remoteServingState(probe) {
-    const out = (await remoteExec(remoteRunningCmd(probe))).stdout || "";
+//
+// `timeoutMs` is the budget for EACH ask. The healer passes one because it is
+// asking over a wire that just failed and its round has a clock of its own:
+// remoteExec's default is a minute per ask, so a heal round on a dead hop used to
+// sit here for two of them (the 2-minute gap in the field log between "backend
+// unreachable" and the teardown it eventually caused).
+async function remoteServingState(probe, timeoutMs) {
+    const ask = (cmd) => remoteExec(cmd, timeoutMs);
+    const out = (await ask(remoteRunningCmd(probe))).stdout || "";
     if (!out.includes("UP"))
         return out.includes("UNKNOWN") ? "UNMEASURABLE" : "DOWN";
-    const h = (await remoteExec(remoteHealthCmd(probe))).stdout || "";
+    const h = (await ask(remoteHealthCmd(probe))).stdout || "";
     if (h.includes("200"))
         return "SERVING";
     if (h.includes("UNKNOWN"))
@@ -300,7 +319,6 @@ function pylibsInstallCmd(dir) {
     // install is a nonzero exit, which installServer now asks about by name.
     return `${chain} ; rc=$?; rm -rf ${stage}; test $rc -eq 0`;
 }
-// force is for tests; auto-decides when omitted. progress(stage) drives the UI progress bar.
 async function installServer(probe, { force, progress } = {}) {
     const localTag = platformTag();
     tunnelLog(`[bootstrap] probe os=${probe.os} arch=${probe.arch} libc=${probe.libc || "?"} py=${probe.python || "none"} ` +
@@ -400,15 +418,55 @@ async function installServer(probe, { force, progress } = {}) {
                     "something is running there that this client cannot replace. Free the port and reconnect.",
             };
         }
+        // What the far side looks like BEFORE the bytes go out. A transfer that then
+        // crawls (13 KB/s on 2026-11-21) or stops is a question about the host — a
+        // full disk, a load average of 40, no memory left — and the answer has to be
+        // in the log already, because a dying wire cannot be asked afterwards (the
+        // failure path's own `df` never ran: the tunnel was gone by then).
+        try {
+            const facts = await remoteExec(`df -h ${dir} 2>&1 | tail -2; cat /proc/loadavg 2>/dev/null; free -m 2>/dev/null | head -2`);
+            tunnelLog("[bootstrap] far side before the transfer:\n" + (facts.stdout || "").trim().slice(0, 600));
+        }
+        catch (e) {
+            /* a host that cannot answer this is still a host to install on */
+        }
         if (strategy === "bundle") {
             const { server, supervisor } = artifact;
             tunnelLog(`[bootstrap] uploading bundle ${path.basename(server)} + supervisor`);
+            // The transfer is 78 MB of binary over whatever link the user has, so it
+            // reports its own fraction: a bar that sits at one number for a minute is
+            // indistinguishable from a hung connect. The supervisor counts into the
+            // same fraction, so the bar never goes backwards between the two files.
+            // The rate and the time left come from the file being sent and are scaled
+            // to what is left of BOTH: they are the only thing that tells a throttled
+            // remote (13 KB/s, ~100 minutes) apart from a broken one.
+            const sizes = [fileSize(server), fileSize(supervisor)];
+            const totalBytes = sizes[0] + sizes[1];
+            let base = 0;
+            let lastBps = 0;
+            const report = (done, info) => {
+                if (!progress)
+                    return;
+                const moved = base + done;
+                const frac = totalBytes ? Math.min(1, moved / totalBytes) : 0;
+                // the first file's rate carries into the second: the bar must not lose
+                // its number in the gap between them
+                const bps = info && info.bps ? info.bps : lastBps;
+                if (bps)
+                    lastBps = bps;
+                progress("install:upload", frac, {
+                    bps,
+                    eta: bps > 0 ? Math.max(0, Math.round((totalBytes - moved) / bps)) : 0,
+                });
+            };
             if (progress)
-                progress("install:upload");
+                progress("install:upload", 0);
             try {
                 // atomic rename over the old binary
-                await uploadFile(server, `${dir}/agent-server.new`);
-                await uploadFile(supervisor, `${dir}/agent-supervisor.new`);
+                await uploadFile(server, `${dir}/agent-server.new`, { onProgress: report });
+                base = sizes[0];
+                report(0, null);
+                await uploadFile(supervisor, `${dir}/agent-supervisor.new`, { onProgress: report });
             }
             catch (e) {
                 tunnelLog("[bootstrap] bundle upload failed: " + (e && e.message));
@@ -429,8 +487,18 @@ async function installServer(probe, { force, progress } = {}) {
             // pylibs: the target-platform site-packages tar, fetched when this install was decided
             tunnelLog(`[bootstrap] uploading pylibs ${path.basename(artifact)}`);
             if (progress)
-                progress("install:upload");
-            await uploadFile(artifact, `${dir}/pylibs.tar.gz`);
+                progress("install:upload", 0);
+            await uploadFile(artifact, `${dir}/pylibs.tar.gz`, {
+                onProgress: (done, total, info) => {
+                    if (!progress)
+                        return;
+                    const bps = info && info.bps ? info.bps : 0;
+                    progress("install:upload", total ? Math.min(1, done / total) : 0, {
+                        bps,
+                        eta: bps > 0 ? Math.max(0, Math.round((total - done) / bps)) : 0,
+                    });
+                },
+            });
             // the unpack-and-swap is a chain of shell steps that can fail as a whole
             // (a truncated upload, a tar that carries only one of the two trees): its
             // exit status is the only thing that says whether the trees actually

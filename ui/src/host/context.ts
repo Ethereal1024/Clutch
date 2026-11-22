@@ -257,16 +257,16 @@ function deriveMessages(options) {
     }
     events = tail;
   }
-  if (rawTask !== null && events.length && events[0] === rawTask && rawTask.content === task) {
-    events = events.slice(1);
-  }
+   if (rawTask !== null && events.length && events[0]?.type === "user_message" && events[0].content === task) {
+     events = events.slice(1);
+   }
 
-  return [
-    { role: "system", content: systemMessage(o) },
-    { role: "user", content: render("task.md", { task }) },
-    ...head,
-    ...toMessages(events),
-  ];
+   return [
+     { role: "system", content: systemMessage(o) },
+     { role: "user", content: render("task.md", { task }) },
+     ...head,
+     ...toMessages(events),
+   ];
 }
 
 // `deriveMessages` pinned to one session's facts, which is the shape the loop

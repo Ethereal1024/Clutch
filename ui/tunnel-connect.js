@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-connect.ts and run `npm run build:host`.
-// source sha256: 471963ca15b18f4d2fbac041881885aabd004327307209c65592415e9d3810ef
+// source sha256: 60f1d36dbe181fc342361a9ecdcfbd9bb70df5705361bc501258691ce5e8d052
 
 "use strict";
 // one connect attempt — auth, the forwards, the health gate
@@ -17,10 +17,10 @@ const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
 const { state, tunnelLog, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, remoteLlmPort, channelFor, channel, } = require("./tunnel-core");
-const { freePort, listen, waitForServer, probeSupervisorShape } = require("./tunnel-net");
+const { freePort, listen, waitForServer, probeServer, probeSupervisorShape } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
-const { PROBE_CMD, parseProbe, installServer, installComponents } = require("./tunnel-bootstrap");
-const { stopTunnel, notifyEnd, startHealing, stopHealing } = require("./tunnel-lifecycle");
+const { PROBE_CMD, parseProbe, installServer, installComponents, remoteServingState, } = require("./tunnel-bootstrap");
+const { stopTunnel, reopenForward, notifyEnd, startHealing, stopHealing } = require("./tunnel-lifecycle");
 const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
 const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
@@ -28,6 +28,23 @@ const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mir
 // ask. Short on purpose: the reset is either a moment that has already passed (a
 // rate limiter's answer, an sshd restarting) or something no wait will fix.
 const DIAL_RETRY_MS = 900;
+// How long a tunnel that is ALREADY up is given to answer before it is treated
+// as gone. The old probe allowed 2 s per request inside a 3 s budget: on a link
+// where one lost retransmission costs more than that, a healthy hop read as a
+// dead one and was torn down — which killed every other window's forward with it
+// (their "Connection lost" dialog) and made the tab switch that triggered it
+// report "connection failed" until the user retried. So the probe is patient,
+// and "no answer" is only a question: the far host is asked about itself over the
+// exec channel (a path the failed forward does not share) before anything is
+// replaced, exactly as the healer does.
+const REUSE_PROBE_MS = 6000;
+const REUSE_REQUEST_MS = 5000;
+// the far side's own verdict, bounded: an exec with no clock of its own can sit
+// on a dead wire for a minute
+const REUSE_EXEC_MS = 12000;
+// The shape probe's own retry (see the gate): long enough for a retransmission,
+// short enough that a port which really is silent still fails promptly.
+const SHAPE_RETRY_MS = 700;
 // How many dials have begun in this process. An attempt compares its own number
 // with this one when it fails: a bigger number means somebody started a NEWER
 // connection while this one was still connecting, and that is the difference
@@ -128,11 +145,36 @@ async function connectTunnel({ host, user, port, password }, progress) {
             await stopTunnel();
         }
         else {
-            // reuse a live tunnel; a dead/partial one is reset so a reconnect works
-            const up = state.currentUrl ? await waitForServer(state.currentUrl + "/api/health", 3000) : false;
-            if (up) {
+            // Reuse a live tunnel — after asking it, patiently (REUSE_PROBE_MS). A hop
+            // that cannot answer within one request timeout is a suspect, not a corpse:
+            // the far host is asked about ITSELF before the tunnel is torn down, because
+            // tearing it down is what took every other window's forward with it.
+            const ask = state.currentUrl
+                ? await probeServer(state.currentUrl + "/api/health", REUSE_PROBE_MS, REUSE_REQUEST_MS)
+                : { up: false, kind: "no-url" };
+            if (ask.up) {
                 tunnelLog("[connect] reusing live tunnel");
                 return { ok: true, url: state.currentUrl };
+            }
+            // Which side is dead? Over the exec channel, never over the forward that
+            // just failed. SERVING (or UNMEASURABLE — a far host whose answer we cannot
+            // hear is not a dead one) means the casualty is this client's own forward,
+            // and re-opening it on the SAME local port is enough: the far host keeps
+            // running, its sessions and their runs included.
+            let verdict = null;
+            try {
+                verdict = await remoteServingState(state.lastProbe || {}, REUSE_EXEC_MS);
+                tunnelLog(`[connect] live tunnel did not answer (${ask.kind}); far side reports ${verdict}`);
+            }
+            catch (e) {
+                tunnelLog("[connect] the far side could not be asked: " + ((e && e.message) || e));
+            }
+            if (verdict === "SERVING" || verdict === "UNMEASURABLE") {
+                if (await reopenForward(ask)) {
+                    tunnelLog("[connect] forward rebound; reusing live tunnel");
+                    return { ok: true, url: state.currentUrl };
+                }
+                tunnelLog("[connect] the forward could not be rebound for a far side that is still serving");
             }
             tunnelLog("[connect] existing tunnel is dead or still starting; resetting");
             await stopTunnel();
@@ -148,6 +190,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
     const cached = password ? "" : getSshSecret(host, user, port);
     const secret = password || cached;
     state.sftpUnavailable = false; // SFTP capability is per connection/host
+    state.wireLost = null; // this attempt's wire, not the last one's
     // never log the secret itself — only whether one is being offered
     tunnelLog(`[connect] attempt host=${host} user=${user} port=${port || 22} secret=${secret ? "yes" : "no"}${cached ? " (cached)" : ""}`);
     // The client THIS attempt installed, held outside the try so the failure path
@@ -188,6 +231,16 @@ async function connectTunnel({ host, user, port, password }, progress) {
             // a hop that dies is a CLAIM to re-bind, not a session to replace
             // (ui/host-core.js rebindTunnelBackend). Both ends can hold their own
             // number without having to agree.
+            // ...and because that count only ever counts PINGS, it is not the last
+            // word on a transfer: ssh2 kills the wire when its pings go unanswered,
+            // and a far side busy writing a 71 MB file can leave its sshd too busy to
+            // answer one for a while. On 2026-11-21 07:45 that killed an upload 100 ms
+            // after three of its SFTP acks arrived. The budget stays 45 s (a dead hop
+            // must still be called out no later than the stream that rides it — see
+            // tests/session-heartbeat-test.js, which reads this number), so the fix is
+            // the other side of the coin: every SFTP ack an upload gets pokes the
+            // counter back to zero (pokeKeepalive in tunnel-remote). A wire that is
+            // really gone stops acking, and 45 s later this says so.
             keepaliveInterval: 15000,
             keepaliveCountMax: 3,
             agent: process.env.SSH_AUTH_SOCK,
@@ -239,7 +292,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
             if (dialSeq !== myDial || state.sshClient !== dialling) {
                 const lost = new Error((e && e.message) || String(e));
                 lost.superseded = true;
-                lost.supersededBy = dialSeq !== myDial ? "newer" : "stopped";
+                lost.supersededBy = dialSeq !== myDial ? "newer" : state.wireLost ? "wire" : "stopped";
                 throw lost;
             }
             if (!resetBeforeHandshake(e) || tries > 1)
@@ -273,7 +326,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
         // stayed true, and the renderer had no way to learn the remote was gone
         // until its next request came back "Failed to fetch".
         let gone = false;
-        const tunnelGone = (why) => {
+        const tunnelGone = (why, cause) => {
             if (gone)
                 return; // end and close both fire on a clean close
             gone = true;
@@ -282,6 +335,9 @@ async function connectTunnel({ host, user, port, password }, progress) {
             // only the CURRENT client may tear down shared state
             if (state.sshClient !== client)
                 return;
+            // the wire died on its own: a dial still building on it must say so rather
+            // than report a stop (see this file's catch, and the upload's watchdog)
+            state.wireLost = cause ? `${why} (${cause})` : why;
             state.sshClient = null;
             state.target = null; // the host this hop belonged to went with it
             state.currentUrl = null;
@@ -336,7 +392,7 @@ async function connectTunnel({ host, user, port, password }, progress) {
             // that carries the CAUSE, so it tears down here too instead of only being
             // written to a log nobody reads.
             if (e && (e.level === "client-timeout" || e.level === "client-socket"))
-                tunnelGone("lost the socket");
+                tunnelGone("lost the socket", e.message);
         });
         // bootstrap: make sure the server exists and is running on the remote
         const probeOut = await remoteExec(PROBE_CMD);
@@ -372,13 +428,27 @@ async function connectTunnel({ host, user, port, password }, progress) {
     }
     catch (e) {
         const raw = (e && e.message) || String(e);
+        // A wire that died BY ITSELF below the handshake — during the bootstrap, or
+        // under a 78 MB upload — throws whatever the failing call was doing ("not
+        // connected", "the SSH connection dropped while the file was still
+        // uploading"), and nothing marks it: the socket event is not this attempt's
+        // to see. So the marker is read from the state, and the verdict then names
+        // the link instead of the chore it was on.
+        const verdict = state.wireLost && !(e && e.superseded)
+            ? Object.assign(new Error(raw), { superseded: true, supersededBy: "wire" })
+            : e;
         // "this attempt was replaced, not refused": its own socket error is the
         // reset another dial (or a teardown) caused, so reporting those words would
         // put a host's name next to a failure the host had nothing to do with
-        const friendly = e && e.superseded
-            ? e.supersededBy === "stopped"
-                ? `the tunnel was stopped while this attempt was still connecting (${raw})`
-                : `a newer connection attempt took the tunnel over while this one was still connecting; this one was stopped (${raw})`
+        const friendly = verdict && verdict.superseded
+            ? verdict.supersededBy === "wire"
+                ? // the far side (or the path to it) cut us off mid-attempt: nothing here
+                    // is about the user stopping anything, and nothing was installed
+                    `${target.host}:${target.port} dropped the connection while this attempt was still connecting ` +
+                        `(${raw}; the wire: ${state.wireLost}) — nothing on the far side was replaced; reconnect`
+                : verdict.supersededBy === "stopped"
+                    ? `the tunnel was stopped while this attempt was still connecting (${raw})`
+                    : `a newer connection attempt took the tunnel over while this one was still connecting; this one was stopped (${raw})`
             : friendlyError(e, target, tries || 1, banner);
         tunnelLog(`[error] connect failed: ${raw} -> ${friendly}`);
         // a cached secret that no longer authenticates is worse than none: drop it
@@ -791,7 +861,19 @@ async function establishForwardAndHealth(localPort, client) {
     if (!up) {
         return failConnect(client, "[health] FAIL: backend not reachable on the remote host", "backend not reachable on the remote host");
     }
-    const shape = await probeSupervisorShape("http://127.0.0.1:" + localPort);
+    // "the port answers" and "it is OUR supervisor" are two questions, and this one
+    // used to get a single 3 s clock right after a gate that may have spent 15: a
+    // stalled retransmission there reported a supervisor that was running fine as
+    // "a non-supervisor server", which on a tab switch is one more way to be told
+    // the connection failed over a wire that was merely slow. Silence gets one more
+    // ask; a "foreign" body is a real answer and is not retried.
+    const base = "http://127.0.0.1:" + localPort;
+    let shape = await probeSupervisorShape(base);
+    if (shape === "down") {
+        tunnelLog("[connect] the supervisor shape probe went unanswered; asking again");
+        await new Promise((r) => setTimeout(r, SHAPE_RETRY_MS));
+        shape = await probeSupervisorShape(base);
+    }
     if (shape !== "up") {
         return failConnect(client, "[health] FAIL: remote 8890 is not a Clutch supervisor (legacy shared server?)", "remote 8890 runs a non-supervisor server (a legacy shared clutch-server?). " +
             "Restart it (pkill -f agent-server) and reconnect, or close the old app.");

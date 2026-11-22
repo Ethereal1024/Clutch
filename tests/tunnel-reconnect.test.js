@@ -515,6 +515,55 @@ async function main() {
     await new Promise((r) => far.close(r));
   }
 
+  // ---- 6b-2. one round at a time: a tick that lands mid-ask asks nothing ----
+  //
+  // The reported popup: "Connection lost … lost the remote connection" while ssh
+  // itself was fine, and a Cancel that fell back to the welcome page. The healer's
+  // round is several questions over a wire that is already suspect, so a round can
+  // easily outlive the interval that ticks it. Two rounds then judge the SAME
+  // forward, both find it bad, both bounce it — and the loser tears down the hop
+  // the winner just repaired. The field log shows exactly that: duplicated
+  // "[heal] far side reports SERVING" 3 ms apart and duplicated exec probes. The
+  // guard is taken before the round's first await, so an overlapping tick never
+  // gets to ask anything at all.
+  {
+    const http = require("http");
+    const { state } = require("../ui/tunnel-core");
+    const { healOnce } = require("../ui/tunnel-lifecycle");
+
+    let asks = 0;
+    const slow = http.createServer((req, res) => {
+      asks++;
+      // answering, but not in this turn: the round is still out when the timer
+      // fires its overlapping tick
+      setTimeout(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end('{"ok": true}');
+      }, 120);
+    });
+    await new Promise((r) => slow.listen(0, "127.0.0.1", r));
+    remote.reset({ bound: true, serving: true, version: VERSION });
+    state.sshClient = { forwardOut() {} }; // never dialled: the ask answers on its own
+    state.localSrv = null;
+    state.lastProbe = probeFor();
+    state.lastStrategy = "pylibs";
+    state.currentUrl = `http://127.0.0.1:${slow.address().port}`; // a forward that answers, slowly
+
+    const first = healOnce();
+    const overlapping = healOnce(); // the 15 s timer ticking into a round still asking
+    await Promise.all([first, overlapping]);
+
+    check(asks === 1, `the overlapping tick asked nothing: one health ask, not two (${asks})`);
+    check(
+      tunnelLogText().includes("[heal] a round is still asking; this tick is skipped"),
+      "and it says so instead of judging a forward another round is already looking at"
+    );
+    check(state.healing === null, "the round that owned the guard gave it back when it was done");
+    check(remote.selfAsks === 0, "a healthy forward never reaches the far host's exec channel");
+    state.sshClient = null;
+    await new Promise((r) => slow.close(r));
+  }
+
   // ---- 6c. the far side is given its model path back, or told so ----
   //
   // A reconnect reaches the reverse-forward bind seconds after the previous hop
@@ -797,9 +846,13 @@ async function main() {
   );
   const claimSrc = HOST_CORE_SRC.split("await releaseSlot(wc.id, slotId); // drop any local session first")[1] || "";
   check(
-    claimSrc.indexOf("await modelPathState()") > -1 &&
-      claimSrc.indexOf("await modelPathState()") < claimSrc.indexOf("supervisorSessionStart("),
+    claimSrc.indexOf("path = await awaitPath();") > -1 &&
+      claimSrc.indexOf("path = await awaitPath();") < claimSrc.indexOf("supervisorSessionStart("),
     "the claim waits for the model path before a session is told where the model is"
+  );
+  check(
+    /try \{\s*path = await awaitPath\(\);\s*\} catch \(e\) \{\s*path = "unknown \(" \+ \(\(e && e\.message\) \|\| e\) \+ "\)";/.test(claimSrc),
+    "and a path that cannot be named is 'unknown', never a claim the tunnel refused"
   );
   check(
     /if \(state\.modelPathInstall\) return state\.modelPathInstall;/.test(CONNECT_SRC) &&

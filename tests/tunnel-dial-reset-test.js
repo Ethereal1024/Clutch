@@ -69,6 +69,18 @@ class FakeClient extends EventEmitter {
         this.emit("error", e);
       });
     }
+    if (behavior === "ready-then-drop") {
+      // the hop came UP and then the far side cut the socket under it (an sshd
+      // restart, an idle timeout, a middlebox): the dial is past the handshake,
+      // in the bootstrap, and the attempt did nothing wrong
+      process.nextTick(() => this.emit("ready"));
+      setTimeout(() => {
+        const e = new Error("read ECONNRESET");
+        e.level = "client-socket"; // ssh2's own words for "the wire is gone"
+        this.emit("error", e);
+      }, 30);
+      return;
+    }
     if (behavior === "reset-after-banner") {
       // sshd spoke first (the ident ssh2 logs as "Remote ident: …"), and the cut
       // came after it: the same socket words, a different place to look.
@@ -82,7 +94,10 @@ class FakeClient extends EventEmitter {
     // "hang": no ready, no error — a handshake still in progress
   }
   exec(cmd, cb) {
-    process.nextTick(() => cb(new Error("mock exec unavailable")));
+    // the probe of a hop that is about to lose its wire answers LATE, so the
+    // socket death (which is what the verdict is about) is what fails this dial
+    const delay = FakeClient.behavior === "ready-then-drop" ? 80 : 0;
+    setTimeout(() => cb(new Error("mock exec unavailable")), delay);
   }
   end() {
     this.ended = true;
@@ -194,6 +209,30 @@ function resetCounters() {
   );
   check(FakeClient.instances.length === 1, "and no second ask was made over a wire somebody else stopped");
 
+  // 4b. the wire dying UNDER the attempt, after the hop was up: nothing the user
+  //     did, and nothing about the credential — the far side (or the path to it)
+  //     cut us off mid-bootstrap, which is what used to leave a connect parked on
+  //     "Uploading server…" for ever with no verdict at all.
+  resetCounters();
+  FakeClient.behavior = "ready-then-drop";
+  const dropped = await Promise.race([
+    connectTunnel({ host: "drop.example", user: "alice", port: 22 }),
+    sleep(1500).then(() => "still pending"),
+  ]);
+  check(
+    dropped !== "still pending" && dropped.ok === false,
+    "a hop whose socket dies mid-bootstrap reports a failure"
+  );
+  check(
+    /drop\.example:22 dropped the connection while this attempt was still connecting/.test(dropped.error || ""),
+    "…and says the connection dropped, not that the user stopped it: " + (dropped && dropped.error)
+  );
+  check(
+    /read ECONNRESET/.test(dropped.error || ""),
+    "…keeping the wire's own words, because they are the diagnosis"
+  );
+  await stopTunnel();
+
   // 5. the collision case, read for its WORDS this time: the loser was killed by
   //    a newer dial, so its verdict must not name the host as a refusal.
   resetCounters();
@@ -208,6 +247,16 @@ function resetCounters() {
   const first = FakeClient.last;
   const winner = connectTunnel({ host: "race.example", user: "alice", port: 22 });
   winner.catch(() => {});
+  // the winner resets `first` a moment after its call (the reuse branch asks the
+  // live tunnel before it tears anything down: probeServer, then the far side's
+  // own verdict over an exec that a mid-handshake client cannot answer). The
+  // error below has to reach a hop the winner has ALREADY ended, or it is a real
+  // pre-handshake reset and the verdict under test is a different one.
+  waited = 0;
+  while (first.ended === false && waited < 2000) {
+    await sleep(5);
+    waited += 5;
+  }
   first.emit("error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
   const loserVerdict = await Promise.race([loser, sleep(1000).then(() => "still pending")]);
   check(loserVerdict !== "still pending" && loserVerdict.ok === false, "the replaced dial reports its failure");

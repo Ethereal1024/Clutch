@@ -267,16 +267,34 @@ function createOrient(options = {}) {
   // channel for a client's) is answered with the rendezvous sentence; the undo
   // record is taken BEFORE the run and kept only when the run actually replaced
   // something, because a refused or failed edit must not leave a snapshot the UI
-  // could "restore". The gate is the TOOL's own declaration and nothing else
-  // (`tool.snapshot`: "this statement overwrites the path its `snapshotArg`
-  // names") — it used to also require that the statement ran on this machine,
-  // which left the undo button dead for exactly the deployments that need it most
-  // (deployment B has no other writer of that record).
+  // could "restore".
+  //
+  // The undo record has TWO gates, exactly as in `registry._invoke`: the tool's own
+  // declaration (`tool.snapshot`: "this statement overwrites the path its
+  // `snapshotArg` names") AND where the statement runs (`ready.local`,
+  // `statement.Statement.local`). The second is not a policy but the record's own
+  // scope: this host's snapshot remembers content it read from a file on THIS
+  // machine, while a statement the client runs writes the CLIENT's filesystem —
+  // where this process can neither read the old content nor restore it. Taking the
+  // record anyway journals a path on the wrong machine (and, worse, a create where
+  // the client's file already exists), so the client's write is the client's to
+  // undo.
   async function runStatement(tool, call) {
     const args = call.args && typeof call.args === "object" ? call.args : {};
     const name = String(tool.owner || "");
     const blocked = moduleBlockedReason(name);
-    if (blocked) return envelope(`ERROR: ${blocked}`, { error: true });
+    if (blocked) {
+      // `registry._invoke`'s sentence, word for word. A session holds the
+      // declarations it was assembled with, so a component removed while it runs
+      // leaves a tool here that cannot work: the call is DEAD, and the sentence has
+      // to correct the model rather than send it to investigate the host. The name
+      // is `tool.name` — the word the model actually called.
+      return envelope(
+        `ERROR: ${tool.name} is not available in this session (${blocked}); ` +
+          "do not call it again — use the tools this request offers.",
+        { error: true }
+      );
+    }
 
     let ready;
     try {
@@ -286,7 +304,8 @@ function createOrient(options = {}) {
       throw error; // a wiring bug is not the model's mistake: the tool boundary says so
     }
 
-    const remembered = tool.snapshot ? await fileBefore(call.workspace, args, tool.snapshotArg) : null;
+    const remembered =
+      tool.snapshot && ready.local ? await fileBefore(call.workspace, args, tool.snapshotArg) : null;
     const result = await executeStatement(ready, tool, call);
     if (remembered !== null && !result.error) {
       // the undo stack keeps its old rule (only content that was actually lost is
