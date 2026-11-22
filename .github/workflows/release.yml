@@ -40,6 +40,14 @@ jobs:
   # job from the run page — it attaches to the SAME release — not a new tag,
   # which leaves the partial one standing next to it forever.
   #
+  # 0.2.0 then showed the limit of that repair: `deb` died in `npm ci` (the
+  # lockfile pointed at a mirror that had gone away), and a re-run rebuilds the
+  # tag's OWN commit, so it cannot pick up a fix. The repair is the commit plus
+  # MOVING the tag onto it (`git tag -f`, `git push -f refs/tags/vX.Y.Z`): a
+  # fresh run that fills the same release, honest as long as nothing has been
+  # attached yet. Still one tag per version — a second version tag beside a
+  # half-built release is the thing not to do.
+  #
   # Stdlib only, on purpose: the scans below import no third-party package, so
   # `python3 -m` works on the runner image without uv sync / npm ci — the gate
   # costs seconds and cannot itself fail for a dependency reason.
