@@ -31,7 +31,29 @@ const path = require("path");
 // same source into different bytes and every committed file would show as
 // changed.
 const UI_DIR = __dirname;
-const TSC = require.resolve("typescript/lib/tsc.js", { paths: [UI_DIR] });
+
+// Resolved on FIRST USE, never at require time. `--check` only recomputes
+// digests, so it must answer on a checkout that never ran `npm ci` — that is
+// the whole point of it, and scripts/sync-android-host.sh runs it in the APK
+// job, which installs no node_modules (the phone's build needs none). Doing the
+// resolve up here made that job die before the check could answer:
+//   Error: Cannot find module 'typescript/lib/tsc.js'
+//     at Object.<anonymous> (ui/build-ts.js:34:21)
+// The two commands that DO compile — the build and --typecheck — ask for it
+// here, and get told what to run when it is genuinely absent.
+let tscCache = null;
+function tsc() {
+  if (tscCache) return tscCache;
+  try {
+    tscCache = require.resolve("typescript/lib/tsc.js", { paths: [UI_DIR] });
+  } catch {
+    throw new Error(
+      `typescript is not installed (looked in ${path.join(UI_DIR, "node_modules")}); ` +
+        `only --check runs without it — run \`npm ci\` in ui/ to build`
+    );
+  }
+  return tscCache;
+}
 
 // The digest is of the SOURCE, not of the output: tsc REPRINTS (a one-line
 // `if (x) y();` becomes a block), so the emitted bytes are not reconstructible
@@ -90,7 +112,7 @@ function createBuilder({ root, src, config, banner, hint, label, rebuild, where 
   function compile() {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), label + "-"));
     try {
-      const run = spawnSync(process.execPath, [TSC, "-p", configPath, "--outDir", tmp], {
+      const run = spawnSync(process.execPath, [tsc(), "-p", configPath, "--outDir", tmp], {
         cwd: root,
         encoding: "utf8",
       });
@@ -164,7 +186,7 @@ function createBuilder({ root, src, config, banner, hint, label, rebuild, where 
   // tree whose committed output is what runs, "does it compile" and "is the
   // output current" are different questions (check/--check answers the second).
   function typecheck() {
-    const run = spawnSync(process.execPath, [TSC, "-p", configPath, "--noEmit"], {
+    const run = spawnSync(process.execPath, [tsc(), "-p", configPath, "--noEmit"], {
       cwd: root,
       stdio: "inherit",
     });

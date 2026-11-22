@@ -12,7 +12,9 @@
 "use strict";
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { spawnSync } = require("child_process");
 const { check, summary } = require("./harness.js");
 const { sources, emittedFiles, digestOf, BANNER_MARK } = require("../ui/build-host.js");
 
@@ -90,6 +92,49 @@ function main() {
     if (head.includes("@ts-check")) pragmas.push(file);
   }
   check(pragmas.length === 0, `no source keeps the old // @ts-check pragma (still in: ${pragmas.join(",") || "—"})`);
+
+  // 6. the gate answers on a BARE checkout. `--check` is what
+  // scripts/sync-android-host.sh runs to decide whether the committed .js match
+  // their sources, and the release job that runs it (android-apk) installs no
+  // ui/node_modules: the phone's build needs no packages. Requiring the
+  // compiler at module load broke exactly that — the 0.2.0 APK job died with
+  //   Error: Cannot find module 'typescript/lib/tsc.js'
+  //     at Object.<anonymous> (ui/build-ts.js:34:21)
+  // before the check could say anything — so this asserts the property
+  // directly: the CLI, driven in a copy of its inputs with no node_modules
+  // beside it, exits 0. Both halves are covered: android/build-host.js resolves
+  // the same ui/build-ts.js, one directory up.
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-bare-checkout-"));
+  try {
+    for (const dir of [path.join(bare, "ui"), path.join(bare, "android", "host")]) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    for (const f of ["build-ts.js", "build-host.js", "tsconfig.host.json"]) {
+      fs.copyFileSync(path.join(UI_DIR, f), path.join(bare, "ui", f));
+    }
+    fs.cpSync(path.join(UI_DIR, "src", "host"), path.join(bare, "ui", "src", "host"), { recursive: true });
+    for (const f of emittedFiles()) fs.copyFileSync(path.join(UI_DIR, f), path.join(bare, "ui", f));
+    fs.copyFileSync(path.join(__dirname, "..", "android", "build-host.js"), path.join(bare, "android", "build-host.js"));
+    fs.cpSync(path.join(__dirname, "..", "android", "host", "src"), path.join(bare, "android", "host", "src"), {
+      recursive: true,
+    });
+    for (const f of fs.readdirSync(path.join(__dirname, "..", "android", "host"))) {
+      if (f.endsWith(".js")) fs.copyFileSync(path.join(__dirname, "..", "android", "host", f), path.join(bare, "android", "host", f));
+    }
+    check(!fs.existsSync(path.join(bare, "ui", "node_modules")), "the copy under test has no node_modules (a bare checkout)");
+    for (const [script, label] of [
+      ["ui/build-host.js", "build-host"],
+      ["android/build-host.js", "android-build-host"],
+    ]) {
+      const r = spawnSync(process.execPath, [path.join(bare, script), "--check"], { encoding: "utf8" });
+      check(
+        r.status === 0 && new RegExp(`${label}: up to date`).test(r.stdout || ""),
+        `${script} --check answers without typescript installed (exit ${r.status}: ${((r.stdout || "") + (r.stderr || "")).trim().split("\n")[0]})`
+      );
+    }
+  } finally {
+    fs.rmSync(bare, { recursive: true, force: true });
+  }
 
   summary("host-built");
 }
