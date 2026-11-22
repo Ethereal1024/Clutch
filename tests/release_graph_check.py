@@ -133,6 +133,18 @@ def reaches(jobs: dict[str, Job], start: str, target: str) -> bool:
     return False
 
 
+def installed(body: str) -> list[str]:
+    """Which install commands the job actually RUNS.
+
+    A YAML comment is not a command: `verify` explains at length what it must
+    not do (that is how a reader learns the rule), and a scan of the raw body
+    reported that explanation as the violation — "`verify` installs packages
+    (npm install)". Comment lines are dropped first; what is left is the job.
+    """
+    code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+    return [word for word in INSTALLS if word in code]
+
+
 def problems(jobs: dict[str, Job]) -> list[str]:
     """Every way the graph breaks the contract above, as human sentences."""
     out: list[str] = []
@@ -142,9 +154,9 @@ def problems(jobs: dict[str, Job]) -> list[str]:
         for module in SCANS:
             if module not in jobs[VERIFY].body:
                 out.append(f"`{VERIFY}` does not run {module}")
-        installed = [word for word in INSTALLS if word in jobs[VERIFY].body]
-        if installed:
-            out.append(f"`{VERIFY}` installs packages ({', '.join(installed)}): "
+        installed_words = installed(jobs[VERIFY].body)
+        if installed_words:
+            out.append(f"`{VERIFY}` installs packages ({', '.join(installed_words)}): "
                        "it must stay dependency-free")
     for job in jobs.values():
         if job.attaches and not reaches(jobs, job.name, VERIFY):
@@ -168,7 +180,7 @@ def check_scan_runs(jobs: dict[str, Job]) -> None:
     for module in SCANS:
         check(re.search(r"^\s*run: .*-\s*m\s*" + re.escape(module), body, re.M) is not None,
               f"{VERIFY} executes `python3 -m {module}`")
-    check(not any(word in body for word in INSTALLS),
+    check(not installed(body),
           f"{VERIFY} needs no uv/npm/pip step")
 
 
@@ -198,6 +210,16 @@ def check_regression(text: str) -> None:
     check(fattened != text, "regression fixture: a step can be added to verify")
     check(any("installs packages" in p for p in problems(parse(fattened))),
           "a `verify` that installs packages is reported")
+
+    # 4. …but prose is not a command: `verify` explains what it must never do,
+    #    and that explanation is not a violation. (It was one until the scan
+    #    learned to drop comment lines — "npm install" inside a `#` note about
+    #    the APK job reported the shipped workflow as installing packages.)
+    noted = text.replace("      - name: Verify UI fonts\n",
+                         "      # never run npm ci or uv sync here\n"
+                         "      - name: Verify UI fonts\n", 1)
+    check(noted != text, "regression fixture: a comment can be added to verify")
+    check(not problems(parse(noted)), "a comment naming an install is not an install")
 
 
 def main() -> int:

@@ -92,6 +92,22 @@ jobs:
       - name: Verify the release graph
         run: python3 -m tests.release_graph_check
 
+      # The committed build outputs, in a bare checkout: ui/*.js and
+      # android/host/*.js are emitted from TypeScript and are what actually
+      # ships (the phone's libnode 18 cannot strip types, the Electron main runs
+      # .js by path), so a source edited without a rebuild ships code nobody
+      # wrote. scripts/sync-android-host.sh runs exactly these `--check` gates
+      # when it assembles the APK — and 0.2.0's APK job is where the outage
+      # landed: the gate demanded typescript (which that job installs no
+      # packages for) and died 19 seconds in, AFTER deb/dmg/win had attached.
+      # Both suites are dependency-free and take about a second: node only, no
+      # npm install, so they belong here — where a rejected tree reaches no
+      # release at all — instead of only in the last job in the chain.
+      - name: Verify the committed build outputs
+        run: |
+          node tests/host-built.test.js
+          node tests/android-built.test.js
+
   deb:
     runs-on: ubuntu-latest
     needs: verify
