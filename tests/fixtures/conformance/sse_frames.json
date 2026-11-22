@@ -1,7 +1,7 @@
 {
   "cases": [
     {
-      "frame": "data: {\"type\": \"state_update\", \"timestamp\": 1700000000.0, \"id\": \"000000000000\", \"key\": \"execution_status\", \"value\": \"idle\"}\n\n",
+      "frame": "data: {\"type\": \"state_update\", \"timestamp\": 1700000000.0, \"id\": \"000000000000\", \"key\": \"execution_status\", \"value\": \"idle\", \"read_only\": null}\n\n",
       "id": "sse.transient.state-update",
       "note": "transient: no log offset -> the bare event JSON"
     },

@@ -5,7 +5,7 @@ A component's tool call has exactly one form —
     render(template, the model's arguments ∪ the host's facts) → a runner → an envelope
 
 — and `agent/tools/statement.py` is the whole of it; `agent/tools/registry.py`'s
-`ExtensionTool.execute` is the order the pieces are used in, and
+`ToolRegistry.execute` is the order the pieces are used in, and
 `prompt.module_blocked_reason` is the question asked before anything is prepared.
 `tests/host-statement.test.js` and `tests/host-orient.test.js` replay both against
 the two JS files.
@@ -13,13 +13,13 @@ the two JS files.
     .venv/bin/python -m tests.statement_capture            # write the fixture
     .venv/bin/python -m tests.statement_capture --check    # regenerate+compare
 
-Nothing here runs a process or touches the filesystem: the artifact lookup
-(`rendezvous.resolve`), the service table (`rendezvous.service`), the channel
-(`channel.current`/`channel.call`), the app host's transport
-(`statement.LocalTransport`) and the "may this component serve this root" probe
-(`registry.module_blocked_reason`) are all patched per case, and the workspace is
-the same kind of stub `tests/tools_capture.py` uses — it records what was asked of
-it, in a trace the JS replay reproduces call for call.
+Nothing here runs a process or touches the filesystem: the declaration table
+(`catalog.table`), the artifact lookup (`rendezvous.resolve`), the service table
+(`rendezvous.service`), the channel (`channel.current`/`channel.call`), the app
+host's transport (`statement.LocalTransport`) and the "may this component serve
+this root" probe (`registry.module_blocked_reason`) are all patched per case, and
+the workspace is the same kind of stub `tests/tools_capture.py` uses — it records
+what was asked of it, in a trace the JS replay reproduces call for call.
 
 What each group pins:
 
@@ -35,22 +35,27 @@ What each group pins:
   * `line` / `run` — one statement, rendered and carried: the prefix in front, the
     host's values over the model's, `defaults` underneath, and a transport
     failure left for the caller to word;
-  * `resident` / `per_call` / `client` — the three builders: which fact bundle
-    each one reads, that a client component with no live channel has NO statement
-    (fail closed, in the channel's own words), and that a client statement carries
-    the root and the fence;
+  * `resident` / `per_call` / `client` — the three shapes `statement.prepare`
+    dispatches on: which fact bundle each one reads (`rendezvous.service` for a
+    service, the artifact for a one-process component, the live channel for a
+    client's), that a client with no channel has NO statement — fail closed, in
+    the channel's own words — and that a client statement carries no root and no
+    fence: those were the second implementation of the client's own shell, and
+    what crosses the wire is now the declaration's template and nothing else;
   * `client_run` — the template sent VERBATIM (not rendered, `defaults` ignored)
     with the model's arguments, `ChannelError` → `ERROR: …`, the reply → envelope;
   * `module_blocked` — `prompt.module_blocked_reason` itself, with `far_root`
     marking the verdicts a host that only serves a far root can still reach (see
     `ui/host/orient.js`'s header: the two subject clauses collapse there);
-  * `execute` — 20 whole calls through `registry.ExtensionTool.execute`, each
+  * `execute` — 21 whole calls through `registry.ToolRegistry.execute`, each
     recording the trace of what the workspace/transport/channel saw AND the
     envelope the model reads: the blocked reason, an uninstalled component, a
     missing argument, success, a non-zero exit, a timeout, a Stop, an unreachable
     transport, the client's refusal and its answer, and six shapes of the undo
     record (replaced, created, failed run, escaping path, renamed argument, and a
-    CLIENT's write — which keeps its record, §5.5).
+    CLIENT's write — which keeps no record at all here: the file it changed is on
+    the client's machine, where this process can neither read nor restore it,
+    `Statement.local`).
 """
 
 from __future__ import annotations
@@ -89,6 +94,16 @@ def patched(module, **names):
     finally:
         for name, value in old.items():
             setattr(module, name, value)
+
+
+def table_of(*components) -> object:
+    """A stand-in for `catalog.table()`: the declarations these cases are about.
+
+    The declaration table is what `statement.prepare` reads a component's own
+    shape from, so every case that goes through it says what THIS host holds —
+    never what the install root happens to contain."""
+    table = {component.name: component for component in components}
+    return lambda: table
 
 
 class FarWorkspace:
@@ -196,36 +211,37 @@ def envelope_of(env: Envelope) -> dict:
 
 
 def resolved(argv, directory="/opt/clutch/components/probe", importable=False, name="clutch-probe"):
-    component = catalog.Component(name=name, run=catalog.PerCall(start=catalog.Launch(importable=importable)))
+    component = catalog.Component(name=name, launch=catalog.Launch(importable=importable))
     return rendezvous.Resolved(
         module=component, directory=Path(directory), argv=tuple(argv), template=False
     )
 
 
-def launch_case(name: str, run, *, artifact=None, unavailable="") -> dict:
-    record = {"name": name, "kind": kind_of(run)}
+def one_process(**fields) -> catalog.Component:
+    """A declaration with no service: its own launch is the prefix of every call,
+    run on this host's machine (`statement._artifact`)."""
+    return catalog.Component(
+        name="clutch-probe", launch=catalog.Launch(argv=("{py}", "-m", "clutch_probe")), **fields
+    )
+
+
+def launch_case(name: str, component: catalog.Component, *, artifact=None, unavailable="") -> dict:
+    """One prefix case: the DECLARATION (a service, or a launch to render) and the
+    artifact this host resolved for it (None when there is none)."""
+    record = {"name": name, "service": component.service is not None}
     if artifact is not None:
         record["resolved"] = {
             "argv": list(artifact.argv),
             "directory": str(artifact.directory),
-            "importable": artifact.module.run.start.importable,
+            "importable": artifact.module.launch.importable,
         }
     record["unavailable"] = unavailable
-    component = catalog.Component(name="clutch-probe", run=run)
     with patched(rendezvous, resolve=lambda _name: artifact, unavailable_reason=lambda _name: unavailable):
         try:
             record["expect"] = {"prefix": statement.launch_prefix(component)}
         except rendezvous.RendezvousError as e:
             record["expect"] = {"error": str(e)}
     return record
-
-
-def kind_of(run) -> str:
-    if isinstance(run, catalog.Resident):
-        return "resident"
-    if isinstance(run, catalog.ClientRun):
-        return "clientRun"
-    return "perCall"
 
 
 # --------------------------------------------------------------- the capture
@@ -269,15 +285,16 @@ def capture_launch_prefix() -> list:
     checkout = resolved(["python3", "/home/u/proj/clutch-probe/main.py"])
     package = resolved(["python3", "-m", "clutch_probe"], directory="/opt/other dir", importable=True)
     hostile = resolved(["python3", "/opt/it's here/main.py"], directory="/opt/it's here")
+    service = catalog.Component(name="clutch-probe", service=catalog.Service(app_dir="clutch", prefix="probe-"))
     return [
-        launch_case("a service answers with no prefix", catalog.Resident(), artifact=package),
-        launch_case("an installed onefile is one word", catalog.PerCall(), artifact=binary),
-        launch_case("a checkout is interpreter + entry", catalog.PerCall(), artifact=checkout),
-        launch_case("a package goes on PYTHONPATH", catalog.PerCall(), artifact=package),
-        launch_case("quoting survives the prefix", catalog.PerCall(), artifact=hostile),
+        launch_case("a service answers with no prefix", service, artifact=package),
+        launch_case("an installed onefile is one word", one_process(), artifact=binary),
+        launch_case("a checkout is interpreter + entry", one_process(), artifact=checkout),
+        launch_case("a package goes on PYTHONPATH", one_process(), artifact=package),
+        launch_case("quoting survives the prefix", one_process(), artifact=hostile),
         launch_case(
             "no artifact",
-            catalog.PerCall(),
+            one_process(),
             artifact=None,
             unavailable="clutch-probe is not installed on this host",
         ),
@@ -385,6 +402,9 @@ def capture_run() -> list:
 
 
 def capture_resident(cfg) -> dict:
+    """A component with a SERVICE: `prepare` asks the service table for the
+    workspace THIS call is about, and the workspace's own transport carries the
+    loopback call."""
     workspace = FarWorkspace()
     calls = []
 
@@ -392,9 +412,9 @@ def capture_resident(cfg) -> dict:
         calls.append([str(root), name, [str(p) for p in protect]])
         return StubService({"port": "51234", "token": "abc", "pid": "77"})
 
-    component = catalog.Component(name="clutch-probe", run=catalog.Resident())
-    with patched(rendezvous, service=service):
-        ready = statement.resident(component, workspace, cfg)
+    component = catalog.Component(name="clutch-probe", service=catalog.Service(app_dir="clutch", prefix="probe-"))
+    with patched(rendezvous, service=service), patched(catalog, table=table_of(component)):
+        ready = statement.prepare(component.name, workspace, cfg)
     line = ready.line("curl -H X-Token:{token} http://127.0.0.1:{port}/read {*}", {"path": "a.txt"}, {})
     return {
         "service_call": calls,
@@ -409,15 +429,16 @@ def capture_resident(cfg) -> dict:
 
 
 def capture_per_call(cfg) -> dict:
+    """A one-process component, asked OUTSIDE any workspace (`prepare_cli`, which
+    is what a host fact goes through): the artifact's launch is the prefix and the
+    app host's transport carries the line."""
     artifact = resolved(["python3", "-m", "clutch_probe"], importable=True)
     transport = StubTransport({})
-    component = catalog.Component(
-        name="clutch-probe", run=catalog.PerCall(), vars={"base": "host.port_url"}
-    )
-    with patched(rendezvous, resolve=lambda _name: artifact), patched(
-        statement, LocalTransport=lambda _root: transport
-    ):
-        ready = statement.per_call(component, cfg)
+    component = one_process(vars={"base": "host.port_url"})
+    with patched(catalog, table=table_of(component)), patched(
+        rendezvous, resolve=lambda _name: artifact
+    ), patched(statement, LocalTransport=lambda _root: transport):
+        ready = statement.prepare_cli(component.name, cfg)
     template = "--base {base} read {*}"
     return {
         "vars": dict(ready.vars),
@@ -430,6 +451,14 @@ def capture_per_call(cfg) -> dict:
 
 
 def capture_client(cfg) -> list:
+    """A component with neither a service nor a launch: its statement is the
+    CLIENT's, and a declaration no live channel holds has none at all.
+
+    The case still records the workspace's root and its protected set: they are
+    what the JS builder has to hand the client WITH the call (ui/host/statement.js)
+    and the replay checks them against these inputs — the Python's client
+    statement names nothing but the component, so the fixture's `expect` pins that
+    and no root/fence of its own."""
     cases = [
         ("a live channel holds it", "", [LOG_PATH], ROOT),
         ("no channel", "clutch-probe runs on the client that calls it and this host has no channel to that client",
@@ -438,26 +467,31 @@ def capture_client(cfg) -> list:
         ("no root", "", [], ""),
     ]
     out = []
-    component = catalog.Component(name="clutch-probe", run=catalog.ClientRun(entry="clutch-ws"))
+    component = catalog.Component(name="clutch-probe", entry="clutch-ws")
     for name, reason, protected, root in cases:
         workspace = FarWorkspace(protected=tuple(protected))
         workspace.root = PurePosixPath(root)
-        # the root AS THE STATEMENT LAYER READS IT (`str(workspace.root)`): an
-        # empty path is Python's ".", and recording the case's own "" instead
-        # would hide that spelling from the replay
+        # the root as the JS builder reads it (`String(workspace.root)`): an empty
+        # path is Python's ".", and recording the case's own "" instead would hide
+        # that spelling from the replay
         record = {"name": name, "reason": reason, "protected": list(protected), "root": str(workspace.root)}
-        with patched(channel, current=lambda _reason=reason: StubChannel(_reason)):
+        with patched(catalog, table=table_of(component)), patched(
+            channel, current=lambda _reason=reason: StubChannel(_reason)
+        ):
             try:
-                ready = statement.client(component, workspace, cfg)
+                ready = statement.prepare(component.name, workspace, cfg)
             except rendezvous.RendezvousError as e:
                 record["expect"] = {"error": str(e)}
             else:
-                record["expect"] = {"module": ready.module, "root": ready.root, "fence": list(ready.fence)}
+                record["expect"] = {"module": ready.module, "local": ready.local}
         out.append(record)
     return out
 
 
 def capture_client_run() -> list:
+    """One statement of a client's own: `Statement.run` sends the template VERBATIM
+    with the model's arguments — no rendering, no prefix, and nothing about the
+    workspace, which the client already holds."""
     cases = [
         ("the client answers", {"content": "file contents", "error": False}),
         ("the client reports an error", {"content": "no such file", "error": True}),
@@ -467,18 +501,17 @@ def capture_client_run() -> list:
     for name, answer in cases:
         calls = []
 
-        def call(component, command, args, timeout_s, *, root="", fence=(), _answer=answer):
-            calls.append([component, command, dict(args), timeout_s, root, list(fence)])
+        def call(component, command, args, timeout_s, _answer=answer):
+            calls.append([component, command, dict(args), timeout_s])
             if "channel_error" in _answer:
                 raise channel.ChannelError(_answer["channel_error"])
             return channel.Reply(content=_answer["content"], error=_answer["error"])
 
-        ready = statement.ClientStatement(module="clutch-probe", root=ROOT, fence=(LOG_PATH, f"{ROOT}/notes.clc"))
+        ready = statement.Statement(vars={}, runner=statement.Client(), module="clutch-probe")
         record = {
             "name": name,
             "module": ready.module,
-            "root": ready.root,
-            "fence": list(ready.fence),
+            "local": ready.local,
             "template": "read_file {*}",
             "args": {"path": "a.txt"},
             "defaults": {"max_bytes": 100},
@@ -525,8 +558,14 @@ def capture_module_blocked() -> list:
         with patched(
             rendezvous,
             unavailable_reason=lambda _name, _f=fields: _f["unavailable"],
-            serves_workspace_here=lambda _name, _f=fields: _f["serves_here"],
-            serves_workspace_over_channel=lambda _name, _f=fields: _f["serves_channel"],
+            # `serves_here` is `serves_workspace_fs`: this host starts the
+            # component's own process, so only a root on this machine can be served.
+            # `serves_channel` is `serves_foreign_fs`: it reaches the root's machine
+            # over a channel, so the root has to be somewhere else (both spellings
+            # come from rendezvous.reaches_another_machine — foreign-fs, or an
+            # entry-only workspace-fs).
+            serves_workspace_fs=lambda _name, _f=fields: _f["serves_here"],
+            serves_foreign_fs=lambda _name, _f=fields: _f["serves_channel"],
         ):
             reason = prompt.module_blocked_reason(workspace, "clutch-probe")
         out.append(
@@ -540,15 +579,25 @@ def capture_module_blocked() -> list:
     return out
 
 
-
-
-
 def capture_execute(cfg) -> list:
     artifact = resolved(["python3", "-m", "clutch_probe"], importable=True)
     out = []
     for case in EXECUTE_CASES:
         out.append(run_execute_case(case, artifact, cfg))
     return out
+
+
+def component_of(case: dict) -> catalog.Component:
+    """The declaration one execute case is about: a process that stays here, one
+    process per call here, or nothing here at all (the client's)."""
+    fields: dict = {"name": case["component"], "vars": case.get("vars", {})}
+    if case["kind"] == "resident":
+        fields["service"] = catalog.Service(app_dir="clutch", prefix="probe-")
+    elif case["kind"] == "perCall":
+        fields["launch"] = catalog.Launch(argv=("{py}", "-m", "clutch_probe"))
+    else:
+        fields["entry"] = "clutch-ws"
+    return catalog.Component(**fields)
 
 
 def run_execute_case(case: dict, artifact, cfg) -> dict:
@@ -560,7 +609,7 @@ def run_execute_case(case: dict, artifact, cfg) -> dict:
     def service(root, component_name, protect=()):
         return StubService(case.get("service_vars", DEFAULT_SERVICE_VARS))
 
-    def channel_call(component, command, args, timeout_s, *, root="", fence=()):
+    def channel_call(component, command, args, timeout_s):
         calls.append(f"send {component} {command} {json.dumps(dict(args), sort_keys=True, ensure_ascii=False)}")
         reply = case.get("reply") or {}
         if "channel_error" in reply:
@@ -568,25 +617,17 @@ def run_execute_case(case: dict, artifact, cfg) -> dict:
         return channel.Reply(content=reply.get("content", ""), error=bool(reply.get("error")))
 
     run_ = case["kind"]
-    component = catalog.Component(
-        name=case["component"],
-        run={
-            "resident": catalog.Resident(),
-            "perCall": catalog.PerCall(),
-            "clientRun": catalog.ClientRun(entry="clutch-ws"),
-        }[run_],
-        vars=case.get("vars", {}),
-    )
-    tool = registry.ExtensionTool(
+    component = component_of(case)
+    tool = registry.Tool(
         name=case.get("tool", "read_file"),
         description="",
         parameters={"properties": {}, "required": []},
+        inst=case["template"],
+        module=component.name,
         access="",
         access_arg="",
         snapshot=case.get("snapshot", False),
         snapshot_arg=case.get("snapshot_arg", ""),
-        component=component,
-        template=case["template"],
         defaults=case.get("defaults", {}),
     )
     record = {
@@ -612,10 +653,13 @@ def run_execute_case(case: dict, artifact, cfg) -> dict:
         "answer": case.get("answer", {}),
         "reply": case.get("reply"),
     }
-    call = registry.Call(workspace=workspace, config=cfg, args=dict(case.get("args", {})), cancel=None, log=None)
+    tools = registry.ToolRegistry([tool])
     with patched(
         registry,
         module_blocked_reason=lambda _ws, _name, _blocked=case.get("blocked", ""): _blocked,
+    ), patched(
+        catalog,
+        table=table_of(component),
     ), patched(
         rendezvous,
         resolve=lambda _name: artifact if run_ == "perCall" and not case.get("unavailable") else None,
@@ -630,43 +674,36 @@ def run_execute_case(case: dict, artifact, cfg) -> dict:
         call=channel_call,
     ):
         workspace.answers = {
-            tool_line(case, artifact, run_): case.get("answer", {}),
+            tool_line(case, artifact): case.get("answer", {}),
         }
         transport.answers = dict(workspace.answers)
-        result = tool.execute(call)
+        result = tools.execute(workspace, cfg, tool.name, dict(case.get("args", {})))
     record["expect"] = envelope_of(result)
     record["trace"] = workspace.trace + transport.trace + calls
     return record
 
 
-def tool_line(case: dict, artifact, run_: str) -> str:
+def tool_line(case: dict, artifact) -> str:
     """The line this case is expected to run, so the stub can answer it.
 
     Rendered with the REAL renderer and a throwaway runner, which is the point:
     the capture must not re-implement what it is measuring. "" means nothing is
     rendered at all — an unrenderable template, a component with no statement.
     """
-    if run_ == "clientRun":
+    if case["kind"] == "clientRun":
         # the template IS the statement: sent verbatim, never rendered here
         return case["template"]
-    component = catalog.Component(
-        name=case["component"],
-        run={
-            "resident": catalog.Resident(),
-            "perCall": catalog.PerCall(),
-            "clientRun": catalog.ClientRun(entry="clutch-ws"),
-        }[run_],
-        vars=case.get("vars", {}),
-    )
+    component = component_of(case)
     service_vars = dict(case.get("service_vars", DEFAULT_SERVICE_VARS))
     workspace = FarWorkspace(files=case.get("files"))
-    with patched(
+    with patched(catalog, table=table_of(component)), patched(
         rendezvous,
         resolve=lambda _name: None if case.get("unavailable") else artifact,
+        unavailable_reason=lambda _name, _u=case.get("unavailable", ""): _u,
         service=lambda *a, **k: StubService(service_vars),
     ):
         try:
-            ready = component.run.statement(component, workspace, config())
+            ready = statement.prepare(component.name, workspace, config())
         except rendezvous.RendezvousError:
             return ""
     workspace.trace.clear()
@@ -858,7 +895,7 @@ EXECUTE_CASES = [
         "answer": {"code": 0, "stdout": '{"content":"wrote","error":false,"diff":""}', "stderr": ""},
     },
     {
-        "name": "a client's write keeps its record too",
+        "name": "a client's write is the client's to undo, not this host's",
         "kind": "clientRun",
         "component": "clutch-ws",
         "template": "write_file {*}",

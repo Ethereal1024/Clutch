@@ -36,6 +36,14 @@ becoming the pid-marker this design deliberately rejected:
     on another user's process) and a recycled pid read as "held". A start tick
     cannot be recycled, and an unreadable process is "unknown", never "dead".
 
+A claim names the machine it lives on (`claim_host`). That is the fact that lets
+a far side be honest about what it cannot see: a lock taken by a session on a
+remote host was claimed by a window on the CLIENT's machine, whose process table
+this host can never read. Such a lock is "remote_claim" — nobody here frees it —
+while a lock claimed by a window on THIS host is decided by this host's kernel.
+The machine named by `claim_host` is the only one that can prove that window
+gone, and lock_reconcile.reclaim() accepts its witness for exactly that reason.
+
 What the record is FOR: the one reconciler (agent/core/lock_reconcile.py) can
 tell a session whose window is provably gone (the claiming process no longer
 exists — kernel facts, no timers, no heartbeats) from a window that is merely
@@ -109,9 +117,12 @@ _CONTEXT: dict = {}
 
 
 # The part of an owner record a CLIENT can use: who holds the lock, on which
-# host, since when, and which window process claimed it. Everything else in the
-# record (boot id, start tick) is for the reconciler, not for the UI.
-OWNER_FIELDS = ("pid", "host", "since", "claim", "claim_pid", "port")
+# host, since when, and which window process claimed it — including the machine
+# that window runs on (`claim_host`), because a far side can only check a claim
+# that lives on its own machine, and must say whose machine a claim is on rather
+# than guess. Everything else in the record (boot id, start tick) is for the
+# reconciler, not for the UI.
+OWNER_FIELDS = ("pid", "host", "since", "claim", "claim_host", "claim_pid", "port")
 
 
 def owner_summary(record: dict | None) -> dict | None:

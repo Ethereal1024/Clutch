@@ -494,12 +494,13 @@ def check_the_endpoint() -> None:
 def check_the_machine_a_component_serves() -> None:
     """`subject` is a machine, and the surface follows it.
 
-    The situation two subjects exist for: the workspace's own `read_file`
-    (`workspace-fs`, spoken to the machine the root lives on) and the ssh plugin's
-    (`foreign-fs`, reached over a channel to another machine) publish the SAME name.
-    Whose tool the model is offered has to follow the root's machine, not the order
-    the table happened to fold — so both directions are pinned here, and so are the
-    two sentences a call would read when only the wrong one is installed.
+    The situation the axis exists for: the workspace's own `read_file` (a
+    `workspace-fs` component this host runs, spoken to the machine the root lives
+    on) and the ssh plugin's (the SAME subject, reached over a channel to another
+    machine — it declares an `entry` and no process here) publish the SAME name.
+    Whose tool the model is offered has to follow the root's machine, not the
+    order the table happened to fold — so both directions are pinned here, and so
+    are the two sentences a call would read when only the wrong one is installed.
     """
     client = Client()
     with isolated_host() as root:
@@ -516,7 +517,7 @@ def check_the_machine_a_component_serves() -> None:
                 "before any session, the local component's read_file is offered",
             )
 
-            _push(client, _plugin(name="clutch-ssh-workspace", tool="read_file", subject="foreign-fs"))
+            _push(client, _plugin(name="clutch-ssh-workspace", tool="read_file", subject="workspace-fs"))
             check(channel.holds("clutch-ssh-workspace"), "and the client's far-side component arrives over the channel")
 
             # a LOCAL root: the plugin's tools are dropped, not merely shadowed —
@@ -558,11 +559,12 @@ def check_the_machine_a_component_serves() -> None:
                 "and the far-side component has nothing to explain for an ssh root",
             )
 
-            # the subject, not the name or what it contributes, is what decides
+            # the same subject from two sides, and what it contributes is which
+            # side a declaration is on
             check(
                 not rendezvous.serves_workspace_fs("clutch-ssh-workspace")
                 and rendezvous.serves_foreign_fs("clutch-ssh-workspace"),
-                "the two predicates answer for the two subjects and nothing else",
+                "the two predicates answer for the two halves of the axis and nothing else",
             )
             check(
                 rendezvous.serves_workspace_fs("clutch-workspace") and not rendezvous.serves_foreign_fs("clutch-workspace"),

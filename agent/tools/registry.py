@@ -286,15 +286,17 @@ def _serves_this_workspace(component: catalog.Component, workspace: Workspace | 
     wrong about, and they are wrong in opposite directions (`prompt.
     module_blocked_reason` asks the same question per call):
 
-      * `workspace-fs` serves the root's own machine. It is KEPT even when the
-        root is elsewhere, on purpose: its refusal is a sentence that says why
-        ("this root is another machine's"), which is more use to the model than a
-        tool that silently is not there. When a
-        `foreign-fs` component is also present it publishes the same names and
-        wins — the table folds pushed declarations last — so the local one is
-        only the sentence you read when the plugin is not installed.
-      * `foreign-fs` reaches another machine over a channel. On a LOCAL workspace
-        it is dropped, not kept-and-refused: its tools share their names with the
+      * `workspace-fs` served BY THIS HOST serves the root's own machine. It is
+        KEPT even when the root is elsewhere, on purpose: its refusal is a
+        sentence that says why ("this root is another machine's"), which is more
+        use to the model than a tool that silently is not there. When a component
+        that reaches another machine answers to the same names it also publishes
+        them and wins — the table folds pushed declarations last — so the local
+        one is only the sentence you read when the plugin is not installed.
+      * a component that reaches ANOTHER machine over a channel
+        (`rendezvous.reaches_another_machine`: the ssh plugin, whose code runs on
+        the client and whose commands travel the tunnel). On a LOCAL workspace it
+        is dropped, not kept-and-refused: its tools share their names with the
         ones that really work here, so keeping it would shadow a working local
         `read_file` with one that reads some other machine a tunnel happens to
         reach.
@@ -303,7 +305,7 @@ def _serves_this_workspace(component: catalog.Component, workspace: Workspace | 
     surface, a test) is no machine to judge by, and every component is offered."""
     if workspace is None:
         return True
-    if component.subject == catalog.FOREIGN_FS:
+    if rendezvous.reaches_another_machine(component):
         return not isinstance(workspace, LocalWorkspace)
     return True
 

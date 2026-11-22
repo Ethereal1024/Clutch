@@ -132,9 +132,11 @@ def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
     stand in for it), and a component whose SUBJECT is *a* workspace filesystem
     only serves the machine that filesystem is on:
 
-      * `workspace-fs` serves the root's own machine, so the root has to live HERE;
-      * `foreign-fs` reaches a machine over a channel of its own (the ssh tunnel),
-        so the root has to be somewhere ELSE.
+      * one whose process is this host's to start serves the root's own machine,
+        so the root has to live HERE (`rendezvous.serves_workspace_fs`);
+      * one that reaches another machine over a channel of its own (the ssh
+        tunnel) serves the machine holding the root, so the root has to be
+        somewhere ELSE (`rendezvous.serves_foreign_fs`).
 
     Both questions are the same one — is this workspace local? — asked in opposite
     directions, which is why one `isinstance` answers them. A component serving

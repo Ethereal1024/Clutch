@@ -156,7 +156,12 @@ from . import components, hostconfig
 # component_diagnostics), not read for whichever half this host can guess at.
 
 # Whose resources a component serves — which decides whether a statement may run
-# for a given workspace at all (registry.module_blocked_reason).
+# for a given workspace at all (registry.module_blocked_reason). The workspace's
+# own filesystem has one subject and two halves: a component whose process this
+# host starts answers for THIS machine, and one that only declares an `entry`
+# reaches the machine holding the root over a channel (rendezvous.
+# reaches_another_machine). FOREIGN_FS is 0.1.x's word for that second half and is
+# still read as one.
 WORKSPACE_FS = "workspace-fs"
 FOREIGN_FS = "foreign-fs"
 NETWORK = "network"

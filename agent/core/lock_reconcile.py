@@ -57,6 +57,7 @@ import glob
 import json
 import os
 import signal
+import socket
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -71,7 +72,9 @@ RECONCILE_INTERVAL_S = 30.0
 # reaped).
 REVOKE_GRACE_S = 8.0
 
-# Every state scan() may report. Only "stale" and "orphan" are actionable.
+# Every state scan() may report. Only "stale" and "orphan" are actionable here,
+# and "remote_claim" becomes actionable only through the witness of the machine
+# that can see the claimant (reclaim below).
 FREE = "free"
 STALE = "stale"
 LIVE = "live"
@@ -80,6 +83,10 @@ UNVERIFIABLE = "unverifiable"
 GHOST = "ghost"
 ORPHAN = "orphan"
 UNOWNED = "unowned"
+# The claimant is a window on ANOTHER machine. This host can never check that
+# process table, so it says so instead of reading its own answer into it: a
+# remote claim is not dead, not live, and not this host's to revoke.
+REMOTE_CLAIM = "remote_claim"
 
 # Answers `run_state(port)` may give (see agent/supervisor.py session_run_state):
 # True = a run is live, False = the session proved itself idle, None = a doubt.
@@ -112,6 +119,12 @@ class LockState:
         }
 
 
+def _here() -> str:
+    """This host's name as a lock record spells it (``socket.gethostname``, the
+    same call project_lock makes when it writes one)."""
+    return socket.gethostname()
+
+
 def _classify(held: bool, owner: dict | None) -> tuple[str, str, str, str]:
     """(state, holder_state, claim_state, detail) for one lock."""
     if not held:
@@ -140,6 +153,14 @@ def _classify(held: bool, owner: dict | None) -> tuple[str, str, str, str]:
             holder,
             "unknown",
             "the holder names no claiming window process, so its window cannot be verified here",
+        )
+    claim_host = owner.get("claim_host")
+    if claim_host and claim_host != _here():
+        return (
+            REMOTE_CLAIM,
+            holder,
+            "unknown",
+            f"its window runs on {claim_host}, the only machine that can check it",
         )
     claim = procstat.state(claim_pid, owner.get("claim_start", ""), owner.get("boot_id", ""))
     if claim == "live":
@@ -309,10 +330,55 @@ def reconcile(
     return report
 
 
-def reclaim(project: str, *, log: Callable[[str], None] | None = None) -> dict:
+def witnessed(owner: dict | None, witness: dict | None) -> bool:
+    """Does ``witness`` name the very window ``owner`` says claimed this lock?
+
+    A witness is the answer of the CLAIMANT'S OWN kernel ("pid P started at S on
+    host H is gone"), relayed by the machine that can read that kernel — the
+    client's, when the claimant is a window there. That is the only machine with
+    the fact, and this host is the only machine that can compare the answer with
+    the record it belongs to. Both halves of the check are needed: a witness that
+    does not name the recorded claim is about some other process, and is ignored
+    whole rather than applied to this lock.
+
+    The comparison is exact on every field the record actually holds. A record
+    without a start tick (a claimant on a host with no /proc) is proven by pid
+    and host alone — weaker, and the caller is the one that decided it was
+    enough, on its own kernel, where the pid is a fact about a process that only
+    has to be gone for the claim to be gone."""
+    if not owner or not isinstance(witness, dict):
+        return False
+    host = witness.get("host")
+    pid = witness.get("pid")
+    if not isinstance(host, str) or not host:
+        return False
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if owner.get("claim_host") != host or owner.get("claim_pid") != pid:
+        return False
+    started = owner.get("claim_start")
+    if started and witness.get("start") and started != witness.get("start"):
+        return False
+    return True
+
+
+def reclaim(
+    project: str,
+    *,
+    witness: dict | None = None,
+    log: Callable[[str], None] | None = None,
+) -> dict:
     """The user's one-click reclaim of ONE project: revoke it if — and only if —
-    its holder is a PROVEN orphan (a live window is never taken away by a
-    button; the UI can report that instead).
+    its holder is a proven orphan (a live window is never taken away by a button;
+    the UI can report that instead).
+
+    ``witness`` extends the same rule to a claim this host cannot see: the
+    client's machine says the window that claimed this lock is gone, and it is
+    the only machine that could know. Without it, a lock taken on behalf of a
+    window on another machine stays "remote_claim" — held, reported, untouchable
+    from here — which is what the next start of that client would otherwise be
+    stuck behind until a reaper's stale window ran out (report: reopened after a
+    restart, offered read-only for a project nothing had open).
 
     Returns the lock before the attempt, what was done, and why, so the UI can
     say what actually happened instead of assuming it worked."""
@@ -326,8 +392,11 @@ def reclaim(project: str, *, log: Callable[[str], None] | None = None) -> dict:
         else:
             report["why"] = "the lock was already free"
         return report
-    if target.state != ORPHAN:
+    attested = target.state == REMOTE_CLAIM and witnessed(target.owner, witness)
+    if target.state != ORPHAN and not attested:
         report["why"] = target.detail or "the holder is not a proven orphan"
+        if target.state == REMOTE_CLAIM and witness:
+            report["why"] = "the witness does not name the window that claimed this lock"
         return report
     freed, why = revoke(target)
     if freed:
@@ -335,7 +404,8 @@ def reclaim(project: str, *, log: Callable[[str], None] | None = None) -> dict:
         report["revoked"] = True
         report["why"] = why
         if log:
-            log(f"[locks] user reclaimed {key}: {why}")
+            how = "its own machine proved the claiming window gone" if attested else why
+            log(f"[locks] user reclaimed {key}: {how}")
     else:
         report["why"] = f"{why}, but the lock is still held"
     return report

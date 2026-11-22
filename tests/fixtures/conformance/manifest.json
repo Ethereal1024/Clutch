@@ -132,5 +132,5 @@
     "<HOME>"
   ],
   "source": "the Python `local` host (agent/server.py build()), deployment A/C",
-  "version": "0.1.64"
+  "version": "0.2.0"
 }

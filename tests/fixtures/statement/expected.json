@@ -50,7 +50,7 @@
   "launch_prefix": [
     {
       "name": "a service answers with no prefix",
-      "kind": "resident",
+      "service": true,
       "resolved": {
         "argv": [
           "python3",
@@ -67,7 +67,7 @@
     },
     {
       "name": "an installed onefile is one word",
-      "kind": "perCall",
+      "service": false,
       "resolved": {
         "argv": [
           "/usr/local/bin/clutch-probe"
@@ -82,7 +82,7 @@
     },
     {
       "name": "a checkout is interpreter + entry",
-      "kind": "perCall",
+      "service": false,
       "resolved": {
         "argv": [
           "python3",
@@ -98,7 +98,7 @@
     },
     {
       "name": "a package goes on PYTHONPATH",
-      "kind": "perCall",
+      "service": false,
       "resolved": {
         "argv": [
           "python3",
@@ -115,7 +115,7 @@
     },
     {
       "name": "quoting survives the prefix",
-      "kind": "perCall",
+      "service": false,
       "resolved": {
         "argv": [
           "python3",
@@ -131,7 +131,7 @@
     },
     {
       "name": "no artifact",
-      "kind": "perCall",
+      "service": false,
       "unavailable": "clutch-probe is not installed on this host",
       "expect": {
         "error": "clutch-probe is not installed on this host"
@@ -477,11 +477,7 @@
       "root": "/home/u/proj",
       "expect": {
         "module": "clutch-probe",
-        "root": "/home/u/proj",
-        "fence": [
-          "/home/u/proj/demo.clc",
-          "demo.clc"
-        ]
+        "local": false
       }
     },
     {
@@ -511,8 +507,7 @@
       "root": ".",
       "expect": {
         "module": "clutch-probe",
-        "root": ".",
-        "fence": []
+        "local": false
       }
     }
   ],
@@ -520,11 +515,7 @@
     {
       "name": "the client answers",
       "module": "clutch-probe",
-      "root": "/home/u/proj",
-      "fence": [
-        "/home/u/proj/demo.clc",
-        "/home/u/proj/notes.clc"
-      ],
+      "local": false,
       "template": "read_file {*}",
       "args": {
         "path": "a.txt"
@@ -548,23 +539,14 @@
           {
             "path": "a.txt"
           },
-          30.0,
-          "/home/u/proj",
-          [
-            "/home/u/proj/demo.clc",
-            "/home/u/proj/notes.clc"
-          ]
+          30.0
         ]
       ]
     },
     {
       "name": "the client reports an error",
       "module": "clutch-probe",
-      "root": "/home/u/proj",
-      "fence": [
-        "/home/u/proj/demo.clc",
-        "/home/u/proj/notes.clc"
-      ],
+      "local": false,
       "template": "read_file {*}",
       "args": {
         "path": "a.txt"
@@ -588,23 +570,14 @@
           {
             "path": "a.txt"
           },
-          30.0,
-          "/home/u/proj",
-          [
-            "/home/u/proj/demo.clc",
-            "/home/u/proj/notes.clc"
-          ]
+          30.0
         ]
       ]
     },
     {
       "name": "the channel refuses",
       "module": "clutch-probe",
-      "root": "/home/u/proj",
-      "fence": [
-        "/home/u/proj/demo.clc",
-        "/home/u/proj/notes.clc"
-      ],
+      "local": false,
       "template": "read_file {*}",
       "args": {
         "path": "a.txt"
@@ -627,12 +600,7 @@
           {
             "path": "a.txt"
           },
-          30.0,
-          "/home/u/proj",
-          [
-            "/home/u/proj/demo.clc",
-            "/home/u/proj/notes.clc"
-          ]
+          30.0
         ]
       ]
     }
@@ -1099,7 +1067,7 @@
       },
       "reply": null,
       "expect": {
-        "content": "ERROR: clutch-probe serves the filesystem of the machine this workspace root lives on, and this root is another machine's",
+        "content": "ERROR: read_file is not available in this session (clutch-probe serves the filesystem of the machine this workspace root lives on, and this root is another machine's); do not call it again — use the tools this request offers.",
         "error": true
       },
       "trace": []
@@ -1140,7 +1108,7 @@
       },
       "reply": null,
       "expect": {
-        "content": "ERROR: unknown component: clutch-probe",
+        "content": "ERROR: read_file is not available in this session (unknown component: clutch-probe); do not call it again — use the tools this request offers.",
         "error": true
       },
       "trace": []
@@ -1476,7 +1444,7 @@
       ]
     },
     {
-      "name": "a client's write keeps its record too",
+      "name": "a client's write is the client's to undo, not this host's",
       "kind": "clientRun",
       "component": "clutch-ws",
       "template": "write_file {*}",
@@ -1508,10 +1476,6 @@
         "error": false
       },
       "trace": [
-        "resolve a.txt",
-        "read /home/u/proj/a.txt",
-        "snapshot /home/u/proj/a.txt old contents",
-        "record /home/u/proj/a.txt 1 old contents",
         "send clutch-ws write_file {*} {\"path\": \"a.txt\"}"
       ]
     }

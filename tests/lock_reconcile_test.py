@@ -308,6 +308,65 @@ def test_reclaim_refuses_a_live_window(tmp: str) -> None:
         os.unlink(pl._local_lock_path(key))
 
 
+def test_a_remote_claim_is_freed_only_on_that_machines_witness(tmp: str) -> None:
+    """A claim that names ANOTHER machine is that machine's to prove gone.
+
+    This host can never read a pid table that is not its own, so it says so
+    ("remote_claim") instead of reading its own answer into the same number.
+    The lock is freed on the claiming machine's own witness, and only when that
+    witness names the very claim the record holds."""
+    pl.ProjectLock._held.clear()
+    key = _key(tmp)
+    host = "some-other-machine"
+    # 999999 is certainly not a window here: this host must never look at it
+    child = _spawn("--hold-remote", key, host, "999999")
+    try:
+        _await_line(child, "held")
+        state = _await_state(key, "remote_claim")
+        check(
+            host in state.detail,
+            f"the report names the one machine that can check it ({state.detail})",
+        )
+        refused = lr.reclaim(key)
+        check(refused["revoked"] is False, "without a witness nothing is revoked")
+        check(child.poll() is None and pl.ProjectLock.inspect(key)["held"], "and the lock stays held")
+        wrong_host = lr.reclaim(key, witness={"host": "yet-another-machine", "pid": 999999})
+        check(wrong_host["revoked"] is False, "a witness about another machine is not applied here")
+        wrong_pid = lr.reclaim(key, witness={"host": host, "pid": 999998})
+        check(wrong_pid["revoked"] is False, "a witness about another process is not applied here")
+        admitted = lr.reclaim(key, witness={"host": host, "pid": 999999})
+        check(admitted["revoked"] is True, f"the claiming machine's own witness frees it ({admitted})")
+        _await_gone(child)
+        check(not pl.ProjectLock.inspect(key)["held"], "the project is openable again")
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+        os.unlink(pl._local_lock_path(key))
+
+
+def test_a_claim_on_this_host_stays_a_local_question(tmp: str) -> None:
+    """`claim_host` naming THIS machine is not a remote claim: the kernel here is
+    the one that decides, exactly as for a record that names no host at all."""
+    import socket
+
+    pl.ProjectLock._held.clear()
+    key = _key(tmp)
+    child = _spawn("--hold-remote", key, socket.gethostname(), "999999")
+    try:
+        _await_line(child, "held")
+        state = _await_state(key, "orphan")
+        check(
+            "window" in state.detail or "dead" in state.detail,
+            f"a local claim is decided by this kernel ({state.detail})",
+        )
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+        os.unlink(pl._local_lock_path(key))
+
+
 # ---- child modes -------------------------------------------------------------
 
 
@@ -346,6 +405,22 @@ def _child_ghost(key: str) -> int:
     os._exit(0)  # the recorded holder exits while the fork keeps the lock
 
 
+def _child_hold_remote(key: str, host: str, claim_pid: str) -> int:
+    """Hold a lock claimed by a window on a NAMED machine, exactly as a session
+    records it for a tunnelled client (agent/server.py --claim-host): the claim
+    and its host, with no local process table read into either."""
+    pl.set_context(
+        port=19400,
+        claim="window",
+        claim_host=host,
+        claim_pid=int(claim_pid),
+    )
+    handle = pl.ProjectLock.acquire(key)
+    print("held" if handle is not None else "refused", flush=True)
+    while True:
+        time.sleep(1)
+
+
 def _child_claimant() -> int:
     print("claimant", flush=True)
     while True:
@@ -367,6 +442,8 @@ if __name__ == "__main__":
             if hasattr(os, "fork") and os.name == "posix":
                 test_ghost_and_unowned_are_reported_not_killed(tmp)
             test_reclaim_refuses_a_live_window(tmp)
+            test_a_remote_claim_is_freed_only_on_that_machines_witness(tmp)
+            test_a_claim_on_this_host_stays_a_local_question(tmp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         print("lock_reconcile_test: all checks passed")
@@ -375,6 +452,8 @@ if __name__ == "__main__":
         sys.exit(_child_claimant())
     if args[0] == "--hold":
         sys.exit(_child_hold(args[1], args[2] if len(args) > 2 else "no-claim"))
+    if args[0] == "--hold-remote":
+        sys.exit(_child_hold_remote(args[1], args[2], args[3]))
     if args[0] == "--ghost":
         sys.exit(_child_ghost(args[1]))
     raise SystemExit(f"unknown mode: {args[0]}")

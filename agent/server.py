@@ -82,7 +82,8 @@ from .api.settings import SettingsMixin
 from .api.workspace import WorkspaceMixin
 from .base import BaseServer, Broadcaster, RunState
 from .config import API_PROTOCOLS, REASONING_EFFORT_LEVELS, Config, flatten_settings
-from .core.project_lock import set_context as set_lock_context
+from .core import claim_watch
+from .core.project_lock import ProjectLock, set_context as set_lock_context
 from .events import FinalEvent, StateUpdateEvent
 from .project import Project
 from .tools.workspace import Workspace
@@ -443,6 +444,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--claim-host",
+        default=None,
+        help=(
+            "the machine the claiming window runs on. It defaults to this host "
+            "(a local window); a session started for a window on another machine "
+            "names that machine, and then this host records the claim without "
+            "ever reading its own process table into it"
+        ),
+    )
+    parser.add_argument(
         "--base-url",
         default=None,
         help=(
@@ -495,28 +506,70 @@ def main() -> int:
     srv = build(config, broadcaster, state)
     # a session released mid-run still leaves a settled transcript (POSIX)
     install_release_handler(state)
-    # A window that went away does not keep its project's write lock: the claim
-    # record names the claiming WINDOW process, and the host's reconciler ends a
-    # session whose claimant the kernel reports dead (agent/core/lock_reconcile.py).
-    # Nothing here watches for silence — a heartbeat or subscriber count cannot
+    # A window that went away does not keep its project's write lock, and this
+    # process is where that is decided — not by a timer here, and not by the
+    # host's reconciler 30 s later. See _claim_gone below.
+    # Silence is still never evidence: a heartbeat or subscriber count cannot
     # tell a closed window from a tunnelled phone, and guessing was the incident.
+    # What IS evidence is the kernel's answer about the claiming process.
 
     # --port 0 makes the OS pick a free port; stdout is the only channel back to
     # the spawning Electron shell, so print the REAL bound port — always as the
     # loopback address, because the UI's port regex keys on 127.0.0.1:<port>.
     bound_port = config.port  # build() published what the socket got, not the 0
     # Name this session in the records its project locks carry: the port it
-    # serves on, and the WINDOW process that claimed it. That record is how the
-    # host tells an orphan (window gone, lock must go) from a frozen phone
-    # (window exists, silence means nothing) without a clock — see
-    # agent/core/lock_reconcile.py. Both facts arrive before any project can be
-    # opened, because opening one is an HTTP request and serving starts below.
+    # serves on, and the app process that claimed it (the Electron MAIN process —
+    # whose death IS the app's death; a renderer can be replaced while the window
+    # lives). That record is how the host tells an orphan (app gone, lock must go)
+    # from a frozen client (process exists, silence means nothing) without a
+    # clock — see agent/core/lock_reconcile.py. Both facts arrive before any
+    # project can be opened, because opening one is an HTTP request and serving
+    # starts below.
+    #
+    # A claim names the machine it lives on (--claim-host). For a session a far
+    # side started for a client behind a tunnel, that is the CLIENT's machine and
+    # this host can never see the claiming process; the record still names it,
+    # because the only machine that can prove that window gone is the one named.
+    here = socket.gethostname()
+    claim_host = args.claim_host or here
+    claim_is_local = claim_host == here
     set_lock_context(
         port=bound_port,
         claim="window" if args.claim_pid else None,
+        claim_host=claim_host if args.claim_pid else None,
         claim_pid=args.claim_pid,
         claim_start=args.claim_start,
     )
+
+    # THE guarantee: this session does not outlive the app that claimed it, and
+    # the .clc write locks it holds die with it (the kernel drops them at exit).
+    #
+    # Not a timer and not a heartbeat: the kernel's answer about the claiming
+    # process, asked once a second by the only process that can act on it. A
+    # closed window, a crashed shell, a `kill -9` and a power cut are the same
+    # fact here (the process is gone) and all of them end with this process
+    # exiting. Nothing on this side is lost by that: the run loop lives in the
+    # client (P2-3), so a run whose client is gone has no one left to finish it —
+    # a surviving session would only hold a lock nobody can use, which is what
+    # the next start then asked the user to "reclaim".
+    def _claim_gone() -> None:
+        print("[clutch-server] the app that claimed this session is gone; releasing", flush=True)
+        record_release(state)  # a run in flight still gets its `released` final
+        ProjectLock.release_all()  # free the .clc NOW instead of at process death
+        if os.name == "posix":
+            # reuse the release path: one final (guarded), then out of serve_forever
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(3.0)  # a main thread stuck in a handler must not pin the locks
+        os._exit(0)  # Windows: no deliverable SIGTERM (the documented caveat)
+
+    # The watchdog runs on the machine that can SEE the claiming process. When
+    # the claim names another machine this pid is not ours to read — the same
+    # number here may well be some stranger — and that machine's session is the
+    # one that ends it: the client asks this host's /api/locks/reclaim with its
+    # own kernel's answer (lock_reconcile.witnessed).
+    if claim_is_local:
+        claim_watch.watch(args.claim_pid, args.claim_start, _claim_gone)
+
     # a window that fell back to read-only gets its claim back the moment the
     # kernel says the .clc is free — by ASKING, never by releasing anything
     threading.Thread(

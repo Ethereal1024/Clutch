@@ -293,32 +293,55 @@ def unavailable_reason(module: str) -> str:
     return ""
 
 
-def serves_workspace_fs(module: str) -> bool:
-    """True when the component serves the WORKSPACE root's own filesystem.
+def reaches_another_machine(mod: catalog.Component) -> bool:
+    """True when the component answers for a filesystem that is not this host's.
 
-    Its subject is the machine the root lives on, so a statement may only be
-    spoken to it while the workspace IS that machine (registry.module_blocked_reason); a
-    component serving anything else — the app's project file, the network, a
-    library of its own — is unaffected by where the workspace lives. Keyed on the
-    subject and not on how the statement is spoken: a service serving a foreign
-    filesystem over a channel it owns is a service too, and it is not this.
+    Two spellings say the same thing, and both are read here because both are in
+    the wild:
+
+      * `subject: foreign-fs` is 0.1.x's word for it (a component that reaches the
+        far side of a channel), and a declaration carrying it still means that;
+      * since 0.2.0 the ssh plugin declares the workspace's OWN subject
+        (`workspace-fs`) and nothing but an `entry` — a FRONTEND half, whose code
+        the client runs and whose commands travel down the tunnel to the machine
+        holding the root (clutch-ssh-workspace's README: "one that declares only
+        `entry` serves the root's machine over a channel"). What it contributes,
+        not what it is called, is where it runs.
+
+    Either way the root has to be somewhere else for the component's tools to
+    mean anything: on a local workspace the same tools exist natively, and this
+    one would read or write a different machine than the root names.
+    """
+    if mod.subject == catalog.FOREIGN_FS:
+        return True
+    return mod.subject == catalog.WORKSPACE_FS and mod.client_side
+
+
+def serves_workspace_fs(module: str) -> bool:
+    """True when the component serves the WORKSPACE root's filesystem FROM HERE.
+
+    Its subject is the machine the root lives on, and its process is this host's
+    to start, so a statement may only be spoken to it while the workspace IS this
+    machine (`prompt.module_blocked_reason`); a component serving anything else —
+    the app's project file, the network, a library of its own — is unaffected by
+    where the workspace lives. The same subject reached over a channel is the
+    other half of the axis (`reaches_another_machine`), not this.
     """
     mod = catalog.table().get(module)
-    return mod is not None and mod.subject == catalog.WORKSPACE_FS
+    return mod is not None and mod.subject == catalog.WORKSPACE_FS and mod.runs_here
 
 
 def serves_foreign_fs(module: str) -> bool:
-    """True when the component serves a filesystem that is NOT the root's machine.
+    """True when the component serves the root's filesystem from ANOTHER machine.
 
-    The other half of the sentence above, and the one `TODO(ssh-workspace)` asked
-    for: a `foreign-fs` component reaches the machine on the far side of a
-    channel (clutch-ssh-workspace, over an ssh tunnel), so it is the workspace
-    that has to be somewhere else for its tools to mean anything. On a local
-    session the same tools exist natively, and calling this one there would read
-    or write a different machine than the root names.
+    The other half of the sentence above: the tools mean the machine at the far
+    end of a channel (clutch-ssh-workspace, over an ssh tunnel), so it is the
+    workspace that has to be elsewhere — and on a local session the same tools
+    exist natively, which is why they are dropped rather than shadowing them
+    (`registry._serves_this_workspace`, `prompt.module_blocked_reason`).
     """
     mod = catalog.table().get(module)
-    return mod is not None and mod.subject == catalog.FOREIGN_FS
+    return mod is not None and reaches_another_machine(mod)
 
 
 def fence_globs(protected: Iterable[Path | str], root: str | Path) -> tuple[str, ...]:

@@ -923,6 +923,72 @@ def main() -> int:
                 "the dead session's beat is refused",
             )
             check(ok, "a beat for a session that exited answers 404 (no phantom session)")
+
+            # ---- a claim that names ANOTHER machine: recorded, never checked ----
+            # The far side cannot read the client's process table, so it must not
+            # even try: the same pid here is a stranger. The claim rides into the
+            # lock records untouched, and only the named machine's witness (its
+            # own kernel's answer) can free the lock — which is what a client
+            # behind a tunnel sends when its window is gone.
+            st, body = http_post(
+                f"{base18}/api/session/start",
+                {"claim_pid": os.getpid(), "claim_start": "1234567", "claim_host": "elsewhere"},
+            )
+            check(st == 200, "a session can be claimed by a window on another machine")
+            d = json.loads(body)
+            rec = sup18.sessions[d["session_id"]]
+            args = rec.proc.args
+            check(args[args.index("--claim-host") + 1] == "elsewhere", "the child is told WHICH machine claims it")
+            check(
+                args[args.index("--claim-start") + 1] == "1234567",
+                "and the start tick the CLIENT reported (a local read would be this host's answer)",
+            )
+            check(
+                rec.claim_pid is None and rec.claim_start is None,
+                "the reaper holds no local pid for a claim it can never see",
+            )
+            remote_child = f"http://127.0.0.1:{d['port']}"
+            with tempfile.TemporaryDirectory() as rdir:
+                st, body = http_post(f"{remote_child}/api/project/new", {"dir": rdir, "name": "tunnelled"})
+                check(st == 200, "the session opens a project")
+                rclc = json.loads(body)["project"]
+                rrecord = pl.ProjectLock.owner(rclc) or {}
+                check(
+                    rrecord.get("claim_host") == "elsewhere",
+                    "the lock names the machine that can check the claim",
+                )
+                check(rrecord.get("claim_pid") == os.getpid(), "and the window process, as its machine reported it")
+                check(rrecord.get("claim_start") == "1234567", "and that window's start tick")
+
+                rlocks = json.loads(http_get(f"{base18}/api/locks")[1])["locks"]
+                rmine = [lk for lk in rlocks if lk.get("project") == str(Path(rclc).resolve())]
+                check(
+                    len(rmine) == 1 and rmine[0]["state"] == "remote_claim",
+                    f"this host reports the claim as another machine's to check ({rmine})",
+                )
+                st, body = http_post(f"{base18}/api/locks/reclaim", {"project": rclc})
+                check(json.loads(body)["revoked"] is False, "and never revokes it on its own")
+                st, body = http_post(
+                    f"{base18}/api/locks/reclaim",
+                    {"project": rclc, "witness": {"host": "somewhere-else", "pid": os.getpid()}},
+                )
+                check(
+                    json.loads(body)["revoked"] is False,
+                    "a witness naming another machine is not applied to this lock",
+                )
+                st, body = http_post(
+                    f"{base18}/api/locks/reclaim",
+                    {"project": rclc, "witness": {"host": "elsewhere", "pid": os.getpid(), "start": "1234567"}},
+                )
+                rverdict = json.loads(body)
+                check(
+                    rverdict["revoked"] is True,
+                    f"the claiming machine's own witness frees it ({rverdict.get('why')})",
+                )
+                check(
+                    wait_until(lambda: not pl.ProjectLock.inspect(rclc)["held"], 15.0, "the remote claim freeing"),
+                    "the project is openable again",
+                )
     finally:
         sup18.shutdown_all()
         if claimant.poll() is None:

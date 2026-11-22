@@ -290,19 +290,26 @@ def main() -> int:
     #     contributes (`service`/`launch` or the client's `entry`), and that is a
     #     separate fact from WHOSE resources it serves (subject), which is what
     #     makes a statement legal for a given workspace at all
-    #     (registry.module_blocked_reason).
+    #     (registry.module_blocked_reason). What the two predicates below read is
+    #     both axes together: the workspace's own subject, served from HERE or from
+    #     the far end of a channel.
     check(rendezvous.serves_workspace_fs(modules.WORKSPACE), "the workspace component serves the workspace filesystem")
     for other in (modules.WEBSEARCH, modules.SKILLS):
         check(not rendezvous.serves_workspace_fs(other), f"{other} is not tied to the workspace's machine")
     check(not rendezvous.serves_workspace_fs("clutch-nope"), "an unknown component serves nothing")
-    # the OTHER half of the same axis: a component that reaches ANOTHER machine's
-    # filesystem (clutch-ssh-workspace, a client plugin over the ssh tunnel). It is
+    # the OTHER half of the same axis: the same filesystem, reached from ANOTHER
+    # machine (clutch-ssh-workspace, a client plugin over the ssh tunnel). It is
     # the first declaration in this repo with no process here at all, which is why
-    # the check below no longer claims that axis is unused.
+    # the check below no longer claims that axis is unused — and since 0.2.0 it
+    # says so by DECLARING the workspace's own subject and no process here (an
+    # `entry` and nothing else), which is what makes it the frontend half rather
+    # than the backend one; `foreign-fs` is the word 0.1.x used for the same thing.
     ssh_workspace = "clutch-ssh-workspace"
-    check(rendezvous.serves_foreign_fs(ssh_workspace), "the ssh plugin serves a foreign filesystem")
+    ssh_mod = catalog.table().get(ssh_workspace)
+    check(ssh_mod is not None and ssh_mod.client_side, "the ssh plugin declares no process on this host")
+    check(rendezvous.serves_foreign_fs(ssh_workspace), "the ssh plugin serves the root's filesystem from another machine")
     for other in (modules.WORKSPACE, modules.WEBSEARCH, modules.WEBSEARCH, modules.SKILLS):
-        check(not rendezvous.serves_foreign_fs(other), f"{other} is not a foreign filesystem")
+        check(not rendezvous.serves_foreign_fs(other), f"{other} is not a filesystem on another machine")
     check(not rendezvous.serves_foreign_fs("clutch-nope"), "an unknown component serves nothing there either")
     elsewhere = [mod.name for mod in catalog.table().values() if mod.client_side]
     check(elsewhere == [ssh_workspace],
