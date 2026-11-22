@@ -30,7 +30,7 @@
 const fs = require("fs");
 const path = require("path");
 const {
-  check, summary, slicer, uiSource, uiModules, runnableSnippet, stateStub,
+  check, summary, slicer, uiSource, uiModules, runnableSnippet, stateStub, installRecordLedger,
 } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
@@ -193,6 +193,9 @@ global.refreshTree = () => {};
 global.autoFoldTurn = () => {};
 global.refreshRollbackAnchors = () => {};
 global.resetRollbackAnchors = () => {};
+
+// the closed-block ledger addEvent/applyStreamEvent touch (stream-events.ts)
+installRecordLedger();
 
 for (const name of [
   "switchBackend", "dropStaleBackend", "escapeHtml", "renderMarkdown",

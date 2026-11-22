@@ -91,6 +91,23 @@ const reclaimOf = (win, notice) =>
   check((await provenOrphanOf({})("/tmp/a.clc")) === false, "a shell with no lock API (Android) simply has no answer");
   check((await provenOrphanOf(orphanHost(calls))(null)) === false, "no project named, nothing to look up");
 
+  // ---- WHICH machine is asked: the tab's own session, never the window's ----
+  // A lock lives on the machine the project lives on, and the shell reaches that
+  // machine's supervisor through the claim of the slot that holds the session.
+  // Asked without a slot, the answer comes from this machine's supervisor — so a
+  // project on a far host read as "no such lock here" and the pane fell through
+  // to "open read-only?" while nobody else had it open: the fix-train report.
+  let askedSlot = "unset";
+  await provenOrphanOf({
+    clutchLocks: {
+      list: async (slotId) => {
+        askedSlot = slotId;
+        return { locks: [] };
+      },
+    },
+  })("/tmp/a.clc", "tab-7");
+  check(askedSlot === "tab-7", "the page asks the host about the TAB's session, which is what picks the machine");
+
   // ---- taking it back: the HOST's verdict is the answer ----
   const notices = [];
   const notice = (m) => notices.push(m);
@@ -124,6 +141,21 @@ const reclaimOf = (win, notice) =>
   check(notices.at(-1).includes("connection refused"), "and says so, instead of failing silently");
   check((await reclaimOf({}, notice)("/tmp/a.clc")) === false, "no lock API -> no action");
 
+  // the reclaim has to reach the SAME machine the verdict came from
+  let reclaimedSlot = "unset";
+  check(
+    (await reclaimOf({
+      clutchLocks: {
+        reclaim: async (project, slotId) => {
+          reclaimedSlot = slotId;
+          return { revoked: true, why: "terminated" };
+        },
+      },
+    }, notice)("/tmp/a.clc", "tab-7")) === true,
+    "the reclaim is sent for the tab's session too",
+  );
+  check(reclaimedSlot === "tab-7", "so the host that HOLDS the lock is the one that is asked to let go");
+
   // ---- the wiring the page actually ships ----
   check(/e\.owner = err\.owner/.test(PROJECT), "the 409's owner reaches the dialog");
   check(/e\.project = err\.project/.test(PROJECT), "and the exact file the host locked");
@@ -134,7 +166,10 @@ const reclaimOf = (win, notice) =>
     conflict.indexOf("provenOrphan") > -1 && conflict.indexOf("provenOrphan") < conflict.indexOf("Open read-only"),
     "the takeover is offered BEFORE the read-only fallback (and only when the host proves it)",
   );
-  check(/await reclaimLock\(e\.project\)/.test(conflict), "and taking it back goes through the host's reclaim");
+  check(/await provenOrphan\(e\.project, tab\.id\)/.test(conflict),
+    "and the question names the tab's own session, which is what reaches the machine holding the lock");
+  check(/await reclaimLock\(e\.project, tab\.id\)/.test(conflict),
+    "and taking it back goes through the host's reclaim, for THIS tab's session");
   check(/await openInTab\(tab, base, readOnly, seq\)/.test(conflict), "a successful reclaim reopens the project it was asked for");
 
   const preload = fs.readFileSync(path.join(ROOT, "ui", "preload.js"), "utf8");

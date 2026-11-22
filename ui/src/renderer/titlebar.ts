@@ -14,7 +14,7 @@ import { setMode } from "./env";
 import { state } from "./state";
 import { busy } from "./stream-view";
 import { currentProject, openProject } from "./project";
-import { tabActivate, tabClose, tabCloseAll, tabCloseOthers, tabReopen, closedTabCount } from "./tab-bar";
+import { tabActivate, tabClose, tabCloseAll, tabCloseOthers, tabReopen, closedTabCount, tabMarkState } from "./tab-bar";
 import { NARROW_Q, shellPanel, setShellPanel, toggleHidden } from "./workspace-panel";
 import { openSettings, showSettingsTab } from "./settings";
 import { openFsBrowser } from "./fs-browser";
@@ -133,7 +133,10 @@ function renderOpenTabs() {
   }
   for (const tab of state.tabs) {
     const mark = tab.id === state.activeTabId ? "✓ " : "";
-    const dot = tab.needsInput ? "  ●" : tab.running ? "  ◐" : "";
+    // the switcher says the same ONE thing the strip's dot does (tab-bar.ts
+    // tabMarkState): a tab waiting for the user is not also drawn as busy
+    const tabState = tabMarkState(tab);
+    const dot = tabState === "ask" ? "  ●" : tabState === "run" ? "  ◐" : "";
     const item = ddItem("activate-tab", mark + tab.name + dot, { tab: tab.id });
     item.title = tab.path;
     if (tab.id === state.activeTabId) item.classList.add("active-tab");

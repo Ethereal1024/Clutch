@@ -59,11 +59,31 @@ function handlerBody(src, name) {
     "an idle fold does nothing at all — a turn is continued, never invented"
   );
   check(/host\.drive\(slotId\)/.test(body), "an open fold is driven by the host: the SAME call the Run button makes");
+  check(/if \(answer\.driven\) return;/.test(body),
+    "a turn this window is ALREADY driving is not resumed: that second drive was the 'a step is already running' on every switch");
+  const atRefusal = body.indexOf('e.code === "run_active"');
+  const branch = body
+    .slice(atRefusal, body.indexOf("return;", atRefusal) + 7)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
+  check(
+    atRefusal > 0 && /return;\s*$/.test(branch.trim()) && !/setStatus\(|setTabRunning\(/.test(branch),
+    "a refused drive (somebody already has the wheel) leaves the badge alone: the old idle flip is what made a live tab look dead"
+  );
   check(!/fetch\(|apiFetch\(/.test(body), "the page reads no log of its own: the fold is the host's answer");
   check(!/type: *"final"/.test(body), "and it writes nothing: the turn's ending is the loop's own line");
   check(
     /e\.code === "run_active"/.test(body) && /another window/.test(body),
     "another window's driver is reported as such, not as a dead session"
+  );
+
+  // the Run button's own door: a refusal is not a failed run
+  const runBody = slicer(src).fnBody("run");
+  const atActive = runBody.indexOf('e.code === "run_active"');
+  const atFailed = runBody.indexOf('"run failed: "');
+  check(
+    atActive > 0 && atFailed > atActive && /return;/.test(runBody.slice(atActive, atFailed)),
+    "a click that meets a drive already in flight stays on it instead of writing 'run failed' over a running turn"
   );
 }
 
@@ -113,6 +133,18 @@ function handlerBody(src, name) {
     /code: \(err && err\.code\) \|\| null/.test(state),
     "its refusal carries the code (run_active, no_session) the page decides on"
   );
+  // ONE wheel per turn: a second start/drive on an instance that is already
+  // driving is refused BEFORE it can step the loop — the session's own lease
+  // cannot catch it (claim_run refuses only a different project).
+  check(/const refuseIfDriving = \(inst\) =>/.test(src), "the host has one refusal for a turn it is already driving");
+  for (const name of ["run:start", "run:run", "run:step", "run:drive"]) {
+    const h = handlerBody(src, name);
+    check(/refuseIfDriving\(/.test(h), `${name} refuses before it touches a loop that is already driving`);
+  }
+  check(!/refuseIfDriving\(/.test(handlerBody(src, "run:stop")),
+    "run:stop stays allowed: it is how a drive is cancelled");
+  check(/driven: !!got\.inst\.driving/.test(state),
+    "run:state says whether THIS window is the one driving — the half of the answer the fold cannot carry");
 }
 
 // ---- 4. ...and on the phone's wire ----
@@ -125,6 +157,11 @@ function handlerBody(src, name) {
     "rebuilt when the base, the mode or the project changed — the same three facts as the desktop");
   check(/state: async \(first, second\)[^]*ensureRun\(slotId, payload\)/.test(src), "the phone's state() builds on demand and takes the payload");
   check(!/result: \{ phase: "idle" \}/.test(src), "and it no longer answers idle for a missing instance");
+  check(/const refuseIfDriving = \(inst\) =>/.test(src) &&
+    (src.match(/refuseIfDriving\(/g) || []).length >= 4,
+    "the phone refuses a second wheel too: start, run, step and drive all go through it");
+  check(/driven: !!\(inst && inst\.driving\)/.test(src),
+    "…and its state() carries the same `driven` the page skips on");
 }
 
 // ---- 5. the payload crosses both bridges (a dropped one asks with no claim) ----

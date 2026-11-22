@@ -44,15 +44,25 @@ export function renderTextBlock(force = false) {
   }
   textRenderLast = now;
   if (!state.lastTextEl) return;
-  const bodyEl = state.lastTextEl.querySelector(".body");
-  bodyEl.innerHTML = renderMarkdown(state.lastTextContent);
-  state.lastTextEl._mathDone = false; // fresh content: the flush owes a math pass
-  highlightCode(state.lastTextEl, true);
-  if (force && !stream.classList.contains("loading")) {
-    typesetMath(state.lastTextEl);
-    state.lastTextEl._mathDone = true;
-  }
+  paintTextBlock(state.lastTextEl, state.lastTextContent, force);
   autoScroll();
+}
+
+// Paint a text block for the text it now holds: the body render, the code pass and
+// — once the text will not grow again (`settled`) — the math pass. The streaming
+// pass above and the record that completes a closed block (stream-events.ts
+// completeRecord) both come through here, so an answer its record wrote whole is
+// painted exactly like one its last delta completed.
+export function paintTextBlock(el, text, settled = false) {
+  const bodyEl = el.querySelector(".body");
+  if (!bodyEl) return;
+  bodyEl.innerHTML = renderMarkdown(text);
+  el._mathDone = false; // fresh content: the flush owes a math pass
+  highlightCode(el, true);
+  if (settled && !stream.classList.contains("loading")) {
+    typesetMath(el);
+    el._mathDone = true;
+  }
 }
 export function scheduleTextRender() {
   if (state.textRenderRaf) return;

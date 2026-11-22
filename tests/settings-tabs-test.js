@@ -304,21 +304,25 @@ function makePage(opts) {
     "the pane fills what is left of the box, so the box's height is the pane's height plus the box's own chrome"
   );
 
-  // the --size is the file picker's, on purpose: the two jumps are the same kind
-  // of jump, so they are the same length (the comment in settings.js says so, and
-  // this is what keeps it from rotting). The sheet spells that length as a token,
-  // so the number is read out of the sheet the way the token is: a hardcoded 0.3s
-  // here would pin a copy of the value instead of the value.
+  // the --size is the sheet's own "a surface changing its own height" duration,
+  // and settings.js takes its length from there (a box travelling between two
+  // panes is exactly that kind of move). The number is read out of the sheet the
+  // way the token is: a hardcoded 0.42s here would pin a copy of the value
+  // instead of the value. The file picker's body collapses on a token too — the
+  // same one for the height and the fade, which is the property its comment in
+  // the sheet is about (a fade that outlives the collapse lingers over whatever
+  // moved up into its place); WHICH token it uses is the picker's call.
   const fsBody = decls(css, "#fs-body");
   const travel = fsBody.match(/transition:\s*([^;]+);/);
+  const heightToken = travel && travel[1].match(/max-height\s+var\((--[a-z0-9-]+)\)/);
   check(
-    Boolean(travel) && /max-height\s+var\(--size\)/.test(travel[1]),
-    "#fs-body still transitions its max-height — the motion this one is copied from"
+    Boolean(heightToken) && new RegExp(`opacity\\s+var\\(${heightToken[1]}\\)`).test(travel[1]),
+    "#fs-body still collapses its height — and its fade is the same length as the collapse"
   );
   const size = css.match(/--size:\s*([\d.]+)s\s*;/);
   check(
     Boolean(size) && Math.round(parseFloat(size[1]) * 1000) === vm.runInContext("SETTINGS_HEIGHT_MS", makePage().ctx),
-    "and the settings box travels for exactly as long as the file picker's body does"
+    "and the settings box travels for exactly as long as the sheet's --size says"
   );
   check(
     /prefers-reduced-motion: reduce/.test(css),

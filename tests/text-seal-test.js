@@ -13,16 +13,21 @@
 // where "……不是代码问题——所以我没替你" and "改 App 的安装目录。" became two
 // answers. The .clc held one complete assistant_message the whole time.
 //
-// The fix: the record is the authoritative copy of its step's text. When it
-// arrives with a live block that its content EXTENDS, it adopts the text into
-// that block and seals it; deltas still in flight for the step are the text the
-// block already says and are dropped. step_start (and a new user_message) open
-// the seal again — the seal is per model step, never a mute.
+// The rule the fix keeps: a text block either STREAMS (deltas extend it) or it is
+// CLOSED (state.textSealed), and a closed block has exactly one writer left — the
+// durable record that owns it: its step's assistant_message, or the run's `final`,
+// which repeats the last one (run-state.ts foldRun closes a turn with it). A
+// record whose content EXTENDS the block writes it whole, in place, and closes it;
+// deltas still in flight for that step are text the block already says and are
+// dropped. step_start (and a new user_message) open the seal again — the seal is
+// per model step, never a mute. A cut (a reconnect, a tab switch) CLOSES the block
+// it can no longer feed instead of taking it off the page, and files it with the
+// record that still owes it (the `awaiting` ledger).
 //
 // Like the other runners here this one drives the REAL addEvent/applyStreamEvent
 // and the real text-render path against stubs, so a silent edit fails it.
 
-const { check, summary, slicer, stateStub, runnableSnippet, uiSource, uiModules } = require("./harness.js");
+const { check, summary, slicer, stateStub, runnableSnippet, uiSource, uiModules, installRecordLedger } = require("./harness.js");
 
 const src = uiSource(); // the renderer, every module in page-load order
 const { fnBody } = slicer(src);
@@ -47,6 +52,14 @@ function fakeEl(tag) {
     _body: body,
     querySelector(sel) { return sel === ".body" ? body : null; },
     appendChild(child) { child.parent = node; node.children.push(child); return child; },
+    // a record's block goes above the block that is still streaming (the page
+    // reads in the log's own order)
+    insertBefore(child, ref) {
+      child.parent = node;
+      const i = node.children.indexOf(ref);
+      if (i >= 0) node.children.splice(i, 0, child); else node.children.push(child);
+      return child;
+    },
     remove() {
       node.removed = true;
       if (node.parent) {
@@ -71,9 +84,7 @@ global.autoScroll = () => {};
 global.renderEvent = () => null; // nothing outside the streaming layer is under test
 global.clearRetryNote = undefined; // the real one, loaded below
 global.flushThinkingRender = () => {}; // the reasoning path is not under test here
-global.flushThinkingRender = () => {}; // the reasoning path is not under test here
 // everything the branches this runner never enters would reach for
-global.pageSink = null;
 global.setRetryNote = () => {};
 global.closePerm = () => {};
 global.forgetAnsweredPerm = () => {};
@@ -98,18 +109,9 @@ global.setOlderPill = () => {};
 global.beginCatchUp = () => {};
 global.endCatchUp = () => {};
 global.clearStream = () => {};
-// the replay bracket (stream-view.ts) and the block a reconnect kept
-// (stream-events.ts): the evals below run as classic scripts, so the real
-// functions resolve these free names against the global scope
+// the replay bracket (stream-view.ts): the evals below run as classic scripts, so
+// the real functions resolve this free name against the global scope
 global.catchUp = false;
-global.carriedTextEl = null;
-global.carriedText = "";
-// the replay bracket (stream-view.ts) and the block a reconnect kept
-// (stream-events.ts): the evals below run as classic scripts, so the real
-// functions resolve these free names against the global scope
-global.catchUp = false;
-global.carriedTextEl = null;
-global.carriedText = "";
 
 // ---- load the real code ----
 // the coalesced text render (stream-text.ts): renderTextBlock is what paints the
@@ -121,9 +123,17 @@ const textSlice = slicer(streamText);
 (0, eval)(runnableSnippet(textSlice.fnBody("createAgentTextBlock")));
 (0, eval)(runnableSnippet(streamText.slice(streamText.indexOf("export let textRenderLast"), streamText.indexOf("export function flushThinkingRender"))));
 (0, eval)(runnableSnippet(fnBody("clearRetryNote")));
+(0, eval)(runnableSnippet(fnBody("dropScaffold")));
 (0, eval)(runnableSnippet(fnBody("discardLivePartial")));
+// the closed-block ledger (stream-events.ts): a cut KEEPS the block it closed and
+// files it with the record that still owes it, so that record writes it whole
+installRecordLedger();
+(0, eval)(runnableSnippet(fnBody("dropOrphanLive")));
 (0, eval)(runnableSnippet(fnBody("applyStreamEvent")));
 (0, eval)(runnableSnippet(fnBody("addEvent")));
+
+// the coalesced render is a frame away; this runner paints it by hand
+const paintPending = () => global.flushTextRender();
 
 // ---- helpers over the pane ----
 const textBlocks = () => eventsEl.children.filter((el) => /(^|\s)event(\s|$)/.test(el.className) && /(^|\s)text(\s|$)/.test(el.className));
@@ -142,10 +152,8 @@ function freshPane() {
   state.retryNoteEl = null;
   state.runSettled = false;
   state.sseRunLostPending = false;
-  // what a reconnect would have carried out of the previous pane
-  global.catchUp = false;
-  global.carriedTextEl = null;
-  global.carriedText = "";
+  global.catchUp = false; // the replay bracket (stream-view.ts)
+  global.awaiting.length = 0; // a fresh pane holds no block a record still owes
 }
 
 // ---- 1. the reported sequence: the record lands between two deltas ----
@@ -189,14 +197,16 @@ addEvent({ type: "text_delta", content: "second step" });
 check(textBlocks().length === 2 && state.lastTextContent === "second step",
   "and its first delta draws a block of its own, in order, under the first");
 
-// ---- 5. a record that belongs to an EARLIER step never clobbers the newer block ----
+// ---- 5. a record that belongs to an EARLIER step lands above the newer block ----
 freshPane();
 addEvent({ type: "text_delta", content: "step two is already speaking" });
 addEvent({ type: "assistant_message", content: "step one's text" }); // the same two feeds, a step behind
-check(state.lastTextEl === null && state.lastTextContent === "",
-  "a record its live block does not extend releases the pointer instead of adopting");
-check(textBlocks().length === 1 && textBlocks()[0]._body.innerHTML !== "<p>step one's text</p>",
-  "and the newer step's block keeps its own text: two steps are never merged into one answer");
+check(state.lastTextEl === textBlocks()[1] && state.lastTextContent === "step two is already speaking",
+  "a record its live block does not extend leaves the pointer with the step that is writing now");
+check(textBlocks().length === 2 && textBlocks()[0]._body.innerHTML === "<p>step one's text</p>",
+  "and the record draws its own block ABOVE it: the page reads in the log's own order");
+check(textBlocks()[1]._body.innerHTML !== "<p>step one's text</p>",
+  "the newer step's block keeps its own text: two steps are never merged into one answer");
 
 // ---- 6. a new task opens the seal; so does a discarded partial ----
 freshPane();
@@ -221,7 +231,7 @@ addEvent({ type: "text_delta", content: "the answer" }); // an echo, not a secon
 check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, "the answer") === 1,
   "a delta echoing the finished answer does not paint it again");
 
-// ---- 8. the reconnect: a settled answer is kept, an unfinished block is not ----
+// ---- 8. the reconnect: a settled answer is kept, an unfinished one becomes a hole ----
 //
 // The reported loss this pins: the window's own socket reconnects (minimize, a
 // phone returning from the background, the stale watchdog), es.onopen drops the
@@ -230,26 +240,36 @@ check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, 
 // or below the offset this window already painted. The pane then ended at a
 // `completed` divider with no answer above it ("git output → completed") while
 // the .clc held the answer all along.
-(0, eval)(runnableSnippet(fnBody("dropOrphanLive")));
 
 freshPane();
 addEvent({ type: "text_delta", content: OPEN });
 addEvent({ type: "assistant_message", content: OPEN + TAIL }); // the step's record adopted it
 check(state.textSealed === true, "the block holds its step's durable record");
+const adoptedEl = state.lastTextEl;
 dropOrphanLive(); // ...and then the socket comes back
 check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
   "a reconnect KEEPS a block that holds the durable record: the closing prose is not lost");
-check(state.lastTextEl === null && state.lastTextContent === "",
-  "…while releasing the live pointer, so a record the outage made it miss can still open its own block");
+check(state.lastTextEl === adoptedEl && state.lastTextContent === OPEN + TAIL,
+  "…and keeps the pointer to it: the record that owns this text is the only writer it has left");
+check(global.awaiting.length === 0,
+  "…filing nothing: a block its record already wrote is owed nothing by the log");
 check(state.textSealed === true,
   "…and the seal keeps the step's straggling deltas from repeating what the block says");
 
 freshPane();
 addEvent({ type: "text_delta", content: OPEN }); // still streaming: no record for it yet
 check(state.textSealed === false, "an unfinished block is not sealed");
+const cutEl = state.lastTextEl;
 dropOrphanLive();
-check(textBlocks().length === 0,
-  "an unfinished block is still dropped on reconnect: the dead attempt's deltas are never stored");
+check(textBlocks().length === 1 && !cutEl.removed,
+  "a cut KEEPS an unfinished block: its deltas are never stored, so deleting it is the opening lost for good");
+check(state.lastTextEl === cutEl && state.lastTextContent === OPEN && state.textSealed === true,
+  "…closes it and keeps the pointer, so the text after the cut cannot append itself to the half");
+check(global.awaiting.length === 1 && global.awaiting[0].el === cutEl && global.awaiting[0].text === OPEN,
+  "…and files it for the record that owns it, so that record can write THIS block whole");
+addEvent({ type: "text_delta", content: TAIL }); // the chunks that arrive after the cut
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 0,
+  "a closed block takes no more deltas: the text after the gap opens no block of its own");
 
 freshPane();
 addEvent({ type: "text_delta", content: OPEN });
@@ -259,13 +279,15 @@ check(state.runSettled === true, "the run is settled once its final landed");
 dropOrphanLive();
 check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
   "the closing prose of a finished run also survives a reconnect (runSettled, not the seal, is what keeps it)");
+check(global.awaiting.length === 0,
+  "…and a finished run owes no record: nothing is filed for it");
 
 // ---- 9. a live `completed` final puts its answer back when the pane lost it ----
 //
 // The final is the last record that can notice the answer is missing: foldRun
 // (run-state.ts) closes a turn by writing its last assistant_message AS the
 // completed summary, so the text is right there — and appendCompletion itself
-// prints nothing for `completed`, which is why nothing else can fall back.
+// prints nothing for `completed`, so no other frame carries it.
 freshPane();
 addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
 check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
@@ -292,12 +314,12 @@ check(textBlocks().length === 0, "an empty completed summary paints nothing");
 freshPane();
 addEvent({ type: "final", status: "aborted", summary: "the reason" });
 check(textBlocks().length === 0,
-  "only `completed` falls back: an aborted run's summary is the reason, shown by the divider");
+  "only a completed run hands its text over: an aborted run's summary is the reason, shown by the divider");
 
 freshPane();
 addEvent({ type: "text_delta", content: OPEN });
 addEvent({ type: "assistant_message", content: OPEN + TAIL });
-dropOrphanLive(); // the reconnect keeps the sealed answer and releases the pointer
+dropOrphanLive(); // the reconnect keeps the sealed answer and its pointer
 addEvent({ type: "final", status: "completed", summary: OPEN + TAIL }); // ...the final lands after it
 check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
   "a final that follows the keep does not paint the kept answer a second time");
@@ -309,9 +331,114 @@ dropOrphanLive();
 addEvent({ type: "user_message", content: "next task" });
 addEvent({ type: "final", status: "completed", summary: "a different answer" });
 check(textBlocks().length === 2 && occurrences(textBlocks()[1]._body.innerHTML, "a different answer") === 1,
-  "a new task ends the carry: its own answer is drawn even though the last one was kept");
+  "a new task ends the run before it: its own answer is drawn even though the last one was kept");
 
-// ---- 10. source-level guards: the state the fix lives in ----
+// ---- 10. the cut: a switched-away pane keeps its half, its record writes it whole ----
+//
+// The reported regression, exactly: the reader comes back to the tab and the
+// answer begins mid-sentence ("，下一次") with everything above it gone. A delta
+// is never stored and the record that painted the block was already delivered, so
+// a discarded half can never be continued NOR repainted — the halved block IS the
+// only copy of the opening this window will ever hold. So a cut CLOSES the block
+// (dropOrphanLive) and files it with the record that owns it: the continuation is
+// dropped instead of appended, and the step's own record — or, if that never
+// lands, the run's final — writes the block's text whole.
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+dropOrphanLive(); // the reader switched away and came back
+addEvent({ type: "text_delta", content: TAIL }); // the chunks that arrive after the cut
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 0,
+  "the text after the cut paints no block of its own: never an answer that starts mid-sentence");
+addEvent({ type: "assistant_message", content: OPEN + TAIL }); // the step's durable record
+check(textBlocks().length === 1 &&
+  occurrences(textBlocks()[0]._body.innerHTML, OPEN) === 1 &&
+  occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "that record writes the closed block WHOLE: the opening is back where it was, the tail appears once");
+check(state.lastTextContent === OPEN + TAIL && state.textSealed === true,
+  "…and the block is the step's copy again, so what is still in flight for it repeats nothing");
+check(global.awaiting.length === 0, "…and nothing is left filed for it");
+addEvent({ type: "text_delta", content: TAIL }); // a straggler of the same step
+check(occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "a straggler after the completion adds nothing to it");
+
+// a record that lags a whole step still completes ITS block, without seizing the
+// step now speaking (the two feeds into addEvent are unordered)
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+dropOrphanLive();
+addEvent({ type: "step_start" }); // the next model step begins while the pane was away
+addEvent({ type: "text_delta", content: "second step" });
+paintPending();
+check(textBlocks().length === 2 && state.lastTextContent === "second step",
+  "the next step streams into a block of its own, as it would have without the outage");
+addEvent({ type: "assistant_message", content: OPEN + TAIL }); // the step before it, one step late
+check(textBlocks().length === 2 && occurrences(textBlocks()[0]._body.innerHTML, OPEN) === 1 &&
+  occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "the late record fills the OLD block in place and opens no third one");
+check(state.lastTextContent === "second step",
+  "…and leaves the render state with the step that is writing now");
+
+// the record never lands (the pane was away for the whole end of that step): the
+// run's final carries the same answer, so it is the one that writes the block
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+dropOrphanLive();
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, OPEN) === 1 &&
+  occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "a final whose record never arrived writes the closed block whole, above its divider");
+
+// a record that does NOT extend the closed block is another step's answer: it
+// paints its own block above it and leaves the closed block exactly as the reader
+// left it
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+dropOrphanLive();
+addEvent({ type: "assistant_message", content: "an unrelated answer" });
+check(textBlocks().length === 2 && occurrences(textBlocks()[0]._body.innerHTML, "an unrelated answer") === 1,
+  "a record the closed block does not extend opens its own block, above it");
+check(occurrences(textBlocks()[1]._body.innerHTML, OPEN) === 1 &&
+  occurrences(textBlocks()[1]._body.innerHTML, TAIL) === 0,
+  "…and the closed block is not touched by it");
+check(global.awaiting.length === 1 && global.awaiting[0].el === textBlocks()[1],
+  "…it is still filed for the record that owns it");
+
+// the next task ends what the run before it left: its records are in the log AHEAD
+// of the new message, so no record of the new run may complete an old block
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+dropOrphanLive();
+addEvent({ type: "user_message", content: "next task" });
+check(global.awaiting.length === 0 && state.lastTextEl === null && state.textSealed === false,
+  "a new task drops the ledger: the run before it is over, and its records had their chance");
+addEvent({ type: "assistant_message", content: OPEN + TAIL }); // a late record of the old run
+check(textBlocks().length === 2, "…so its late record draws a block of its own");
+check(occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 0,
+  "…the block the reader left stays exactly as it was");
+check(occurrences(textBlocks()[1]._body.innerHTML, TAIL) === 1,
+  "…and the late record is drawn whole, once");
+
+// a dead attempt is the one block that IS removed: the retry re-streams from its
+// own first word, so keeping it would leave the opening standing above a copy
+freshPane();
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+dropOrphanLive();
+addEvent({ type: "llm_retry", discard: true, attempt: 1, max_retries: 3 });
+check(textBlocks().length === 0,
+  "a discarded attempt takes its closed half with it: the retried answer starts from its beginning");
+check(global.awaiting.length === 0, "…and nothing is left filed for a block that is gone");
+addEvent({ type: "text_delta", content: OPEN });
+paintPending();
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, OPEN) === 1,
+  "and the retried text paints one block, once");
+
+// ---- 11. source-level guards: the rule the fix lives in ----
 const STATE = fs.readFileSync(path.join(__dirname, "..", "ui", "src", "renderer", "state.ts"), "utf8");
 const PROJECT = moduleOf("project.ts");
 check(/^\s*textSealed: false,$/m.test(STATE),
@@ -323,5 +450,26 @@ check(/const savedTextSealed = state\.textSealed;/.test(PROJECT) &&
   "history paging (which renders records into an off-DOM sink) saves and restores it");
 check(!/if \(state\.lastTextEl && state\.lastTextEl\.isConnected\) \{\s*state\.lastTextEl = null;\s*state\.lastTextContent = "";\s*return true;\s*\}/.test(src),
   "the one-way latch that dropped the pointer is gone: a live block is never abandoned mid-step");
+check(/if \(state\.textSealed\) return true;/.test(fnBody("applyStreamEvent")),
+  "a closed block takes no more deltas: what follows a cut cannot be appended to the half");
+check(/const owed = !\(state\.textSealed \|\| state\.runSettled\);/.test(fnBody("dropOrphanLive")) &&
+  /awaitRecord\(live, state\.lastTextContent\)/.test(fnBody("dropOrphanLive")) &&
+  /state\.textSealed = true;/.test(fnBody("dropOrphanLive")),
+  "a cut closes the block and files it, unless its record already wrote it or the run is over");
+check(/flushTextRender\(\);/.test(fnBody("dropOrphanLive")),
+  "…and paints it first: the block a record will overwrite shows every character it was closed with");
+check(!/function forgetHoles|addHole\(|discardLivePartial\(keepText/.test(src),
+  "no second mechanism: the ledger prunes a block something took off the page (awaitingFor), nothing else tracks it");
+check(/const owed = awaitingFor\(ev\.content\);/.test(fnBody("applyStreamEvent")) &&
+  /completeRecord\(owed\.el, ev\.content\);/.test(fnBody("applyStreamEvent")),
+  "the step's record writes its own closed block whole, wherever it stands on the page");
+check(/if \(live\) eventsEl\.insertBefore\(wrap, live\);/.test(fnBody("applyStreamEvent")),
+  "a record that extends nothing draws its own block above the step speaking now (the page is in log order)");
+check(/if \(!awaiting\[i\]\.el\.isConnected\) awaiting\.splice\(i, 1\);/.test(fnBody("awaitingFor")),
+  "the ledger prunes a block something took off the page, so no other bookkeeping has to be told");
+check(!/forgetHoles/.test(fnBody("clearStream")),
+  "and clearing the pane needs no tell: a block that is off the page is pruned when a record looks for it");
+check(/paintTextBlock\(el, text, true\);/.test(fnBody("completeRecord")),
+  "one painter for both writers: a closed block is painted by the same pass the streaming block is");
 
 summary("text-seal-test");

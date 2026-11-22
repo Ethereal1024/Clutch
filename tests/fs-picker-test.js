@@ -152,7 +152,7 @@ async function main() {
   const fsNameInput = node({ value: "" });
   const fsFilenameInput = node({ value: "", focus() {} });
   const fsUp = node({});
-  const fsGo = node({});
+  const fsMkdirBtn = node({});
   const fsModal = node({});
   global.connSelect = connSelect; // the eval'd bodies read the page's global scope
   global.connStatus = connStatus;
@@ -170,7 +170,7 @@ async function main() {
       "#fs-name-input": fsNameInput,
       "#fs-filename-input": fsFilenameInput,
       "#fs-up": fsUp,
-      "#fs-go": fsGo,
+      "#fs-mkdir-btn": fsMkdirBtn,
       "#fs-modal": fsModal,
       "#conn-actions": connActions,
       "#conn-progress": connProgress,
@@ -677,6 +677,16 @@ async function main() {
   global.fsPath = "";
   global.fsParent = null;
   global.fsRow = (label, kind) => ({ label, kind });
+  // the leaves the inline create row and the caret policy live in (module state in
+  // fs-browser.ts, seeded here the same way fsPath/fsParent are): the listing is
+  // driven for real, so what it reads and writes has to exist in this scope
+  global.fsMode = "open";
+  global.fsEntries = [];
+  global.fsRows = [];
+  global.fsCreatedPath = "";
+  global.fsFirstLoad = false; // focus policy off: no auto-focus in a headless run
+  global.fsNewFolder = null;
+  global.cancelNewFolder = () => {}; // the create row itself is exercised by hand
   global.openProject = () => {};
   global.closeModal = () => {};
   global.fsModal = fsModal;
@@ -874,6 +884,31 @@ async function main() {
     openFn.indexOf('contains("disabled")') < openFn.indexOf('pop.classList.add("open")'),
     "customSelect refuses to open while it is disabled — and the guard stands before the list is shown");
 
+  // ---- 9b) ＋ New folder makes the folder in the list, the way a desktop does ----
+  const mkdirBody = fnBody("beginNewFolder");
+  check(/input\.value = "";[\s\S]*?input\.placeholder = "New folder"/.test(mkdirBody),
+    "the row starts empty with a placeholder hint, like VS Code");
+  check(/listEl\.insertBefore\(row, listEl\.firstChild\)/.test(mkdirBody),
+    "and lands where the folder will: the first line of the listing");
+  check(/input\.focus\(\)/.test(mkdirBody) && !/input\.select\(\)/.test(mkdirBody),
+    "the input is focused but not pre-selected: type to name the folder");
+  check(/e\.key === "Escape"[\s\S]*?cancelNewFolder\(\)/.test(mkdirBody) &&
+    /input\.addEventListener\("blur"[\s\S]*?commitNewFolder\(true/.test(mkdirBody),
+    "Enter or a click elsewhere commits only if a name was typed; empty input leaves nothing behind");
+  const commitBody = fnBody("commitNewFolder");
+  check(/apiFetch\("\/api\/fs\/mkdir", \{ method: "POST", body: \{ dir, name \} \}\)/.test(commitBody) &&
+    !/fs-create/.test(commitBody),
+    "one POST makes the folder: there is no second Create to press");
+  check(/const token = state\.fsListToken;/.test(commitBody) &&
+    /if \(state\.fsListToken !== token\) return;/.test(commitBody),
+    "and a listing asked for while it was being made is the user's answer, not undone");
+  check(/if \(!name\) \{[\s\S]*?cancelNewFolder\(\);/.test(commitBody),
+    "an empty name does not create a folder: the row simply goes away");
+  // the offer row the name bar resolves was created as `create-offer` and cleared
+  // as `.fs-create-offer`: the miss left one such row per resolve in the list
+  check(/querySelector\("\.create-offer"\)/.test(fnBody("clearCreateOffer")),
+    "the create offer is cleared by the class it was made with");
+
   // ---- 10) the markup and the CSS the report is about ----
   const connBar = HTML.slice(HTML.indexOf('<div class="fs-conn">'), HTML.indexOf('<div id="fs-body">'));
   const rowEnd = connBar.search(/\n {8}<\/div>/); // the host row closes at the row's own indent
@@ -891,6 +926,17 @@ async function main() {
   check(!/id="conn-connect"[^>]*\n[^<]*<\/button>\s*\n\s*<p id="conn-status"/.test(HTML) ||
     connBar.indexOf('id="conn-connect"') < connBar.indexOf('id="conn-status"'),
     "and it stays above the picker's own status line");
+
+  // the create row is drawn as a row of the listing, so its type and its column
+  // are the listing's: `.modal-box input` (0,1,1) owns every field in this dialog
+  // and had given the typed name 14px text 11px right of the names under it
+  check(/<button id="fs-mkdir-btn"[^>]*>＋ New folder<\/button>/.test(HTML) &&
+    !/id="fs-mkdir-row"|id="fs-go"/.test(HTML),
+    "the toolbar's ＋ New folder is the only door, and the popup row it opened is gone");
+  check(/#fs-list input\.fs-inline-input \{[^}]*font-size: 13px/.test(CSS),
+    "the typed name wears the list's own type, not the dialog's field type");
+  check(/#fs-list \.fs-edit-error \{[^}]*padding: 0 0 var\(--s1\) 18px/.test(CSS),
+    "and its refusal is indented to the name column, not to the field's box");
 
   summary("fs-picker");
 }

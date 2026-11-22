@@ -42,6 +42,25 @@ import { state } from "./state";
 import { resumeTurn } from "./render-events";
 import { connectSSE } from "./sse-stream";
 import { connLostExitPending } from "./conn-lost";
+import { adoptBase, claimTab, onTabAutoConnect } from "./slots";
+import { beginPaneLoad, onConnectDoor, showWelcome } from "./project";
+import { connectTabMachine, handleSshConnect } from "./conn-flow";
+import { notice } from "./settings";
+import { tabActivate } from "./tab-bar";
+
+// A failed tab's Connect button is conn-flow's SSH door — the only door that can
+// ask for a password (project.ts showBlocked). project.ts may not import
+// conn-flow.ts (conn-flow → fs-browser → project is a cycle), so the one module
+// that already sees both hands it in, at load, before any click can want it.
+onConnectDoor(handleSshConnect);
+
+// A RESTORED tab whose file lives on a machine this window is not on dials that
+// machine itself, without waiting for a Connect press: the tab's own recorded
+// host is the intent, and the cached password in ~/.clutch/settings.json (or the
+// prompt conn-flow falls back to) makes the dial silent. Same cycle rule, other
+// direction — slots.ts cannot import conn-flow.ts (project → slots) — so the
+// dialer is handed in here too.
+onTabAutoConnect(connectTabMachine);
 
 // the flat LLM config this UI would mirror to ~/.clutch/settings.json, read
 // from localStorage (the UI's own source of truth); null when nothing stored.
@@ -104,13 +123,64 @@ export async function loadHostDefaults() {
 // the trailing call still leaves exactly one live stream
 (async () => {
   // Restored tabs own their sessions. Claiming the window's default slot too
-  // would spawn a session nobody is looking at; the first activation claims the
-  // tab's own slot instead (project.ts activateTab).
+  // would spawn a session nobody is looking at: the remembered tab claims its
+  // OWN slot (project.ts activateTab) and every other restored tab stays lazy
+  // until it is clicked.
   const restoredTabs = state.tabs.length > 0 && !connLostExitPending();
-  if (!restoredTabs) await resolveApiBase(); // learn this window's session port (IPC) first
+  if (!restoredTabs) {
+    // No tab opens on this boot (an empty strip, or the conn-lost Cancel that
+    // asked for the welcome page), so no tab may LOOK open either: the strip is
+    // painted from the store, and the remembered id would highlight a tab
+    // nothing is showing.
+    if (state.activeTabId) {
+      state.activeTabId = null;
+      document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+    }
+    await resolveApiBase(); // learn this window's session port (IPC) first
+  }
+  // The tab the last page was looking at — a hint from tab-bar.ts, never a
+  // promise: its slot may be gone (host restarted, project deleted).
+  const bootTab = restoredTabs
+    ? state.tabs.find((t) => t.id === state.activeTabId) || state.tabs[0]
+    : null;
+  if (bootTab) {
+    // The pane becomes this tab's LOAD now, before anything is claimed: the
+    // claim's own hop (slots.ts → conn-flow connectTabMachine) reports into that
+    // card, and a live load outranks the welcome page because both are views of
+    // one state (pane.ts), not layers of a stack. A boot that ends with no
+    // session calls showWelcome() again below.
+    beginPaneLoad(bootTab);
+    // Claim BEFORE the first draw: /api/host must be answered by the tab's own
+    // host, and its `ui` block has to be in place for the rows the activation
+    // paints. A failed claim leaves apiBase null, and the welcome page is next.
+    const base = await claimTab(bootTab);
+    if (base) adoptBase(base);
+    // a claim slots.ts REFUSED says why (the tab's file is on a machine this
+    // window is not on): that names the host, so say it rather than landing on
+    // a welcome page with no explanation
+    else if (bootTab.unreachable) notice(bootTab.unreachable, "info");
+  }
   await loadHostDefaults(); // the host's own ui block, before any row is drawn
   healSettingsMirror();
-  if (restoredTabs) return; // nothing is open until a tab is clicked
+  if (restoredTabs) {
+    if (!bootTab || !state.apiBase) {
+      // no session for the remembered tab: the welcome page is the honest view,
+      // and the strip stays listed so a click can claim a slot again
+      state.activeTabId = null;
+      document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+      showWelcome();
+      return;
+    }
+    await tabActivate(bootTab.id);
+    // the activation claims the slot itself; if THAT found no session there is
+    // nothing to stream, so say so on the welcome page instead of an empty pane
+    if (!state.apiBase) {
+      state.activeTabId = null;
+      document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+      showWelcome();
+    }
+    return; // the activation opened the stream; a tab nobody clicked claims nothing
+  }
   const url = await reconciledBackendUrl();
   if (url) switchBackend(url);
   connectSSE();
@@ -118,8 +188,12 @@ export async function loadHostDefaults() {
   // open (render-events.ts resumeTurn); one that does not gets the same call
   // when a project is opened, because that is when the log it can resume appears.
   resumeTurn();
-  // Nothing dials a host on startup: a remembered remote stays a PRESELECTION in
-  // the picker (conn-store.ts) until the user presses Connect there.
+  // Nothing dials a host on startup JUST BECAUSE it is remembered: a remote the
+  // window is not on stays a PRESELECTION in the picker (conn-store.ts) until
+  // the user presses Connect there. The one thing that may dial is a restored
+  // TAB whose own file lives there (slots.ts claimTab): that is not a
+  // preselection, it is the resource the user asked the app to remember, and
+  // without the hop the tab could only fail with "not a .clc project file".
 })();
 
 // ---- custom titlebar window controls ----------------------------------------

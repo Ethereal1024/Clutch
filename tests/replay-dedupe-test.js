@@ -27,7 +27,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub, installRecordLedger } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const APP = uiSource(); // the renderer, every module in page load order
@@ -135,6 +135,9 @@ global.refreshTree = () => {
   treeRefreshes++;
 };
 
+// the closed-block ledger the reconnect teardown files a kept block in (stream-events.ts)
+installRecordLedger();
+
 for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
   (0, eval)(fnBody(name));
 }
@@ -226,18 +229,21 @@ check(rendered.length === beforeNotice && pill[pill.length - 1] === 4096,
 // ---- 7. a catch-up paints in one pass: the view moves once, at its end ----
 // (the block the server brackets between `history` and `replayed`: without the
 // bracket a returning phone scrolls once per replayed record, dragging a user
-// who had scrolled up along with it)
+// who had scrolled up along with it — and without the batch, a tunnel paints
+// once per FRAME, which is a transcript that visibly assembles itself)
 check(global.catchUp === true, "the 'history' frame opens the catch-up");
 const pinsBefore = pins.length;
 addEvent(frame(50, { type: "user_message", text: "owed" }));
 addEvent(frame(61, { type: "final", status: "ok", summary: "owed" }));
-check(rendered.length === beforeNotice + 2 && pins.length === pinsBefore,
-  "its records are painted without moving the view");
+check(rendered.length === beforeNotice && pins.length === pinsBefore,
+  "its records are held as paint work, not appended one SSE frame at a time");
 check(global.catchUp === true, "and the block is still open: only the server closes it");
 addEvent({ type: "replayed", count: 2 });
-check(global.catchUp === false, "the 'replayed' frame closes the catch-up");
+check(rendered.length === beforeNotice + 2,
+  "the 'replayed' frame paints the whole block before the view moves");
+check(global.catchUp === false, "and it closes the catch-up");
 check(pins.length === pinsBefore + 1 && pins[pins.length - 1] === 1000,
-  "and the view moves exactly once, at the end, onto the tail");
+  "and the view moves exactly once, at the end, onto the real tail");
 // the same frame is the first moment the workspace tree may be read: the host
 // resolves the project this stream named BEFORE it serves that block
 // (agent/api/events.py _project_for_sse), and a session that was replaced under
@@ -259,5 +265,16 @@ addEvent({ type: "resync" });
 check(rendered.length === 0 && global.state.streamHighOffset === null &&
   global.state.oldestOffset === null,
   "...and 'resync' starts it over instead of leaving two on one screen");
+
+// ---- 9. a block that is abandoned drops its held paint work ----
+// (a resync, a project switch: those rows belong to the pane that is going away,
+// and a batch timer that fired after the clear would append them into the new one)
+addEvent({ type: "history", older: 0 });
+const heldBefore = rendered.length;
+addEvent(frame(90, { type: "user_message", text: "never painted" }));
+check(rendered.length === heldBefore, "a record is held while its block is open");
+addEvent({ type: "resync" });
+check(global.state.owedRecords.length === 0 && global.state.owedFlush === 0,
+  "and the resync that starts the pane over drops the held rows AND their timer");
 
 summary("replay-dedupe");

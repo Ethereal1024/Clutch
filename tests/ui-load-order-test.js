@@ -228,11 +228,27 @@ async function main() {
     if (!named.size) continue;
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      let line = lines[i];
       if (!line || /^[\s/*}"'`]/.test(line)) continue;
       if (/^import\b/.test(line) || /^export\s*\{/.test(line)) continue;
       if (/^export\s+(async\s+)?function\b/.test(line)) continue;
       if (/^(export\s+)?(const|let|var)\s+\w+\s*=\s*(async\s*)?(\(|function\b)/.test(line)) continue;
+      // A TYPE annotation is not a read, and these sources are TypeScript:
+      // `let nf: { row: HTMLElement; busy: boolean } | null = null;` names an
+      // imported `busy` in a type position and runs nothing. For a declaration,
+      // scan its INITIALIZER (the text after the first `=` outside brackets).
+      const decl = /^(export\s+)?(const|let|var)\s+\w+/.exec(line);
+      if (decl) {
+        let depth = 0, cut = -1;
+        for (let k = decl[0].length; k < line.length; k++) {
+          const c = line[k];
+          if (c === "{" || c === "(" || c === "[") depth++;
+          else if (c === "}" || c === ")" || c === "]") depth--;
+          else if (c === "=" && depth === 0) { cut = k + 1; break; }
+        }
+        if (cut < 0) continue; // a declaration with no initializer reads nothing
+        line = line.slice(cut);
+      }
       const arrow = line.indexOf("=>");
       const now = arrow < 0 ? line : line.slice(0, arrow);
       for (const [name, dep] of named) {

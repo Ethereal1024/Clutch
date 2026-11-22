@@ -5,9 +5,13 @@
 // .clc. Two tabs therefore run in parallel, exactly like two windows did before
 // the tabs existed.
 //
-// Persistence stores only the visual working set (id/path/name/dirty). A base
-// is not persisted: after a reload the host still holds the session, and the
-// slot's own claim re-attaches to it (no second spawn).
+// Persistence stores the visual working set (id/path/name) and the machine
+// each file lives on. A base is not persisted: after a reload the host still
+// holds the session, and the slot's own claim re-attaches to it (no second
+// spawn). The machine IS persisted, because the host's slot table is not: a
+// remote tab that forgot its machine claimed a LOCAL session after a quit, and
+// the local host answered "not a .clc project file" for a file it does not have
+// (slots.ts, which records the machine from what the host claimed).
 //
 // Data flow:
 //   user opens project → project.ts activateTab → setProjectInfo
@@ -17,7 +21,7 @@
 import { state } from "./state";
 import { busy } from "./stream-view";
 import { askConfirm } from "./settings";
-import { ensureTab, findTabByPath, forgetMemento, releaseTab, unwatchTab } from "./slots";
+import { asMachine, ensureTab, findTabByPath, forgetDomCache, forgetMemento, onTabsPersist, releaseTab, unwatchTab } from "./slots";
 import { execute } from "./commands";
 import { activateTab, showWelcome } from "./project";
 
@@ -33,9 +37,13 @@ function saveTabs(): void {
       id: t.id,
       path: t.path,
       name: t.name,
-      dirty: !!t.dirty,
+      // undefined (never recorded) is dropped by JSON.stringify: the next load
+      // reads it back as undefined, which is exactly "still unknown"
+      machine: t.machine,
     }));
-    localStorage.setItem(LS_KEY, JSON.stringify({ tabs }));
+    // the tab the user is looking at is part of the working set: boot.ts reopens
+    // it (claiming its own slot) instead of stopping at the welcome page
+    localStorage.setItem(LS_KEY, JSON.stringify({ tabs, activeTabId: state.activeTabId || "" }));
   } catch {}
 }
 
@@ -63,15 +71,20 @@ function loadTabs(): void {
           id: t.id,
           path: t.path,
           name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
-          dirty: !!t.dirty,
+          // undefined for a store written before the field existed: unknown, and
+          // the claim then follows whatever the window is on (with the open's
+          // own self-heal, project.ts, as the backstop)
+          machine: asMachine(t.machine),
           base: null,
           running: false,
           needsInput: false,
         }));
     }
-    // activeTabId is not restored: the project is not open yet on boot. Clicking
-    // a tab claims its slot then; nothing is spawned before that.
-    state.activeTabId = null;
+    // The remembered tab is a HINT, not a promise: boot.ts claims its slot and
+    // falls back to the welcome page when that slot has no session. An id no
+    // restored tab carries (closed elsewhere, stale store) names nothing.
+    const active = typeof data.activeTabId === "string" ? data.activeTabId : "";
+    state.activeTabId = state.tabs.some((t) => t.id === active) ? active : null;
   } catch {}
 }
 
@@ -93,6 +106,19 @@ export function closedTabCount(): number {
 
 // ---- rendering ----
 
+/** The tab's status, or null when it has none. ONE value, because a tab can only
+ *  ever report one thing: a tab waiting for the user outranks a tab that is
+ *  merely working — "waiting" is itself a running execution (slots.ts maps
+ *  execution_status "waiting" to running), so an asking tab is both, and of the
+ *  two the reader can only act on one. The strip's dot and the switcher's glyph
+ *  (titlebar.ts) both read this, so they cannot disagree, and the strip can
+ *  never paint two marks on one tab. */
+export function tabMarkState(tab: { running?: boolean; needsInput?: boolean }): "ask" | "run" | null {
+  if (tab.needsInput) return "ask";
+  if (tab.running) return "run";
+  return null;
+}
+
 export function renderTabBar(): void {
   const bar = document.getElementById("tab-bar");
   if (!bar) return;
@@ -104,25 +130,24 @@ export function renderTabBar(): void {
 
   for (const tab of state.tabs) {
     const el = document.createElement("div");
+    const mark = tabMarkState(tab);
+    // the one state that changes the tab itself is "active" (lifted). "running"
+    // only lifts the text; "waiting for an answer" is the amber dot below.
     el.className =
       "doc-tab" +
       (tab.id === state.activeTabId ? " active" : "") +
-      (tab.running ? " running" : "") +
-      (tab.needsInput ? " needs-input" : "");
+      (tab.running ? " running" : "");
     el.dataset.tabId = tab.id;
     el.tabIndex = 0; // arrow keys walk the strip (see the keydown below)
     el.draggable = true;
     el.setAttribute("role", "tab");
     el.setAttribute("aria-selected", tab.id === state.activeTabId ? "true" : "false");
-    el.title =
-      tab.path +
-      (tab.running ? "\nrunning" : "") +
-      (tab.needsInput ? "\nwaiting for your answer" : "");
+    // the words follow the same one state as the dot: an asking tab says what
+    // the reader can act on, not "running and waiting"
+    el.title = tab.path + (mark === "ask" ? "\nwaiting for your answer" : mark === "run" ? "\nrunning" : "");
     el.setAttribute(
       "aria-label",
-      tab.name +
-        (tab.running ? " — running" : "") +
-        (tab.needsInput ? " — waiting for input" : "")
+      tab.name + (mark === "ask" ? " — waiting for input" : mark === "run" ? " — running" : "")
     );
 
     const label = document.createElement("span");
@@ -130,21 +155,11 @@ export function renderTabBar(): void {
     label.textContent = tab.name;
     el.appendChild(label);
 
-    if (tab.dirty) {
+    // one dot, one build path: .doc-tab-dot is the box, the state class adds
+    // colour and motion only (style.css)
+    if (mark) {
       const dot = document.createElement("span");
-      dot.className = "doc-tab-dirty";
-      dot.setAttribute("aria-label", "unsaved");
-      el.appendChild(dot);
-    }
-    if (tab.running) {
-      const dot = document.createElement("span");
-      dot.className = "doc-tab-run";
-      dot.setAttribute("aria-hidden", "true");
-      el.appendChild(dot);
-    }
-    if (tab.needsInput) {
-      const dot = document.createElement("span");
-      dot.className = "doc-tab-ask";
+      dot.className = "doc-tab-dot doc-tab-dot-" + mark;
       dot.setAttribute("aria-hidden", "true");
       el.appendChild(dot);
     }
@@ -264,6 +279,7 @@ export async function tabClose(id: string): Promise<void> {
   unwatchTab(id);
   await releaseTab(tab);
   forgetMemento(id);
+  forgetDomCache(id);
   state.tabs.splice(idx, 1);
   if (tab.path) {
     closedStack.push({ path: tab.path, name: tab.name });
@@ -289,6 +305,8 @@ export async function tabActivate(id: string): Promise<void> {
   if (!tab) return;
   noteMru(tab.id);
   await activateTab(tab);
+  // the tab last looked at is the one a reload reopens
+  saveTabs();
 }
 
 // Window > Close Other Tabs / Close All Tabs. Each running tab still asks its
@@ -312,15 +330,6 @@ export async function tabReopen(): Promise<void> {
   if (!last) return;
   const tab = ensureTab(last.path, last.name);
   await tabActivate(tab.id);
-}
-
-/** Mark (or unmark) a tab's dirty indicator without triggering a project open. */
-export function tabMarkDirty(path: string, dirty: boolean): void {
-  const tab = state.tabs.find((t) => t.path === path);
-  if (!tab || tab.dirty === dirty) return;
-  tab.dirty = dirty;
-  renderTabBar();
-  saveTabs();
 }
 
 // ---- keyboard navigation ----
@@ -367,5 +376,9 @@ document.addEventListener("clutch:tab-state", () => renderTabBar());
 
 // ---- init ----
 
+// a machine learned by a claim (slots.ts noteTabMachine) is part of the working
+// set: it is written with the rest of it, so the next boot knows where each
+// tab's file is before anything is claimed
+onTabsPersist(saveTabs);
 loadTabs();
 renderTabBar();

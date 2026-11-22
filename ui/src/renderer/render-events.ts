@@ -230,48 +230,57 @@ export async function hostCall(promise) {
 
 export async function run() {
   const task = els.task.value.trim();
-  if (!task || busy) return;
+  if (busy) return;
   if (!currentProject) return;
   const host = window.clutchRun;
-  if (!host || typeof host.start !== "function" || typeof host.drive !== "function") {
+  if (!host || typeof host.run !== "function") {
     // an honest absence, not a fallback: a build without a host loop cannot run
     // a turn, and pretending otherwise is how two loops came to exist
     notice("this build has no host run loop — it cannot run a task");
     return;
   }
-  els.task.value = ""; // the task is now "in the stream"; keep the input clear
-  els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
-  // ...and it joins the box's sent-message history: ArrowUp walks it back
-  // (task-input.ts), which is how the user re-reads or re-asks what they sent
-  recordSentTask(task);
+  // If there's a task, record it and prepare the UI. If resuming an interrupted
+  // turn, there's no new task — the log holds what opened it. Either way, the
+  // unified host.run() interface handles it: new task if idle, continue if open.
+  if (task) {
+    els.task.value = ""; // the task is now "in the stream"; keep the input clear
+    els.task.style.height = TASK_BASE_H + "px"; // animate the input back to its default size
+    // ...and it joins the box's sent-message history: ArrowUp walks it back
+    // (task-input.ts), which is how the user re-reads or re-asks what they sent
+    recordSentTask(task);
+  }
   // sending a message returns to the live tail unconditionally
   state.followTail = true;
   autoScroll(true);
-  // The payload /api/run used to take, and the host still takes: the task, the
-  // mode the loop is built for, and the .clc this page is showing. The project
-  // is a CLAIM the host checks against its session's open project
-  // (ui/run-session.js): a run that would land in another window's log is
-  // refused, never written.
-  const payload = { task, mode: agentMode, project: currentProject };
+  // The unified payload: task (new), mode, and project (claim the host verifies).
+  // If there is no task, the host interprets this as a continuation of an open turn.
+  const payload = { task: task || "", mode: agentMode, project: currentProject };
   // The slot helpers are read defensively: unit tests pull one function body
   // out of this module and run it with only the globals they stub.
   const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
-  let opened = false; // did a turn actually open on disk?
   setStatus("running"); // the click is the user's claim; the host's frames confirm it
   if (typeof setTabRunning === "function") setTabRunning(slotId, true);
   try {
-    await hostCall(host.start(slotId, payload));
-    opened = true;
-    // Drive to the end. The turn's own ending is a durable `final` the loop
-    // writes and the log stream paints, so nothing here fabricates one.
+    // The unified run() interface: automatically distinguishes new turn (idle)
+    // from continuation (open). The caller does not have to know which.
     driving.add(slotId);
     try {
-      await hostCall(host.drive(slotId));
+      await hostCall(host.run(slotId, payload));
     } finally {
       driving.delete(slotId);
     }
   } catch (e) {
     const msg = (e && e.message) || e;
+    if (e && e.code === "run_active") {
+      // A drive of this turn is already in flight in this window (a resume that
+      // beat the click, or a second click on a button the host had not yet
+      // answered with `running`). Not a failure — the run the user asked for IS
+      // the one running — so no "run failed" line: just stay on it.
+      console.info("[run] already driving this turn:", msg);
+      setStatus("running");
+      if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+      return;
+    }
     // No code: the call never reached a host at all (a dead IPC channel, an
     // unreachable bridge). no_session: the host answered that this window has
     // no session. Both are the lost session the dialog owns, not a one-line
@@ -279,16 +288,12 @@ export async function run() {
     // the session answered and refused, and its message says why — so it stays
     // inline with the attempt's record below.
     if (!e || !e.code || e.code === "no_session") {
-      connectionLost("could not reach the session to start the task (" + msg + ")");
+      connectionLost("could not reach the session to run the task (" + msg + ")");
+    } else {
+      addEvent({ type: "final", status: "error", summary: "run failed: " + msg });
     }
-    addEvent({ type: "final", status: "error", summary: "run failed: " + msg });
-    // A turn that never opened leaves nothing to drive: the button belongs to
-    // the user again. A turn that opened stays the host's to describe — its
-    // failure frame already said "error", and driving again continues it.
-    if (!opened) {
-      setStatus("idle");
-      if (typeof setTabRunning === "function") setTabRunning(slotId, false);
-    }
+    setStatus("idle");
+    if (typeof setTabRunning === "function") setTabRunning(slotId, false);
   }
 }
 
@@ -366,8 +371,20 @@ export async function resumeTurn() {
     return;
   }
   if (!answer || !answer.result || answer.result.phase !== "open") return;
+  // `driven` is the host's answer to the half of the question the fold cannot
+  // answer: the turn is open AND this window already has a wheel on it (a
+  // run:start or run:drive of ours still in flight — the reason the page comes
+  // back here at all is a tab switch, which re-runs finishOpen()). Driving it
+  // again is what produced "a step is already running" on every switch, and the
+  // catch below then marked the RUNNING tab idle.
+  //
+  // Nothing to drive: the wheel in flight paints its own frames. What the switch
+  // DOES have to restore is the truth about the tab — a turn this window is
+  // driving is a running tab, and saying nothing here left the reader looking at
+  // an idle badge and a ▶ Run button on work that was still going.
   setStatus("running");
   if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+  if (answer.driven) return;
   try {
     driving.add(slotId);
     try {
@@ -378,10 +395,19 @@ export async function resumeTurn() {
   } catch (e) {
     const msg = (e && e.message) || e;
     if (e && e.code === "run_active") {
-      // another window's host holds the run slot and is driving this very turn:
-      // the honest answer is to leave it alone and say why nothing happens here
-      notice("this turn is being driven by another window");
-    } else if (!e || !e.code || e.code === "no_session") {
+      // Refused before it could touch the loop: somebody is already driving this
+      // turn (another window, the phone, or this window's own start between the
+      // state and this call). That is a fact about the turn, not a failure of
+      // this window: no toast — the notice here is the "a step is already
+      // running" the reader saw on every switch — and no `setStatus("idle")` /
+      // `setTabRunning(slotId, false)`, which is what marked a RUNNING tab idle
+      // and made a remote turn look like it had died when the reader came back
+      // to it. The turn is open and being written; the session's own
+      // execution_status frames are what end it, here and in the tab strip.
+      console.info("[resume] somebody is already driving this turn:", msg);
+      return;
+    }
+    if (!e || !e.code || e.code === "no_session") {
       connectionLost("could not reach the session to resume the turn (" + msg + ")");
     } else {
       notice("could not resume the turn (" + msg + ")");

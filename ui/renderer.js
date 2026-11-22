@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: c54d4bcc4163ebc6fe17d3696981addba702f6963ae9cb3cd3642473f9cb6b05
+// sources sha256: b9375ab583caa11fb9ef0cc8eadff00770997ae35a10ca4661e530af87b6501b
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -43,7 +43,7 @@
       }
       return d.result;
     }
-    const listeners2 = /* @__PURE__ */ new Map();
+    const listeners3 = /* @__PURE__ */ new Map();
     let stream2 = null;
     function ensureStream() {
       if (stream2) return;
@@ -55,7 +55,7 @@
         } catch (e) {
           return;
         }
-        const set = listeners2.get(d.event);
+        const set = listeners3.get(d.event);
         if (!set) return;
         for (const cb of [...set]) {
           try {
@@ -67,10 +67,10 @@
     }
     function subscribe(channel, cb) {
       ensureStream();
-      let set = listeners2.get(channel);
+      let set = listeners3.get(channel);
       if (!set) {
         set = /* @__PURE__ */ new Set();
-        listeners2.set(channel, set);
+        listeners3.set(channel, set);
       }
       set.add(cb);
       return () => set.delete(cb);
@@ -84,6 +84,12 @@
       // bridge route takes no window id and the renderer cannot name another one.
       // The slotId only names WHICH of this page's sessions is leaving.
       releaseSession: (slotId) => call("clutchApi", "releaseSession", [slotId]),
+      // per-slot backend target (the picker's pin): the same two verbs the desktop
+      // preload exposes, so a page on the bridge can name the device its next
+      // claim should use. A bridge host that does not implement them rejects the
+      // call, exactly as any other route it does not serve.
+      setSlotTarget: (slotId, target) => call("clutchApi", "setSlotTarget", [slotId, target]),
+      getSlotTarget: (slotId) => call("clutchApi", "getSlotTarget", [slotId]),
       onBaseChanged: (cb) => subscribe("backend:base-changed", cb)
     });
     expose("clutchSettings", {
@@ -101,6 +107,7 @@
     }
     expose("clutchRun", {
       start: (slotId, payload) => call("clutchRun", "start", runArgs(slotId, payload)),
+      run: (slotId, payload) => call("clutchRun", "run", runArgs(slotId, payload)),
       stop: (slotId) => call("clutchRun", "stop", [slotId]),
       step: (slotId) => call("clutchRun", "step", [slotId]),
       drive: (slotId) => call("clutchRun", "drive", [slotId]),
@@ -131,6 +138,9 @@
       connect: (cfg) => call("clutchTunnel", "connect", [cfg]),
       status: () => call("clutchTunnel", "status"),
       disconnect: () => call("clutchTunnel", "disconnect"),
+      // the devices this host knows (connected or recently connected), for the
+      // picker that parks a tab on one of them
+      list: () => call("clutchTunnel", "list"),
       onEnd: (cb) => subscribe("tunnel:ended", cb),
       onProgress: (cb) => subscribe("tunnel:progress", cb)
     });
@@ -200,6 +210,15 @@
     sseRunLostPending: false,
     // the run this window was watching has ended (painted its ending already)
     runSettled: false,
+    // ---- stream-events.ts ----
+    // the paint work a catch-up (`history` … `replayed`) has queued but not run:
+    // the block is painted in batches, one per timer tick, instead of once per SSE
+    // frame — a tunnel delivers each frame in its own chunk, so a per-frame append
+    // is a paint per record (the reported "a pile of messages loads itself").
+    // Each entry is the thunk that renders one record; `owedFlush` is the timer
+    // handle that will run them.
+    owedRecords: [],
+    owedFlush: 0,
     // ---- stream-text.ts ----
     // the coalesced-render frame handles: a token arrives, the frame repaints
     textRenderRaf: 0,
@@ -214,10 +233,11 @@
     // the most recent agent text block (created by streaming text_delta)
     lastTextEl: null,
     lastTextContent: "",
-    // that block holds a durable assistant_message's text, which is the whole of
-    // that model step's prose: a text_delta still arriving for the same step is a
-    // copy of what the block already says and must not be appended (nor open a
-    // second block) — the delta feed and the log's own SSE feed are unordered
+    // that block is CLOSED and takes no more deltas: either it holds a durable
+    // assistant_message's text, which is the whole of that model step's prose (a
+    // text_delta still arriving for the same step is a copy of what the block already
+    // says — the delta feed and the log's own SSE feed are unordered), or a cut ended
+    // it and only the record that owns it may write it now (stream-events.ts)
     textSealed: false,
     // the thinking (reasoning) block
     thinkingEl: null,
@@ -471,10 +491,129 @@
   var fsMode = "open";
   var fsPath = "";
   var fsParent = null;
+  var fsEntries = [];
+  var fsNewFolder = null;
+  var fsCreatedPath = "";
+  var fsFirstLoad = true;
+  var fsRows = [];
+  function syncFilenameBar() {
+    const name = fsMode === "new" ? "Project name" : "File name";
+    $("#fs-filename-label").textContent = name;
+    $("#fs-filename-input").placeholder = fsMode === "new" ? "my-project" : "name.clc or sub/path.clc";
+  }
+  function syncCreateAction() {
+    if (fsMode !== "new") return;
+    const value = $("#fs-filename-input").value.trim();
+    $("#fs-create").disabled = !value || !fsPath;
+  }
+  function fsMkdirError(e) {
+    const msg = String(e && e.message || e || "could not create the folder");
+    const exists = /^already exists:\s*(.+)$/.exec(msg);
+    return exists ? "a folder named " + exists[1] + " is already here" : msg;
+  }
+  function cancelNewFolder() {
+    const nf = fsNewFolder;
+    if (!nf) return;
+    fsNewFolder = null;
+    nf.row.remove();
+  }
+  function focusAfterNewFolder() {
+    const first = fsRows[0];
+    if (first) first.focus();
+    else $("#fs-mkdir-btn").focus();
+  }
+  function beginNewFolder() {
+    if (fsNewFolder) {
+      if (fsNewFolder.busy) return;
+      fsNewFolder.input.focus();
+      return;
+    }
+    if (!fsPath) return;
+    clearCreateOffer();
+    const listEl = $("#fs-list");
+    const row = document.createElement("div");
+    row.className = "fs-row fs-edit-row";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "fs-inline-input";
+    input.value = "";
+    input.placeholder = "New folder";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.setAttribute("aria-label", "new folder name");
+    const error = document.createElement("p");
+    error.className = "fs-edit-error";
+    error.setAttribute("role", "alert");
+    row.appendChild(input);
+    row.appendChild(error);
+    const nf = { row, input, error, busy: false };
+    fsNewFolder = nf;
+    input.addEventListener("keydown", (e) => {
+      if (nf.busy) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitNewFolder();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        cancelNewFolder();
+        focusAfterNewFolder();
+      }
+    });
+    input.addEventListener("input", () => {
+      row.classList.remove("fs-edit-row-error");
+      error.textContent = "";
+      input.removeAttribute("aria-invalid");
+    });
+    input.addEventListener("blur", (e) => {
+      if (fsNewFolder === nf && !nf.busy) commitNewFolder(true, e.relatedTarget);
+    });
+    listEl.insertBefore(row, listEl.firstChild);
+    listEl.scrollTop = 0;
+    input.focus();
+  }
+  async function commitNewFolder(fromBlur = false, nextFocus = null) {
+    const nf = fsNewFolder;
+    if (!nf || nf.busy) return;
+    const name = nf.input.value.trim();
+    if (!name) {
+      cancelNewFolder();
+      if (!fromBlur) focusAfterNewFolder();
+      return;
+    }
+    const dir = fsPath;
+    const token = state.fsListToken;
+    nf.busy = true;
+    nf.row.setAttribute("aria-busy", "true");
+    nf.input.readOnly = true;
+    try {
+      const data = await apiFetch("/api/fs/mkdir", { method: "POST", body: { dir, name } });
+      if (fsNewFolder !== nf) return;
+      fsNewFolder = null;
+      nf.row.remove();
+      fsCreatedPath = data && data.path || "";
+      if (state.fsListToken !== token) return;
+      await loadDir(dir, false);
+      if (fromBlur && nextFocus && nextFocus.isConnected) nextFocus.focus();
+    } catch (e) {
+      if (fsNewFolder !== nf) return;
+      nf.busy = false;
+      nf.input.readOnly = false;
+      nf.row.removeAttribute("aria-busy");
+      nf.row.classList.add("fs-edit-row-error");
+      nf.error.textContent = fsMkdirError(e);
+      nf.input.setAttribute("aria-invalid", "true");
+      nf.input.focus();
+      nf.input.select();
+    }
+  }
   function openFsBrowser(mode) {
     fsMode = mode;
     fsPath = "";
     fsParent = null;
+    fsEntries = [];
+    fsCreatedPath = "";
+    fsFirstLoad = true;
+    cancelNewFolder();
     if (mode === "new") {
       $("#fs-title").textContent = "New project";
       $("#fs-create").textContent = "Create";
@@ -483,11 +622,13 @@
       $("#fs-title").textContent = "Open project";
       $("#fs-create").classList.add("hidden");
     }
+    syncFilenameBar();
     $("#fs-filename-input").value = "";
+    syncCreateAction();
     hidePickerBody();
     setFsListing(true);
-    $("#fs-up").disabled = false;
-    $("#fs-go").disabled = false;
+    $("#fs-up").disabled = true;
+    $("#fs-mkdir-btn").disabled = true;
     $("#fs-path-input").disabled = false;
     fsModal.classList.remove("hidden", "closing");
     const settled = busy ? Promise.resolve(null) : reconciledBackendUrl().catch((e) => {
@@ -502,6 +643,7 @@
   }
   function closeFsBrowser() {
     setFsListing(false);
+    cancelNewFolder();
     closeModal(fsModal);
   }
   var fsRowActions = /* @__PURE__ */ new WeakMap();
@@ -516,9 +658,21 @@
   function fsRow(label, cls = "", onClick = null) {
     const row = document.createElement("div");
     row.className = "fs-row " + cls;
-    row.textContent = label;
+    const name = document.createElement("span");
+    name.className = "fs-name";
+    name.textContent = label;
+    name.title = label;
+    row.appendChild(name);
     if (onClick) {
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
       fsRowActions.set(row, onClick);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      });
       row.addEventListener("click", () => {
         if (fsActivatedRow === row) {
           fsActivatedRow = null;
@@ -544,6 +698,25 @@
   });
   $("#fs-list").addEventListener("pointercancel", () => {
     fsPress = null;
+  });
+  $("#fs-list").addEventListener("keydown", (e) => {
+    const target = e.target;
+    if (target && target.tagName === "INPUT") return;
+    if (!fsRows.length) return;
+    const at = fsRows.indexOf(target);
+    let next = -1;
+    if (e.key === "ArrowDown") next = at < 0 ? 0 : Math.min(at + 1, fsRows.length - 1);
+    else if (e.key === "ArrowUp") next = at <= 0 ? 0 : at - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = fsRows.length - 1;
+    else if (e.key === "Backspace" && fsParent) {
+      e.preventDefault();
+      loadDir(fsParent);
+      return;
+    }
+    if (next < 0) return;
+    e.preventDefault();
+    fsRows[next].focus();
   });
   async function loadDir(path, remember = true, refetched = false) {
     const listEl = $("#fs-list");
@@ -575,30 +748,61 @@
       fsPath = data.path;
       fsParent = data.parent;
       if (remember) localStorage.setItem("clutch_fs_last_dir", fsPath);
-      $("#fs-path-input").value = data.path;
-      listEl.innerHTML = "";
-      if (data.parent) {
-        listEl.appendChild(fsRow(".. (up)", "dir", () => loadDir(data.parent)));
-      }
-      for (const e of data.entries) {
-        const label = e.link ? e.name + " \u2192 " + e.link : e.name;
-        if (e.dir) {
-          listEl.appendChild(fsRow(label, "dir", () => loadDir(e.path)));
-        } else if (e.name.endsWith(".clc") && fsMode === "open") {
-          listEl.appendChild(
-            fsRow(label, "file clc", () => {
-              closeFsBrowser();
-              openProject(e.path);
-            })
-          );
-        } else {
-          listEl.appendChild(fsRow(label, "file plain"));
-        }
-      }
-      if (!listEl.children.length) listEl.appendChild(fsRow("(empty)", "plain"));
+      const pathInput = $("#fs-path-input");
+      pathInput.value = data.path;
+      pathInput.title = data.path;
+      pathInput.scrollLeft = pathInput.scrollWidth;
+      fsNewFolder = null;
+      $("#fs-up").disabled = !data.parent;
+      $("#fs-mkdir-btn").disabled = false;
       showPickerBody();
-      $("#fs-filename-input").value = "";
-      $("#fs-filename-input").focus();
+      listEl.innerHTML = "";
+      fsEntries = (data.entries || []).map((e) => e.name);
+      fsRows = [];
+      let created = null;
+      const entries = data.entries || [];
+      for (const e of entries) {
+        const label = e.link ? e.name + " \u2192 " + e.link : e.name;
+        let row;
+        if (e.dir) {
+          const fresh = e.path === fsCreatedPath;
+          row = fsRow(label, fresh ? "dir just-created" : "dir", () => loadDir(e.path));
+          if (fresh) created = row;
+        } else if (e.name.endsWith(".clc") && fsMode === "open") {
+          row = fsRow(label, "file clc", () => {
+            closeFsBrowser();
+            openProject(e.path);
+          });
+        } else {
+          row = fsRow(label, "file plain");
+        }
+        listEl.appendChild(row);
+        if (row.tabIndex === 0) fsRows.push(row);
+      }
+      fsCreatedPath = "";
+      if (!entries.length) {
+        const empty = document.createElement("div");
+        empty.className = "fs-empty";
+        const glyph = document.createElement("span");
+        glyph.className = "fs-empty-glyph";
+        glyph.setAttribute("aria-hidden", "true");
+        glyph.textContent = "\u25A4";
+        const line = document.createElement("p");
+        line.textContent = "this folder is empty";
+        const hint = document.createElement("p");
+        hint.className = "fs-empty-hint";
+        hint.textContent = fsMode === "new" ? "\uFF0B New folder makes one here" : "nothing to open in it";
+        empty.appendChild(glyph);
+        empty.appendChild(line);
+        empty.appendChild(hint);
+        listEl.appendChild(empty);
+      }
+      if (created) created.focus();
+      else if (!IS_ANDROID) {
+        if (fsFirstLoad && fsMode === "new") $("#fs-filename-input").focus();
+        else if (fsRows.length) fsRows[0].focus();
+      }
+      fsFirstLoad = false;
     } catch (e) {
       if (token !== state.fsListToken) return;
       const remembered = localStorage.getItem("clutch_fs_last_dir");
@@ -633,12 +837,12 @@
   var pendingCreate = "";
   var lastStatInput = "";
   function clearCreateOffer() {
-    const offer = $("#fs-list").querySelector(".fs-create-offer");
+    const offer = $("#fs-list").querySelector(".create-offer");
     if (offer) offer.remove();
   }
   function showCreateOffer(dir, name) {
     clearCreateOffer();
-    const label = "\u2192 New: " + name;
+    const label = "\uFF0B New: " + name;
     const row = fsRow(label, "create-offer", () => confirmCreate(dir, name));
     $("#fs-list").insertBefore(row, $("#fs-list").firstChild);
   }
@@ -681,10 +885,13 @@
         const slash = data.path.lastIndexOf("/");
         const dir = slash >= 0 ? data.path.slice(0, slash) || "/" : fsPath;
         const name = slash >= 0 ? data.path.slice(slash + 1) : data.path;
-        if (dir && name) {
-          pendingCreate = dir + "\0" + name;
-          showCreateOffer(dir, name);
+        if (!dir || !name) return;
+        if (fsMode === "new") {
+          confirmCreate(dir, name);
+          return;
         }
+        pendingCreate = dir + "\0" + name;
+        showCreateOffer(dir, name);
       }
     } catch (e) {
       notice("Could not check path: " + (e && e.message ? e.message : e));
@@ -697,6 +904,7 @@
     pendingCreate = "";
     lastStatInput = "";
     clearCreateOffer();
+    syncCreateAction();
   });
   $("#fs-create").addEventListener("click", () => {
     const name = $("#fs-filename-input").value.trim();
@@ -704,38 +912,16 @@
     closeFsBrowser();
     createProject(fsPath, name);
   });
-  $("#fs-mkdir-btn").addEventListener("click", () => {
-    const row = $("#fs-mkdir-row");
-    row.classList.remove("hidden");
-    const input = $("#fs-mkdir-input");
-    input.value = "";
-    input.focus();
-  });
-  function hideMkdirRow() {
-    $("#fs-mkdir-row").classList.add("hidden");
-    $("#fs-mkdir-input").value = "";
-  }
-  async function commitMkdir() {
-    const name = $("#fs-mkdir-input").value.trim();
-    if (!name || !fsPath) {
-      hideMkdirRow();
-      return;
-    }
-    hideMkdirRow();
-    try {
-      const data = await apiFetch("/api/fs/mkdir", { method: "POST", body: { dir: fsPath, name } });
-      await loadDir(fsPath, false);
-      if (data && data.path) await loadDir(data.path);
-    } catch (e) {
-      notice("Could not create folder: " + (e && e.message ? e.message : e));
-    }
-  }
-  $("#fs-mkdir-ok").addEventListener("click", commitMkdir);
-  $("#fs-mkdir-cancel").addEventListener("click", hideMkdirRow);
-  $("#fs-mkdir-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") commitMkdir();
-    if (e.key === "Escape") hideMkdirRow();
-  });
+  $("#fs-cancel").addEventListener("pointerdown", cancelNewFolder);
+  $("#fs-create").addEventListener("pointerdown", cancelNewFolder);
+  fsModal.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (e.target === fsModal) cancelNewFolder();
+    },
+    true
+  );
+  $("#fs-mkdir-btn").addEventListener("click", beginNewFolder);
   dismissOnOverlayPress(fsModal, closeFsBrowser);
   $("#welcome-new").addEventListener("click", () => openFsBrowser("new"));
   $("#welcome-open").addEventListener("click", () => openFsBrowser("open"));
@@ -1482,6 +1668,201 @@
     }
   });
 
+  // src/renderer/pane.ts
+  var HOP_SHARE = 0.4;
+  var REPLAY_PHASES = {
+    parse: [0, 0.5],
+    render: [0.5, 0.9],
+    typeset: [0.9, 1]
+  };
+  function paneWelcome() {
+    return { view: "welcome" };
+  }
+  function paneTab(tabId) {
+    return { view: "tab", tabId: tabId || "" };
+  }
+  function paneLoad(tabId, label, where = "") {
+    return { view: "load", tabId: tabId || "", label: label || "", where: where || "", progress: { pct: null, note: "" } };
+  }
+  function paneBlocked(tabId, text, machine = null) {
+    return {
+      view: "blocked",
+      tabId: tabId || null,
+      text: text || "",
+      status: "",
+      // a new verdict, not the last one's words
+      machine: machine || null,
+      shown: true
+    };
+  }
+  var pane = paneWelcome();
+  var listeners = [];
+  function currentPane() {
+    return pane;
+  }
+  function paneShowsTab(tabId) {
+    return pane.view === "tab" && !!tabId && pane.tabId === tabId;
+  }
+  function paneBlockedTabId() {
+    return pane.view === "blocked" ? pane.tabId : null;
+  }
+  function paneLoadPct() {
+    return pane.view === "load" && pane.progress ? pane.progress.pct : null;
+  }
+  function onPaneChange(fn) {
+    listeners.push(fn);
+  }
+  function setPane(next) {
+    pane = next;
+    render();
+    for (const fn of listeners) fn(pane);
+  }
+  function byId(id) {
+    return document.getElementById(id);
+  }
+  function render() {
+    const state2 = pane;
+    const stream2 = byId("stream");
+    if (stream2) {
+      stream2.dataset.pane = state2.view;
+      stream2.dataset.tabId = state2.view === "tab" || state2.view === "load" ? state2.tabId : "";
+      stream2.classList.toggle("loading", state2.view === "load");
+    }
+    const visible = state2.view === "blocked" && !state2.shown ? "" : state2.view;
+    for (const el of Array.from(document.querySelectorAll("[data-view]"))) {
+      el.classList.toggle("hidden", el.getAttribute("data-view") !== visible);
+    }
+    if (state2.view === "load") renderLoad(state2);
+    else stopBar();
+    if (state2.view === "blocked") renderBlocked(state2);
+    if (state2.view !== "tab") {
+      const jump = byId("jump-bottom");
+      if (jump) jump.classList.add("hidden");
+    }
+  }
+  function renderLoad(state2) {
+    const title = byId("tab-load-title");
+    if (title) title.textContent = state2.label;
+    const where = byId("tab-load-where");
+    if (where) where.textContent = state2.where;
+    const barEl = byId("open-progress");
+    if (!barEl) return;
+    const progress = state2.progress;
+    barEl.classList.toggle("hidden", !progress);
+    if (!progress) {
+      stopBar();
+      return;
+    }
+    const note = byId("open-progress-note");
+    if (note) note.textContent = progress.note || "";
+    const fill = barEl.querySelector(".open-progress-fill");
+    const label = barEl.querySelector(".open-progress-label");
+    if (!fill) return;
+    if (progress.pct === null) {
+      stopBar();
+      fill.classList.add("indeterminate");
+      fill.style.width = "";
+      if (label) label.textContent = "";
+      return;
+    }
+    const whole = Math.round(Math.max(0, Math.min(100, progress.pct)));
+    fill.classList.remove("indeterminate");
+    const fresh = !bar || bar.tabId !== state2.tabId;
+    bar = { fill, label, tabId: state2.tabId };
+    if (fresh) {
+      barShown = 0;
+      barPainted = -1;
+    }
+    barTarget = whole;
+    paintBar();
+    if (!barStop && barShown !== barTarget) {
+      barAt = 0;
+      barStop = nextFrame(barFrame);
+    }
+  }
+  var CHASE_TAU_MS = 130;
+  var CHASE_MIN_PCT = 0.35;
+  function chasePct(shown, target, dtMs) {
+    const to = Math.max(0, Math.min(100, Number(target) || 0));
+    const from = Math.max(0, Math.min(100, Number(shown) || 0));
+    if (!(to > from)) return to;
+    const k = 1 - Math.exp(-Math.max(0, Number(dtMs) || 0) / CHASE_TAU_MS);
+    return Math.min(to, Math.max(from + (to - from) * k, from + CHASE_MIN_PCT));
+  }
+  var bar = null;
+  var barTarget = 0;
+  var barShown = 0;
+  var barPainted = -1;
+  var barStop = null;
+  var barAt = 0;
+  function nextFrame(cb) {
+    if (typeof requestAnimationFrame === "function") {
+      const id2 = requestAnimationFrame(cb);
+      return () => cancelAnimationFrame(id2);
+    }
+    const id = setTimeout(() => cb(Date.now()), 16);
+    return () => clearTimeout(id);
+  }
+  function paintBar() {
+    if (!bar) return;
+    const whole = Math.round(barShown);
+    if (whole === barPainted) return;
+    barPainted = whole;
+    bar.fill.style.width = whole + "%";
+    if (bar.label) bar.label.textContent = whole + "%";
+  }
+  function barFrame(now) {
+    barStop = null;
+    if (!bar || pane.view !== "load") {
+      bar = null;
+      return;
+    }
+    const dt = barAt ? Math.max(1, now - barAt) : 16;
+    barAt = now;
+    barShown = chasePct(barShown, barTarget, dt);
+    paintBar();
+    if (barShown < barTarget) barStop = nextFrame(barFrame);
+  }
+  function stopBar() {
+    if (barStop) barStop();
+    barStop = null;
+    bar = null;
+    barTarget = 0;
+    barShown = 0;
+    barPainted = -1;
+    barAt = 0;
+  }
+  function renderBlocked(state2) {
+    const text = byId("tab-blocked-text");
+    if (text) text.textContent = state2.text;
+    const status = byId("tab-blocked-status");
+    if (status) status.textContent = state2.status;
+    const connect = byId("tab-blocked-connect");
+    if (connect) connect.classList.toggle("hidden", !state2.machine);
+  }
+  function setProgress(progress) {
+    if (pane.view !== "load") return;
+    setPane({ ...pane, progress });
+  }
+  function reportHopStage(stagePct, note) {
+    setProgress({
+      pct: stagePct === null ? null : stagePct * HOP_SHARE,
+      note: note || ""
+    });
+  }
+  function paneHopSettled(up) {
+    if (pane.view !== "load") return;
+    setProgress(up ? { pct: paneLoadPct(), note: "Opening project\u2026" } : null);
+  }
+  function paneReplayProgress(phase, frac) {
+    if (pane.view !== "load") return;
+    const [from, to] = REPLAY_PHASES[phase];
+    const f = Math.max(0, Math.min(1, Number(frac) || 0));
+    const start = paneLoadPct() ?? 0;
+    const end = start + (100 - start) * (from + (to - from) * f);
+    setProgress({ pct: end, note: pane.progress ? pane.progress.note : "" });
+  }
+
   // src/renderer/slots.ts
   var SLOT_EVENT = "clutch:tab-state";
   function activeTab() {
@@ -1505,7 +1886,6 @@
       id: "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       path,
       name: name || (path ? path.split("/").pop() || path : ""),
-      dirty: false,
       base: null,
       running: false,
       needsInput: false
@@ -1516,14 +1896,208 @@
   function announceTabState() {
     document.dispatchEvent(new CustomEvent(SLOT_EVENT));
   }
+  function machineLabel(m) {
+    if (!m) return "this machine";
+    return m.user ? `${m.user}@${m.host}:${m.port}` : `${m.host}:${m.port}`;
+  }
+  function asMachine(v) {
+    if (v === void 0) return void 0;
+    if (v === null || v === false) return null;
+    if (typeof v !== "object" || !v.host) return void 0;
+    return {
+      host: String(v.host),
+      user: String(v.user || ""),
+      port: String(v.port === void 0 || v.port === null || v.port === "" ? 22 : v.port)
+    };
+  }
+  function sameMachine(a, b) {
+    if (a === void 0 || b === void 0) return a === b;
+    if (a === null || b === null) return a === b;
+    return a.host === b.host && a.user === b.user && String(a.port) === String(b.port);
+  }
+  function tunnelTarget(ts) {
+    const t = ts && ts.target;
+    if (!t || !t.host) return null;
+    return { host: String(t.host), user: String(t.user || ""), port: String(t.port || 22) };
+  }
+  async function tunnelNow() {
+    if (!(window.clutchTunnel && window.clutchTunnel.status)) return { active: false, target: null };
+    try {
+      const s = await window.clutchTunnel.status();
+      return { active: !!(s && s.active), target: tunnelTarget(s) };
+    } catch (e) {
+      return { active: false, target: null };
+    }
+  }
+  async function pinSlot(slotId, target) {
+    if (!(window.clutchApi && window.clutchApi.setSlotTarget)) return;
+    try {
+      await window.clutchApi.setSlotTarget(slotId, target);
+    } catch (e) {
+    }
+  }
+  function rememberedMachine() {
+    try {
+      const list = JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+      const first = Array.isArray(list) ? list.find((c) => c && c.host) : null;
+      if (first) return asMachine(first);
+    } catch (e) {
+    }
+    try {
+      const host = localStorage.getItem("clutch_ssh_host");
+      if (!host) return null;
+      return {
+        host,
+        user: localStorage.getItem("clutch_ssh_user") || "",
+        port: String(localStorage.getItem("clutch_ssh_port") || 22)
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+  function hopUpFor(tab) {
+    if (!tab || !tab.machine) return true;
+    if (!tab.base) return false;
+    try {
+      if (localStorage.getItem("clutch_ssh_connected") !== "1") return false;
+    } catch (e) {
+      return false;
+    }
+    return sameMachine(rememberedMachine(), tab.machine);
+  }
+  var dialing = false;
+  async function dialMachine(m) {
+    if (!m || dialing) return false;
+    if (!(window.clutchTunnel && window.clutchTunnel.connect)) return false;
+    dialing = true;
+    try {
+      const res = await window.clutchTunnel.connect({
+        host: m.host,
+        user: m.user,
+        port: Number(m.port) || 22
+      });
+      return !!(res && res.ok);
+    } catch (e) {
+      return false;
+    } finally {
+      dialing = false;
+    }
+  }
+  var autoConnectDoor = null;
+  function onTabAutoConnect(fn) {
+    autoConnectDoor = fn;
+  }
+  var autoDial = null;
+  function autoConnect(m) {
+    if (!autoConnectDoor) {
+      return dialMachine(m).then(
+        (ok) => ok ? "" : `could not reconnect to ${machineLabel(m)} \u2014 open the file picker and press Connect`
+      );
+    }
+    if (autoDial && sameMachine(autoDial.m, m)) return autoDial.p;
+    const p = autoConnectDoor(m).finally(() => {
+      if (autoDial && autoDial.p === p) autoDial = null;
+    });
+    autoDial = { m, p };
+    return p;
+  }
+  async function prepareTabMachine(tab) {
+    const m = tab.machine;
+    if (m === null) {
+      await pinSlot(tab.id, { kind: "local" });
+      return "";
+    }
+    if (!m) return "";
+    const now = await tunnelNow();
+    if (now.active && sameMachine(now.target, m)) {
+      await pinSlot(tab.id, { kind: "tunnel" });
+      return "";
+    }
+    const name = tab.name || tab.path;
+    if (now.active) {
+      return `${name} lives on ${machineLabel(m)}, but this window is on ${now.target ? machineLabel(now.target) : "another machine"} \u2014 connect to ${machineLabel(m)} in the file picker to open it`;
+    }
+    const why = await autoConnect(m);
+    if (why) return `${name} lives on ${machineLabel(m)} \u2014 ${why}`;
+    await pinSlot(tab.id, { kind: "tunnel" });
+    return "";
+  }
+  async function noteTabMachine(tab) {
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return;
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(tab.id);
+    } catch (e) {
+      return;
+    }
+    if (!st || !st.claimed) return;
+    let next = tab.machine;
+    if (st.kind === "local") next = null;
+    else if (st.kind === "tunnel") {
+      const now = await tunnelNow();
+      if (now.target) next = now.target;
+    }
+    if (sameMachine(tab.machine, next)) return;
+    tab.machine = next;
+    announceTabState();
+    if (persistTabs) {
+      try {
+        persistTabs();
+      } catch (e) {
+      }
+    }
+  }
+  var persistTabs = null;
+  function onTabsPersist(cb) {
+    persistTabs = cb;
+  }
+  function noSessionThere(tab) {
+    return `${tab.name || tab.path} lives on ${machineLabel(tab.machine)} \u2014 no session there right now: connect to it in the file picker to open it`;
+  }
+  async function localClaimHasNoFile(tab) {
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return false;
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(tab.id);
+    } catch (e) {
+      return false;
+    }
+    if (!st || st.kind !== "local") return false;
+    const dir = String(tab.path || "").replace(/\/[^/]*$/, "");
+    if (!dir) return false;
+    try {
+      const r = await fetch(tab.base + "/api/fs/stat?path=" + encodeURIComponent(dir));
+      if (!r.ok) return false;
+      const body = await r.json();
+      return !!(body && body.type === "none");
+    } catch (e) {
+      return false;
+    }
+  }
   async function claimTab(tab) {
     if (!tab) return null;
     if (!(window.clutchApi && window.clutchApi.baseUrl)) {
       return tab.base || null;
     }
+    const why = await prepareTabMachine(tab);
+    if (why) {
+      tab.base = null;
+      tab.unreachable = why;
+      return null;
+    }
     try {
       const base = await window.clutchApi.baseUrl(tab.id);
       tab.base = base ? String(base).replace(/\/+$/, "") : null;
+      if (!tab.base) {
+        if (tab.machine) tab.unreachable = noSessionThere(tab);
+        return null;
+      }
+      tab.unreachable = null;
+      if (tab.machine && await localClaimHasNoFile(tab)) {
+        await releaseTab(tab);
+        tab.unreachable = noSessionThere(tab);
+        return null;
+      }
       return tab.base;
     } catch (e) {
       console.warn("[slot] claim failed", tab.id, e);
@@ -1554,6 +2128,7 @@
     document.dispatchEvent(new CustomEvent("clutch:backend-changed", { detail: state.apiBase }));
   }
   var mementos = /* @__PURE__ */ new Map();
+  var domCaches = /* @__PURE__ */ new Map();
   var MEMENTO_KEY = (slotId) => "clutch_view:" + slotId;
   function readStoredMemento(slotId) {
     try {
@@ -1607,6 +2182,84 @@
     state.followTail = m.follow;
     stream2.scrollTop = m.follow ? stream2.scrollHeight : m.scroll;
     return true;
+  }
+  function viewIsSettled(eventsEl2) {
+    if (!eventsEl2.children.length) return false;
+    if (eventsEl2.querySelector(".stream, .live")) return false;
+    for (const el of Array.from(eventsEl2.querySelectorAll(".fold, pre"))) {
+      if (el.style.height || el.style.gridTemplateRows) return false;
+    }
+    return true;
+  }
+  function saveDomCache(slotId) {
+    if (!slotId) return;
+    const eventsEl2 = document.getElementById("events");
+    const stream2 = document.getElementById("stream");
+    if (!eventsEl2 || !stream2 || !paneShowsTab(slotId) || !viewIsSettled(eventsEl2)) {
+      domCaches.delete(slotId);
+      return;
+    }
+    const nodes = document.createDocumentFragment();
+    while (eventsEl2.firstChild) nodes.appendChild(eventsEl2.firstChild);
+    domCaches.set(slotId, {
+      nodes,
+      streamScrollTop: stream2.scrollTop,
+      stateSnapshot: {
+        streamHighOffset: state.streamHighOffset,
+        oldestOffset: state.oldestOffset,
+        followTail: state.followTail,
+        runSettled: state.runSettled,
+        // the live pointers go with the nodes they name (see DomCache). They are
+        // read here, while this tab is still the pane's, and put back by
+        // restoreDomCache when it is the pane's again.
+        lastTextEl: state.lastTextEl,
+        lastTextContent: state.lastTextContent,
+        textSealed: state.textSealed,
+        thinkingEl: state.thinkingEl,
+        thinkingContent: state.thinkingContent,
+        toolGroupEl: state.toolGroupEl,
+        compactionEl: state.compactionEl,
+        retryNoteEl: state.retryNoteEl
+      }
+    });
+  }
+  function restoreDomCache(slotId) {
+    if (!slotId) return false;
+    const cache = domCaches.get(slotId);
+    const eventsEl2 = document.getElementById("events");
+    const stream2 = document.getElementById("stream");
+    if (!cache || !eventsEl2 || !stream2) return false;
+    domCaches.delete(slotId);
+    for (const node of Array.from(cache.nodes.childNodes)) {
+      if (node.nodeType === 1) node.dataset.restored = "1";
+    }
+    eventsEl2.replaceChildren(cache.nodes);
+    stream2.scrollTop = cache.streamScrollTop;
+    const s = cache.stateSnapshot;
+    state.streamHighOffset = s.streamHighOffset;
+    state.oldestOffset = s.oldestOffset;
+    state.followTail = s.followTail;
+    state.runSettled = s.runSettled;
+    state.lastTextEl = s.lastTextEl || null;
+    state.lastTextContent = s.lastTextContent || "";
+    state.textSealed = !!s.textSealed;
+    state.thinkingEl = s.thinkingEl || null;
+    state.thinkingContent = s.thinkingContent || "";
+    state.toolGroupEl = s.toolGroupEl || null;
+    state.compactionEl = s.compactionEl || null;
+    state.retryNoteEl = s.retryNoteEl || null;
+    if (state.textRenderRaf) {
+      cancelAnimationFrame(state.textRenderRaf);
+      state.textRenderRaf = 0;
+    }
+    if (state.thinkingRenderRaf) {
+      cancelAnimationFrame(state.thinkingRenderRaf);
+      state.thinkingRenderRaf = 0;
+    }
+    return true;
+  }
+  function forgetDomCache(slotId) {
+    domCaches.delete(slotId);
   }
   var watchers = /* @__PURE__ */ new Map();
   function watchTab(tab) {
@@ -1848,42 +2501,46 @@
   }
   async function run() {
     const task = els.task.value.trim();
-    if (!task || busy) return;
+    if (busy) return;
     if (!currentProject) return;
     const host = window.clutchRun;
-    if (!host || typeof host.start !== "function" || typeof host.drive !== "function") {
+    if (!host || typeof host.run !== "function") {
       notice("this build has no host run loop \u2014 it cannot run a task");
       return;
     }
-    els.task.value = "";
-    els.task.style.height = TASK_BASE_H + "px";
-    recordSentTask(task);
+    if (task) {
+      els.task.value = "";
+      els.task.style.height = TASK_BASE_H + "px";
+      recordSentTask(task);
+    }
     state.followTail = true;
     autoScroll(true);
-    const payload = { task, mode: agentMode, project: currentProject };
+    const payload = { task: task || "", mode: agentMode, project: currentProject };
     const slotId = typeof activeSlotId === "function" ? activeSlotId() : "";
-    let opened = false;
     setStatus("running");
     if (typeof setTabRunning === "function") setTabRunning(slotId, true);
     try {
-      await hostCall(host.start(slotId, payload));
-      opened = true;
       driving.add(slotId);
       try {
-        await hostCall(host.drive(slotId));
+        await hostCall(host.run(slotId, payload));
       } finally {
         driving.delete(slotId);
       }
     } catch (e) {
       const msg = e && e.message || e;
+      if (e && e.code === "run_active") {
+        console.info("[run] already driving this turn:", msg);
+        setStatus("running");
+        if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+        return;
+      }
       if (!e || !e.code || e.code === "no_session") {
-        connectionLost("could not reach the session to start the task (" + msg + ")");
+        connectionLost("could not reach the session to run the task (" + msg + ")");
+      } else {
+        addEvent({ type: "final", status: "error", summary: "run failed: " + msg });
       }
-      addEvent({ type: "final", status: "error", summary: "run failed: " + msg });
-      if (!opened) {
-        setStatus("idle");
-        if (typeof setTabRunning === "function") setTabRunning(slotId, false);
-      }
+      setStatus("idle");
+      if (typeof setTabRunning === "function") setTabRunning(slotId, false);
     }
   }
   async function stop() {
@@ -1924,6 +2581,7 @@
     if (!answer || !answer.result || answer.result.phase !== "open") return;
     setStatus("running");
     if (typeof setTabRunning === "function") setTabRunning(slotId, true);
+    if (answer.driven) return;
     try {
       driving.add(slotId);
       try {
@@ -1934,8 +2592,10 @@
     } catch (e) {
       const msg = e && e.message || e;
       if (e && e.code === "run_active") {
-        notice("this turn is being driven by another window");
-      } else if (!e || !e.code || e.code === "no_session") {
+        console.info("[resume] somebody is already driving this turn:", msg);
+        return;
+      }
+      if (!e || !e.code || e.code === "no_session") {
         connectionLost("could not reach the session to resume the turn (" + msg + ")");
       } else {
         notice("could not resume the turn (" + msg + ")");
@@ -1985,15 +2645,19 @@
     }
     textRenderLast = now;
     if (!state.lastTextEl) return;
-    const bodyEl = state.lastTextEl.querySelector(".body");
-    bodyEl.innerHTML = renderMarkdown(state.lastTextContent);
-    state.lastTextEl._mathDone = false;
-    highlightCode(state.lastTextEl, true);
-    if (force && !stream.classList.contains("loading")) {
-      typesetMath(state.lastTextEl);
-      state.lastTextEl._mathDone = true;
-    }
+    paintTextBlock(state.lastTextEl, state.lastTextContent, force);
     autoScroll();
+  }
+  function paintTextBlock(el, text, settled = false) {
+    const bodyEl = el.querySelector(".body");
+    if (!bodyEl) return;
+    bodyEl.innerHTML = renderMarkdown(text);
+    el._mathDone = false;
+    highlightCode(el, true);
+    if (settled && !stream.classList.contains("loading")) {
+      typesetMath(el);
+      el._mathDone = true;
+    }
   }
   function scheduleTextRender() {
     if (state.textRenderRaf) return;
@@ -2076,8 +2740,8 @@
   function headLag(fold) {
     const block = fold.parentElement;
     if (!block) return 0;
-    const pane = stream.getBoundingClientRect();
-    return Math.max(0, pane.top + stream.clientTop - block.getBoundingClientRect().top);
+    const pane2 = stream.getBoundingClientRect();
+    return Math.max(0, pane2.top + stream.clientTop - block.getBoundingClientRect().top);
   }
   var foldScrollHold = 0;
   function foldHoldsScroll() {
@@ -2280,12 +2944,12 @@
     stuckRaf = 0;
     const heads = stream.querySelectorAll(".turn-fold-head");
     if (!heads.length) return;
-    const pane = stream.getBoundingClientRect().top;
+    const pane2 = stream.getBoundingClientRect().top;
     const state2 = [];
     for (const head of heads) {
       const block = head.parentElement;
       const fold = head.nextElementSibling;
-      state2.push([head, !!(block && fold && block.getBoundingClientRect().top < pane - 0.5 && fold.getBoundingClientRect().bottom > pane + 1)]);
+      state2.push([head, !!(block && fold && block.getBoundingClientRect().top < pane2 - 0.5 && fold.getBoundingClientRect().bottom > pane2 + 1)]);
     }
     for (const [head, stuck] of state2) head.classList.toggle("stuck", stuck);
   }
@@ -2949,10 +3613,17 @@
     state.oldestOffset = null;
     state.streamHighOffset = null;
     state.runSettled = false;
+    state.owedRecords.length = 0;
+    if (state.owedFlush) {
+      clearTimeout(state.owedFlush);
+      state.owedFlush = 0;
+    }
+    endCatchUp();
     resetRollbackAnchors();
     setOlderPill(0);
   }
   var olderRemaining = 0;
+  var olderOwner = false;
   var paging = false;
   var olderBusy = "";
   var pageSink = null;
@@ -2970,8 +3641,16 @@
   }
   function setOlderPill(n) {
     olderRemaining = Math.max(0, n | 0);
+    paintOlderPill();
+  }
+  function setOlderOwner(on) {
+    olderOwner = !!on;
+    paintOlderPill();
+  }
+  function paintOlderPill() {
     const pill = document.getElementById("older-pill");
-    if (olderRemaining > 0) {
+    if (!pill) return;
+    if (olderOwner && olderRemaining > 0) {
       pill.classList.remove("hidden");
       paintOlderLabel();
     } else {
@@ -3074,14 +3753,8 @@
     setStatus("idle");
     document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: currentProject, name: info.name } }));
   }
-  function hideWelcome() {
-    document.getElementById("welcome").classList.add("hidden");
-    els.run.disabled = busy || !currentProject;
-  }
   function showWelcome() {
     supersedeOpen();
-    const welcome = document.getElementById("welcome");
-    if (welcome) welcome.classList.remove("hidden");
     currentProject = "";
     state.apiBase = null;
     try {
@@ -3089,7 +3762,7 @@
     } catch (e) {
     }
     closeSSE();
-    clearStream();
+    apply(paneWelcome());
     showReadOnlyBadge(false);
     setStatus("idle");
     document.dispatchEvent(new CustomEvent("clutch:project-info", { detail: { project: "", name: "" } }));
@@ -3104,23 +3777,23 @@
     }
     return bits.length ? `Held by ${bits.join(" ")}.` : "";
   }
-  async function provenOrphan(project) {
+  async function provenOrphan(project, slotId) {
     const api = window.clutchLocks;
     if (!project || !api || typeof api.list !== "function") return false;
     try {
-      const res = await api.list();
+      const res = await api.list(slotId);
       const locks = res && res.locks || [];
       const mine = locks.find((lk) => lk && lk.project === project);
-      return !!(mine && mine.state === "orphan");
+      return !!(mine && (mine.state === "orphan" || mine.claim_liveness === "dead"));
     } catch {
       return false;
     }
   }
-  async function reclaimLock(project) {
+  async function reclaimLock(project, slotId) {
     const api = window.clutchLocks;
     if (!api || typeof api.reclaim !== "function") return false;
     try {
-      const res = await api.reclaim(project);
+      const res = await api.reclaim(project, slotId);
       if (res && res.revoked) return true;
       notice("The host would not release it: " + (res && (res.why || res.error) || "no answer"));
     } catch (e) {
@@ -3128,15 +3801,101 @@
     }
     return false;
   }
+  var connectDoor = null;
+  function onConnectDoor(fn) {
+    connectDoor = fn;
+  }
+  function dismissBlocked() {
+    const state2 = currentPane();
+    if (state2.view === "blocked") setPane({ ...state2, shown: false });
+  }
+  function showBlocked(tab, text, machine) {
+    apply(paneBlocked(tab && tab.id || null, text, machine || null));
+  }
+  function blockedStatus() {
+    return {
+      id: "tab-blocked-status",
+      get textContent() {
+        const pane2 = currentPane();
+        return pane2.view === "blocked" ? pane2.status : "";
+      },
+      set textContent(value) {
+        const pane2 = currentPane();
+        if (pane2.view === "blocked") setPane({ ...pane2, status: value == null ? "" : String(value) });
+      }
+    };
+  }
+  (function wireBlocked() {
+    const btn = document.getElementById("tab-blocked-connect");
+    if (btn) {
+      btn.addEventListener("click", async () => {
+        const shown = currentPane();
+        const machine = shown.view === "blocked" ? shown.machine : null;
+        if (!machine || !connectDoor) return;
+        const tab = state.tabs.find((x) => x.id === paneBlockedTabId());
+        if (!tab) return;
+        btn.disabled = true;
+        try {
+          const ok = await connectDoor(machine.host, machine.user, machine.port, blockedStatus());
+          if (!ok) return;
+          tab.unreachable = null;
+          dismissBlocked();
+          await activateTab(tab);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    }
+    const dismiss = document.getElementById("tab-blocked-dismiss");
+    if (dismiss) dismiss.addEventListener("click", () => dismissBlocked());
+  })();
+  async function machineMismatch(tab) {
+    if (tab.machine !== void 0) return null;
+    if (!(window.clutchApi && window.clutchApi.slotStatus)) return null;
+    let st;
+    try {
+      st = await window.clutchApi.slotStatus(tab.id);
+    } catch (e) {
+      return null;
+    }
+    if (!st || st.kind !== "local") return null;
+    if (await hereHasIt(tab)) return null;
+    return rememberedMachine();
+  }
+  async function hereHasIt(tab) {
+    const dir = dirOf(tab.path);
+    if (!dir) return true;
+    try {
+      const r = await apiFetch("/api/fs/stat?path=" + encodeURIComponent(dir), {
+        base: tab.base || state.apiBase
+      });
+      return !(r && r.type === "none");
+    } catch (e) {
+      return true;
+    }
+  }
+  function apply(next) {
+    if (next.view !== "tab") clearStream();
+    if (next.view === "load") stream.scrollTop = 0;
+    setPane(next);
+  }
+  function tabLabel(tab) {
+    return tab && (tab.name || (tab.path ? String(tab.path).split("/").pop() : "")) || "project";
+  }
+  function beginPaneLoad(tab) {
+    const id = tab && tab.id || "";
+    const label = tabLabel(tab);
+    const where = tab && tab.machine ? `on ${machineLabel(tab.machine)}` : "";
+    const now = currentPane();
+    if (id && now.view === "load" && now.tabId === id) {
+      if (now.label !== label || now.where !== where) setPane({ ...now, label, where });
+      return;
+    }
+    apply(paneLoad(id, label, where));
+  }
+  onPaneChange((pane2) => setOlderOwner(pane2.view === "tab"));
   async function openInTab(tab, base, readOnly = false, seq = openSeq) {
     const path = tab.path;
-    const prog = document.getElementById("open-progress");
-    const fill = prog.querySelector(".open-progress-fill");
-    const label = prog.querySelector(".open-progress-label");
-    const setPct = (pct) => {
-      fill.style.width = pct + "%";
-      label.textContent = Math.round(pct) + "%";
-    };
     try {
       if (!base) throw noBackend();
       const ctl = new AbortController();
@@ -3147,7 +3906,7 @@
         body: JSON.stringify({ path, ...readOnly ? { read_only: true } : {} }),
         signal: ctl.signal
       });
-      if (isStale(seq)) return;
+      if (isStale(seq)) return null;
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         const e = new Error(err.error || r.status);
@@ -3156,11 +3915,9 @@
         e.project = err.project || null;
         throw e;
       }
-      if (isStale(seq)) return;
+      if (isStale(seq)) return null;
       clearStream();
-      stream.classList.add("loading");
-      prog.classList.remove("hidden");
-      setPct(0);
+      paneReplayProgress("parse", 0);
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -3170,7 +3927,7 @@
       let rendered = 0;
       for (; ; ) {
         const { done, value } = await reader.read();
-        if (isStale(seq)) return;
+        if (isStale(seq)) return null;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         let nl;
@@ -3185,7 +3942,7 @@
             console.warn("[openProject] undecodable line", e);
             continue;
           }
-          if (isStale(seq)) return;
+          if (isStale(seq)) return null;
           if (msg.error) {
             const e = new Error(msg.error);
             e.code = msg.code || null;
@@ -3201,66 +3958,101 @@
               workdir: msg.meta.workdir,
               read_only: !!msg.meta.read_only
             });
-            hideWelcome();
             started = true;
           } else if (msg.count) {
             totalEvents = msg.count;
             if (typeof msg.older === "number") setOlderPill(msg.older);
           } else if (msg.progress && msg.progress.total) {
-            setPct(50 * msg.progress.done / msg.progress.total);
+            paneReplayProgress("parse", msg.progress.done / msg.progress.total);
           } else if (msg.event) {
             addEvent(msg);
-            if (totalEvents) setPct(50 + 40 * (++rendered / totalEvents));
+            if (totalEvents) paneReplayProgress("render", ++rendered / totalEvents);
           }
           if (++processed % 25 === 0) await new Promise((r2) => setTimeout(r2, 0));
         }
       }
-      if (isStale(seq)) return;
-      await typesetProgressively(eventsEl, (f) => setPct(90 + 10 * f));
-      if (isStale(seq)) return;
-      if (started) setPct(100);
-      prog.classList.add("hidden");
-      stream.classList.remove("loading");
+      if (isStale(seq)) return null;
+      await typesetProgressively(eventsEl, (f) => paneReplayProgress("typeset", f));
+      if (isStale(seq)) return null;
+      if (started) paneReplayProgress("typeset", 1);
+      apply(paneTab(tab.id));
       stream.scrollTop = stream.scrollHeight;
       if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
+      if (started) await noteTabMachine(tab);
+      if (isStale(seq)) return null;
       finishOpen();
+      return null;
     } catch (e) {
-      if (isStale(seq, e)) return;
-      prog.classList.add("hidden");
-      stream.classList.remove("loading");
+      if (isStale(seq, e)) return null;
       if (e && e.code === "project_open_conflict") {
         const held = describeHolder(e.owner);
-        if (seq !== openSeq) return;
-        if (await provenOrphan(e.project)) {
-          if (seq !== openSeq) return;
+        const name = tabLabel(tab);
+        if (isStale(seq)) return null;
+        if (await provenOrphan(e.project, tab.id)) {
+          if (isStale(seq)) return null;
           const take = await askConfirm({
             title: "Take this project back?",
             text: "The window that held this project is gone, but its session still holds the lock.\n" + (held ? held + "\n" : "") + "Reclaim the project and open it?",
             ok: "Reclaim",
             cancel: "Leave it"
           });
-          if (take && await reclaimLock(e.project)) {
-            if (seq !== openSeq) return;
-            await openInTab(tab, base, readOnly, seq);
-            return;
+          if (isStale(seq)) return null;
+          if (!take) {
+            return paneBlocked(
+              tab.id,
+              (held ? held + "\n" : "") + `${name} is still held by a session whose window is gone. Take it back to open it here.`
+            );
           }
-          return;
+          if (await reclaimLock(e.project, tab.id)) {
+            if (isStale(seq)) return null;
+            return await openInTab(tab, base, readOnly, seq);
+          }
+          return paneBlocked(
+            tab.id,
+            (held ? held + "\n" : "") + `${name} is still held, and the host would not release it.`
+          );
         }
-        if (seq !== openSeq) return;
+        if (isStale(seq)) return null;
         const wantReadOnly = await askConfirm({
           title: "Already open elsewhere",
           text: (held ? held + "\n" : "") + "This project is already open in another window.\nOpen it read-only? Read-only mode cannot run tasks.",
           ok: "Open read-only"
         });
+        if (isStale(seq)) return null;
         if (wantReadOnly) {
-          if (seq !== openSeq) return;
-          await openInTab(tab, base, true, seq);
-          return;
+          return await openInTab(tab, base, true, seq);
         }
-        return;
+        return paneBlocked(
+          tab.id,
+          (held ? held + "\n" : "") + `${name} is open in another window, so it stays closed here.`
+        );
       }
-      notice("Failed to open project: " + e.message);
+      if (e && /not a \.clc/i.test(String(e.message || ""))) {
+        const far = await machineMismatch(tab);
+        if (isStale(seq)) return null;
+        if (far) {
+          tab.machine = far;
+          const moved = await claimTab(tab);
+          if (isStale(seq)) return null;
+          if (moved) {
+            adoptBase(moved);
+            clearStream();
+            return await openInTab(tab, moved, readOnly, seq);
+          }
+          clearStream();
+          return paneBlocked(
+            tab.id,
+            tab.unreachable || `${tab.name || tab.path} lives on ${machineLabel(far)}`,
+            far
+          );
+        }
+      }
       console.error("[openProject] failed:", { api: state.apiBase, path, error: e && e.message });
+      return paneBlocked(
+        tab.id,
+        "Failed to open project: " + e.message + (tab.machine ? ` (on ${machineLabel(tab.machine)})` : ""),
+        tab.machine
+      );
     }
   }
   function finishOpen() {
@@ -3284,8 +4076,12 @@
     const openPath = info && info.memory && typeof info.memory.path === "string" ? info.memory.path : "";
     if (!openPath || openPath !== (tab.projectKey || tab.path)) return false;
     const pages = [];
-    let cursor = m.high + 1;
-    const target = typeof m.oldest === "number" ? m.oldest : cursor - 1;
+    const mem = info && info.memory;
+    const tail = mem && typeof mem.bytes === "number" && Number.isFinite(mem.bytes) ? mem.bytes : null;
+    let cursor = tail === null ? m.high + 1 : tail;
+    const target = typeof m.oldest === "number" ? m.oldest : m.high;
+    const span = Math.max(1, cursor - target);
+    const from = cursor;
     for (let i = 0; i < RESTORE_MAX_PAGES && cursor > target; i++) {
       let page;
       try {
@@ -3303,6 +4099,7 @@
       const older = Number.isFinite(page.older) ? page.older : 0;
       if (older >= cursor) break;
       cursor = older;
+      paneReplayProgress("parse", Math.min(1, (from - cursor) / span));
     }
     if (!pages.length) return false;
     const project = tab.projectKey || tab.path;
@@ -3314,28 +4111,62 @@
       read_only: false
       // the stream's status frame carries the real claim
     });
-    hideWelcome();
+    const total = pages.reduce((n, p) => n + p.length, 0);
+    let painted = 0;
     for (let i = pages.length - 1; i >= 0; i--) {
       for (const item of pages[i]) {
         if (isStale(seq)) return true;
         addEvent(item);
+        if (total) paneReplayProgress("render", ++painted / total);
+        if (painted % 25 === 0) {
+          await new Promise((r) => setTimeout(r, 0));
+          if (isStale(seq)) return true;
+        }
       }
     }
     setOlderPill(Math.max(0, cursor));
+    await typesetProgressively(eventsEl, (f) => paneReplayProgress("typeset", f));
+    if (isStale(seq)) return true;
     stream.scrollTop = stream.scrollHeight;
     if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
+    paneReplayProgress("typeset", 1);
     finishOpen();
+    return true;
+  }
+  function paintCachedView(tab) {
+    if (!tab || !tab.id || !tab.path) return false;
+    if (tab.machine && !hopUpFor(tab)) return false;
+    if (!restoreDomCache(tab.id)) return false;
+    dropOrphanLive();
+    const m = mementoOf(tab.id);
+    const projectPath = tab.projectKey || tab.path;
+    setProjectInfo({
+      project: projectPath,
+      name: tab.name || projectPath.split("/").pop() || projectPath,
+      workdir: m && m.workdir || dirOf(projectPath),
+      read_only: false
+    });
+    if (m) setOlderPill(m.older);
     return true;
   }
   async function activateTab(tab, readOnly = false) {
     if (!tab) return;
     const same = tab.id === state.activeTabId;
-    if (same && opening && opening.id === tab.id) return opening.promise;
+    if (same && opening && opening.id === tab.id) {
+      await opening.promise;
+      return;
+    }
     const here = tab.projectKey || tab.path;
     if (same && !opening && currentProject && currentProject === here) return;
     const prev = activeTab();
     if (prev && prev.id !== tab.id) {
       saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
+      if (paneBlockedTabId() === prev.id) {
+        forgetDomCache(prev.id);
+        dismissBlocked();
+      } else {
+        saveDomCache(prev.id);
+      }
       if (prev.running) watchTab(prev);
     }
     const seq = supersedeOpen();
@@ -3345,26 +4176,38 @@
     if (changed) document.dispatchEvent(new CustomEvent("clutch:tab-state"));
     unwatchTab(tab.id);
     tab.needsInput = false;
-    const run2 = (async () => {
+    const cached = paintCachedView(tab);
+    if (!cached) beginPaneLoad(tab);
+    const run2 = async () => {
       const base = await claimTab(tab);
-      if (isStale(seq)) return;
+      if (isStale(seq)) return null;
       if (!base) {
-        notice("this tab has no session \u2014 the backend is not running");
-        return;
+        return paneBlocked(
+          tab.id,
+          tab.unreachable || "This tab has no session \u2014 the backend is not running.",
+          tab.unreachable ? tab.machine || null : null
+        );
       }
+      tab.unreachable = null;
       adoptBase(base);
-      if (!tab.path) return;
-      if (await restoreTabView(tab, base, seq)) return;
-      if (isStale(seq)) return;
-      await openInTab(tab, base, readOnly, seq);
-    })();
-    const mine = { id: tab.id, promise: run2 };
+      if (!tab.path) return paneTab(tab.id);
+      if (cached) {
+        finishOpen();
+        return paneTab(tab.id);
+      }
+      if (await restoreTabView(tab, base, seq)) return isStale(seq) ? null : paneTab(tab.id);
+      if (isStale(seq)) return null;
+      return await openInTab(tab, base, readOnly, seq);
+    };
+    const mine = { id: tab.id, promise: run2() };
     opening = mine;
+    let next = null;
     try {
-      await run2;
+      next = await run2();
     } finally {
       if (opening === mine) opening = null;
     }
+    if (next && !isStale(seq)) apply(next);
   }
   async function openProject(path, readOnly = false) {
     const existing = findTabByPath(path);
@@ -3376,6 +4219,7 @@
     const prev = activeTab();
     if (prev) {
       saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
+      saveDomCache(prev.id);
       if (prev.running) watchTab(prev);
     }
     const seq = supersedeOpen();
@@ -3383,10 +4227,15 @@
     const tab = ensureTab("", name);
     state.activeTabId = tab.id;
     document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+    beginPaneLoad(tab);
     const base = await claimTab(tab);
     if (isStale(seq)) return;
     if (!base) {
-      notice("could not start a session for the new project");
+      showBlocked(
+        tab,
+        tab.unreachable || "Could not start a session for the new project \u2014 the backend is not running.",
+        tab.unreachable ? tab.machine || null : null
+      );
       return;
     }
     adoptBase(base);
@@ -3398,12 +4247,12 @@
       if (data.name) tab.name = data.name;
       clearStream();
       setProjectInfo(data);
-      hideWelcome();
+      apply(paneTab(tab.id));
       finishOpen();
     } catch (e) {
       if (isStale(seq)) return;
       const held = e && e.code === "project_open_conflict" ? describeHolder(e.owner) : "";
-      notice("Failed to create project: " + e.message + (held ? " \u2014 " + held : ""));
+      const why = "Failed to create project: " + e.message + (held ? " \u2014 " + held : "");
       if (!tab.path) {
         const i = state.tabs.indexOf(tab);
         if (i >= 0) state.tabs.splice(i, 1);
@@ -3411,6 +4260,8 @@
         await releaseTab(tab);
         document.dispatchEvent(new CustomEvent("clutch:tab-state"));
       }
+      showBlocked(tab, why);
+      if (!state.tabs.length) showWelcome();
     }
   }
 
@@ -3614,7 +4465,12 @@
     return el.matches(".event.text");
   }
   function foldLiveRow(el) {
-    if (!eventsEl || !el || !runInFlight()) return;
+    if (!eventsEl || !el) return;
+    if (el.dataset && el.dataset.restored) {
+      delete el.dataset.restored;
+      return;
+    }
+    if (!runInFlight()) return;
     if (el.parentNode !== eventsEl) return;
     if (el.matches(".event.text")) {
       settleRunBlocks();
@@ -3783,21 +4639,25 @@
       delete streamRows[id];
     }
   }
-  function discardLivePartial(keepText = false) {
+  function discardLivePartial() {
     if (state.textRenderRaf) {
       cancelAnimationFrame(state.textRenderRaf);
       state.textRenderRaf = 0;
     }
-    if (state.thinkingRenderRaf) {
-      cancelAnimationFrame(state.thinkingRenderRaf);
-      state.thinkingRenderRaf = 0;
-    }
     if (state.lastTextEl) {
-      if (!keepText) state.lastTextEl.remove();
+      unawait(state.lastTextEl);
+      state.lastTextEl.remove();
       state.lastTextEl = null;
     }
     state.lastTextContent = "";
     state.textSealed = false;
+    dropScaffold();
+  }
+  function dropScaffold() {
+    if (state.thinkingRenderRaf) {
+      cancelAnimationFrame(state.thinkingRenderRaf);
+      state.thinkingRenderRaf = 0;
+    }
     if (state.thinkingEl) {
       state.thinkingEl.remove();
       state.thinkingEl = null;
@@ -3805,16 +4665,45 @@
     state.thinkingContent = "";
     clearStreamPreviews();
   }
-  var carriedTextEl = null;
-  var carriedText = "";
   function dropOrphanLive() {
-    const keepText = Boolean(state.lastTextEl && state.lastTextEl.isConnected && (state.textSealed || state.runSettled));
-    carriedTextEl = keepText ? state.lastTextEl : null;
-    carriedText = keepText ? state.lastTextContent || "" : "";
-    discardLivePartial(keepText);
-    if (keepText) state.textSealed = true;
+    const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
+    if (live && state.lastTextContent) {
+      const owed = !(state.textSealed || state.runSettled);
+      flushTextRender();
+      state.textSealed = true;
+      if (owed) awaitRecord(live, state.lastTextContent);
+      dropScaffold();
+    } else {
+      discardLivePartial();
+    }
     state.toolGroupEl = null;
     clearRetryNote();
+  }
+  var awaiting = [];
+  function awaitRecord(el, text) {
+    if (!awaiting.some((w) => w.el === el)) awaiting.push({ el, text });
+  }
+  function unawait(el) {
+    const i = awaiting.findIndex((w) => w.el === el);
+    if (i >= 0) awaiting.splice(i, 1);
+  }
+  function awaitingFor(text) {
+    if (!text) return null;
+    for (let i = awaiting.length - 1; i >= 0; i--) {
+      if (!awaiting[i].el.isConnected) awaiting.splice(i, 1);
+    }
+    for (let i = awaiting.length - 1; i >= 0; i--) {
+      const w = awaiting[i];
+      if (w.text && text.startsWith(w.text)) return w;
+    }
+    return null;
+  }
+  function completeRecord(el, text) {
+    paintTextBlock(el, text, true);
+    unawait(el);
+    if (state.lastTextEl !== el) return;
+    state.lastTextContent = text;
+    state.textSealed = true;
   }
   function setRetryNote(ev) {
     if (state.retryNoteEl) state.retryNoteEl.remove();
@@ -3853,9 +4742,12 @@
     if (ev && ev.type === "user_message") {
       if (state.sseRunLostPending) announceRunLost();
       state.runSettled = false;
-      state.textSealed = false;
-      carriedTextEl = null;
-      carriedText = "";
+      if (state.textSealed) {
+        state.lastTextEl = null;
+        state.lastTextContent = "";
+        state.textSealed = false;
+      }
+      awaiting.length = 0;
       forgetAnsweredPerm();
     } else if (ev && ev.type === "final") {
       state.runSettled = true;
@@ -3866,6 +4758,14 @@
       return;
     }
     if (ev && ev.type === "replayed") {
+      if (state.owedFlush) {
+        clearTimeout(state.owedFlush);
+        state.owedFlush = 0;
+      }
+      while (state.owedRecords.length) {
+        const row = state.owedRecords.shift();
+        if (row) row();
+      }
       endCatchUp();
       refreshTree();
       if (state.sseRunLostPending) announceRunLost();
@@ -3878,20 +4778,34 @@
     if (stream.classList.contains("loading") && ev.type === "state_update") {
       return;
     }
-    if (ev && ev.type !== "text_delta") flushTextRender();
-    if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
-    if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
-      state.toolGroupEl = null;
+    const paint = () => {
+      if (ev && ev.type !== "text_delta") flushTextRender();
+      if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
+      if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
+        state.toolGroupEl = null;
+      }
+      if (applyStreamEvent(ev)) return;
+      const el = renderEvent(ev);
+      if (el) {
+        if (wireOffset !== null && !pageSink) el.dataset.offset = String(wireOffset);
+        (pageSink || eventsEl).appendChild(el);
+        if (el.matches(".event.user")) highlightCode(el);
+        if (el.matches(".event.user") && !pageSink) typesetMath(el);
+        autoScroll();
+      }
+    };
+    if (catchUp && !pageSink) {
+      state.owedRecords.push(paint);
+      if (!state.owedFlush) {
+        state.owedFlush = setTimeout(() => {
+          state.owedFlush = 0;
+          const batch = state.owedRecords.splice(0, state.owedRecords.length);
+          for (const row of batch) row();
+        }, 40);
+      }
+      return;
     }
-    if (applyStreamEvent(ev)) return;
-    const el = renderEvent(ev);
-    if (el) {
-      if (wireOffset !== null && !pageSink) el.dataset.offset = String(wireOffset);
-      (pageSink || eventsEl).appendChild(el);
-      if (el.matches(".event.user")) highlightCode(el);
-      if (el.matches(".event.user") && !pageSink) typesetMath(el);
-      autoScroll();
-    }
+    paint();
   }
   function applyStreamEvent(ev) {
     if (ev.type === "compaction_delta") {
@@ -3940,16 +4854,15 @@
     }
     if (ev.type === "assistant_message") {
       state.toolGroupEl = null;
-      if (state.lastTextEl && state.lastTextEl.isConnected) {
-        const live = state.lastTextContent || "";
-        if (ev.content && ev.content.startsWith(live)) {
-          state.lastTextContent = ev.content;
-          state.textSealed = true;
-          renderTextBlock(true);
-          return true;
-        }
-        state.lastTextEl = null;
-        state.lastTextContent = "";
+      const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
+      if (live && ev.content && ev.content.startsWith(state.lastTextContent || "")) {
+        completeRecord(live, ev.content);
+        return true;
+      }
+      const owed = awaitingFor(ev.content);
+      if (owed) {
+        completeRecord(owed.el, ev.content);
+        autoScroll();
         return true;
       }
       if (ev.reasoning && !(state.thinkingEl && state.thinkingEl.isConnected)) appendThinkingRow(ev.reasoning);
@@ -3957,7 +4870,8 @@
         const wrap = createAgentTextBlock();
         wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
         highlightCode(wrap);
-        (pageSink || eventsEl).appendChild(wrap);
+        if (live) eventsEl.insertBefore(wrap, live);
+        else (pageSink || eventsEl).appendChild(wrap);
       }
       return true;
     }
@@ -3968,26 +4882,23 @@
       clearRetryNote();
       if (!pageSink && !catchUp && ev.status === "completed" && String(ev.summary || "").trim()) {
         const want = String(ev.summary || "");
-        const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextContent || "" : "";
-        if (live) {
-          if (live !== want && want.startsWith(live)) {
-            state.lastTextContent = want;
-            state.textSealed = true;
-            renderTextBlock(true);
+        const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
+        if (live && want.startsWith(state.lastTextContent || "")) {
+          completeRecord(live, want);
+        } else {
+          const owed = awaitingFor(want);
+          if (owed) {
+            completeRecord(owed.el, want);
+            autoScroll();
+          } else {
+            const wrap = createAgentTextBlock();
+            (pageSink || eventsEl).appendChild(wrap);
+            state.lastTextEl = wrap;
+            completeRecord(wrap, want);
+            autoScroll();
           }
-        } else if (!(carriedTextEl && carriedTextEl.isConnected && want.startsWith(carriedText))) {
-          const wrap = createAgentTextBlock();
-          wrap.querySelector(".body").innerHTML = renderMarkdown(want);
-          highlightCode(wrap);
-          (pageSink || eventsEl).appendChild(wrap);
-          state.lastTextEl = wrap;
-          state.lastTextContent = want;
-          state.textSealed = true;
-          autoScroll();
         }
       }
-      carriedTextEl = null;
-      carriedText = "";
       if (state.lastTextEl && state.lastTextEl.isConnected) highlightCode(state.lastTextEl);
       appendCompletion(ev.status, ev.summary);
       refreshTree();
@@ -4106,7 +5017,7 @@
     const GAP = 4, EDGE = 8, MAX_H = 240, MIN_H = 72, MIN_W = 120, MAX_W = 460;
     const opts = [];
     let selected = null;
-    const listeners2 = [];
+    const listeners3 = [];
     const isOpen = () => root.classList.contains("open");
     const onScreen = (r) => r.bottom > 0 && r.top < window.innerHeight;
     function place() {
@@ -4144,7 +5055,7 @@
       root.classList.remove("open");
       pop.classList.remove("open");
     }
-    function render() {
+    function render2() {
       const o = opts.find((x) => x.value === selected);
       valueEl.textContent = o ? o.text : "";
       markEl.textContent = o && o.mark || "";
@@ -4165,9 +5076,9 @@
         row.addEventListener("click", () => {
           const changed = opt.value !== selected;
           selected = opt.value;
-          render();
+          render2();
           close();
-          if (changed) for (const fn of listeners2) fn();
+          if (changed) for (const fn of listeners3) fn();
         });
         pop.appendChild(row);
       }
@@ -4197,19 +5108,19 @@
       set innerHTML(_v) {
         opts.length = 0;
         selected = null;
-        render();
+        render2();
       },
       // only ever cleared
       appendChild(opt) {
         opts.push({ value: opt.value, text: opt.textContent, mark: opt.mark || "" });
-        render();
+        render2();
       },
       get value() {
         return selected || "";
       },
       set value(v) {
         selected = v;
-        render();
+        render2();
       },
       get disabled() {
         return root.classList.contains("disabled");
@@ -4218,7 +5129,7 @@
         root.classList.toggle("disabled", !!b);
       },
       addEventListener(_ev, fn) {
-        listeners2.push(fn);
+        listeners3.push(fn);
       },
       focus() {
         btn.focus();
@@ -4721,6 +5632,7 @@
     syncConnConnect();
   }
   var activeConnStatus = null;
+  var activeDoor = "";
   var CONN_STAGES = {
     auth: { pct: 10, label: "Connecting\u2026" },
     probe: { pct: 22, label: "Inspecting remote\u2026" },
@@ -4734,44 +5646,90 @@
     // connect on a phone look like it "only checks the remote server" and never
     // installs (report #5)
     "install:fetch": { pct: 40, label: "Preparing remote server\u2026" },
-    "install:upload": { pct: 45, label: "Uploading server\u2026" },
+    // `span`: the stage has measured work to show, and a fraction of it moves the
+    // bar. The upload is 78 MB of bundle and takes as long as the link takes — a
+    // label frozen at 45% for a minute is how a live transfer reads as a hung one
+    "install:upload": { pct: 45, span: 25, label: "Uploading server\u2026" },
     "install:start": { pct: 70, label: "Starting server\u2026" },
     forward: { pct: 90, label: "Starting tunnel\u2026" }
   };
-  function updateConnProgress(stage) {
+  function fmtRate(bps) {
+    const n = Number(bps) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB/s";
+    if (n >= 1024) return Math.round(n / 1024) + " KB/s";
+    return Math.round(n) + " B/s";
+  }
+  function fmtEta(secs) {
+    const s = Math.max(0, Math.round(Number(secs) || 0));
+    if (s >= 3600) {
+      const h = Math.floor(s / 3600);
+      const m = Math.round(s % 3600 / 60);
+      return h + " h" + (m ? " " + m + " min" : "");
+    }
+    if (s >= 60) return Math.round(s / 60) + " min";
+    return s + " s";
+  }
+  function updateConnProgress(update) {
+    const stage = typeof update === "string" ? update : update && update.stage;
+    const frac = update && typeof update === "object" && typeof update.frac === "number" ? Math.max(0, Math.min(1, update.frac)) : null;
+    const bps = update && typeof update === "object" && typeof update.bps === "number" && update.bps > 0 ? update.bps : null;
+    const eta = update && typeof update === "object" && typeof update.eta === "number" && update.eta > 0 ? update.eta : null;
     const s = CONN_STAGES[stage];
-    if (activeConnStatus) activeConnStatus.textContent = s ? s.label : "Working\u2026";
-    for (const bar of [$("#conn-progress"), $("#conn-new-progress"), $("#conn-lost-progress")]) {
-      if (bar.classList.contains("hidden")) continue;
-      const fill = bar.querySelector(".conn-progress-fill");
+    const pane2 = activeDoor === "load";
+    let label = "Working\u2026";
+    if (s) {
+      label = s.label;
+      if (frac !== null) label = s.label.replace(/\s*…$/, "") + (pane2 ? "" : " " + Math.round(frac * 100) + "%");
+      if (frac !== null && bps) {
+        label += " \xB7 " + fmtRate(bps);
+        if (eta) label += " \xB7 " + fmtEta(eta) + " left";
+      }
+    }
+    if (activeConnStatus) activeConnStatus.textContent = label;
+    const pct = s ? s.pct + (frac !== null ? (s.span || 0) * frac : 0) : null;
+    if (pane2) reportHopStage(pct, label);
+    for (const bar2 of [$("#conn-progress"), $("#conn-new-progress"), $("#conn-lost-progress")]) {
+      if (bar2.classList.contains("hidden")) continue;
+      const fill = bar2.querySelector(".conn-progress-fill");
       if (s) {
         fill.classList.remove("indeterminate");
-        fill.style.width = s.pct + "%";
+        fill.style.width = s.pct + (frac !== null ? (s.span || 0) * frac : 0) + "%";
       } else {
         fill.classList.add("indeterminate");
         fill.style.width = "";
       }
     }
   }
-  function connBarWaiting(bar) {
-    bar.classList.remove("hidden");
-    const fill = bar.querySelector(".conn-progress-fill");
+  function connBarWaiting(bar2) {
+    bar2.classList.remove("hidden");
+    const fill = bar2.querySelector(".conn-progress-fill");
     fill.classList.add("indeterminate");
     fill.style.width = "";
   }
   function doorOf(statusEl) {
     if (!statusEl) return "bar";
     if (statusEl.id === "conn-new-status") return "popup";
+    if (statusEl.id === "tab-blocked-status") return "pane";
     if (statusEl.id === "conn-lost-why") return "lost";
     return "bar";
   }
   function setFsConnecting(host, statusEl, door) {
     activeConnStatus = statusEl;
+    activeDoor = door;
     if (door === "lost") {
       syncConnConnect();
       return;
     }
+    if (door === "load") {
+      reportHopStage(null, "Connecting to " + host + "\u2026");
+      syncConnConnect();
+      return;
+    }
     statusEl.textContent = "Connecting to " + host + "\u2026";
+    if (door === "pane") {
+      syncConnConnect();
+      return;
+    }
     if (door === "bar") {
       $("#conn-actions").classList.add("hidden");
       hidePickerBody();
@@ -4781,12 +5739,19 @@
   }
   function setFsConnectError(msg, statusEl, door) {
     activeConnStatus = statusEl;
+    activeDoor = door;
     statusEl.textContent = msg;
     if (door === "popup") {
       $("#conn-new-progress").classList.add("hidden");
       return;
     }
     if (door === "lost") {
+      return;
+    }
+    if (door === "pane") {
+      return;
+    }
+    if (door === "load") {
       return;
     }
     $("#conn-progress").classList.add("hidden");
@@ -4867,6 +5832,43 @@
     } catch (e) {
       setFsConnectError("connection failed: " + e.message, statusEl, door);
     } finally {
+      setConnBusy(false);
+      syncConnConnect();
+    }
+  }
+  async function connectTabMachine(machine) {
+    const host = machine && machine.host;
+    const user = machine && machine.user;
+    const port = Number(machine && machine.port || 22);
+    if (!host || !user) return "";
+    if (!(window.clutchTunnel && window.clutchTunnel.connect)) {
+      return "this shell cannot open an SSH tunnel";
+    }
+    if (connBusy) return "another connection is already in progress";
+    setConnBusy(true);
+    setFsConnecting(host, null, "load");
+    let up = false;
+    try {
+      let res = await window.clutchTunnel.connect({ host, user, port });
+      if (!res.ok && res.error && /authentication/i.test(res.error)) {
+        const pw = await showPasswordPrompt("Password / key passphrase for " + user + "@" + host);
+        if (!pw) return "connection cancelled";
+        res = await window.clutchTunnel.connect({ host, user, port, password: pw });
+      }
+      if (!res.ok && await hopLandedFor(host, user, port)) res = { ok: true, url: null };
+      if (res.ok) {
+        upsertConn(host, user, port);
+        localStorage.setItem("clutch_ssh_connected", "1");
+        up = true;
+        return "";
+      }
+      return "connection failed: " + (res.error || "could not connect");
+    } catch (e) {
+      return "connection failed: " + (e && e.message || e);
+    } finally {
+      paneHopSettled(up);
+      activeConnStatus = null;
+      activeDoor = "";
       setConnBusy(false);
       syncConnConnect();
     }
@@ -7026,10 +8028,10 @@
     plugRead();
   }
   function plugPaneVisible() {
-    const pane = $("#settings-pane-plugins");
+    const pane2 = $("#settings-pane-plugins");
     const box = $("#settings-modal");
-    if (!pane || !box) return false;
-    return !pane.classList.contains("hidden") && !box.classList.contains("hidden");
+    if (!pane2 || !box) return false;
+    return !pane2.classList.contains("hidden") && !box.classList.contains("hidden");
   }
   if (window.clutchApi && window.clutchApi.onBaseChanged) {
     window.clutchApi.onBaseChanged(() => {
@@ -7127,7 +8129,7 @@
 
   // src/renderer/commands.ts
   var registry = /* @__PURE__ */ new Map();
-  var listeners = /* @__PURE__ */ new Set();
+  var listeners2 = /* @__PURE__ */ new Set();
   function register(def) {
     registry.set(def.id, def);
   }
@@ -7160,7 +8162,7 @@
     return registry.has(id);
   }
   function onChange(cb) {
-    listeners.add(cb);
+    listeners2.add(cb);
   }
   function matches(e, spec) {
     const parts = spec.toLowerCase().split("+");
@@ -7198,9 +8200,11 @@
         id: t.id,
         path: t.path,
         name: t.name,
-        dirty: !!t.dirty
+        // undefined (never recorded) is dropped by JSON.stringify: the next load
+        // reads it back as undefined, which is exactly "still unknown"
+        machine: t.machine
       }));
-      localStorage.setItem(LS_KEY, JSON.stringify({ tabs }));
+      localStorage.setItem(LS_KEY, JSON.stringify({ tabs, activeTabId: state.activeTabId || "" }));
     } catch {
     }
   }
@@ -7221,13 +8225,17 @@
           id: t.id,
           path: t.path,
           name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
-          dirty: !!t.dirty,
+          // undefined for a store written before the field existed: unknown, and
+          // the claim then follows whatever the window is on (with the open's
+          // own self-heal, project.ts, as the backstop)
+          machine: asMachine(t.machine),
           base: null,
           running: false,
           needsInput: false
         }));
       }
-      state.activeTabId = null;
+      const active = typeof data.activeTabId === "string" ? data.activeTabId : "";
+      state.activeTabId = state.tabs.some((t) => t.id === active) ? active : null;
     } catch {
     }
   }
@@ -7241,44 +8249,38 @@
   function closedTabCount() {
     return closedStack.length;
   }
+  function tabMarkState(tab) {
+    if (tab.needsInput) return "ask";
+    if (tab.running) return "run";
+    return null;
+  }
   function renderTabBar() {
-    const bar = document.getElementById("tab-bar");
-    if (!bar) return;
+    const bar2 = document.getElementById("tab-bar");
+    if (!bar2) return;
     const newBtn = document.getElementById("tab-new-btn");
-    Array.from(bar.querySelectorAll(".doc-tab")).forEach((el) => el.remove());
-    bar.classList.toggle("hidden", state.tabs.length === 0);
+    Array.from(bar2.querySelectorAll(".doc-tab")).forEach((el) => el.remove());
+    bar2.classList.toggle("hidden", state.tabs.length === 0);
     for (const tab of state.tabs) {
       const el = document.createElement("div");
-      el.className = "doc-tab" + (tab.id === state.activeTabId ? " active" : "") + (tab.running ? " running" : "") + (tab.needsInput ? " needs-input" : "");
+      const mark = tabMarkState(tab);
+      el.className = "doc-tab" + (tab.id === state.activeTabId ? " active" : "") + (tab.running ? " running" : "");
       el.dataset.tabId = tab.id;
       el.tabIndex = 0;
       el.draggable = true;
       el.setAttribute("role", "tab");
       el.setAttribute("aria-selected", tab.id === state.activeTabId ? "true" : "false");
-      el.title = tab.path + (tab.running ? "\nrunning" : "") + (tab.needsInput ? "\nwaiting for your answer" : "");
+      el.title = tab.path + (mark === "ask" ? "\nwaiting for your answer" : mark === "run" ? "\nrunning" : "");
       el.setAttribute(
         "aria-label",
-        tab.name + (tab.running ? " \u2014 running" : "") + (tab.needsInput ? " \u2014 waiting for input" : "")
+        tab.name + (mark === "ask" ? " \u2014 waiting for input" : mark === "run" ? " \u2014 running" : "")
       );
       const label = document.createElement("span");
       label.className = "doc-tab-label";
       label.textContent = tab.name;
       el.appendChild(label);
-      if (tab.dirty) {
+      if (mark) {
         const dot = document.createElement("span");
-        dot.className = "doc-tab-dirty";
-        dot.setAttribute("aria-label", "unsaved");
-        el.appendChild(dot);
-      }
-      if (tab.running) {
-        const dot = document.createElement("span");
-        dot.className = "doc-tab-run";
-        dot.setAttribute("aria-hidden", "true");
-        el.appendChild(dot);
-      }
-      if (tab.needsInput) {
-        const dot = document.createElement("span");
-        dot.className = "doc-tab-ask";
+        dot.className = "doc-tab-dot doc-tab-dot-" + mark;
         dot.setAttribute("aria-hidden", "true");
         el.appendChild(dot);
       }
@@ -7332,8 +8334,8 @@
       el.addEventListener("dragend", () => {
         draggingId = null;
       });
-      if (newBtn) bar.insertBefore(el, newBtn);
-      else bar.appendChild(el);
+      if (newBtn) bar2.insertBefore(el, newBtn);
+      else bar2.appendChild(el);
     }
     const active = state.tabs.find((t) => t.id === state.activeTabId);
     document.title = active ? `${active.running ? "\u25CF " : ""}${active.name} \u2014 Clutch` : "Clutch";
@@ -7377,6 +8379,7 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     unwatchTab(id);
     await releaseTab(tab);
     forgetMemento(id);
+    forgetDomCache(id);
     state.tabs.splice(idx, 1);
     if (tab.path) {
       closedStack.push({ path: tab.path, name: tab.name });
@@ -7400,6 +8403,7 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     if (!tab) return;
     noteMru(tab.id);
     await activateTab(tab);
+    saveTabs();
   }
   async function tabCloseOthers() {
     const keep = state.activeTabId;
@@ -7439,6 +8443,7 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     if (project) tabOpen(project, name || project.split("/").pop() || project);
   });
   document.addEventListener("clutch:tab-state", () => renderTabBar());
+  onTabsPersist(saveTabs);
   loadTabs();
   renderTabBar();
 
@@ -7537,7 +8542,8 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     }
     for (const tab of state.tabs) {
       const mark = tab.id === state.activeTabId ? "\u2713 " : "";
-      const dot = tab.needsInput ? "  \u25CF" : tab.running ? "  \u25D0" : "";
+      const tabState = tabMarkState(tab);
+      const dot = tabState === "ask" ? "  \u25CF" : tabState === "run" ? "  \u25D0" : "";
       const item = ddItem("activate-tab", mark + tab.name + dot, { tab: tab.id });
       item.title = tab.path;
       if (tab.id === state.activeTabId) item.classList.add("active-tab");
@@ -7594,6 +8600,8 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
   refreshMenu();
 
   // src/renderer/boot.ts
+  onConnectDoor(handleSshConnect);
+  onTabAutoConnect(connectTabMachine);
   function storedLlmConfig() {
     try {
       const active = localStorage.getItem("clutch_llm_active");
@@ -7643,10 +8651,37 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
   }
   (async () => {
     const restoredTabs = state.tabs.length > 0 && !connLostExitPending();
-    if (!restoredTabs) await resolveApiBase();
+    if (!restoredTabs) {
+      if (state.activeTabId) {
+        state.activeTabId = null;
+        document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+      }
+      await resolveApiBase();
+    }
+    const bootTab = restoredTabs ? state.tabs.find((t) => t.id === state.activeTabId) || state.tabs[0] : null;
+    if (bootTab) {
+      beginPaneLoad(bootTab);
+      const base = await claimTab(bootTab);
+      if (base) adoptBase(base);
+      else if (bootTab.unreachable) notice(bootTab.unreachable, "info");
+    }
     await loadHostDefaults();
     healSettingsMirror();
-    if (restoredTabs) return;
+    if (restoredTabs) {
+      if (!bootTab || !state.apiBase) {
+        state.activeTabId = null;
+        document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+        showWelcome();
+        return;
+      }
+      await tabActivate(bootTab.id);
+      if (!state.apiBase) {
+        state.activeTabId = null;
+        document.dispatchEvent(new CustomEvent("clutch:tab-state"));
+        showWelcome();
+      }
+      return;
+    }
     const url = await reconciledBackendUrl();
     if (url) switchBackend(url);
     connectSSE();

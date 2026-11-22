@@ -230,12 +230,12 @@ export function connectSSE() {
     // cheap thing is to say it again on every connect.
     if (typeof pushTrustArmed === "function") pushTrustArmed();
     // A session really answered, and everything the PREVIOUS stream drew is now
-    // un-updatable — the deltas it missed are gone for good. Restart the
-    // streaming state AND take the nodes with it (stream-events.ts
-    // dropOrphanLive), instead of only forgetting the references: a live partial
-    // left on the page freezes exactly as the user saw it — "thinking… N chars"
-    // over a run that is no longer thinking — and the turn's own durable record
-    // then draws a second copy of the text under the stale first half.
+    // un-updatable — the deltas it missed are gone for good. So the block that was
+    // streaming is CLOSED (stream-events.ts dropOrphanLive): a live partial left as
+    // it is would be APPENDED to by the next delta, i.e. an answer that jumps
+    // mid-sentence, and the step's durable record could no longer repair it. Closed,
+    // the text the reader had stays on the page and that record writes it whole; the
+    // "thinking… N chars" block a run is no longer writing is the one thing that goes.
     dropOrphanLive();
     // The tree is read where the SESSION has answered, never here. This frame is
     // the response HEADERS arriving, and the host resolves the project this

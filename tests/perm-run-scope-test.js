@@ -27,7 +27,7 @@
 //   3. a live ask is never dropped because the pane happens to be "loading",
 //      while the loading guard still drops a replayed status frame.
 
-const { check, summary, slicer, uiModules, rendererScript, stateStub } = require("./harness.js");
+const { check, summary, slicer, uiModules, rendererScript, stateStub, installRecordLedger } = require("./harness.js");
 
 const mods = uiModules();
 const src = mods.map((m) => m.code).join("\n");
@@ -173,6 +173,7 @@ const renderer = [
   slice.fnBody("appendCompletion"),
   slice.fnBody("renderEvent"),
 ].join("\n\n");
+installRecordLedger(); // the closed-block ledger stream-events.ts keeps a cut block in
 (0, eval)(renderer);
 
 // the prompt is open iff #perm-modal lost its "hidden" class — the only signal

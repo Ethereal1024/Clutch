@@ -159,12 +159,27 @@
     flex: 1 0 100%;
     min-width: 0;
   }
+  /* the picker's own finger scale: one control height for the toolbar, the name
+     bar and the list rows (the settings pane and the plugin tab raise the same
+     names for their own panes — the picker had none, so on a touch screen its
+     toolbar stayed a pointer-sized strip) */
+  #fs-modal {
+    --ctl-h: 40px;
+  }
+  /* ...and the toolbar is TWO lines here: the way up and the path on the first,
+     the hidden toggle and New folder on the second. A 360px column holds the path
+     and both labels on one line only by squeezing the path to nothing (its basis
+     is 0), so the lines are PLACED rather than left to wrap: one column for the
+     square icon, one for the path, one for the button — the path spans the width
+     of the first line, the toggle starts the second under it. */
   .fs-toolbar {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: var(--ctl-h) minmax(0, 1fr) auto;
+    row-gap: var(--s2);
   }
-  .fs-toolbar input {
-    min-width: 0;
-  }
+  #fs-up { grid-area: 1 / 1; }
+  .fs-toolbar label.hidden-toggle { grid-area: 2 / 1 / 3 / 3; justify-self: start; }
+  #fs-mkdir-btn { grid-area: 2 / 3; justify-self: end; }
 
   /* modals own fixed pixel widths (420/540/560) — cap them to the viewport */
   .modal-box,

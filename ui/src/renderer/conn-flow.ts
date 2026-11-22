@@ -21,7 +21,8 @@ import {
   renderConnSelector, setConnBusy, updateConnConnect, upsertConn,
 } from "./conn-store";
 import { $ } from "./dom";
-import { fsMode, loadDir } from "./fs-browser";
+import { loadDir } from "./fs-browser";
+import { paneHopSettled, reportHopStage } from "./pane";
 import { closeModal, dismissOnOverlayPress } from "./settings";
 import { state } from "./state";
 
@@ -124,6 +125,10 @@ export function resetConnChrome() {
 }
 
 export let activeConnStatus = null; // status element of the modal currently connecting
+// ...and the door that attempt came from, named once where it started (the
+// element alone cannot say it: the tab's own load reports into the PANE's state,
+// which is no element at all — pane.ts). updateConnProgress reads this.
+let activeDoor = "";
 
 // connection progress bar: the tunnel reports coarse stages over IPC
 export const CONN_STAGES = {
@@ -139,19 +144,91 @@ export const CONN_STAGES = {
   // connect on a phone look like it "only checks the remote server" and never
   // installs (report #5)
   "install:fetch": { pct: 40, label: "Preparing remote server…" },
-  "install:upload": { pct: 45, label: "Uploading server…" },
+  // `span`: the stage has measured work to show, and a fraction of it moves the
+  // bar. The upload is 78 MB of bundle and takes as long as the link takes — a
+  // label frozen at 45% for a minute is how a live transfer reads as a hung one
+  "install:upload": { pct: 45, span: 25, label: "Uploading server…" },
   "install:start": { pct: 70, label: "Starting server…" },
   forward: { pct: 90, label: "Starting tunnel…" },
 };
-export function updateConnProgress(stage) {
+
+// How much of the tab's own loading bar (#open-progress) the HOP may fill is
+// pane.ts's business: one load is one bar moving one way, and the file that owns
+// that arithmetic (HOP_SHARE, the replay's phases) is the same one that paints it.
+// This flow only REPORTS a stage (reportHopStage) — it never touches the bar.
+
+// A transfer's own speed, in the units a person reads: 13 KB/s is the number that
+// matters when the far side is writing at a crawl, because it is the one that
+// says "this is slow, not stuck".
+export function fmtRate(bps) {
+  const n = Number(bps) || 0;
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB/s";
+  if (n >= 1024) return Math.round(n / 1024) + " KB/s";
+  return Math.round(n) + " B/s";
+}
+
+// ...and how much longer, coarse on purpose: an ETA that counts seconds during a
+// hundred-minute upload is noise.
+export function fmtEta(secs) {
+  const s = Math.max(0, Math.round(Number(secs) || 0));
+  if (s >= 3600) {
+    const h = Math.floor(s / 3600);
+    const m = Math.round((s % 3600) / 60);
+    return h + " h" + (m ? " " + m + " min" : "");
+  }
+  if (s >= 60) return Math.round(s / 60) + " min";
+  return s + " s";
+}
+
+// A stage name, or { stage, frac, bps, eta } for a stage that has measured work to
+// show. The fraction is read only for the stage it belongs to: a number with no
+// stage is nothing to paint. bps/eta are the transfer's own (see tunnel-remote):
+// they are shown next to the percent and never turn the stage into an error.
+export function updateConnProgress(update) {
+  const stage = typeof update === "string" ? update : update && update.stage;
+  const frac =
+    update && typeof update === "object" && typeof update.frac === "number"
+      ? Math.max(0, Math.min(1, update.frac))
+      : null;
+  const bps =
+    update && typeof update === "object" && typeof update.bps === "number" && update.bps > 0
+      ? update.bps
+      : null;
+  const eta =
+    update && typeof update === "object" && typeof update.eta === "number" && update.eta > 0
+      ? update.eta
+      : null;
   const s = CONN_STAGES[stage];
-  if (activeConnStatus) activeConnStatus.textContent = s ? s.label : "Working…";
+  // The tab's own loading bar (#open-progress, door "load") has a percent of its
+  // own at the right end, so its note says the STAGE and the speed and never the
+  // number: "Uploading server 42% 42%" is what a shared label would read. That
+  // note is the pane's state, not an element (pane.ts), so this door writes
+  // nothing here: it REPORTS the stage below.
+  const pane = activeDoor === "load";
+  let label = "Working…";
+  if (s) {
+    label = s.label;
+    // "Uploading server 42%": the ellipsis is the promise that something is
+    // coming, so a number replaces it rather than following it
+    if (frac !== null) label = s.label.replace(/\s*…$/, "") + (pane ? "" : " " + Math.round(frac * 100) + "%");
+    // ...and the rate (with what is left) when the transfer measured one: a
+    // percent that is real but crawling was the last thing that read as a hang
+    if (frac !== null && bps) {
+      label += " · " + fmtRate(bps);
+      if (eta) label += " · " + fmtEta(eta) + " left";
+    }
+  }
+  if (activeConnStatus) activeConnStatus.textContent = label;
+  const pct = s ? s.pct + (frac !== null ? (s.span || 0) * frac : 0) : null;
+  // the same stage arithmetic as the picker's bars, reported as the hop's own
+  // fraction — the pane turns it into its share of the bar (one load, one bar)
+  if (pane) reportHopStage(pct, label);
   for (const bar of [$("#conn-progress"), $("#conn-new-progress"), $("#conn-lost-progress")]) {
     if (bar.classList.contains("hidden")) continue;
     const fill = bar.querySelector(".conn-progress-fill");
     if (s) {
       fill.classList.remove("indeterminate");
-      fill.style.width = s.pct + "%";
+      fill.style.width = s.pct + (frac !== null ? (s.span || 0) * frac : 0) + "%";
     } else {
       fill.classList.add("indeterminate"); // unknown stage: keep the bar animating
       fill.style.width = "";
@@ -190,6 +267,13 @@ export function connBarWaiting(bar) {
 export function doorOf(statusEl) {
   if (!statusEl) return "bar";
   if (statusEl.id === "conn-new-status") return "popup";
+  // the failed tab's own panel (project.ts showBlocked): its status line is the
+  // whole chrome of that attempt, and the picker is not on screen — so this door
+  // reports there and moves nothing else
+  if (statusEl.id === "tab-blocked-status") return "pane";
+  // ...and the tab's own LOAD is not a door at all: connectTabMachine names it
+  // where it starts ("load"), because its surface is the pane's state rather than
+  // an element (pane.ts) — no element here can stand for it
   // the disconnect dialog: a re-dial of the host this window was on (conn-lost.ts)
   // reports here, and it is a door of its own for one more reason — the picker's Retry
   // re-uses the last attempt made FROM THE BAR, and a reconnect is not that press
@@ -199,6 +283,7 @@ export function doorOf(statusEl) {
 
 export function setFsConnecting(host, statusEl, door) {
   activeConnStatus = statusEl;
+  activeDoor = door;
   if (door === "lost") {
     // The disconnect dialog is its own chrome, and it is already the whole UI: its
     // line says "Reconnecting…", the host it is going back to is on the line above
@@ -210,7 +295,25 @@ export function setFsConnecting(host, statusEl, door) {
     syncConnConnect();
     return;
   }
+  if (door === "load") {
+    // the tab's loading card is the whole chrome here: its NOTE is the pane's
+    // state (pane.ts), so even this first sentence is a report (and the bar under
+    // it, with the stage and the transfer's speed, follows through
+    // updateConnProgress). The picker's bars, its Retry/Cancel and its fold
+    // belong to another door, and moving them from a boot would paint chrome onto
+    // a picker nobody opened.
+    reportHopStage(null, "Connecting to " + host + "…");
+    syncConnConnect(); // ...but the picker's Connect still stands down while it runs
+    return;
+  }
   statusEl.textContent = "Connecting to " + host + "…";
+  if (door === "pane") {
+    // the failed tab's panel: its own line is the whole chrome of this attempt,
+    // and the picker is not on screen — moving its bars would be a second door
+    // reporting an attempt nobody can see
+    syncConnConnect(); // the picker's own Connect still stands down while it runs
+    return;
+  }
   if (door === "bar") {
     $("#conn-actions").classList.add("hidden"); // an attempt replaces the last verdict
     // and retires the listing in flight (hidePickerBody ends that wait): the fold is
@@ -224,6 +327,7 @@ export function setFsConnecting(host, statusEl, door) {
 
 export function setFsConnectError(msg, statusEl, door) {
   activeConnStatus = statusEl;
+  activeDoor = door;
   statusEl.textContent = msg;
   if (door === "popup") {
     // the verdict is the popup's, with its own Connect armed again by setConnBusy:
@@ -238,6 +342,17 @@ export function setFsConnectError(msg, statusEl, door) {
     // returns — connLostChrome). Retry/Cancel belong to the picker's bar, which this
     // attempt never took: leaving them there would be a second door onto a second
     // attempt, behind a dialog that is still up.
+    return;
+  }
+  if (door === "pane") {
+    // the failed tab's panel reads the failure on its own line; the picker's bar
+    // never took this attempt, so nothing there is armed or disarmed by it
+    return;
+  }
+  if (door === "load") {
+    // the tab's own panel is where a failed hop is read (project.ts showBlocked
+    // from the claim's verdict): the bar only carried the attempt, and the caller
+    // takes it down — writing the sentence into a vanishing note would lose it
     return;
   }
   $("#conn-progress").classList.add("hidden");
@@ -372,7 +487,80 @@ export async function handleSshConnect(host, user, port, statusEl) {
   }
 }
 
-// Dial a host as a MOVE. Both doors that name a host — choosing one in the list
+// ---- the tab's own load: the hop its file needs ------------------------------
+//
+// A tab whose file lives on a far machine cannot claim a session until the hop to
+// that machine is up (slots.ts prepareTabMachine), so that hop IS a step of
+// loading the tab — and it belongs in the tab's own loading bar, not behind a
+// Connect button somewhere else.
+//
+// The tab's record is the intent. The user opened that file on that machine, the
+// connect that got them there won, and the secret it typed is in the settings
+// mirror (ssh_secrets) for the next dial — so this is a RECONNECT: one attempt,
+// the cached secret first, and the password dialog only when the far side refuses
+// that secret (a changed password, a host whose secret was never cached). A
+// question asked while the tab is loading is still one press, and it is the ONLY
+// press the user has to make: nothing here sends them to the picker to do it.
+//
+// REPORTS into the tab's own load (door "load", above) — the stage and the
+// transfer's speed as the card's note, the fraction as the bar's first share of
+// one whole load. The arithmetic belongs to pane.ts, which also continues that
+// same bar with the replay (project.ts openInTab). Returns "" when the hop is up,
+// or the sentence the tab's panel should carry.
+//
+// It does NOT switch this window's backend: that is the claim's business and the
+// caller is about to make it (claimTab → the tab's own slot). Resolving the
+// window's default session here would claim one for the window itself — a session
+// nobody is looking at, which is what boot.ts exists to avoid.
+export async function connectTabMachine(machine): Promise<string> {
+  const host = machine && machine.host;
+  const user = machine && machine.user;
+  const port = Number((machine && machine.port) || 22);
+  if (!host || !user) return ""; // nothing named: not this path's question
+  if (!(window.clutchTunnel && window.clutchTunnel.connect)) {
+    return "this shell cannot open an SSH tunnel";
+  }
+  if (connBusy) return "another connection is already in progress";
+  setConnBusy(true);
+  setFsConnecting(host, null, "load");
+  let up = false;
+  try {
+    let res = await window.clutchTunnel.connect({ host, user, port });
+    if (!res.ok && res.error && /authentication/i.test(res.error)) {
+      // the cached secret did not authenticate (changed password, or none was ever
+      // cached for this host): ask HERE, once, and let the host cache what wins so
+      // the next boot needs no dialog at all
+      const pw = await showPasswordPrompt("Password / key passphrase for " + user + "@" + host);
+      if (!pw) return "connection cancelled";
+      res = await window.clutchTunnel.connect({ host, user, port, password: pw });
+    }
+    // the loser of a concurrent dial is not a failed connect (hopLandedFor)
+    if (!res.ok && (await hopLandedFor(host, user, port))) res = { ok: true, url: null };
+    if (res.ok) {
+      upsertConn(host, user, port);
+      localStorage.setItem("clutch_ssh_connected", "1");
+      up = true;
+      return "";
+    }
+    // No degrade-to-SSH-tools here: a tab whose FILE is on that machine needs the
+    // hop's session, and a local server with a remote exec bridge has no file.
+    // The honest verdict is this attempt's own words.
+    return "connection failed: " + (res.error || "could not connect");
+  } catch (e) {
+    return "connection failed: " + ((e && e.message) || e);
+  } finally {
+    // Up: the bar keeps the hop's share and says what is happening now (the
+    // session spawns, then the replay — project.ts continues the same bar). Down:
+    // no bar at all, because the panel that carries the verdict takes the pane.
+    paneHopSettled(up);
+    activeConnStatus = null;
+    activeDoor = "";
+    setConnBusy(false);
+    syncConnConnect();
+  }
+}
+
+
 // and the new-connection popup's Connect — are attempts to BE on that host, and a
 // window is on one host at a time: the standing intent (and the tunnel that
 // carried it) is spent BEFORE the new attempt, exactly as the list's choice always

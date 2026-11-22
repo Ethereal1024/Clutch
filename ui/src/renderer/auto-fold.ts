@@ -554,7 +554,15 @@ export function holdsTheLine(el) {
 // frame is painted: a row is never painted in the pane and then watched jumping
 // into the block.
 export function foldLiveRow(el) {
-  if (!eventsEl || !el || !runInFlight()) return;
+  if (!eventsEl || !el) return;
+  // A row the view cache put back (slots.ts restoreDomCache) is not a row this run
+  // drew: it stood in the pane, complete, when the tab was left — its own
+  // `data-restored` mark says so. The window may still be marked busy for a run
+  // that belonged to the tab it just left, and folding this finished transcript
+  // into that block would move rows the reader had in plain sight. The mark is
+  // read once, here, and taken off.
+  if (el.dataset && el.dataset.restored) { delete el.dataset.restored; return; }
+  if (!runInFlight()) return;
   if (el.parentNode !== eventsEl) return; // already in a block, or in the pager's sink
   // Prose is where a segment ends: the block the rows above it were going into stops
   // filling in, and the rows that follow fold into a block of their own (openRunBlock).

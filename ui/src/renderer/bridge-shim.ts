@@ -114,6 +114,12 @@
     // bridge route takes no window id and the renderer cannot name another one.
     // The slotId only names WHICH of this page's sessions is leaving.
     releaseSession: (slotId) => call("clutchApi", "releaseSession", [slotId]),
+    // per-slot backend target (the picker's pin): the same two verbs the desktop
+    // preload exposes, so a page on the bridge can name the device its next
+    // claim should use. A bridge host that does not implement them rejects the
+    // call, exactly as any other route it does not serve.
+    setSlotTarget: (slotId, target) => call("clutchApi", "setSlotTarget", [slotId, target]),
+    getSlotTarget: (slotId) => call("clutchApi", "getSlotTarget", [slotId]),
     onBaseChanged: (cb) => subscribe("backend:base-changed", cb),
   });
 
@@ -149,6 +155,7 @@
   // page that was not there when the turn opened has to ask (P2-3 resume).
   expose("clutchRun", {
     start: (slotId, payload) => call("clutchRun", "start", runArgs(slotId, payload)),
+    run: (slotId, payload) => call("clutchRun", "run", runArgs(slotId, payload)),
     stop: (slotId) => call("clutchRun", "stop", [slotId]),
     step: (slotId) => call("clutchRun", "step", [slotId]),
     drive: (slotId) => call("clutchRun", "drive", [slotId]),
@@ -182,6 +189,9 @@
     connect: (cfg) => call("clutchTunnel", "connect", [cfg]),
     status: () => call("clutchTunnel", "status"),
     disconnect: () => call("clutchTunnel", "disconnect"),
+    // the devices this host knows (connected or recently connected), for the
+    // picker that parks a tab on one of them
+    list: () => call("clutchTunnel", "list"),
     onEnd: (cb) => subscribe("tunnel:ended", cb),
     onProgress: (cb) => subscribe("tunnel:progress", cb),
   });

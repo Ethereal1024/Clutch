@@ -52,6 +52,12 @@ of comments/strings/braces, the exact part of the grammar this bug lives in):
      animated in js and the tokens live in css, so nothing in either language
      can see the other: without a pin, editing one half is a silent change to
      the rhythm
+ 10. every indeterminate progress sliver runs inside a track that clips it: the
+     fill is moved from -100% to 285.714% of its own 35% box, so a track without
+     `overflow: hidden` turns a 3px bar into a band sweeping across the card —
+     the reported "the loading bar flies in from outside the window". CSS cannot
+     report it (the geometry is legal) and js cannot see it (the element is where
+     it was told to be), so the shape of the two rules is what is pinned
 
 Run: uv run python3 -m tests.ui_css_check
 """
@@ -523,6 +529,50 @@ def check_motion() -> None:
           + (f" — {drifts[0]}" if drifts else ""))
 
 
+# The unmeasured state of a progress bar is a 35% sliver moved with
+# `transform: translateX(-100%)` -> `translateX(285.714%)` of its OWN box (what
+# @keyframes conn-slide does): it starts one track-width to the LEFT of the track
+# and ends more than a track-width past its right. That travel only reads as a
+# bar while the TRACK clips it — without `overflow: hidden` the same sliver is a
+# band crossing the whole card, which is what "the loading bar flies in from
+# outside the window" looked like on the tab load card. Nothing in js can see
+# this: the element is exactly where it should be, the track is what is not
+# clipping it.
+SLIVER_ANIMATION = "conn-slide"
+
+
+def _rule_bodies(code: str) -> list[tuple[str, str]]:
+    """(cleaned prelude, body) for every block with no block inside it."""
+    return [(_clean(m.group(1)), m.group(2)) for m in re.finditer(r"([^{}]+)\{([^{}]*)\}", code)]
+
+
+def check_sliver_clip() -> None:
+    code = code_only(DESKTOP.read_text(encoding="utf-8"))
+    bodies: dict[str, str] = {}
+    slivers: list[str] = []
+    for prelude, body in _rule_bodies(code):
+        for selector in prelude.split(","):
+            selector = selector.strip()
+            if not selector:
+                continue
+            bodies[selector] = body  # the last rule wins, like the cascade
+            if re.search(r"\banimation\s*:[^;}]*\b" + SLIVER_ANIMATION + r"\b", body):
+                slivers.append(selector)
+    print("each indeterminate sliver's track:")
+    check(len(slivers) >= 2,
+          f"both progress bars still have their unmeasured state ({len(slivers)} found)")
+    for selector in slivers:
+        fill = re.search(r"\.([A-Za-z0-9_-]*)-fill", selector)
+        if not fill:
+            check(False, f"{selector} is a sliver whose track cannot be named from it (`.-fill` -> `.-track`)")
+            continue
+        track = f".{fill.group(1)}-track"
+        clipped = bool(re.search(r"overflow\s*:\s*hidden", bodies.get(track, "")))
+        check(clipped, f"{track} clips the sliver {selector} runs in — its travel is "
+                       f"-100% to 285.714% of the fill's own box, so only the track's "
+                       f"overflow keeps it inside a bar")
+
+
 def check_android_copy(name: str) -> None:
     src = UI / name
     dst = ANDROID_UI / name
@@ -649,6 +699,7 @@ def main() -> int:
     check_android_copy("mobile.css")
     check_tokens()
     check_motion()
+    check_sliver_clip()
     print("the scan itself:")
     check_regression()
     check_regression_tokens()

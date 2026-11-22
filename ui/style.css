@@ -166,6 +166,11 @@
      component are the ONE red this palette owns, so calling it --danger where
      that is what it means keeps a future palette change to a single line. */
   --danger: var(--accent);
+  /* the palette's second colour with a job: amber, "this is waiting for YOU".
+     Deliberately not the accent — red already means in flight or stopped, and
+     the two states share one tab dot (.doc-tab-dot), so they must not read as
+     one colour at a glance. 8.9:1 on --bg2, where the tab strip sits. */
+  --warn: #E3B341;
   /* native widgets (the checkbox, the select popup, the scrollbar gutter)
      follow the sheet instead of Chromium's light default */
   color-scheme: dark;
@@ -373,7 +378,11 @@ body { display: flex; flex-direction: column; height: 100%; }
   display: flex;
   align-items: stretch;
   gap: 0;
-  height: 32px;
+  /* 32px of tab band on this rule's own 1px. The band matters: a tab is 32px
+     tall, so the box its contents centre in (32px less the 2px active-indicator
+     border) is an even 30px and the 6px status dot centres on a whole pixel
+     instead of half of one (see .doc-tab-dot below). */
+  height: 33px;
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
   overflow-x: auto;
@@ -413,24 +422,31 @@ body { display: flex; flex-direction: column; height: 100%; }
   border-bottom-color: var(--accent);
 }
 .doc-tab-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
-/* dirty mark (•): accent dot when the project has unsaved state */
-.doc-tab-dirty { color: var(--accent); font-size: 10px; flex-shrink: 0; display: none; }
-.doc-tab.dirty .doc-tab-dirty { display: block; }
-/* a tab whose OWN run is in flight, and one waiting for the user's answer */
-.doc-tab-run,
-.doc-tab-ask {
+/* the tab's status mark: ONE dot, one meaning at a time. A tab either has its
+   own run in flight (accent, pulsing) or is waiting for the user's answer
+   (amber, still) — and "waiting" IS a running execution (slots.ts maps
+   execution_status "waiting" to running), so drawing a mark per flag put two
+   dots on one tab. tabMarkState (tab-bar.ts) picks the one that matters and
+   this element carries it; the switcher's ● / ◐ reads the same function.
+   The box lives here alone: the state class adds colour, never geometry. It
+   centres in an even 30px band (32px tab less the 2px active-indicator border)
+   at 12 — a whole pixel, so its edge rows are solid and the pulsing one cannot
+   read a row off the still one. */
+.doc-tab-dot {
   width: 6px; height: 6px; border-radius: 50%;
-  flex-shrink: 0; display: block;
+  flex: none;
+  align-self: center;
+  display: block;
 }
-.doc-tab-run { background: var(--accent); animation: tab-run-pulse 1.2s ease-in-out infinite; }
-.doc-tab-ask { background: var(--green); }
+.doc-tab-dot-run { background: var(--accent); animation: tab-run-pulse 1.2s ease-in-out infinite; }
+.doc-tab-dot-ask { background: var(--warn); }
 .doc-tab.running { color: var(--text); }
 @keyframes tab-run-pulse {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .doc-tab-run { animation: none; opacity: 1; }
+  .doc-tab-dot-run { animation: none; opacity: 1; }
 }
 /* close ✕ button inside each tab */
 .doc-tab-close {
@@ -792,24 +808,102 @@ main { display: flex; flex: 1; min-height: 0; }
 #task-input:focus { outline: none; border-color: var(--accent); }
 .muted { color: var(--muted); font-size: 13px; }
 
-/* project-open progress: a thin overlay strip pinned over the top of the
-   stream — no layout shift, transient, driven by the real byte progress */
+/* ---- the pane's LOAD state ---------------------------------------------------
+   A tab being opened owns the pane (pane.ts: one state at a time). This card
+   covers the stream, so the previous tab's conversation can never sit under the
+   bar of the tab that is coming — that was the reported bug. Same card language
+   as .tab-blocked, one step quieter. The bar lives INSIDE the card: it reports on
+   that load and must not outlive it.
+
+   z-index: see .tab-blocked — #stream is never hidden, so "only one of the pane's
+   states is on screen" has to be TRUE OF THE PAINT, not only of which element
+   carries `hidden`. */
+.tab-load {
+  position: absolute; inset: 0;
+  z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s4);
+  background: var(--bg);
+}
+.tab-load-card {
+  width: 100%; max-width: 520px;
+  padding: var(--s4);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6);
+}
+.tab-load-title { font-size: 14px; line-height: 1.4; font-weight: 600; color: var(--text); }
+.tab-load-where { margin-top: var(--s1); font-size: 12px; color: var(--muted); }
+.tab-load-where:empty { display: none; }
+
+/* the load's report: TWO lines inside the card (nothing scrolls under it — the
+   card does not scroll), driven by the real byte progress.
+
+   Two lines, and both of them RESERVED, because the card must not change size
+   while it stands there. The bar is up from the first frame; the percent arrives
+   with the first measured event, and the note after that. With the label and the
+   note as items of one flex row, an empty one is a box of no height and the row
+   is only as tall as the 3px track — so the card grew the moment "42%" appeared
+   (the reported "the loading window is a different height once the number
+   shows"). A fixed row height and a note line of its own make the card's height
+   a property of the markup, not of what has arrived yet.
+
+   The note used to sit BESIDE the track, capped at 58% of the card, so its
+   truncated width WAS the track's remainder: a stage that said "'Uploading
+   server · 13 KB/s…" left a shorter bar than "Connecting…", and the bar changed
+   length whenever the words did (the reported bar that "goes short and long").
+   On a line of its own it truncates at the card's width and the track keeps
+   every pixel it had. */
 .open-progress {
-  position: sticky; top: 0; /* pinned to the visible top of the stream; never scrolls away */
-  z-index: 5;
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 16px;
-  background: linear-gradient(to bottom, var(--bg) 55%, rgba(15, 15, 16, 0));
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: var(--s3);
 }
 .open-progress.hidden { display: none; }
-.open-progress-track { flex: 1; height: 3px; background: var(--border); }
-/* no width transition: setPct fires per event / per parse percent in bursts,
+/* the row is 16px with or without a number in it: that is the label's line, and
+   reserving it is the whole point (see above). `align-items: center` keeps the
+   3px track optically on that line's middle. */
+.open-progress-row {
+  display: flex; align-items: center; gap: 10px;
+  height: 16px;
+}
+/* `overflow: hidden` is not decoration: the unmeasured state below is a 35% sliver
+   translated from -100% to 285.714% of its OWN box, i.e. from one track-width to
+   the left of here to more than a track-width past the right. Without the clip it
+   leaves the 3px track entirely and sweeps across the card — the reported "the
+   progress bar comes in from outside the window". The picker's track
+   (.conn-progress-track) has always clipped for the same reason. */
+.open-progress-track {
+  flex: 1; height: 3px; background: var(--border);
+  overflow: hidden; border-radius: 2px;
+}
+/* no width transition HERE: setPct fires per event / per parse percent in bursts,
    and a CSS transition makes the fill chase the label (bar stuck at ~50% while
-   the label already reads 90%). Instant width keeps bar and label in lockstep. */
+   the label already reads 90%). The motion is the pane's (pane.ts, chasePct):
+   it eases the fill toward each reported number AND paints the label from the
+   same number, so a coarse report travels instead of jumping and the two can
+   never disagree. */
 .open-progress-fill { height: 100%; width: 0%; background: var(--accent); }
+/* a stage the flow has not measured yet (the hop's own dial, before sshd answers):
+   the same sliding sliver the picker's bars use, so "no number yet" reads as
+   moving rather than as a bar at zero */
+.open-progress-fill.indeterminate { width: 35%; animation: conn-slide 1.1s ease-in-out infinite; }
+/* a fixed 4ch, not a min-width: the label is `100%` at most, this font is mono,
+   so four characters is the whole range and the track never shifts when the
+   number gains a digit */
 .open-progress-label {
-  font-family: var(--font-mono); font-size: 12px; color: var(--muted);
-  min-width: 3.5ch; text-align: right;
+  flex: none; width: 4ch;
+  font-family: var(--font-mono); font-size: 12px; line-height: 16px;
+  color: var(--muted); text-align: right; font-variant-numeric: tabular-nums;
+}
+/* What the load is doing, in words (a hop's stage and speed). A line of its own,
+   always there: it is empty for a replay (a percent and nothing to say) and that
+   must cost no layout, not collapse the card. It truncates at the card's width
+   instead of sizing the bar. */
+.open-progress-note {
+  display: block; height: 16px; line-height: 16px;
+  font-size: 12px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* scroll-up paging pill: sits at the top of the stream for lazily-opened
@@ -877,6 +971,49 @@ main { display: flex; flex: 1; min-height: 0; }
 .stream-wrap {
   position: relative; flex: 1; display: flex;
   flex-direction: column; min-height: 0;
+}
+
+/* The pane's own report: a tab that could not open says why, and keeps saying
+   it (project.ts showBlocked). It covers the stream instead of sitting above
+   it, because while it stands there is no transcript underneath — and when the
+   tab does open, the panel is taken away rather than scrolled off. Sharp
+   corners and a hard shadow, the same card language as the dialogs.
+
+   IT HAS TO BE PAINTED ABOVE #stream, and it is NOT the tree order that says so:
+   pane.ts toggles `hidden` on the pane's [data-view] cards only, #stream stays in
+   the layout for every state, and it is a POSITIONED box (it anchors ::before and
+   .jump-bottom) that comes AFTER this card in index.html. Two positioned boxes
+   with no z-index paint in tree order, so the stream — transparent, full-size,
+   above — covered this panel without hiding it: the card was readable and every
+   press landed on the stream behind it (the reported "the window that asks me to
+   connect cannot be clicked"; Connect and Dismiss did nothing). One pane, one view
+   is about which view is UP, not about priority between them, so both cards take
+   the same single layer over the stream, and .tab-load takes it too rather than
+   leaning on where it happens to sit in the document. */
+.tab-blocked {
+  position: absolute; inset: 0;
+  z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s4);
+  background: var(--bg);
+}
+.tab-blocked-card {
+  width: 100%; max-width: 520px;
+  padding: var(--s4);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6);
+}
+.tab-blocked-text { font-size: 14px; line-height: 1.55; color: var(--text); }
+.tab-blocked-status {
+  margin-top: var(--s2);
+  font-size: 12px; line-height: 1.45; color: var(--muted);
+}
+.tab-blocked-status:empty { margin-top: 0; }
+.tab-blocked-actions {
+  display: flex; gap: var(--s2); justify-content: flex-end;
+  margin-top: var(--s4);
 }
 #stream {
   position: relative; /* anchors the ::before rail and the absolute jump-bottom */
@@ -2164,9 +2301,9 @@ mjx-container[display="true"] {
   border: 1px solid var(--border);
   border-radius: 0;
   color: var(--text);
-  padding: 7px var(--select-gutter) 7px var(--s2); /* match the buttons' 7px vertical padding */
-  height: 32px;              /* fixed height: equal to the buttons, so the
-                                flex row centers every box on the same line */
+  padding: 0 var(--select-gutter) 0 var(--s2); /* the height is the box's, the
+                                text centers in it: see the control rule below */
+  height: var(--ctl-h);      /* the same box as the buttons beside it */
   font-family: var(--font-mono);
   font-size: 13px;
 }
@@ -2177,13 +2314,9 @@ mjx-container[display="true"] {
 .fs-conn-row select:disabled { opacity: 0.4; cursor: default; }
 .fs-conn-row button {
   white-space: nowrap;
-  height: 32px;
-  /* center the label vertically: fullwidth glyphs (＋) have a taller line box,
-     so without flex centering + a tight line-height the text sits low */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
+  /* the box (height, centering, line-height) is the picker's one control rule;
+     what this row adds is that its two buttons do not squeeze the select */
+  flex: none;
 }
 /* The picker's own Connect: it belongs to the FOLDED conn bar — the welcome state,
    where the conn bar is the whole dialog. While the body is up, the file browser is
@@ -2222,10 +2355,51 @@ mjx-container[display="true"] {
   /* the height and the fade are the same length on purpose: the body is either
      here or gone, and a fade that finishes after the height has collapsed leaves
      the last third of it fading over whatever moved up into its place. */
-  transition: max-height var(--size), opacity var(--size);
+  transition: max-height var(--move), opacity var(--move);
 }
 #fs-body.collapsed { max-height: 0; opacity: 0; }
+/* ONE control height for the whole picker. The connect bar, the toolbar and the
+   name bar are three rows of one machine, and they were 33, 35 and 38px: a seam
+   that reads as unfinished before anything is even pressed. Every box is --ctl-h
+   tall with its label centered in it — a fullwidth glyph (＋) has a taller line
+   box than Archivo's, so line-height 1 plus flex centering is what keeps the text
+   off the floor of its own box instead of the padding deciding for it. */
+#fs-modal button,
+#fs-modal input[type="text"] {
+  height: var(--ctl-h);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+/* a field's text is positioned by its line box, not centered like a button's
+   label: one line as tall as the content box (the height minus its two 1px
+   borders) is what puts a 13px name in the middle of a 32px box. This is the
+   measured rule, not a guess — the ink of the label sat 7px high without it. */
+#fs-modal input[type="text"] { line-height: calc(var(--ctl-h) - 2px); }
+#fs-modal button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  white-space: nowrap;
+}
+#fs-modal input[type="text"] { min-width: 0; }
 .fs-toolbar { display: flex; gap: var(--s2); margin-bottom: var(--s3); }
+/* the way up is an icon, so it is a square: one arrow, one box, no label to
+   wrap. The glyph is `→` turned a quarter anticlockwise, not the `▸` caret the
+   sheet uses elsewhere: this face draws `▸` at 6x7px — a full stop with a point
+   (see .turn-fold-caret) — while `→` carries a shaft, so at 14px it is a 14px
+   arrow, the size a button's direction needs. The icon font has no `↑`. */
+#fs-up {
+  flex: none;
+  width: var(--ctl-h);
+  padding: 0;
+}
+.fs-up-glyph {
+  display: block;
+  transform: rotate(-90deg);
+  font-size: 14px;
+  line-height: 1;
+}
 .fs-toolbar input { flex: 1; }
 label.hidden-toggle {
   font-family: var(--font-mono); font-size: 11px; color: var(--muted);
@@ -2266,30 +2440,152 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
 /* beat #fs-toolbar input { flex: 1 } so the checkbox stays its natural size */
 #fs-toolbar label.hidden-toggle input { flex: none; }
 #fs-list {
-  height: 260px;
+  /* the list is the dialog's one scroll region: it keeps a band of the window in
+     sight at every size, and it is the same box whether it holds one row or fifty
+     — a list that grows with its contents makes the buttons under it move */
+  height: clamp(220px, 40vh, 320px);
   border: 1px solid var(--border);
   background: var(--bg);
   font-family: var(--font-mono);
   font-size: 13px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
-.fs-row { padding: 6px var(--row-gutter); cursor: pointer; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; user-select: none; }
-.fs-row:hover { background: var(--bg2); }
-.fs-row.dir::before { content: "▸"; color: var(--muted); }
-.fs-row.file::before { content: ""; width: 8px; }
+/* rows share the list's left gutter with the fields above them, so the column of
+   names is one column; the height is the control height, so a row and the box
+   beside it are the same size */
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--ctl-h);
+  padding: 0 var(--row-gutter);
+  cursor: default;
+  user-select: none;
+}
+/* a row that acts says so on hover, on press and on focus — the states the
+   buttons above it have, in the same --quick, so one gesture cannot land at two
+   speeds in one pane. A row takes the caret because the user asked for it (a
+   click or an arrow key), so focus is the accent bar here, not a ring. */
+.fs-row[tabindex="0"] { cursor: pointer; }
+/* hover says "this can be pressed": a row that cannot (a file this picker will not
+   open, the empty line) does not light up under the pointer — the state would
+   claim an action that is not there */
+.fs-row[tabindex="0"]:hover { background: var(--bg2); }
+.fs-row[tabindex="0"]:active { background: var(--bg3); }
+.fs-row:focus {
+  outline: none;
+  background: var(--bg2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+/* one marker cell in front of every row, empty for a file: names start at the
+   same column whatever is in front of them. `▶` (U+25B6) at 10px is the bundled
+   face's 9x10px solid mark — the `▸` it replaced is 6x7 there, which read as a
+   full stop beside a 10px-tall name. */
+.fs-row::before {
+  content: "";
+  flex: none;
+  width: 10px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1;
+}
+.fs-row.dir::before { content: "▶"; color: var(--muted); }
+/* one line per name: a long one ends in an ellipsis instead of wrapping the row
+   to two lines and pushing every row after it down */
+.fs-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fs-row.dir .fs-name { font-weight: 600; } /* a folder outranks a file at a glance */
 .fs-row.clc { color: var(--accent); }
 .fs-row.plain { color: var(--muted); cursor: default; }
-.fs-row.error-row { color: var(--accent); cursor: default; }
-.fs-row.action { color: var(--accent); cursor: pointer; }
-.fs-row.action:hover { background: var(--bg2); }
+/* the folder the last create made: marked once, in the listing that replaces the
+   row it was typed into — the receipt for a press, where the eye already is */
+.fs-row.just-created { box-shadow: inset 2px 0 0 var(--accent); animation: fs-arrive var(--move) var(--arrival); }
+@keyframes fs-arrive {
+  from { background: var(--bg3); }
+  to { background: transparent; }
+}
+/* an empty folder, said in the list rather than left as a blank box: what it is,
+   and the one thing there is to do in it */
+.fs-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s1);
+  height: 100%;
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+.fs-empty-glyph { font-size: 22px; line-height: 1; color: var(--muted); }
+.fs-empty p { margin: 0; }
+.fs-empty-hint { font-family: var(--font-mono); font-size: var(--fs-sm); }
+/* the inline create row: the name is typed where the folder will appear, so the
+   row is a list row with a field in it and no box of its own — the caret and the
+   accent bar are the whole form. Its two rules are keyed to #fs-list because
+   `.modal-box input` (0,1,1) owns the look of every field in this dialog and
+   would otherwise hand this one 14px text and 10px of side padding: the name
+   would sit 11px right of, and two sizes above, the names in the rows under it. */
+.fs-edit-row {
+  flex-wrap: wrap;
+  row-gap: var(--s1);
+  background: var(--bg2);
+  box-shadow: inset 2px 0 0 var(--accent);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.fs-row.fs-edit-row::before { content: "▶"; color: var(--accent); }
+#fs-list input.fs-inline-input {
+  flex: 1;
+  min-width: 0;
+  height: var(--ctl-h);
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  /* the line box is the row (there is no 1px border to subtract here) */
+  line-height: var(--ctl-h);
+}
+#fs-list input.fs-inline-input::placeholder {
+  font-style: italic;
+  color: var(--muted);
+  opacity: 0.55;
+}
+#fs-list .fs-inline-input:focus { outline: none; }
+.fs-edit-row[aria-busy="true"] .fs-inline-input { opacity: 0.55; cursor: progress; }
+/* the refusal is the server's own sentence, under the name it is about: indented
+   to the name column (the 10px marker cell plus the row's 8px gap) so it reads as
+   a line about that name, not as a second field */
+#fs-list .fs-edit-error {
+  flex: 1 0 100%;
+  margin: 0;
+  padding: 0 0 var(--s1) 18px;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--muted);
+}
+.fs-edit-error:empty { display: none; }
+.fs-edit-row-error { box-shadow: inset 2px 0 0 var(--accent); }
+.fs-edit-row-error .fs-edit-error { color: var(--accent); }
+.fs-edit-row-error .fs-inline-input { color: var(--accent); }
 #fs-new { margin-top: var(--s4); }
-/* read-only path display bar — no interaction chrome */
+/* read-only path display: it reads as a line of the toolbar, not as a field —
+   no box, no border, no chrome. The value is scrolled to its end in loadDir (the
+   folder on screen is the last segment of the path); the whole path is on hover
+   and selectable for copying. */
 #fs-path-input[readonly] {
   color: var(--muted); background: transparent; border-color: transparent;
-  cursor: default; pointer-events: none;
+  cursor: default;
   font-family: var(--font-mono); font-size: 12px;
+  padding-left: 0;
 }
-#fs-path-input[readonly]:focus { outline: none; box-shadow: none; }
+#fs-path-input[readonly]:hover { color: var(--text); }
+#fs-path-input[readonly]:focus { outline: none; box-shadow: none; border-color: transparent; }
 /* filename entry bar — label + full-width input below the list */
 #fs-filename-bar {
   display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3);
@@ -2300,18 +2596,23 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   white-space: nowrap;
 }
 #fs-filename-bar input { flex: 1; }
-/* +Folder inline creation row */
+#fs-filename-bar input::placeholder { color: var(--muted); opacity: 0.7; }
 #fs-mkdir-btn { flex-shrink: 0; }
-#fs-mkdir-row {
-  display: flex; gap: var(--s2); align-items: center; margin-bottom: var(--s3);
+/* the row that offers to create what the name bar resolved (the typed path does
+   not exist yet): an accent line at the top of the list, in the list's own type —
+   it is an action, and the accent is the whole difference it needs */
+.fs-row.create-offer {
+  color: var(--accent);
+  background: var(--bg2);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
-#fs-mkdir-row input { flex: 1; }
-#fs-mkdir-row button { flex-shrink: 0; }
-/* create offer row in the file list (shown when the typed path doesn't exist) */
-.fs-row.create-offer { color: var(--accent); font-style: italic; }
-.fs-row.create-offer:hover { background: var(--bg2); }
-/* Don't Save is between Cancel and the primary action */
-#fs-dont-save { margin-left: auto; }
+.fs-row.create-offer::before { content: "＋"; color: var(--accent); font-weight: 600; }
+.fs-row.create-offer::after {
+  content: "↵ create";
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--dim);
+}
 
 /* project label */
 .project-label { font-size: 13px; font-family: var(--font-display); font-weight: 600; color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1; }
@@ -2420,15 +2721,16 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
      the base rule above puts on --quick, and no more: a <button> among them is
      already silenced by `button:active:not(:disabled)`, which outranks any class. */
   .tree-node:active,
-  .fs-row:active,
+  .fs-row[tabindex="0"]:active,
   .cselect-opt:active,
   .thinking-row:active,
   .result-row:active,
   .tool-row.folded:active .tool-label {
     transition: none;
   }
-  .fs-row:active,
-  .fs-row.action:active,
+  /* ...and only the rows that act: a file this picker will not open, or the line
+     that says the list is loading, does not flash under a finger either */
+  .fs-row[tabindex="0"]:active,
   .tree-node:active {
     background: rgba(255, 255, 255, 0.07);
   }

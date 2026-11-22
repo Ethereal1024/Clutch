@@ -12,7 +12,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { check, summary, slicer, uiSource, stateStub } = require("./harness.js");
+const { check, summary, slicer, uiSource, stateStub, runnableSnippet, installRecordLedger } = require("./harness.js");
 
 const ROOT = path.join(__dirname, "..");
 const src = uiSource(); // the renderer, every module in page load order
@@ -38,8 +38,17 @@ global.state.thinkingContent = "";
 global.state.retryNoteEl = null;
 global.streamRows = {};
 
+// the text painter (stream-text.ts): dropOrphanLive closes a block with a real
+// render pass (flushTextRender), so the block shows every character it is closed
+// with — the stubs below are everything that pass touches
+global.renderMarkdown = (t) => "<p>" + t + "</p>";
+global.highlightCode = () => {};
+global.typesetMath = () => {};
+global.stream = { classList: { contains: () => false }, scrollHeight: 1000, scrollTop: 0 };
+
 function fakeNode(tag) {
-  return {
+  const body = { innerHTML: "" };
+  const node = {
     tag,
     className: "",
     textContent: "",
@@ -47,16 +56,31 @@ function fakeNode(tag) {
     removed: false,
     // a node on the page: dropOrphanLive keeps only what is still connected
     isConnected: true,
-    appendChild(c) { this.children.push(c); return c; },
-    remove() { this.removed = true; },
+    _body: body,
+    querySelector(sel) { return sel === ".body" ? body : null; },
+    insertBefore(c) { node.children.push(c); return c; },
+    appendChild(c) { c.parent = node; node.children.push(c); return c; },
+    remove() {
+      node.removed = true;
+      if (node.parent) {
+        const i = node.parent.children.indexOf(node);
+        if (i >= 0) node.parent.children.splice(i, 1);
+      }
+    },
   };
+  return node;
 }
 
 // ---- load the real code ----
 (0, eval)(fnBody("clearStreamPreviews"));
+(0, eval)(fnBody("dropScaffold"));
 (0, eval)(fnBody("discardLivePartial"));
 (0, eval)(fnBody("setRetryNote"));
 (0, eval)(fnBody("clearRetryNote"));
+// the text painter: flushTextRender is the pass dropOrphanLive closes a block with
+const streamText = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "stream-text.ts"), "utf8");
+(0, eval)(runnableSnippet(streamText.slice(streamText.indexOf("export let textRenderLast"), streamText.indexOf("export function flushThinkingRender"))));
+installRecordLedger(); // the ledger a cut files the block it closed in
 
 // ---- 1) discardLivePartial: every live block of the dead attempt goes ----
 const textNode = fakeNode("div");
@@ -98,22 +122,23 @@ const at = apply.indexOf("if (ev.type === \"llm_retry\")");
 check(at >= 0, "applyStreamEvent still has an llm_retry branch");
 const next = apply.indexOf("if (ev.type ===", at + 5);
 const branch = apply.slice(at, next < 0 ? apply.length : next);
-check(branch.includes("if (ev.discard) discardLivePartial();"),
-  "the branch drops the live partial when the notice carries discard");
+check(/if \(ev\.discard\) discardLivePartial\(\);/.test(branch),
+  "the branch drops the live partial when the notice carries discard — the one path that takes a block off the page");
 check(branch.indexOf("discardLivePartial()") < branch.indexOf("setRetryNote(ev)"),
   "the stale blocks are gone before the retry chip appears");
 check(branch.indexOf("setRetryNote(ev)") >= 0, "the chip is still shown for a plain notice");
+check(!/addHole|openHole|dropHole/.test(apply),
+  "and a retry needs no hole bookkeeping: discardLivePartial drops the ledger entry with the block");
 
-// ---- 4) the WINDOW's socket: a reconnect drops the same stale blocks ----
+// ---- 4) the WINDOW's socket: a reconnect CLOSES the block instead of dropping it ----
 //
 // The other half of the same failure, with no notice to react to. When the
-// window's own SSE socket dies mid-turn, the deltas it missed are never stored
-// and the agent reissues the request from scratch — so the partial the dead
-// stream drew is exactly as stale as a retried one. The reconnect (es.onopen)
-// used to reset only the REFERENCES, leaving the nodes on the page: the reported
-// freeze, a "thinking… N chars" block that no event can ever update again, with
-// the restarted turn's own block growing beside it and the durable
-// assistant_message rendering a second copy of the text below.
+// window's own SSE socket dies mid-turn, the deltas it missed are never stored,
+// so the partial the dead stream drew can never be CONTINUED — deleting it is the
+// opening of the answer lost for good. A cut therefore CLOSES the block and files
+// it with the record that still owes it (text-seal-test.js pins what that record
+// then writes). What must still go is everything no record will ever come back
+// for: the frozen reasoning block, the half-streamed call rows, the stale chip.
 (0, eval)(fnBody("dropOrphanLive"));
 
 const text2 = fakeNode("div");
@@ -133,14 +158,20 @@ cancelledRaf = [];
 
 dropOrphanLive();
 
-check(text2.removed && global.state.lastTextEl === null && global.state.lastTextContent === "",
-  "a reconnect takes the partial text block off the page, not just its reference");
+check(!text2.removed && global.state.lastTextEl === text2 && global.state.lastTextContent === "half a thought",
+  "a reconnect KEEPS a half-streamed block and keeps the pointer: its deltas are never stored, so the block IS the only copy of that opening");
+check(global.state.textSealed === true,
+  "…it closes it, so the text after the cut cannot be appended to the half");
+check(text2._body.innerHTML === "<p>half a thought</p>",
+  "…painted with every character it is closed with, not with the last frame's text");
+check(global.awaiting.length === 1 && global.awaiting[0].el === text2 && global.awaiting[0].text === "half a thought",
+  "…and filed for the record that owns it, so that record writes THIS block whole");
 check(think2.removed && global.state.thinkingEl === null && global.state.thinkingContent === "",
-  "…and the frozen reasoning block with it (the 'stuck in thinking' the user saw)");
+  "…and the frozen reasoning block does go (the 'stuck in thinking' the user saw)");
 check(rowC.removed && Object.keys(global.streamRows).length === 0, "…and any half-streamed tool row");
 check(chip2.removed && global.state.retryNoteEl === null, "…and the stale retry chip");
-check(cancelledRaf.indexOf(3) >= 0 && global.state.textRenderRaf === 0, "…cancelling the render it had queued");
-check(cancelledRaf.indexOf(4) >= 0 && global.state.thinkingRenderRaf === 0, "…and the reasoning render beside it");
+check(cancelledRaf.indexOf(3) >= 0 && global.state.textRenderRaf === 0, "…the render it had queued lands now");
+check(cancelledRaf.indexOf(4) >= 0 && global.state.thinkingRenderRaf === 0, "…and the reasoning render beside it is cancelled");
 check(global.state.toolGroupEl === null, "…and closing the tool group it was drawing into");
 
 // wiring: the reconnect reaches that teardown, and no longer just nulls the refs
@@ -148,36 +179,39 @@ const sse = fs.readFileSync(path.join(ROOT, "ui", "src", "renderer", "sse-stream
 const onopen = sse.slice(sse.indexOf("es.onopen = () => {"));
 const onopenBody = onopen.slice(0, onopen.indexOf("\n  };"));
 check(onopenBody.includes("dropOrphanLive();"),
-  "es.onopen drops the live partial instead of leaving it on the page");
+  "es.onopen closes the block the stream can no longer feed");
 check(!/lastTextEl = null|thinkingEl = null/.test(onopenBody),
   "…and does not reset the references alone, which left the frozen nodes behind");
 
 // ---- 5) a reconnect KEEPS what the log already says ----
 //
-// The other side of the same teardown, and the reported loss. A block whose text
-// a step's durable assistant_message has taken over (textSealed), or one that
+// The other side of the same cut, and the reported loss. A block whose text a
+// step's durable assistant_message has taken over (textSealed), or one that
 // belongs to a run whose final has landed (runSettled), is not a partial: the
 // replay a reconnect starts is filtered at this window's watermark, so the record
 // that drew it is never re-delivered and removing the node is permanent. The pane
 // then ends at a `completed` divider with the closing prose gone — "git output →
 // completed" — while the .clc has held the answer all along.
+//
+// Such a block owes the log nothing, so nothing is filed for it: its own record
+// already wrote it, and the pointer stays with it so the run's final writes into
+// THIS block instead of painting the answer a second time.
+global.awaiting.length = 0; // section 4 filed its block; these are blocks nothing is owed for
 const sealedEl = fakeNode("div");
 const think3 = fakeNode("div");
 global.state.lastTextEl = sealedEl;
 global.state.lastTextContent = "the closing report";
-global.state.textSealed = true; // its step's record adopted this text
+global.state.textSealed = true; // its step's record wrote this text
 global.state.runSettled = false;
 global.state.thinkingEl = think3;
 global.state.retryNoteEl = null;
-global.carriedTextEl = null;
-global.carriedText = "";
 dropOrphanLive();
 check(!sealedEl.removed, "a reconnect keeps a block that holds a durable record's text");
-check(global.state.lastTextEl === null && global.state.lastTextContent === "",
-  "…while releasing the live pointer (a record the outage made it miss must open its own block)");
+check(global.awaiting.length === 0,
+  "…and files nothing: a block its record wrote is owed no text by the log");
+check(global.state.lastTextEl === sealedEl && global.state.lastTextContent === "the closing report",
+  "…keeping the pointer to it, so the run's final writes into THIS block");
 check(global.state.textSealed === true, "…and keeping the seal, so the step's straggling deltas are dropped");
-check(global.carriedTextEl === sealedEl && global.carriedText === "the closing report",
-  "…and remembering it, so the run's final does not paint the same answer twice");
 check(think3.removed, "the reasoning block is still a partial and still goes");
 
 const settledEl = fakeNode("div");
@@ -185,16 +219,15 @@ global.state.lastTextEl = settledEl;
 global.state.lastTextContent = "the closing report";
 global.state.textSealed = false;
 global.state.runSettled = true; // the run's final already landed
-global.carriedTextEl = null;
-global.carriedText = "";
 dropOrphanLive();
-check(!settledEl.removed,
-  "…and the closing prose of a finished run survives too (runSettled, not the seal, keeps it)");
+check(!settledEl.removed && global.state.lastTextEl === settledEl,
+  "…and the closing prose of a finished run survives too (runSettled, not the seal, is what keeps it)");
+check(global.awaiting.length === 0, "…a finished run owes no record either");
 
 global.state.lastTextEl = null;
+global.state.lastTextContent = "";
 global.state.textSealed = false;
 global.state.runSettled = false;
-global.carriedTextEl = null;
-global.carriedText = "";
+global.awaiting.length = 0;
 
 summary("mid-stream-retry-test", "discard semantics hold on the UI side");

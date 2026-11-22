@@ -18,7 +18,7 @@ import { SSE_RUN_LOST } from "./sse-stream";
 import { state } from "./state";
 import {
   appendThinkingRow, buildThinkingBlock, createAgentTextBlock,
-  flushTextRender, flushThinkingRender, renderTextBlock, scheduleTextRender,
+  flushTextRender, flushThinkingRender, paintTextBlock, scheduleTextRender,
   scheduleThinkingRender,
 } from "./stream-text";
 import { eventsEl, stream } from "./els";
@@ -81,67 +81,118 @@ export function clearStreamPreviews() {
 // notice announces it (discard=true); none of that partial output is durable
 // (stream deltas are never stored), so nothing is lost by dropping it here.
 //
-// `keepText` is the one exception, and it is not a retry: a block that holds a
-// durable assistant_message's text (textSealed) or that of a run already closed
-// (runSettled) is the log's own copy of an answer, not a partial. A reconnect
-// must still release the pointer — a record the outage made this window miss has
-// to be able to open its own block — but it must not delete what the log says.
-export function discardLivePartial(keepText = false) {
+// This is the ONE path that takes a block off the page: the attempt that wrote it
+// is dead, and what replaces it streams the same text from its first word, so the
+// half would only sit above a copy of itself.
+export function discardLivePartial() {
   if (state.textRenderRaf) { cancelAnimationFrame(state.textRenderRaf); state.textRenderRaf = 0; }
-  if (state.thinkingRenderRaf) { cancelAnimationFrame(state.thinkingRenderRaf); state.thinkingRenderRaf = 0; }
-  if (state.lastTextEl) { if (!keepText) state.lastTextEl.remove(); state.lastTextEl = null; }
+  if (state.lastTextEl) {
+    unawait(state.lastTextEl); // a cut may have filed it for a record that never comes
+    state.lastTextEl.remove();
+    state.lastTextEl = null;
+  }
   state.lastTextContent = "";
-  state.textSealed = false; // the block that held the durable text is gone
+  state.textSealed = false; // the block that held it is gone
+  dropScaffold();
+}
+
+// What an attempt in flight draws beside its text: the reasoning row, and the tool
+// rows whose arguments are still arriving. Deltas both, nothing of them is stored,
+// so neither a cut nor a retry can keep one — no record would ever complete it.
+function dropScaffold() {
+  if (state.thinkingRenderRaf) { cancelAnimationFrame(state.thinkingRenderRaf); state.thinkingRenderRaf = 0; }
   if (state.thinkingEl) { state.thinkingEl.remove(); state.thinkingEl = null; }
   state.thinkingContent = "";
   clearStreamPreviews();
 }
 
-// The same teardown, asked for by the WINDOW's own socket instead of by a
-// `discard` notice: a reconnect (sse-stream.ts es.onopen) restarts the streaming
-// state, and an UNFINISHED block is as dead to this view as a retried one is — a
-// delta is never stored (agent/events.py keeps finals), so the window cannot
-// continue that block, only abandon it. The agent's own answer to the same
-// failure is to reissue the request and re-stream the turn from its start, and
-// the log replays whatever this window never painted; both draw the turn again,
-// complete.
+// ---- a cut: the block is CLOSED, and its record writes it ----
 //
-// Keeping an unfinished block instead is the reported freeze: "thinking… 412
-// chars" left on screen for good under a run that is no longer thinking, a
-// second live block opening beside it, and the turn's own assistant_message
-// rendering a duplicate of the text under the stale first half. But the rule is
-// about the DELTAS, not the block: once a step's durable record has adopted the
-// text (textSealed) or the run's final has landed (runSettled), there is no
-// delta this window is owed — only a record it already painted. Dropping that
-// node is the other reported loss, an answer the log has and the pane does not.
+// The window's own socket came back (sse-stream.ts es.onopen) or a tab came back
+// (project.ts paintCachedView) — either way the text block that was streaming
+// stopped being fed, and no delta after this point continues it. A delta is never
+// stored (agent/events.py keeps finals), so the chunks that arrive after the cut
+// are the text AFTER a gap, and appending them is what the reader saw as an answer
+// beginning mid-sentence ("，下一次") with everything above it gone.
 //
-// So a KEPT block is remembered here (carriedTextEl/carriedText): the live
-// pointer is still released below, but the run's `final` can then recognise its
-// own answer already on the page instead of painting a second copy of it.
-let carriedTextEl = null;
-let carriedText = "";
-
+// So a cut CLOSES the block instead of taking it off the page, and one rule holds
+// from there on: a text block either STREAMS (deltas extend it) or it is CLOSED
+// (state.textSealed), and a closed block's text has exactly one writer left — the
+// record that owns it, the step's assistant_message, or the run's `final`, which
+// repeats the last one (run-state.ts foldRun writes the closing answer as the
+// completed summary). Both write it WHOLE, in place, and only into a block their
+// text starts with. That prefix is the identity this page has always used between
+// a record and its own deltas (assistant_message below), and it is what lets a
+// record that lags a whole step still land in its block instead of over the step
+// now speaking.
+//
+// Taking the block off the page is the same loss seen from the other side: the
+// record that painted it is behind addEvent's watermark and is never re-delivered,
+// so a removed block is a paragraph gone for good — the pane ended at a
+// `completed` divider with the closing prose missing ("git output → completed")
+// while the .clc had held the answer all along.
 export function dropOrphanLive() {
-  // A sealed block (its step's assistant_message adopted its text) or one that
-  // belongs to a run already closed (its final landed) is NOT a partial. The
-  // deltas it might still be owed are never stored, and the record that drew it
-  // is never re-delivered — addEvent's watermark drops every replay at or below
-  // what this window has already painted — so removing the node is a permanent
-  // loss: the pane ends at a `completed` divider with the closing prose gone
-  // ("git output → completed") while the .clc has held the answer all along.
-  // Only an unsealed block mid-step is as dead as a retried one, and only that
-  // one may go.
-  const keepText = Boolean(state.lastTextEl && state.lastTextEl.isConnected &&
-    (state.textSealed || state.runSettled));
-  carriedTextEl = keepText ? state.lastTextEl : null;
-  carriedText = keepText ? (state.lastTextContent || "") : "";
-  discardLivePartial(keepText);
-  // the pointer is released either way (a record the outage made this window miss
-  // has to be able to open its own block); the seal still says the step's deltas
-  // would only repeat what the kept block already shows
-  if (keepText) state.textSealed = true;
+  const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
+  if (live && state.lastTextContent) {
+    // Is a record still owed for this text? Not once the step's record adopted it
+    // (textSealed) or the run ended: the copy on the page is the log's own then.
+    const owed = !(state.textSealed || state.runSettled);
+    flushTextRender(); // the block shows every character it is closed with
+    state.textSealed = true;
+    if (owed) awaitRecord(live, state.lastTextContent);
+    dropScaffold(); // the reasoning row and the half-streamed calls are not text
+  } else {
+    discardLivePartial(); // an empty block: nothing on the page worth keeping
+  }
   state.toolGroupEl = null;
   clearRetryNote(); // a reconnect may have skipped the event that would clear it
+}
+
+// ---- the blocks the log still owes text to ----
+//
+// A cut closed them (dropOrphanLive), so their text is on the page but not in the
+// log this window can read any more, and the record that owns them has not landed.
+// A list, not a slot: a step can be cut more than once, and the feeds into addEvent
+// are unordered, so a record can arrive a whole step behind its block.
+const awaiting = [];
+
+function awaitRecord(el, text) {
+  if (!awaiting.some((w) => w.el === el)) awaiting.push({ el, text });
+}
+
+function unawait(el) {
+  const i = awaiting.findIndex((w) => w.el === el);
+  if (i >= 0) awaiting.splice(i, 1);
+}
+
+// The block a record of `text` completes: the newest one still on the page whose
+// text that record extends. Nodes something took off the pane (clearStream, a
+// replayed tab's own repaint) are dropped on the way past — a block that is not on
+// the page can never be filled, and no other bookkeeping has to be told.
+function awaitingFor(text) {
+  if (!text) return null;
+  for (let i = awaiting.length - 1; i >= 0; i--) {
+    if (!awaiting[i].el.isConnected) awaiting.splice(i, 1);
+  }
+  for (let i = awaiting.length - 1; i >= 0; i--) {
+    const w = awaiting[i];
+    if (w.text && text.startsWith(w.text)) return w;
+  }
+  return null;
+}
+
+// Write a block's whole text — the pass renderTextBlock makes, aimed at the node
+// the record names instead of at the streaming pointer — and close it. The pointer
+// only ever names the block of the step writing now (step_start releases it), so a
+// block it names keeps the record's text and the seal, while a block an EARLIER
+// step left behind is completed where it stands and the render state stays with
+// the step that is still speaking.
+function completeRecord(el, text) {
+  paintTextBlock(el, text, true);
+  unawait(el);
+  if (state.lastTextEl !== el) return;
+  state.lastTextContent = text;
+  state.textSealed = true;
 }
 
 // transient "connection lost — retrying…" chip. Shown when an LLM stream
@@ -214,13 +265,20 @@ export function addEvent(ev) {
     // the record of what happened to the run before it.
     if (state.sseRunLostPending) announceRunLost();
     state.runSettled = false;
-    // a task opens a NEW run: nothing of the run before it may keep collecting
-    // text — its durable copy is on the log and its block is final (stream-events'
-    // assistant_message seals a block once it holds the record)
-    state.textSealed = false;
-    // ...and a block a reconnect carried out of that run is not this run's answer
-    carriedTextEl = null;
-    carriedText = "";
+    // A task opens a NEW run: the block the run before it left is CLOSED, and its
+    // text is on the log, so it is not this run's answer and no record of this run
+    // may be mistaken for a continuation of it. A task queued INTO the run now
+    // writing leaves the streaming block alone — that step has not finished, and
+    // its next delta belongs to the block already on the page.
+    if (state.textSealed) {
+      state.lastTextEl = null;
+      state.lastTextContent = "";
+      state.textSealed = false;
+    }
+    // ...and no block of that run is still owed a record: its records are in the
+    // log AHEAD of this message, so every one of them has already had its chance
+    // to arrive — an entry left here could only be matched by a later run's text
+    awaiting.length = 0;
     // ...and every ask id the run before it handed out is dead
     forgetAnsweredPerm();
   } else if (ev && ev.type === "final") {
@@ -236,6 +294,18 @@ export function addEvent(ev) {
   }
   // the catch-up is over: the view follows again, with a single move
   if (ev && ev.type === "replayed") {
+    // ...and the block is IN the pane first: the batches addEvent held are
+    // painted here, in order, because endCatchUp's one scroll has to land on
+    // the real tail — not on a transcript that is still queued (a batch timer
+    // would fire after the scroll and leave the view above its own ending).
+    if (state.owedFlush) {
+      clearTimeout(state.owedFlush);
+      state.owedFlush = 0;
+    }
+    while (state.owedRecords.length) {
+      const row = state.owedRecords.shift();
+      if (row) row();
+    }
     endCatchUp();
     // The block that just closed is also the first moment this window may read
     // the workspace tree: the session resolved the project this stream named
@@ -271,34 +341,64 @@ export function addEvent(ev) {
   if (stream.classList.contains("loading") && ev.type === "state_update") {
     return;
   }
-  // finalize the coalesced text block before any non-text event
-  if (ev && ev.type !== "text_delta") flushTextRender();
-  // the same for the reasoning block: a non-reasoning event is the end of that
-  // stream, so the char counter has to land on its final value in this frame —
-  // before the next block takes the tail (step_start drops the block outright).
-  if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
-  // events that break a tool group; results follow their own tool_calls
-  if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
-    state.toolGroupEl = null;
-  }
-  if (applyStreamEvent(ev)) return;
+  // ---- the catch-up block: paint in batches, not one SSE frame at a time ----
+  //
+  // Everything below is DOM work. While a catch-up is open (`history` …
+  // `replayed`, stream-view.ts) the records arriving are the block the window
+  // was owed, and a tunnel delivers each SSE frame in its own chunk: painting
+  // per frame is a paint per record, so the transcript visibly assembled itself
+  // row by row in many small bursts the moment the load card went (the reported
+  // "a pile of messages loads itself at once"). Loopback hid it — the same block
+  // arrives in one read and lands in one paint. So the work is held as thunks
+  // and run together on a short timer: one batch is one frame's worth of rows
+  // whatever the wire did, and `replayed` drains what is left BEFORE the view
+  // follows again (the rows have to be in the pane when endCatchUp scrolls).
+  const paint = () => {
+    // finalize the coalesced text block before any non-text event
+    if (ev && ev.type !== "text_delta") flushTextRender();
+    // the same for the reasoning block: a non-reasoning event is the end of that
+    // stream, so the char counter has to land on its final value in this frame —
+    // before the next block takes the tail (step_start drops the block outright).
+    if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
+    // events that break a tool group; results follow their own tool_calls
+    if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
+      state.toolGroupEl = null;
+    }
+    if (applyStreamEvent(ev)) return;
 
-  const el = renderEvent(ev);
-  if (el) {
-    // the record's own byte offset rides on the row: it is what the roll-back
-    // gesture on a task row addresses (task-rollback.ts), and the server's
-    // journal is keyed by exactly this number
-    if (wireOffset !== null && !pageSink) el.dataset.offset = String(wireOffset);
-    (pageSink || eventsEl).appendChild(el);
-    // user tasks render markdown too; replay hits this path as well.
-    // NOTE: className is "event user" (two tokens) — classList.contains("event.user")
-    // would be a single-token lookup and ALWAYS false (live math never typeset);
-    // use CSS selector semantics like the replay path's ".event.user .body".
-    if (el.matches(".event.user")) highlightCode(el);
-    // user tasks may carry LaTeX; live path only (replay batches it after insertion)
-    if (el.matches(".event.user") && !pageSink) typesetMath(el);
-    autoScroll();
+    const el = renderEvent(ev);
+    if (el) {
+      // the record's own byte offset rides on the row: it is what the roll-back
+      // gesture on a task row addresses (task-rollback.ts), and the server's
+      // journal is keyed by exactly this number
+      if (wireOffset !== null && !pageSink) el.dataset.offset = String(wireOffset);
+      (pageSink || eventsEl).appendChild(el);
+      // user tasks render markdown too; replay hits this path as well.
+      // NOTE: className is "event user" (two tokens) — classList.contains("event.user")
+      // would be a single-token lookup and ALWAYS false (live math never typeset);
+      // use CSS selector semantics like the replay path's ".event.user .body".
+      if (el.matches(".event.user")) highlightCode(el);
+      // user tasks may carry LaTeX; live path only (replay batches it after insertion)
+      if (el.matches(".event.user") && !pageSink) typesetMath(el);
+      autoScroll();
+    }
+  };
+  if (catchUp && !pageSink) {
+    state.owedRecords.push(paint);
+    if (!state.owedFlush) {
+      // One flush per tick covers every record that arrived since the last one.
+      // 40ms is short enough that no reader can see the batch and long enough
+      // that a tunnel's worth of frames lands inside one (~25 paints a second,
+      // against one per record before).
+      state.owedFlush = setTimeout(() => {
+        state.owedFlush = 0;
+        const batch = state.owedRecords.splice(0, state.owedRecords.length);
+        for (const row of batch) row();
+      }, 40);
+    }
+    return;
   }
+  paint();
 }
 
 // the live event layer: every event type whose handling depends on streaming
@@ -337,8 +437,9 @@ export function applyStreamEvent(ev) {
   if (ev.type === "llm_retry") {
     // transient: an LLM stream attempt failed; the client is reconnecting with
     // backoff (never stored; the next delta removes the chip). discard=true
-    // means the dead attempt had already streamed part of this turn: drop the
-    // live partial before the retried answer starts drawing
+    // means the dead attempt had already streamed part of this turn: everything
+    // it drew goes before the retried answer starts drawing (discardLivePartial,
+    // which is the only thing in this file that takes a block off the page).
     if (ev.discard) discardLivePartial();
     setRetryNote(ev);
     return true;
@@ -362,42 +463,41 @@ export function applyStreamEvent(ev) {
   }
   if (ev.type === "assistant_message") {
     state.toolGroupEl = null;
-    // Stored sessions render the final message once (no delta stream). The LIVE
-    // case is not that simple: this record rides the log's own feed (POST
-    // /api/log → broadcast → SSE) while its step's deltas ride the run's IPC
-    // feed, and the two are unordered — the record can land between two deltas
-    // of its own step. Dropping the pointer there (what this did) left the
-    // block holding the text up to its last delta and let the leftover tail
-    // open a SECOND block underneath: one answer painted as two, its closing
-    // sentence cut in half ("…所以我没替你" / "改 App 的安装目录。").
-    if (state.lastTextEl && state.lastTextEl.isConnected) {
-      const live = state.lastTextContent || "";
-      // the record is that step's complete text and it EXTENDS what the block
-      // streamed: adopt it in place — the block keeps its node, its position and
-      // its scroll — and seal it, because the deltas still in flight for this
-      // step are the text it already says. A later step_start opens a new block
-      // (and clears the seal); a delta cannot, while this one is sealed.
-      if (ev.content && ev.content.startsWith(live)) {
-        state.lastTextContent = ev.content;
-        state.textSealed = true;
-        renderTextBlock(true);
-        return true;
-      }
-      // not this step's text at all (this record arrived after the NEXT step had
-      // opened its block — the same two feeds, lagging by a whole step): leave
-      // that block to its own deltas and stop owning this one, as before
-      state.lastTextEl = null;
-      state.lastTextContent = "";
+    const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
+    // The record of a step EXTENDS the text its deltas streamed — and the two
+    // feeds into addEvent are unordered, so it can land between two of them.
+    // Adopting it in place is what keeps one answer one block: the block keeps its
+    // node, its position and its scroll, and a block a cut closed inside this step
+    // is completed here, whole.
+    if (live && ev.content && ev.content.startsWith(state.lastTextContent || "")) {
+      completeRecord(live, ev.content);
+      return true;
+    }
+    // ...or a block a cut closed whose record lagged behind the step that came
+    // after it (the feeds are unordered by a whole step, not only by a delta): the
+    // record fills that block in place and takes nothing from the step speaking now
+    const owed = awaitingFor(ev.content);
+    if (owed) {
+      completeRecord(owed.el, ev.content);
+      autoScroll();
       return true;
     }
     // thinking renders above the agent text; skip if a live reasoning stream already
     // rendered this turn
     if (ev.reasoning && !(state.thinkingEl && state.thinkingEl.isConnected)) appendThinkingRow(ev.reasoning);
+    // A block of its own: the record of a step whose block this pane does not hold
+    // — a stored session (no deltas at all), a replayed transcript, or a step whose
+    // text went with a pane that was away. Each record is drawn once (addEvent's
+    // watermark), so this is never a second copy of a block already on the page.
     if (ev.content) {
       const wrap = createAgentTextBlock();
       wrap.querySelector(".body").innerHTML = renderMarkdown(ev.content);
       highlightCode(wrap);
-      (pageSink || eventsEl).appendChild(wrap);
+      // A step still streaming below it began after this record was written, so the
+      // record's block goes above it: the page reads in the log's own order. (A
+      // paging pass has no live block at all — project.ts renders pages into a sink.)
+      if (live) eventsEl.insertBefore(wrap, live);
+      else (pageSink || eventsEl).appendChild(wrap);
     }
     return true;
   }
@@ -411,40 +511,36 @@ export function applyStreamEvent(ev) {
     clearRetryNote(); // a lost stream that never recovered leaves no chip behind
     // The divider below says "completed" and nothing else (render-events.ts
     // appendCompletion), so the answer it closes has to be on the page already.
-    // It is — unless something took the block off (dropOrphanLive's discard, a
-    // replayed pane, a step the outage swallowed), and the log's replay starts at
-    // this window's watermark, so the assistant_message that drew it is never
-    // re-delivered. That is the reported ending: "git output → completed", the
-    // closing prose gone, while the .clc holds it. The final carries that text
-    // itself (run-state.ts foldRun closes a turn by writing its last
-    // assistant_message as the completed summary), so this is the one record that
-    // can put the answer back — and the last place that can notice it is missing.
+    // It is — unless the pane never had it, and the log's replay starts at this
+    // window's watermark, so no record will be re-delivered to draw it. The final
+    // itself carries that text (run-state.ts foldRun closes a turn by writing its
+    // last assistant_message as the completed summary), so it is the one record
+    // that can put the answer back where the block would have been.
     if (!pageSink && !catchUp && ev.status === "completed" && String(ev.summary || "").trim()) {
       const want = String(ev.summary || "");
-      const live = state.lastTextEl && state.lastTextEl.isConnected ? (state.lastTextContent || "") : "";
-      if (live) {
-        // the block on the page is already drawing this answer (its step's record
-        // adopted the same text). Complete it if the outage cut it short, but never
-        // paint a second copy: a doubled answer is the other reported bug.
-        if (live !== want && want.startsWith(live)) {
-          state.lastTextContent = want;
-          state.textSealed = true;
-          renderTextBlock(true);
+      const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
+      if (live && want.startsWith(state.lastTextContent || "")) {
+        // the block on the page is this answer's, whole or cut short by an outage:
+        // write the answer into it and close it, never a second copy under the first
+        completeRecord(live, want);
+      } else {
+        const owed = awaitingFor(want);
+        if (owed) {
+          // the step's record never landed: the block a cut closed is the one this
+          // final completes, in place and whole
+          completeRecord(owed.el, want);
+          autoScroll();
+        } else {
+          // nothing of the answer is on the page: draw it above the divider, and
+          // hand the pointer over so a straggling delta cannot open a second one
+          const wrap = createAgentTextBlock();
+          (pageSink || eventsEl).appendChild(wrap);
+          state.lastTextEl = wrap;
+          completeRecord(wrap, want);
+          autoScroll();
         }
-      } else if (!(carriedTextEl && carriedTextEl.isConnected && want.startsWith(carriedText))) {
-        // no live block owns the answer, and no reconnect kept a copy of it either
-        const wrap = createAgentTextBlock();
-        wrap.querySelector(".body").innerHTML = renderMarkdown(want);
-        highlightCode(wrap);
-        (pageSink || eventsEl).appendChild(wrap);
-        state.lastTextEl = wrap;
-        state.lastTextContent = want;
-        state.textSealed = true;
-        autoScroll();
       }
     }
-    carriedTextEl = null; // the run is over: nothing carries past its final
-    carriedText = "";
     // fences may have closed since the last delta: one final render pass
     if (state.lastTextEl && state.lastTextEl.isConnected) highlightCode(state.lastTextEl);
     // completion divider; for non-completed runs the summary carries the reason
@@ -505,10 +601,11 @@ export function applyStreamEvent(ev) {
   // accumulate text and render once per frame (a full re-parse per token is O(n²))
   if (ev.type === "text_delta" && ev.content) {
     clearRetryNote(); // text is flowing again: the reconnect landed
-    // This step's durable record already adopted the text (assistant_message
-    // above): a delta that arrives afterwards is part of what the block says,
-    // so appending it would repeat the tail and opening a block would be the
-    // split answer again. The seal is per model step — step_start clears it.
+    // A closed block takes no more deltas: either they are text the block already
+    // says (its record wrote it whole) or they are the text after a gap no delta
+    // can fill (a cut closed the block). Appending either would repeat or misplace
+    // it, and opening a block of its own is the mid-sentence answer itself.
+    // step_start opens the seal: the next step's text starts a block.
     if (state.textSealed) return true;
     if (!state.lastTextEl) {
       state.lastTextEl = createAgentTextBlock();

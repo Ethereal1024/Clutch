@@ -712,11 +712,17 @@ async function main() {
   session.clear(); // the intent alone, with no note from any exit behind it
   check((await reconciledBackendUrl()) === null,
   "the note is not what makes that null: with the intent gone the stale-remote branch has nothing to dial either");
-  const hideCalls = APP.match(/(?<!function )hideWelcome\(\)/g) || [];
-  check(/id="welcome" class="welcome">/.test(HTML) && hideCalls.length === 3,
-  "and the welcome page is what that is: it ships visible in the markup, and the only calls that hide it are the ways a project gets opened (full open, create, tail restore; project.ts)");
-  check(/function hideWelcome\(\) \{\n  document\.getElementById\("welcome"\)\.classList\.add\("hidden"\);/.test(APP),
-  "no boot path, no reload path and no restore hides it: the window the user lands on is the fresh one");
+  // The welcome page ships visible in the markup and is one of the pane's views:
+  // pane.ts decides which view is on screen, from the state, in one loop. Nothing
+  // else names the element at all, so no boot path, no reload path and no restore
+  // can hide or show it behind the state's back (it used to be a hideWelcome()
+  // call each opener had to remember).
+  check(/id="welcome" class="welcome" data-view="welcome">/.test(HTML) &&
+  !/getElementById\("welcome"\)|querySelector\("#welcome"\)|hideWelcome/.test(APP),
+  "and the welcome page is what that is: it ships visible in the markup, and no module hides it — " +
+  "it is one of the pane's views, and the state is the only thing that puts another one up");
+  check(/for \(const el of Array\.from\(document\.querySelectorAll\("\[data-view\]"\)\)\) \{\n\s*el\.classList\.toggle\("hidden", el\.getAttribute\("data-view"\) !== visible\);/.test(APP),
+  "one loop, one owner: the view whose name matches the state is the visible one, and every other is hidden");
 
   // the window is now honestly session-less: nothing raises the dialog again on
   // its own account, and the detector the teardown feeds decides by the intent

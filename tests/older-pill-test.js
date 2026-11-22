@@ -143,9 +143,13 @@ vm.runInContext(
   runnableSnippet(
     region("let olderRemaining", "loadOlder") +
     "\nctx_probe = { setOldest: (v) => { state.oldestOffset = v; }," +
+    " setOwner: (on) => setOlderOwner(on)," +
     " paging: () => ({ paging, olderBusy, olderRemaining, oldestOffset: state.oldestOffset }) };"),
   ctx);
 ctx.ctx_probe.setOldest(4096); // the tail of a project is loaded: there is a page below it
+// a transcript owns the pane (pane.ts publishes that, project.ts setOlderOwner):
+// the pill is a transcript's control, so nothing shows without one
+ctx.ctx_probe.setOwner(true);
 
 const settle = async () => {
   // let the two rAFs of nextPaint() and the promise chain drain
@@ -166,6 +170,18 @@ async function main() {
   ctx.setOlderPill(1300);
   check(label.textContent === "load earlier records (2 KB)",
         "and a small page still rounds up to a whole KB, never to 0 (" + label.textContent + ")");
+
+  // ---- 1b) the pill belongs to a transcript, not to a count ----
+  // the pane can hold a load card, a failure panel or the welcome page while the
+  // count is still there: the pill leaves with the transcript and comes back with
+  // it, remembering the count instead of losing it
+  ctx.ctx_probe.setOwner(false);
+  check(pill.has("hidden"),
+        "a pane no transcript owns hides the pill even with a page on offer");
+  ctx.ctx_probe.setOwner(true);
+  check(!pill.has("hidden") && label.textContent === "load earlier records (2 KB)",
+        "and the count survives the trip: the same offer is back ("
+        + label.textContent + ")");
 
   // ---- 2) the tap is answered on the frame it lands ----
   ctx.setOlderPill(3 * 1024 * 1024);

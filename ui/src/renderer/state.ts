@@ -11,6 +11,10 @@
 // The grouping is by the file that used to declare the binding, because that is
 // where the reasoning lives (each comment travelled with its variable).
 
+// A machine a project file can live on: this one (null) or the far side of an
+// SSH tunnel. `port` is the SSH port, kept as the store writes it.
+export type Machine = { host: string; user: string; port: string };
+
 export const state = {
   // ---- tab-bar.ts / slots.ts ----
   // One entry per tab. `id` is ALSO the tab's session slot: the host claims one
@@ -19,7 +23,16 @@ export const state = {
     id: string;
     path: string;
     name: string;
-    dirty: boolean;
+    // Which machine this tab's .clc lives on. A tab is a file on ONE machine,
+    // and a session claimed on another cannot open it — the host answers "not a
+    // .clc project file" (agent/api/project.py) for a path that machine does not
+    // have. undefined = not known yet (a store written before this field),
+    // null = this machine, an object = the far side of a tunnel. Recorded from
+    // what the HOST claimed (slots.ts), never guessed from the path.
+    machine?: Machine | null;
+    // Why this tab cannot be reopened right now (slots.ts sets it, activation
+    // says it once, a successful claim clears it).
+    unreachable?: string | null;
     // this tab's session URL (null until claimed / after release)
     base?: string | null;
     // the host-canonical path once the tab is open (the resource identity)
@@ -66,6 +79,16 @@ export const state = {
   // the run this window was watching has ended (painted its ending already)
   runSettled: false,
 
+  // ---- stream-events.ts ----
+  // the paint work a catch-up (`history` … `replayed`) has queued but not run:
+  // the block is painted in batches, one per timer tick, instead of once per SSE
+  // frame — a tunnel delivers each frame in its own chunk, so a per-frame append
+  // is a paint per record (the reported "a pile of messages loads itself").
+  // Each entry is the thunk that renders one record; `owedFlush` is the timer
+  // handle that will run them.
+  owedRecords: [] as Array<() => void>,
+  owedFlush: 0,
+
   // ---- stream-text.ts ----
   // the coalesced-render frame handles: a token arrives, the frame repaints
   textRenderRaf: 0,
@@ -81,10 +104,11 @@ export const state = {
   // the most recent agent text block (created by streaming text_delta)
   lastTextEl: null,
   lastTextContent: "",
-  // that block holds a durable assistant_message's text, which is the whole of
-  // that model step's prose: a text_delta still arriving for the same step is a
-  // copy of what the block already says and must not be appended (nor open a
-  // second block) — the delta feed and the log's own SSE feed are unordered
+  // that block is CLOSED and takes no more deltas: either it holds a durable
+  // assistant_message's text, which is the whole of that model step's prose (a
+  // text_delta still arriving for the same step is a copy of what the block already
+  // says — the delta feed and the log's own SSE feed are unordered), or a cut ended
+  // it and only the record that owns it may write it now (stream-events.ts)
   textSealed: false,
   // the thinking (reasoning) block
   thinkingEl: null,

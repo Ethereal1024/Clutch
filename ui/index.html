@@ -126,7 +126,7 @@
        revealed by mobile.css while the panel is open -->
   <div id="shell-backdrop" class="shell-backdrop"></div>
 
-  <div id="welcome" class="welcome">
+  <div id="welcome" class="welcome" data-view="welcome">
     <div class="welcome-box">
       <h1><span class="logo">▣</span> Clutch</h1>
       <p class="muted">Open an existing project or start a new one.</p>
@@ -337,22 +337,16 @@
       </div>
       <div id="fs-body">
         <div id="fs-toolbar" class="fs-toolbar">
-          <button id="fs-up" title="up one level">..</button>
-          <input id="fs-path-input" type="text" readonly tabindex="-1" autocomplete="off" />
-          <button id="fs-go" class="hidden" tabindex="-1">Go</button>
+          <button id="fs-up" aria-label="up one level" title="up one level"><span class="fs-up-glyph" aria-hidden="true">→</span></button>
+          <input id="fs-path-input" type="text" readonly tabindex="-1" autocomplete="off" aria-label="current folder" />
           <label class="hidden-toggle" title="show hidden (dot) files">
             <input type="checkbox" id="fs-hidden-toggle" /> show hidden
           </label>
-          <button id="fs-mkdir-btn" title="create a folder in the current directory">＋ Folder</button>
+          <button id="fs-mkdir-btn" title="create a folder in the folder on screen">＋ New folder</button>
         </div>
-        <div id="fs-mkdir-row" class="hidden">
-          <input id="fs-mkdir-input" type="text" placeholder="folder-name" autocomplete="off" />
-          <button id="fs-mkdir-ok">Create folder</button>
-          <button id="fs-mkdir-cancel">✕</button>
-        </div>
-        <div id="fs-list" class="scroll"></div>
+        <div id="fs-list" class="scroll" tabindex="-1" aria-label="folder contents"></div>
         <div id="fs-filename-bar">
-          <label for="fs-filename-input">File name</label>
+          <label id="fs-filename-label" for="fs-filename-input">File name</label>
           <input id="fs-filename-input" type="text" placeholder="name.clc or sub/path.clc" autocomplete="off" spellcheck="false" />
         </div>
         <!-- kept as hidden stubs: test suite queries these nodes -->
@@ -361,7 +355,7 @@
         </div>
         <div id="fs-actions" class="modal-actions">
           <button id="fs-cancel">Cancel</button>
-          <button id="fs-create" class="primary hidden">Create</button>
+          <button id="fs-create" class="primary hidden" disabled>Create</button>
         </div>
       </div>
       <div id="conn-actions" class="conn-actions hidden">
@@ -437,11 +431,22 @@
   <main>
     <section id="left">
       <div class="stream-wrap">
-        <div id="stream" class="scroll">
-          <div id="open-progress" class="open-progress hidden">
-            <div class="open-progress-track"><div class="open-progress-fill"></div></div>
-            <span class="open-progress-label">0%</span>
+        <!-- A tab that could not open is a STATE, not a reminder: notice() hides
+             itself after 8 s, and an empty pane with no reason on it is the bug
+             this panel exists for (project.ts showBlocked keeps it up until the
+             tab opens or the user dismisses it). It covers the stream because
+             while it stands there is no transcript under it. -->
+        <div id="tab-blocked" class="tab-blocked hidden" role="alert" data-view="blocked">
+          <div class="tab-blocked-card">
+            <div id="tab-blocked-text" class="tab-blocked-text"></div>
+            <div id="tab-blocked-status" class="tab-blocked-status"></div>
+            <div class="tab-blocked-actions">
+              <button id="tab-blocked-connect" class="primary hidden" type="button">Connect</button>
+              <button id="tab-blocked-dismiss" type="button">Dismiss</button>
+            </div>
           </div>
+        </div>
+        <div id="stream" class="scroll">
           <button id="older-pill" class="older-pill hidden" type="button" title="load earlier records from this conversation">
             <!-- the wait, in the control that was just pressed: a page is one
                  request (js/project.js loadOlder) and its reply is a megabyte of
@@ -450,6 +455,34 @@
             <span id="older-label"></span>
           </button>
           <div id="events" class="events"></div>
+        </div>
+        <!-- The pane's THIRD state: a tab is being opened (pane.ts owns every
+             view of the pane; project.ts beginPaneLoad enters it). It covers the
+             stream because while a tab is loading there is no transcript under
+             it — the tab we left is in the view cache, not on screen — and it
+             names the tab that is coming, so a switch reads as one state instead
+             of the old project under a bar. The bar lives INSIDE the card: it is
+             that load's report, and it never outlives the card it explains. Two
+             things report here, in this order: the HOP a tab's file needs (its
+             machine is not this one — conn-flow connectTabMachine) and then the
+             project replay (project.ts openInTab); both report a FRACTION into
+             pane.ts, which is the only place the bar is painted.
+             The note carries what the load is DOING, because "Uploading server ·
+             13 KB/s · 1 h 40 min left" is the difference between a bar that is
+             working and a bar that looks hung; the percent keeps its own place at
+             the right end. -->
+        <div id="tab-load" class="tab-load hidden" data-view="load">
+          <div class="tab-load-card">
+            <div id="tab-load-title" class="tab-load-title" role="status"></div>
+            <div id="tab-load-where" class="tab-load-where"></div>
+            <div id="open-progress" class="open-progress hidden">
+              <div class="open-progress-row">
+                <div class="open-progress-track"><div class="open-progress-fill"></div></div>
+                <span class="open-progress-label">0%</span>
+              </div>
+              <span id="open-progress-note" class="open-progress-note"></span>
+            </div>
+          </div>
         </div>
         <button id="jump-bottom" class="jump-bottom hidden" type="button" title="scroll to bottom">
           <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
