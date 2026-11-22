@@ -70,7 +70,16 @@ HTTPX2_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.versi
 # x86_64 / aarch64 × cp310–cp313).
 PYDANTIC_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('pydantic'))")"
 PYDANTIC_CORE_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('pydantic_core'))")"
-PINS=("openai==$OPENAI_VER" "httpx2==$HTTPX2_VER" "pydantic==$PYDANTIC_VER" "pydantic_core==$PYDANTIC_CORE_VER")
+# jiter belongs to that set for the same reason pydantic_core does: openai's
+# other compiled wheel, the one that decides how the chat payload is parsed.
+# Left to the index it drifts away from the client silently whenever openai's
+# floor moves (0.2.0 downloaded 0.19.0 for py3.11+ while this venv ran 0.16.0
+# from uv.lock, and 0.18.0 for py3.10 — three parsers in one release), and an
+# unpinned wheel is also free to demand a newer python than the leg being
+# built. cp310–cp313 × manylinux2014 / musllinux_1_1 × x86_64 / aarch64 are
+# all published, so pinning it cannot starve a leg.
+JITER_VER="$("$PY" -c "import importlib.metadata;print(importlib.metadata.version('jiter'))")"
+PINS=("openai==$OPENAI_VER" "httpx2==$HTTPX2_VER" "pydantic==$PYDANTIC_VER" "pydantic_core==$PYDANTIC_CORE_VER" "jiter==$JITER_VER")
 
 TMP="$(mktemp -d)"
 # || true: a raced file lock (AV scanner) must not flip the script's exit code
@@ -83,10 +92,40 @@ mkdir -p "$TMP/pkg"
   --platform "$TAG" --python-version "$PYVER" --implementation cp --abi "$ABI" \
   -d "$TMP/wheels" "${PINS[@]}"
 
-"$PY" -m pip install --target "$TMP/pkg/site-packages" \
-  --no-index --find-links "$TMP/wheels" --only-binary=:all: --no-compile \
-  --platform "$TAG" --python-version "$PYVER" --implementation cp --abi "$ABI" \
-  "${PINS[@]}"
+# A wheel IS the install: unpack the ones pip just chose for the target. The
+# second `pip install --target` this used to run was not neutral — it resolves
+# a second time, and it judges each candidate's Requires-Python against the
+# interpreter RUNNING pip (this venv's, e.g. 3.10) instead of --python-version
+# (the leg being built). That is how the 0.2.0 matrix split: the four py3.10
+# legs shipped, and the twelve legs above them failed in six seconds each with
+#   ERROR: Package 'jiter' requires a different Python: 3.10.12 not in '>=3.11'
+# — a wheel that was correct for the target, refused because the builder's
+# python was older than the target's. Unpacking what was already fetched makes
+# the target the only thing that decides the contents, and leaves no second
+# resolution to disagree with the download.
+"$PY" - "$TMP/wheels" "$TMP/pkg/site-packages" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+wheels, dest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+for whl in sorted(wheels.glob("*.whl")):
+    with zipfile.ZipFile(whl) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            parts = info.filename.split("/")
+            # "<dist>-<ver>.data/{purelib,platlib}/..." is site-packages content;
+            # a wheel's scripts/headers/data sections have no business in a tar
+            # that is imported, never executed from a shell.
+            if len(parts) > 2 and parts[0].endswith(".data"):
+                if parts[1] not in ("purelib", "platlib"):
+                    continue
+                parts = parts[2:]
+            out = dest.joinpath(*parts)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(zf.read(info))
+PY
 
 cp -r "$ROOT/agent" "$TMP/pkg/agent"
 # Ship sources only: a .pyc embeds the compiling interpreter's view of source

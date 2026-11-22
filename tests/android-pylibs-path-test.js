@@ -152,7 +152,10 @@ async function main() {
     // against ("SystemError: The installed pydantic-core version ... is
     // incompatible"), which is the drift that re-broke the tree. Both are
     // pinned from THIS venv, so the tar must carry exactly the venv's version
-    // of each, and exactly one generation of each.
+    // of each, and exactly one generation of each. jiter is in the set for the
+    // same reason — openai's other compiled wheel, and the one that floated
+    // three ways in 0.2.0 (0.16.0 here, 0.18.0 for py3.10, 0.19.0 for 3.11+,
+    // the last of which also demanded a python the builder did not have).
     const distInfos = listing.split("\n").filter((l) => /\.dist-info\/?$/.test(l));
     const gens = (name) =>
       distInfos.filter((l) => new RegExp(`site-packages/${name}-[^/]+\\.dist-info`).test(l));
@@ -162,12 +165,13 @@ async function main() {
       }).stdout.trim();
     check(gens("openai").length === 1 && gens("httpx2").length === 1, "tar carries one openai + httpx2 generation");
     check(
-      gens("pydantic").length === 1 && gens("pydantic_core").length === 1,
-      "tar pins exactly one pydantic + pydantic_core generation (④: no index-day drift)"
+      gens("pydantic").length === 1 && gens("pydantic_core").length === 1 && gens("jiter").length === 1,
+      "tar pins exactly one pydantic + pydantic_core + jiter generation (④: no index-day drift)"
     );
     check(
       gens("pydantic")[0] === `site-packages/pydantic-${venvVer("pydantic")}.dist-info/` &&
         gens("pydantic_core")[0] === `site-packages/pydantic_core-${venvVer("pydantic_core")}.dist-info/` &&
+        gens("jiter")[0] === `site-packages/jiter-${venvVer("jiter")}.dist-info/` &&
         gens("openai")[0] === `site-packages/openai-${venvVer("openai")}.dist-info/` &&
         gens("httpx2")[0] === `site-packages/httpx2-${venvVer("httpx2")}.dist-info/`,
       "every pin equals the client venv's own version (the pair this client runs)"
