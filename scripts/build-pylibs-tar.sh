@@ -136,10 +136,11 @@ cp -r "$ROOT/agent" "$TMP/pkg/agent"
 find "$TMP/pkg" -name "*.pyc" -delete
 find "$TMP/pkg" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$(dirname "$OUT")"
-# Deterministic bytes for a given input set: fixed mtimes + gzip -n (drops the
-# timestamp header). The tar's content hash is the remote install gate, so
-# stable bytes let reconnects hit the ~/.clutch/bundles cache instead of
-# re-uploading the whole stack every session.
-find "$TMP/pkg" -exec touch -t 197001010000 {} +
-tar -C "$TMP/pkg" -cf - agent site-packages | gzip -n > "$OUT"
+# Deterministic bytes for a given input set. The tar's content hash is the
+# remote install gate AND the asset name the release publishes, so the archive
+# must be a function of the CONTENT alone — pack-pylibs-tar.py owns that (fixed
+# member order, mtimes, ids, modes); `tar | gzip -n` did not, because
+# `tar -C dir -cf - agent site-packages` walks readdir order and a fresh
+# checkout reshuffles it (v0.2.0 shipped two hashes for identical files).
+"$PY" "$ROOT/scripts/pack-pylibs-tar.py" "$TMP/pkg" "$OUT"
 echo "pylibs tar written: $OUT ($TAG, py$PYVER)"

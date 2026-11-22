@@ -108,6 +108,18 @@ jobs:
           node tests/host-built.test.js
           node tests/android-built.test.js
 
+      # The pylibs tar's sha256 is a VERSION, not a checksum: it is the asset
+      # name the release publishes and the value the remote compares before
+      # reinstalling. 0.2.0's release carries the proof that it was not one —
+      # two runs over the same 1974 files published two names for them
+      # (…-37df4cf252b7cb0a and …-8ef08185757ac59d) because `tar` wrote them in
+      # readdir order, and a fresh checkout hands that back differently. This
+      # gate packs one tree twice, created in opposite orders under different
+      # umasks and clocks, and requires one hash — python3 only, no venv, no
+      # network, so it belongs here rather than in the legs that need PyPI.
+      - name: Verify the pylibs tar packer
+        run: node tests/pylibs-tar-pack-test.js
+
   deb:
     runs-on: ubuntu-latest
     needs: verify
