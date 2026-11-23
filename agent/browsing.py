@@ -264,7 +264,8 @@ def _fs_mkdir_remote(state: RunState, raw_dir: str, name: str) -> dict[str, Any]
 
 
 def tree(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
-    """Dispatch by transport; both walks share the lazy partial-walk policy."""
+    """Dispatch by transport; both walks list exactly what the panel shows: the
+    root, plus every directory the reader has expanded. Nothing else is read."""
     if isinstance(ws, RemoteWorkspace):
         return _walk_remote(ws, expanded, show_hidden)
     return _walk(ws.root, ws, expanded, show_hidden)
@@ -276,39 +277,72 @@ def _tree_node(name: str, child_rel: str, is_dir: bool) -> dict[str, Any]:
     return {"name": name, "path": child_rel, "dir": is_dir, "link": None}
 
 
-def _should_list(rel: str, child_rel: str, expanded: set[str]) -> bool:
-    """Whether a child dir gets listed now: the root, an explicitly expanded
-    dir, or a dir directly under an expanded one (the one-level lookahead)."""
-    return rel == "" or child_rel in expanded or rel in expanded
+def _should_list(child_rel: str, expanded: set[str]) -> bool:
+    """Whether a child dir gets listed now: it is one the reader has OPEN.
+
+    There used to be a one-level lookahead on top of this (`rel in expanded` and
+    `rel == ""`), so every refresh listed the contents of every top-level dir and
+    of every expanded one. That is what made the walk expensive: a panel showing
+    27 rows shipped 341 entries, and on a remote workspace each extra level was
+    another SSH round trip on the way to a tree the user was not looking at.
+    The children of a dir the reader opens arrive on the next walk, which the
+    toggle asks for immediately (workspace-panel.ts: scheduleTreeRefresh(0))."""
+    return child_rel in expanded
+
+
+def _expanded_dirs(expanded: list[str]) -> list[str]:
+    """The directories one walk lists, root first: "" plus the expanded paths that
+    are plain relative paths *under an expanded parent*.
+
+    The UI sends the dirs it has open, relative to the root. A path that is
+    absolute, climbs out with "..", or sits under a dir the panel is not showing
+    is dropped: the tree only hangs a listing under a parent node it discovered,
+    so such a path could never be rendered — and the remote walk would otherwise
+    hand it to `ls`."""
+    wanted = set()
+    for raw in expanded:
+        text = str(raw).replace("\\", "/").strip()
+        # absolute (or a Windows drive spelling): never a path under the root
+        if not text or text.startswith("/") or ":" in text.split("/", 1)[0]:
+            continue
+        parts = [p for p in text.split("/") if p not in ("", ".")]
+        if not parts or ".." in parts:
+            continue
+        wanted.add("/".join(parts))
+    out = [""]
+    # shallow first: a parent's node exists before its children are attached
+    for rel in sorted(wanted, key=lambda r: (r.count("/"), r)):
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        if parent == "" or parent in wanted:
+            out.append(rel)
+    return out
 
 
 def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
-    """Remote counterpart of _walk: same lazy partial walk (root + expanded dirs +
-    one-level lookahead), but every level lists all its directories in ONE exec
-    (RemoteWorkspace.list_many), so a tree costs ~depth round trips instead of one
-    per directory. Entries come from the shared parse_ls_entries parser."""
-    expanded = set(expanded)
+    """Remote counterpart of _walk: the same partial walk, but the directories to
+    list are known BEFORE the first exec — the root plus the expanded dirs — so
+    `list_many` does the whole tree in ONE round trip instead of one per level.
+
+    That chain was the cost. A remote exec on the tunnel measures 0.3–0.9 s
+    (median 387 ms over 8k execs), and the old walk could not even build the
+    level-2 command until level 1's names came back, so a three-level tree was
+    three of those back to back. Now a tree is one, and a wider expansion only
+    splits when the command outgrows the sshd's limit."""
+    dirs = _expanded_dirs(expanded)
+    listed = ws.list_many(dirs)  # one SSH round trip
     children: dict[str, list[dict[str, Any]]] = {}
     by_path: dict[str, dict[str, Any]] = {}
-
-    frontier: list[str] = [""]
-    while frontier:
-        listed = ws.list_many(frontier)  # one SSH round trip per tree level
-        next_frontier: list[str] = []
-        for rel in frontier:
-            out: list[dict[str, Any]] = []
-            for name, is_dir in parse_ls_entries("\n".join(listed.get(rel, []))):
-                if not show_hidden and name.startswith("."):
-                    continue
-                child_rel = name if rel == "" else f"{rel}/{name}"
-                node = _tree_node(name, child_rel, is_dir)
-                out.append(node)
-                if is_dir:
-                    by_path[child_rel] = node
-                    if _should_list(rel, child_rel, expanded):
-                        next_frontier.append(child_rel)
-            children[rel] = out
-        frontier = next_frontier
+    for rel in dirs:  # depth order: the parent node exists when its children attach
+        out: list[dict[str, Any]] = []
+        for name, is_dir in parse_ls_entries("\n".join(listed.get(rel, []))):
+            if not show_hidden and name.startswith("."):
+                continue
+            child_rel = name if rel == "" else f"{rel}/{name}"
+            node = _tree_node(name, child_rel, is_dir)
+            out.append(node)
+            if is_dir:
+                by_path[child_rel] = node
+        children[rel] = out
 
     # attach each listed level under its parent dir node
     for rel, out in children.items():
@@ -321,10 +355,10 @@ def _walk_remote(ws: Workspace, expanded: list[str], show_hidden: bool) -> list:
 
 
 def _walk(root: Path, workspace: Workspace, expanded: list[str], show_hidden: bool) -> list:
-    """Lazy partial tree walk: list children only for the root, the currently
-    expanded dirs, and their direct children (one level of lookahead). Deeper
-    levels are fetched as they get expanded, so opening a big project never walks
-    the whole tree up front. show_hidden keeps dotfiles out of every level.
+    """Lazy partial tree: list children only for the root and the expanded dirs, so
+    opening a big project never walks the whole tree up front and a refresh never
+    reads a directory nobody is looking at. show_hidden keeps dotfiles out of every
+    level.
 
     A directory the OS refuses to list raises OSError here and the caller fails
     loudly: an unreadable directory must not be quietly rendered as an empty one
@@ -351,7 +385,7 @@ def _walk(root: Path, workspace: Workspace, expanded: list[str], show_hidden: bo
             # trees and symlink cycles; the agent's tools still follow links, so
             # only the UI is affected
             if e.is_dir() and not e.is_symlink():
-                if _should_list(rel, child_rel, expanded):
+                if _should_list(child_rel, expanded):
                     node["children"] = build(e, child_rel)
             out.append(node)
         return out

@@ -116,14 +116,33 @@ export interface ApiFetchInit {
   body?: any;
   base?: string;
   timeout?: number;
+  // The caller's own cancellation. A tab switch supersedes whatever the tab it
+  // left was still asking for, and the request has to END there rather than run
+  // to completion into a pane that is another project's now: on a remote project
+  // one abandoned answer is a 256 KB page off the tunnel, one after another, and
+  // they are exactly the work that piles up behind the next switch.
+  signal?: AbortSignal;
 }
-export async function apiFetch(path, { method = "GET", body, base = state.apiBase, timeout = 30000 }: ApiFetchInit = {}) {
+export async function apiFetch(path, { method = "GET", body, base = state.apiBase, timeout = 30000, signal }: ApiFetchInit = {}) {
   if (!base) throw noBackend();
   // bounded: a hung backend must surface as a failed button, not a forever-
   // pending one (AbortError carries no .status -> callers treat it as
   // "backend unreachable", the same path as a refused connection)
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeout);
+  // the caller's abort is the same abort: one signal reaches the socket, and
+  // whoever asked cannot tell our deadline from its own cancellation
+  const onAbort = () => {
+    try {
+      ctl.abort();
+    } catch (e) {
+      /* already aborted by the deadline */
+    }
+  };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort);
+  }
   let r;
   try {
     r = await fetch(base + path, body === undefined ? { method, signal: ctl.signal } : {
@@ -134,6 +153,7 @@ export async function apiFetch(path, { method = "GET", body, base = state.apiBas
     });
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onAbort);
   }
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data.error) {

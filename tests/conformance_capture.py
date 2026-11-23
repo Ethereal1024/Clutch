@@ -262,7 +262,8 @@ def _fixture_cases(cap: Capture, state: RunState, root: Path, clc: Path) -> None
                   " .clc is NOT yet protected (protection is set at run start)")
     cap.call("workspace.tree", "tree.hidden", "GET", "/api/workspace/tree?hidden=1")
     cap.call("workspace.tree", "tree.expanded", "GET", "/api/workspace/tree?expanded=sub",
-             note="one level of lookahead: an expanded dir lists its children")
+             note="an OPEN dir lists its children; an unopened one stays a leaf row"
+                  " (no lookahead: a refresh reads only the root and the open dirs)")
 
     cap.call("fs.list", "fs.list.dir", "GET", "/api/fs/list?path={root}")
     cap.call("fs.list", "fs.list.not-a-directory", "GET", "/api/fs/list?path={root}/alpha.txt",

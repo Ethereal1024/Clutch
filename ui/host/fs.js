@@ -625,39 +625,59 @@ function createWorkspace(options = {}) {
     return result;
   }
 
-  function shouldList(rel, childRel, expanded) {
-    // the root, an explicitly expanded dir, or a dir directly under an expanded
-    // one (the one-level lookahead)
-    return rel === "" || expanded.has(childRel) || expanded.has(rel);
+  // The directories one walk lists, root first: "" plus the expanded paths that
+  // are plain relative paths under an expanded parent. Mirrors the Python host
+  // (agent/browsing.py: `_expanded_dirs`), because both answer the same golden.
+  // A path that is absolute, climbs out with `..`, or sits under a dir the panel
+  // is not showing is dropped: the tree only hangs a listing under a parent node
+  // it discovered, so such a path could never be rendered — and it would
+  // otherwise be handed to `ls`.
+  function expandedDirs(expanded) {
+    const wanted = new Set();
+    for (const raw of expanded || []) {
+      const text = String(raw)
+        .replace(/\\/g, "/")
+        .trim();
+      if (!text || text.startsWith("/") || text.split("/")[0].includes(":")) continue;
+      const parts = text.split("/").filter((p) => p !== "" && p !== ".");
+      if (!parts.length || parts.includes("..")) continue;
+      wanted.add(parts.join("/"));
+    }
+    const depth = (rel) => rel.split("/").length - 1;
+    // shallow first: a parent's node exists before its children are attached
+    return [""].concat(
+      [...wanted]
+        .sort((a, b) => depth(a) - depth(b) || (a < b ? -1 : a > b ? 1 : 0))
+        .filter((rel) => {
+          const parent = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+          return parent === "" || wanted.has(parent);
+        }),
+    );
   }
 
-  // Lazy partial tree walk: list children only for the root, the currently
-  // expanded dirs, and their direct children. Deeper levels are fetched as they
-  // get expanded, so opening a big project never walks the whole tree up front;
-  // and each level is ONE exec.
+  // The whole walk in ONE round trip. The directories to list are known before
+  // the first exec — the root plus the dirs the reader has OPEN — so `listMany`
+  // batches them; there used to be a walk of one level per exec, and level N's
+  // command could not even be built until level N-1's names came back (on the
+  // tunnel that is 0.3–0.9 s per level). Nothing else is read: with no lookahead
+  // an opened dir's children arrive on the walk its toggle asks for at once
+  // (workspace-panel.ts: `scheduleTreeRefresh(0)`).
   async function tree(expanded = [], showHidden = false) {
-    const wanted = new Set((expanded || []).map(String));
+    const dirs = expandedDirs(expanded);
+    const listed = await listMany(dirs); // the whole tree, one round trip
     const children = new Map();
     const byPath = new Map();
-    let frontier = [""];
-    while (frontier.length) {
-      const listed = await listMany(frontier); // one round trip per tree level
-      const next = [];
-      for (const rel of frontier) {
-        const out = [];
-        for (const entry of parseEntries((listed[rel] || []).join("\n"))) {
-          if (!visible(entry.name, showHidden)) continue;
-          const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
-          const node = { name: entry.name, path: childRel, dir: entry.isDir, link: null };
-          out.push(node);
-          if (entry.isDir) {
-            byPath.set(childRel, node);
-            if (shouldList(rel, childRel, wanted)) next.push(childRel);
-          }
-        }
-        children.set(rel, out.sort(compareEntries));
+    for (const rel of dirs) {
+      // depth order: a parent's node exists when its children attach
+      const out = [];
+      for (const entry of parseEntries((listed[rel] || []).join("\n"))) {
+        if (!visible(entry.name, showHidden)) continue;
+        const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
+        const node = { name: entry.name, path: childRel, dir: entry.isDir, link: null };
+        out.push(node);
+        if (entry.isDir) byPath.set(childRel, node);
       }
-      frontier = next;
+      children.set(rel, out.sort(compareEntries));
     }
     // attach each listed level under its parent dir node
     for (const [rel, out] of children) {

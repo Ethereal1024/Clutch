@@ -28,7 +28,7 @@ check(/const SSE_STALE_MS = SSE_KEEPALIVE_MS \* 3;/.test(src),
   "three missed keepalives (not one) are the threshold for a dead stream");
 check(/const SSE_ERROR_WINDOW_MS = 30000;/.test(src),
   "a base that stops answering is TIMED, not counted: a count is a budget in seconds");
-check(/es\.onerror = \(\) => \{\n    \/\/ the browser reconnects/.test(src),
+check(/es\.onerror = \(\) => \{[\s\S]{0,900}?sseDegrade\("the backend did not answer/.test(src),
   "es.onerror is no longer an empty auto-reconnect stub");
 check(/connectionLost\("could not reach the session to stop the task/.test(src),
   "stop() surfaces the failure instead of an empty catch (through the dialog)");
@@ -100,6 +100,11 @@ global.clearTimeout = () => {};
 global.document = { hidden: false };
 global.SSE_STALE_MS = 45000;
 global.SSE_ERROR_WINDOW_MS = 30000;
+// settleCatchUp() (stream-events.ts) closes the catch-up bracket with
+// endCatchUp, which is stream-view.ts's one move: the drain and that move are
+// tests/catch-up-paint-test.js's subject, so the bracket's move is stubbed here
+// and the real settleCatchUp (in the eval list below) still runs.
+global.endCatchUp = () => {};
 global.setStatus = (s) => {
   statuses.push(s);
   global.busy = s === "running" || s === "waiting";
@@ -166,7 +171,10 @@ global.window = {
 };
 
 // ---- load the real code ----
-for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "sseSuspend", "sseResume", "stop"]) {
+// settleCatchUp is here because connectSSE/closeSSE/es.onerror end the catch-up
+// block before they let go of a stream; what a drain paints, and when it must
+// happen, is tests/catch-up-paint-test.js's subject, not this runner's.
+for (const name of ["hostCall", "sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog", "connectSSE", "settleCatchUp", "sseSuspend", "sseResume", "stop"]) {
   (0, eval)(fnBody(name));
 }
 

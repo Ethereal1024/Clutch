@@ -138,7 +138,7 @@ global.refreshTree = () => {
 // the closed-block ledger the reconnect teardown files a kept block in (stream-events.ts)
 installRecordLedger();
 
-for (const name of ["addEvent", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
+for (const name of ["addEvent", "settleCatchUp", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll"]) {
   (0, eval)(fnBody(name));
 }
 
@@ -268,13 +268,13 @@ check(rendered.length === 0 && global.state.streamHighOffset === null &&
 
 // ---- 9. a block that is abandoned drops its held paint work ----
 // (a resync, a project switch: those rows belong to the pane that is going away,
-// and a batch timer that fired after the clear would append them into the new one)
+// and a queue that outlived the clear would append them into the new one)
 addEvent({ type: "history", older: 0 });
 const heldBefore = rendered.length;
 addEvent(frame(90, { type: "user_message", text: "never painted" }));
 check(rendered.length === heldBefore, "a record is held while its block is open");
 addEvent({ type: "resync" });
-check(global.state.owedRecords.length === 0 && global.state.owedFlush === 0,
-  "and the resync that starts the pane over drops the held rows AND their timer");
+check(global.state.owedRecords.length === 0,
+  "and the resync that starts the pane over drops the held rows with it");
 
 summary("replay-dedupe");

@@ -306,18 +306,20 @@ async function main() {
   api.state.project = { readOnly: false };
   api.state.busy = false;
 
-  // One exec per tree LEVEL, not per directory: `listMany` is the only real
-  // capability gap the plan found in the JS port (§3 P1), so the round-trip count
-  // is part of the contract these cases pin.
-  for (const [cid, tripes] of [
-    ["tree.root", 2], // root, then sub
-    ["tree.hidden", 2],
-    ["tree.expanded", 3], // root, sub, sub/deep
+  // ONE exec for the whole walk, not one per directory and not one per level:
+  // every directory that gets listed (the root plus the expanded dirs) is known
+  // before the first exec, so `listMany` batches them. That is the contract these
+  // cases pin — a walk that went back to one round trip per level would triple
+  // the cost of an expanded remote tree (0.3–0.9 s per exec on the tunnel).
+  for (const [cid, trips] of [
+    ["tree.root", 1], // root only (nothing expanded, and no lookahead)
+    ["tree.hidden", 1],
+    ["tree.expanded", 1], // root, sub and sub/deep in the same exec
   ]) {
     const before = shell.state.calls;
     await replay(cid);
     const used = shell.state.calls - before;
-    check(used === tripes, `${cid}: ${tripes} exec(s) for the whole walk (got ${used})`);
+    check(used === trips, `${cid}: ${trips} exec(s) for the whole walk (got ${used})`);
   }
 
   await replay("fs.list.dir");

@@ -200,7 +200,8 @@ installRecordLedger();
 for (const name of [
   "switchBackend", "dropStaleBackend", "escapeHtml", "renderMarkdown",
   "appendCompletion", "renderEvent", "applyStreamEvent", "addEvent",
-  "announceRunLost", "clearStream", "beginCatchUp", "endCatchUp", "autoScroll",
+  "settleCatchUp", "announceRunLost", "clearStream", "beginCatchUp", "endCatchUp",
+  "autoScroll",
 ]) {
   // the sources are TypeScript modules now: the slice has to lose its types
   // (and its `export` prefix) before it is a legal classic script

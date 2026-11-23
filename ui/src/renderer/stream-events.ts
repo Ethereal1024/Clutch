@@ -253,6 +253,23 @@ export function announceRunLost() {
   addEvent({ type: "final", status: "error", summary: SSE_RUN_LOST });
 }
 
+// The one way a catch-up block ends: paint every record it queued, in order, and
+// then close the bracket — one layout, one scroll, in the one task that calls this.
+// See the block's comment inside addEvent: the queue is DATA until the server
+// closes the block (`replayed`), and a record is counted in the watermark when it
+// ARRIVES, so a queued row dropped here is a row no later `?since=` would ever
+// resend. That is why every way a block can end comes through this function and
+// not through endCatchUp() alone — a drain that left the bracket open would hold
+// every record that followed it too (a fresh connect with no `since` never sends
+// the `replayed` that would close it).
+export function settleCatchUp() {
+  while (state.owedRecords.length) {
+    const row = state.owedRecords.shift();
+    if (row) row();
+  }
+  endCatchUp(); // the bracket's one move, now that the rows are in the pane
+}
+
 export function addEvent(ev) {
   // lazy wire shape: {offset, event} carries each durable event's byte offset
   // so the UI can page the earlier records
@@ -309,26 +326,22 @@ export function addEvent(ev) {
   // reconnect history line: restore the honest on-disk older count. It also
   // OPENS the catch-up block: everything until the `replayed` frame is a record
   // this window is owed, and the view must not chase each one (stream-view.ts).
+  // A block that never closed (its stream went away mid-answer) is painted first:
+  // those rows are the transcript's PREFIX, and they are already counted in the
+  // watermark, so dropping them would be a hole the next reconnect never asks for.
   if (ev && ev.type === "history") {
+    settleCatchUp();
     setOlderPill(ev.older || 0);
     beginCatchUp();
     return;
   }
   // the catch-up is over: the view follows again, with a single move
   if (ev && ev.type === "replayed") {
-    // ...and the block is IN the pane first: the batches addEvent held are
-    // painted here, in order, because endCatchUp's one scroll has to land on
-    // the real tail — not on a transcript that is still queued (a batch timer
-    // would fire after the scroll and leave the view above its own ending).
-    if (state.owedFlush) {
-      clearTimeout(state.owedFlush);
-      state.owedFlush = 0;
-    }
-    while (state.owedRecords.length) {
-      const row = state.owedRecords.shift();
-      if (row) row();
-    }
-    endCatchUp();
+    // ...and the block is IN the pane first: what addEvent held is painted here,
+    // in order, because the bracket's one scroll has to land on the real tail —
+    // not on a transcript that is still queued. This one task is the block's
+    // whole paint: one layout, one scroll, no cascade of either.
+    settleCatchUp();
     // The block that just closed is also the first moment this window may read
     // the workspace tree: the session resolved the project this stream named
     // BEFORE it served that block (agent/api/events.py _project_for_sse), and a
@@ -363,18 +376,31 @@ export function addEvent(ev) {
   if (stream.classList.contains("loading") && ev.type === "state_update") {
     return;
   }
-  // ---- the catch-up block: paint in batches, not one SSE frame at a time ----
+  // ---- the catch-up block: paint it once, when the server closes it ----
   //
   // Everything below is DOM work. While a catch-up is open (`history` …
   // `replayed`, stream-view.ts) the records arriving are the block the window
-  // was owed, and a tunnel delivers each SSE frame in its own chunk: painting
-  // per frame is a paint per record, so the transcript visibly assembled itself
-  // row by row in many small bursts the moment the load card went (the reported
-  // "a pile of messages loads itself at once"). Loopback hid it — the same block
-  // arrives in one read and lands in one paint. So the work is held as thunks
-  // and run together on a short timer: one batch is one frame's worth of rows
-  // whatever the wire did, and `replayed` drains what is left BEFORE the view
-  // follows again (the rows have to be in the pane when endCatchUp scrolls).
+  // was owed, and over a tunnel each one is its OWN SSE frame in its own task:
+  // painting per frame is a paint per record, so the transcript visibly
+  // assembles itself row by row while the reader watches — the reported "一次
+  // 性闪过很多消息，最后才停在尾部消息". Loopback hid it (the same block arrives in
+  // one read and lands in one paint), and a timer between the frames only lowers
+  // the rate: the cascade is still a cascade.
+  //
+  // The block is DATA until its closing frame. The rows are held as thunks and
+  // painted by the one task that closes the block (`replayed`), so the pane takes
+  // the catch-up in a single layout and the view moves once, afterwards, through
+  // autoScroll — which respects the latch. Nothing here waits on a guess: the
+  // server brackets its answer explicitly (agent/api/events.py `_sse`), so the
+  // end of the block is a frame, not a timeout.
+  //
+  // The invariant that makes holding safe: addEvent advances the watermark
+  // (state.streamHighOffset) when a record ARRIVES, so a queued row that is
+  // dropped is a row no later `?since=` will ever send again. settleCatchUp() is
+  // therefore the one ending EVERY way a block can end goes through — `replayed`,
+  // a new `history`, a replaced/closed stream (sse-stream.ts), a tab switch saving
+  // its cache (project.ts) — and clearStream drops the queue only because it drops
+  // the pane and the watermark together.
   const paint = () => {
     // finalize the coalesced text block before any non-text event
     if (ev && ev.type !== "text_delta") flushTextRender();
@@ -407,17 +433,6 @@ export function addEvent(ev) {
   };
   if (catchUp && !pageSink) {
     state.owedRecords.push(paint);
-    if (!state.owedFlush) {
-      // One flush per tick covers every record that arrived since the last one.
-      // 40ms is short enough that no reader can see the batch and long enough
-      // that a tunnel's worth of frames lands inside one (~25 paints a second,
-      // against one per record before).
-      state.owedFlush = setTimeout(() => {
-        state.owedFlush = 0;
-        const batch = state.owedRecords.splice(0, state.owedRecords.length);
-        for (const row of batch) row();
-      }, 40);
-    }
     return;
   }
   paint();

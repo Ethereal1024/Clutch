@@ -13,7 +13,7 @@ import { connectionLost, resolveConnectionLost } from "./conn-lost";
 import { pushTrustArmed } from "./permissions";
 import { currentProject } from "./project";
 import { state } from "./state";
-import { addEvent, dropOrphanLive } from "./stream-events";
+import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
 import { refreshTree } from "./workspace-panel";
 
 // ---- SSE live stream + session list ----
@@ -192,6 +192,13 @@ export function connectSSE() {
   // boot IIFE switching backends before its trailing connect — replaces the
   // old stream instead of leaking a second one (two live streams deliver every
   // event twice: the per-token stutter).
+  // The block the OLD stream was still delivering ends with it: its rows are
+  // already counted in the watermark (addEvent counts a record when it ARRIVES),
+  // so a dropped queue is a hole the next `?since=` would never fill, and a
+  // bracket left open would hold the new stream's rows behind a `replayed` it
+  // never sends. Paint them into the pane they belong to, and close the block,
+  // before anything is asked of the new stream.
+  settleCatchUp();
   if (es) es.close();
   // ?project= scopes the stream to this window's .clc. ?since= is the offset we
   // have already painted: the server answers with every durable record after
@@ -248,6 +255,13 @@ export function connectSSE() {
     if (!currentProject) refreshTree();
   };
   es.onerror = () => {
+    // The browser retries the SAME URL, so the `?since=` of the retry is the one
+    // this window asked with — a record still sitting in the catch-up queue would
+    // be dropped by the watermark when the block arrives again and could never be
+    // asked for a second time. End the block now: the screen then matches the
+    // watermark, the view is not left chasing rows it already holds, and the
+    // retry opens a block of its own that closes whatever is still missing.
+    settleCatchUp();
     // the browser reconnects on its own, but a base that is GONE retries
     // forever without a word: a cached "running" past that window is a claim
     // we can no longer support, so it goes and the button reacts
@@ -272,6 +286,10 @@ export function reconnectSSE() {
 // released). A reconnect heals it again; a page with no session must not keep
 // an EventSource pointed at a port nobody serves.
 export function closeSSE() {
+  // a block this stream was still delivering ends before the socket goes (see
+  // connectSSE): the watermark already counts those rows, and the `replayed`
+  // that would close the bracket is not coming
+  settleCatchUp();
   if (!es) return;
   try {
     es.close();

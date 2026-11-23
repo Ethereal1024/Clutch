@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 8bd32ff385929213efc599fbb99e6b1c65a866478b1d97c53da17883b7e46368
+// sources sha256: 017523bbaaecc51808fe975bc49188ba4139546fb789a57fcd23d2166b6b4440
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -213,13 +213,14 @@
     runSettled: false,
     // ---- stream-events.ts ----
     // the paint work a catch-up (`history` … `replayed`) has queued but not run:
-    // the block is painted in batches, one per timer tick, instead of once per SSE
-    // frame — a tunnel delivers each frame in its own chunk, so a per-frame append
-    // is a paint per record (the reported "a pile of messages loads itself").
-    // Each entry is the thunk that renders one record; `owedFlush` is the timer
-    // handle that will run them.
+    // the block is DATA until the server closes it, and its closing frame paints
+    // the whole block in one task — a tunnel delivers each record in its own SSE
+    // frame, so a paint per frame is a paint per record (the reported "a pile of
+    // messages loads itself" / "一次性闪过很多消息"). Each entry is the thunk that
+    // renders one record; settleCatchUp() runs them and closes the bracket, and
+    // every way the block can end goes through it (the watermark already counts
+    // these rows, so a dropped one would never be asked for again).
     owedRecords: [],
-    owedFlush: 0,
     // ---- stream-text.ts ----
     // the coalesced-render frame handles: a token arrives, the frame repaints
     textRenderRaf: 0,
@@ -1010,29 +1011,98 @@
   }
   NARROW_Q.addEventListener("change", layoutShell);
   layoutShell();
-  function scheduleTreeRefresh() {
+  function scheduleTreeRefresh(delay = 300) {
     clearTimeout(treeRefreshTimer);
-    treeRefreshTimer = setTimeout(refreshTree, 300);
+    treeRefreshTimer = setTimeout(() => {
+      for (const one of treeStates.values()) one.fetchedAt = 0;
+      void refreshTree(true);
+    }, delay);
   }
-  async function refreshTree() {
+  var treeStates = /* @__PURE__ */ new Map();
+  var NO_TREE = { root: "", tree: [], expanded: /* @__PURE__ */ new Set(), sig: "", fetchedAt: 0 };
+  var shownWorkspace = null;
+  var treeGen = 0;
+  var treeWalk = null;
+  var TREE_FRESH_MS = 1e4;
+  function treeState(project) {
+    let st = treeStates.get(project);
+    if (!st) {
+      st = { root: "", tree: [], expanded: /* @__PURE__ */ new Set(), sig: "", fetchedAt: 0 };
+      treeStates.set(project, st);
+    }
+    return st;
+  }
+  function paintTree(tree, expanded, sig) {
+    lastTreeSig = sig;
+    els.tree.innerHTML = "";
+    for (const node of tree) els.tree.appendChild(renderNode(node, 0, expanded));
+  }
+  function enterWorkspace(project, root = "") {
+    const next = project || "";
+    if (shownWorkspace === next) {
+      if (root) els.workspace.textContent = root;
+      return;
+    }
+    shownWorkspace = next;
+    treeGen++;
+    clearTimeout(treeRefreshTimer);
+    treeRefreshTimer = null;
+    dropWalk();
+    const st = treeStates.get(next) || NO_TREE;
+    const where = root || st.root;
+    els.workspace.textContent = where || "";
+    paintTree(st.tree, st.expanded, st.sig);
+  }
+  function dropWalk() {
+    if (!treeWalk) return;
+    try {
+      treeWalk.ctl.abort();
+    } catch (e) {
+    }
+    treeWalk = null;
+  }
+  async function refreshTree(force = false) {
+    const project = shownWorkspace || "";
+    if (treeWalk && treeWalk.project === project) return;
+    const st = treeState(project);
+    if (!force && st.fetchedAt && Date.now() - st.fetchedAt < TREE_FRESH_MS) return;
+    dropWalk();
+    const gen = ++treeGen;
+    const ctl = new AbortController();
+    treeWalk = { project, ctl };
     try {
       const params = new URLSearchParams();
       if (showHidden) params.set("hidden", "1");
-      for (const p of expandedDirs) params.append("expanded", p);
+      for (const p of st.expanded) params.append("expanded", p);
       const qs = params.toString() ? "?" + params : "";
-      const data = await apiFetch("/api/workspace/tree" + qs);
-      if (data.root) els.workspace.textContent = data.root;
-      const sig = JSON.stringify([...expandedDirs]) + "|" + JSON.stringify(data.tree || []);
-      if (sig === lastTreeSig) return;
-      lastTreeSig = sig;
-      els.tree.innerHTML = "";
-      for (const node of data.tree || []) els.tree.appendChild(renderNode(node, 0));
+      const data = await apiFetch("/api/workspace/tree" + qs, { signal: ctl.signal });
+      if (gen !== treeGen) return;
+      if (data.root) {
+        st.root = data.root;
+        els.workspace.textContent = data.root;
+      }
+      const tree = data.tree || [];
+      const sig = JSON.stringify([...st.expanded]) + "|" + JSON.stringify(tree);
+      st.tree = tree;
+      st.sig = sig;
+      st.fetchedAt = Date.now();
+      if (sig !== lastTreeSig) paintTree(tree, st.expanded, sig);
     } catch (e) {
-      console.warn("[tree] refresh failed", e);
+      if (!(e && e.name === "AbortError")) console.warn("[tree] refresh failed", e);
+    } finally {
+      if (treeWalk && treeWalk.ctl === ctl) treeWalk = null;
     }
   }
-  var expandedDirs = /* @__PURE__ */ new Set();
-  function renderNode(node, depth) {
+  function pendingRow(depth) {
+    const row = document.createElement("div");
+    row.className = "tree-node file tree-pending";
+    row.style.paddingLeft = depth * 12 + "px";
+    row.style.opacity = "0.55";
+    row.style.fontStyle = "italic";
+    row.innerHTML = `<span class="icon">\xB7</span><span class="name">loading\u2026</span>`;
+    return row;
+  }
+  function renderNode(node, depth, expanded) {
     const wrap = document.createElement("div");
     wrap.className = "tree-branch";
     const row = document.createElement("div");
@@ -1042,31 +1112,37 @@
     row.innerHTML = `<span class="icon">${node.dir ? "\u25B8" : "\xB7"}</span><span class="name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
     wrap.appendChild(row);
     if (node.dir) {
-      const isOpen = expandedDirs.has(node.path);
+      const isOpen = expanded.has(node.path);
       const children = document.createElement("div");
       children.className = "tree-children";
       children.style.display = isOpen ? "" : "none";
       if (isOpen) row.querySelector(".icon").textContent = "\u25BE";
       if (isOpen) {
-        for (const c of node.children || []) children.appendChild(renderNode(c, depth + 1));
+        if (node.children) {
+          for (const c of node.children) children.appendChild(renderNode(c, depth + 1, expanded));
+        } else {
+          children.appendChild(pendingRow(depth + 1));
+        }
       }
       row.addEventListener("click", (e) => {
         e.stopPropagation();
         const open = children.style.display !== "none";
         if (open) {
-          expandedDirs.delete(node.path);
+          expanded.delete(node.path);
           children.style.display = "none";
           row.querySelector(".icon").textContent = "\u25B8";
-        } else {
-          expandedDirs.add(node.path);
-          row.querySelector(".icon").textContent = "\u25BE";
-          children.innerHTML = "";
-          if (node.children && node.children.length) {
-            for (const c of node.children) children.appendChild(renderNode(c, depth + 1));
-            children.style.display = "";
-          }
+          return;
         }
-        scheduleTreeRefresh();
+        expanded.add(node.path);
+        row.querySelector(".icon").textContent = "\u25BE";
+        children.innerHTML = "";
+        if (node.children && node.children.length) {
+          for (const c of node.children) children.appendChild(renderNode(c, depth + 1, expanded));
+        } else {
+          children.appendChild(pendingRow(depth + 1));
+        }
+        children.style.display = "";
+        scheduleTreeRefresh(0);
       });
       wrap.appendChild(children);
     }
@@ -3450,6 +3526,7 @@
   }
   function connectSSE() {
     if (!state.apiBase) return;
+    settleCatchUp();
     if (es) es.close();
     const qs = new URLSearchParams();
     if (currentProject) qs.set("project", currentProject);
@@ -3474,6 +3551,7 @@
       if (!currentProject) refreshTree();
     };
     es.onerror = () => {
+      settleCatchUp();
       if (!sseErrorsSince) sseErrorsSince = Date.now();
       if (Date.now() - sseErrorsSince >= SSE_ERROR_WINDOW_MS) {
         sseDegrade("the backend did not answer for " + Math.round(SSE_ERROR_WINDOW_MS / 1e3) + "s");
@@ -3485,6 +3563,7 @@
     connectSSE();
   }
   function closeSSE() {
+    settleCatchUp();
     if (!es) return;
     try {
       es.close();
@@ -3609,6 +3688,7 @@
   var currentProject = "";
   var openSeq = 0;
   var openAbort = null;
+  var viewAbort = null;
   var opening = null;
   function supersedeOpen() {
     openSeq++;
@@ -3618,6 +3698,13 @@
       } catch (e) {
       }
       openAbort = null;
+    }
+    if (viewAbort) {
+      try {
+        viewAbort.abort();
+      } catch (e) {
+      }
+      viewAbort = null;
     }
     return openSeq;
   }
@@ -3652,10 +3739,6 @@
     state.streamHighOffset = null;
     state.runSettled = false;
     state.owedRecords.length = 0;
-    if (state.owedFlush) {
-      clearTimeout(state.owedFlush);
-      state.owedFlush = 0;
-    }
     endCatchUp();
     resetRollbackAnchors();
     setOlderPill(0);
@@ -3794,6 +3877,7 @@
   function showWelcome() {
     supersedeOpen();
     currentProject = "";
+    enterWorkspace("");
     state.apiBase = null;
     try {
       sessionStorage.removeItem("clutch_api_url");
@@ -4114,9 +4198,12 @@
   async function restoreTabView(tab, base, seq) {
     const m = mementoOf(tab.id);
     if (!m || m.high === null || !tab.path) return false;
+    const ctl = new AbortController();
+    viewAbort = ctl;
+    const signal = ctl.signal;
     let info;
     try {
-      info = await apiFetch("/api/session", { base });
+      info = await apiFetch("/api/session", { base, signal });
     } catch (e) {
       return false;
     }
@@ -4135,7 +4222,7 @@
       try {
         page = await apiFetch(
           `/api/history?before=${cursor}&limit=${RESTORE_PAGE_BYTES}&align=turn`,
-          { base }
+          { base, signal }
         );
       } catch (e) {
         break;
@@ -4209,6 +4296,7 @@
     if (same && !opening && currentProject && currentProject === here) return;
     const prev = activeTab();
     if (prev && prev.id !== tab.id) {
+      settleCatchUp();
       saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
       if (paneBlockedTabId() === prev.id) {
         forgetDomCache(prev.id);
@@ -4227,6 +4315,9 @@
     tab.needsInput = false;
     const cached = paintCachedView(tab);
     if (!cached) beginPaneLoad(tab);
+    const projectHere = tab.projectKey || tab.path || "";
+    const hereMemo = mementoOf(tab.id);
+    enterWorkspace(projectHere, hereMemo && hereMemo.workdir || dirOf(projectHere));
     const run2 = async () => {
       const base = await claimTab(tab);
       if (isStale(seq)) return null;
@@ -4239,6 +4330,7 @@
       }
       tab.unreachable = null;
       adoptBase(base);
+      refreshTree();
       if (!tab.path) return paneTab(tab.id);
       if (cached) {
         finishOpen();
@@ -4782,6 +4874,13 @@
     if (state.runSettled) return;
     addEvent({ type: "final", status: "error", summary: SSE_RUN_LOST });
   }
+  function settleCatchUp() {
+    while (state.owedRecords.length) {
+      const row = state.owedRecords.shift();
+      if (row) row();
+    }
+    endCatchUp();
+  }
   function addEvent(ev) {
     let wireOffset = null;
     if (ev && typeof ev === "object" && ev.event && typeof ev.offset === "number") {
@@ -4809,20 +4908,13 @@
       state.runSettled = true;
     }
     if (ev && ev.type === "history") {
+      settleCatchUp();
       setOlderPill(ev.older || 0);
       beginCatchUp();
       return;
     }
     if (ev && ev.type === "replayed") {
-      if (state.owedFlush) {
-        clearTimeout(state.owedFlush);
-        state.owedFlush = 0;
-      }
-      while (state.owedRecords.length) {
-        const row = state.owedRecords.shift();
-        if (row) row();
-      }
-      endCatchUp();
+      settleCatchUp();
       refreshTree();
       if (state.sseRunLostPending) announceRunLost();
       return;
@@ -4852,13 +4944,6 @@
     };
     if (catchUp && !pageSink) {
       state.owedRecords.push(paint);
-      if (!state.owedFlush) {
-        state.owedFlush = setTimeout(() => {
-          state.owedFlush = 0;
-          const batch = state.owedRecords.splice(0, state.owedRecords.length);
-          for (const row of batch) row();
-        }, 40);
-      }
       return;
     }
     paint();
@@ -6490,10 +6575,20 @@
     e.code = "no_backend";
     return e;
   }
-  async function apiFetch(path, { method = "GET", body, base = state.apiBase, timeout = 3e4 } = {}) {
+  async function apiFetch(path, { method = "GET", body, base = state.apiBase, timeout = 3e4, signal } = {}) {
     if (!base) throw noBackend();
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeout);
+    const onAbort = () => {
+      try {
+        ctl.abort();
+      } catch (e) {
+      }
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort);
+    }
     let r;
     try {
       r = await fetch(base + path, body === void 0 ? { method, signal: ctl.signal } : {
@@ -6504,6 +6599,7 @@
       });
     } finally {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
     }
     const data = await r.json().catch(() => ({}));
     if (!r.ok || data.error) {

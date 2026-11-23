@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.browsing import entry_visible, fs_list, tree
+from agent.browsing import entry_visible, fs_list, tree, _walk_remote
 from agent.tools.workspace import LocalWorkspace, parse_ls_entries
 
 
@@ -62,7 +62,7 @@ def test_tree_walk_local() -> None:
         off = tree(ws, [], show_hidden=False)
         names = {n["name"] for n in off}
         assert names == {"normaldir", "normalfile"}, names
-        # the one-level lookahead into normaldir must not leak dot entries either
+        # opening normaldir must not leak dot entries either
         (root / "normaldir" / ".dot").write_text("x")
         off = tree(ws, ["normaldir"], show_hidden=False)
         nd = next(n for n in off if n["name"] == "normaldir")
@@ -72,6 +72,66 @@ def test_tree_walk_local() -> None:
         on = tree(ws, [], show_hidden=True)
         names = {n["name"] for n in on}
         assert names == {".hiddendir", ".hiddenfile", "normaldir", "normalfile"}, names
+
+
+def test_tree_walk_lists_only_open_dirs() -> None:
+    """A refresh reads the root and the dirs on screen — never one level into every
+    top-level dir. That lookahead is what made a 27-row panel ship 341 entries and
+    cost a remote workspace a second SSH round trip (both now removed)."""
+    with tempfile.TemporaryDirectory(prefix="clutch-tree-") as td:
+        root = Path(td)
+        (root / "a" / "inner").mkdir(parents=True)
+        (root / "a" / "inner" / "leaf.txt").write_text("x")
+        (root / "a" / "one.txt").write_text("x")
+        (root / "b").mkdir()
+        (root / "b" / "two.txt").write_text("x")
+        ws = LocalWorkspace(str(root))
+
+        cold = tree(ws, [], show_hidden=False)
+        assert {n["name"] for n in cold} == {"a", "b"}, cold
+        assert all("children" not in n for n in cold), "an unopened dir is a leaf row"
+
+        opened = tree(ws, ["a"], show_hidden=False)
+        a = next(n for n in opened if n["name"] == "a")
+        assert {c["name"] for c in a["children"]} == {"inner", "one.txt"}, a["children"]
+        inner = next(c for c in a["children"] if c["name"] == "inner")
+        assert "children" not in inner, "one level down is not guessed"
+        b = next(n for n in opened if n["name"] == "b")
+        assert "children" not in b, "opening one dir does not read its siblings"
+
+        deeper = tree(ws, ["a", "a/inner"], show_hidden=False)
+        a = next(n for n in deeper if n["name"] == "a")
+        inner = next(c for c in a["children"] if c["name"] == "inner")
+        assert {c["name"] for c in inner["children"]} == {"leaf.txt"}
+
+
+def test_tree_walk_remote_batches_one_exec() -> None:
+    """The remote walk asks for every dir it knows in ONE list_many: the old walk
+    needed a round trip per level AND could not build level N+1's command before
+    level N answered (0.3–0.9 s each on the tunnel)."""
+
+    class FakeRemote:
+        def __init__(self, tree_map: dict[str, list[str]]) -> None:
+            self.tree_map = tree_map
+            self.calls: list[list[str]] = []
+
+        def list_many(self, paths: list[str]) -> dict[str, list[str]]:
+            self.calls.append(list(paths))
+            return {p: list(self.tree_map.get(p, [])) for p in paths}
+
+    ws = FakeRemote({"": ["a/", "file.txt"], "a": ["inner/", "one.txt"], "a/inner": ["leaf.txt"]})
+    nodes = _walk_remote(ws, ["a", "a/inner"], show_hidden=False)
+    assert ws.calls == [["", "a", "a/inner"]], ws.calls
+    a = next(n for n in nodes if n["name"] == "a")
+    assert {c["name"] for c in a["children"]} == {"inner", "one.txt"}
+    inner = next(c for c in a["children"] if c["name"] == "inner")
+    assert {c["name"] for c in inner["children"]} == {"leaf.txt"}
+
+    # a path the panel could not be showing is not handed to `ls`: not absolute,
+    # not through "..", and not under a dir that is not itself open
+    ws = FakeRemote({"": ["a/"]})
+    _walk_remote(ws, ["../etc", "/etc", "a/b"], show_hidden=False)
+    assert ws.calls == [[""]], ws.calls
 
 
 def test_parse_ls_entries_dots() -> None:
@@ -100,5 +160,7 @@ if __name__ == "__main__":
     test_entry_visible()
     test_fs_list_local()
     test_tree_walk_local()
+    test_tree_walk_lists_only_open_dirs()
+    test_tree_walk_remote_batches_one_exec()
     test_parse_ls_entries_dots()
     print("All tests passed.")

@@ -135,6 +135,11 @@ global.refreshTree = () => {};
 // the reconnect's own teardown of the dead stream's live blocks (stream-events.js
 // dropOrphanLive) — stubbed here, driven for real by mid-stream-retry-test.js
 global.dropOrphanLive = () => {};
+// settleCatchUp() (stream-events.ts) ends the catch-up bracket with endCatchUp,
+// which is stream-view.ts's one move: the drain and that move are
+// tests/catch-up-paint-test.js's subject, so the bracket's move is stubbed here
+// and the real settleCatchUp (in the eval list below) still runs.
+global.endCatchUp = () => {};
 global.clearRetryNote = () => {};
 global.cancelAnimationFrame = () => {};
 global.state.textRenderRaf = 0;
@@ -148,7 +153,7 @@ global.document = { hidden: false };
 
 // ---- load the real code ----
 for (const name of ["sseFrame", "sseDegrade", "sseWatchdogTick", "startSseWatchdog",
-  "connectSSE", "reconnectSSE", "sseSuspend", "sseResume"]) {
+  "connectSSE", "settleCatchUp", "reconnectSSE", "sseSuspend", "sseResume"]) {
   (0, eval)(fnBody(name));
 }
 // count the reconnects without replacing the behaviour: the real one still runs

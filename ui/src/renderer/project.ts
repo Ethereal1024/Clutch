@@ -28,11 +28,11 @@ import { resumeTurn } from "./render-events";
 import { askConfirm, notice } from "./settings";
 import { closeSSE, reconnectSSE } from "./sse-stream";
 import { state } from "./state";
-import { addEvent, dropOrphanLive } from "./stream-events";
+import { addEvent, dropOrphanLive, settleCatchUp } from "./stream-events";
 import { endCatchUp, nearBottom, setJumpVisible, setStatus } from "./stream-view";
 import { eventsEl, stream } from "./els";
 import { refreshRollbackAnchors, resetRollbackAnchors } from "./task-rollback";
-import { refreshTree } from "./workspace-panel";
+import { enterWorkspace, refreshTree } from "./workspace-panel";
 import {
   activeTab,
   adoptBase,
@@ -69,6 +69,12 @@ export let currentProject = ""; // path of the active .clc project file
 //   * every UI mutation of an open is behind `seq === openSeq`.
 let openSeq = 0;
 let openAbort: AbortController | null = null;
+// The view restore's own requests (/api/session and the history pages). A tab
+// click supersedes them the same way it supersedes the open: they are the tab we
+// left's, and on a remote project each abandoned page is another 256 KB dragged
+// off the tunnel while the tab the reader actually wants is waiting for it. Left
+// running they are what made a delay ADD UP instead of repeating.
+let viewAbort: AbortController | null = null;
 let opening: { id: string; promise: Promise<PaneState | null> } | null = null;
 
 function supersedeOpen(): number {
@@ -80,6 +86,14 @@ function supersedeOpen(): number {
       /* already aborted */
     }
     openAbort = null;
+  }
+  if (viewAbort) {
+    try {
+      viewAbort.abort();
+    } catch (e) {
+      /* already aborted */
+    }
+    viewAbort = null;
   }
   return openSeq;
 }
@@ -116,9 +130,8 @@ export function clearStream() {
   state.streamHighOffset = null; // and no replayed record to dedupe a reconnect against
   state.runSettled = false; // a fresh pane holds no run's ending (stream-events.ts)
   // ...and no queued paint of a catch-up: those rows belong to the pane that just
-  // left, and a batch timer that fired after this would append them into this one
+  // left, and a queue that outlived this would append them into the new one
   state.owedRecords.length = 0;
-  if (state.owedFlush) { clearTimeout(state.owedFlush); state.owedFlush = 0; }
   // ...and no OPEN catch-up either: the bracket belonged to the stream that just
   // left, and a window still flagged as catching up would hold every later row
   // in a batch nothing would ever close (the `replayed` frame that closes it is
@@ -336,6 +349,8 @@ export function setProjectInfo(info) {
 export function showWelcome() {
   supersedeOpen(); // a replay in flight must not repaint after the last tab closes
   currentProject = "";
+  // no tab, no workspace: the tree goes with the project it belonged to
+  enterWorkspace("");
   state.apiBase = null;
   try {
     sessionStorage.removeItem("clutch_api_url");
@@ -883,9 +898,15 @@ const RESTORE_PAGE_BYTES = 256 * 1024;
 async function restoreTabView(tab, base, seq: number): Promise<boolean> {
   const m = mementoOf(tab.id);
   if (!m || m.high === null || !tab.path) return false;
+  // This restore's own requests are cancellable: the NEXT tab click aborts them
+  // (supersedeOpen), so an abandoned walk stops here instead of dragging its
+  // remaining pages off the tunnel while the tab the reader wants waits.
+  const ctl = new AbortController();
+  viewAbort = ctl;
+  const signal = ctl.signal;
   let info;
   try {
-    info = await apiFetch("/api/session", { base });
+    info = await apiFetch("/api/session", { base, signal });
   } catch (e) {
     return false;
   }
@@ -929,7 +950,7 @@ async function restoreTabView(tab, base, seq: number): Promise<boolean> {
     try {
       page = await apiFetch(
         `/api/history?before=${cursor}&limit=${RESTORE_PAGE_BYTES}&align=turn`,
-        { base }
+        { base, signal }
       );
     } catch (e) {
       break; // partly restored is still usable: the older pill offers the rest
@@ -1078,6 +1099,13 @@ export async function activateTab(tab, readOnly = false) {
 
   const prev = activeTab();
   if (prev && prev.id !== tab.id) {
+    // A catch-up the pane is still receiving is the LEAVING tab's last words, and
+    // both records taken below (the memento and the DOM cache) carry the watermark
+    // that already counts them: paint them into the pane first, and close the
+    // block, or the tab comes back missing exactly that block — the one thing a
+    // reconnect will not resend — and the next tab opens inside a bracket that
+    // was never closed.
+    settleCatchUp();
     saveMemento(prev.id, { older: olderRemaining, workdir: els.workspace.textContent || "" });
     if (paneBlockedTabId() === prev.id) {
       // That pane held a failure panel, not a transcript: caching it would save
@@ -1109,6 +1137,17 @@ export async function activateTab(tab, readOnly = false) {
   // switch is one state.
   const cached = paintCachedView(tab);
   if (!cached) beginPaneLoad(tab);
+  // The workspace panel is the other half of what a click changes, and it changes
+  // in THIS task: the tree, its expansions and its root belong to the project the
+  // tab stands for, never to the one we just left. Painting it here is what makes
+  // a switch atomic — and coming back to a workspace paints the tree it had,
+  // instead of keeping the other tab's files up until a walk answers (seconds on
+  // a remote project, which is the "the tab and the workspace disagree" report).
+  // The root we can already name is this tab's own record; the host's answer
+  // replaces it the moment the claim lands (refreshTree below).
+  const projectHere = tab.projectKey || tab.path || "";
+  const hereMemo = mementoOf(tab.id);
+  enterWorkspace(projectHere, (hereMemo && hereMemo.workdir) || dirOf(projectHere));
 
   // What this activation must SHOW when it is over. Every path below decides
   // that and paints nothing, so a state can only land once — at the end, and
@@ -1133,6 +1172,12 @@ export async function activateTab(tab, readOnly = false) {
     }
     tab.unreachable = null;
     adoptBase(base);
+    // The workspace walk starts NOW, next to the transcript restore instead of
+    // after it: it is a different question to a different endpoint, and the panel
+    // it fills is already showing this project (enterWorkspace). Coalesced with
+    // finishOpen's own call below (one walk at a time), so this costs a switch
+    // nothing — it only stops the two from being serial.
+    refreshTree();
     if (!tab.path) return paneTab(tab.id); // a placeholder tab (createProject fills the path)
 
     // The cached picture (when there was one) is already the pane's: it was

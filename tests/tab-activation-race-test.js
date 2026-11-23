@@ -89,7 +89,7 @@ const { fnBody } = slicer(project);
 // ---- 4. switching back restores the log's TAIL, not the gap the tab left ------
 {
   const restore = fnBody("restoreTabView");
-  check(/apiFetch\("\/api\/session", \{ base \}\)/.test(restore),
+  check(/apiFetch\("\/api\/session", \{ base, signal \}\)/.test(restore),
     "the tail restore first asks WHICH project this session has open");
   check(/openPath !== \(tab\.projectKey \|\| tab\.path\)/.test(restore),
     "and refuses to paint another project's log when the session was replaced");
@@ -107,6 +107,12 @@ const { fnBody } = slicer(project);
     "the restored math is typeset on the same phase the full replay uses");
   check(/for \(let i = pages\.length - 1; i >= 0; i--\)/.test(restore),
     "backward pages are painted oldest-first");
+  check(/const ctl = new AbortController\(\);\s*\n\s*viewAbort = ctl;/.test(restore) &&
+        /\{ base, signal \}/.test(restore),
+    "the walk's own requests are cancellable, so a superseded restore stops pulling pages " +
+    "off the tunnel instead of stacking behind the next switch");
+  check(/if \(viewAbort\) \{\s*\n\s*try \{\s*\n\s*viewAbort\.abort\(\);/.test(fnBody("supersedeOpen")),
+    "and the next tab click is what aborts them");
   check(/if \(isStale\(seq\)\) return true;/.test(restore),
     "a newer activation stops the restore mid-paint");
   check(/if \(await restoreTabView\(tab, base, seq\)\) return isStale\(seq\) \? null : paneTab\(tab\.id\);/.test(fnBody("activateTab")),

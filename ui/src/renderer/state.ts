@@ -81,13 +81,14 @@ export const state = {
 
   // ---- stream-events.ts ----
   // the paint work a catch-up (`history` … `replayed`) has queued but not run:
-  // the block is painted in batches, one per timer tick, instead of once per SSE
-  // frame — a tunnel delivers each frame in its own chunk, so a per-frame append
-  // is a paint per record (the reported "a pile of messages loads itself").
-  // Each entry is the thunk that renders one record; `owedFlush` is the timer
-  // handle that will run them.
+  // the block is DATA until the server closes it, and its closing frame paints
+  // the whole block in one task — a tunnel delivers each record in its own SSE
+  // frame, so a paint per frame is a paint per record (the reported "a pile of
+  // messages loads itself" / "一次性闪过很多消息"). Each entry is the thunk that
+  // renders one record; settleCatchUp() runs them and closes the bracket, and
+  // every way the block can end goes through it (the watermark already counts
+  // these rows, so a dropped one would never be asked for again).
   owedRecords: [] as Array<() => void>,
-  owedFlush: 0,
 
   // ---- stream-text.ts ----
   // the coalesced-render frame handles: a token arrives, the frame repaints
