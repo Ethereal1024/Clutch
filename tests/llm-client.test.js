@@ -18,6 +18,7 @@ const {
   STALL_PROBE_MS,
   MAX_BACKOFF_MS,
 } = require("../ui/llm-client.js");
+const { installSystemTrust } = require("../ui/system-ca.js");
 
 // ---- a provider that answers exactly what a test tells it to ----
 function serve(handler) {
@@ -94,6 +95,62 @@ function selfSignedHttps() {
     server.listen(0, "127.0.0.1", () =>
       resolve({
         base: `https://127.0.0.1:${server.address().port}`,
+        close: () =>
+          new Promise((done) => {
+            if (server.closeAllConnections) server.closeAllConnections();
+            server.close(() => done());
+          }),
+      })
+    );
+  });
+}
+
+// A real HTTPS peer whose leaf is signed by a CA this machine does NOT have —
+// the stand-in for "the root is only in the OS store". The CA comes back with
+// the server so a test can install it exactly the way system-ca.ts installs the
+// machine's store, and the same peer then answers as a REFUSED handshake when
+// nothing installed it: the two ends of the reported failure in one server.
+function mintedCaHttps() {
+  const fs = require("fs");
+  const os = require("os");
+  const nodePath = require("path");
+  const { execFileSync } = require("child_process");
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "clutch-minted-ca-"));
+  const at = (name) => nodePath.join(dir, name);
+  const run = (args) => {
+    try {
+      execFileSync("openssl", args, { stdio: "ignore" });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+  const minted =
+    run(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=clutch-test-ca", "-keyout", at("ca.key"), "-out", at("ca.pem")]) &&
+    run(["req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1", "-keyout", at("leaf.key"), "-out", at("leaf.csr")]);
+  if (!minted) return null;
+  fs.writeFileSync(at("ext"), "subjectAltName=IP:127.0.0.1\n");
+  const signed = run(["x509", "-req", "-in", at("leaf.csr"), "-CA", at("ca.pem"), "-CAkey", at("ca.key"), "-CAcreateserial", "-days", "1", "-extfile", at("ext"), "-out", at("leaf.pem")]);
+  if (!signed) return null;
+  let server;
+  try {
+    server = https.createServer({ key: fs.readFileSync(at("leaf.key")), cert: fs.readFileSync(at("leaf.pem")) }, (req, res) => {
+      head(res);
+      chunk(res, say("trusted answer"));
+      // a finish_reason is what ends the turn: without it the body looks like a
+      // stream that died mid-answer, which the client (correctly) retries
+      chunk(res, stop("stop"));
+      end(res);
+    });
+  } catch (e) {
+    return null;
+  }
+  const caPem = fs.readFileSync(at("ca.pem"), "utf8");
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () =>
+      resolve({
+        base: `https://127.0.0.1:${server.address().port}`,
+        caPem,
         close: () =>
           new Promise((done) => {
             if (server.closeAllConnections) server.closeAllConnections();
@@ -194,6 +251,57 @@ async function main() {
         }
         check(err && err.code === "tls" && err.retryable === false, "a real self-signed handshake ends the turn as a TLS verdict, with no redial");
         check(err && new RegExp(peer.base.replace(/^https:\/\//, "").replace(/[.:]/g, "\\$&")).test(err.message), "…naming the host the base_url pointed at");
+      } finally {
+        await peer.close();
+      }
+    }
+  }
+
+  // ---- 1c. a root the MACHINE trusts is trusted; a root in neither store is not ----
+  //
+  // The follow-up to 1b, and the same reported failure from the other end: the
+  // fix is that the main process adopts the OS certificate store (system-ca.ts),
+  // not that verification is relaxed. So the same peer is asked the same
+  // question twice — once with its root installed the way the machine's store
+  // is, once without — and a third time against the REAL store install, which
+  // must still refuse a root that is in neither store. The last one is what
+  // separates "trusts the machine's roots" from "trusts anything".
+  {
+    const peer = await mintedCaHttps();
+    if (!peer) {
+      console.log("skip: no openssl on this machine — system-ca.test.js covers the tiers without a socket");
+    } else {
+      const turn = async () => {
+        try {
+          const events = await collect(createLlmClient({ baseUrl: peer.base, model: "m", apiKey: "k" }), {});
+          return { events, err: null };
+        } catch (e) {
+          return { events: null, err: e };
+        }
+      };
+      try {
+        // the stand-in for the OS store: this runtime has no global install (no
+        // setDefaultCACertificates), so the merged list rides on the request —
+        // exactly the tier-2 path, through the client's real request site
+        const runtime = { getCACertificates: (kind) => (kind === "system" ? [peer.caPem] : []) };
+        check(installSystemTrust({ tlsModule: runtime }).tier === "request", "a runtime without the global API installs per request");
+        {
+          const { events, err } = await turn();
+          check(!err && events.some((e) => e.content === "trusted answer"), "a certificate rooted in the machine's store is trusted, and the turn completes");
+        }
+        // nothing installed: the same peer, the same client, the handshake dies
+        installSystemTrust({ tlsModule: { getCACertificates: () => [] } });
+        {
+          const { err } = await turn();
+          check(err && err.code === "tls" && err.retryable === false, "with no store adopted the same peer is refused, as a TLS verdict");
+        }
+        // and the real runtime: adopting the OS store does not trust a throwaway
+        // root that no store on this machine has
+        installSystemTrust();
+        {
+          const { err } = await turn();
+          check(err && err.code === "tls", "adopting the OS store trusts the machine's roots, not any root");
+        }
       } finally {
         await peer.close();
       }

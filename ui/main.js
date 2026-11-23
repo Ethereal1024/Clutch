@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 73b646c70a032563a13bf763ec1c66567e9809a922f23441a93376a68b546b34
+// source sha256: 2412c610f559716861a723d0b7a96f4aaa680610b2c2e4147d35f3dd9dccce73
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -34,6 +34,9 @@ const { exec_max_command_bytes: EXEC_MAX_COMMAND_BYTES, exec_chunk_bytes: EXEC_C
 // the composition root for one session's run loop (P1-4): fetches the session's
 // declarations + session facts and wires all five ports into createRunHost.
 const { createSessionRun, llmSettingsRev } = require("./run-session");
+// the renderer trusts the OS certificate store and Node does not, by default:
+// this adopts it for the main process at startup (see system-ca.ts)
+const { installSystemTrust, describeTrust } = require("./system-ca");
 function tunnelLog(...args) {
     tunnel.tunnelLog(...args);
 }
@@ -323,6 +326,14 @@ if (!app.requestSingleInstanceLock()) {
 else {
     app.on("second-instance", () => createWindow());
     app.whenReady().then(async () => {
+        // The window (Chromium) verifies against the OS certificate store; this
+        // process (Node) verifies against the CA list bundled with the runtime, so
+        // behind a proxy that inspects HTTPS the page worked and every model request
+        // was refused ("self signed certificate"). Adopt the OS store once, here,
+        // before the first session or update request can run — and say so in
+        // tunnel.log, so a log answers "which roots is this run trusting?" instead
+        // of leaving the next certificate error to be diagnosed from zero.
+        tunnelLog(describeTrust(installSystemTrust()));
         // file:// cache can serve stale renderer scripts after a bundle update: clear it on launch
         try {
             await session.defaultSession.clearCache();

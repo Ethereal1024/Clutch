@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/llm-proxy.ts and run `npm run build:host`.
-// source sha256: 9a6605cecadbb5cf8bae53b81dd7de740737d30e6c2b1a3a27b9146509ad0aed
+// source sha256: e35017437e205052c6d494abad4bf7afe184c21e99c5d911fd035fd56915910e
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -14,6 +14,9 @@ const https = require("https");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
+// the OS trust store for the runtime that cannot install it globally (see
+// system-ca); empty on the phone and on any current desktop Node
+const { trustOptions } = require("./system-ca");
 // proxy-agent is ESM-only since v7, so only runtimes with require(esm) support
 // (node >= 20.19, Electron >= 33) can load it synchronously. The Android shell
 // runs embedded node 18, where this require throws ERR_REQUIRE_ESM — and an
@@ -161,6 +164,7 @@ function startLlmProxy(upstream) {
                 const transport = target.protocol === "http:" ? http : https;
                 const preq = transport.request(target, {
                     method: "POST",
+                    ...trustOptions(),
                     agent: getAgent(target),
                     headers: {
                         "Content-Type": req.headers["content-type"] || "application/json",

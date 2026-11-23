@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/llm-client.ts and run `npm run build:host`.
-// source sha256: 664a86987f4683ad011e570be4c95e49755e0e727d6dda68be2a6be3ee302c45
+// source sha256: 8fb7f6b72353ac4ce99264af8f6abb8175d044f87b6f9593469f68adfaf45616
 
 "use strict";
 // The model client — what agent/llm/ was, now on the side that actually has a
@@ -51,6 +51,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const http = require("http");
 const https = require("https");
 const { joinUpstream, getAgent } = require("./llm-proxy");
+// the OS trust store, for a runtime that has no global install (see system-ca):
+// empty in the normal case, the merged CA list when this Node needs it per request
+const { trustOptions } = require("./system-ca");
 const READ_TIMEOUT_MS = 240000; // chunk-gap budget (was llm_read_timeout)
 const STALL_PROBE_MS = 20000; // the dead-path probe: silence this long starts asking
 const PROBE_TIMEOUT_MS = 6000; // the probe's own budget (one HEAD-ish round trip)
@@ -116,6 +119,11 @@ function statusError(status, raw) {
 // not. So the verdict is final (a trust decision does not heal on a redial, and
 // D12's endless ladder is for a DEAD path, not a refused one) and it carries the
 // knob: NODE_EXTRA_CA_CERTS (or --use-system-ca) is the whole fix.
+//
+// The main cause is now removed at the root rather than at the message: main
+// adopts the OS store at startup (see system-ca.ts), which is the store the
+// window already used. This verdict is what is left when the presented root is
+// in NEITHER store — a proxy whose CA is installed nowhere this process can see.
 const TLS_UNTRUSTED_CODES = new Set([
     "DEPTH_ZERO_SELF_SIGNED_CERT",
     "SELF_SIGNED_CERT_IN_CHAIN",
@@ -153,7 +161,7 @@ function tlsError(e, target) {
     if (TLS_STALE_CODES.has(code)) {
         return new LlmError("tls", `TLS certificate${where}: ${reason} — check this machine's clock, and whether something in the path presents its own certificate.`, false);
     }
-    return new LlmError("tls", `TLS certificate not trusted${where}: ${reason} — this app verifies against Node's own CA list, not the system one, so a proxy that inspects HTTPS is the usual cause (the browser trusts its root CA, the agent does not). Point NODE_EXTRA_CA_CERTS at that root CA, or start the app with --use-system-ca, and reopen it.`, false);
+    return new LlmError("tls", `TLS certificate not trusted${where}: ${reason} — this process verifies against the system certificate store and Node's bundled list, so a refusal means the path presented a certificate whose root is in neither (a proxy that inspects HTTPS with its own root, or a machine missing a CA). If that root is not in the system store, point NODE_EXTRA_CA_CERTS at it, or start the app with --use-system-ca, and reopen it.`, false);
 }
 // Transport failures, named by phase: a connect failure points at routing / a
 // proxy / the base_url, a reset mid-body at the provider or a relay between
@@ -225,7 +233,7 @@ function probeAlive(baseUrl, timeoutMs = PROBE_TIMEOUT_MS) {
         const transport = target.protocol === "http:" ? http : https;
         let req;
         try {
-            req = transport.request(target, { method: "GET", agent: getAgent(target), timeout: timeoutMs }, (res) => {
+            req = transport.request(target, { method: "GET", ...trustOptions(), agent: getAgent(target), timeout: timeoutMs }, (res) => {
                 res.destroy();
                 done(true);
             });
@@ -256,7 +264,7 @@ async function* attempt({ url, headers, body, signal, readTimeoutMs, stallMs, pr
     let lastActivity = Date.now();
     let delivered = false;
     let probing = false;
-    const req = transport.request(target, { method: "POST", agent: getAgent(target), headers });
+    const req = transport.request(target, { method: "POST", ...trustOptions(), agent: getAgent(target), headers });
     // Kill the attempt with a failure the caller can classify. A read parked on the
     // body is woken by destroying the response; before the headers exist, by
     // destroying the request.

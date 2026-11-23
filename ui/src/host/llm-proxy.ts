@@ -9,6 +9,9 @@ const https = require("https");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
+// the OS trust store for the runtime that cannot install it globally (see
+// system-ca); empty on the phone and on any current desktop Node
+const { trustOptions } = require("./system-ca");
 // proxy-agent is ESM-only since v7, so only runtimes with require(esm) support
 // (node >= 20.19, Electron >= 33) can load it synchronously. The Android shell
 // runs embedded node 18, where this require throws ERR_REQUIRE_ESM — and an
@@ -160,6 +163,7 @@ function startLlmProxy(upstream) {
           target,
           {
             method: "POST",
+            ...trustOptions(),
             agent: getAgent(target),
             headers: {
               "Content-Type": req.headers["content-type"] || "application/json",
