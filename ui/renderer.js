@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: e74933355181a5bd0d5e2f7c0bcca0a54e5b715587efb794810b101f3fc189f1
+// sources sha256: 8adab34efd903fea2ad706cacc3c9dd93773e31e501cc9feda3fc5336995b957
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -53,6 +53,7 @@
         try {
           d = JSON.parse(m.data);
         } catch (e) {
+          console.error("[bridge-shim] dropped an event frame that is not JSON (" + (e && e.message || e) + "):", m.data);
           return;
         }
         const set = listeners3.get(d.event);
@@ -5196,15 +5197,22 @@
   }
   var llmUrlInput = $("#llm-url-input");
   var profileSelect = customSelect($("#llm-profile-select"));
+  var PROFILES_KEY = "clutch_llm_profiles";
   function llmProfiles() {
+    const raw = localStorage.getItem(PROFILES_KEY);
+    if (raw === null) return {};
+    let map;
     try {
-      return JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
+      map = JSON.parse(raw);
+      if (!map || typeof map !== "object" || Array.isArray(map)) throw new Error("it is not a map of profiles");
     } catch (e) {
+      corruptRecord("saved LLM profiles", PROFILES_KEY, e);
       return {};
     }
+    return map;
   }
   function saveLlmProfiles(profiles) {
-    localStorage.setItem("clutch_llm_profiles", JSON.stringify(profiles));
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
   }
   function renderLlmProfiles(activeName) {
     const profiles = llmProfiles();
@@ -5446,13 +5454,16 @@
       if (key) localStorage.setItem("clutch_api_key", key);
       localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
       if (window.clutchSettings && window.clutchSettings.save) {
-        await window.clutchSettings.save({
+        const reply = await window.clutchSettings.save({
           api_key: key,
           model,
           base_url: llmUrl,
           reasoning_effort: payload.reasoning_effort,
           api_protocol: payload.api_protocol
         });
+        if (reply && reply.ok === false) {
+          throw new Error("~/.clutch/settings.json was not written: " + (reply.error || "the host refused it"));
+        }
       }
       try {
         await apiFetch("/api/settings", { method: "POST", body: payload });
@@ -5496,6 +5507,24 @@
     clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => el.classList.add("hidden"), kind === "error" ? 8e3 : 4e3);
   }
+  var corruptReported = /* @__PURE__ */ new Set();
+  function corruptRecord(what, key, why) {
+    let raw = null;
+    try {
+      raw = localStorage.getItem(key);
+    } catch (e) {
+    }
+    if (raw) {
+      try {
+        localStorage.setItem(key + ".corrupt", raw);
+      } catch (e) {
+      }
+    }
+    if (corruptReported.has(key)) return;
+    corruptReported.add(key);
+    const detail = why && why.message || String(why || "it is not the JSON this build writes");
+    notice(`The ${what} could not be read (${detail}). Its bytes were kept as "${key}.corrupt", not thrown away.`);
+  }
   var confirmModal = $("#confirm-modal");
   var confirmResolve = null;
   function askConfirm({ title, text, ok = "OK", cancel = "Cancel" }) {
@@ -5534,17 +5563,25 @@
   var passModal = $("#ssh-pass-modal");
   var passInput = $("#ssh-pass-input");
   var passLabel = $("#ssh-pass-label");
+  var CONNS_KEY = "clutch_ssh_connections";
   function sshConns() {
+    const raw = localStorage.getItem(CONNS_KEY);
+    if (raw === null) return [];
+    let list;
     try {
-      return JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+      list = JSON.parse(raw);
+      if (!Array.isArray(list) || list.some((c) => !c || typeof c.host !== "string"))
+        throw new Error("it is not a list of hosts");
     } catch (e) {
+      corruptRecord("saved SSH hosts", CONNS_KEY, e);
       return [];
     }
+    return list;
   }
   function upsertConn(host, user, port) {
     const list = sshConns().filter((c) => !(c.host === host && c.user === user && String(c.port) === String(port)));
     list.unshift({ host, user, port: String(port) });
-    localStorage.setItem("clutch_ssh_connections", JSON.stringify(list));
+    localStorage.setItem(CONNS_KEY, JSON.stringify(list));
     localStorage.setItem("clutch_ssh_host", host);
     localStorage.setItem("clutch_ssh_user", user);
     localStorage.setItem("clutch_ssh_port", String(port));
@@ -8128,14 +8165,10 @@
     paintBackend(ev.detail);
   });
   function readActiveModel() {
-    try {
-      const active = localStorage.getItem("clutch_llm_active");
-      if (!active) return "";
-      const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
-      return profiles[active] && profiles[active].model || "";
-    } catch {
-      return "";
-    }
+    const active = localStorage.getItem("clutch_llm_active");
+    if (!active) return "";
+    const p = llmProfiles()[active];
+    return p && p.model || "";
   }
   function paintModel() {
     const m = readActiveModel();
@@ -8241,39 +8274,48 @@
         machine: t.machine
       }));
       localStorage.setItem(LS_KEY, JSON.stringify({ tabs, activeTabId: state.activeTabId || "" }));
-    } catch {
+    } catch (e) {
     }
   }
   function loadTabs() {
+    let raw;
     try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      if (Array.isArray(data.tabs)) {
-        const seenId = /* @__PURE__ */ new Set();
-        const seenPath = /* @__PURE__ */ new Set();
-        state.tabs = data.tabs.filter((t) => t && typeof t.id === "string" && typeof t.path === "string").filter((t) => {
-          if (!t.id || seenId.has(t.id) || !t.path || seenPath.has(t.path)) return false;
-          seenId.add(t.id);
-          seenPath.add(t.path);
-          return true;
-        }).map((t) => ({
-          id: t.id,
-          path: t.path,
-          name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
-          // undefined for a store written before the field existed: unknown, and
-          // the claim then follows whatever the window is on (with the open's
-          // own self-heal, project.ts, as the backstop)
-          machine: asMachine(t.machine),
-          base: null,
-          running: false,
-          needsInput: false
-        }));
-      }
-      const active = typeof data.activeTabId === "string" ? data.activeTabId : "";
-      state.activeTabId = state.tabs.some((t) => t.id === active) ? active : null;
-    } catch {
+      raw = localStorage.getItem(LS_KEY);
+    } catch (e) {
+      return;
     }
+    if (!raw) return;
+    let data;
+    try {
+      data = JSON.parse(raw);
+      if (!data || typeof data !== "object") throw new Error("it is not a tab store");
+    } catch (e) {
+      corruptRecord("remembered tabs", LS_KEY, e);
+      return;
+    }
+    if (Array.isArray(data.tabs)) {
+      const seenId = /* @__PURE__ */ new Set();
+      const seenPath = /* @__PURE__ */ new Set();
+      state.tabs = data.tabs.filter((t) => t && typeof t.id === "string" && typeof t.path === "string").filter((t) => {
+        if (!t.id || seenId.has(t.id) || !t.path || seenPath.has(t.path)) return false;
+        seenId.add(t.id);
+        seenPath.add(t.path);
+        return true;
+      }).map((t) => ({
+        id: t.id,
+        path: t.path,
+        name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
+        // undefined for a store written before the field existed: unknown, and
+        // the claim then follows whatever the window is on (with the open's
+        // own self-heal, project.ts, as the backstop)
+        machine: asMachine(t.machine),
+        base: null,
+        running: false,
+        needsInput: false
+      }));
+    }
+    const active = typeof data.activeTabId === "string" ? data.activeTabId : "";
+    state.activeTabId = state.tabs.some((t) => t.id === active) ? active : null;
   }
   var mru = [];
   var closedStack = [];
@@ -8523,13 +8565,17 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
   register({ id: "open-recent", run: ({ path }) => path && openProject(path) });
   var RECENT_KEY = "clutch_recent";
   function recentList() {
+    const raw = localStorage.getItem(RECENT_KEY);
+    if (!raw) return [];
+    let list;
     try {
-      const raw = localStorage.getItem(RECENT_KEY);
-      const list = raw ? JSON.parse(raw) : [];
-      return Array.isArray(list) ? list.filter((r) => r && typeof r.path === "string") : [];
+      list = JSON.parse(raw);
+      if (!Array.isArray(list)) throw new Error("it is not a list of projects");
     } catch (e) {
+      corruptRecord("recent-project list", RECENT_KEY, e);
       return [];
     }
+    return list.filter((r) => r && typeof r.path === "string");
   }
   function recordRecent(project, name) {
     if (!project) return;
@@ -8639,24 +8685,30 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
   onConnectDoor(handleSshConnect);
   onTabAutoConnect(connectTabMachine);
   function storedLlmConfig() {
-    try {
-      const active = localStorage.getItem("clutch_llm_active");
-      const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
-      const p = active && profiles[active];
-      if (p && (p.base_url || p.model || p.api_key)) {
-        return {
-          base_url: p.base_url || "",
-          model: p.model || "",
-          api_key: p.api_key || "",
-          reasoning_effort: p.reasoning_effort || "",
-          api_protocol: p.api_protocol || ""
-        };
-      }
-    } catch (e) {
+    const active = localStorage.getItem("clutch_llm_active");
+    const p = active ? llmProfiles()[active] : null;
+    if (p && (p.base_url || p.model || p.api_key)) {
+      return {
+        base_url: p.base_url || "",
+        model: p.model || "",
+        api_key: p.api_key || "",
+        reasoning_effort: p.reasoning_effort || "",
+        api_protocol: p.api_protocol || ""
+      };
     }
-    try {
-      const legacy = JSON.parse(localStorage.getItem("clutch_llm") || "null");
-      const key = localStorage.getItem("clutch_api_key") || "";
+    const key = localStorage.getItem("clutch_api_key") || "";
+    const legacyRaw = localStorage.getItem("clutch_llm");
+    if (legacyRaw) {
+      let legacy = null;
+      try {
+        legacy = JSON.parse(legacyRaw);
+        if (!legacy || typeof legacy !== "object" || Array.isArray(legacy)) {
+          throw new Error("it is not a flat endpoint record");
+        }
+      } catch (e) {
+        corruptRecord("saved LLM endpoint (the older clutch_llm record)", "clutch_llm", e);
+        legacy = null;
+      }
       if (legacy && (legacy.base_url || legacy.model || key)) {
         return {
           base_url: legacy.base_url || "",
@@ -8666,23 +8718,24 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
           api_protocol: ""
         };
       }
-    } catch (e) {
     }
     return null;
   }
   function healSettingsMirror() {
     const cfg = storedLlmConfig();
     if (!cfg) return;
-    if (window.clutchSettings && window.clutchSettings.ensure) {
-      window.clutchSettings.ensure(cfg).catch(() => {
-      });
-    }
+    if (!(window.clutchSettings && window.clutchSettings.ensure)) return;
+    const failed = (why) => notice("Could not rebuild ~/.clutch/settings.json: " + why);
+    window.clutchSettings.ensure(cfg).then((r) => {
+      if (r && r.ok === false) failed(r.error || "the host refused it");
+    }, (e) => failed(e && e.message || String(e)));
   }
   async function loadHostDefaults() {
     try {
       const data = await apiFetch("/api/host");
       if (data && data.ui) state.hostUiDefaults = data.ui;
     } catch (e) {
+      notice("The host did not describe its UI defaults (" + (e && e.message || e) + "); rows are drawn with this build's own, which may not be what it serves.", "info");
     }
   }
   (async () => {

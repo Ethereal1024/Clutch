@@ -115,7 +115,7 @@ def _stored(root: Path, name: str) -> dict:
     return json.loads((root / "settings" / f"{name}.json").read_text(encoding="utf-8"))
 
 
-def _routes(base: str, name: str) -> None:
+def _routes(base: str, name: str, root: Path) -> None:
     """The two settings routes, exercised over a real socket."""
 
     def get() -> tuple[int, dict]:
@@ -149,6 +149,22 @@ def _routes(base: str, name: str) -> None:
     check(st == 400 and "name is required" in json.loads(answered)["error"], "a read that names no component is a usage error")
     st, body = http_post(f"{base}/api/components/settings", {"name": "clutch-nothing", "values": {}})
     check(st == 404 and "no component named" in json.loads(body)["error"], "and a component this host does not hold is not found")
+
+    # the same corrupt document from the wire: the form is told what to fix. A 200
+    # carrying every default is the answer that made the next save replace the
+    # user's whole document.
+    store = root / "settings" / f"{name}.json"
+    before = store.read_text(encoding="utf-8")
+    store.write_text("{not json", encoding="utf-8")
+    st, answered = get()
+    check(
+        st == 500 and f"{name}.json" in answered.get("error", ""),
+        "a corrupt settings document answers the form with the reason, not with defaults",
+    )
+    st, answered = post({"library.order": "recent"})
+    check(st == 500 and "left untouched" in answered.get("error", ""), "and a save over it is refused")
+    check(store.read_text(encoding="utf-8") == "{not json", "...leaving the user's bytes where they were")
+    store.write_text(before, encoding="utf-8")
 
 
 def main() -> int:
@@ -188,6 +204,40 @@ def main() -> int:
         )
         check(settings.values("clutch-form", component) == DEFAULTS, "a value that no longer fits its declaration is not a value")
 
+        # -- a document that is there and cannot be read ------------------------
+        #
+        # "no values stored" is a claim about the user's file, and every writer
+        # here replaces that file WHOLE: answering it for bytes the host failed to
+        # parse threw away every knob the person had set and left nothing behind to
+        # recover them from. It is raised with the path instead, and the bytes stay
+        # where the user can fix or delete them.
+        target = root / "settings" / "clutch-form.json"
+        target.write_text("{not json", encoding="utf-8")
+
+        def bad_file(call) -> str:
+            try:
+                call()
+            except settings.BadFile as err:
+                return str(err)
+            return ""
+
+        said = bad_file(lambda: settings.values("clutch-form", component))
+        check("clutch-form.json" in said, "a settings document that will not parse is reported, not read as all-defaults")
+        check("left untouched" in said, "...and says the file was left alone: " + (said or "(nothing raised)"))
+        check(bad_file(lambda: settings.write("clutch-form", component, {"library.root": "/x"})), "a write over it is refused too")
+        check(
+            target.read_text(encoding="utf-8") == "{not json",
+            "...and every knob the user set is still in the file, exactly as they left it",
+        )
+        check(bad_file(lambda: statement.host_vars(component, Config())), "a statement that would hand the component that file fails instead")
+        check(target.read_text(encoding="utf-8") == "{not json", "...still not written over")
+
+        target.write_text("[1,2,3]", encoding="utf-8")
+        said = bad_file(lambda: settings.values("clutch-form", component))
+        check("settings object" in said, "a document that parses to the wrong shape is corrupt the same way")
+        target.unlink()
+        check(settings.values("clutch-form", component) == DEFAULTS, "a document that is GONE is still simply 'never set'")
+
         # -- the delivery: the interface the component ALREADY has -------------
         ready = statement.host_vars(component, Config())
         check(set(ready) == {"settings"}, "`vars: {settings: host.settings}` fills that one host value and no other")
@@ -208,7 +258,7 @@ def main() -> int:
         srv = build_server(0, sup)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
-            _routes(f"http://127.0.0.1:{srv.server_address[1]}", "clutch-form")
+            _routes(f"http://127.0.0.1:{srv.server_address[1]}", "clutch-form", root)
         finally:
             srv.shutdown()
             sup.shutdown_all()

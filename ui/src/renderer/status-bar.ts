@@ -17,6 +17,7 @@
 // it exports. ui/build-renderer.js bundles the whole renderer (entry boot.ts).
 
 import { $ } from "./dom";
+import { llmProfiles } from "./settings";
 
 const sbStatus  = $("#sb-status")  as HTMLElement;
 const sbBackend = $("#sb-backend") as HTMLElement;
@@ -55,15 +56,15 @@ document.addEventListener("clutch:backend-changed", (ev: Event) => {
 });
 
 // ---- model ----
+// The active profile's model, read through the ONE reader of that record
+// (settings.ts llmProfiles), so a record that will not parse is reported there
+// instead of being shown as "no model configured" — which is a claim about the
+// user's settings that a failed parse cannot make.
 function readActiveModel(): string {
-  try {
-    const active = localStorage.getItem("clutch_llm_active");
-    if (!active) return "";
-    const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
-    return (profiles[active] && profiles[active].model) || "";
-  } catch {
-    return "";
-  }
+  const active = localStorage.getItem("clutch_llm_active");
+  if (!active) return "";
+  const p = llmProfiles()[active];
+  return (p && p.model) || "";
 }
 
 function paintModel() {

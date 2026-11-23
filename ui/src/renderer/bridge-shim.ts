@@ -81,6 +81,12 @@
       try {
         d = JSON.parse(m.data);
       } catch (e) {
+        // The host wrote a frame that is not JSON: a real fault (a truncated or
+        // garbled event), and dropping it silently made it look like the host
+        // simply said nothing. The page has no notice of its own here — this API
+        // is the one everything above it drives the app with — so it is said out
+        // loud on the console, with the bytes, and the frame is dropped.
+        console.error("[bridge-shim] dropped an event frame that is not JSON (" + ((e && e.message) || e) + "):", m.data);
         return;
       }
       const set = listeners.get(d.event);

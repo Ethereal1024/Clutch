@@ -1,7 +1,9 @@
 // Settings-mirror self-heal check: ~/.clutch/settings.json is derived state
 // (session children + the LLM proxy read it) that only a UI save recreates.
 // The app must rebuild it from the renderer's localStorage copy when it went
-// missing/corrupt, and must NOT touch an existing healthy file (manual edits).
+// MISSING, must NOT touch an existing healthy file (manual edits), and must not
+// guess at a file that exists and does not parse: that one is reported, its
+// bytes left untouched.
 // Run: node tests/settings-mirror.test.js
 const assert = require("assert");
 const fs = require("fs");
@@ -75,10 +77,27 @@ async function main() {
   assert.deepStrictEqual(r, { ok: true, healed: false }, "existing file is not clobbered");
   assert.strictEqual(JSON.parse(fs.readFileSync(SETTINGS, "utf-8")).custom, "keep", "manual keys survive");
 
-  // 3. corrupt file -> heals
+  // 3. corrupt file -> REPORTED, bytes untouched. Deriving "nothing configured"
+  // from a file that exists and does not parse is what let the next save write a
+  // one-key object over a hand-edited file whose ssh_secrets were the only copy
+  // of a cached password. The file is the user's; it stays where they can fix it.
   fs.writeFileSync(SETTINGS, "{not json");
   r = await ensure(null, CFG);
-  assert.strictEqual(r.healed, true, "corrupt file heals");
+  assert.strictEqual(r.ok, false, "corrupt file is not silently replaced");
+  assert.match(r.error, /cannot be read/, "and the answer says why: " + r.error);
+  assert.match(r.error, /left untouched/, "and that its bytes were left alone");
+  assert.strictEqual(fs.readFileSync(SETTINGS, "utf-8"), "{not json", "the corrupt bytes are still there");
+  r = await save(null, { api_key: "k1" });
+  assert.strictEqual(r.ok, false, "a save over a corrupt file is refused too");
+  assert.strictEqual(fs.readFileSync(SETTINGS, "utf-8"), "{not json", "and writes nothing over it");
+
+  // 3b. parses, but is not a settings object (an array) -> the same report: the
+  // bytes exist and are not this file's document, so they are not "nothing set".
+  fs.writeFileSync(SETTINGS, "[1,2,3]");
+  r = await ensure(null, CFG);
+  assert.strictEqual(r.ok, false, "a wrong-shaped document is not silently replaced either");
+  assert.match(r.error, /does not hold a settings object/, "and the answer names the shape: " + r.error);
+  assert.strictEqual(fs.readFileSync(SETTINGS, "utf-8"), "[1,2,3]", "its bytes are still there");
 
   // 4. blank object -> heals
   fs.writeFileSync(SETTINGS, "{}");

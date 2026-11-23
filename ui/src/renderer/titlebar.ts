@@ -16,7 +16,7 @@ import { busy } from "./stream-view";
 import { currentProject, openProject } from "./project";
 import { tabActivate, tabClose, tabCloseAll, tabCloseOthers, tabReopen, closedTabCount, tabMarkState } from "./tab-bar";
 import { NARROW_Q, shellPanel, setShellPanel, toggleHidden } from "./workspace-panel";
-import { openSettings, showSettingsTab } from "./settings";
+import { openSettings, showSettingsTab, corruptRecord } from "./settings";
 import { openFsBrowser } from "./fs-browser";
 import { setTrustArmed, trustArmed } from "./permissions";
 import { run as runTask, stop as stopTask } from "./render-events";
@@ -72,14 +72,22 @@ register({ id: "open-recent", run: ({ path }) => path && openProject(path) });
 
 const RECENT_KEY = "clutch_recent";
 
+// The recent-project list. Nothing remembered yet is an empty list; a record that
+// will not parse is not — it is reported and kept aside (corruptRecord), because
+// every open records into this list and would otherwise write a one-entry list
+// over it.
 function recentList(): Array<{ path: string; name: string }> {
+  const raw = localStorage.getItem(RECENT_KEY);
+  if (!raw) return [];
+  let list;
   try {
-    const raw = localStorage.getItem(RECENT_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? list.filter((r) => r && typeof r.path === "string") : [];
+    list = JSON.parse(raw);
+    if (!Array.isArray(list)) throw new Error("it is not a list of projects");
   } catch (e) {
+    corruptRecord("recent-project list", RECENT_KEY, e);
     return [];
   }
+  return list.filter((r) => r && typeof r.path === "string");
 }
 
 function recordRecent(project: string, name: string) {

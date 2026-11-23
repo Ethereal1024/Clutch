@@ -11,7 +11,7 @@
 
 import { IS_ANDROID } from "./env";
 import { $ } from "./dom";
-import { customSelect } from "./settings";
+import { corruptRecord, customSelect } from "./settings";
 import { state } from "./state";
 
 // ---- SSH connection (in the project picker) ----
@@ -28,18 +28,32 @@ export const passModal = $("#ssh-pass-modal");
 export const passInput = $("#ssh-pass-input");
 export const passLabel = $("#ssh-pass-label");
 
+export const CONNS_KEY = "clutch_ssh_connections";
+
+// The saved hosts, most recent first. No record yet IS an empty list; a record
+// that will not parse is not — answering [] for it is what let the next connect
+// write a one-host list over every host the user had saved. It is reported and
+// kept aside instead (corruptRecord), and the picker then offers what is actually
+// there: nothing.
 export function sshConns() {
+  const raw = localStorage.getItem(CONNS_KEY);
+  if (raw === null) return [];
+  let list;
   try {
-    return JSON.parse(localStorage.getItem("clutch_ssh_connections") || "[]");
+    list = JSON.parse(raw);
+    if (!Array.isArray(list) || list.some((c) => !c || typeof c.host !== "string"))
+      throw new Error("it is not a list of hosts");
   } catch (e) {
+    corruptRecord("saved SSH hosts", CONNS_KEY, e);
     return [];
   }
+  return list;
 }
 
 export function upsertConn(host, user, port) {
   const list = sshConns().filter((c) => !(c.host === host && c.user === user && String(c.port) === String(port)));
   list.unshift({ host, user, port: String(port) });
-  localStorage.setItem("clutch_ssh_connections", JSON.stringify(list));
+  localStorage.setItem(CONNS_KEY, JSON.stringify(list));
   localStorage.setItem("clutch_ssh_host", host);
   localStorage.setItem("clutch_ssh_user", user);
   localStorage.setItem("clutch_ssh_port", String(port));

@@ -65,6 +65,19 @@ os.homedir = () => tmp; // llm-proxy reads os.homedir()/.clutch/settings.json
 try {
   check(getUpstream() === "https://api.deepseek.com", "no env/settings -> deepseek default (never hard-locked)");
 
+  // a file that EXISTS and does not parse is NOT "nothing configured". Folding it
+  // to the built-in default is what sent the user's requests to DeepSeek while
+  // their own endpoint and key sat in bytes we had failed to read — and said
+  // nothing. It is reported instead (the request fails with this message).
+  const throwsWith = (fn, re, label) => {
+    try {
+      fn();
+      check(false, label + " (no error thrown)");
+    } catch (e) {
+      check(re.test((e && e.message) || String(e)), label + " (" + ((e && e.message) || e) + ")");
+    }
+  };
+
   try {
     fs.mkdirSync(path.join(tmp, ".clutch"), { recursive: true });
     fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), JSON.stringify({ base_url: "https://open.bigmodel.cn/api/coding/paas/v4" }));
@@ -98,6 +111,28 @@ try {
     );
     check(getUpstream() === "https://api.deepseek.com", "profiles: switching active follows the switch");
     check(getApiKey() === "sk-ds", "profiles: switching active swaps the key");
+
+    // corrupt bytes: reported, and the built-in default is NOT substituted
+    fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), "{not json");
+    throwsWith(() => getUpstream(), /cannot be read/, "corrupt settings file is reported, not defaulted");
+    throwsWith(() => getApiKey(), /cannot be read/, "…and the key read reports it too");
+    check(
+      fs.readFileSync(path.join(tmp, ".clutch", "settings.json"), "utf-8") === "{not json",
+      "…and the bytes are left where the user can fix them",
+    );
+
+    // a legacy map whose `active` name has no profile behind it: same answer
+    fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), JSON.stringify({ profiles: {}, active: "gone" }));
+    throwsWith(() => getUpstream(), /holds no such profile/, "an active profile that is absent is reported, not defaulted");
+
+    // parses, but is not an endpoint object: the same "exists and is not
+    // readable as settings" answer, not the built-in default
+    fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), "[1,2,3]");
+    throwsWith(() => getUpstream(), /does not hold a settings object/, "a wrong-shaped document is reported, not defaulted");
+
+    // an EMPTY file is not corrupt: it is a machine nobody configured yet
+    fs.writeFileSync(path.join(tmp, ".clutch", "settings.json"), "   ");
+    check(getUpstream() === "https://api.deepseek.com", "a blank file is 'not configured yet', not a failure");
   } finally {
     os.homedir = origHome;
   }
@@ -236,6 +271,27 @@ async function upstream(handler) {
       check(out.status === 502 && /upstream LLM unreachable/.test(out.body),
             "an upstream that refuses the connection is still answered as 502");
       stopLlmProxy();
+    }
+
+    // 6d. a settings file that exists and does not parse: the request FAILS with
+    //     that message (502), instead of being quietly rerouted to the built-in
+    //     provider while the user's own endpoint and key sit in unread bytes
+    {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-proxy-corrupt-"));
+      fs.mkdirSync(path.join(home, ".clutch"), { recursive: true });
+      fs.writeFileSync(path.join(home, ".clutch", "settings.json"), "{not json");
+      const realHome = os.homedir;
+      os.homedir = () => home;
+      try {
+        const port = await startLlmProxy(); // no explicit upstream: it reads the file
+        const out = await post(port);
+        check(out.status === 502, "a corrupt settings file fails the request (502), not the deepseek default");
+        check(/cannot be read/.test(out.body), "…and the answer carries the reason: " + out.body.trim());
+        stopLlmProxy();
+      } finally {
+        os.homedir = realHome;
+        fs.rmSync(home, { recursive: true, force: true });
+      }
     }
   } finally {
     if (origUpstream === undefined) delete process.env.CLUTCH_LLM_UPSTREAM;

@@ -242,16 +242,28 @@ export function setApiProtocol(v) {
 export const llmUrlInput = $("#llm-url-input");
 export const profileSelect = customSelect($("#llm-profile-select"));
 
-export function llmProfiles() {
+const PROFILES_KEY = "clutch_llm_profiles";
+
+// The saved profiles, keyed by name. Nothing stored yet is an empty map; a record
+// that will not parse is reported (corruptRecord) and its bytes kept aside,
+// because every caller of this either DRAWS the list or WRITES it back — both of
+// which would otherwise act on profiles the user never wrote.
+export function llmProfiles(): Record<string, any> {
+  const raw = localStorage.getItem(PROFILES_KEY);
+  if (raw === null) return {};
+  let map;
   try {
-    return JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
+    map = JSON.parse(raw);
+    if (!map || typeof map !== "object" || Array.isArray(map)) throw new Error("it is not a map of profiles");
   } catch (e) {
+    corruptRecord("saved LLM profiles", PROFILES_KEY, e);
     return {};
   }
+  return map;
 }
 
 export function saveLlmProfiles(profiles) {
-  localStorage.setItem("clutch_llm_profiles", JSON.stringify(profiles));
+  localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
 }
 
 export function renderLlmProfiles(activeName) {
@@ -604,13 +616,21 @@ export async function pushSettings() {
     if (key) localStorage.setItem("clutch_api_key", key);
     localStorage.setItem("clutch_llm", JSON.stringify({ model, base_url: llmUrl }));
     if (window.clutchSettings && window.clutchSettings.save) {
-      await window.clutchSettings.save({
+      const reply = await window.clutchSettings.save({
         api_key: key,
         model,
         base_url: llmUrl,
         reasoning_effort: payload.reasoning_effort,
         api_protocol: payload.api_protocol,
       });
+      // The host answers {ok:false, error} when the file was NOT written (an
+      // unreadable settings.json it will not overwrite, no permission, a full
+      // disk). Reporting the save as done over that answer is the "it says saved
+      // and the next run still uses the old model" report: the session's answer
+      // is best effort, this file is not.
+      if (reply && reply.ok === false) {
+        throw new Error("~/.clutch/settings.json was not written: " + (reply.error || "the host refused it"));
+      }
     }
     // ...then tell the LIVE session (its tool surface/prompt section), best
     // effort: a session that cannot answer is not a failed save, because the
@@ -681,6 +701,37 @@ export function notice(message, kind = "error") {
   el.classList.toggle("error", kind === "error");
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => el.classList.add("hidden"), kind === "error" ? 8000 : 4000);
+}
+
+// ---- a stored record that will not parse ------------------------------------
+//
+// localStorage is the UI's own source of truth for the saved hosts, the LLM
+// profiles and the tab working set. A record that is MISSING is an empty value
+// and says nothing; a record that EXISTS but does not parse is a fact about
+// stored bytes, and answering "nothing here" for it is how the next save wrote a
+// one-entry record over the only copy the user had. This is that answer instead:
+// one report per record per page life (the readers run on every repaint), and the
+// bytes kept aside — as `<key>.corrupt` — so the save that follows cannot be the
+// end of them.
+const corruptReported = new Set<string>();
+export function corruptRecord(what, key, why) {
+  let raw = null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch (e) {
+    /* no storage at all: there is nothing stored to be corrupt */
+  }
+  if (raw) {
+    try {
+      localStorage.setItem(key + ".corrupt", raw);
+    } catch (e) {
+      /* storage full or off: the report below still stands */
+    }
+  }
+  if (corruptReported.has(key)) return;
+  corruptReported.add(key);
+  const detail = (why && why.message) || String(why || "it is not the JSON this build writes");
+  notice(`The ${what} could not be read (${detail}). Its bytes were kept as "${key}.corrupt", not thrown away.`);
 }
 
 export const confirmModal = $("#confirm-modal");

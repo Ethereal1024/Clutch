@@ -709,7 +709,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": f"no component named {name!r} on this host"}, 404)
             return
         schema = {key: dict(spec) for key, spec in component.settings.items() if isinstance(spec, Mapping)}
-        self._json({"name": name, "schema": schema, "values": settings.values(name, component)})
+        try:
+            current = settings.values(name, component)
+        except settings.BadFile as err:
+            # the stored document is there and unreadable: it is NOT "every knob at
+            # its default" (that answer is what let the next save overwrite it), so
+            # the form is told what to fix instead of being drawn over the loss
+            self._json({"error": str(err)}, 500)
+            return
+        self._json({"name": name, "schema": schema, "values": current})
 
     def _save_component_settings(self) -> None:
         """Set the knobs a person touched; answer the whole document back.
@@ -737,6 +745,10 @@ class _Handler(BaseHTTPRequestHandler):
             saved = settings.write(name, component, updates)
         except settings.BadSetting as err:
             self._json({"error": str(err)}, 400)
+            return
+        except settings.BadFile as err:
+            # nothing was written: the document it could not read is still there
+            self._json({"error": str(err)}, 500)
             return
         self._json({"status": "saved", "values": saved})
 

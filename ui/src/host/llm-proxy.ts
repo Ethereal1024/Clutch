@@ -28,17 +28,50 @@ const UPSTREAM_TIMEOUT_MS = 90000;
 let server = null;
 let agent = null;
 
-// Read ~/.clutch/settings.json; legacy {profiles, active} maps resolve to the active profile
+// Read ~/.clutch/settings.json; legacy {profiles, active} maps resolve to the
+// active profile. A MISSING file is "nothing configured" and the built-in
+// endpoint below is then the honest answer. A file that EXISTS and does not
+// parse is not: the user's own endpoint and key are in those bytes, and
+// answering {} for them sent their requests to the built-in provider without a
+// word. It throws instead, so the request fails with that message (the
+// handler's catch answers 502).
 function readSettingsFile() {
+  const p = path.join(os.homedir(), ".clutch", "settings.json");
+  let raw;
   try {
-    const d = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".clutch", "settings.json"), "utf-8"));
-    if (d && d.profiles) {
-      return d.profiles[d.active] || {};
-    }
-    return d || {};
+    raw = fs.readFileSync(p, "utf-8");
   } catch (e) {
-    return {};
+    if (e && e.code === "ENOENT") return {};
+    throw e;
   }
+  let d;
+  // an empty file is "nothing configured yet", the same reading
+  // ~/.clutch/settings-mirror gives it (the next ensure heals it): it parses as
+  // nothing, so it is not bytes we failed to understand.
+  if (!raw.trim()) return {};
+  try {
+    d = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `~/.clutch/settings.json cannot be read (${e && e.message}); fix or delete that file`,
+    );
+  }
+  // parses, but is not an endpoint object (an array, a number, a string): the
+  // same "exists and cannot be read as settings" case, just later. Reading it
+  // as {} would send the user's requests to the built-in provider silently.
+  if (!d || typeof d !== "object" || Array.isArray(d)) {
+    throw new Error(`~/.clutch/settings.json does not hold a settings object; fix or delete that file`);
+  }
+  if (d.profiles) {
+    const p2 = d.active ? d.profiles[d.active] : null;
+    if (!p2) {
+      throw new Error(
+        `~/.clutch/settings.json names LLM profile "${d.active}" and holds no such profile; fix or delete that file`,
+      );
+    }
+    return p2;
+  }
+  return d || {};
 }
 
 // Upstream LLM endpoint: env first, then ~/.clutch/settings.json, then the

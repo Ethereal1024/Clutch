@@ -38,6 +38,19 @@ class BadSetting(ValueError):
     """A write the declaration cannot honor: the key, or the value, is not its."""
 
 
+class BadFile(ValueError):
+    """The stored document is there and cannot be read: not the same as absent.
+
+    Answering "no values stored" for bytes that exist — and then rewriting the
+    file whole from the declaration's defaults, which is what the next save or
+    materialize does — threw away every knob a person had set, silently, and left
+    nothing on disk to recover it from. A missing document is genuinely "never
+    set"; one that exists and will not parse (or cannot be read at all) is a fact
+    about the user's file, so it is raised with the path and the reason, and the
+    file is left exactly where they can fix or delete it.
+    """
+
+
 def path(name: str) -> Path:
     """Where one component's settings document lives (whether or not it exists).
 
@@ -60,7 +73,7 @@ def _stored(name: str, component: catalog.Component) -> dict[str, Any]:
     and the default stands in its place. Refusing to start a component over a
     stale knob would make an upgrade a trap.
     """
-    raw = _read(path(name))
+    raw = _read(path(name)) or {}
     out: dict[str, Any] = {}
     for key, spec in component.settings.items():
         if key not in raw:
@@ -111,13 +124,28 @@ def materialize(name: str, component: catalog.Component) -> str:
     return str(target)
 
 
-def _read(target: Path) -> dict[str, Any]:
-    """One settings document, or {} when there is not a readable one."""
+def _read(target: Path) -> dict[str, Any] | None:
+    """One settings document; None when there is not one at all.
+
+    A document that is PRESENT and cannot be read raises BadFile: it holds the
+    knobs a person set, and every caller here writes the file whole, so reading it
+    as "nothing stored" would be the one answer that destroys them.
+    """
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return dict(data) if isinstance(data, Mapping) else {}
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise BadFile(f"{target} cannot be read ({err}); it was left untouched — fix or delete that file") from err
+    try:
+        data = json.loads(text)
+    except ValueError as err:
+        raise BadFile(
+            f"{target} is not readable JSON ({err}); it was left untouched — fix or delete that file"
+        ) from err
+    if not isinstance(data, Mapping):
+        raise BadFile(f"{target} does not hold a settings object; it was left untouched — fix or delete that file")
+    return dict(data)
 
 
 def _store(name: str, document: Mapping[str, Any]) -> None:

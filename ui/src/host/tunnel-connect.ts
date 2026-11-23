@@ -338,8 +338,18 @@ async function connectTunnel({ host, user, port, password }, progress) {
       await dialOnce();
     }
     tunnelLog("[phase] ssh ready");
-    // the secret that authenticated is what the next connect reuses
-    if (password) saveSshSecret(host, user, port, password);
+    // the secret that authenticated is what the next connect reuses. Caching is
+    // the side effect, not the connection: an unreadable settings.json is said
+    // here and the hop stays up — the next connect simply asks again.
+    if (password) {
+      try {
+        saveSshSecret(host, user, port, password);
+      } catch (e) {
+        tunnelLog(
+          `[connect] connected, but the settings mirror could not cache the secret: ${(e && (e as any).message) || e}`,
+        );
+      }
+    }
     if (progress) progress("probe");
 
     // The connection is over, however it ended. `end` is a FIN and ONLY a FIN:
@@ -474,8 +484,18 @@ async function connectTunnel({ host, user, port, password }, progress) {
       : friendlyError(e, target, tries || 1, banner);
     tunnelLog(`[error] connect failed: ${raw} -> ${friendly}`);
     // a cached secret that no longer authenticates is worse than none: drop it
-    // so this path prompts again (and a typed one can take its place)
-    if (cached && /authentication/i.test(friendly)) forgetSshSecret(host, user, port);
+    // so this path prompts again (and a typed one can take its place). Like the
+    // save above, dropping it is a side effect of the attempt: a settings file
+    // that cannot be written is said in the log, not raised over the real error.
+    if (cached && /authentication/i.test(friendly)) {
+      try {
+        forgetSshSecret(host, user, port);
+      } catch (e) {
+        tunnelLog(
+          `[connect] the stale cached secret could not be dropped: ${(e && (e as any).message) || e}`,
+        );
+      }
+    }
     // Only a dial that still owns the wire may tear the shared state down. A
     // SECOND dial started on top of this one (the page's own redial landing next
     // to the engine ladder's attempt, a second window, the picker's retry)

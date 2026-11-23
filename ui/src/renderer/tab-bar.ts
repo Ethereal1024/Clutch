@@ -20,7 +20,7 @@
 
 import { state } from "./state";
 import { busy } from "./stream-view";
-import { askConfirm } from "./settings";
+import { askConfirm, corruptRecord } from "./settings";
 import { asMachine, ensureTab, findTabByPath, forgetDomCache, forgetMemento, onTabsPersist, releaseTab, unwatchTab } from "./slots";
 import { execute } from "./commands";
 import { activateTab, showWelcome } from "./project";
@@ -44,48 +44,65 @@ function saveTabs(): void {
     // the tab the user is looking at is part of the working set: boot.ts reopens
     // it (claiming its own slot) instead of stopping at the welcome page
     localStorage.setItem(LS_KEY, JSON.stringify({ tabs, activeTabId: state.activeTabId || "" }));
-  } catch {}
+  } catch (e) {
+    /* storage off or full: the working set is this life's, the next launch opens
+       with none — nothing to report, there is no user action behind it */
+  }
 }
 
 function loadTabs(): void {
+  let raw: string | null;
   try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    if (Array.isArray(data.tabs)) {
-      // One slot per id and one tab per project: a duplicate id would make two
-      // tabs share ONE session (both showing whatever that session has open),
-      // and a duplicate path would put two writers on one .clc. Old stores could
-      // carry either; drop the later copy instead of repairing it ambiguously.
-      const seenId = new Set<string>();
-      const seenPath = new Set<string>();
-      state.tabs = data.tabs
-        .filter((t) => t && typeof t.id === "string" && typeof t.path === "string")
-        .filter((t) => {
-          if (!t.id || seenId.has(t.id) || !t.path || seenPath.has(t.path)) return false;
-          seenId.add(t.id);
-          seenPath.add(t.path);
-          return true;
-        })
-        .map((t) => ({
-          id: t.id,
-          path: t.path,
-          name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
-          // undefined for a store written before the field existed: unknown, and
-          // the claim then follows whatever the window is on (with the open's
-          // own self-heal, project.ts, as the backstop)
-          machine: asMachine(t.machine),
-          base: null,
-          running: false,
-          needsInput: false,
-        }));
-    }
-    // The remembered tab is a HINT, not a promise: boot.ts claims its slot and
-    // falls back to the welcome page when that slot has no session. An id no
-    // restored tab carries (closed elsewhere, stale store) names nothing.
-    const active = typeof data.activeTabId === "string" ? data.activeTabId : "";
-    state.activeTabId = state.tabs.some((t) => t.id === active) ? active : null;
-  } catch {}
+    raw = localStorage.getItem(LS_KEY);
+  } catch (e) {
+    return; // no storage at all: no remembered tabs, and nothing to say about it
+  }
+  if (!raw) return;
+  let data: any;
+  try {
+    data = JSON.parse(raw);
+    if (!data || typeof data !== "object") throw new Error("it is not a tab store");
+  } catch (e) {
+    // A store that will not parse is not "no tabs": the tabs the user had are in
+    // those bytes, and the first tab-state save would write an empty strip over
+    // them. Reported and kept aside (corruptRecord), then the boot opens on the
+    // welcome page — the honest view when the working set cannot be read.
+    corruptRecord("remembered tabs", LS_KEY, e);
+    return;
+  }
+  if (Array.isArray(data.tabs)) {
+    // One slot per id and one tab per project: a duplicate id would make two
+    // tabs share ONE session (both showing whatever that session has open),
+    // and a duplicate path would put two writers on one .clc. Old stores could
+    // carry either; drop the later copy instead of repairing it ambiguously.
+    const seenId = new Set<string>();
+    const seenPath = new Set<string>();
+    state.tabs = data.tabs
+      .filter((t) => t && typeof t.id === "string" && typeof t.path === "string")
+      .filter((t) => {
+        if (!t.id || seenId.has(t.id) || !t.path || seenPath.has(t.path)) return false;
+        seenId.add(t.id);
+        seenPath.add(t.path);
+        return true;
+      })
+      .map((t) => ({
+        id: t.id,
+        path: t.path,
+        name: typeof t.name === "string" ? t.name : t.path.split("/").pop() || t.path,
+        // undefined for a store written before the field existed: unknown, and
+        // the claim then follows whatever the window is on (with the open's
+        // own self-heal, project.ts, as the backstop)
+        machine: asMachine(t.machine),
+        base: null,
+        running: false,
+        needsInput: false,
+      }));
+  }
+  // The remembered tab is a HINT, not a promise: boot.ts claims its slot and
+  // falls back to the welcome page when that slot has no session. An id no
+  // restored tab carries (closed elsewhere, stale store) names nothing.
+  const active = typeof data.activeTabId === "string" ? data.activeTabId : "";
+  state.activeTabId = state.tabs.some((t) => t.id === active) ? active : null;
 }
 
 // ---- MRU and the closed-tab stack --------------------------------------------

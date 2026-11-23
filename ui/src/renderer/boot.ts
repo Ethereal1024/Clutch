@@ -45,7 +45,7 @@ import { connLostExitPending } from "./conn-lost";
 import { adoptBase, claimTab, onTabAutoConnect } from "./slots";
 import { beginPaneLoad, onConnectDoor, showWelcome } from "./project";
 import { connectTabMachine, handleSshConnect } from "./conn-flow";
-import { notice } from "./settings";
+import { corruptRecord, llmProfiles, notice } from "./settings";
 import { tabActivate } from "./tab-bar";
 
 // A failed tab's Connect button is conn-flow's SSH door — the only door that can
@@ -64,25 +64,38 @@ onTabAutoConnect(connectTabMachine);
 
 // the flat LLM config this UI would mirror to ~/.clutch/settings.json, read
 // from localStorage (the UI's own source of truth); null when nothing stored.
-// Active profile first, then the legacy clutch_llm + clutch_api_key pair.
+// Active profile first, then the legacy clutch_llm + clutch_api_key pair. Both
+// records are read through the one reader that reports a record it cannot parse
+// (settings.ts llmProfiles / corruptRecord): "unreadable" is not "nothing stored",
+// and the caller below would otherwise do nothing about a real problem.
 export function storedLlmConfig() {
-  try {
-    const active = localStorage.getItem("clutch_llm_active");
-    const profiles = JSON.parse(localStorage.getItem("clutch_llm_profiles") || "{}");
-    const p = active && profiles[active];
-    if (p && (p.base_url || p.model || p.api_key)) {
-      return {
-        base_url: p.base_url || "",
-        model: p.model || "",
-        api_key: p.api_key || "",
-        reasoning_effort: p.reasoning_effort || "",
-        api_protocol: p.api_protocol || "",
-      };
+  const active = localStorage.getItem("clutch_llm_active");
+  const p = active ? llmProfiles()[active] : null;
+  if (p && (p.base_url || p.model || p.api_key)) {
+    return {
+      base_url: p.base_url || "",
+      model: p.model || "",
+      api_key: p.api_key || "",
+      reasoning_effort: p.reasoning_effort || "",
+      api_protocol: p.api_protocol || "",
+    };
+  }
+  const key = localStorage.getItem("clutch_api_key") || "";
+  const legacyRaw = localStorage.getItem("clutch_llm");
+  if (legacyRaw) {
+    let legacy = null;
+    try {
+      legacy = JSON.parse(legacyRaw);
+      // parses and is not the flat object this build writes (an array, a number, a
+      // string) is the same failure the parse error is, just later: reported, not
+      // read as "no endpoint set".
+      if (!legacy || typeof legacy !== "object" || Array.isArray(legacy)) {
+        throw new Error("it is not a flat endpoint record");
+      }
+    } catch (e) {
+      corruptRecord("saved LLM endpoint (the older clutch_llm record)", "clutch_llm", e);
+      legacy = null;
     }
-  } catch (e) {}
-  try {
-    const legacy = JSON.parse(localStorage.getItem("clutch_llm") || "null");
-    const key = localStorage.getItem("clutch_api_key") || "";
     if (legacy && (legacy.base_url || legacy.model || key)) {
       return {
         base_url: legacy.base_url || "",
@@ -92,30 +105,37 @@ export function storedLlmConfig() {
         api_protocol: "",
       };
     }
-  } catch (e) {}
+  }
   return null;
 }
 
 // rebuild the settings.json mirror if it went missing while the UI still has
-// the config (fire-and-forget: the next session spawn / proxy request needs it)
+// the config (fire-and-forget: the next session spawn / proxy request needs it).
+// A heal that did not happen is said out loud: the file it could not write is the
+// one every session child and the LLM proxy read.
 export function healSettingsMirror() {
   const cfg = storedLlmConfig();
   if (!cfg) return; // nothing stored: nothing to heal from
-  if (window.clutchSettings && window.clutchSettings.ensure) {
-    window.clutchSettings.ensure(cfg).catch(() => {});
-  }
+  if (!(window.clutchSettings && window.clutchSettings.ensure)) return;
+  const failed = (why) => notice("Could not rebuild ~/.clutch/settings.json: " + why);
+  window.clutchSettings.ensure(cfg).then((r) => {
+    if (r && r.ok === false) failed(r.error || "the host refused it");
+  }, (e) => failed((e && e.message) || String(e)));
 }
 
 // the host's own default `ui` block: fetched once at boot, before the first
 // row is drawn, so the host's document (host.json) speaks through every event
-// that carries no `ui` of its own. Best effort in both directions: an older
-// host without the endpoint, or any fetch failure, leaves the compiled-in
-// constants standing -- the renderer never waits on the network to draw.
+// that carries no `ui` of its own. A host that will not answer is SAID: the rows
+// then come from this build's compiled-in constants, and the user is looking at
+// defaults nobody confirmed instead of the host's own answer.
 export async function loadHostDefaults() {
   try {
     const data = await apiFetch("/api/host");
     if (data && data.ui) state.hostUiDefaults = data.ui;
-  } catch (e) {} // constants remain the fallback
+  } catch (e) {
+    notice("The host did not describe its UI defaults (" + ((e && e.message) || e) +
+      "); rows are drawn with this build's own, which may not be what it serves.", "info");
+  }
 }
 
 // settle the stored URL before connecting SSE; connectSSE is idempotent, so a
