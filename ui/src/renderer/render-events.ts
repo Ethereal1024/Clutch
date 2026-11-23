@@ -160,12 +160,44 @@ export function escapeHtml(s) {
   })[c]);
 }
 
+// marked 12's own inline `del` rule is `/^(~~?)(?=[^\s~])…/` — a SINGLE tilde
+// opens strikethrough, and its body may span newlines. Prose that writes ranges
+// with `~` ("1~2 周", "p95 1.7~2.3cm", "80~150ms") therefore pairs the first
+// tilde with the second and marks everything in between as deleted text: a whole
+// paragraph of a report came back struck through, and the readable fragments
+// either side of the strike read as different numbers than the writer typed
+// ("1~2 周 … + 1~2 天训练" showed as "2 周 … 12 天训练"). The model writes those
+// ranges constantly, so this is not a rare shape, and nothing in the prose says
+// why a line appeared crossed out. So strikethrough means what GFM means: two
+// tildes. A lone `~` is a character. (A tokenizer override is tried before
+// marked's own rules; returning undefined falls through to them, so `~~x~~`
+// still works.)
+let markedTuned = false;
+function tuneMarked() {
+  if (markedTuned || typeof marked === "undefined" || typeof marked.use !== "function") return;
+  markedTuned = true;
+  try {
+    marked.use({
+      tokenizer: {
+        del(this: any, src: string) {
+          const m = /^(~~)(?=[^\s~])([\s\S]*?[^\s~])\1(?=[^~]|$)/.exec(src);
+          if (!m) return undefined;
+          return { type: "del", raw: m[0], text: m[2], tokens: this.lexer.inlineTokens(m[2]) };
+        },
+      },
+    });
+  } catch (e) {
+    // a marked that cannot take the override is still a marked worth using
+  }
+}
+
 // markdown via marked + DOMPurify (LLM output is untrusted); breaks=true
 // hard-wraps user tasks
 export function renderMarkdown(text, breaks = false) {
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
     return escapeHtml(text);
   }
+  tuneMarked();
   try {
     const src = String(text);
     // protect math from marked's backslash escapes via ⟦MATHn⟧ placeholders

@@ -46,6 +46,7 @@
 
 const http = require("http");
 const https = require("https");
+const { StringDecoder } = require("string_decoder");
 const { joinUpstream, getAgent } = require("./llm-proxy");
 // the OS trust store, for a runtime that has no global install (see system-ca):
 // empty in the normal case, the merged CA list when this Node needs it per request
@@ -341,7 +342,11 @@ async function* attempt({ url, headers, body, signal, readTimeoutMs, stallMs, pr
 
     if (res.statusCode < 200 || res.statusCode >= 300) {
       let raw = "";
-      for await (const chunk of res) raw += chunk;
+      // a body decoded chunk by chunk cuts multi-byte characters in half (see
+      // the stream below); the provider's own words are worth keeping intact
+      const bodyDecoder = new StringDecoder("utf8");
+      for await (const chunk of res) raw += bodyDecoder.write(chunk);
+      raw += bodyDecoder.end();
       delivered = true; // the status line was delivered: a retry must discard
       throw statusError(res.statusCode, raw);
     }
@@ -358,9 +363,16 @@ async function* attempt({ url, headers, body, signal, readTimeoutMs, stallMs, pr
     });
 
     let buffer = "";
+    // A TCP chunk boundary can fall in the MIDDLE of a multi-byte character,
+    // and `chunk.toString("utf8")` decodes each chunk on its own: the split
+    // character becomes U+FFFD — the "�" glyphs a transcript showed as
+    // "1 或 2 ���" and "仍在 2cm ��" — and the lost bytes are gone for good,
+    // because the answer is persisted as it streams. The decoder holds an
+    // incomplete tail back and emits it with the next chunk.
+    const decoder = new StringDecoder("utf8");
     for await (const chunk of res) {
       lastActivity = Date.now();
-      buffer += chunk.toString("utf8");
+      buffer += decoder.write(chunk);
       let cut;
       // SSE blocks end at a blank line; \r\n is normalized because providers
       // differ and a split block is a JSON parse error nobody should debug twice

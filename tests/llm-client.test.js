@@ -916,6 +916,62 @@ async function main() {
     }
   }
 
+  // ---- 14. a chunk boundary inside a character does not corrupt the answer ----
+
+  // TCP hands over whatever slices it likes, and a slice can end in the middle
+  // of a UTF-8 sequence. Decoding each chunk on its own (`chunk.toString("utf8")`)
+  // turned the split character into U+FFFD — the "�" glyphs a transcript showed
+  // as "1 或 2 ���" and "仍在 2cm ��" — and because the answer is persisted as it
+  // streams, the lost bytes were gone for good. A decoder has to carry the
+  // incomplete tail into the next chunk.
+  {
+    const answer = "焦距仍能恢复到 0.04%~0.4%，落点 p95 ≤3cm ✓";
+    const wire = Buffer.from(
+      `data: ${JSON.stringify(say(answer))}\n\n` +
+        `data: ${JSON.stringify(stop())}\n\n` +
+        "data: [DONE]\n\n",
+      "utf8"
+    );
+    // one byte into the answer's first character: an incomplete 3-byte sequence
+    const at = wire.indexOf(Buffer.from(answer[0], "utf8")) + 1;
+    const up = await serve(({ res }) => {
+      head(res);
+      res.write(wire.subarray(0, at));
+      setTimeout(() => res.end(wire.subarray(at)), 40);
+    });
+    try {
+      const events = await collect(createLlmClient({ baseUrl: up.base, model: "m", apiKey: "k" }));
+      const text = events.filter((e) => e.type === "text").map((e) => e.delta).join("");
+      const finish = events[events.length - 1];
+      check(text === answer, "a character split across two chunks arrives whole, with no replacement glyph");
+      check(!/\ufffd/.test(text + ((finish && finish.content) || "")), "…and the finish that assembles it carries none either");
+    } finally {
+      await up.close();
+    }
+  }
+
+  // the error body is read the same way: a provider's own words are what a
+  // reader acts on, so a 401 written in Chinese must not arrive as diamonds
+  {
+    const message = "上游拒绝了这次请求：额度不足";
+    const body = Buffer.from(JSON.stringify({ error: { message } }), "utf8");
+    const at = body.indexOf(Buffer.from("拒", "utf8")) + 1;
+    const up = await serve(({ res }) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.write(body.subarray(0, at));
+      setTimeout(() => res.end(body.subarray(at)), 40);
+    });
+    try {
+      const client = createLlmClient({ baseUrl: up.base, model: "m", apiKey: "k" });
+      const err = await client.ask({ messages: MSGS }).then(() => null, (e) => e);
+      check(err && err.code === "api_error", "a split error body is still an api_error");
+      check(err && err.message.includes(message), "the provider's message survives a mid-character split");
+      check(err && !/\ufffd/.test(err.message), "…with no replacement glyph in it");
+    } finally {
+      await up.close();
+    }
+  }
+
   summary("llm-client: one streaming turn, the retry ladder, and the errors the loop acts on");
 }
 

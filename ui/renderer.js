@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 2afca4121f42c7f28fe1a7ddf8c6f1ee1d395d36f2ab792080db4291d3c90b2e
+// sources sha256: 8bd32ff385929213efc599fbb99e6b1c65a866478b1d97c53da17883b7e46368
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -2470,10 +2470,28 @@
       "'": "&#39;"
     })[c]);
   }
+  var markedTuned = false;
+  function tuneMarked() {
+    if (markedTuned || typeof marked === "undefined" || typeof marked.use !== "function") return;
+    markedTuned = true;
+    try {
+      marked.use({
+        tokenizer: {
+          del(src) {
+            const m = /^(~~)(?=[^\s~])([\s\S]*?[^\s~])\1(?=[^~]|$)/.exec(src);
+            if (!m) return void 0;
+            return { type: "del", raw: m[0], text: m[2], tokens: this.lexer.inlineTokens(m[2]) };
+          }
+        }
+      });
+    } catch (e) {
+    }
+  }
   function renderMarkdown(text, breaks = false) {
     if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
       return escapeHtml(text);
     }
+    tuneMarked();
     try {
       const src = String(text);
       const math = [];
