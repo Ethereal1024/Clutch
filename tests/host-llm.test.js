@@ -233,6 +233,18 @@ check(classify(passthrough) === passthrough, "an LlmError is passed through unto
 
 check(classify(new Error("cannot parse")).code === "unknown", "an unclassified error stays unknown and non-retryable");
 
+// A certificate this host refuses is not a dead path: redialing a trust decision
+// only hides it. The reason alone ("self signed certificate") leaves a reader
+// with nothing to do, so the verdict carries the usual cause and the knob.
+const untrustedCert = classify(Object.assign(new Error("self signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }));
+check(untrustedCert.code === "tls" && !untrustedCert.retryable, "an untrusted certificate is a final TLS verdict, not an unknown transport failure");
+check(
+  /NODE_EXTRA_CA_CERTS/.test(untrustedCert.message) && /self signed certificate/.test(untrustedCert.message),
+  "…that keeps the certificate's reason and names the CA knob an inspecting proxy needs"
+);
+const expiredCert = classify(Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }));
+check(expiredCert.code === "tls" && /clock/.test(expiredCert.message), "an expired one points at the clock instead");
+
 // ---- 3. proxy resolution (llm/proxy.py) ----
 
 check(getProxyForUrl("https://api.deepseek.com/v1", { https_proxy: "http://p:8080" }) === "http://p:8080", "https_proxy serves an https target");

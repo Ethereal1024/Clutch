@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/llm-client.ts and run `npm run build:host`.
-// source sha256: 23e6deb19a2520a8259234106d968a024f65fdcdb3837da642474d86a2ebd424
+// source sha256: 664a86987f4683ad011e570be4c95e49755e0e727d6dda68be2a6be3ee302c45
 
 "use strict";
 // The model client — what agent/llm/ was, now on the side that actually has a
@@ -104,13 +104,66 @@ function statusError(status, raw) {
     }
     return new LlmError("api_error", message, RETRYABLE_STATUS.has(status));
 }
+// ---- TLS trust ---------------------------------------------------------------
+// A handshake that fails verification is not a transport failure that heals and
+// not a provider verdict: it is this PROCESS refusing the peer, before a single
+// byte of HTTP, and the two things a reader can act on are WHICH host and WHY.
+// The default OpenSSL sentence ("self signed certificate") names neither, and
+// the failure is usually not the provider's at all: an inspecting proxy (a
+// corporate gateway, an intercepting VPN/appliance, a local MITM proxy) answers
+// TLS itself with a root CA the SYSTEM store has and Node's bundled list does
+// not — which is why the browser opens the same URL happily and this app does
+// not. So the verdict is final (a trust decision does not heal on a redial, and
+// D12's endless ladder is for a DEAD path, not a refused one) and it carries the
+// knob: NODE_EXTRA_CA_CERTS (or --use-system-ca) is the whole fix.
+const TLS_UNTRUSTED_CODES = new Set([
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "UNABLE_TO_GET_ISSUER_CERT",
+    "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+    "CERT_UNTRUSTED",
+    "CERT_REJECTED",
+    "INVALID_CA",
+    "CERT_SIGNATURE_FAILURE",
+]);
+// The certificate is the right one for a name, just not valid NOW (or not this
+// name): a clock, a stale certificate, or a path answering for somebody else.
+const TLS_STALE_CODES = new Set(["CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID"]);
+const TLS_NAME_CODES = new Set(["ERR_TLS_CERT_ALTNAME_INVALID"]);
+function isTlsError(code) {
+    return TLS_UNTRUSTED_CODES.has(code) || TLS_STALE_CODES.has(code) || TLS_NAME_CODES.has(code);
+}
+function hostOf(target) {
+    try {
+        return new URL(String(target || "")).host;
+    }
+    catch (e) {
+        return "";
+    }
+}
+function tlsError(e, target) {
+    const code = String((e && e.code) || "");
+    const host = hostOf(target);
+    const where = host ? ` for ${host}` : "";
+    const reason = String((e && e.message) || code || "certificate verification failed");
+    if (TLS_NAME_CODES.has(code)) {
+        return new LlmError("tls", `TLS certificate${where}: ${reason} — the certificate does not cover that name, so either the base_url is wrong or something in the path answers for it.`, false);
+    }
+    if (TLS_STALE_CODES.has(code)) {
+        return new LlmError("tls", `TLS certificate${where}: ${reason} — check this machine's clock, and whether something in the path presents its own certificate.`, false);
+    }
+    return new LlmError("tls", `TLS certificate not trusted${where}: ${reason} — this app verifies against Node's own CA list, not the system one, so a proxy that inspects HTTPS is the usual cause (the browser trusts its root CA, the agent does not). Point NODE_EXTRA_CA_CERTS at that root CA, or start the app with --use-system-ca, and reopen it.`, false);
+}
 // Transport failures, named by phase: a connect failure points at routing / a
 // proxy / the base_url, a reset mid-body at the provider or a relay between
 // (client.py's timeout_error / classify).
-function transportError(e) {
+function transportError(e, target) {
     if (e instanceof LlmError)
         return e;
     const code = e && e.code;
+    if (code && isTlsError(String(code)))
+        return tlsError(e, target);
     if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "EHOSTUNREACH" || code === "ENETUNREACH") {
         return new LlmError("connection", `Cannot reach the API endpoint: ${e.message}`, true);
     }
@@ -208,7 +261,7 @@ async function* attempt({ url, headers, body, signal, readTimeoutMs, stallMs, pr
     // body is woken by destroying the response; before the headers exist, by
     // destroying the request.
     const kill = (err) => {
-        const e = err instanceof LlmError ? err : transportError(err);
+        const e = err instanceof LlmError ? err : transportError(err, target);
         if (res)
             res.destroy(e);
         else
@@ -793,7 +846,7 @@ function createLlmClient(options) {
                 }
             }
             catch (e) {
-                const err = e instanceof LlmError ? e : transportError(e);
+                const err = e instanceof LlmError ? e : transportError(e, url);
                 if (signal && signal.aborted)
                     throw cancelled();
                 // a partly delivered attempt is only re-runnable when the caller
@@ -861,6 +914,9 @@ module.exports = {
     backoffMs,
     probeAlive,
     isContextOverflow,
+    // the classification of a transport/TLS failure, exported because the verdict
+    // is a contract the tests pin (which code, retryable, which sentence)
+    transportError,
     // the policy numbers, so a caller reads them from one place
     READ_TIMEOUT_MS,
     STALL_PROBE_MS,

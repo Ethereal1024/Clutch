@@ -160,6 +160,35 @@ class HttpStatusError extends Error {
   }
 }
 
+// Certificate failures, in the three shapes the platform reports them. Kept
+// beside classify() because the verdict is one sentence plus the code: this
+// module has no URL to name (the request functions own the target), so the
+// message carries the reason and the knob, and the caller names the endpoint
+// from its own settings.
+const TLS_UNTRUSTED_CODES = new Set([
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_UNTRUSTED",
+  "CERT_REJECTED",
+  "INVALID_CA",
+  "CERT_SIGNATURE_FAILURE",
+]);
+const TLS_STALE_CODES = new Set(["CERT_HAS_EXPIRED", "CERT_NOT_YET_VALID"]);
+const TLS_CODES = new Set([...TLS_UNTRUSTED_CODES, ...TLS_STALE_CODES, "ERR_TLS_CERT_ALTNAME_INVALID"]);
+
+function tlsMessage(code, reason) {
+  if (code === "ERR_TLS_CERT_ALTNAME_INVALID") {
+    return `TLS certificate: ${reason} — the certificate does not cover the base_url's host, so either that host is wrong or something in the path answers for it.`;
+  }
+  if (TLS_STALE_CODES.has(code)) {
+    return `TLS certificate: ${reason} — check this machine's clock, and whether something in the path presents its own certificate.`;
+  }
+  return `TLS certificate not trusted: ${reason} — this host verifies against Node's own CA list, not the system one, so a proxy that inspects HTTPS is the usual cause (the browser trusts its root CA, the agent does not). Point NODE_EXTRA_CA_CERTS at that root CA, or start the host with --use-system-ca, and reopen it.`;
+}
+
 function classify(e, retryableStatus = DEFAULT_RETRYABLE_STATUS) {
   if (e instanceof LlmError) return e;
   if (e instanceof HttpStatusError) {
@@ -192,6 +221,18 @@ function classify(e, retryableStatus = DEFAULT_RETRYABLE_STATUS) {
   if (e && e.__llmTimeout) return timeoutError(e.__llmTimeout);
   const code = e && typeof e.code === "string" ? e.code : "";
   const text = e && e.message ? String(e.message) : "";
+  // A handshake this process refused, before any HTTP: not a dead path (so the
+  // ladder must not redial it) and not the provider's verdict. The bare OpenSSL
+  // sentence names neither the cause nor the knob, and the cause is usually a
+  // TLS-inspecting proxy — its root CA is in the SYSTEM store, which the browser
+  // reads and Node's bundled list does not.
+  if (TLS_CODES.has(code)) {
+    return new LlmError({
+      code: "tls",
+      retryable: false,
+      message: tlsMessage(code, text || code),
+    });
+  }
   const transportCode =
     /^(ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ECONNABORTED|ERR_STREAM_PREMATURE_CLOSE)$/.test(
       code

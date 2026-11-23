@@ -6,12 +6,14 @@
 // cannot be half-killed on purpose.
 // Run: node tests/llm-client.test.js
 const http = require("http");
+const https = require("https");
 const { check, summary } = require("./harness.js");
 const {
   createLlmClient,
   LlmError,
   backoffMs,
   probeAlive,
+  transportError,
   READ_TIMEOUT_MS,
   STALL_PROBE_MS,
   MAX_BACKOFF_MS,
@@ -40,6 +42,58 @@ function serve(handler) {
       resolve({
         requests,
         base: `http://127.0.0.1:${server.address().port}`,
+        close: () =>
+          new Promise((done) => {
+            if (server.closeAllConnections) server.closeAllConnections();
+            server.close(() => done());
+          }),
+      })
+    );
+  });
+}
+
+// A real HTTPS peer presenting a certificate nobody trusts, because that is the
+// failure the classification has to reach: the handshake dies before a response
+// exists, so nothing but the socket's own error can carry the verdict. Node
+// cannot mint a certificate, so openssl does — and a machine without it skips
+// this case (the mapping itself is pinned without a socket, below).
+function selfSignedHttps() {
+  const fs = require("fs");
+  const os = require("os");
+  const nodePath = require("path");
+  const { execFileSync } = require("child_process");
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "clutch-selfsigned-"));
+  const keyPath = nodePath.join(dir, "key.pem");
+  const certPath = nodePath.join(dir, "cert.pem");
+  const mint = (extra) => {
+    try {
+      execFileSync(
+        "openssl",
+        ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-keyout", keyPath, "-out", certPath, "-subj", "/CN=127.0.0.1", ...extra],
+        { stdio: "ignore" }
+      );
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+  // the SAN matters: a chain error is what we want, and a hostname mismatch
+  // would answer first on a certificate that names no IP (openssl < 1.1.1 has
+  // no -addext, so the bare form is the fallback)
+  if (!mint(["-addext", "subjectAltName=IP:127.0.0.1"]) && !mint([])) return null;
+  let server;
+  try {
+    server = https.createServer({ key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }, (req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end("data: [DONE]\n\n");
+    });
+  } catch (e) {
+    return null;
+  }
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () =>
+      resolve({
+        base: `https://127.0.0.1:${server.address().port}`,
         close: () =>
           new Promise((done) => {
             if (server.closeAllConnections) server.closeAllConnections();
@@ -95,6 +149,55 @@ async function main() {
       err && /unknown LLM protocol: grpc \(the host speaks chat and responses\)/.test(err.message),
       "a third protocol is refused by name, and the two the host speaks are named back"
     );
+  }
+
+  // ---- 1b. a refused certificate is its own verdict, and it says what to do ----
+  //
+  // The reported dead end: "run failed: self signed certificate; if the root CA
+  // is installed locally, try running Node.js with --use-system-ca". True, and
+  // useless — a reader is left with neither the host that refused nor the reason
+  // their browser is happy with the same URL. This app reaches the model itself
+  // (Electron main / Node), whose trust list is Node's own and not the OS store,
+  // so an HTTPS-inspecting proxy is trusted by the browser and refused here.
+  {
+    const untrusted = Object.assign(new Error("self signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" });
+    const verdict = transportError(untrusted, "https://api.example.test/v1/chat/completions");
+    check(verdict instanceof LlmError && verdict.code === "tls", "an untrusted certificate is a TLS verdict, not an 'unknown' transport failure");
+    check(verdict.retryable === false, "and it is final: a trust decision does not heal on a redial (D12's ladder is for a dead path)");
+    check(/api\.example\.test/.test(verdict.message), "it names the host the handshake was for");
+    check(/self signed certificate/.test(verdict.message), "and keeps the certificate's own reason");
+    check(
+      /NODE_EXTRA_CA_CERTS/.test(verdict.message) && /--use-system-ca/.test(verdict.message),
+      "and the knob that fixes a proxy's root CA (the browser trusts the OS store, this app does not)"
+    );
+
+    const expired = transportError(Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" }), "https://api.example.test/v1");
+    check(expired.code === "tls" && /clock/.test(expired.message), "an expired certificate points at the clock, not at the proxy");
+
+    const wrongName = transportError(Object.assign(new Error("Hostname/IP does not match certificate's altnames"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }), "https://api.example.test/v1");
+    check(wrongName.code === "tls" && /does not cover that name/.test(wrongName.message), "a hostname mismatch says the certificate does not cover the name");
+
+    const refused = transportError(Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:9"), { code: "ECONNREFUSED" }), "https://api.example.test/v1");
+    check(refused.code === "connection" && refused.retryable, "a refused connection is still the retryable transport error it always was");
+
+    const peer = await selfSignedHttps();
+    if (!peer) {
+      console.log("skip: no openssl on this machine — the real-socket case is covered by the mapping above");
+    } else {
+      try {
+        const client = createLlmClient({ baseUrl: peer.base, model: "m", apiKey: "k" });
+        let err = null;
+        try {
+          await collect(client, {});
+        } catch (e) {
+          err = e;
+        }
+        check(err && err.code === "tls" && err.retryable === false, "a real self-signed handshake ends the turn as a TLS verdict, with no redial");
+        check(err && new RegExp(peer.base.replace(/^https:\/\//, "").replace(/[.:]/g, "\\$&")).test(err.message), "…naming the host the base_url pointed at");
+      } finally {
+        await peer.close();
+      }
+    }
   }
 
   // ---- 2a. relay shapes: the answer is not always in `delta.content` ----
