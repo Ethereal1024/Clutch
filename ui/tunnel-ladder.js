@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-ladder.ts and run `npm run build:host`.
-// source sha256: 0e1dfa519e8eb532b5a7f5916b15a7367419d29abed04a37869bebc327be8774
+// source sha256: 381aaefcd4e93c19d19b723dfcd2573be7e391e7c4e2d484f08de5bc6d6b5873
 
 "use strict";
 // The engine-side reconnect ladder: the half of an outage that has to outlive
@@ -124,6 +124,20 @@ function createTunnelLadder({ connect, status, secretFor = () => "", onUp = () =
             return false; // an unanswerable question is not a live hop
         }
     }
+    // The ladder's one read of the credential store. `ok:false` means the store
+    // itself could not be read (a settings.json the user has to fix): said in the
+    // log here, never quietly read as "no secret stored", and never a reason to
+    // fail a connect that already won — a redial that needs the secret then fails
+    // its own attempt, where the user sees it.
+    function cachedSecret(host, user, port) {
+        try {
+            return { ok: true, has: Boolean(secretFor(host, user, port)) };
+        }
+        catch (e) {
+            log(`[ladder] the credential store could not be read (${(e && e.message) || e})`);
+            return { ok: false, has: false };
+        }
+    }
     // A connect the user made and won: this is the standing intent the ladder may
     // dial, and it replaces whatever host was there before (the picker has one
     // connection, not a list of them). How that connect authenticated is read from
@@ -135,9 +149,15 @@ function createTunnelLadder({ connect, status, secretFor = () => "", onUp = () =
         tries = 0;
         intent = host && user ? { host, user, port: Number(port) || 22 } : null;
         armed = Boolean(intent);
-        needsSecret = Boolean(intent) && Boolean(secretFor(intent.host, intent.user, intent.port));
+        const secret = intent ? cachedSecret(intent.host, intent.user, intent.port) : { ok: true, has: false };
+        needsSecret = secret.has;
         if (intent)
-            log(`[ladder] armed for ${intent.user}@${intent.host}:${intent.port}${needsSecret ? "" : " (key or agent: nothing to ask for)"}`);
+            log(`[ladder] armed for ${intent.user}@${intent.host}:${intent.port}` +
+                (needsSecret
+                    ? ""
+                    : secret.ok
+                        ? " (key or agent: nothing to ask for)"
+                        : " (no cached secret could be read; a redial that needs one fails its own attempt)"));
         publish();
     }
     // The user's own act owns the wire: a connect must not race a background dial,
@@ -177,16 +197,20 @@ function createTunnelLadder({ connect, status, secretFor = () => "", onUp = () =
             return;
         }
         const { host, user, port } = intent;
-        if (needsSecret && !secretFor(host, user, port)) {
-            // the connect that armed this ladder used a password, and there is none
-            // left to dial with (forgotten, or the cache went with it). This ladder may
-            // not ask for one, and an attempt that cannot authenticate is not a retry —
-            // it is an auth failure repeated at every backoff step, which is how a
-            // pocketed phone gets its own address banned. The page's dialog owns this
-            // host now; it can ask, and whatever connect it wins with arms us again.
-            log(`[ladder] the credential for ${user}@${host}:${port} is gone; the page's dialog owns this host`);
-            standDown();
-            return;
+        if (needsSecret) {
+            const secret = cachedSecret(host, user, port);
+            if (!secret.has) {
+                // the connect that armed this ladder used a password, and there is none
+                // left to dial with (forgotten, or the cache went with it — or the store
+                // it lives in could not be read, said above). This ladder may not ask for
+                // one, and an attempt that cannot authenticate is not a retry — it is an
+                // auth failure repeated at every backoff step, which is how a pocketed
+                // phone gets its own address banned. The page's dialog owns this host now;
+                // it can ask, and whatever connect it wins with arms us again.
+                log(`[ladder] the credential for ${user}@${host}:${port} is gone; the page's dialog owns this host`);
+                standDown();
+                return;
+            }
         }
         inFlight = true;
         tries += 1;

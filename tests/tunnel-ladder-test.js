@@ -112,7 +112,7 @@ function harness({ secret = "s3cret", active = false, watch = null } = {}) {
     states,
     // the fake shell's own state: a live hop, the cached secret, next verdict
     setUp: (v) => (up = v),
-    setSecret: (v) => (secretValue = () => v),
+    setSecret: (v) => (secretValue = typeof v === "function" ? v : () => v),
     setHandler: (h) => (handler = h),
     ok: () => async () => ({ ok: true }),
     fail: (err) => async () => ({ ok: false, error: err || "boom" }),
@@ -374,6 +374,39 @@ async function main() {
     await h.clock.advance();
     check(h.states.length === 2 && h.states[1].armed === false,
       "standing down because the credential is gone is a change the watcher hears");
+  }
+  // a credential store that cannot be READ (settings-mirror readMirror throws for
+  // a settings.json that exists and will not parse) is not a failed connect and
+  // not "no secret stored": the read happens after a connect that already won, so
+  // it is logged, the arm stands, and the redial it affects stands down where the
+  // page's dialog can take over.
+  {
+    const h = harness();
+    await arm(h); // one good connect, store readable at that moment
+    h.setSecret(() => {
+      throw new Error("~/.clutch/settings.json cannot be read (bad JSON)");
+    });
+    await h.ladder.userConnect({ host: "far", user: "me", port: 2222 });
+    check(h.ladder.state().armed === true, "a connect that won arms even when the credential store cannot be read");
+    check(
+      h.logs.some((l) => /credential store could not be read/.test(l)),
+      "…and the unreadable store is said in the log, not swallowed",
+    );
+  }
+  {
+    const h = harness({ secret: "s3cret" });
+    await arm(h); // armed WITH a cached secret: this ladder may not ask for one
+    h.setSecret(() => {
+      throw new Error("~/.clutch/settings.json cannot be read (bad JSON)");
+    });
+    h.ladder.hopLost();
+    await h.clock.advance();
+    check(h.calls.length === 1, "an unreadable store supplies no secret: no dial is made without one");
+    check(h.ladder.state().armed === false, "…the ladder hands the host back to the page's dialog");
+    check(
+      h.logs.some((l) => /credential store could not be read/.test(l)),
+      "…and says why it did",
+    );
   }
   {
     const h = harness();
