@@ -4,7 +4,7 @@
 //
 // The field report: "远程连接标签页连接失败时的确认窗口无法被点击" — a remote tab
 // whose connect failed puts the pane's blocked card up (project.ts showBlocked:
-// the reason, then Connect / Dismiss), and neither button answers a press.
+// the reason, then Retry / Dismiss), and neither button answers a press.
 //
 // It is not the buttons and not the handlers: it is PAINT ORDER. pane.ts owns
 // every view of the pane, but it only toggles `hidden` on the pane's [data-view]
@@ -14,7 +14,7 @@
 // top of the card: `#stream` has no background, so the card still read perfectly,
 // while every press in that rectangle landed on the stream behind it. Reproduced
 // in a real engine with document.elementFromPoint over the card's own buttons
-// before the fix: "tab-blocked-connect => stream".
+// before the fix: either button => stream.
 //
 // Fix: the cards that REPLACE the pane are one layer above the stream
 // (.tab-blocked and .tab-load, z-index: 1). Neither the buttons nor the markup
@@ -139,12 +139,11 @@ const PROBE = `\n<script>\n(function () {
   var out = [];
   document.getElementById("welcome").classList.add("hidden");
   var blocked = document.getElementById("tab-blocked");
-  document.getElementById("tab-blocked-text").textContent = "Could not open this tab";
-  document.getElementById("tab-blocked-status").textContent = "connection failed: no route to host";
-  document.getElementById("tab-blocked-connect").classList.remove("hidden");
+  document.getElementById("tab-blocked-text").textContent =
+    "Could not open this tab: connection failed: no route to host";
   blocked.classList.remove("hidden");
   out.push(hit("tab-blocked-text"));
-  out.push(hit("tab-blocked-connect"));
+  out.push(hit("tab-blocked-retry"));
   out.push(hit("tab-blocked-dismiss"));
   blocked.classList.add("hidden");
   document.getElementById("tab-load-title").textContent = "Opening project…";

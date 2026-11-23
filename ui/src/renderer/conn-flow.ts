@@ -267,10 +267,6 @@ export function connBarWaiting(bar) {
 export function doorOf(statusEl) {
   if (!statusEl) return "bar";
   if (statusEl.id === "conn-new-status") return "popup";
-  // the failed tab's own panel (project.ts showBlocked): its status line is the
-  // whole chrome of that attempt, and the picker is not on screen — so this door
-  // reports there and moves nothing else
-  if (statusEl.id === "tab-blocked-status") return "pane";
   // ...and the tab's own LOAD is not a door at all: connectTabMachine names it
   // where it starts ("load"), because its surface is the pane's state rather than
   // an element (pane.ts) — no element here can stand for it
@@ -307,13 +303,6 @@ export function setFsConnecting(host, statusEl, door) {
     return;
   }
   statusEl.textContent = "Connecting to " + host + "…";
-  if (door === "pane") {
-    // the failed tab's panel: its own line is the whole chrome of this attempt,
-    // and the picker is not on screen — moving its bars would be a second door
-    // reporting an attempt nobody can see
-    syncConnConnect(); // the picker's own Connect still stands down while it runs
-    return;
-  }
   if (door === "bar") {
     $("#conn-actions").classList.add("hidden"); // an attempt replaces the last verdict
     // and retires the listing in flight (hidePickerBody ends that wait): the fold is
@@ -342,11 +331,6 @@ export function setFsConnectError(msg, statusEl, door) {
     // returns — connLostChrome). Retry/Cancel belong to the picker's bar, which this
     // attempt never took: leaving them there would be a second door onto a second
     // attempt, behind a dialog that is still up.
-    return;
-  }
-  if (door === "pane") {
-    // the failed tab's panel reads the failure on its own line; the picker's bar
-    // never took this attempt, so nothing there is armed or disarmed by it
     return;
   }
   if (door === "load") {

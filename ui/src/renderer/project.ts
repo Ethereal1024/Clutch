@@ -441,17 +441,8 @@ export async function reclaimLock(project, slotId) {
 // itself after 8 seconds, so the failure's only words vanished while the pane
 // stayed blank underneath with nothing on it (the reported "标签页一片空白").
 // A failed activation therefore paints this panel INSIDE the pane, where it
-// stays until the tab opens or the user dismisses it; and when the failure names
-// a machine, the panel offers the one action that fixes it — the same SSH door
-// the file picker uses, which is the only door that can ask for a password.
-let connectDoor: any = null;
-
-// project.ts may not import conn-flow.ts: conn-flow → fs-browser → project is a
-// chain already, so a back-edge would close the cycle. boot.ts, the one module
-// that sees both, hands the SSH door in instead.
-export function onConnectDoor(fn) {
-  connectDoor = fn;
-}
+// stays until the tab opens or the user dismisses it; and its one action is
+// Retry — the load again, from the top, exactly as a click on the tab opens it.
 
 // Hide it but keep knowing WHICH tab it was standing in for: that tab's pane is
 // still no transcript, so its DOM must not be cached as one (activateTab asks
@@ -469,45 +460,54 @@ function showBlocked(tab, text, machine?) {
   apply(paneBlocked((tab && tab.id) || null, text, machine || null));
 }
 
-// conn-flow reports an attempt by writing into the element it is handed; hand it
-// the STATE instead, so the panel's line still has exactly one writer and a
-// re-render cannot overwrite the attempt behind its back.
-function blockedStatus(): any {
-  return {
-    id: "tab-blocked-status",
-    get textContent() {
-      const pane = currentPane();
-      return pane.view === "blocked" ? pane.status : "";
-    },
-    set textContent(value) {
-      const pane = currentPane();
-      if (pane.view === "blocked") setPane({ ...pane, status: value == null ? "" : String(value) });
-    },
-  };
+// Retry is not a second way to open a tab: it IS the tab again, from the top.
+// Everything a panel can be standing over — a dial that did not get through, a
+// claim with no session behind it, a lock, a forward that died mid-replay — is
+// answered by running the one route a click on the tab runs, and that route's
+// own bar is where it reports (the load card in pane.ts, conn-flow's hop with its
+// password prompt and its share of the bar, then the replay).
+//
+// The panel used to offer the PICKER's door instead ("Connect"), from before the
+// load route could dial: handleSshConnect is a WINDOW-level move (it calls
+// switchBackendResolved and refreshPicker, and a change of host tears down what
+// the window was on) whose progress could only ever be a line of text in this
+// panel — the same load, reported in a second shape on a second surface. The load
+// route asks for a password itself now (conn-flow.ts connectTabMachine), so that
+// door had no reason left, and the picker's move stays in the picker.
+export async function retryTab(tab) {
+  if (!tab) return;
+  dismissBlocked();
+  // The panel says this open did not land, so any picture cached for the tab is
+  // the OLD one and must not stand in for it: activateTab would paint it over the
+  // load's card, and every stage the hop reports would land in a pane that is not
+  // a load (pane.ts setProgress reports into nothing).
+  forgetDomCache(tab.id);
+  // ...and the verdict the panel is showing belongs to the attempt that just
+  // failed. A stale sentence here would outlive its truth (the hop it asked for
+  // may be up by now, from the picker), and the new attempt writes its own.
+  tab.unreachable = null;
+  beginPaneLoad(tab);
+  // "currentProject" is the window's belief that it is LOOKING at a project. A
+  // failure AFTER the meta line (a forward that died mid-replay) leaves the belief
+  // behind, and activateTab's "already open" early return would then leave this
+  // fresh card at 0% with nothing running. Only this tab's own belief is spent —
+  // another tab's project is none of this retry's business.
+  if (state.activeTabId === tab.id) currentProject = "";
+  await activateTab(tab);
 }
 
 // The panel is markup in index.html; its two buttons are wired once, at load.
 (function wireBlocked() {
-  const btn = document.getElementById("tab-blocked-connect") as HTMLButtonElement | null;
-  if (btn) {
-    btn.addEventListener("click", async () => {
-      const shown = currentPane();
-      const machine = shown.view === "blocked" ? shown.machine : null;
-      if (!machine || !connectDoor) return;
+  const retry = document.getElementById("tab-blocked-retry") as HTMLButtonElement | null;
+  if (retry) {
+    retry.addEventListener("click", async () => {
       const tab = state.tabs.find((x) => x.id === paneBlockedTabId());
       if (!tab) return;
-      btn.disabled = true;
+      retry.disabled = true;
       try {
-        const ok = await connectDoor(machine.host, machine.user, machine.port, blockedStatus());
-        if (!ok) return; // the attempt's own words are in the status line now
-        // the hop is up and the standing intent is written: this tab's claim now
-        // goes through its machine (slots.ts prepareTabMachine) and the open
-        // records where the file really is
-        tab.unreachable = null;
-        dismissBlocked();
-        await activateTab(tab);
+        await retryTab(tab);
       } finally {
-        btn.disabled = false;
+        retry.disabled = false;
       }
     });
   }

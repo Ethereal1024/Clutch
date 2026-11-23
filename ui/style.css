@@ -1006,11 +1006,6 @@ main { display: flex; flex: 1; min-height: 0; }
   box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.6);
 }
 .tab-blocked-text { font-size: 14px; line-height: 1.55; color: var(--text); }
-.tab-blocked-status {
-  margin-top: var(--s2);
-  font-size: 12px; line-height: 1.45; color: var(--muted);
-}
-.tab-blocked-status:empty { margin-top: 0; }
 .tab-blocked-actions {
   display: flex; gap: var(--s2); justify-content: flex-end;
   margin-top: var(--s4);

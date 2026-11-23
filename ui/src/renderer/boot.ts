@@ -43,16 +43,10 @@ import { resumeTurn } from "./render-events";
 import { connectSSE } from "./sse-stream";
 import { connLostExitPending } from "./conn-lost";
 import { adoptBase, claimTab, onTabAutoConnect } from "./slots";
-import { beginPaneLoad, onConnectDoor, showWelcome } from "./project";
-import { connectTabMachine, handleSshConnect } from "./conn-flow";
+import { beginPaneLoad, showWelcome } from "./project";
+import { connectTabMachine } from "./conn-flow";
 import { corruptRecord, llmProfiles, notice } from "./settings";
 import { tabActivate } from "./tab-bar";
-
-// A failed tab's Connect button is conn-flow's SSH door — the only door that can
-// ask for a password (project.ts showBlocked). project.ts may not import
-// conn-flow.ts (conn-flow → fs-browser → project is a cycle), so the one module
-// that already sees both hands it in, at load, before any click can want it.
-onConnectDoor(handleSshConnect);
 
 // A RESTORED tab whose file lives on a machine this window is not on dials that
 // machine itself, without waiting for a Connect press: the tab's own recorded

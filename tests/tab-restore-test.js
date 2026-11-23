@@ -377,31 +377,83 @@ function twoTabs(ctx) {
     "the state that run returns replaces it at the one landing point");
 }
 
-// ---- 4b) the panel itself: markup, wiring, and the door it dials -------------
+// ---- 4b) the panel itself: markup and the ONE action it offers ----------------
 {
   const index = read("ui/index.html");
   check(/id="tab-blocked"[\s\S]{0,900}id="stream"/.test(index),
     "the failure panel is markup INSIDE the pane (before the stream), not a toast floating over it");
-  check(/id="tab-blocked-text"/.test(index) && /id="tab-blocked-status"/.test(index) &&
-        /id="tab-blocked-connect"/.test(index) && /id="tab-blocked-dismiss"/.test(index),
-    "it carries the reason, the connect attempt's own status line, and the two buttons it needs");
-  check(/id="tab-blocked-connect" class="primary hidden"/.test(index),
-    "Connect starts hidden: a failure that names no machine offers no dial");
+  check(/id="tab-blocked-text"/.test(index) && /id="tab-blocked-retry"[^>]*>Retry</.test(index) &&
+        /id="tab-blocked-dismiss"/.test(index),
+    "it carries the reason and two buttons: Retry (the load again) and Dismiss");
+  check(!/tab-blocked-status/.test(index) && !/tab-blocked-connect/.test(index),
+    "the old Connect and the progress line it wrote into are gone: a retry IS the load, and the load's " +
+    "bar is the pane's own (#open-progress), not a second shape for the same attempt");
 
-  check(/export function onConnectDoor\(fn\)/.test(project) &&
-        /connectDoor\(machine\.host, machine\.user, machine\.port, blockedStatus\(\)\)/.test(project),
-    "the panel's Connect dials through a door handed in from outside (project.ts may not import conn-flow: a cycle)");
-  check(/function blockedStatus\(\)/.test(project) &&
-        /set textContent\(value\) \{[\s\S]{0,200}setPane\(\{ \.\.\.pane, status: value == null \? "" : String\(value\) \}\)/.test(project),
-    "and the attempt reports into the pane's STATE, not into the panel's element: one writer for that line");
-  check(/onConnectDoor\(handleSshConnect\)/.test(boot) && /from "\.\/conn-flow"/.test(boot),
-    "boot.ts hands it the picker's own SSH door — the one attempt that can ask for a password");
-  check(/statusEl\.id === "tab-blocked-status"\) return "pane"/.test(read("ui/src/renderer/conn-flow.ts")),
-    "and that attempt is a door of its own in conn-flow: it reports on the panel's line and moves no picker chrome");
-  check(/dismissBlocked\(\);\s*await activateTab\(tab\);/.test(project),
-    "and a successful connect re-activates the tab, whose claim now goes through its machine");
+  const flow = read("ui/src/renderer/conn-flow.ts");
+  check(/export async function retryTab\(tab\)/.test(project) &&
+        /dismissBlocked\(\);\s*\n\s*\/\/[\s\S]{0,400}forgetDomCache\(tab\.id\);\s*\n\s*\/\/[\s\S]{0,300}tab\.unreachable = null;\s*\n\s*beginPaneLoad\(tab\);/.test(project),
+    "Retry makes the tab load again, from the top: the panel goes, a stale picture and the failed " +
+    "attempt's own verdict are dropped, and the load card comes back");
+  check(/if \(state\.activeTabId === tab\.id\) currentProject = "";\s*\n\s*await activateTab\(tab\);/.test(project),
+    "and it spends the window's \"already open\" belief for THAT tab only, so activateTab cannot early-return " +
+    "and leave the fresh card at 0% with nothing running");
+  check(/getElementById\("tab-blocked-retry"\)/.test(project) && /state\.tabs\.find\(\(x\) => x\.id === paneBlockedTabId\(\)\)/.test(project),
+    "the button is wired to the tab the panel stands for, and only to it");
+  check(!/onConnectDoor|connectDoor|blockedStatus/.test(project) && !/onConnectDoor|handleSshConnect/.test(boot),
+    "the panel's door into conn-flow is gone from project.ts and from boot.ts: the picker's window-level " +
+    "connect (switchBackendResolved, refreshPicker, a host change) is not how a tab opens its file");
+  check(!/"tab-blocked-status"\) return "pane"/.test(flow) && !/door === "pane"/.test(flow),
+    "and conn-flow has no third door for it: an attempt reports into the picker, the popup, the disconnect " +
+    "dialog, or the tab's own load");
   check(/function dismissBlocked\(\)/.test(project) && !/blockedTabId = null;[\s\S]{0,80}dismissBlocked/.test(project),
     "Dismiss hides the panel but still remembers which tab it stood in for (that pane is no transcript)");
+}
+
+// ---- 4c) Retry, DRIVEN: the panel gives way to the load, in that order --------
+{
+  // The REAL function, out of the file that ships, against stubs that record what
+  // it did and in which order. The order is the contract: the panel must be gone
+  // and the card up BEFORE activateTab runs (it decides what to paint from the
+  // pane it finds), and a stale picture must be dropped before the card, or it
+  // would be restored over it.
+  const drive = async (tab, activeTabId) => {
+    const calls = [];
+    const ctx = vm.createContext({
+      console,
+      state: { activeTabId },
+      currentProject: "/w/a.clc",
+      dismissBlocked: () => calls.push("dismiss"),
+      forgetDomCache: (id) => calls.push("forget:" + id),
+      beginPaneLoad: (t) => calls.push("load:" + t.id),
+      activateTab: async (t) => calls.push("activate:" + t.id),
+    });
+    vm.runInContext(runnableSnippet(slicer(project).fnBody("retryTab")), ctx);
+    ctx.tab = tab;
+    await vm.runInContext("retryTab(tab)", ctx);
+    return {
+      calls: calls.join(" "),
+      current: vm.runInContext("currentProject", ctx),
+      unreachable: tab ? tab.unreachable : undefined,
+    };
+  };
+
+  const mine = await drive({ id: "tab-a", path: "/w/a.clc", unreachable: "lives on X, connect in the picker" }, "tab-a");
+  check(mine.calls === "dismiss forget:tab-a load:tab-a activate:tab-a",
+    "Retry dismisses the panel, drops the tab's cached picture, puts the load card up and only then " +
+    "re-activates the tab — the normal route, from the top (" + mine.calls + ")");
+  check(mine.current === "",
+    "and it spends the window's already-open belief, so activateTab re-runs the claim instead of returning");
+  check(mine.unreachable === null,
+    "…and the reason the panel was showing: a new attempt writes its own verdict, a stale one would outlive its truth");
+
+  const other = await drive({ id: "tab-b", path: "/w/b.clc" }, "tab-a");
+  check(other.calls === "dismiss forget:tab-b load:tab-b activate:tab-b" && other.current === "/w/a.clc",
+    "a panel standing in a tab that is NOT the active one leaves the window's project alone — a retry in the " +
+    "background is not a reason to forget what the window is showing");
+
+  const none = await drive(null, "tab-a");
+  check(none.calls === "" && none.current === "/w/a.clc",
+    "a panel with no tab behind it does nothing at all");
 }
 
 // the machine the reported tab lives on, and the tab itself

@@ -42,7 +42,6 @@ export type PaneState =
       view: "blocked";
       tabId: string | null;
       text: string;
-      status: string;
       machine: PaneMachine;
       shown: boolean;
     };
@@ -84,7 +83,6 @@ export function paneBlocked(tabId: string | null, text: string, machine: PaneMac
     view: "blocked",
     tabId: tabId || null,
     text: text || "",
-    status: "", // a new verdict, not the last one's words
     machine: machine || null,
     shown: true,
   };
@@ -290,13 +288,12 @@ function stopBar() {
 }
 
 
+// The panel is the verdict and one action. It has no line of its own to report
+// into: an attempt made FROM it used to write here, and that attempt is the load
+// now (project.ts retryTab), whose stages are the load bar's own.
 function renderBlocked(state: Extract<PaneState, { view: "blocked" }>) {
   const text = byId("tab-blocked-text");
   if (text) text.textContent = state.text;
-  const status = byId("tab-blocked-status");
-  if (status) status.textContent = state.status;
-  const connect = byId("tab-blocked-connect");
-  if (connect) connect.classList.toggle("hidden", !state.machine);
 }
 
 // ---- what a load reports ---------------------------------------------------

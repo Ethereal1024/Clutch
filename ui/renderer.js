@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 017523bbaaecc51808fe975bc49188ba4139546fb789a57fcd23d2166b6b4440
+// sources sha256: 773b86a8f159f344a32ea2e0000d28e8619832ed64e2c3655b2ebbab7f2b75f1
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -1775,8 +1775,6 @@
       view: "blocked",
       tabId: tabId || null,
       text: text || "",
-      status: "",
-      // a new verdict, not the last one's words
       machine: machine || null,
       shown: true
     };
@@ -1921,10 +1919,6 @@
   function renderBlocked(state2) {
     const text = byId("tab-blocked-text");
     if (text) text.textContent = state2.text;
-    const status = byId("tab-blocked-status");
-    if (status) status.textContent = state2.status;
-    const connect = byId("tab-blocked-connect");
-    if (connect) connect.classList.toggle("hidden", !state2.machine);
   }
   function setProgress(progress) {
     if (pane.view !== "load") return;
@@ -3923,10 +3917,6 @@
     }
     return false;
   }
-  var connectDoor = null;
-  function onConnectDoor(fn) {
-    connectDoor = fn;
-  }
   function dismissBlocked() {
     const state2 = currentPane();
     if (state2.view === "blocked") setPane({ ...state2, shown: false });
@@ -3934,37 +3924,26 @@
   function showBlocked(tab, text, machine) {
     apply(paneBlocked(tab && tab.id || null, text, machine || null));
   }
-  function blockedStatus() {
-    return {
-      id: "tab-blocked-status",
-      get textContent() {
-        const pane2 = currentPane();
-        return pane2.view === "blocked" ? pane2.status : "";
-      },
-      set textContent(value) {
-        const pane2 = currentPane();
-        if (pane2.view === "blocked") setPane({ ...pane2, status: value == null ? "" : String(value) });
-      }
-    };
+  async function retryTab(tab) {
+    if (!tab) return;
+    dismissBlocked();
+    forgetDomCache(tab.id);
+    tab.unreachable = null;
+    beginPaneLoad(tab);
+    if (state.activeTabId === tab.id) currentProject = "";
+    await activateTab(tab);
   }
   (function wireBlocked() {
-    const btn = document.getElementById("tab-blocked-connect");
-    if (btn) {
-      btn.addEventListener("click", async () => {
-        const shown = currentPane();
-        const machine = shown.view === "blocked" ? shown.machine : null;
-        if (!machine || !connectDoor) return;
+    const retry = document.getElementById("tab-blocked-retry");
+    if (retry) {
+      retry.addEventListener("click", async () => {
         const tab = state.tabs.find((x) => x.id === paneBlockedTabId());
         if (!tab) return;
-        btn.disabled = true;
+        retry.disabled = true;
         try {
-          const ok = await connectDoor(machine.host, machine.user, machine.port, blockedStatus());
-          if (!ok) return;
-          tab.unreachable = null;
-          dismissBlocked();
-          await activateTab(tab);
+          await retryTab(tab);
         } finally {
-          btn.disabled = false;
+          retry.disabled = false;
         }
       });
     }
@@ -5897,7 +5876,6 @@
   function doorOf(statusEl) {
     if (!statusEl) return "bar";
     if (statusEl.id === "conn-new-status") return "popup";
-    if (statusEl.id === "tab-blocked-status") return "pane";
     if (statusEl.id === "conn-lost-why") return "lost";
     return "bar";
   }
@@ -5914,10 +5892,6 @@
       return;
     }
     statusEl.textContent = "Connecting to " + host + "\u2026";
-    if (door === "pane") {
-      syncConnConnect();
-      return;
-    }
     if (door === "bar") {
       $("#conn-actions").classList.add("hidden");
       hidePickerBody();
@@ -5934,9 +5908,6 @@
       return;
     }
     if (door === "lost") {
-      return;
-    }
-    if (door === "pane") {
       return;
     }
     if (door === "load") {
@@ -8808,7 +8779,6 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
   refreshMenu();
 
   // src/renderer/boot.ts
-  onConnectDoor(handleSshConnect);
   onTabAutoConnect(connectTabMachine);
   function storedLlmConfig() {
     const active = localStorage.getItem("clutch_llm_active");
