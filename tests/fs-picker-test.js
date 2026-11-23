@@ -181,6 +181,15 @@ async function main() {
   global.IS_ANDROID = true;
   global.connOnValue = "";
   global.connBusy = false;
+  // conn-store.ts names the storage key ONCE, in a module-level const
+  // (`export const CONNS_KEY`), and fnBody() slices the function alone. The
+  // declaration has to reach this scope too, or the real bodies below are
+  // evaluated without it — read from the module, as `var`, so the indirect eval
+  // leaves it where they can see it (the corrupt-record runner pins the same
+  // declaration, and the value it carries).
+  const connsKey = CONN_STORE.match(/^export const CONNS_KEY = .*$/m);
+  if (!connsKey) throw new Error("conn-store.ts no longer declares CONNS_KEY");
+  (0, eval)(connsKey[0].replace(/^export const /, "var "));
 
   // indirect eval in the global scope: the REAL bodies, as the page loads them
   for (const name of [
