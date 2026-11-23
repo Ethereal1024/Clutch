@@ -242,6 +242,10 @@ function main() {
     ctx.state.lastTextEl = partial;
     ctx.state.lastTextContent = "half an answer";
     ctx.state.textSealed = false;
+    // ...and, in a pane a record drew (an opened project's replay), the block that
+    // record painted: the run's final repeats its text on the reconnect
+    ctx.state.lastRecordEl = partial;
+    ctx.state.lastRecordText = "half an answer";
 
     check(ctx.viewIsSettled(eventsEl) === true,
       "2a) a running transcript IS a picture — refusing it is what made every switch cost a replay and a progress bar");
@@ -250,6 +254,8 @@ function main() {
     const cache = ctx.domCaches.get("tab-a");
     check(cache.stateSnapshot.lastTextEl === partial && cache.stateSnapshot.lastTextContent === "half an answer",
       "2c) the live text pointer travels with the nodes it names");
+    check(cache.stateSnapshot.lastRecordEl === partial && cache.stateSnapshot.lastRecordText === "half an answer",
+      "2c2) …and the block a record drew does too: its final is replayed into this pane, and must complete that block");
 
     // restoring puts the pointers back, so the record that owns that block can
     // finish it in place instead of opening a complete second copy under it
@@ -257,10 +263,14 @@ function main() {
     back.ctx.domCaches.set("tab-a", cache);
     back.ctx.state.lastTextEl = null;
     back.ctx.state.lastTextContent = "";
+    back.ctx.state.lastRecordEl = null;
+    back.ctx.state.lastRecordText = "";
     check(back.ctx.restoreDomCache("tab-a") === true, "2d) the running pane restores");
     check(back.ctx.state.lastTextEl === partial && back.ctx.state.lastTextContent === "half an answer" &&
       partial.dataset.restored === "1",
       "2e) …and the block on the page is the one the render state names again (no second, truncated-then-complete copy)");
+    check(back.ctx.state.lastRecordEl === partial && back.ctx.state.lastRecordText === "half an answer",
+      "2e2) …and the record's block comes back with it, so the final that follows paints nothing new");
 
     // an EMPTY pane is nothing to keep: the replay is one request
     check(ctx.viewIsSettled(el({ tag: "div" })) === false, "2f) an empty pane is not settled");
@@ -350,6 +360,9 @@ function main() {
       "5d) restoring consumes the entry, so an emptied fragment can never be painted over a populated pane");
     check(/lastTextEl: state\.lastTextEl/.test(save) && /state\.lastTextEl = s\.lastTextEl/.test(restore),
       "5e) the live pointer is part of what a tab's picture IS: snapshotted with it and put back with it");
+    check(/lastRecordEl: state\.lastRecordEl/.test(save) && /state\.lastRecordEl = s\.lastRecordEl/.test(restore) &&
+      /lastRecordText: state\.lastRecordText/.test(save) && /state\.lastRecordText = s\.lastRecordText/.test(restore),
+      "5e2) …and so is the block the newest durable record drew: the final that repeats it arrives after the restore");
     const project = read("ui/src/renderer/project.ts");
     check(/restoreDomCache\(tab\.id\)[^]*?dropOrphanLive\(\);/.test(project),
       "5f) a restored pane is normalised in the same task that paints it — after the nodes are back, before any frame — the same teardown a reconnect performs");

@@ -128,6 +128,10 @@ const textSlice = slicer(streamText);
 // the closed-block ledger (stream-events.ts): a cut KEEPS the block it closed and
 // files it with the record that still owes it, so that record writes it whole
 installRecordLedger();
+// ...and the record's own block (stream-events.ts rememberRecord): the final reads
+// it, so the runner drives the real one. Absent on the code before the fix, where
+// the checks below then fail on the duplicate they were written for.
+if (/function rememberRecord/.test(src)) (0, eval)(runnableSnippet(fnBody("rememberRecord")));
 (0, eval)(runnableSnippet(fnBody("dropOrphanLive")));
 (0, eval)(runnableSnippet(fnBody("applyStreamEvent")));
 (0, eval)(runnableSnippet(fnBody("addEvent")));
@@ -148,6 +152,8 @@ function freshPane() {
   state.lastTextEl = null;
   state.lastTextContent = "";
   state.textSealed = false;
+  state.lastRecordEl = null; // the block the newest durable record drew
+  state.lastRecordText = "";
   state.textRenderRaf = 0;
   state.retryNoteEl = null;
   state.runSettled = false;
@@ -471,5 +477,59 @@ check(!/forgetHoles/.test(fnBody("clearStream")),
   "and clearing the pane needs no tell: a block that is off the page is pruned when a record looks for it");
 check(/paintTextBlock\(el, text, true\);/.test(fnBody("completeRecord")),
   "one painter for both writers: a closed block is painted by the same pass the streaming block is");
+
+// ---- 11. a REPLAYED turn is drawn by its record, and its final completes THAT block ----
+//
+// The reported duplicate, exactly: a restored tab (and an opened project) replays
+// the log, and the six durable types come from that replay and nowhere else — no
+// step_start, no delta, so no live block and nothing in the `awaiting` ledger. The
+// record paints the turn; the run's final follows it immediately with the SAME
+// text as its summary (run-state.ts foldRun closes a completed turn by writing its
+// last assistant_message as the summary). The final used to see no live block and
+// nothing owed, so it painted a block of its own — the same answer twice, under two
+// `agent` headers.
+freshPane();
+addEvent({ type: "assistant_message", content: OPEN + TAIL });
+check(state.lastRecordEl === textBlocks()[0] && state.lastRecordText === OPEN + TAIL,
+  "the block a record drew is remembered: the final that repeats it has something to complete");
+addEvent({ type: "final", status: "completed", summary: OPEN + TAIL });
+check(textBlocks().length === 1 && occurrences(textBlocks()[0]._body.innerHTML, TAIL) === 1,
+  "a replayed turn that ends in its final is ONE block: the final completes the record's block");
+check(state.lastTextEl === textBlocks()[0] && state.textSealed === true,
+  "…and the pointer is on it, so nothing that follows can open a second one");
+
+// the whole transcript, the way a tab switch delivers it: user, answer, final, again
+freshPane();
+addEvent({ type: "user_message", content: "first task" });
+addEvent({ type: "assistant_message", content: "answer one" });
+addEvent({ type: "final", status: "completed", summary: "answer one" });
+addEvent({ type: "user_message", content: "second task" });
+addEvent({ type: "assistant_message", content: "answer two" });
+addEvent({ type: "final", status: "completed", summary: "answer two" });
+check(textBlocks().length === 2 &&
+  occurrences(textBlocks()[0]._body.innerHTML, "answer one") === 1 &&
+  occurrences(textBlocks()[1]._body.innerHTML, "answer two") === 1,
+  "a replayed two-turn transcript is TWO blocks: each turn's record draws its answer once, and its final adds none");
+
+// a new task ends it: the block a run left is not the next run's answer
+freshPane();
+addEvent({ type: "assistant_message", content: "answer one" });
+addEvent({ type: "user_message", content: "next task" });
+check(state.lastRecordEl === null && state.lastRecordText === "",
+  "a new task forgets the block the run before it drew");
+addEvent({ type: "final", status: "completed", summary: "a different answer" });
+check(textBlocks().length === 2 && occurrences(textBlocks()[1]._body.innerHTML, "a different answer") === 1,
+  "…so its own final is drawn: no record of this run is mistaken for the previous run's block");
+
+// a record that a paged history row drew is not the tail's answer (project.ts
+// renders older pages into an off-DOM sink)
+check(/if \(pageSink \|\| !text\) return;/.test(moduleOf("stream-events.ts")),
+  "a block drawn into the off-DOM history sink is not remembered: rows above the tail are not its answer");
+check(/rememberRecord\(wrap, ev\.content\)/.test(fnBody("applyStreamEvent")) &&
+  /rememberRecord\(owed\.el, ev\.content\)/.test(fnBody("applyStreamEvent")),
+  "every path that draws a record remembers its block: its own, and the cut block it fills");
+check(/state\.lastRecordEl = null;/.test(fnBody("clearStream")) &&
+  /state\.lastRecordText = "";/.test(fnBody("clearStream")),
+  "a fresh project pane forgets it: no final completes a node the pane that left owned");
 
 summary("text-seal-test");

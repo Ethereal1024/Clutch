@@ -110,6 +110,15 @@ export const state = {
   // says — the delta feed and the log's own SSE feed are unordered), or a cut ended
   // it and only the record that owns it may write it now (stream-events.ts)
   textSealed: false,
+  // The block the pane DREW for the newest durable assistant_message, and the text
+  // it holds. A record no live block adopts paints a block of its own — a STORED
+  // session (no deltas at all), a replayed transcript, a tail a restored tab
+  // rebuilt. The run's `final` repeats exactly that record's text (run-state.ts
+  // foldRun closes a completed turn by writing its last assistant_message as the
+  // summary), so it has to complete THIS block; painting a block of its own is the
+  // reported "one answer, twice" (stream-events.ts).
+  lastRecordEl: null,
+  lastRecordText: "",
   // the thinking (reasoning) block
   thinkingEl: null,
   thinkingContent: "",

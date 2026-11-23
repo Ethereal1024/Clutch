@@ -102,6 +102,10 @@ export function clearStream() {
   state.lastTextEl = null;
   state.lastTextContent = "";
   state.textSealed = false;
+  // ...and the block a record drew went with them: a final in this pane must never
+  // complete a node the pane that just left owned (stream-events.ts lastRecordEl)
+  state.lastRecordEl = null;
+  state.lastRecordText = "";
   state.thinkingEl = null;
   state.thinkingContent = "";
   if (state.textRenderRaf) { cancelAnimationFrame(state.textRenderRaf); state.textRenderRaf = 0; }

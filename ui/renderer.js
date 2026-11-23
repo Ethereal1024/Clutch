@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: b9375ab583caa11fb9ef0cc8eadff00770997ae35a10ca4661e530af87b6501b
+// sources sha256: e74933355181a5bd0d5e2f7c0bcca0a54e5b715587efb794810b101f3fc189f1
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -239,6 +239,15 @@
     // says — the delta feed and the log's own SSE feed are unordered), or a cut ended
     // it and only the record that owns it may write it now (stream-events.ts)
     textSealed: false,
+    // The block the pane DREW for the newest durable assistant_message, and the text
+    // it holds. A record no live block adopts paints a block of its own — a STORED
+    // session (no deltas at all), a replayed transcript, a tail a restored tab
+    // rebuilt. The run's `final` repeats exactly that record's text (run-state.ts
+    // foldRun closes a completed turn by writing its last assistant_message as the
+    // summary), so it has to complete THIS block; painting a block of its own is the
+    // reported "one answer, twice" (stream-events.ts).
+    lastRecordEl: null,
+    lastRecordText: "",
     // the thinking (reasoning) block
     thinkingEl: null,
     thinkingContent: "",
@@ -2215,6 +2224,11 @@
         lastTextEl: state.lastTextEl,
         lastTextContent: state.lastTextContent,
         textSealed: state.textSealed,
+        // ...and the block a record drew, for the same reason: the final that repeats
+        // it is replayed into the restored pane, and only this pointer says the answer
+        // is already on the page (stream-events.ts)
+        lastRecordEl: state.lastRecordEl,
+        lastRecordText: state.lastRecordText,
         thinkingEl: state.thinkingEl,
         thinkingContent: state.thinkingContent,
         toolGroupEl: state.toolGroupEl,
@@ -2243,6 +2257,8 @@
     state.lastTextEl = s.lastTextEl || null;
     state.lastTextContent = s.lastTextContent || "";
     state.textSealed = !!s.textSealed;
+    state.lastRecordEl = s.lastRecordEl || null;
+    state.lastRecordText = s.lastRecordText || "";
     state.thinkingEl = s.thinkingEl || null;
     state.thinkingContent = s.thinkingContent || "";
     state.toolGroupEl = s.toolGroupEl || null;
@@ -3598,6 +3614,8 @@
     state.lastTextEl = null;
     state.lastTextContent = "";
     state.textSealed = false;
+    state.lastRecordEl = null;
+    state.lastRecordText = "";
     state.thinkingEl = null;
     state.thinkingContent = "";
     if (state.textRenderRaf) {
@@ -4705,6 +4723,11 @@
     state.lastTextContent = text;
     state.textSealed = true;
   }
+  function rememberRecord(el, text) {
+    if (pageSink || !text) return;
+    state.lastRecordEl = el;
+    state.lastRecordText = text;
+  }
   function setRetryNote(ev) {
     if (state.retryNoteEl) state.retryNoteEl.remove();
     state.retryNoteEl = document.createElement("div");
@@ -4747,6 +4770,8 @@
         state.lastTextContent = "";
         state.textSealed = false;
       }
+      state.lastRecordEl = null;
+      state.lastRecordText = "";
       awaiting.length = 0;
       forgetAnsweredPerm();
     } else if (ev && ev.type === "final") {
@@ -4857,11 +4882,13 @@
       const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
       if (live && ev.content && ev.content.startsWith(state.lastTextContent || "")) {
         completeRecord(live, ev.content);
+        rememberRecord(live, ev.content);
         return true;
       }
       const owed = awaitingFor(ev.content);
       if (owed) {
         completeRecord(owed.el, ev.content);
+        rememberRecord(owed.el, ev.content);
         autoScroll();
         return true;
       }
@@ -4872,6 +4899,7 @@
         highlightCode(wrap);
         if (live) eventsEl.insertBefore(wrap, live);
         else (pageSink || eventsEl).appendChild(wrap);
+        rememberRecord(wrap, ev.content);
       }
       return true;
     }
@@ -4885,16 +4913,24 @@
         const live = state.lastTextEl && state.lastTextEl.isConnected ? state.lastTextEl : null;
         if (live && want.startsWith(state.lastTextContent || "")) {
           completeRecord(live, want);
+          rememberRecord(live, want);
         } else {
           const owed = awaitingFor(want);
+          const recorded = state.lastRecordEl && state.lastRecordEl.isConnected && state.lastRecordText && want.startsWith(state.lastRecordText) ? state.lastRecordEl : null;
           if (owed) {
             completeRecord(owed.el, want);
+            autoScroll();
+          } else if (recorded) {
+            state.lastTextEl = recorded;
+            completeRecord(recorded, want);
+            rememberRecord(recorded, want);
             autoScroll();
           } else {
             const wrap = createAgentTextBlock();
             (pageSink || eventsEl).appendChild(wrap);
             state.lastTextEl = wrap;
             completeRecord(wrap, want);
+            rememberRecord(wrap, want);
             autoScroll();
           }
         }

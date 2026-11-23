@@ -195,6 +195,23 @@ function completeRecord(el, text) {
   state.textSealed = true;
 }
 
+// The block the newest durable assistant_message drew, whichever path drew it. The
+// run's `final` repeats exactly that record's text (run-state.ts foldRun closes a
+// completed turn by writing its last assistant_message as the summary), so it is
+// the block the final has to complete — a stored session, a replayed transcript
+// and a tail a restored tab rebuilt have no live block at all, and the record's own
+// block is then the only copy of the answer on the page.
+//
+// A history page renders into an off-DOM sink (project.ts loadOlder): those rows
+// belong to the turns above the tail, not to its answer, so they are not
+// remembered. A node that left the page is pruned where it is read (the final),
+// like the awaiting ledger's.
+function rememberRecord(el, text) {
+  if (pageSink || !text) return;
+  state.lastRecordEl = el;
+  state.lastRecordText = text;
+}
+
 // transient "connection lost — retrying…" chip. Shown when an LLM stream
 // attempt fails (network drop / read timeout) and the client reconnects with
 // backoff; removed as soon as new tokens arrive, the compaction clears, or the
@@ -275,6 +292,11 @@ export function addEvent(ev) {
       state.lastTextContent = "";
       state.textSealed = false;
     }
+    // ...and the answer the run before it already drew is not this run's: a final
+    // of this run must not complete that block, even if its text happens to extend
+    // it (lastRecordEl, stream-events.ts)
+    state.lastRecordEl = null;
+    state.lastRecordText = "";
     // ...and no block of that run is still owed a record: its records are in the
     // log AHEAD of this message, so every one of them has already had its chance
     // to arrive — an entry left here could only be matched by a later run's text
@@ -471,6 +493,7 @@ export function applyStreamEvent(ev) {
     // is completed here, whole.
     if (live && ev.content && ev.content.startsWith(state.lastTextContent || "")) {
       completeRecord(live, ev.content);
+      rememberRecord(live, ev.content);
       return true;
     }
     // ...or a block a cut closed whose record lagged behind the step that came
@@ -479,6 +502,7 @@ export function applyStreamEvent(ev) {
     const owed = awaitingFor(ev.content);
     if (owed) {
       completeRecord(owed.el, ev.content);
+      rememberRecord(owed.el, ev.content);
       autoScroll();
       return true;
     }
@@ -498,6 +522,7 @@ export function applyStreamEvent(ev) {
       // paging pass has no live block at all — project.ts renders pages into a sink.)
       if (live) eventsEl.insertBefore(wrap, live);
       else (pageSink || eventsEl).appendChild(wrap);
+      rememberRecord(wrap, ev.content); // the block a following final completes
     }
     return true;
   }
@@ -523,12 +548,35 @@ export function applyStreamEvent(ev) {
         // the block on the page is this answer's, whole or cut short by an outage:
         // write the answer into it and close it, never a second copy under the first
         completeRecord(live, want);
+        rememberRecord(live, want);
       } else {
         const owed = awaitingFor(want);
+        // ...or the record itself already put the answer on the page. A stored
+        // session, a replayed transcript and a tail a restored tab rebuilt paint
+        // RECORDS only: the step's assistant_message drew a block of its own, and
+        // this final repeats exactly that text (run-state.ts foldRun) — so the
+        // final completes the block the record drew. A block of its own here is the
+        // reported one answer twice, under two `agent` headers.
+        const recorded =
+          state.lastRecordEl &&
+          state.lastRecordEl.isConnected &&
+          state.lastRecordText &&
+          want.startsWith(state.lastRecordText)
+            ? state.lastRecordEl
+            : null;
         if (owed) {
           // the step's record never landed: the block a cut closed is the one this
           // final completes, in place and whole
           completeRecord(owed.el, want);
+          autoScroll();
+        } else if (recorded) {
+          // nothing of the answer is missing: the record's block is completed where
+          // the record left it, above the divider, in one copy. The pointer goes
+          // with it, as in the branch above: the answer is whole, and a delta still
+          // in flight for this step must not open a second block under it
+          state.lastTextEl = recorded;
+          completeRecord(recorded, want);
+          rememberRecord(recorded, want);
           autoScroll();
         } else {
           // nothing of the answer is on the page: draw it above the divider, and
@@ -537,6 +585,7 @@ export function applyStreamEvent(ev) {
           (pageSink || eventsEl).appendChild(wrap);
           state.lastTextEl = wrap;
           completeRecord(wrap, want);
+          rememberRecord(wrap, want);
           autoScroll();
         }
       }

@@ -506,6 +506,13 @@ type DomCache = {
     lastTextEl: any;
     lastTextContent: string;
     textSealed: boolean;
+    // ...and the block the newest durable record DREW (stream-events.ts), when it
+    // was not a live block at all: a replayed or stored turn paints its answer from
+    // the record, and the run's `final` — which repeats that record's text — comes
+    // back through the reconnect with it. A cache that dropped this pointer made
+    // the final paint the answer a second time under the one already on the page.
+    lastRecordEl: any;
+    lastRecordText: string;
     thinkingEl: any;
     thinkingContent: string;
     toolGroupEl: any;
@@ -663,6 +670,11 @@ export function saveDomCache(slotId: string) {
       lastTextEl: state.lastTextEl,
       lastTextContent: state.lastTextContent,
       textSealed: state.textSealed,
+      // ...and the block a record drew, for the same reason: the final that repeats
+      // it is replayed into the restored pane, and only this pointer says the answer
+      // is already on the page (stream-events.ts)
+      lastRecordEl: state.lastRecordEl,
+      lastRecordText: state.lastRecordText,
       thinkingEl: state.thinkingEl,
       thinkingContent: state.thinkingContent,
       toolGroupEl: state.toolGroupEl,
@@ -715,6 +727,11 @@ export function restoreDomCache(slotId: string): boolean {
   state.lastTextEl = s.lastTextEl || null;
   state.lastTextContent = s.lastTextContent || "";
   state.textSealed = !!s.textSealed;
+  // ...and the block the last record drew, if this pane painted one (a replayed or
+  // stored turn). It is only read while it is CONNECTED, so a snapshot that names
+  // nothing this pane put back is ignored rather than completing a foreign node.
+  state.lastRecordEl = s.lastRecordEl || null;
+  state.lastRecordText = s.lastRecordText || "";
   state.thinkingEl = s.thinkingEl || null;
   state.thinkingContent = s.thinkingContent || "";
   state.toolGroupEl = s.toolGroupEl || null;
