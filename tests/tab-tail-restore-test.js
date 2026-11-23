@@ -35,7 +35,7 @@ const { region } = slicer(PROJECT);
 (0, eval)(runnableSnippet(region("const RESTORE_MAX_PAGES", "restoreTabView")));
 
 const MEMENTO = {
-  scroll: 40, follow: false, high: 100, oldest: 40, older: 0, workdir: "/p",
+  scroll: 40, high: 100, oldest: 40, older: 0, workdir: "/p",
 };
 
 // The real restore is evaluated above (with the real budgets); the URL checks
@@ -49,6 +49,7 @@ let requests;
 let painted;
 let progress;
 let pills;
+let placed;
 let opened;
 let stale;
 
@@ -57,6 +58,7 @@ function world({ session, pages, staleAfter }) {
   painted = [];
   progress = [];
   pills = [];
+  placed = [];
   opened = 0;
   stale = false;
   let n = 0;
@@ -77,7 +79,9 @@ function world({ session, pages, staleAfter }) {
   global.paneReplayProgress = (phase, frac) => progress.push([phase, frac]);
   global.setOlderPill = (v) => pills.push(v);
   global.typesetProgressively = async () => {};
-  global.restoreMemento = () => {};
+  // where the reader stands is the tab's own place, and it is put back by the
+  // one helper both open paths share (tests/tab-position-test.js drives that one)
+  global.placeRestored = (id) => { placed.push(id); };
   global.finishOpen = () => { opened++; };
   global.stream = { scrollTop: 0, scrollHeight: 1234 };
   global.eventsEl = {};
@@ -114,8 +118,9 @@ async function main() {
     "the bar moves by bytes that actually arrived, and ends the parse phase full (" + parse.join(",") + ")");
   check(progress.some((p) => p[0] === "typeset" && p[1] === 1),
     "and it closes on the typeset phase, like every other open path");
-  check(stream.scrollTop === 1234 && opened === 1,
-    "then the view is at the tail and the open is finished exactly once");
+  check(placed.join(",") === "t" && opened === 1,
+    "then the tab's OWN place is put back (placeRestored) — not the log's tail, which is further " +
+    "down than the reader left it — and the open is finished exactly once");
 
   // ---- 2. a host that cannot say how big the log is falls back to the memento ----
   world({
@@ -133,8 +138,8 @@ async function main() {
     staleAfter: 1,
   });
   await restoreTabView(tab, "http://host", 1);
-  check(painted.indexOf("clear") < 0 && opened === 0,
-    "a tab that took the pane mid-walk leaves this one with nothing painted and no open finished");
+  check(painted.indexOf("clear") < 0 && opened === 0 && placed.length === 0,
+    "a tab that took the pane mid-walk leaves this one with nothing painted, no place put back and no open finished");
 
   // ---- 4. a session with another project open is never repainted from its log ----
   world({

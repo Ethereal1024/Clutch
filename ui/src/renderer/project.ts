@@ -29,7 +29,7 @@ import { askConfirm, notice } from "./settings";
 import { closeSSE, reconnectSSE } from "./sse-stream";
 import { state } from "./state";
 import { addEvent, dropOrphanLive } from "./stream-events";
-import { endCatchUp, setStatus } from "./stream-view";
+import { endCatchUp, nearBottom, setJumpVisible, setStatus } from "./stream-view";
 import { eventsEl, stream } from "./els";
 import { refreshRollbackAnchors, resetRollbackAnchors } from "./task-rollback";
 import { refreshTree } from "./workspace-panel";
@@ -706,11 +706,10 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<Pa
     // the load ends here: the transcript is the pane's now (the card and the bar
     // were part of the LOAD state, so they go with it)
     apply(paneTab(tab.id));
-    stream.scrollTop = stream.scrollHeight; // jump straight to the end of the record
-    // ...unless this is a tab coming back: put the reader where they left it,
-    // unless its own run produced records while it was away (then the tail is
-    // what they came back for)
-    if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
+    // ...and back where this tab was left: the replay repainted the same records,
+    // so the reader's own pixel is the honest place to stand (a tab with no place
+    // of its own lands on the tail instead — placeRestored decides)
+    placeRestored(tab.id);
     // The host resolved this path on SOME machine, and that is a fact now — not
     // before. Recording it here (rather than at claim time) is what keeps a tab
     // from this store's pre-machine past diagnosable: a claim that lands local
@@ -825,6 +824,32 @@ async function openInTab(tab, base, readOnly = false, seq = openSeq): Promise<Pa
       tab.machine
     );
   }
+}
+
+// Where a tab's view stands once its transcript is back, and what the pane
+// follows from there.
+//
+// Coming back to a tab means the SAME part of the log, at the same pixel: the
+// replay (or the tail restore) is how the records get here, never a reason to
+// land somewhere else. So the tab's own place is the placement, and the latch is
+// read OFF that placement — a reader who left on the tail comes back following
+// it, one who left in the middle comes back there and stays there while the
+// reconnect appends below (the ↓ pill is the way to the new tail). What the tab's
+// run did while it was away is not a reason to move the reader: it was not asked
+// for, and it is exactly the "it jumps somewhere else" this replaces.
+//
+// A tab with no place to go back to — its first open, or one abandoned before it
+// ever painted — stands on the tail, which is where a fresh transcript starts.
+function placeRestored(tabId: string): void {
+  const placed = restoreMemento(tabId);
+  if (placed === null) {
+    state.followTail = true;
+    stream.scrollTop = stream.scrollHeight;
+    setJumpVisible(false);
+    return;
+  }
+  state.followTail = nearBottom();
+  setJumpVisible(!state.followTail);
 }
 
 // The ending every open path shares (full replay and tail restore alike):
@@ -954,8 +979,10 @@ async function restoreTabView(tab, base, seq: number): Promise<boolean> {
   // placement honest (a taller row would otherwise put the tail above the fold)
   await typesetProgressively(eventsEl, (f) => paneReplayProgress("typeset", f));
   if (isStale(seq)) return true; // a newer tab is taking the pane
-  stream.scrollTop = stream.scrollHeight;
-  if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
+  // the tail is painted up to the LOG's end, which may be past where this tab was
+  // left: its own place is what the reader comes back to, so it is put back here
+  // and the latch follows it (placeRestored)
+  placeRestored(tab.id);
   // the tail is painted and the card is about to go: the bar closes on the same
   // phase the full replay uses, so no path ends a load with the bar short of it
   paneReplayProgress("typeset", 1);
@@ -995,6 +1022,12 @@ function paintCachedView(tab): boolean {
   // while instead of showing the page it already had").
   if (tab.machine && !hopUpFor(tab)) return false;
   if (!restoreDomCache(tab.id)) return false;
+  // The picture is the pane's again, on the exact pixel it was left on — so the
+  // latch is read off that place, not off the tab we just left: the cache's own
+  // snapshot is a coarser answer, and what must hold from here is "a reader who
+  // came back mid-transcript stays there while the catch-up appends below".
+  state.followTail = nearBottom();
+  setJumpVisible(!state.followTail);
   // The picture is the pane's again, live pointers and all (slots.ts DomCache).
   // A tab that was running when it was left brings back the block its step was
   // still writing into, and no delta for it is owed: the frames of a background

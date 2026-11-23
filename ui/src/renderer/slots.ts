@@ -459,9 +459,17 @@ export function adoptBase(base: string | null) {
 // What a tab looked like when it was left. The events themselves are durable in
 // its .clc, so activation replays them through the same /api/project/open path
 // the first open uses; this only puts the reader back where they were.
+//
+// The place is `scroll` — the pixel the pane stood at — and that is the whole
+// answer to "where was I". A tab comes back showing the part of the transcript it
+// was showing when it was switched out, whether or not the log grew meanwhile and
+// whether or not its run was still going. There is deliberately no `follow` flag
+// to disagree with it: the latch (stream-view.ts followTail) is read OFF the
+// place once the pane is back on it (project.ts placeRestored), so a reader who
+// left on the tail keeps following it and one who left in the middle stays there
+// while the reconnect appends below.
 type Memento = {
   scroll: number;
-  follow: boolean;
   high: number | null;   // newest painted byte offset (start of that record)
   oldest: number | null; // oldest painted byte offset — the range to rebuild
   older: number;         // bytes still unloaded before `oldest`
@@ -538,7 +546,6 @@ function readStoredMemento(slotId: string): Memento | null {
     if (!m || typeof m !== "object" || typeof m.high !== "number") return null;
     return {
       scroll: typeof m.scroll === "number" ? m.scroll : 0,
-      follow: !!m.follow,
       high: typeof m.high === "number" ? m.high : null,
       oldest: typeof m.oldest === "number" ? m.oldest : null,
       older: typeof m.older === "number" ? m.older : 0,
@@ -555,9 +562,17 @@ export function saveMemento(
 ) {
   if (!slotId) return;
   const stream = document.getElementById("stream");
+  // Only a pane that is SHOWING this tab knows what it looked like. A tab left
+  // while its load card was still up (or while a failure panel stood in its
+  // place) has no place to remember: a card is not a transcript, and the scroll a
+  // load starts from is 0 (project.ts apply). Saving that overwrote the place the
+  // reader had actually left the tab on, so every return to a tab abandoned
+  // mid-load landed at the very top of its log — while a tab abandoned on a
+  // transcript, the common case, came back correctly. Keeping the memento the tab
+  // already had is the honest answer, and it is now the ONLY writer of the place.
+  if (!stream || !paneShowsTab(slotId)) return;
   const m: Memento = {
-    scroll: stream ? stream.scrollTop : 0,
-    follow: !!state.followTail,
+    scroll: stream.scrollTop,
     high: state.streamHighOffset,
     oldest: state.oldestOffset,
     older: typeof extra.older === "number" ? extra.older : 0,
@@ -584,15 +599,28 @@ export function forgetMemento(slotId: string) {
   }
 }
 
-export function restoreMemento(slotId: string) {
-  const m = mementos.get(slotId);
+/** Put the pane back on the place this tab was left at.
+ *
+ *  Returns the offset the pane landed on, or null when the tab has no place to go
+ *  back to (its very first open, or one left before it ever painted a
+ *  transcript) — which is the caller's cue to stand on the tail instead.
+ *
+ *  The saved place is a PIXEL, not a fraction of the log: the same records paint
+ *  to the same height, so the pixel is exactly what "the part I was looking at"
+ *  means. `mementoOf` (not the in-memory map) is what makes that survive a page
+ *  or app reload: after one, the map is empty and localStorage is the only copy
+ *  left — reading only the map put every tab of a restored working set back on
+ *  the tail. A log that shrank under the tab (a compaction, rows folded away) can
+ *  leave the pixel past the end, so it is clamped here rather than left to the
+ *  browser to clamp behind our back.
+ */
+export function restoreMemento(slotId: string): number | null {
+  const m = mementoOf(slotId);
   const stream = document.getElementById("stream");
-  if (!m || !stream) return false;
-  state.followTail = m.follow;
-  // after the replay the pane is at its end; a reader who had scrolled up goes
-  // back to where they were, a tail-follower stays on the tail
-  stream.scrollTop = m.follow ? stream.scrollHeight : m.scroll;
-  return true;
+  if (!m || !stream) return null;
+  const end = Math.max(0, stream.scrollHeight - stream.clientHeight);
+  stream.scrollTop = Math.max(0, Math.min(m.scroll, end));
+  return stream.scrollTop;
 }
 
 // ---- DOM cache: save and restore per-tab rendered content --------------------
@@ -654,11 +682,17 @@ export function saveDomCache(slotId: string) {
     domCaches.delete(slotId);
     return;
   }
+  // The place is read BEFORE any row moves: emptying the pane shrinks the
+  // scrollable area, and the browser clamps scrollTop with it (that clamp is the
+  // trusted "content shrank" scroll stream-view.ts learns to ignore). A cache
+  // that read the offset after the move stored 0 and put every restored tab back
+  // at the very top of its transcript.
+  const streamScrollTop = stream.scrollTop;
   const nodes = document.createDocumentFragment();
   while (eventsEl.firstChild) nodes.appendChild(eventsEl.firstChild);
   domCaches.set(slotId, {
     nodes,
-    streamScrollTop: stream.scrollTop,
+    streamScrollTop,
     stateSnapshot: {
       streamHighOffset: state.streamHighOffset,
       oldestOffset: state.oldestOffset,
@@ -708,8 +742,11 @@ export function restoreDomCache(slotId: string): boolean {
   }
   // Restore the events content.
   eventsEl.replaceChildren(cache.nodes);
-  // Restore scroll position.
-  stream.scrollTop = cache.streamScrollTop;
+  // Restore scroll position — the same pixel the tab was left on, clamped to what
+  // the pane it just landed in can actually reach (a viewport that grew while the
+  // tab was away, or a pane restored into a webview that had not laid out yet).
+  const end = Math.max(0, stream.scrollHeight - stream.clientHeight);
+  stream.scrollTop = Math.max(0, Math.min(cache.streamScrollTop, end));
   // Restore the offsets the SSE stream uses: streamHighOffset tells
   // reconnectSSE where to pick up (?since=), so the tab only receives the
   // events it missed while it was in the background.

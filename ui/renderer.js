@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 8adab34efd903fea2ad706cacc3c9dd93773e31e501cc9feda3fc5336995b957
+// sources sha256: 2afca4121f42c7f28fe1a7ddf8c6f1ee1d395d36f2ab792080db4291d3c90b2e
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -2148,7 +2148,6 @@
       if (!m || typeof m !== "object" || typeof m.high !== "number") return null;
       return {
         scroll: typeof m.scroll === "number" ? m.scroll : 0,
-        follow: !!m.follow,
         high: typeof m.high === "number" ? m.high : null,
         oldest: typeof m.oldest === "number" ? m.oldest : null,
         older: typeof m.older === "number" ? m.older : 0,
@@ -2161,9 +2160,9 @@
   function saveMemento(slotId, extra = {}) {
     if (!slotId) return;
     const stream2 = document.getElementById("stream");
+    if (!stream2 || !paneShowsTab(slotId)) return;
     const m = {
-      scroll: stream2 ? stream2.scrollTop : 0,
-      follow: !!state.followTail,
+      scroll: stream2.scrollTop,
       high: state.streamHighOffset,
       oldest: state.oldestOffset,
       older: typeof extra.older === "number" ? extra.older : 0,
@@ -2186,12 +2185,12 @@
     }
   }
   function restoreMemento(slotId) {
-    const m = mementos.get(slotId);
+    const m = mementoOf(slotId);
     const stream2 = document.getElementById("stream");
-    if (!m || !stream2) return false;
-    state.followTail = m.follow;
-    stream2.scrollTop = m.follow ? stream2.scrollHeight : m.scroll;
-    return true;
+    if (!m || !stream2) return null;
+    const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
+    stream2.scrollTop = Math.max(0, Math.min(m.scroll, end));
+    return stream2.scrollTop;
   }
   function viewIsSettled(eventsEl2) {
     if (!eventsEl2.children.length) return false;
@@ -2209,11 +2208,12 @@
       domCaches.delete(slotId);
       return;
     }
+    const streamScrollTop = stream2.scrollTop;
     const nodes = document.createDocumentFragment();
     while (eventsEl2.firstChild) nodes.appendChild(eventsEl2.firstChild);
     domCaches.set(slotId, {
       nodes,
-      streamScrollTop: stream2.scrollTop,
+      streamScrollTop,
       stateSnapshot: {
         streamHighOffset: state.streamHighOffset,
         oldestOffset: state.oldestOffset,
@@ -2249,7 +2249,8 @@
       if (node.nodeType === 1) node.dataset.restored = "1";
     }
     eventsEl2.replaceChildren(cache.nodes);
-    stream2.scrollTop = cache.streamScrollTop;
+    const end = Math.max(0, stream2.scrollHeight - stream2.clientHeight);
+    stream2.scrollTop = Math.max(0, Math.min(cache.streamScrollTop, end));
     const s = cache.stateSnapshot;
     state.streamHighOffset = s.streamHighOffset;
     state.oldestOffset = s.oldestOffset;
@@ -3995,8 +3996,7 @@
       if (isStale(seq)) return null;
       if (started) paneReplayProgress("typeset", 1);
       apply(paneTab(tab.id));
-      stream.scrollTop = stream.scrollHeight;
-      if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
+      placeRestored(tab.id);
       if (started) await noteTabMachine(tab);
       if (isStale(seq)) return null;
       finishOpen();
@@ -4074,6 +4074,17 @@
       );
     }
   }
+  function placeRestored(tabId) {
+    const placed = restoreMemento(tabId);
+    if (placed === null) {
+      state.followTail = true;
+      stream.scrollTop = stream.scrollHeight;
+      setJumpVisible(false);
+      return;
+    }
+    state.followTail = nearBottom();
+    setJumpVisible(!state.followTail);
+  }
   function finishOpen() {
     reconnectSSE();
     refreshTree();
@@ -4146,8 +4157,7 @@
     setOlderPill(Math.max(0, cursor));
     await typesetProgressively(eventsEl, (f) => paneReplayProgress("typeset", f));
     if (isStale(seq)) return true;
-    stream.scrollTop = stream.scrollHeight;
-    if (!tab.running && !tab.needsInput) restoreMemento(tab.id);
+    placeRestored(tab.id);
     paneReplayProgress("typeset", 1);
     finishOpen();
     return true;
@@ -4156,6 +4166,8 @@
     if (!tab || !tab.id || !tab.path) return false;
     if (tab.machine && !hopUpFor(tab)) return false;
     if (!restoreDomCache(tab.id)) return false;
+    state.followTail = nearBottom();
+    setJumpVisible(!state.followTail);
     dropOrphanLive();
     const m = mementoOf(tab.id);
     const projectPath = tab.projectKey || tab.path;
