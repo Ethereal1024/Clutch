@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/host-core.ts and run `npm run build:host`.
-// source sha256: c158e9269aebb30ed333aeb2926a3914afc6096510bd9b415a9b95241100e869
+// source sha256: aa3ac082a9109b2de8b23a4650fe185abed36f97c158bb4fdbcc4a45ab998375
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -11,18 +11,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 //
 // deps:
 //   supervisorBase()      => "http://127.0.0.1:8890" | null  (null = no local mode, N4)
-//   remoteLlmBase()       => "http://127.0.0.1:8892/v1"     (reverse-forward LLM proxy;
-//                            the port is the one the reverse forward landed on —
-//                            8892 unless the far side had to choose another)
-//   remoteLlmModel()      => "deepseek-v4-flash" | ""       (model for the remote session)
-//   remoteLlmKnobs()      => { reasoning_effort, api_protocol }  (same trip as the model)
 //   tunnelStatus()        => { active, url }                (SSH tunnel state)
-//   awaitModelPath()      => Promise<"listening"|"installing"|"unavailable"|"none">
-//                            (joins the far side's in-flight reverse-forward
-//                            install; "listening" is the only answer that means
-//                            a session's --base-url points at something that
-//                            answers. The connect no longer waits for it, so
-//                            this claim does — see ui/tunnel-connect.js)
 //   restartRemoteServer() => Promise<bool>                  (reboot an idle-exited remote supervisor)
 //   openSessionForward(port) => Promise<{ localPort, close() }>
 //   startLocalSession(onFail) => Promise<{mode, sessionId, url, stop}> | null
@@ -39,21 +28,14 @@ const defaultSessions = require("./supervisor-client");
 // session overrides the boot placeholder via `backend:base-changed`
 const BASE_CHANGED = "backend:base-changed";
 function createHostCore(deps) {
-    const { supervisorBase, remoteLlmBase, 
-    // where this client serves the far side's model RIGHT NOW ({base_url, model})
-    // or null when it serves nothing — the re-point target a session's heartbeat
-    // carries (see llmTarget below and ui/tunnel-core.js servedLlmBase)
-    remoteLlmTarget = () => null, remoteLlmModel = () => "", remoteLlmKnobs = () => ({}), 
+    const { supervisorBase, 
     // Global (primary) tunnel status — used when a slot has no pinned target
     tunnelStatus, 
     // Per-tunnel ops: (tunnelId) => <op>. Provided by hosts that support multiple
     // simultaneous tunnels; absent on Android and in tests that inject fakes.
-    tunnelStatusFor = undefined, openSessionForwardFor = undefined, awaitModelPathFor = undefined, restartRemoteServerFor = undefined, remoteLlmBaseFor = undefined, 
+    tunnelStatusFor = undefined, openSessionForwardFor = undefined, restartRemoteServerFor = undefined, 
     // Single-tunnel ops — still required for backward compat and for the global tunnel
-    restartRemoteServer, openSessionForward, 
-    // no tunnel at all (a host with no tunnel dep, a hermetic test): "none" says
-    // "nothing to wait for", which is also what a fake-dep suite means by it
-    awaitModelPath = async () => "none", startLocalSession, log = () => { }, sessions = defaultSessions, } = deps;
+    restartRemoteServer, openSessionForward, startLocalSession, log = () => { }, sessions = defaultSessions, } = deps;
     // per-SLOT backend state: `${winId}::${slotId}` -> {kind, sessionId, url, winId, slotId, stop()}
     //
     // A slot is ONE TAB's session. The supervisor already spawns one agent child
@@ -90,15 +72,9 @@ function createHostCore(deps) {
                 openFwd: typeof openSessionForwardFor === "function"
                     ? (port) => openSessionForwardFor(tid, port)
                     : openSessionForward,
-                awaitPath: typeof awaitModelPathFor === "function"
-                    ? () => awaitModelPathFor(tid)
-                    : awaitModelPath,
                 restartRemote: typeof restartRemoteServerFor === "function"
                     ? () => restartRemoteServerFor(tid)
                     : restartRemoteServer,
-                remoteLlm: typeof remoteLlmBaseFor === "function"
-                    ? () => remoteLlmBaseFor(tid)
-                    : remoteLlmBase,
             };
         }
         // Slot pinned to local: return inactive tunnel status so claimSlotBackend
@@ -107,18 +83,14 @@ function createHostCore(deps) {
             return {
                 tunnelSt: () => ({ active: false }),
                 openFwd: openSessionForward,
-                awaitPath: awaitModelPath,
                 restartRemote: restartRemoteServer,
-                remoteLlm: remoteLlmBase,
             };
         }
         // No pin — use the global (primary) tunnel ops unchanged
         return {
             tunnelSt: tunnelStatus || (() => ({})),
             openFwd: openSessionForward,
-            awaitPath: awaitModelPath,
             restartRemote: restartRemoteServer,
-            remoteLlm: remoteLlmBase,
         };
     }
     // Set target for a specific slot. target may be:
@@ -146,19 +118,6 @@ function createHostCore(deps) {
         if (!wc || wc.isDestroyed())
             return;
         wc.send(BASE_CHANGED, slotId ? { slotId, url } : url);
-    }
-    // Where this client serves the far side's model right now, as a re-point target
-    // for a session whose LLM endpoint was frozen at spawn — or null when it serves
-    // nothing. Read on every beat (the far side's port moves with every hop), and
-    // never throws: a beat whose target cannot be named is a plain liveness beat,
-    // which must keep working while the network is misbehaving.
-    function llmTarget() {
-        try {
-            return remoteLlmTarget() || null;
-        }
-        catch (e) {
-            return null;
-        }
     }
     // A release the supervisor did not confirm is not a stopped session.
     //
@@ -313,12 +272,7 @@ function createHostCore(deps) {
     }
     async function registerTunnelBackend(wc, slotId, supBase, res, openFwd = openSessionForward) {
         const fwd = await openFwd(res.port);
-        const hb = sessions.startSupervisorHeartbeat(supBase, res.sessionId, tunnelClaimOnFail(wc, slotId, supBase, res.sessionId), 
-        // where this client serves the model right now: the session's endpoint
-        // follows it when a hop lands the far-side forward on another port (a
-        // session's --base-url was frozen at spawn and the run inside it outlives
-        // every hop, so a frozen base is a run that can never recover)
-        llmTarget);
+        const hb = sessions.startSupervisorHeartbeat(supBase, res.sessionId, tunnelClaimOnFail(wc, slotId, supBase, res.sessionId));
         const wb = tunnelClaim(wc, slotId, supBase, res.sessionId, res.port, fwd, hb);
         windowBackends.set(slotKey(wc.id, slotId), wb);
         return wb.url;
@@ -349,7 +303,7 @@ function createHostCore(deps) {
         // the supervisor is the authority on "is the session still there", and the
         // beat doubles as the re-claim: it re-arms the window contract the reaper
         // judges staleness by
-        const alive = await sessions.supervisorSessionHeartbeat(supBase, existing.sessionId, llmTarget);
+        const alive = await sessions.supervisorSessionHeartbeat(supBase, existing.sessionId);
         if (alive == null)
             return { verdict: "doubt" }; // unreachable is not gone
         if (!alive)
@@ -364,7 +318,7 @@ function createHostCore(deps) {
             // this hop's failing, not the session's — keep the claim and try again
             return { verdict: "doubt" };
         }
-        const hb = sessions.startSupervisorHeartbeat(supBase, existing.sessionId, tunnelClaimOnFail(wc, slotId, supBase, existing.sessionId), llmTarget);
+        const hb = sessions.startSupervisorHeartbeat(supBase, existing.sessionId, tunnelClaimOnFail(wc, slotId, supBase, existing.sessionId));
         const wb = tunnelClaim(wc, slotId, supBase, existing.sessionId, existing.sessionPort, fwd, hb);
         if (windowBackends.get(slotKey(wc.id, slotId)) !== existing) {
             // superseded while we worked (a newer claim, or the window closed):
@@ -382,7 +336,7 @@ function createHostCore(deps) {
     async function claimSlotBackend(wc, slotId = "", notify = false) {
         const key = slotKey(wc.id, slotId);
         // Resolve tunnel deps for this slot
-        const { tunnelSt, openFwd, awaitPath, restartRemote, remoteLlm } = resolveSlotTunnelDeps(wc.id, slotId);
+        const { tunnelSt, openFwd, restartRemote } = resolveSlotTunnelDeps(wc.id, slotId);
         const ts = tunnelSt();
         // Is this slot's file known to live on a MACHINE? slots.ts pins
         // {kind:"tunnel"} for a tab whose file is out there, and the pin is the
@@ -420,35 +374,13 @@ function createHostCore(deps) {
                 }
             }
             await releaseSlot(wc.id, slotId); // drop any local session first
-            // The far side's model path is installed beside the connect, not inside it
-            // (ui/tunnel-connect.js startModelPath): a far side that is silent about
-            // global requests must not be able to hold "Starting tunnel…" open. What it
-            // must not do either is get a session whose --base-url points at a port
-            // nobody serves — the request is ACCEPTED by the reverse forward and
-            // answered by nobody, and the agent's read then parks in its own budget
-            // ("only Stop moved it"). So the wait happens HERE: once, at the one moment
-            // the answer is actually needed, and bounded by the installer's own clocks.
-            // A path that is not up is not a reason to refuse the session — a run whose
-            // model does not answer beats no run — but the log says which it is. A dep
-            // that THROWS is "unknown", never a failed claim: the tunnel not answering
-            // about a port says nothing about whether a run may start.
-            let path;
-            try {
-                path = await awaitPath();
-            }
-            catch (e) {
-                path = "unknown (" + ((e && e.message) || e) + ")";
-            }
-            if (path !== "listening") {
-                log(`[backend] the far side's model path is ${path}; starting the session anyway`);
-            }
-            let res = await sessions.supervisorSessionStart(ts.url, remoteLlm(), remoteLlmModel(), remoteLlmKnobs());
+            let res = await sessions.supervisorSessionStart(ts.url);
             if (res.error) {
                 // the remote supervisor may have idle-exited: restart it through the tunnel and retry once
                 log(`[backend] tunnel session start failed (${res.error}); restarting remote supervisor`);
                 const ok = await restartRemote();
                 if (ok) {
-                    res = await sessions.supervisorSessionStart(ts.url, remoteLlm(), remoteLlmModel(), remoteLlmKnobs());
+                    res = await sessions.supervisorSessionStart(ts.url);
                     if (res.error)
                         log(`[backend] tunnel session retry failed: ${res.error}`);
                 }

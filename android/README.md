@@ -234,6 +234,13 @@ WebView 及其定时器）。信任模式的倒计时（"Allow 按钮自己按�
 
 ## 隧道连上后卡在 "Starting tunnel…"（报告：0.1.47 连远端永远转，不落地也不报错）
 
+> **后续（甲-P1 清理，此节之后）：这里讲的"模型通路"已经删除。** 会话的模型调用改在客户端
+> 自己的进程里走 `ui/llm-client.js`，没有任何模型请求经过隧道，于是 `startModelPath` /
+> `awaitModelPath` / `state.modelPath` / `releaseModelPath` 与远端 `127.0.0.1:8892` 一并
+> 消失（`--base-url`/`--model` 也不再传给会话子进程）。反向转发这套机制**保留**，现在只服务
+> 插件通道（`tests/tunnel-reverse-channel-test.js`，取代了删掉的
+> `tests/tunnel-reverse-port-test.js`）。下文按当时的发布记录原样保留，不再描述现状。
+
 **报告**：连远端时进度停在 "Starting tunnel…"，界面不报错也不超时——既没有失败提示，
 也永远等不到连上那一刻。0.1.47 已经给这一步加了 4 秒的钟（上一版这一节写的就是那个钟），
 报告照旧，所以**钟不是答案**。
@@ -1000,14 +1007,17 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
    在**不能**直连 github.com 的网络里，组件市场与远端 pylibs 安装都应能走通（见
    「源镜像在手机上够不着」一节）。
 10. 隧道不落地（报告"0.1.47 卡在 Starting tunnel…"）：连一台**对反向转发请求不回话**的远端
-    （中间盒 / 非 OpenSSH sshd / 卡住的 request 通道），进度条必须**照常走到连上**——模型的
-    通路不是 connect 的判决条件；`~/.clutch/tunnel.log` 里此时应出现
+    （中间盒 / 非 OpenSSH sshd / 卡住的 request 通道），进度条必须**照常走到连上**。connect
+    现在**一条反向转发请求都不发**（先问话的是第一条会话认领之后的插件通道），所以沉默根本
+    碰不到 connect 的判决。连上之后在页面里做一件要插件的事（认领一次会话）：那一次请求问的
+    是**对端自选端口**（port 0，插件通道没有契约端口），`~/.clutch/tunnel.log` 里此时应出现
     `reverse forward unanswered (…did not answer the reverse-forward request within 4000ms…);
-    not asking for a port of its own`，随后是 `model path unavailable …; asking again in
-    15000ms`，并且 `tunnel:status` 的 `modelPath` 不是 `listening`；起会话时同一份日志里有
-    `the far side's model path is unavailable; starting the session anyway`（见上一节报告）。
-    对端确实**拒绝**（`Address already in use`）时才是另一条路：阶梯重试 6 次、再请对端自选
-    端口。
+    not asking for a port of its own (plugin)`，紧接着
+    `the far side would not forward a port for this client's plugins`——**只问一次**，不会跟着
+    再问一个数字；隧道本身不受影响（`tunnel:status` 里没有 `modelPath` 这类字段，连接照旧在），
+    远端 sshd 一旦释放掉那个没装上的监听，下一次认领又问 0。对端确实**拒绝**
+    （`Address already in use`）时才是另一条路：同一端口阶梯重试 6 次、再请对端自选端口
+    （见上一节报告）。
 11. 坏掉的 pylibs 树不再"假装修好了"（报告"移动端连不上，报错 no backend"）：在一台
     `~/.clutch-server/VERSION` 与本次发布**相同**、但树里叠了两代 `pydantic*-dist-info`（或
     `PYTHONPATH=~/.clutch-server/site-packages python3 -c "import pydantic, pydantic_core"`
@@ -1019,11 +1029,13 @@ python3 仍 null、`setArtifactProvider(null)` 还原桌面行为。
     tar 传坏（上传成功、解包失败）时界面报的是 `the remote could not unpack the wheels (exit N…).
     Nothing was replaced …`，且**远端 `VERSION` 没变**（`ssh` 上机复核）——这是"失败不再留下半棵树
     的证据"，也是下一次连接会重试的前提。
-12. teardown 归还反向转发：断开后停一两秒，在远端 `ss -ltnp | grep 127.0.0.1` 里，那条会话（以及
-    它自己那条 `sshd: ubuntu@notty`）留下的监听不该还在；客户端 `~/.clutch/tunnel.log` 的断开处有
-    `[disconnect] releasing the far side's reverse forward on 127.0.0.1:<port>`。手机端走的常是
-    "请对端自选端口"那条路（8892 被别人占着），那就该看到 `<port>` 是自选的那个、而不是 8892
-    ——**只归还自己被授予的编号**是这条的判据（见上一节）。
+12. 反向转发只归还自己的编号：断开后停一两秒，在远端 `ss -ltnp | grep 127.0.0.1` 里，那条会话
+    （以及它自己那条 `sshd: ubuntu@notty`）留下的监听不该还在——**监听不残留**是这条唯一的判据
+    （客户端不会替对端去收回什么，也收不了：一条连接只能 cancel 被它自己授予的 forward）。
+    那个编号永远是 sshd 当场给的：插件通道没有契约端口，每一次都是
+    `client.forwardIn("127.0.0.1", 0, …)`，8892 这类号码不会被预先填进去。所以再认领一次时应
+    看到它**重新问 0**、拿到一个新编号，`ss` 里不会出现一个"上一代留下、被别人复用"的写死端口
+    （见上一节）。
 13. 系统栏同色（报告"状态栏/导航栏不是 App 的底色"）：状态栏、导航栏、App 底色三处同色，
     栏上图标识是浅色；旋转屏幕与弹出软键盘时系统栏区域不闪白（见「系统栏不是 App 的底色」一节）。
 14. 缩放锁（报告"两指误触就放大"）：聊天区、顶栏两指蹭与双击都不放大，界面不会停在"糊住且
@@ -1163,14 +1175,14 @@ python3 -m http.server 8000        # 供出；aarch64 远端同法换 arch 再�
 2. **准备远端**：全新 Linux——x86_64 用任意云主机/局域网机器/sshd 容器；
    aarch64 用树莓派、ARM 盒子或 ARM 云实例。要求：sshd 能被手机访问、有 python3。
 3. **连接**：App 里填 SSH 主机/用户/密钥 → 一键连接。观察进度：
-   probe → 下载 tar（第 2 步的索引）→ SFTP 上传 → 远端解压 → 前向/反向转发 → 健康门。
+   probe → 下载 tar（第 2 步的索引）→ SFTP 上传 → 远端解压 → 前向转发 → 健康门
+   （反向转发不在这条路上：它由第一次 claim 为插件端点单独安装，见 `ui/tunnel-connect.js`）。
 4. **远端核对（M2 的硬判据）**：
    ```bash
    ssh <远端> cat ~/.clutch-server/VERSION        # 16 hex
    ssh <远端> ls ~/.clutch-server                 # agent/ site-packages/ STRATEGY=pylibs
    ```
    VERSION 应 == 所装 tar 的 sha256 前 16 位（索引里 `version` 字段的值）。
-5. **完整对话**：设置里配 LLM key（请求走远端 `127.0.0.1:8892` 反向转发回手机上的
-   llm-proxy；该端口被占用时由远端自选一个端口，见 `ui/tunnel-connect.js`），
-   发一轮消息确认 SSE 流式与权限确认弹窗正常。
+5. **完整对话**：设置里配 LLM key（**模型请求在本机进程内发出**，走 `ui/llm-client.js`，
+   不经过隧道、也不需要隧道上有任何端口），发一轮消息确认 SSE 流式与权限确认弹窗正常。
 6. **M2 达标线**：x86_64 与 aarch64 各一台全新远端一键连接成功，且 VERSION==tar 哈希。

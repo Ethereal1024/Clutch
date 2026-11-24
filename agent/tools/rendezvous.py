@@ -293,34 +293,6 @@ def unavailable_reason(module: str) -> str:
     return ""
 
 
-def reaches_another_machine(mod: catalog.Component) -> bool:
-    """True when the component answers for a filesystem that is not this host's.
-
-    Two spellings say the same thing, and both are read here because both are in
-    the wild:
-
-      * `subject: foreign-fs` is 0.1.x's word for it (a component that reaches the
-        far side of a channel), and a declaration carrying it still means that;
-      * since 0.2.0 a client-side component declares the workspace's OWN subject
-        (`workspace-fs`) and nothing but an `entry` — a FRONTEND half, whose code
-        the client runs and whose commands travel down the tunnel to the machine
-        holding the root. What it contributes, not what it is called, is where it
-        runs.
-
-    Either way the root has to be somewhere else for the component's tools to
-    mean anything: on a local workspace the same tools exist natively, and this
-    one would read or write a different machine than the root names.
-
-    Nothing in this repo ships that shape any more (the ssh plugin was retired in
-    favour of the host's own four, tools/host.py `_REMOTE_DECLARATIONS`), but the
-    client can still push one, and this is the rule it is read by
-    (tests/channel_test.py drives both halves with a synthetic declaration).
-    """
-    if mod.subject == catalog.FOREIGN_FS:
-        return True
-    return mod.subject == catalog.WORKSPACE_FS and mod.client_side
-
-
 def serves_workspace_fs(module: str) -> bool:
     """True when the component serves the WORKSPACE root's filesystem FROM HERE.
 
@@ -328,26 +300,31 @@ def serves_workspace_fs(module: str) -> bool:
     to start, so a statement may only be spoken to it while the workspace IS this
     machine (`prompt.module_blocked_reason`); a component serving anything else —
     the app's project file, the network, a library of its own — is unaffected by
-    where the workspace lives. The same subject reached over a channel is the
-    other half of the axis (`reaches_another_machine`), not this.
+    where the workspace lives.
     """
     mod = catalog.table().get(module)
     return mod is not None and mod.subject == catalog.WORKSPACE_FS and mod.runs_here
 
 
-def serves_foreign_fs(module: str) -> bool:
-    """True when the component serves the root's filesystem from ANOTHER machine.
+def serves_remote_workspace_fs(module: str) -> bool:
+    """True when the component serves *a* workspace filesystem from ANOTHER machine.
 
-    The other half of the sentence above: the tools mean the machine at the far
-    end of a channel, so it is the workspace that has to be elsewhere — and on a
-    local session the same tools exist natively, which is why they are dropped
-    rather than shadowing them (`registry._serves_this_workspace`,
-    `prompt.module_blocked_reason`). On a root that IS elsewhere the four names
-    are the host's own (`registry.build_tools` drops a component publishing one),
-    so this predicate's answer there is a diagnostic, not a tool.
+    The far half of `serves_workspace_fs`: its subject is a workspace root's
+    filesystem, but its process is not this host's (no `service`, no `launch` — it
+    carries the `entry` the CLIENT runs), so its statements would read the machine
+    at the other end of the channel. Only a push can bring one here
+    (tools/channel.py); nothing this repo ships has that shape.
+
+    On a LOCAL root the same names exist natively, so such a component is not
+    offered — keeping it would shadow the `read_file` that really works on this
+    machine with one that reads some machine a tunnel happens to reach
+    (`registry.build_tools`) — and a call is refused with that sentence
+    (`prompt.module_blocked_reason`). On a root that IS elsewhere the four file
+    names are the host's own (`tools/host.py`), so what it contributes there is a
+    diagnostic rather than a second reading.
     """
     mod = catalog.table().get(module)
-    return mod is not None and reaches_another_machine(mod)
+    return mod is not None and mod.client_side and mod.subject == catalog.WORKSPACE_FS
 
 
 def fence_globs(protected: Iterable[Path | str], root: str | Path) -> tuple[str, ...]:

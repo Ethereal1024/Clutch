@@ -210,7 +210,12 @@ def main() -> int:
     wd.terminate()
     wd.wait(timeout=10)
 
-    # ---- 7. base_url + model forwarding (remote sessions point at the LLM proxy) ----
+    # ---- 7. a session is spawned with nothing but its port ----
+    # The claimed base_url/model/knobs used to be forwarded so that a remote child
+    # could dial the client's LLM proxy. The model call now happens in the CLAIMING
+    # CLIENT's own process (ui/llm-client), so a session has no endpoint or model
+    # of its own to be told. The fields are still ACCEPTED — an older client keeps
+    # sending them — and simply ignored.
     sup5, port5, _ = start_supervisor(stale_s=60, idle_timeout_s=60)
     base5 = f"http://127.0.0.1:{port5}"
     st, body = http_post(
@@ -222,33 +227,20 @@ def main() -> int:
             "api_protocol": "responses",
         },
     )
-    check(st == 200, "session start with base_url accepted")
+    check(st == 200, "session start accepts a stray endpoint and model")
     d5 = json.loads(body)
-    args5 = sup5.sessions[d5["session_id"]].proc.args
+    argv5 = [str(a) for a in sup5.sessions[d5["session_id"]].proc.args]
     check(
-        "--base-url" in args5 and "http://127.0.0.1:8892/v1" in args5,
-        "base_url forwarded to the session child (--base-url ...)",
+        "--base-url" not in argv5 and "--model" not in argv5,
+        "no --base-url/--model reaches the session child: the endpoint is the client's",
     )
     check(
-        "--model" in args5 and "deepseek-v4-flash" in args5,
-        "model forwarded to the session child (--model ...): a remote host owns no settings",
+        "--reasoning-effort" not in argv5 and "--api-protocol" not in argv5,
+        "no LLM knob reaches the session child either (a claim cannot move them)",
     )
     check(
-        "--reasoning-effort" in args5 and "max" in args5,
-        "reasoning_effort forwarded to the session child (--reasoning-effort max)",
-    )
-    check(
-        "--api-protocol" in args5 and "responses" in args5,
-        "api_protocol forwarded to the session child (--api-protocol responses)",
-    )
-    # end of the line: the child really runs with the claimed knobs, not with
-    # the defaults it would have picked on its own host
-    port5 = d5["port"]
-    st, body = http_get(f"http://127.0.0.1:{port5}/api/settings")
-    knobs5 = json.loads(body)
-    check(
-        knobs5.get("reasoning_effort") == "max" and knobs5.get("api_protocol") == "responses",
-        "the session child APPLIED the claimed knobs (GET /api/settings)",
+        argv5[-2:] == ["--port", "0"],
+        "the session child is spawned with nothing but its port",
     )
     sup5.shutdown_all()
 
@@ -787,16 +779,16 @@ def main() -> int:
         d17 = json.loads(body)
         check(
             st == 200 and bool(d17.get("session_id")),
-            "a session starts on the endpoint and model its caller named",
+            "a session starts even when its caller names an endpoint (the endpoint is the client's)",
         )
         sid17, child17 = d17["session_id"], f"http://127.0.0.1:{d17['port']}"
         st, body = http_get(f"{child17}/api/settings")
         born17 = json.loads(body)
         check(
             st == 200
-            and born17.get("base_url") == "http://127.0.0.1:9/v1"
-            and born17.get("model") == "born-model",
-            "the child it spawned really holds the endpoint and model it was born with",
+            and born17.get("base_url") != "http://127.0.0.1:9/v1"
+            and born17.get("model") != "born-model",
+            "the child did not take the endpoint or model its caller named",
         )
 
         for beat17 in (

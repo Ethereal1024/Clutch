@@ -25,6 +25,12 @@
 > 那句用户可见文案所描述的那条路。但字面上它确实是“换一条路继续”，所以 I3 应当读作
 > “**除模式三这一次显式、可见的降级之外**”。要不要把它升成一条 D 编号决策，留给下一轮拍板；
 > 在那之前，不要用 I3 去删模式三，也不要拿模式三去否认 I3。四个工具的落点见 §13 M7。
+>
+> **补记二（已拍板，甲-P1 之后）**：模式三与 `tryDegradeToSshTools()` **保留**，本轮只把它
+> 记账（§13 M8），不删。决定是：这块以后要**显式做成一个用户可感知的功能**——用户在界面上
+> 看得到"现在走的是只用 sshd 的远侧"，而不是在装不上时被静默换到另一条路继续。所以它的最终
+> 形态**不会违反 I3**：I3 反对的是"悄悄"换路，不是"被用户选择、并在界面上写明"的那条路。在
+> 那个功能落地之前，本节上面那段"字面上的例外"仍是当前事实，读判据时照它读。
 
 ---
 
@@ -537,6 +543,7 @@ flowchart TD
 - [x] **M3** 既有 ruff 基线：`E501 scripts/market_index.py:187`。—— 已把那句三段式 f-string 折成“先算 `declared` 再抛”（与文件下面 version 那段同一个写法），报错文本一字未改；`ruff check scripts/market_index.py` 现在全绿。
   - **补记（全仓基线是 3 条，不是 1 条；“全绿”只对那一个文件成立）**：`ruff check agent scripts` 今天报 3 条，全是**既有**、与本次重构无关的：`agent/config.py:11 F401`（`from pathlib import Path` 从未使用）、`agent/tools/answers.py:24 I001`（import 块顺序）、`scripts/ui-render-bench/run.py:20 F401`（`os` 未使用）。后两个文件在本次重构里**逐字节未改**（`git status` 里根本不出现），`pyproject.toml` 的 `select` 一直是 `E,F,W,B,I`、没被改过——所以这三条是 HEAD 里就有的，不是本轮弄红的。按“py 只删循环那一半”的规矩**不动它们**（清 import 顺序属于整理，不是这次的任务）。CI 不跑 ruff（`.github/workflows/` 里没有这一步），所以它不挡发布；§14 那条命令的诚实读法是“3 条既有告警”。
   - **补记（§13 M5 那一轮跑门时又看见第 4 条，是我们自己的）**：`ruff check agent scripts` 报出 `agent/tools/catalog.py:434:121 E501 (123 > 120)`；`git log -L 430,436` 指到 `8894d60`（“feat(settings)”那笔，本分支未推送的提交），所以它不是既有告警，而是那一笔把一行折得太长。既然 §14 的注释把基线写成“3 条既有”，就把这一行折回去（`detail = f"…"` + `Diagnostic(component.name, "", detail)`，与相邻几句同一个写法；报错文本一字未改），`ruff check agent scripts` 回到那 3 条、`tests/catalog_test.py` 仍 `all passed`。**教训**：M3 那句“3 条”是当时的快照，重跑门之前不能当常量用。
+  - **补记（甲-P1 复核：HEAD 上是 4 条，本轮没有新增）**：把 HEAD 单独 checkout 出去跑同一句命令，报的正是这 4 条——`agent/config.py:11 F401`、`agent/server.py:57 I001`、`agent/tools/answers.py:24 I001`、`scripts/ui-render-bench/run.py:20 F401`。甲-P1 之后剩下 3 条：`config.py` 那条**随这次改动消失了**（LLM 字段那一段动过，`pathlib.Path` 的未用 import 一并没了），`server.py:57 I001` 是 HEAD 就有的（本轮只改了它 `--base-url` 的帮助文本，没碰 import 块）。所以“4 条”是本轮复核的诚实读法；`answers.py` / `run.py` 照旧不动（清 import 顺序不是这次的任务）。
 - [ ] **M4** `scripts/market_index.py --check` 要读 github 上的 4 个 release manifest，而本开发环境到 github.com（以及 pypi.org）不通——`curl` 20 s 超时，`example.com` 却是 200——所以 §14 的市场门禁在本环境只能标为“跑不了”，不是被改坏了。同理 `tests/remote-bootstrap-e2e.js`。
   - **补记（网络已通，“不通”这条不成立了）**：`https://api.github.com/` → 200、`https://pypi.org/simple/` → 200、`example.com` → 200，`ssh -T git@github.com` → `Hi Ethereal1024!`；`scripts/market_index.py --check` 在本环境 rc=0（P6-1 已收口），§14 的市场门禁是真跑了、不是“跑不了”。
   - M4 剩下的只有后半句：`tests/remote-bootstrap-e2e.js` 要 `CLUTCH_E2E_HOST` / `CLUTCH_E2E_USER` / `CLUTCH_E2E_PASS` 指向一台真的、能被 SSH 进去并装 `~/.clutch-server` 的主机——**这三个变量在本机没有**（`env` 里无、`tests/` 里也不留默认值，脚本缺变量直接 `exit 2`）。这是 M4 唯一的阻塞。
@@ -577,10 +584,11 @@ flowchart TD
   - **同名谁赢**：组件声明了宿主已持有的名字 → 丢掉那条组件工具，只留一条非致命 `catalog.Diagnostic`（`registry.build_tools`）。所以“本地根 + 装了 `clutch-workspace`”仍是组件那份，“远侧根”是宿主那份，不要靠声明顺序定胜负。
   - **验证**：`tests/decl_api_test.py` / `channel_test.py` / `rendezvous_test.py`（第 2b 节改成“表里没有任何组件声明 `foreign-fs`”，合成的这一幕搬去 `tests/channel_test.py`）/ `transport_test.py` / `remote_filesystem_test.py` 全绿；`node tests/conform.test.js` / `tool-decl.test.js` / `prompt.test.js` / `plugin-link.test.js`（第 11 节换成合成 fixture）全绿；`node ui/build-host.js --check` up to date。
 
-- [ ] **M8 P4 残渣：远侧会话的“反向转发模型通路”（8892）还留着（只记账，本轮没动）**
-  - **事实**：`ui/src/host/host-core.ts:9-13` 的 `deps.remoteLlmBase()` 给远侧会话的 `--base-url` 就是 `http://127.0.0.1:8892/v1`（反向转发回本窗口的模型代理），`host-core.ts:464-469` 每次 `supervisorSessionStart` 都带上 `remoteLlm()` / `remoteLlmModel()` / `remoteLlmKnobs()`；`ui/src/host/tunnel-connect.ts:516` 的注释仍写着那是 “the ONLY way a remote session reaches a model”。
-  - **为什么算残渣**：`agent/` 已经没有任何能发起模型请求的东西（I1 的判据 `tests/exec_layer_test.py`：第三方 import 为空、两个入口的可达图上没有模型、没有消息投影器）。两件事同时为真 ⇒ 这段接线在读者眼里等于“远侧还有一个循环”，正是 P4 要删掉的旧形状；它只是不会出错（远侧没人用它）。
-  - **为什么这轮不删**：删它要改 `--base-url` 的传递、隧道里那条反向转发的安装与重试梯子，以及钉着 8892 的 `tests/host-core.test.js`（67 / 101 / 532）与 `tests/tunnel-reverse-port-test.js` 整条链——超出 甲-P1 的范围。要动就单独立一笔，连同“远侧真的要用模型时谁提供”一起答。
+- [x] **M8 甲-P1 收尾：远侧会话的“反向转发模型通路”（8892）删除；“外来文件系统”那句判词清理（2026-11-25）**
+  - **原账（当时只记账）**：`ui/src/host/host-core.ts` 的 `deps.remoteLlmBase()` 给远侧会话的 `--base-url` 是 `http://127.0.0.1:8892/v1`（反向转发回本窗口的模型代理），每次 `supervisorSessionStart` 都带上 `remoteLlm()` / `remoteLlmModel()` / `remoteLlmKnobs()`；`tunnel-connect.ts` 的注释还写着那是 “the ONLY way a remote session reaches a model”。而 `agent/` 早已没有任何能发起模型请求的东西——这段接线在读者眼里等于“远侧还有一个循环”。
+  - **删掉的**：模型通路整条（`remoteLlmBase` / `remoteLlm` / `remoteLlmModel` / `remoteLlmKnobs`、`startModelPath` / `awaitModelPath` / `state.modelPath` / `releaseModelPath`、`llmProxy` 的远端那一侧、远端 `127.0.0.1:8892`），以及只服务它的“等模型端口 listening”那一步；`agent/server.py --base-url/--model` 不再被 supervisor 转给会话子进程（`start_session()` 只收认领事实，spawn 的是 `[..., "--port", "0"]`）。`tests/tunnel-reverse-port-test.js` 随之删除，换上 `tests/tunnel-reverse-channel-test.js`（钉的是**插件通道**那一半：只问一次、port 0、沉默不复问、阶梯仍为拒绝保留）。
+  - **留在原地的**：`agent/server.py` 的 `--base-url` / `--model` 两个开关、`agent/config.py` 的 LLM 字段与 `/api/settings`——它们是**还没有读者的设置面**（远侧不再有人用模型），删它们属于另一件事；记账在此，别再当成“通路还在”的证据。反向转发机制本身也留着：插件通道 `registerChannel("plugin")` 是它唯一的使用者，**没有契约端口**（`installReverseForward` 恒问 0），因此仓库里没有 `unforwardIn`、也没有任何“收回对端端口”的日志。
+  - **“外来文件系统”那一半（原以为全是死代码，实测只有一半是）**：`FOREIGN_FS` / `foreign-fs` 这个**拼写**是死的（全仓无声明），已彻底删除；但 `reaches_another_machine` 的另一半——`subject == workspace-fs` **且** `client_side`——是**活的**，`tools/channel.py` 的推送能让它成立（`tests/channel_test.py` 推一个合成的远侧组件）。真删它会让一个被推来的组件的 `read_file` 与本地那条并排进表，而 `ToolRegistry._tools = {t.name: t for t in tools}` 保留**最后一条**，于是被推来的那条会静默顶掉能用的本地 `read_file`。所以按现状词汇把它恢复成具名判断：`rendezvous.serves_remote_workspace_fs(module)`（与既有的 `serves_workspace_fs` 互为一条轴的两半），读者是 `registry.build_tools`（本地根下跳过它，附注释说明影子问题）与 `prompt.module_blocked_reason`（本地根 + 远侧文件系统组件 → “serves the filesystem of another machine over a channel, and this workspace root is a local one”）。驱动这一半的用例只有 `tests/channel_test.py`，它同时钉住两半互为反面。
 
 ---
 
@@ -593,7 +601,7 @@ node tests/no-local-fallback-test.js            # P0-3/P0-4 之后必须 0 FAIL
 # （脚本方式 `python3 tests/x_test.py` 只把 tests/ 放进 sys.path，只有本机 .venv
 #  里的 editable .pth 兜住了仓库根；`-m` 在哪台机器上都对）
 for t in tests/*_test.py; do python3 -m "tests.$(basename "${t%.py}")" >/dev/null || echo "FAIL $t"; done
-python3 -m ruff check agent scripts --output-format concise   # 3 条既有告警（M3 补记），CI 不跑这一步
+python3 -m ruff check agent scripts --output-format concise   # 4 条既有告警（M3 补记 + 甲-P1 复核），CI 不跑这一步
 
 # 类型闸门：host（ui/tsconfig.host.json）+ 渲染器（ui/tsconfig.renderer.json）各一份配置，
 # 一个 `npm run typecheck` 连跑两遍 --noEmit，rc=0（D14 补记）

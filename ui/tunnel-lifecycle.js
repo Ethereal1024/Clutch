@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-lifecycle.ts and run `npm run build:host`.
-// source sha256: c012ab79be7c5ef78b9879bb0beac220f938ac48d0ba53a3390008d78178ba33
+// source sha256: 1d4dcd657019f174c53807c9a57f407db6e3f79c0a52186f9b6deea569bbfafa
 
 "use strict";
 // teardown, the per-window session forwards, and self-healing
@@ -21,7 +21,6 @@ const { state, tunnelLog, HEAL_INTERVAL_MS, REMOTE_API_PORT } = require("./tunne
 const { freePort, listen, waitForServer, probeServer } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
 const { startCommand, stopServer, remoteServingState } = require("./tunnel-bootstrap");
-const { stopLlmProxy } = require("./llm-proxy");
 const { stopExecBridge } = require("./exec-bridge");
 // `notify` is for teardowns the RENDERER did not ask for. Its own disconnect
 // (the SSH picker, window close) is caller-managed: the renderer clears its
@@ -30,63 +29,9 @@ const { stopExecBridge } = require("./exec-bridge");
 // to a port nobody serves: the SSE stream ends silently (the window shows a
 // run that is not there) and Stop posts the cancel into nothing while the
 // remote session keeps running -- unreachable, and unable to be stopped.
-// Hand the far side's listener back on the way out. An sshd does release a
-// session's tcpip-forward bindings when the session ends — but only once it
-// learns that it did, and a hop that died without a FIN (a phone that lost its
-// radio, a process killed mid-flight, a NAT that forgot the flow) leaves the
-// listener bound until something else notices. On a stock sshd that something is
-// the TCP keepalive, two hours later, and the field's next hop found its own
-// 8892 held by that ghost: every bind refused, the ladder spent, and the model
-// path pushed to a port of the far side's choosing (tunnel-core's remoteLlmPort).
-//
-// The cancel is a global request the client may send at any time, it costs one
-// packet on a wire that is still up, and it must go BEFORE end(): a teardown
-// that only closes the socket leaves the far side to infer the rest. It is
-// best-effort by construction — ssh2 throws when the socket is already gone
-// ("Not connected"), and the far side's sshd is the authority on its own ports
-// either way — so nothing here is awaited or reported as a failure of the
-// teardown.
-//
-// Only the listener THIS hop was granted is cancelled: a teardown deliberately
-// keeps the remembered port (tunnel-core's remoteLlmPort), and cancelling a port
-// this client was never given would be a request about someone else's listener.
-function releaseModelPath(client) {
-    if (!client || state.modelPathClient !== client)
-        return;
-    if (state.modelPath !== "listening" || !state.llmProxyRemotePort)
-        return;
-    const port = state.llmProxyRemotePort;
-    tunnelLog(`[disconnect] releasing the far side's reverse forward on 127.0.0.1:${port}`);
-    try {
-        client.unforwardIn("127.0.0.1", port, (err) => {
-            if (err)
-                tunnelLog("[disconnect] reverse forward release refused: " + ((err && err.message) || err));
-        });
-    }
-    catch (e) {
-        tunnelLog("[disconnect] reverse forward release skipped: " + ((e && e.message) || e));
-    }
-}
 async function stopTunnel(notify = false) {
     tunnelLog("[disconnect] stopTunnel");
     stopHealing();
-    // The far side's model path lives and dies with the hop that carried it: the
-    // reverse forward is a global request on THIS client, and the port it landed on
-    // is meaningless once the client is gone. A repair still waiting on the clock
-    // must not fire into the next hop either — that hop installs its own path
-    // (tunnel-connect's startModelPath), and this timer would be a second ask about
-    // a dead wire.
-    if (state.modelPathRepairTimer) {
-        clearTimeout(state.modelPathRepairTimer);
-        state.modelPathRepairTimer = null;
-    }
-    // before the modelPath facts are cleared: the release asks whether THIS hop
-    // was granted a listener, and that answer lives in exactly those facts
-    releaseModelPath(state.sshClient);
-    state.modelPath = null;
-    state.modelPathClient = null;
-    state.modelPathInstall = null; // an install in flight settles into a no-op (finishModelPath's guard)
-    state.modelPathRepairDelay = null;
     if (state.localSrv) {
         state.localSrv.close();
         state.localSrv = null;
@@ -111,7 +56,6 @@ async function stopTunnel(notify = false) {
     if (state.sftpHandle) {
         state.sftpHandle = null;
     }
-    stopLlmProxy();
     stopExecBridge();
     // intentional disconnects are caller-managed; an unexpected death (the ssh
     // 'end' event) and a teardown the caller flags both notify
@@ -146,12 +90,6 @@ function tunnelStatus() {
         // wire to a concurrent attempt tell "that attempt landed for ME" from
         // "something else is up".
         target: state.target ? { host: state.target.host, user: state.target.user, port: state.target.port } : null,
-        // Where the far side's model path got to: "listening" is the only value that
-        // means a session may be pointed at remoteLlmBase(); "unavailable" says the
-        // far side would not (or would not answer) forward, and a session started
-        // anyway will not reach a model. The hop itself is up in every case (see
-        // tunnel-connect: it is not part of the connect's verdict).
-        modelPath: state.modelPath,
         // exec bridge URL for the local agent's SshTransport; null with no live tunnel
         execBridge: state.sshClient && state.execBridgePort ? "http://127.0.0.1:" + state.execBridgePort : null,
     };

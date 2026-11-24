@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 911f124335e5d17bea374742fe0befbcc217b1b474585f4a10322e495d4b1d6c
+// source sha256: affc2aae93d3e896c37c4899e13a1f166a357e20553beccca38183787e5f1949
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -15,7 +15,7 @@ const { createHostCore } = require("./host-core");
 // lock file itself
 const sessions = require("./supervisor-client");
 const { createComponentsView } = require("./components-view");
-const { writeSettingsMirror, ensureSettingsMirror, readSettings, getSshSecret } = require("./settings-mirror");
+const { writeSettingsMirror, ensureSettingsMirror, getSshSecret } = require("./settings-mirror");
 const { createTunnelLadder } = require("./tunnel-ladder");
 // the About pane's update button: the check/download half (shared with the
 // Android host) and the desktop installer that replaces this build
@@ -40,17 +40,6 @@ const { installSystemTrust, describeTrust } = require("./system-ca");
 function tunnelLog(...args) {
     tunnel.tunnelLog(...args);
 }
-// The remote host carries no LLM settings of its own (the settings mirror is
-// local), so the model must ride along with the session claim; without it the
-// remote server dies at LLM init with "missing LLM argument: model".
-const remoteLlmModel = () => readSettings().model || "";
-// reasoning_effort / api_protocol ride along with the model, for the same
-// reason: the remote host settings file has neither, and the session would
-// run with provider defaults instead of this client settings.
-const remoteLlmKnobs = () => {
-    const s = readSettings();
-    return { reasoning_effort: s.reasoning_effort || "", api_protocol: s.api_protocol || "" };
-};
 // no base placeholder: the machine-wide supervisor port (8890) answers the
 // session lifecycle, not a window API, so handing it to the renderer as a
 // "fallback" would only point it at a port that fails every request. A window
@@ -59,30 +48,9 @@ const remoteLlmKnobs = () => {
 // Android host; this shell only feeds it its desktop inputs. Electron
 // webContents already satisfies host-core's window-handle contract
 // ({id, isDestroyed(), send}).
-//
-// remote sessions get their LLM through the tunnel's reverse forward, and NOT on
-// a frozen port: 8892 is what the far side is asked for first, but when a
-// listener the far host will not release holds it, the reverse forward lands on
-// a port the far side picks instead (ui/tunnel-connect.js) — so the base is read
-// here, at claim time, from the state that remembers where it landed.
 const hostCore = createHostCore({
     supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
-    remoteLlmBase: () => tunnel.remoteLlmBase(),
-    // what a session's heartbeat carries so its LLM endpoint can FOLLOW the model
-    // path when a hop lands the reverse forward on another port: only a path that
-    // is actually listening is a target (tunnel-core servedLlmBase), because a
-    // port nobody serves is exactly the failure this is here to end
-    remoteLlmTarget: () => {
-        const base = tunnel.servedLlmBase();
-        return base ? { base_url: base, model: remoteLlmModel() } : null;
-    },
-    remoteLlmModel,
-    remoteLlmKnobs,
     tunnelStatus: () => tunnel.tunnelStatus(),
-    // the far side's model path is installed beside the connect, not inside it: the
-    // claim waits for it here, so a session is never spawned with its --base-url
-    // pointed at a port nobody serves (ui/tunnel-connect.js startModelPath)
-    awaitModelPath: () => tunnel.awaitModelPath(),
     restartRemoteServer: () => tunnel.restartRemoteServer(),
     openSessionForward: (port) => tunnel.openSessionForward(port),
     startLocalSession,

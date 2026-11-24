@@ -1,11 +1,9 @@
-// Client-side LLM reverse proxy (Electron main process): accepts the OpenAI
-// wire protocols the client can speak (/chat/completions and /responses),
-// injects the client API key, forwards to the upstream provider, and streams
-// the response back. The remote backend reaches it via the SSH -R tunnel (no
-// remote internet/key needed). Honors the machine's HTTP proxy and surfaces the
-// real upstream error.
-const http = require("http");
-const https = require("https");
+// Where this machine's model endpoint and key come from, and how to reach them:
+// the env first, then ~/.clutch/settings.json, then a built-in default. The
+// model calls themselves are made in THIS process by llm-client (the OpenAI
+// wire protocols, streamed back to the run), so nothing about a model crosses
+// the tunnel and no far-side session is pointed at anything here. Honors the
+// machine's HTTP proxy and the OS trust store.
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
@@ -26,9 +24,6 @@ try {
   if (!e || e.code !== "ERR_REQUIRE_ESM") throw e;
 }
 
-const UPSTREAM_TIMEOUT_MS = 90000;
-
-let server = null;
 let agent = null;
 
 // Read ~/.clutch/settings.json; legacy {profiles, active} maps resolve to the
@@ -137,103 +132,4 @@ function joinUpstream(upstream, reqUrl) {
   return u.href;
 }
 
-// Which request paths this proxy serves: the two OpenAI wire protocols the
-// client can be configured for. The SDK appends the resource to the configured
-// base URL, so the path ends with the resource name however the base URL is
-// shaped (/v1/responses, /api/paas/v4/chat/completions, …).
-function isLlmPath(reqUrl) {
-  const path = (reqUrl || "").split("?")[0];
-  return path.endsWith("/chat/completions") || path.endsWith("/responses");
-}
-
-function startLlmProxy(upstream) {
-  server = http.createServer((req, res) => {
-    if (req.method !== "POST" || !isLlmPath(req.url)) {
-      res.writeHead(404).end("not found");
-      return;
-    }
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      try {
-        const body = Buffer.concat(chunks);
-        const target = new URL(joinUpstream(upstream || getUpstream(), req.url));
-        const transport = target.protocol === "http:" ? http : https;
-        const preq = transport.request(
-          target,
-          {
-            method: "POST",
-            ...trustOptions(),
-            agent: getAgent(target),
-            headers: {
-              "Content-Type": req.headers["content-type"] || "application/json",
-              Accept: req.headers["accept"] || "application/json",
-              Authorization: "Bearer " + getApiKey(),
-              "Content-Length": body.length,
-            },
-          },
-          (pres) => {
-            res.writeHead(pres.statusCode, { "Content-Type": pres.headers["content-type"] || "application/json" });
-            // The far side can die MID-BODY (a provider dropping a slow stream, a
-            // reset by the network in between). pipe() alone leaves this response
-            // open forever in that case, and the agent's read sitting on it then
-            // parks until its own 240s budget — the "still thinking after the
-            // network came back" report, seen from the proxy end as an accepted
-            // connection nobody ever answers. Tearing the response down is the
-            // only honest outcome: it makes that read raise now, so the run's own
-            // retry takes over instead of waiting out a budget.
-            pres.on("error", () => res.destroy());
-            pres.on("aborted", () => res.destroy());
-            pres.pipe(res);
-          }
-        );
-        preq.setTimeout(UPSTREAM_TIMEOUT_MS, () => preq.destroy(new Error("upstream timed out")));
-        preq.on("error", (e) => {
-          if (res.headersSent) {
-            // mid-stream: an SSE body cannot be replaced by a 502, and ending it
-            // cleanly would be worse than failing — a truncated answer would be
-            // read as a complete one. Destroy: the client's read fails, which is
-            // what it can act on.
-            res.destroy();
-            return;
-          }
-          try {
-            res.writeHead(502, { "Content-Type": "text/plain" });
-            res.end("upstream LLM unreachable: " + (e && e.message));
-          } catch (err) {
-            /* response already started */
-          }
-        });
-        // The client hung up mid-response (the app was backgrounded, its window
-        // closed, the tunnel died): stop pumping upstream into a socket nobody is
-        // reading. An unfinished response that is left to sit is a ghost — it
-        // holds a descriptor and any upstream work behind it for nothing.
-        res.on("close", () => {
-          if (!res.writableFinished) preq.destroy();
-        });
-        res.on("error", () => preq.destroy());
-        preq.end(body);
-      } catch (e) {
-        // never let an upstream/parse failure become an uncaught main-process error
-        try {
-          res.writeHead(502, { "Content-Type": "text/plain" });
-          res.end("proxy error: " + (e && e.message));
-        } catch (err) {
-          /* response already started */
-        }
-      }
-    });
-  });
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
-  });
-}
-
-function stopLlmProxy() {
-  if (server) {
-    server.close();
-    server = null;
-  }
-}
-
-module.exports = { startLlmProxy, stopLlmProxy, joinUpstream, isLlmPath, getUpstream, getApiKey, getAgent };
+module.exports = { joinUpstream, getUpstream, getApiKey, getAgent };

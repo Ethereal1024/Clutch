@@ -22,9 +22,9 @@
 //                        success, no failure, no disconnect (the shape that
 //                        parked "Starting tunnel…" in the field)
 //   forward: "held"    → every bind for the CONTRACT port is refused,
-//                        "address already in use" (the orphaned listener the
-//                        field log holds on 8892), while a port the far side
-//                        picks itself (port 0 — RFC 4254) is granted: a held
+//                        "address already in use" (the orphaned listener a
+//                        field log had left on its port), while a port the far
+//                        side picks itself (port 0 — RFC 4254) is granted: a held
 //                        port is not a far side that cannot forward
 //   forward: "reject"  → every bind is refused at all (a far side that really
 //                        has no forwarding to give)

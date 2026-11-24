@@ -560,12 +560,10 @@ def capture_module_blocked() -> list:
             unavailable_reason=lambda _name, _f=fields: _f["unavailable"],
             # `serves_here` is `serves_workspace_fs`: this host starts the
             # component's own process, so only a root on this machine can be served.
-            # `serves_channel` is `serves_foreign_fs`: it reaches the root's machine
-            # over a channel, so the root has to be somewhere else (both spellings
-            # come from rendezvous.reaches_another_machine — foreign-fs, or an
-            # entry-only workspace-fs).
+            # `serves_channel` is `serves_remote_workspace_fs`: the component's
+            # process is the CLIENT's, so the root has to be somewhere else.
             serves_workspace_fs=lambda _name, _f=fields: _f["serves_here"],
-            serves_foreign_fs=lambda _name, _f=fields: _f["serves_channel"],
+            serves_remote_workspace_fs=lambda _name, _f=fields: _f["serves_channel"],
         ):
             reason = prompt.module_blocked_reason(workspace, "clutch-probe")
         out.append(

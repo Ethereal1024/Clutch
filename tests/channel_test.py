@@ -575,15 +575,21 @@ def check_the_machine_a_component_serves() -> None:
                 "and the far-side component has nothing to explain for an ssh root",
             )
 
-            # the same subject from two sides, and what it contributes is which
-            # side a declaration is on
+            # The two halves of one axis, and what a component contributes is
+            # which half it is on: whose process performs the statement.
             check(
-                not rendezvous.serves_workspace_fs(far) and rendezvous.serves_foreign_fs(far),
-                "the two predicates answer for the two halves of the axis and nothing else",
+                rendezvous.serves_workspace_fs("clutch-workspace")
+                and not rendezvous.serves_remote_workspace_fs("clutch-workspace"),
+                "a component this host starts serves THIS machine's filesystem",
             )
             check(
-                rendezvous.serves_workspace_fs("clutch-workspace") and not rendezvous.serves_foreign_fs("clutch-workspace"),
-                "…symmetrically",
+                rendezvous.serves_remote_workspace_fs(far) and not rendezvous.serves_workspace_fs(far),
+                "…and one whose process is the client's serves the other machine's",
+            )
+            check(
+                not rendezvous.serves_workspace_fs("no-such-component")
+                and not rendezvous.serves_remote_workspace_fs("no-such-component"),
+                "a component this host does not know serves neither",
             )
         finally:
             channel.clear()

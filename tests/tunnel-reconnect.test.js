@@ -28,7 +28,7 @@ const { check, summary } = require("./harness");
 
 // tunnelLog appends synchronously to $HOME/.clutch/tunnel.log; a few checks below
 // read it back, because "where did it stop?" is the report these come from. HOME
-// is redirected to a scratch dir FIRST, the way tests/tunnel-reverse-port-test.js
+// is redirected to a scratch dir FIRST, the way tests/tunnel-reverse-channel-test.js
 // does: a runner that reads the log must not also scribble on the developer's own
 // ~/.clutch/tunnel.log (it used to, and the real log became unreadable as field
 // evidence for exactly that reason).
@@ -211,10 +211,10 @@ async function main() {
 
   const realWorld = {
     "bundle supervisor": "/home/u/.clutch-server/agent-supervisor --port 8890 --idle-timeout 25 --agent-cmd /home/u/.clutch-server/agent-server",
-    "bundle session child": "/home/u/.clutch-server/agent-server --port 0 --base-url http://127.0.0.1:8892/v1",
+    "bundle session child": "/home/u/.clutch-server/agent-server --port 0",
     "pylibs supervisor": "python3 -m agent.supervisor --port 8890 --idle-timeout 25",
     "pylibs supervisor (prefixed interpreter)": "/usr/bin/python3 -m agent.supervisor --port 8890 --idle-timeout 25",
-    "pylibs session child": "/usr/bin/python3 -m agent.server --port 0 --base-url http://127.0.0.1:8892/v1 --model deepseek-flash",
+    "pylibs session child": "/usr/bin/python3 -m agent.server --port 0",
     "the nohup shell that started a pylibs supervisor":
       "bash -c cd /home/u/.clutch-server && nohup setsid env PYTHONPATH=site-packages python3 -m agent.supervisor --port 8890 --idle-timeout 25",
     "the pkill shell itself":
@@ -608,308 +608,22 @@ async function main() {
     await new Promise((r) => slow.close(r));
   }
 
-  // ---- 6c. the far side is given its model path back, or told so ----
-  //
-  // A reconnect reaches the reverse-forward bind seconds after the previous hop
-  // died, when the remote sshd may still be releasing the old listener on 8892.
-  // Fired once, a refused bind left the far side talking into that orphaned
-  // listener — the connection is ACCEPTED, so it looks alive, and nobody ever
-  // answers it. The agent's read then parks until its own read budget, with the
-  // network perfectly fine: the "reconnecting did not help, only Stop did"
-  // report. So the install retries until the bind really lands, stops the
-  // moment a newer connect owns the session, and reports failure instead of
-  // pretending the model path is up.
-  {
-    const { state, remoteLlmBase, LLM_PROXY_REMOTE_PORT, channel } = require("../ui/tunnel-core");
-    const { installReverseForward } = require("../ui/tunnel-connect");
-    // these cases are the MODEL path's ladder: the row is what says which port has
-    // the contract, and the install itself knows nothing about which channel it is
-    const model = channel("model");
-    state.sshClient = null;
-
-    let calls = 0;
-    const flaky = {
-      forwardIn(_host, _port, cb) {
-        calls++;
-        if (calls < 3) return cb(new Error("bind: Address already in use"));
-        cb(null);
-      },
-    };
-    state.sshClient = flaky;
-    const landed = await installReverseForward(flaky, model, { tries: 5, retryMs: 5, maxWaitMs: 20 });
-    check(landed === true && calls === 3, `a refused reverse-forward bind is retried until it lands (${calls} tries)`);
-
-    // ...and a session that is no longer this client's is left alone: the new
-    // connect installs its own forward, and a late retry must not fight it
-    let late = 0;
-    const replaced = { forwardIn() { late++; } };
-    state.sshClient = flaky; // someone else's session already owns the tunnel
-    const abandoned = await installReverseForward(replaced, model, { tries: 3, retryMs: 5, maxWaitMs: 10 });
-    check(abandoned === false && late === 0, "a replaced session's forward is never installed at all");
-
-    // A port that never frees up is not automatically a dead model path, though:
-    // the far side may hold 8892 with a listener this window cannot kill (an
-    // sshd whose peer vanished holds it for hours — the stock keepalive is off)
-    // while still being perfectly willing to forward on another port. So the
-    // ladder ends by asking IT to pick one (port 0), and the process remembers
-    // the answer: every later hop re-binds that port, and every session this
-    // process spawns is told to use it.
-    const asked = [];
-    let refused = 0;
-    const held = {
-      forwardIn(_host, port, cb) {
-        asked.push(port);
-        if (port === 0) return cb(null, 46123); // the far side picks
-        refused++;
-        cb(new Error("bind: Address already in use"));
-      },
-    };
-    state.sshClient = held;
-    const elsewhere = await installReverseForward(held, model, { tries: 3, retryMs: 5, maxWaitMs: 10 });
-    check(elsewhere === true && refused === 3, `a held port does not sink the connection (${refused} retries, then the far side's own port)`);
-    check(
-      asked.length === 4 && asked[3] === 0 && asked.slice(0, 3).every((p) => p === 8892),
-      `the preferred port is tried FIRST and the far side is asked to choose only after it is exhausted (${asked.join(",")})`
-    );
-    check(state.llmProxyRemotePort === 46123, "the port the far side chose is remembered for every later hop");
-    check(
-      remoteLlmBase() === "http://127.0.0.1:46123/v1",
-      "…and the sessions this process spawns are pointed at the port that actually landed"
-    );
-
-    // but a host that refuses the preferred port AND a port of its own choosing
-    // is a FAILURE, never a quiet connect: three tries, then the one ask
-    state.llmProxyRemotePort = null;
-    let refusedBoth = 0;
-    const closed = { forwardIn(_host, _port, cb) { refusedBoth++; cb(new Error("bind: refused")); } };
-    state.sshClient = closed;
-    const never = await installReverseForward(closed, model, { tries: 3, retryMs: 5, maxWaitMs: 10 });
-    check(
-      never === false && refusedBoth === 4,
-      `a host that forwards to nobody fails the connect loudly: 3 tries on ${LLM_PROXY_REMOTE_PORT}, then one ask for its own (${refusedBoth} calls)`
-    );
-    check(state.llmProxyRemotePort === null, "and nothing is remembered from a bind that never landed");
-
-    // ...and a far side that says NOTHING is not a far side that says no: ssh2
-    // calls the forwardIn callback from the REPLY handler and from nowhere else,
-    // so an attempt with no reply in flight was a promise nothing could settle.
-    // That is the report 0.1.46 closed on — "still stuck on Starting tunnel…" —
-    // because progress("forward") prints that label right before the bind and no
-    // other await in the phase is unbounded. Its own clock ends it now, and
-    // 0.1.47 went further: silence is not a verdict about the port (asking the
-    // same far side for a port of its own is the same question), and it is not a
-    // verdict about the connect either (the model path is not what the connect
-    // is — see section 7). So one unanswered ask is the whole cost.
-    const silent = new EventEmitter();
-    let silentAsks = 0;
-    silent.forwardIn = () => {
-      silentAsks++; // the far side never answers, and never dies
-    };
-    state.sshClient = silent;
-    let t0 = Date.now();
-    const unbound = await installReverseForward(silent, model, { tries: 3, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 40 });
-    let elapsed = Date.now() - t0;
-    check(
-      unbound === false && elapsed >= 30 && elapsed < 1500,
-      `an unanswered bind gives up on its own clock instead of parking the connect (${elapsed}ms)`
-    );
-    check(
-      silentAsks === 1,
-      `…and a SILENT far side is asked exactly once: another ask is another clock about a question nothing answers (${silentAsks})`
-    );
-    check(
-      /did not answer the reverse-forward request within 40ms/.test(tunnelLogText()),
-      "…and the tunnel log names the timeout that ended it (where did it stop, without a debugger)"
-    );
-    check(
-      /not asking for a port of its own/.test(tunnelLogText()),
-      "…and it does not follow silence with the port-0 ask, which the far side would be silent about too"
-    );
-    check(
-      silent.listenerCount("close") === 0 && silent.listenerCount("error") === 0,
-      "…leaving no listeners behind on the client it gave up on"
-    );
-
-    // ...and an attempt ends AT ONCE when the client itself reports the wire is
-    // gone: the keepalive that notices a hop which died without a FIN tears the
-    // client down, and a promise already in flight has to hear about it.
-    const dying = new EventEmitter();
-    dying.forwardIn = () => {};
-    state.sshClient = dying;
-    t0 = Date.now();
-    const pending = installReverseForward(dying, model, { tries: 1, retryMs: 5, maxWaitMs: 10, bindTimeoutMs: 5000 });
-    setTimeout(() => {
-      state.sshClient = null;
-      dying.emit("close");
-    }, 60);
-    const dead = await pending;
-    elapsed = Date.now() - t0;
-    check(
-      dead === false && elapsed < 1000,
-      `a client that dies mid-bind settles the attempt at once, not with the 5000ms clock (${elapsed}ms)`
-    );
-    check(
-      dying.listenerCount("close") === 0 && dying.listenerCount("error") === 0,
-      "…and that path leaves no listeners on the dead client either"
-    );
-    state.sshClient = null;
-  }
-
-  // ---- 6d. the listener the far side granted us is handed back before the wire goes ----
-  //
-  // An sshd releases a session's tcpip-forward bindings when it learns the
-  // session ended — and a hop that died without a FIN (a phone that lost its
-  // radio, a process killed mid-flight) teaches it nothing until the TCP
-  // keepalive does, two hours later on a stock sshd. That ghost listener is what
-  // the next hop's own 8892-in-use came from. So the teardown cancels the one
-  // listener THIS hop was granted, as a global request on a wire that is still
-  // up, before end() lets the far side infer the rest.
-  {
-    const { state } = require("../ui/tunnel-core");
-    const { stopTunnel } = require("../ui/tunnel-lifecycle");
-    const order = [];
-    const granted = {
-      end() {
-        order.push("end");
-      },
-      unforwardIn(host, port, cb) {
-        order.push(`unforward:${host}:${port}`);
-        if (cb) cb();
-      },
-    };
-    state.sshClient = granted;
-    state.modelPathClient = granted;
-    state.modelPath = "listening";
-    state.llmProxyRemotePort = 8892;
-    state.modelPathRepairTimer = null;
-    state.currentUrl = "http://127.0.0.1:1";
-    state.localSrv = null;
-    state.sessionForwards = new Set();
-    const logAt = tunnelLogText().length;
-    await stopTunnel();
-    check(
-      order.length === 2 && order[0] === "unforward:127.0.0.1:8892" && order[1] === "end",
-      "a teardown cancels the far side's reverse forward BEFORE it ends the wire (" + order.join(" then ") + ")"
-    );
-    check(
-      tunnelLogText().includes("[disconnect] releasing the far side's reverse forward on 127.0.0.1:8892"),
-      "…and says which listener it handed back (the port is the fact the next hop needs)"
-    );
-    check(
-      state.llmProxyRemotePort === 8892,
-      "…while the PORT stays remembered: the far side keeps it, the cancel was about this hop's binding"
-    );
-
-    // a model path that never landed is not a listener to hand back — and a
-    // listener belonging to a NEWER hop is not this hop's to cancel either:
-    // cancelling a port this client was never given is a request about somebody
-    // else's listener, and the next hop would spend its ladder on it.
-    for (const [what, setup] of [
-      ["a model path that never landed", { modelPath: "unavailable", sameClient: true }],
-      ["a listener belonging to a newer hop", { modelPath: "listening", sameClient: false }],
-    ]) {
-      order.length = 0;
-      const me = {
-        end() {
-          order.push("end");
-        },
-        unforwardIn() {
-          order.push("unforward");
-        },
-      };
-      const other = { end() {} };
-      state.sshClient = me;
-      state.modelPathClient = setup.sameClient ? me : other;
-      state.modelPath = setup.modelPath;
-      state.llmProxyRemotePort = 8892;
-      state.currentUrl = "http://127.0.0.1:1";
-      state.localSrv = null;
-      state.sessionForwards = new Set();
-      await stopTunnel();
-      check(order.join(",") === "end", `nothing is cancelled for ${what}`);
-    }
-
-    // the wire may already be gone: ssh2 throws "Not connected" from its own
-    // guard, and the teardown must not turn that into a failed disconnect
-    order.length = 0;
-    const dead = {
-      end() {
-        order.push("end");
-      },
-      unforwardIn() {
-        throw new Error("Not connected");
-      },
-    };
-    state.sshClient = dead;
-    state.modelPathClient = dead;
-    state.modelPath = "listening";
-    state.llmProxyRemotePort = 8892;
-    state.currentUrl = "http://127.0.0.1:1";
-    state.localSrv = null;
-    state.sessionForwards = new Set();
-    let threw = null;
-    try {
-      await stopTunnel();
-    } catch (e) {
-      threw = e;
-    }
-    check(
-      !threw && order.join(",") === "end",
-      "a client whose wire is already gone still tears down (the release is best-effort: " +
-        ((threw && threw.message) || "no error") +
-        ")"
-    );
-    check(
-      /reverse forward release skipped/.test(tunnelLogText()),
-      "…and what the release could not do is logged, not thrown at the disconnect"
-    );
-    state.modelPath = null;
-    state.modelPathClient = null;
-    state.llmProxyRemotePort = null;
-  }
-
   // ---- 7. the paths a fake remote cannot reach, asserted on the source ----
   //
   // report #4 (0.1.47: "still stuck on Starting tunnel…", deterministic, on a good
   // network). The clock added in 0.1.47 bounded the wait but left the SHAPE the
   // report was about: the hop's verdict still depended on the far side answering a
   // global request. What the connect builds is a hop — a local forward to a live
-  // supervisor — and the far side's model path is installed beside it, with the
-  // property that actually matters ("never point a session at a port nobody
-  // serves") waiting where it can be waited for: the claim, just before the
-  // session's --base-url is built.
+  // supervisor — and nothing else: no reverse forward of its own is part of the
+  // verdict (a channel is installed by the claim that could use it).
   check(
-    /^\s*startModelPath\(client\);/m.test(CONNECT_SRC) &&
-      !/await installReverseForward\(client\)/.test(CONNECT_SRC),
-    "the far side's model path is started beside the connect, never awaited by it"
+    !/await installReverseForward\(client\)/.test(CONNECT_SRC),
+    "no reverse forward is awaited by the connect"
   );
   check(
     /establishForwardAndHealth\(localPort, client\)/.test(CONNECT_SRC) &&
       !/could not be given a listener/.test(CONNECT_SRC),
     "a far side that never gets its listener can no longer hold the connect open, let alone fail it"
-  );
-  const claimSrc = HOST_CORE_SRC.split("await releaseSlot(wc.id, slotId); // drop any local session first")[1] || "";
-  check(
-    claimSrc.indexOf("path = await awaitPath();") > -1 &&
-      claimSrc.indexOf("path = await awaitPath();") < claimSrc.indexOf("supervisorSessionStart("),
-    "the claim waits for the model path before a session is told where the model is"
-  );
-  check(
-    /try \{\s*path = await awaitPath\(\);\s*\} catch \(e\) \{\s*path = "unknown \(" \+ \(\(e && e\.message\) \|\| e\) \+ "\)";/.test(claimSrc),
-    "and a path that cannot be named is 'unknown', never a claim the tunnel refused"
-  );
-  check(
-    /if \(state\.modelPathInstall\) return state\.modelPathInstall;/.test(CONNECT_SRC) &&
-      /state\.sshClient !== client\) return Promise\.resolve\(state\.modelPath/.test(CONNECT_SRC),
-    "one install in flight, joined by every asker: a repair and a claim ask the far side once, not once each"
-  );
-  check(
-    /state\.modelPathRepairTimer\.unref/.test(CONNECT_SRC) && /state\.modelPath = null;/.test(LIFECYCLE_SRC),
-    "a pending repair never keeps a host alive, and it dies with the hop it belongs to"
-  );
-  check(
-    /stream\.on\("error", kill\)/.test(CONNECT_SRC) && /proxy\.on\("error", kill\)/.test(CONNECT_SRC),
-    "either half of the reverse-forward pipe dying takes the other half down with it"
   );
   check(
     !/progress\("install"\)/.test(CONNECT_SRC),

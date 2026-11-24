@@ -5,7 +5,7 @@ Every UI window is a SESSION: the supervisor spawns one agent.server child
 the port back. The window then talks to its child DIRECTLY (locally, or over
 its own tunnel forward) — the supervisor never proxies traffic, it only owns
 the lifecycle: spawn, beat, release, reap. No message it forwards carries work
-(the model path lives in the client, not in the child — see the P4 note below).
+(the model call lives in the client, not in the child).
 
 Endpoints:
 
@@ -232,23 +232,17 @@ class SessionSupervisor(ProcessSupervisor):
 
     def start_session(
         self,
-        base_url: str | None = None,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
-        api_protocol: str | None = None,
         claim_pid: int | None = None,
         claim_start: str | None = None,
         claim_host: str | None = None,
     ) -> Session | None:
         """Spawn one agent.server child on a random port, learning the port from
-        its stdout banner. None when the child never prints it. base_url/model
-        are forwarded as --base-url/--model: a REMOTE session's LLM endpoint and
-        model belong to the claiming client (which owns the settings), not to
-        the remote host's own ~/.clutch/settings.json — that file usually has no
-        model at all, and an empty model aborts the run before it starts. The
-        reasoning_effort / api_protocol knobs ride along for the same reason:
-        the child validates them through argparse choices, so an unknown value
-        fails the spawn loudly instead of being silently ignored.
+        its stdout banner. None when the child never prints it.
+
+        The child is spawned with nothing but its port: the model call is made
+        by the claiming client (ui/llm-client, on the window's own machine), so
+        a session has no endpoint or model of its own to be told — that is why
+        nothing here carries --base-url/--model any more.
 
         ``claim_host`` names the machine the claiming window runs on — the
         client's, whenever this session was started for a window behind a
@@ -258,14 +252,6 @@ class SessionSupervisor(ProcessSupervisor):
         child records it so the machine named can attest to it later, and this
         host's reaper never reads its own pid table into it)."""
         cmd = [*self.agent_cmd, "--port", "0"]
-        if base_url:
-            cmd += ["--base-url", base_url]
-        if model:
-            cmd += ["--model", model]
-        if reasoning_effort:
-            cmd += ["--reasoning-effort", reasoning_effort]
-        if api_protocol:
-            cmd += ["--api-protocol", api_protocol]
         claim_is_local = not claim_host or claim_host == socket.gethostname()
         pinned_start: str | None = None
         if claim_pid:
@@ -612,11 +598,6 @@ class _Handler(BaseHTTPRequestHandler):
             claim_host = body.get("claim_host")
             claim_start = body.get("claim_start")
             sess = sup.start_session(
-                base_url=body.get("base_url") or None,
-                model=body.get("model") or None,
-                # the client LLM knobs ride with the claim, exactly like the model
-                reasoning_effort=body.get("reasoning_effort") or None,
-                api_protocol=body.get("api_protocol") or None,
                 # the OS process of the window claiming this session, and the
                 # machine it runs on: the one fact that lets the RIGHT host tell
                 # "window gone" from "window silent" later, without a timer
@@ -647,8 +628,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/session/heartbeat":
             body = self._read_body()
             ok = sup.heartbeat(body.get("session_id"))
-            # a purely liveness beat: the run's model path lives in the client
-            # (P4), so a {base_url, model} in the body is read as nothing
+            # a purely liveness beat: the model call lives in the client
+            # (ui/llm-client), so nothing but a session id is read from it
             self._json({"status": "ok" if ok else "unknown"}, 200 if ok else 404)
         elif path == "/api/locks/reclaim":
             # The user's own hand on a project the host can PROVE is orphaned.

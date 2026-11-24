@@ -290,36 +290,6 @@ def _bootstrap(config: Config, log: LazyEventLog | None = None, *, remote: bool 
     return out
 
 
-def _serves_this_workspace(component: catalog.Component, workspace: Workspace | None) -> bool:
-    """May `component`'s tools be offered for a call rooted in `workspace`?
-
-    Only the components that serve *a* workspace filesystem have a machine to be
-    wrong about, and they are wrong in opposite directions (`prompt.
-    module_blocked_reason` asks the same question per call):
-
-      * `workspace-fs` served BY THIS HOST serves the root's own machine. It
-        stays in the pass when the root is elsewhere (its non-filesystem tools
-        may still mean something, and its refusal is a sentence that says why:
-        "this root is another machine's"), but the four file names are not its to
-        answer there — the HOST declares those itself, and `build_tools` drops a
-        component publishing one (`held`), so what this filter keeps is the
-        component, not a second reading of `read_file`.
-      * a component that reaches ANOTHER machine over a channel
-        (`rendezvous.reaches_another_machine`: code on the client, commands down
-        the tunnel). On a LOCAL workspace it is dropped, not kept-and-refused: its
-        tools share their names with the ones that really work here, so keeping it
-        would shadow a working local `read_file` with one that reads some other
-        machine a tunnel happens to reach.
-
-    `workspace` None (a tool list built before any run has a root: the schema
-    surface, a test) is no machine to judge by, and every component is offered."""
-    if workspace is None:
-        return True
-    if rendezvous.reaches_another_machine(component):
-        return not isinstance(workspace, LocalWorkspace)
-    return True
-
-
 def build_tools(
     config: Config,
     log: LazyEventLog | None = None,
@@ -345,15 +315,15 @@ def build_tools(
     can be driven at all is one filter for the whole model-facing surface
     (`_drivable`), shared with the prompt fragments they carry.
 
-    `workspace` is the session's root, when there is one: it decides which
-    machine each component may be offered for (`_serves_this_workspace`), and
-    whether the host declares the four file tools itself (a `RemoteWorkspace`
-    has no daemon to serve them: tools/host.py `_REMOTE_DECLARATIONS`). It is
-    a filter on the surface, not a second implementation — a call still asks
+    `workspace` is the session's root, when there is one: it decides whether the
+    host declares the four file tools itself (a `RemoteWorkspace` has no daemon
+    to serve them: tools/host.py `_REMOTE_DECLARATIONS`). It is a filter on the
+    surface, not a second implementation — a call still asks
     `module_blocked_reason` before it runs. `log` is the session's own project
     log: the one condition behind the `project` gate (`gates.gate_project`), and
     the reader the host's own log tools are handed on every call."""
     remote = isinstance(workspace, RemoteWorkspace)
+    local = isinstance(workspace, LocalWorkspace)
     tools: list[Tool] = _bootstrap(config, log, remote=remote)
     # The names the host holds ITSELF in this session, and the reason a component
     # that declares one of them is dropped instead of wired twice: on a remote
@@ -364,7 +334,14 @@ def build_tools(
     # wiring both would be two readings of one name.
     held = {t.name for t in tools if t.host is not None}
     for component in _drivable():
-        if not _serves_this_workspace(component, workspace):
+        if local and rendezvous.serves_remote_workspace_fs(component.name):
+            # A component whose statements would be spoken to ANOTHER machine's
+            # filesystem has nothing to say about a root that lives HERE: the same
+            # names exist natively, and wiring it would shadow a working local
+            # `read_file` with one that reads some machine a tunnel happens to
+            # reach. Reachable only through a client push (tools/channel.py); on a
+            # root that IS elsewhere its names are the host's own, so `held` drops
+            # it there.
             continue
         for spec in component.tools:
             if config.mode not in spec.modes:
@@ -672,7 +649,6 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "build_tools",
-    "_serves_this_workspace",
     # what the model and the UI are told
     "prompt_section",
     "components_unavailable",

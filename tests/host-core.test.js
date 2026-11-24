@@ -24,8 +24,8 @@ function fakeSessions() {
     // flip it to say the far host really dropped the session instead of just
     // this client's forward to it.
     sessionAlive: true,
-    supervisorSessionStart: async (base, baseUrl, model, knobs) => {
-      calls.started.push({ base, baseUrl, model, knobs });
+    supervisorSessionStart: async (base, ...rest) => {
+      calls.started.push({ base, rest });
       return { sessionId: "s" + ++seq, port: 30000 + seq };
     },
     supervisorSessionStop: (base, sid) => calls.stopped.push({ base, sid }),
@@ -64,9 +64,6 @@ function makeCore({ tunnel = { active: false, url: null }, localSessions = 99, s
   let lseq = 0;
   const deps = {
     supervisorBase: () => "http://127.0.0.1:8890",
-    remoteLlmBase: () => "http://127.0.0.1:8892/v1",
-    remoteLlmModel: () => "deepseek-v4-flash",
-    remoteLlmKnobs: () => ({ reasoning_effort: "max", api_protocol: "responses" }),
     tunnelStatus: () => tunnel,
     restartRemoteServer: async () => true,
     openSessionForward: async (port) => {
@@ -92,18 +89,19 @@ function makeCore({ tunnel = { active: false, url: null }, localSessions = 99, s
 }
 
 async function main() {
-  // 1. tunnel active: remote claim via the reverse-forward LLM base
+  // 1. tunnel active: remote claim through the tunnel's forwarded supervisor
   {
     const { core, sessions } = makeCore({ tunnel: { active: true, url: "http://127.0.0.1:8891" } });
     const url = await core.ensureSlotBackend(fakeWin(1));
     assert.strictEqual(url, "http://127.0.0.1:31001", "tunnel claim forwards the session port");
     assert.strictEqual(sessions.calls.started[0].base, "http://127.0.0.1:8891");
-    assert.strictEqual(sessions.calls.started[0].baseUrl, "http://127.0.0.1:8892/v1", "remote sessions point at the reverse forward");
-    assert.strictEqual(sessions.calls.started[0].model, "deepseek-v4-flash", "the client model rides along: a remote session cannot read it");
+    // Nothing about a model travels with the claim: the run's model calls are
+    // made in THIS process (ui/llm-client), so the far side is never handed an
+    // endpoint, a model name or a knob — and never has one to go stale on.
     assert.deepStrictEqual(
-      sessions.calls.started[0].knobs,
-      { reasoning_effort: "max", api_protocol: "responses" },
-      "the two LLM knobs ride with the model: the remote host has neither",
+      sessions.calls.started[0].rest,
+      [],
+      "the claim names the supervisor and nothing else",
     );
     // second ensure: same window reuses its backend, no new session child
     assert.strictEqual(await core.ensureSlotBackend(fakeWin(1)), url, "existing tunnel backend is reused");
@@ -498,83 +496,7 @@ async function main() {
     assert.strictEqual(core.backendCount(), 1, "the parked claim still names the far session");
   }
 
-  // 20. the far side's model path is awaited HERE (the claim), not inside the
-  //     connect (ui/tunnel-connect.js startModelPath): the connect can no longer
-  //     be parked by a far side that never answers a global request — the report
-  //     this dependency exists for — and this await is the one place a session's
-  //     --base-url is checked against a listener that is actually there. The
-  //     request is ACCEPTED by the reverse forward and answered by nobody, so a
-  //     session handed a base too early parks in the agent's own read budget.
-  {
-    let release;
-    const gate = new Promise((r) => (release = r));
-    let asked = 0;
-    const ts = { active: true, url: "http://127.0.0.1:8891" };
-    const { core, sessions, state } = makeCore({
-      tunnel: ts,
-      over: {
-        awaitModelPath: () => {
-          asked++;
-          return gate;
-        },
-      },
-    });
-    const claim = core.ensureSlotBackend(fakeWin(20));
-    await tick();
-    await tick();
-    assert.strictEqual(sessions.calls.started.length, 0, "no session is spawned while the model path is still being installed");
-    release("listening");
-    assert.ok(await claim, "the claim lands once the path answers");
-    assert.strictEqual(asked, 1, "the claim asked the far side's model path once");
-    assert.strictEqual(sessions.calls.started.length, 1, "and only then is the session spawned");
-    assert.strictEqual(
-      sessions.calls.started[0].baseUrl,
-      "http://127.0.0.1:8892/v1",
-      "still pointed at the reverse forward, whose listener the await just confirmed",
-    );
-    assert.deepStrictEqual(
-      state.logs.filter((l) => /model path/.test(l)),
-      [],
-      "a path that IS up needs no caveat in the log",
-    );
-  }
-
-  // 21. a path that is not up: the session is started anyway, and the log says
-  //     which path it was started over — a run whose model does not answer beats
-  //     no run, but it must not be a silent guess
-  {
-    const { core, sessions, state } = makeCore({
-      tunnel: { active: true, url: "http://127.0.0.1:8891" },
-      over: { awaitModelPath: async () => "unavailable" },
-    });
-    assert.ok(await core.ensureSlotBackend(fakeWin(21)), "a far side with no model path still gets its session");
-    assert.strictEqual(sessions.calls.started.length, 1, "the session is spawned regardless of the path");
-    assert.ok(
-      state.logs.includes("[backend] the far side's model path is unavailable; starting the session anyway"),
-      "the log names the path the session was started over (" + JSON.stringify(state.logs) + ")",
-    );
-  }
-
-  // 22. a model-path dep that throws is "unknown", never a failed claim: the
-  //     tunnel not answering about a port is not a reason to refuse a run
-  {
-    const { core, sessions, state } = makeCore({
-      tunnel: { active: true, url: "http://127.0.0.1:8891" },
-      over: {
-        awaitModelPath: async () => {
-          throw new Error("no wire");
-        },
-      },
-    });
-    assert.ok(await core.ensureSlotBackend(fakeWin(22)), "a model-path error does not cost the session");
-    assert.strictEqual(sessions.calls.started.length, 1, "and the session child is the ordinary one");
-    assert.ok(
-      state.logs.includes("[backend] the far side's model path is unknown (no wire); starting the session anyway"),
-      "the error is reported as unknown, not swallowed (" + JSON.stringify(state.logs) + ")",
-    );
-  }
-
-  // 23. the claiming window is named in ONE place — the supervisor client, with
+  // 20. the claiming window is named in ONE place — the supervisor client, with
   //     (host, pid, start tick) on every session start, local or tunnelled — so
   //     the state machine hands the claim nothing and cannot get it wrong. That
   //     pid is the HOST process (the Electron main / Android host), never the
@@ -599,7 +521,7 @@ async function main() {
       "and the claim does not depend on the window handle at all");
   }
 
-  // 24. one window, two SLOTS: each tab claims its own session child, releases
+  // 21. one window, two SLOTS: each tab claims its own session child, releases
   //     independently, and every notification names the slot it is about —
   //     the whole point of the tab refactor (old windows = old sessions).
   {
@@ -630,7 +552,7 @@ async function main() {
     assert.strictEqual(state.localStops.length, 2, "each stop is per session");
   }
 
-  // 25. a slot whose FILE LIVES ON A MACHINE is never served by a local session
+  // 22. a slot whose FILE LIVES ON A MACHINE is never served by a local session
   //
   // The reported dead end: a restored remote tab claimed a slot while the hop
   // was not serving it, the host fell back to a local session, and the open
@@ -687,7 +609,7 @@ async function main() {
     assert.strictEqual(state.localStarts.length, 1);
   }
 
-  // 26. a release the supervisor did NOT confirm keeps the claim, PARKED
+  // 23. a release the supervisor did NOT confirm keeps the claim, PARKED
   //
   // The reported defect: a tab that had been open for WRITE came back after a
   // reconnect with "Already open elsewhere — open it read-only?", though the

@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/plugin-host.ts and run `npm run build:host`.
-// source sha256: db9162e5c9a9fda5e3c44c376ecbcc685339e7aae95d92f65892d52cdc77c3a5
+// source sha256: 9cd8ad28ffca9a542e73cfd68b97a7ad0750c20e6263e07950d6a19ceb3702bd
 
 // The client's OWN component domain: plugins this app holds and runs itself.
 //
@@ -43,8 +43,8 @@
 // bridge (`CLUTCH_EXEC_BRIDGE`), the loopback port that reaches the far side of
 // an ssh tunnel. It is a capability, not a courtesy — whoever holds that address
 // can run anything on the other machine — so it exists for the plugins whose
-// whole job is the far machine's filesystem (`subject: foreign-fs`) and for
-// nothing else does the value mean anything. It is read at every call rather than
+// whole job is a filesystem on the far side of that tunnel, and for nothing else
+// does the value mean anything. It is read at every call rather than
 // captured at construction, because the port only lives while a tunnel is up; an
 // empty string is "there is no bridge right now", a fact a plugin can answer with,
 // as opposed to a guess or a timeout.

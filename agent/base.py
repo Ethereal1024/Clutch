@@ -428,12 +428,13 @@ class BaseServer(ABC):
         """Tools for a run; config overrides self.config for a per-run mode
         (chat read-only toolset vs work's full set).
 
-        The run's workspace goes with them: which components may be offered
-        depends on which machine the root is on (`registry._serves_this_workspace`),
-        and a local session must not be handed a plugin that reads a DIFFERENT
-        machine's files under the local `read_file` name. `state.workspace` is
-        the open project's workspace (set_project); before a project is open it
-        is None, which offers everything.
+        The run's workspace goes with them: a remote root has no daemon of ours to
+        answer for the workspace's own filesystem, so the host declares the four
+        file tools itself there (`tools/host.py`) and a component publishing one of
+        those names is dropped rather than wired twice (`registry.build_tools`'s
+        `held`); a call still asks `prompt.module_blocked_reason` before it runs.
+        `state.workspace` is the open project's workspace (set_project); before a
+        project is open it is None, which offers everything.
 
         The project's log goes with them too, and it is the same object in both
         places: `build_tools` needs it to answer the `project` gate, and the

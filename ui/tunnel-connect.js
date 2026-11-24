@@ -1,13 +1,12 @@
 // GENERATED FILE — do not edit; edit src/host/tunnel-connect.ts and run `npm run build:host`.
-// source sha256: e0f36126c9241a4503ff3c54e25ed56861696175ce3e68781baa5124d54dc335
+// source sha256: 49cd21e30954db814cabef66da43c8f977a906f7ed093d5462f09d3a8ca46b14
 
 "use strict";
 // one connect attempt — auth, the forwards, the health gate
 //
 // connectTunnel is the whole attempt: reuse a live tunnel, start the
-// client-side proxies (the LLM proxy is reachable from the far side over the
-// reverse forward), authenticate, probe, install, then set up the forwards
-// and gate on the health check through them. The gate has the last word: the
+// client-side exec bridge, authenticate, probe, install, then set up the
+// forwards and gate on the health check through them. The gate has the last word: the
 // forward must answer, and it must answer as a Clutch supervisor — a legacy
 // shared server on the same port is refused by name.
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -16,12 +15,11 @@ const os = require("os");
 const path = require("path");
 const fs = require("fs");
 const { Client } = require("ssh2");
-const { state, tunnelLog, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, remoteLlmPort, channelFor, channel, } = require("./tunnel-core");
+const { state, tunnelLog, REMOTE_API_PORT, CONNECT_TIMEOUT_MS, channelFor, } = require("./tunnel-core");
 const { freePort, listen, waitForServer, probeServer, probeSupervisorShape } = require("./tunnel-net");
 const { remoteExec } = require("./tunnel-remote");
 const { PROBE_CMD, parseProbe, installServer, installComponents, remoteServingState, } = require("./tunnel-bootstrap");
 const { stopTunnel, reopenForward, notifyEnd, startHealing, stopHealing } = require("./tunnel-lifecycle");
-const { startLlmProxy, stopLlmProxy } = require("./llm-proxy");
 const { startExecBridge, stopExecBridge } = require("./exec-bridge");
 const { getSshSecret, saveSshSecret, forgetSshSecret } = require("./settings-mirror");
 // How long a dial that was reset before the handshake waits before its one more
@@ -212,7 +210,6 @@ async function connectTunnel({ host, user, port, password }, progress) {
     const myDial = ++dialSeq;
     try {
         const localPort = await freePort();
-        state.llmProxyPort = await startLlmProxy();
         state.execBridgePort = await startExecBridge();
         const opts = {
             host,
@@ -357,7 +354,6 @@ async function connectTunnel({ host, user, port, password }, progress) {
                 state.localSrv.close();
                 state.localSrv = null;
             }
-            stopLlmProxy();
             stopExecBridge();
             notifyEnd();
         };
@@ -492,63 +488,37 @@ async function connectTunnel({ host, user, port, password }, progress) {
         return { ok: false, error: friendly };
     }
 }
-// Asking the far side to listen on 8892 (and forward what arrives back here, to
-// this window's LLM proxy) is the ONLY way a remote session reaches a model. It
-// used to be fired once and forgotten: the reply was read for an error only to
-// write it to a log, and the connect carried on regardless.
+// The reverse forward: asking the far side to listen on a loopback port and
+// forward what arrives back here. It is one channel today — the client's plugin
+// endpoint (plugin-link), installed at CLAIM time, not at connect — and this is
+// the ladder every channel is installed by.
 //
-// That is one half of the field report. A reconnect reaches this line seconds
-// after the previous hop died, and the remote sshd is still holding the old
-// session's 8892 listener while it is released — so the bind comes back refused,
-// nothing retries it, and every LLM request the agent then makes is ACCEPTED by
-// that orphaned listener and answered by nobody. From the agent's side the model
-// is simply not answering: the run sits in "thinking" (a parked read in its own
-// 240s budget) however long the network has been back, and only a Stop — which
-// breaks the read — gets it moving again. So: retry the bind until it really is
-// bound, and let the gate below fail the connect loudly if it never is.
+// It is a ladder, not a single ask, because a reconnect reaches this line
+// seconds after the previous hop died and the far sshd is still holding the old
+// listener: the bind comes back refused, and a moment later the port is free.
+// Retrying the SAME port is what lets a session that was already told a port keep
+// reaching this machine.
 //
-// The second release of the same report is why retrying is not the whole story.
-// It read as "stuck on Starting tunnel…", and the listener holding 8892 need not
-// be a dying one: sshd's keepalive is off in the stock config, so a session
-// whose network vanished without a FIN (a phone that lost its radio, a laptop
-// that slept) is held — and holds 8892 with it — for hours, and a listener left
-// by a hop this window no longer owns is not ours to kill. A bind that never
-// lands is not proof the far side cannot forward: it is proof it cannot forward
-// on THAT port. So the ladder ends by asking the far side to pick a port for
-// itself (port 0 — RFC 4254 has sshd bind what it can and report the number),
-// and this process remembers the answer for every later hop (see remoteLlmPort).
+// Silence is a different answer from refusal. ssh2 answers forwardIn only when
+// the FAR side replies to the global request (SSH_MSG_GLOBAL_REQUEST:
+// node_modules/ssh2/lib/client.js invokes the callback from the reply handler,
+// and from nowhere else), so a middlebox, a hardened or non-OpenSSH sshd, or a
+// wedged request channel can leave the promise pending for as long as the client
+// object lives. The bind therefore gets a clock of its own (bindTimeoutMs) and
+// settles the moment the client says it is gone; a silent far side ends the
+// ladder there, without the port-0 ask, because asking twice into silence buys
+// nothing.
 //
-// The THIRD release of that report — 0.1.46, "still stuck on Starting tunnel…" —
-// is the one the ladder above could not reach, because the ladder is not where it
-// parks. ssh2 answers forwardIn only when the FAR side replies to the global
-// request (SSH_MSG_GLOBAL_REQUEST: node_modules/ssh2/lib/client.js invokes the
-// callback from the reply handler, and from nowhere else), so an attempt whose
-// answer never arrives leaves this await pending for as long as the client object
-// lives. The keepalive does eventually notice a wire that died without a FIN and
-// tears the CLIENT down (15s × 3), but nothing rejects a promise that is already
-// in flight: the phase stayed on "Starting tunnel…" — the label progress("forward")
-// prints right before this — for good. Every other await in the phase is bounded
-// (CONNECT_TIMEOUT_MS on the health probe, 3s on the supervisor probe, the exec
-// budget in tunnel-remote), so the bind gets a clock of its own, and it also
-// settles the moment the client says it is gone.
+// A refusal on the preferred port, by contrast, is not proof the far side cannot
+// forward — only that it cannot forward on THAT port. When a channel has a
+// preferred port and the ladder exhausts it, the far side is asked to pick one
+// (port 0: RFC 4254 has sshd bind what it can and report the number) and the row
+// remembers the answer for every later hop.
 //
-// The FOURTH release of that report — 0.1.47, still "Starting tunnel…", still
-// deterministic on a good network — is why a clock was never the answer. The
-// clock made the wait up to 4 seconds instead of forever, but it did not remove
-// the wait: this hop's outcome still DEPENDED on the far side answering, and a
-// far side that says nothing about global requests (a middlebox, a hardened or
-// non-OpenSSH sshd, a session whose request channel is wedged) was still the
-// thing the user's reconnect hung on. The structural change is not a shorter
-// clock: the model path stops being part of the connect's verdict at all. The
-// connect's own gates stay the ones that describe the hop it is actually
-// building — a local forward, a live supervisor behind it, and that supervisor's
-// shape — and the far side's model path is installed BESIDE them (startModelPath),
-// with a session claim (host-core) waiting for it at the one moment it can be
-// waited for without parking a connect: right before a session is told to use it.
-//
-// So: silent is not refused (the ladder stops and the port-0 ask is skipped — one
-// clock, one question), a failure here is not a failure of the hop, and nothing a
-// far side does or does not say can hold "Starting tunnel…" open.
+// Nothing installed by this function is on the connect's critical path: the
+// connect's gates are the hop's own (a local forward, a live supervisor behind
+// it, that supervisor's shape), and the plugin channel is installed by the first
+// claim that could use it.
 const REVERSE_FORWARD_TRIES = 6;
 const REVERSE_FORWARD_RETRY_MS = 500; // first step of the ladder
 const REVERSE_FORWARD_MAX_WAIT_MS = 2000; // a port freeing up, not a network: cap it here
@@ -650,8 +620,8 @@ async function bindReverseForwardWithLadder(client, port, opts = {}) {
 // and if the far side refuses that port rather than falling silent, it is asked to
 // pick a port for itself (port 0) — a port held by a hop it has not reaped yet
 // costs the channel a different port, not the connect. The port that really landed
-// is written to the row, so every later hop re-binds THAT port and every session is
-// told where the channel went (tunnel-core's remoteLlmPort).
+// is written to the row, so every later hop re-binds THAT port and the far side is
+// told where the channel went.
 //
 // `chan` is a row from tunnel-core's table, and nothing here knows which one it is:
 // the ladder, the silence rule, the port-0 fallback and the memory are the same
@@ -661,13 +631,10 @@ async function installReverseForward(client, chan, opts = {}) {
         tunnelLog("[phase] reverse forward asked for a channel this process never registered; refused");
         return false;
     }
-    // a channel granted a port earlier is re-bound on THAT port first: the far side's
-    // sessions are already pointed at it, so the same port costs every live session
-    // nothing. (A session CAN now be re-pointed — its heartbeat carries whatever base
-    // this client serves, ui/supervisor-client.js beatBody — but that is the recovery
-    // path for a port we could not get back, not something to spend on every hop.) A
-    // channel with no contract port has nothing to prefer and goes straight to the
-    // far side's pick.
+    // a channel granted a port earlier is re-bound on THAT port first: the far side
+    // was told that number, so the same port costs a re-connect nothing. A channel
+    // with no contract port has nothing to prefer and goes straight to the far
+    // side's pick.
     const preferred = chan.remote() || chan.preferred;
     if (preferred != null) {
         const first = await bindReverseForwardWithLadder(client, preferred, opts);
@@ -703,125 +670,12 @@ async function installReverseForward(client, chan, opts = {}) {
     }
     return false;
 }
-// ---- the far side's model path, installed beside the hop ----
-//
-// The reverse forward is how a remote session reaches a model, so it still has to
-// land — but it is not what the connect is. Two facts forced them apart:
-//
-//   * the far side can be SILENT about a global request. ssh2 calls forwardIn's
-//     callback from the reply handler and from nowhere else, so a session that
-//     never answers leaves an attempt with no way to settle; the 4s clock ends
-//     that attempt, but the connect then still waited on the answer's ARRIVAL to
-//     decide (and, before the clock, parked on "Starting tunnel…" forever). A
-//     middlebox, a non-OpenSSH sshd or a wedged request channel is enough, and it
-//     is deterministic — which is exactly what the field reported.
-//   * the port is only needed LATER. A session's --base-url is built when the
-//     session is spawned (host-core's claim), not while the hop is coming up.
-//
-// So the install runs on its own promise, state.modelPath says where it got to,
-// and the one caller that must not hand out a base without a listener behind it
-// joins it (awaitModelPath, from host-core's claim). Every asker joins the SAME
-// in-flight promise: one question, one clock, however many windows ask.
-//
-// A model path that does not land is retried, because it is the difference
-// between a run that works and one that "thinks" until its own read budget
-// expires — but gently, doubling from 15s to 60s, unref'd so a pending retry
-// never keeps a host alive, and only for the client it was started for.
-const MODEL_PATH_REPAIR_MS = 15000; // first retry after a model path that did not land
-const MODEL_PATH_REPAIR_CAP_MS = 60000; // a far side that will not forward is asked this often at most
-function clearModelPathRepair() {
-    if (state.modelPathRepairTimer) {
-        clearTimeout(state.modelPathRepairTimer);
-        state.modelPathRepairTimer = null;
-    }
-}
-function scheduleModelPathRepair(client) {
-    clearModelPathRepair();
-    const wait = state.modelPathRepairDelay || MODEL_PATH_REPAIR_MS;
-    state.modelPathRepairTimer = setTimeout(() => {
-        state.modelPathRepairTimer = null;
-        // the hop this was about is gone: the next connect installs its own path, and
-        // a retry into a dead client could only be a write to a null wire
-        if (state.sshClient !== client)
-            return;
-        startModelPath(client);
-    }, wait);
-    if (state.modelPathRepairTimer.unref)
-        state.modelPathRepairTimer.unref();
-    // the next wait is longer: a far side that refuses once usually refuses again,
-    // and a repair loop at 15s forever is noise in the log and a bind storm on it
-    state.modelPathRepairDelay = Math.min(wait * 2, MODEL_PATH_REPAIR_CAP_MS);
-}
-// The install settled. Whatever it learned is about the client it was started
-// for: a hop that has been replaced since must not have its model path spoken for
-// by the dead one's verdict.
-function finishModelPath(client, ok) {
-    if (state.modelPathClient !== client)
-        return state.modelPath || "none";
-    state.modelPathInstall = null;
-    if (state.sshClient !== client)
-        return state.modelPath || "none";
-    if (ok) {
-        state.modelPath = "listening";
-        state.modelPathRepairDelay = null;
-        clearModelPathRepair();
-        tunnelLog(`[phase] model path listening 127.0.0.1:${state.llmProxyRemotePort || remoteLlmPort()} on the far side ` +
-            `-> client proxy :${state.llmProxyPort}`);
-        return state.modelPath;
-    }
-    state.modelPath = "unavailable";
-    const wait = state.modelPathRepairDelay || MODEL_PATH_REPAIR_MS;
-    tunnelLog(`[phase] model path unavailable (127.0.0.1:${remoteLlmPort()} was not given to us); asking again in ${wait}ms`);
-    scheduleModelPathRepair(client);
-    return state.modelPath;
-}
-// Kick off (or join) the install of the far side's model path. Never awaited by
-// the connect; the returned promise resolves to state.modelPath, so a repair and
-// a claim can share it.
-function startModelPath(client) {
-    if (!client || state.sshClient !== client)
-        return Promise.resolve(state.modelPath || "none");
-    if (state.modelPathClient === client) {
-        if (state.modelPathInstall)
-            return state.modelPathInstall;
-        if (state.modelPath === "listening")
-            return Promise.resolve("listening");
-    }
-    state.modelPathClient = client;
-    state.modelPath = "installing";
-    clearModelPathRepair(); // this attempt IS the repair
-    const install = installReverseForward(client, channel("model")).then((ok) => finishModelPath(client, ok), 
-    // installReverseForward answers false rather than rejecting, but a rejection
-    // here must still settle the promise a claim is waiting on
-    (e) => {
-        tunnelLog("[phase] model path install failed: " + ((e && e.message) || e));
-        return finishModelPath(client, false);
-    });
-    state.modelPathInstall = install;
-    return install;
-}
-// Where the far side's model path is, joining the install in flight if there is
-// one. This is the claim's view: "listening" is the only answer that means a
-// session's --base-url points at something that will answer. With nothing in
-// flight and no path (a failed install, or a hop that has not started one), it
-// asks once NOW rather than waiting for the repair clock: a claim is the moment
-// the answer is needed, and the ask is bounded by the installer's own clocks
-// (4s on silence, the ladder on a refusal).
-async function awaitModelPath() {
-    if (state.modelPath === "listening")
-        return "listening";
-    if (state.modelPathInstall)
-        return state.modelPathInstall;
-    if (!state.sshClient)
-        return "none";
-    return startModelPath(state.sshClient);
-}
-// Note there is no plugin path here. The client's plugin endpoint is installed at
+// The one channel installed over a hop is the plugin path, and it is installed at
 // CLAIM time, not at connect (ui/plugin-link.js: a window's api:base -> offer),
 // because a claim is the first moment a session could call one: asking the far
 // side for a loopback port on every hop would be a listener held on that machine
 // for a facility nobody had used. What this file owes that channel is the routing
-// rule, and it is already generic — a row in `channels`, not a model special case.
+// rule and the ladder, both generic — a row in `channels`, not a special case.
 // Failing a gate is not a reason to close a wire a NEWER dial may already own:
 // an attempt that lost the race fails BECAUSE of the reset the winner performed,
 // so an unguarded teardown here closes the very tunnel that just won. Same
@@ -865,16 +719,6 @@ async function establishForwardAndHealth(localPort, client) {
     });
     await listen(state.localSrv, localPort);
     tunnelLog(`[phase] local forward listening 127.0.0.1:${localPort} -> remote 127.0.0.1:${REMOTE_API_PORT}`);
-    // Started, NOT awaited. The far side's model path is a promise this hop makes
-    // to the sessions that will be spawned over it, not a gate the user's connect
-    // passes through: the connect is the thing on screen, and a far side that never
-    // answers a global request used to park it here forever (0.1.46's report) — or,
-    // with the 4s clock, for as long as it took for the clock to say the far side
-    // was silent. Neither is necessary: the port is only needed at SPAWN time, and
-    // host-core's claim awaits awaitModelPath() before it points a session's
-    // --base-url anywhere. The gates below describe the hop itself and stay as they
-    // were: a local forward, a live supervisor behind it, that supervisor's shape.
-    startModelPath(client);
     // Nothing for the plugin path here: it is installed by the first claim of a
     // session on this hop (ui/plugin-link.js offer, from main.js's api:base).
     const up = await waitForServer("http://127.0.0.1:" + localPort + "/api/health", CONNECT_TIMEOUT_MS);
@@ -933,6 +777,4 @@ async function establishForwardAndHealth(localPort, client) {
 module.exports = {
     connectTunnel,
     installReverseForward,
-    startModelPath,
-    awaitModelPath,
 };

@@ -497,8 +497,8 @@ def main() -> int:
         "--base-url",
         default=None,
         help=(
-            "LLM API base URL. Point at the client-side proxy "
-            "(http://127.0.0.1:8892/v1) when the server has no internet."
+            "LLM API base URL (any OpenAI-compatible endpoint). Overrides the "
+            "saved settings and the environment for this session."
         ),
     )
     args = parser.parse_args()
@@ -533,9 +533,10 @@ def main() -> int:
         config.llm_api_protocol = saved.get("api_protocol") or None
     api_key = config.api_key
     if args.base_url and not api_key:
-        # the client-side proxy injects the real key; the server only needs a
-        # placeholder. No env fallback: the key comes from the UI settings
-        # (state.api_key) or an explicit config.api_key.
+        # A --base-url endpoint that was given no key still gets a non-empty one:
+        # the OpenAI client refuses to build without it, and a keyless local
+        # endpoint does not look at the value. The real key comes from the UI
+        # settings (state.api_key) or an explicit config.api_key.
         api_key = "proxy"
 
     broadcaster = Broadcaster()

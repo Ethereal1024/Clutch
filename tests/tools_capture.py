@@ -157,6 +157,14 @@ class FarWorkspace(Workspace):
     def delete(self, path: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    def list(self, path: str) -> list[str]:  # pragma: no cover
+        raise NotImplementedError
+
+    def grep(
+        self, pattern: str, path: str = ".", include: str | None = None
+    ) -> list[tuple[str, int, str]]:  # pragma: no cover
+        raise NotImplementedError
+
 
 class StubLog:
     """The log reader's four facts (`recall._scan` reads no more)."""

@@ -29,7 +29,6 @@ const { createHostCore } = useUI("host-core.js");
 const {
   writeSettingsMirror,
   ensureSettingsMirror,
-  readSettings,
   getSshSecret,
 } = useUI("settings-mirror.js");
 const { createComponentsView } = useUI("components-view.js");
@@ -82,11 +81,6 @@ function loadSessionModule() {
 // only ever point a window at a dead port that fails every request with
 // "Failed to fetch". A host with nothing to offer returns null and the window
 // stays on "not running" until the tunnel produces a real forwarded session.
-// remote sessions: LLM via the tunnel's reverse forward. The port is NOT frozen
-// here: 8892 is what the far side is asked for first, but when a listener the far
-// host will not release holds it, the reverse forward lands on a port the far
-// side picks instead (ui/tunnel-connect.js) — so the base comes from the tunnel
-// (tunnel-core's remoteLlmBase) and is read at claim time, after that landing.
 
 function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {}) {
   tunnel = tunnel || useUI("ssh-tunnel.js");
@@ -99,25 +93,7 @@ function createAndroidHost({ tunnel, sessions, log, bridgePort = 8899 }: any = {
 
   const hostCore = createHostCore({
     supervisorBase: () => null, // N4: no local supervisor on Android
-    remoteLlmBase: () => tunnel.remoteLlmBase(),
-    // the same re-point target the desktop shell hands host-core: a session's
-    // --base-url is frozen at spawn, so where this device serves the model has to
-    // ride the heartbeat or a hop that moves the reverse forward strands the run
-    remoteLlmTarget: () => {
-      const base = tunnel.servedLlmBase();
-      return base ? { base_url: base, model: readSettings().model || "" } : null;
-    },
-    // same reason as ui/main.js: the remote session cannot read this device's settings
-    remoteLlmModel: () => readSettings().model || "",
-    remoteLlmKnobs: () => {
-      const s = readSettings();
-      return { reasoning_effort: s.reasoning_effort || "", api_protocol: s.api_protocol || "" };
-    },
     tunnelStatus: () => tunnel.tunnelStatus(),
-    // the far side's model path is installed beside the connect, not inside it:
-    // the claim waits for it here (host-core), so a session is never spawned with
-    // its --base-url pointed at a port nobody serves (ui/tunnel-connect.js)
-    awaitModelPath: () => tunnel.awaitModelPath(),
     restartRemoteServer: () => tunnel.restartRemoteServer(),
     openSessionForward: (port) => tunnel.openSessionForward(port),
     startLocalSession: null, // N4: no local mode; the renderer shows "not running"

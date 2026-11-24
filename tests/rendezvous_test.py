@@ -442,14 +442,14 @@ def main() -> int:
     # declares read_file and its three siblings itself
     # (agent/tools/host.py `_REMOTE_DECLARATIONS`), so a component publishing
     # those names could only shadow the only implementation that works there.
-    # The two predicates still have their readers (registry._serves_this_workspace,
+    # The predicate still has its readers (registry.build_tools,
     # prompt.module_blocked_reason) and a driver that is not this table
     # (tests/channel_test.py pushes a synthetic client-side workspace-fs
     # declaration and reads both halves through it), so what is pinned HERE is
     # the empty answer: nothing in this repo claims that side of the axis.
     for mod in catalog.table().values():
-        check(not rendezvous.serves_foreign_fs(mod.name), f"{mod.name} is not a filesystem on another machine")
-    check(not rendezvous.serves_foreign_fs("clutch-nope"), "an unknown component serves nothing there either")
+        check(not rendezvous.serves_remote_workspace_fs(mod.name), f"{mod.name} is not a filesystem on another machine")
+    check(not rendezvous.serves_remote_workspace_fs("clutch-nope"), "an unknown component serves nothing there either")
     elsewhere = [mod.name for mod in catalog.table().values() if mod.client_side]
     check(elsewhere == [], f"no component in this table runs somewhere else ({elsewhere})")
     check(all(mod.requires for mod in catalog.table().values() if mod.runs_here),

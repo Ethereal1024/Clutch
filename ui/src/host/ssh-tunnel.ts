@@ -1,7 +1,8 @@
 // SSH tunnel (ssh2) to a remote clutch-server, embedded in the Electron main
-// process: local forward to the remote supervisor API + reverse forward to the
-// client-side LLM proxy. Debug logging appends to ~/.clutch/tunnel.log (the
-// auth secret itself is never written there — only whether one is offered).
+// process: local forward to the remote supervisor API, plus the reverse
+// channels the far side dials back through (see tunnel-core's registry). Debug
+// logging appends to ~/.clutch/tunnel.log (the auth secret itself is never
+// written there — only whether one is offered).
 //
 // This file is the module's public face and nothing else. The tunnel itself is
 // six modules over one state object: tunnel-core.js owns the state and the log,
@@ -10,10 +11,10 @@
 // contract — ui/main.js, ui/exec-bridge.js (a lazy require, which is what keeps
 // its cycle with this file from closing) and android/host/android-host.js.
 
-const { tunnelLog, remoteLlmBase, servedLlmBase } = require("./tunnel-core");
+const { tunnelLog } = require("./tunnel-core");
 const { remoteExec, uploadFileViaExec } = require("./tunnel-remote");
 const { chooseStrategy } = require("./tunnel-bootstrap");
-const { connectTunnel, startModelPath, awaitModelPath } = require("./tunnel-connect");
+const { connectTunnel } = require("./tunnel-connect");
 const {
   stopTunnel,
   onTunnelEnd,
@@ -23,11 +24,11 @@ const {
 } = require("./tunnel-lifecycle");
 
 // List all active tunnels: currently just the primary tunnel. In a multi-tunnel
-// future this would return all instances in the registry.
+// future this would return instances from the registry.
 function listTunnels() {
   const list = [];
   const primary = tunnelStatus();
-  // Only include tunnels that have a target (i.e., are connected or have been connected)
+  // Only include tunnels with a target (i.e., connected or once connected)
   if (primary.target) {
     const tunnelId = `${primary.target.host}:${primary.target.user}:${primary.target.port}`;
     list.push({
@@ -35,7 +36,6 @@ function listTunnels() {
       active: primary.active,
       url: primary.url,
       target: primary.target,
-      modelPath: primary.modelPath,
     });
   }
   return list;
@@ -46,15 +46,6 @@ module.exports = {
   stopTunnel,
   remoteExec,
   tunnelLog,
-  remoteLlmBase,
-  // the base this client is SERVING right now (null when it serves nothing): what
-  // a session's heartbeat carries so its LLM endpoint can follow the model path
-  // when a hop lands it on another port (ui/supervisor-client.js beatBody)
-  servedLlmBase,
-  // the far side's model path, installed beside the connect and awaited by the
-  // session claim (host-core) rather than by the connect itself
-  awaitModelPath,
-  startModelPath,
   onTunnelEnd,
   tunnelStatus,
   uploadFileViaExec,

@@ -80,19 +80,9 @@ async function supervisorIdentity(base) {
 }
 
 // ---- shared supervisor session HTTP (identical local and behind the tunnel) ----
-async function supervisorSessionStart(base, baseUrl, model, knobs: any = {}) {
-  // POST {base}/api/session/start {base_url, model, reasoning_effort,
-  //   api_protocol} -> {session_id, port}
-  // model travels with base_url: a remote session reads its own host's empty
-  // settings and would fail LLM init ("missing LLM argument: model")
+async function supervisorSessionStart(base) {
+  // POST {base}/api/session/start -> {session_id, port}
   const payload: Record<string, any> = {};
-  if (baseUrl) payload.base_url = baseUrl;
-  if (model) payload.model = model;
-  // the knobs travel with the model: the remote host settings file has
-  // neither, so the session would otherwise run with provider defaults
-  // instead of the levels this client chose (empty = child default)
-  if (knobs.reasoning_effort) payload.reasoning_effort = knobs.reasoning_effort;
-  if (knobs.api_protocol) payload.api_protocol = knobs.api_protocol;
   // The window that is CLAIMING, in the only terms the machine it runs on can be
   // asked about later: (host, pid, start tick). EVERY claim names them, locally
   // and through a tunnel alike — the machine that RECORDS a claim may be another
@@ -179,37 +169,15 @@ async function supervisorSessionStop(base, sid, { leaving = false, timeoutMs = 2
 // and re-bound when a hop returns, never replaced — replacing it would start a
 // second session over the old one's work, which the far host then reports as
 // "this project is already open in another window".
-// The body of one beat: the session id, plus where this client serves the model
-// RIGHT NOW when it serves it at all.
-//
-// The base rides along because a remote session's LLM endpoint belongs to THIS
-// client (its own proxy at the far end of a reverse forward) and that forward
-// can land on another port after a hop: the far sshd keeps a dead hop's listener
-// (a phone that lost its radio sends no FIN), so the next forward is granted a
-// port of the far side's choosing. The session's --base-url was frozen at spawn
-// and the session outlives the hop, so without this the run can only redial into
-// a port nobody serves — the field's "the session is fine, my network is fine,
-// the agent still says it cannot reach the API".
-//
-// `target` is a FUNCTION, read per beat (the port moves with every hop); it
-// answers {base_url, model} or nothing. ABSENT is not the same as empty: a beat
-// with no base is a pure liveness beat, and the supervisor must never move a
-// live session to a port this client does not actually serve.
-function beatBody(sid: string, target: (() => any) | any) {
-  const body: Record<string, any> = { session_id: sid };
-  try {
-    const t = typeof target === "function" ? target() : target;
-    if (t && t.base_url) {
-      body.base_url = t.base_url;
-      if (t.model) body.model = t.model;
-    }
-  } catch {
-    // a target that cannot be named is no target: beat for liveness alone
-  }
-  return body;
+// The body of one beat: the session id, and nothing else. Liveness is the whole
+// question a beat asks — the far side reads no model endpoint from it (a run's
+// model calls happen in THIS process, see llm-client), so a beat that carried
+// one would only ever be a stale copy of something nobody should follow.
+function beatBody(sid: string) {
+  return { session_id: sid };
 }
 
-async function supervisorSessionHeartbeat(base, sid, target) {
+async function supervisorSessionHeartbeat(base, sid) {
   if (!sid) return false; // nothing to re-bind to: gone is the honest answer
   try {
     const ctl = new AbortController();
@@ -218,7 +186,7 @@ async function supervisorSessionHeartbeat(base, sid, target) {
       const r = await fetch(`${base}/api/session/heartbeat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(beatBody(sid, target)),
+        body: JSON.stringify(beatBody(sid)),
         signal: ctl.signal,
       });
       if (r.ok) return true;
@@ -234,12 +202,7 @@ async function supervisorSessionHeartbeat(base, sid, target) {
 // Keep a session alive; onFail fires when the supervisor stops answering for
 // longer than its own stale window (see HEARTBEAT_STALE_MS) — i.e. when the
 // session is provably gone, not when one request happened to fail.
-//
-// `target` (optional) is read on every beat and, when it names a base, is how the
-// session's LLM endpoint FOLLOWS this client when the far side's model path moves
-// (see beatBody). Liveness is unaffected either way: a beat that cannot name a
-// target is a beat.
-function startSupervisorHeartbeat(base, sid, onFail, target) {
+function startSupervisorHeartbeat(base, sid, onFail) {
   let stopped = false;
   let timer = null;
   let lastOk = Date.now();
@@ -251,7 +214,7 @@ function startSupervisorHeartbeat(base, sid, onFail, target) {
         const r = await fetch(`${base}/api/session/heartbeat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(beatBody(sid, target)),
+          body: JSON.stringify(beatBody(sid)),
           signal: ctl.signal,
         });
         return r.ok;

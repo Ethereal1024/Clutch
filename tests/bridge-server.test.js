@@ -53,10 +53,6 @@ function fakeTunnel() {
       state.stopped += 1;
     },
     onTunnelEnd: (cb) => state.endCbs.push(cb),
-    // the reverse-forward port the real tunnel remembers (8892 unless a held
-    // listener pushed the bind elsewhere) — what a remote session's base is
-    // built from, so the fake has to carry it like the real face does
-    remoteLlmBase: () => "http://127.0.0.1:8892/v1",
     tunnelLog: (...a) => state.logs.push(a.join(" ")),
   };
 }
@@ -370,7 +366,11 @@ async function main() {
   const url = await globalThis.clutchApi.baseUrl();
   assert.strictEqual(url, "http://127.0.0.1:31001", "baseUrl resolves the forwarded session port");
   assert.strictEqual(sessions.calls.started[0].base, "http://127.0.0.1:8891", "session start hits the tunnel");
-  assert.strictEqual(sessions.calls.started[0].baseUrl, "http://127.0.0.1:8892/v1", "remote LLM base via reverse forward");
+  assert.strictEqual(
+    sessions.calls.started[0].baseUrl,
+    undefined,
+    "…and hands the session no model address: the claim is the port, and the model calls happen in this process"
+  );
   assert.deepStrictEqual(tunnel.state.forwards, [30001], "one session forward opened");
 
   // 2. settings mirror: save writes the flat file (0600) under the sandbox HOME

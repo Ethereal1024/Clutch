@@ -40,8 +40,8 @@
 // bridge (`CLUTCH_EXEC_BRIDGE`), the loopback port that reaches the far side of
 // an ssh tunnel. It is a capability, not a courtesy — whoever holds that address
 // can run anything on the other machine — so it exists for the plugins whose
-// whole job is the far machine's filesystem (`subject: foreign-fs`) and for
-// nothing else does the value mean anything. It is read at every call rather than
+// whole job is a filesystem on the far side of that tunnel, and for nothing else
+// does the value mean anything. It is read at every call rather than
 // captured at construction, because the port only lives while a tunnel is up; an
 // empty string is "there is no bridge right now", a fact a plugin can answer with,
 // as opposed to a guess or a timeout.

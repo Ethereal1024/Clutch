@@ -218,7 +218,7 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
   };
 
   const tick = procstat.starttime(process.pid);
-  await supervisorSessionStart("http://127.0.0.1:8890", undefined, undefined, {});
+  await supervisorSessionStart("http://127.0.0.1:8890");
   const local = sent.at(-1).body;
   check(local.claim_pid === process.pid,
     "a claim names THIS host process, never the renderer behind the window");
@@ -227,16 +227,21 @@ const { startSupervisorHeartbeat } = require(path.join(ROOT, "ui", "supervisor-c
   check(("claim_start" in local) === !!tick && (!tick || local.claim_start === tick),
     "with its start tick where the host has one, so a recycled pid cannot answer for it");
 
-  await supervisorSessionStart("http://127.0.0.1:8891", "http://127.0.0.1:8892/v1", "m", {
-    reasoning_effort: "max",
-  });
+  await supervisorSessionStart("http://127.0.0.1:8891");
   const remote = sent.at(-1).body;
   check(remote.claim_host === os.hostname() && remote.claim_pid === process.pid,
     "a tunnelled claim names the same window: the far side records it and asks this machine later, " +
     "instead of guessing until its 300 s timer runs out");
-  check(remote.reasoning_effort === "max", "and the LLM knobs still ride along with it");
+  // The start body carries the claim and nothing about a model. A run's model
+  // calls happen in THIS process (ui/llm-client), so there is no base URL or
+  // model name for the far side to be handed — and none for it to go stale on.
+  check(!("base_url" in remote) && !("model" in remote) &&
+        !("reasoning_effort" in remote) && !("api_protocol" in remote),
+    "and nothing about a model rides along: the far side is never pointed at an endpoint");
 
-  await supervisorSessionStart("http://127.0.0.1:8890", undefined, undefined, { claim_pid: 4242 });
+  // A caller that tries to name somebody else's process is ignored: the client
+  // is the only authority for what its own claim is.
+  await supervisorSessionStart("http://127.0.0.1:8890", { claim_pid: 4242 });
   check(sent.at(-1).body.claim_pid === process.pid,
     "a caller cannot name somebody else's process as the claim: the client is the authority for what it is");
 

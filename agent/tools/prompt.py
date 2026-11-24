@@ -134,14 +134,14 @@ def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
 
       * one whose process is this host's to start serves the root's own machine,
         so the root has to live HERE (`rendezvous.serves_workspace_fs`);
-      * one that reaches another machine over a channel of its own (the ssh
-        tunnel) serves the machine holding the root, so the root has to be
-        somewhere ELSE (`rendezvous.serves_foreign_fs`).
+      * one whose process is the CLIENT's (it carries an `entry`: only a push can
+        bring one) serves the machine holding that root, so the root has to be
+        somewhere ELSE (`rendezvous.serves_remote_workspace_fs`).
 
     Both questions are the same one — is this workspace local? — asked in opposite
     directions, which is why one `isinstance` answers them. A component serving
-    anything else (the project file, the network, a library of its own) is unaffected
-    by where the workspace lives.
+    anything else (the project file, the network, a library of its own) is
+    unaffected by where the workspace lives.
     """
     if module is None:
         return "no component serves this tool"
@@ -154,7 +154,7 @@ def module_blocked_reason(workspace: Workspace, module: str | None) -> str:
             f"{module} serves the filesystem of the machine this workspace root lives on, "
             f"and this root is another machine's"
         )
-    if local and rendezvous.serves_foreign_fs(module):
+    if local and rendezvous.serves_remote_workspace_fs(module):
         return (
             f"{module} serves the filesystem of another machine over a channel, "
             f"and this workspace root is a local one"

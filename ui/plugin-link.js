@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/plugin-link.ts and run `npm run build:host`.
-// source sha256: 454f41f63c7cc89d76aca7d9a4bd2ccfe53deb7e45460456510f9b5d6fe6bd0a
+// source sha256: 39b583091a65ffd7c3bd7879c0a25cedf09ee8db8654ea44569132b4ba74d118
 
 // The client's plugin PATH: the listener, the reverse channel it answers on, and
 // the push that tells a session what this client runs.
@@ -21,10 +21,6 @@
 //   * NOTHING is pushed before the forward is installed. A session told to dial a
 //     port nobody serves fails every call with "the channel is not answering",
 //     which is a worse lie than "this host has no channel".
-//   * A declaration ABOUT another machine — the root's filesystem reached over a
-//     channel — is only offered while a hop is live (snapshot): its tools are
-//     only meaningful where the tunnel reaches, and on this side the same names
-//     belong to the local component.
 //   * A push is the WHOLE set (agent/tools/channel.py refuses a partial one), so
 //     a change is a re-push, and "I have no plugins" is a DELETE — the session's
 //     refusal is then a sentence about the state, not a dial that times out.
@@ -50,7 +46,6 @@ const PUSH_TIMEOUT_MS = 5000;
 const state = {
     server: null, // the /call listener (ui/plugin-server.js)
     chan: null, // the tunnel-core row that routes the far side's connection to it
-    client: null, // the ssh client the forward was installed for
     installing: null, // the in-flight install, so ten asks are one forward
     installingFor: null, // …and which client it is about
     bases: new Set(), // session bases this client serves (/api/channel of each)
@@ -124,41 +119,8 @@ function session(method, base, payload) {
 // What a session should be told right now, as the exact bytes that would be
 // pushed. Compared as JSON because the push is a replacement: "the same set" has
 // to mean the same bytes, or every sync would be a new generation.
-//
-// A declaration that reaches ANOTHER machine is a promise about the far side of a
-// hop: its tools arrive over this client's reverse channel and run on the machine
-// at the other end of it. Without a live hop there is nothing to run them on, and
-// the session's own filesystem component is the one that works for those names —
-// so a declaration pushed then would shadow working tools with ones that can only
-// answer "no tunnel". The hop is `state.client`: set when a forward is installed
-// for a live ssh client, cleared by stop() and by the tunnel's own hopLost().
-//
-// Two declaration shapes say "another machine", and both are read here because
-// both are in the wild (agent/tools/rendezvous.py `reaches_another_machine` is
-// the same rule on the host's side): `subject: foreign-fs` is 0.1.x's word for
-// it, and 0.2.0 declares the workspace's own `workspace-fs` with nothing but an
-// `entry` — a frontend half, whose code the client runs and whose commands
-// travel the tunnel.
-const WORKSPACE_FS = "workspace-fs";
-const FOREIGN_FS = "foreign-fs";
-function runsHere(component) {
-    if (component && component.service)
-        return true;
-    const launch = component && component.launch;
-    return Boolean(launch && (launch.argv || launch.entry || launch.binary || launch.importable));
-}
-function reachesAnotherMachine(component) {
-    if (!component)
-        return false;
-    if (component.subject === FOREIGN_FS)
-        return true;
-    return component.subject === WORKSPACE_FS && !runsHere(component);
-}
 function snapshot() {
-    const components = state.server ? state.server.declarations() : [];
-    if (state.client)
-        return components;
-    return components.filter((c) => !reachesAnotherMachine(c));
+    return state.server ? state.server.declarations() : [];
 }
 async function pushTo(base) {
     const components = snapshot();
@@ -206,9 +168,9 @@ async function sync() {
 // and every session this client serves. It is not called when a hop comes up, and
 // that is deliberate — the hop's job is the hop, and asking the far side for a
 // loopback port nobody has claimed a session on would be a listener held on the
-// far machine for a facility no one has used yet (the same reason the model path
-// is per hop, not per connect). A claim is the first moment a session could
-// possibly call a plugin, so a claim is the first moment this is worth doing.
+// far machine for a facility no one has used yet. A claim is the first moment a
+// session could possibly call a plugin, so a claim is the first moment this is
+// worth doing.
 //
 // Idempotent: the listener is one, the row is one, and an install already in
 // flight is joined rather than repeated — ten windows asking for the same tunnel
@@ -221,7 +183,6 @@ function start(client) {
         return Promise.resolve(false);
     if (state.installing && state.installingFor === client)
         return state.installing;
-    state.client = client;
     const run = async () => {
         try {
             if (!state.server) {
@@ -235,11 +196,10 @@ function start(client) {
                 log(`listening 127.0.0.1:${state.server.port()} for this client's plugins`);
             }
             if (!state.chan) {
-                // No contract port: unlike the model path, nothing on the far side is
-                // configured with this number in advance, so the far side always picks
-                // and there is nothing to collide with. The row exists only while a
-                // listener does — a row with nothing behind it would route a connection
-                // into a refusal.
+                // No contract port: nothing on the far side is configured with this
+                // number in advance, so the far side always picks and there is nothing
+                // to collide with. The row exists only while a listener does — a row
+                // with nothing behind it would route a connection into a refusal.
                 state.chan = registerChannel("plugin", {
                     local: () => (state.server ? state.server.port() : null),
                     what: "client plugins",
@@ -319,7 +279,6 @@ async function stop() {
     }
     const server = state.server;
     state.server = null;
-    state.client = null;
     state.installing = null;
     state.installingFor = null;
     if (server)
@@ -344,7 +303,6 @@ function useHost(next) {
 // pushing a new port to a session nobody has re-established, whose answer is
 // silence, once per base, on every sync.
 function hopLost() {
-    state.client = null;
     if (state.chan)
         state.chan.setRemote(null);
     state.bases.clear();

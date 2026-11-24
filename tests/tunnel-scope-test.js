@@ -129,9 +129,6 @@ function makeCore(tunnel) {
   let sseq = 0;
   return createHostCore({
     supervisorBase: () => "http://127.0.0.1:8890",
-    remoteLlmBase: () => "http://127.0.0.1:8892/v1",
-    remoteLlmModel: () => "m",
-    remoteLlmKnobs: () => ({}),
     tunnelStatus: () => tunnel,
     restartRemoteServer: async () => true,
     openSessionForward: async (port) => ({ localPort: port + 1000, close: () => {} }),

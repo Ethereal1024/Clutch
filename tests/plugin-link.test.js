@@ -12,7 +12,8 @@
 //     nobody serves would fail every call with "the channel is not answering",
 //     which is a worse lie than "this host has no channel";
 //   * one install per client, however many windows ask, and the far side picks
-//     the port (a channel with no contract port must never be asked for 8892);
+//     the port (a channel with no contract port is never asked for one of its
+//     own first);
 //   * the push is the WHOLE set, in the words the target's parser reads (port,
 //     token, components), with the token the listener really checks and no byte
 //     about where the plugin lives on this machine;
@@ -372,7 +373,6 @@ async function main() {
   const postsBeforeHopLoss = apiA.of("POST").length;
   pluginLink.hopLost();
   check(chan.remote() === null, "a lost hop forgets the port it was granted");
-  check(pluginLink.state.client === null, "…and the client the forward belonged to");
   check(pluginLink.state.bases.size === 0, "…and the sessions that hop was carrying");
   check(tunnelCore.channelFor(FakeWire.grant) === null, "…so the dead port routes nowhere");
   const nopush = await pluginLink.refresh();
@@ -419,63 +419,59 @@ async function main() {
   await pluginLink.stop();
   check(pluginLink.state.bases.size === 0, "stopping twice is a no-op, not a second round of DELETEs");
 
-  // ---- 11. a declaration about ANOTHER machine only travels with a live hop --
+  // ---- 11. the snapshot is the listener's own set, whatever it says ----------
   //
-  // Such a component says "the filesystem over there", so its tools are only
-  // meaningful while a hop reaches there. Declared without one, it would shadow
-  // the session's own filesystem component — whose `read_file` works on the
-  // machine the root names — with one that can only answer "no tunnel". The gate
-  // is the hop's client, which this file already knows: set by start(), cleared
-  // by stop() and by the tunnel's own hopLost().
+  // This file used to WITHHOLD a declaration that reaches ANOTHER machine
+  // (`subject: workspace-fs` with an `entry` instead of a process here) until a hop
+  // was live: on this side those names belong to the local component, and a
+  // declaration pushed with no tunnel behind it could only answer "no tunnel".
   //
-  // Two declaration shapes carry that meaning and both are pinned: `subject:
-  // foreign-fs` is 0.1.x's word for it, and 0.2.0 declares the workspace's own
-  // subject with nothing but an `entry` (its code is the client's, its commands
-  // travel the tunnel) — the same rule the host reads in
-  // agent/tools/rendezvous.py `reaches_another_machine`. The fixtures are
-  // synthetic: no component in this repo ships that shape any more (the ssh
-  // plugin was retired with 甲-P1), but the client side of the wire still holds
-  // the rule, so the test keeps a declaration for it to hold.
-  const sshShape = { entry: "plugin.js", tools: [{ name: "read_file", description: "read a file on the far side", parameters: { properties: {} } }] };
-  const fixtures = [
-    ["clutch-far-fs", { ...sshShape, subject: "workspace-fs" }],
-    ["clutch-far-legacy", { ...sshShape, subject: "foreign-fs" }],
-  ];
-  for (const [name, manifest] of fixtures) {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-link-foreign-"));
-    write(path.join(directory, "component.json"), JSON.stringify({ name, version: "0.1.0", ...manifest }, null, 2) + "\n");
-    write(path.join(directory, "plugin.js"), `exports.call = async () => ({content: 'far'});\n`);
-    host.install({ manifest: { name, version: "0.1.0", ...manifest }, artifact: directory, version: "0.1.0" });
-  }
-  const declaredElsewhere = (set) =>
-    set
-      .filter((c) => fixtures.some(([name]) => c.name === name))
-      .map((c) => c.name)
-      .sort();
-  check(pluginLink.state.client === null, "no hop is live right after stop()");
-  check(pluginLink.snapshot().length === 0, "…and with no listener there is nothing to declare, far side or not");
+  // That hold-back is gone. Whether such a component may serve a given root is the
+  // HOST's question, asked once per call and once per surface
+  // (agent/tools/prompt.module_blocked_reason, registry.build_tools: dropped for a
+  // local root, shadowed by the host's own four on a remote one), and this file is
+  // in no position to answer it — it cannot see a session's workspace at all. What
+  // is left here is the one promise it CAN keep: nothing is pushed before there is
+  // a forward for the far side to dial ("no-forward" in pushTo). What a declaration
+  // says about the machines it serves is none of this file's business.
+  const farShape = {
+    entry: "plugin.js",
+    subject: "workspace-fs",
+    tools: [{ name: "read_file", description: "read a file on the far side", parameters: { properties: {} } }],
+  };
+  const farManifest = { name: "clutch-far-fs", version: "0.1.0", ...farShape };
+  const farDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "clutch-link-far-"));
+  write(path.join(farDirectory, "component.json"), JSON.stringify(farManifest, null, 2) + "\n");
+  write(path.join(farDirectory, "plugin.js"), `exports.call = async () => ({content: 'far'});\n`);
+  host.install({ manifest: farManifest, artifact: farDirectory, version: "0.1.0" });
+  check(host.list().length === 2, "the client now holds a plugin whose subject is a workspace's own filesystem");
+
+  check(pluginLink.state.server === null, "no listener right after stop()");
+  check(pluginLink.snapshot().length === 0, "…and a stopped client declares nothing");
 
   const wire3 = new FakeWire();
   FakeWire.grant = 47033;
   tunnelCore.state.sshClient = wire3;
   await pluginLink.start(wire3);
-  const warm = pluginLink.snapshot();
-  check(pluginLink.state.client === wire3, "a live hop's client is remembered, and that is what the snapshot reads");
+  const listed = pluginLink.snapshot();
   check(
-    declaredElsewhere(warm).length === 2,
-    `on a live hop both spellings of the far side's declaration travel (${declaredElsewhere(warm).join(", ")})`
+    listed.length === pluginLink.state.server.declarations().length,
+    "the snapshot IS the listener's own set — one reader, one list"
   );
-  check(warm.some((c) => c.tools.some((t) => t.name === "read_file")), "…carrying the names the session offers");
+  check(
+    listed.some((c) => c.name === "clutch-far-fs") && listed.some((c) => c.name === COMPONENT),
+    `…both declarations travel, far-side subject or not (${listed.map((c) => c.name).sort().join(", ")})`
+  );
 
-  pluginLink.hopLost(); // what the tunnel does when the hop dies
-  const cold = pluginLink.snapshot();
+  // A dead hop takes the far-side PORT away, never the set: what to declare is the
+  // install's answer, and the next claim installs a new port and re-pushes the same
+  // list (sections 5-6). Editing the list here would be this file judging a
+  // machine it never sees.
+  pluginLink.hopLost();
+  check(pluginLink.snapshot().length === listed.length, "a dead hop does not edit the set");
   check(
-    declaredElsewhere(cold).length === 0,
-    `and a hop that dies takes them back out of the set (${declaredElsewhere(cold).join(", ")})`
-  );
-  check(
-    cold.some((c) => c.name === COMPONENT),
-    "…while the client-local plugin stays: the rule is what it serves and where it runs, not the plugin"
+    pluginLink.state.chan !== null && pluginLink.state.chan.remote() === null,
+    "…it forgets the port the far side granted, which is what makes the next push wait"
   );
   await pluginLink.stop();
 

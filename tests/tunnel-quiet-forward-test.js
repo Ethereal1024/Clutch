@@ -11,23 +11,28 @@
 // for as long as the client object lives — no error, no close, no clock. Nothing
 // else in that phase is unbounded, so the connect parked there for good.
 //
-// Two releases answered that with a clock (0.1.47) and then by taking the model
-// path out of the connect's verdict altogether (0.1.48). This runner pins the
-// result on the REAL protocol, because the fact that matters is about the far
-// side, not about this repo's code: an ssh2 server that authenticates, runs the
-// probe, forwards direct-tcpip — and says nothing at all when asked to listen.
+// Two releases answered that with a clock (0.1.47) and then by taking the ask out
+// of the connect altogether (0.1.48); since 甲-P1 there is no model path to
+// install either — the reverse forward belongs to the plugin channel and is asked
+// for on the first claim. This runner pins the result on the REAL protocol,
+// because the fact that matters is about the far side, not about this repo's
+// code: an ssh2 server that authenticates, runs the probe, forwards direct-tcpip
+// — and says nothing at all when asked to listen.
 //
-//   * the connect settles anyway, and quickly, and the far side is asked ONCE
-//     (asking a silent far side again is the same question on the same wire);
-//   * silence is not success: no listener is claimed, a session is never
-//     pointed at a port nobody serves, and the answer each asker gets is
-//     "unavailable" — from the same bounded clock, however many askers there are;
-//   * the connect's own verdict is the hop it built (a local forward and a live
-//     supervisor behind it), not the model path beside it;
-//   * and the field's OTHER shape is told apart from silence: a far side that
-//     REFUSES 8892 (the orphaned listener in the field log) is an answer, so the
-//     ladder runs, ends by asking the far side for a port of its own, and the
-//     connect is still called good on the port it was given.
+//   * the connect ASKS FOR NOTHING: no tcpip-forward global request leaves a hop
+//     whose job is the hop (what a channel asks for is the channel runner's);
+//   * the hop's own forward is where the connect's verdict comes from, and the
+//     fake far side records the direct-tcpip it was asked for — so "nothing was
+//     asked" can be told apart from "the wire was never used";
+//   * a far side that never answers therefore cannot park anything, and a hop
+//     that was granted no listener has none to hand back (nothing is cancelled);
+//   * and the field's OTHER shape is told apart from silence: a far side that is
+//     up, reports SERVING, and still will not carry a forwarded channel is a
+//     verdict about the WIRE, not about the server.
+//
+// The reverse-forward asks themselves — the contract port, port 0, the ladder,
+// and "silence ends the install on its own clock" — are
+// tests/tunnel-reverse-channel-test.js.
 //
 // Run: node tests/tunnel-quiet-forward-test.js
 
@@ -48,7 +53,7 @@ const { startFakeSshd } = require("./fake-sshd");
 
 // ---- the far-side bootstrap, stubbed at its module seam --------------------
 //
-// Same seam and same reason as tunnel-reverse-port-test.js: the probe and the
+// Same seam and same reason as tests/tunnel-reverse-channel-test.js: the probe and the
 // install are not what this runner is about, and stubbing them here is what
 // lets the real forwards run without a real remote shell.
 const bootPath = require.resolve("../ui/tunnel-bootstrap");
@@ -69,21 +74,13 @@ bootMod.exports = {
 };
 require.cache[bootPath] = bootMod;
 
-const { connectTunnel, stopTunnel, awaitModelPath, tunnelStatus } = require("../ui/ssh-tunnel");
-const { state, remoteLlmBase, LLM_PROXY_REMOTE_PORT } = require("../ui/tunnel-core");
+const { connectTunnel, stopTunnel } = require("../ui/ssh-tunnel");
+const { state } = require("../ui/tunnel-core");
 
-// The clock the code gives ONE unanswered ask, read from the source so this
-// runner cannot drift from it (the budgets below are that number plus room).
-const connectSrc = fs.readFileSync(path.join(__dirname, "..", "ui", "tunnel-connect.js"), "utf8");
-const BIND_TIMEOUT_MS = Number(
-  (/REVERSE_FORWARD_BIND_TIMEOUT_MS = (\d+)/.exec(connectSrc) || [])[1]
-);
-const CONNECT_BUDGET_MS = 8000; // the connect: the hop, not the model path
+const CONNECT_BUDGET_MS = 8000; // the connect: the hop, and nothing else
 // The health gate's own clock (CONNECT_TIMEOUT_MS) plus the far-side ask it makes
 // after it fails: a hop that cannot be forwarded has to be waited out once.
 const NO_FORWARD_BUDGET_MS = 22000;
-const SILENT_BUDGET_MS = BIND_TIMEOUT_MS + 6000; // one clock, then done
-const LADDER_BUDGET_MS = 20000; // 6 refusals + the ladder's backoff + the port-0 ask
 
 // Where the far host's supervisor is: the local forward dials 127.0.0.1:8890
 // through the fake sshd, so the health gate needs something there. On a machine
@@ -100,22 +97,6 @@ function supervisorOn8890() {
     });
     req.on("error", () => resolve(false));
     req.setTimeout(2000, () => req.destroy());
-  });
-}
-
-function withDeadline(promise, ms) {
-  return new Promise((resolve) => {
-    const t = setTimeout(() => resolve({ settled: false, ms }), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(t);
-        resolve({ settled: true, value });
-      },
-      (e) => {
-        clearTimeout(t);
-        resolve({ settled: true, value: "threw: " + ((e && e.message) || e) });
-      }
-    );
   });
 }
 
@@ -150,7 +131,7 @@ async function connectOnce(far) {
   return { res, stages, ms: Date.now() - t0 };
 }
 
-// ---- the three far sides ---------------------------------------------------
+// ---- the far sides ---------------------------------------------------------
 
 async function silentFarSide(hopShouldWork) {
   const far = await startFakeSshd({ forward: "silent" });
@@ -161,38 +142,29 @@ async function silentFarSide(hopShouldWork) {
     ms < CONNECT_BUDGET_MS,
     `quiet: the connect settled in ${ms}ms with a far side that never answers the reverse forward`
   );
-  check(
-    far.events.filter((e) => e.startsWith("tcpip-forward")).length === 1,
-    "quiet: the far side was asked exactly once (asking it again is the same question on the same wire)"
-  );
 
-  // The other half of the same promise: a session must not be pointed at a port
-  // nobody serves, and every asker must get that answer from the same clock.
-  const asked = await withDeadline(awaitModelPath(), SILENT_BUDGET_MS);
+  // The whole promise in one assertion: a hop asks for no reverse forward, so a
+  // far side that would not answer the question is never asked it. The control
+  // beside it matters — the wire WAS used (the hop's own forward dialled the far
+  // side's service), so "no tcpip-forward" is "we did not ask", not "we never got
+  // that far".
+  const asks = far.events.filter((e) => e.startsWith("tcpip-forward"));
   check(
-    asked.settled,
-    asked.settled
-      ? "quiet: awaitModelPath settled (the claim never parks either)"
-      : `quiet: awaitModelPath TIMED OUT after ${SILENT_BUDGET_MS}ms — a claim would park here`
+    asks.length === 0,
+    `quiet: the connect asked the far side for NO reverse forward at all (${asks.join(",") || "none"})`
   );
-  check(asked.value === "unavailable", `quiet: silence is not success — the model path is ${asked.value}`);
-  check(tunnelStatus().modelPath !== "listening", "quiet: no listener is claimed for a far side that said nothing");
   check(
-    remoteLlmBase() === `http://127.0.0.1:${LLM_PROXY_REMOTE_PORT}/v1`,
-    "quiet: a session would still be pointed at the contract port, never at a port nobody answered for"
+    far.events.some((e) => e.startsWith("direct-tcpip:")),
+    "quiet: …while the hop's own forward did go out (the wire carried the connect)"
   );
 
   const log = tunnelLogText();
-  check(
-    /reverse forward unanswered .*not asking for a port of its own/.test(log),
-    "quiet: the ladder stopped at the unanswered ask instead of spending another clock"
-  );
-  check(!/model path listening/.test(log), "quiet: nothing was installed, so nothing is logged as listening");
+  check(!/reverse forward/.test(log), "quiet: the connect's log has no reverse-forward step in it at all");
 
   // The connect's verdict is the hop it built — a local forward and a live
-  // supervisor behind it — and the silent model path beside it is not part of it.
+  // supervisor behind it — and nothing beside it.
   if (hopShouldWork) {
-    check(res.ok === true, "quiet: a silent model path does not fail a hop that is otherwise up");
+    check(res.ok === true, "quiet: the hop is up");
     check(res.url === state.currentUrl, "quiet: the hop's url is the one the connect reported");
   } else {
     check(
@@ -205,93 +177,33 @@ async function silentFarSide(hopShouldWork) {
   check(await closedTo(far), "quiet: the wire is closed once the teardown is done");
   check(
     !far.events.some((e) => e.startsWith("cancel-tcpip-forward")),
-    "quiet: a hop that was never granted a listener has none to hand back (nothing is cancelled)"
+    "quiet: a hop that was granted no listener has none to hand back (nothing is cancelled)"
   );
   await far.close();
 }
 
 async function answeringFarSide() {
-  // Control: the same wire, the same question — answered. Silence has to be
-  // told apart from a reply, or "the far side said nothing" is just "we never
-  // went there".
+  // Control: the same wire, the same hop — with a far side that would answer. It
+  // is still not asked, because the connect has no question to ask it. That is
+  // the difference between "the far side was silent" and "the far side was
+  // never asked", and only this pair can tell them apart.
   const far = await startFakeSshd({ forward: "accept" });
   const { res, stages, ms } = await connectOnce(far);
 
   check(stages.includes("forward"), "answer: the connect reached the forward stage");
   check(ms < CONNECT_BUDGET_MS, `answer: the connect settled in ${ms}ms`);
-  const asked = await withDeadline(awaitModelPath(), SILENT_BUDGET_MS);
-  check(asked.settled && asked.value === "listening", `answer: the model path is listening (${asked.value})`);
+  const asks = far.events.filter((e) => e.startsWith("tcpip-forward"));
   check(
-    remoteLlmBase() === `http://127.0.0.1:${LLM_PROXY_REMOTE_PORT}/v1`,
-    "answer: a session is pointed at the port the far side granted"
+    asks.length === 0,
+    `answer: a far side that WOULD answer is not asked either (${asks.join(",") || "none"})`
   );
   check(res.ok === true, "answer: the hop is up");
 
-  // …and the hop hands its listener back on the way out. An sshd releases a
-  // session's tcpip-forward bindings only when it learns the session ENDED, and
-  // a client that just closes the socket teaches it nothing until the TCP
-  // keepalive does (two hours on a stock sshd) — which is where the field's next
-  // hop found its own 8892 held by a listener nobody had ever answered on.
   await stopTunnel();
   check(await closedTo(far), "answer: the wire is closed once the teardown is done");
-  const cancels = far.events.filter((e) => e.startsWith("cancel-tcpip-forward"));
   check(
-    cancels.length === 1 && cancels[0] === `cancel-tcpip-forward:${LLM_PROXY_REMOTE_PORT}`,
-    "answer: the far side is told to release exactly the listener it granted (" + (cancels.join(",") || "none") + ")"
-  );
-  const grants = far.events.filter((e) => e.startsWith("tcpip-forward"));
-  check(
-    grants.length === 1 && grants[0] === `tcpip-forward:${LLM_PROXY_REMOTE_PORT}`,
-    "answer: …and it is the only listener this hop was ever given (" + grants.join(",") + ")"
-  );
-  await far.close();
-}
-
-async function refusingFarSide() {
-  // The field log's shape: 8892 is held on the far host (an orphaned listener
-  // from a hop this window no longer owns), so every bind is refused. That is an
-  // ANSWER — the ladder may spend its retries, but the connect must still be
-  // called good, on a port the far side picks for itself.
-  const CHOSEN = 46123;
-  const far = await startFakeSshd({ forward: "held", chosenPort: CHOSEN });
-  const { res, stages, ms } = await connectOnce(far);
-
-  check(stages.includes("forward"), "held: the connect reached the forward stage");
-  check(ms < CONNECT_BUDGET_MS, `held: the connect does not wait for the ladder (${ms}ms)`);
-
-  const asked = await withDeadline(awaitModelPath(), LADDER_BUDGET_MS);
-  check(asked.settled, "held: the ladder finished inside its own budget");
-  check(asked.value === "listening", `held: a port of the far side's own is the model path (${asked.value})`);
-  check(
-    remoteLlmBase() === `http://127.0.0.1:${CHOSEN}/v1`,
-    "held: a session spawned now is pointed at the port the far side chose"
-  );
-  check(res.ok === true, "held: a held 8892 is not a failed connect");
-
-  const asks = far.events.filter((e) => e.startsWith("tcpip-forward")).map((e) => e.split(":")[1]);
-  check(
-    asks.filter((p) => p === String(LLM_PROXY_REMOTE_PORT)).length === 6 && asks.includes("0"),
-    `held: the contract port was tried to the end of the ladder, then the far side was asked for its own (${asks.join(",")})`
-  );
-  const log = tunnelLogText();
-  check(/reverse forward on 8892 refused/.test(log), "held: the refusal is logged as a refusal, not as silence");
-  check(/chosen by the far side/.test(log), "held: the port that landed is logged as the far side's choice");
-
-  await stopTunnel();
-  check(await closedTo(far), "held: the wire is closed once the teardown is done");
-  // The listener to hand back is the one this hop was GRANTED (the far side's
-  // own pick), never the contract port it was refused: 8892 on that far host is
-  // somebody else's listener, and a cancel for a port this client never held
-  // would be a request about theirs — exactly the orphan the field log is made
-  // of.
-  const cancels = far.events.filter((e) => e.startsWith("cancel-tcpip-forward"));
-  check(
-    cancels.length === 1 && cancels[0] === `cancel-tcpip-forward:${CHOSEN}`,
-    "held: the port the far side granted is the one handed back (" + (cancels.join(",") || "none") + ")"
-  );
-  check(
-    !cancels.some((e) => e === `cancel-tcpip-forward:${LLM_PROXY_REMOTE_PORT}`),
-    "held: the port it REFUSED is never cancelled (that listener is not this window's)"
+    !far.events.some((e) => e.startsWith("cancel-tcpip-forward")),
+    "answer: …and the teardown cancels nothing, because nothing was ever asked for"
   );
   await far.close();
 }
@@ -318,16 +230,14 @@ async function noForwardingFarSide() {
 }
 
 async function main() {
-  check(BIND_TIMEOUT_MS > 0 && BIND_TIMEOUT_MS < 60000, `read the far side clock from the source: ${BIND_TIMEOUT_MS}ms`);
   const hopShouldWork = await supervisorOn8890();
   console.log(`      (a supervisor answers on 127.0.0.1:8890: ${hopShouldWork} — the hop's own gate)`);
 
   await silentFarSide(hopShouldWork);
   await answeringFarSide();
-  await refusingFarSide();
   await noForwardingFarSide();
 
-  summary("tunnel-quiet-forward", "the connect is not held open by the far side's answer");
+  summary("tunnel-quiet-forward", "the connect asks the far side for nothing, so its silence cannot hold it");
   process.exit(0);
 }
 
