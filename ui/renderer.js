@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 86c39559b41608d3897783e36d6226d9408368b8f0d4b2beeacd5c870dfcb6b1
+// sources sha256: 46c5dfd07514b14f25a20c4f37b22723fa320b3a14ec918480dc825577610e10
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -4991,6 +4991,7 @@
         highlightCode(wrap);
         if (live) eventsEl.insertBefore(wrap, live);
         else (pageSink || eventsEl).appendChild(wrap);
+        if (!pageSink) typesetMath(wrap);
         rememberRecord(wrap, ev.content);
       }
       return true;

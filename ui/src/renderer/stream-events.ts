@@ -541,6 +541,18 @@ export function applyStreamEvent(ev) {
       // paging pass has no live block at all — project.ts renders pages into a sink.)
       if (live) eventsEl.insertBefore(wrap, live);
       else (pageSink || eventsEl).appendChild(wrap);
+      // The record's text is final, so its math is typeset HERE: this block has no
+      // delta to defer to and no completing record behind it — a stored session, a
+      // replayed transcript, a reconnect's catch-up, a step whose text went with a
+      // pane that was away. The live pass that typesets is the STREAMING one
+      // (stream-text.ts paintTextBlock) and this block never streamed, so without
+      // this call the answer's LaTeX stays raw — the reported bare `$\omega$`,
+      // `$$\varepsilon …$$` at the tail of a tab that had just been restored. The
+      // markdown pass is not the problem: it protects every $…$ pair (⟦MATHn⟧,
+      // render-events.ts renderMarkdown) and MathJax renders the text whole.
+      // A paging sink is skipped: the history page typesets its own blocks once
+      // they are in the pane (project.ts loadOlder).
+      if (!pageSink) typesetMath(wrap);
       rememberRecord(wrap, ev.content); // the block a following final completes
     }
     return true;

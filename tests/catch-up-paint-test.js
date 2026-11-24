@@ -112,7 +112,11 @@ global.reducedMotion = () => true;
 global.flushTextRender = () => {};
 global.flushThinkingRender = () => {};
 global.highlightCode = () => {};
-global.typesetMath = () => {};
+// the math pass, counted: an answer that arrives as a RECORD (no delta streamed
+// it) is typeset by stream-events.ts itself, and the paging sink is not (the
+// history page typesets its own blocks once they are in the pane)
+let mathTypeset = [];
+global.typesetMath = (el) => { mathTypeset.push(el); };
 // stream-events.ts's other imports: none of them is what this runner measures
 global.autoFoldTurn = () => {};
 global.closePerm = () => {};
@@ -136,7 +140,15 @@ global.renderMarkdown = (t) => "<p>" + t + "</p>";
 global.SSE_RUN_LOST = "the session running this task went away";
 global.appendThinkingRow = () => {};
 global.buildThinkingBlock = () => fakeRow();
-global.createAgentTextBlock = () => fakeRow();
+// an agent text block with a real `.body`: the record path below writes the
+// rendered markdown into it (stream-events.ts block of its own)
+global.createAgentTextBlock = () => {
+  const row = fakeRow();
+  const body = shell();
+  row.querySelector = (sel) => (sel === ".body" ? body : null);
+  row.body = body;
+  return row;
+};
 global.paintTextBlock = () => {};
 global.scheduleTextRender = () => {};
 global.scheduleThinkingRender = () => {};
@@ -253,6 +265,31 @@ async function main() {
   const clearSrc = clearAt < 0 ? "" : project.slice(clearAt, project.indexOf("// ---- scroll-up paging", clearAt));
   check(/state\.owedRecords\.length = 0/.test(clearSrc) && /endCatchUp\(\)/.test(clearSrc),
     "clearStream drops the queue and closes the bracket with the pane it empties");
+
+  // ---- 7) an answer that arrives as a RECORD keeps its math ----
+  // The reported bug: the tail of a restored tab showed bare `$\omega$` / `$$…$$`.
+  // A record painted as a block of its own never streamed, so no delta and no
+  // completing record owes it a math pass — stream-events.ts has to run it. (The
+  // markdown pass was never the problem: renderMarkdown protects every $…$ pair.)
+  const answer = "the direction is $\\omega$ bucketed, so $$\\varepsilon \\approx r\\,(\\omega-\\hat\\omega)$$";
+  mathTypeset = [];
+  const beforeRecord = eventsEl.kids.length;
+  await frame({ offset: 4000, event: { type: "assistant_message", content: answer } });
+  check(eventsEl.kids.length === beforeRecord + 1, "a record with no live block paints a block of its own");
+  check(mathTypeset.length === 1,
+    "…and that block is TYPESET: its record is final, so nothing else would ever run the math pass");
+  check(mathTypeset[0] && mathTypeset[0].body, "…on the block it just painted");
+
+  // the history page's sink is the one exception: project.ts (loadOlder) typesets
+  // the blocks once it has moved them into the pane, so a math pass here would be
+  // a second one over the same rows
+  mathTypeset = [];
+  global.pageSink = shell();
+  await frame({ offset: 4100, event: { type: "assistant_message", content: answer } });
+  check(mathTypeset.length === 0, "a paged history row is not typeset into the sink (project.ts does it after insertion)");
+  global.pageSink = null;
+  check(/if \(!pageSink\) typesetMath\(wrap\)/.test(renderer("stream-events")),
+    "the record path typesets only outside a paging sink");
 
   summary("catch-up-paint");
 }
