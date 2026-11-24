@@ -159,11 +159,12 @@
     flex: 1 0 100%;
     min-width: 0;
   }
-  /* the picker's own finger scale: one control height for the toolbar, the name
-     bar and the list rows (the settings pane and the plugin tab raise the same
-     names for their own panes — the picker had none, so on a touch screen its
-     toolbar stayed a pointer-sized strip) */
-  #fs-modal {
+  /* the phone's CONTROL SCALE, said once for every dialog: the box raises the
+     name and the shared control rule in style.css turns it into a finger-sized
+     box — the picker's connect bar, toolbar, name bar and rows, a settings row,
+     a dialog's foot. (The plugin pane below raises the same names for the small
+     controls that live inside its rows.) */
+  .modal-box {
     --ctl-h: 40px;
   }
   /* ...and the toolbar is TWO lines here: the way up and the path on the first,

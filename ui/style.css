@@ -752,7 +752,7 @@ select option { background-color: var(--bg2); color: var(--text); }
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 32px;
+  height: var(--ctl-h);
   padding: 7px 8px;
   background: var(--bg);
   color: var(--text);
@@ -827,7 +827,7 @@ select option { background-color: var(--bg2); color: var(--text); }
 .cselect.disabled .cselect-btn { opacity: 0.4; cursor: default; }
 .cselect.disabled .cselect-btn:hover { border-color: var(--border); }
 .fs-conn-row .cselect { flex: 1; }
-.modal-box > .cselect .cselect-btn { font-family: var(--font-display); font-size: 14px; padding: 8px var(--row-gutter); }
+.modal-box > .cselect .cselect-btn { font-family: var(--font-display); font-size: 14px; padding: 0 var(--row-gutter); }
 .modal-box > .cselect { margin-bottom: var(--s4); }
 /* a picker that is a modal's own field is set in the display face too. Its popup is
    on <body> now (it has to escape the pane's clipping), so it cannot inherit that
@@ -1379,6 +1379,10 @@ mjx-container[display="true"] {
 .event.thinking .hdr { color: var(--muted); font-size: 12px; }
 .thinking-row {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  /* the same 25px row as .tool-row: a fold is a press target, and at 19px it sat
+     under the sheet's 24px --tap floor and off the process rows' rhythm — two
+     line heights in one block of rows */
+  padding: 3px 0;
   color: var(--muted); font-size: 13px; cursor: pointer;
   user-select: none; font-family: var(--font-mono);
 }
@@ -1627,6 +1631,8 @@ mjx-container[display="true"] {
 
 .result-row {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  /* the same 25px row as .tool-row and .thinking-row (see there) */
+  padding: 3px 0;
   color: var(--muted); font-size: 13px; cursor: pointer;
   user-select: none;
 }
@@ -1776,7 +1782,8 @@ mjx-container[display="true"] {
 /* field spacing: only DIRECT form fields in a modal get it — the picker's
    toolbar/path input is a descendant and must stay a tight flex row. One value for
    all three field kinds (an input, a select, the custom dropdown): they are the
-   same rung of the same column, and 14px was a step no scale in this sheet has. */
+   same rung of the same column, and 14px was a step no scale in this sheet has.
+   The box they share is the control rule just below. */
 .modal-box > input { margin-bottom: var(--s4); }
 /* profile-name uniqueness feedback in the LLM profile editor */
 .modal-box .llm-profile-error { margin: 2px 0 12px; color: var(--accent); font-size: 12px; }
@@ -1790,16 +1797,61 @@ mjx-container[display="true"] {
   border: 1px solid var(--border);
   border-radius: 0;
   color: var(--text);
-  padding: var(--s2) var(--select-gutter) var(--s2) var(--row-gutter);
+  padding: 0 var(--select-gutter) 0 var(--row-gutter);
   font-family: var(--font-display);
   font-size: 14px;
   margin-bottom: var(--s4);
+}
+/* ---- one control box ----
+   Controls that share a row are one rung: a field, a picker and a button beside
+   each other are the same --ctl-h box, with the label centered in it. They were
+   three heights in one row — a button at 35 (7px of padding around its line box),
+   a field at 38 (the field's 8px the same way), the custom dropdown pinned at 32 —
+   a seam that reads as unfinished before anything is pressed. Height and the
+   vertical padding say the BOX; the label is placed by a line box (a field) or by
+   flex (a button), so it is never the padding that puts the text on the floor of
+   its own box. Every dialog control that shares a line belongs here, including
+   the two rows that are not a `.modal-actions`: the picker's connect bar and the
+   settings profile row (`.fs-conn-row`). */
+.modal-box > input,
+.modal-box > select,
+.modal-box > .cselect .cselect-btn,
+.modal-actions button,
+.fs-conn-row button,
+.fs-conn-row input[type="text"],
+#fs-modal button,
+#fs-modal input[type="text"] {
+  height: var(--ctl-h);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+/* a field's text is positioned by its line box: one line as tall as the content
+   box (the height minus its two 1px borders) is what puts a 13px name in the
+   middle of a 32px box. A native select centers its own text in a fixed height;
+   a text input does not, and its ink sat 7px high without this. */
+.modal-box > input,
+.fs-conn-row input[type="text"],
+#fs-modal input[type="text"] { line-height: calc(var(--ctl-h) - 2px); }
+/* a button's label: flex centering, one line, never wrapped. A fullwidth glyph
+   (＋) draws a taller line box than Archivo's, so the line height is pinned to 1
+   and the box — not the glyph's ascender — decides where the label sits. */
+.modal-actions button,
+.fs-conn-row button,
+#fs-modal button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  white-space: nowrap;
 }
 /* the same one-line focus as `#task-input:focus`, for every field in a modal — the
    plugin tab's filter box is one of these boxes, not a case of its own */
 .modal-box input:focus { outline: none; border-color: var(--accent); }
 .modal-box p { margin: 10px 0 0; line-height: 1.5; }
-.modal-actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 20px; }
+/* a dialog's foot is one row of that control, centered in the row — not left on
+   the text baseline, where a 32px button and its neighbour sat 1.5px apart */
+.modal-actions, #conn-actions { display: flex; align-items: center; gap: 12px; justify-content: flex-end; }
+.modal-actions { margin-top: 20px; }
 .modal-box h4 { margin: 20px 0 12px; font-size: 13px; font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text); }
 /* a confirm question may be two lines and says so with \n */
 #confirm-text { white-space: pre-line; }
@@ -2364,7 +2416,7 @@ mjx-container[display="true"] {
   border-radius: 0;
   color: var(--text);
   padding: 0 var(--select-gutter) 0 var(--s2); /* the height is the box's, the
-                                text centers in it: see the control rule below */
+                                text centers in it: see the control box above */
   height: var(--ctl-h);      /* the same box as the buttons beside it */
   font-family: var(--font-mono);
   font-size: 13px;
@@ -2374,12 +2426,9 @@ mjx-container[display="true"] {
    in the sheet — `.modal-box > select` — still use) */
 .fs-conn-row select:focus { outline: none; border-color: var(--accent); }
 .fs-conn-row select:disabled { opacity: 0.4; cursor: default; }
-.fs-conn-row button {
-  white-space: nowrap;
-  /* the box (height, centering, line-height) is the picker's one control rule;
-     what this row adds is that its two buttons do not squeeze the select */
-  flex: none;
-}
+/* the box (height, centering, line-height) is the dialog's control box; what this
+   row adds is that its two buttons do not squeeze the select */
+.fs-conn-row button { flex: none; }
 /* The picker's own Connect: it belongs to the FOLDED conn bar — the welcome state,
    where the conn bar is the whole dialog. While the body is up, the file browser is
    the picker and the choice in the list above is what brought it up: a second door
@@ -2405,9 +2454,9 @@ mjx-container[display="true"] {
    element's OWN box, which is 35% of the track here — so the same travel is
    -100%→285.714% (= 100/35): identical pixels, moved on the compositor. */
 @keyframes conn-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(285.714%); } }
-/* SSH failure options: Retry + Cancel pinned to the bottom-right of the picker.
-   The collapsed (failure) box becomes a flex column with a taller min-height. */
-#conn-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: auto; padding-top: var(--s5); }
+/* SSH failure options: Retry + Cancel pinned to the bottom-right of the picker —
+   the foot's row (`.modal-actions, #conn-actions` above), pushed down here. */
+#conn-actions { margin-top: auto; padding-top: var(--s5); }
 #fs-modal .modal-box:has(#fs-body.collapsed) { display: flex; flex-direction: column; min-height: 210px; }
 /* the file-browsing body collapses smoothly during SSH connect (height + fade).
    max-height clamps it deterministically; 480px safely covers the bounded body. */
@@ -2420,32 +2469,12 @@ mjx-container[display="true"] {
   transition: max-height var(--move), opacity var(--move);
 }
 #fs-body.collapsed { max-height: 0; opacity: 0; }
-/* ONE control height for the whole picker. The connect bar, the toolbar and the
-   name bar are three rows of one machine, and they were 33, 35 and 38px: a seam
-   that reads as unfinished before anything is even pressed. Every box is --ctl-h
-   tall with its label centered in it — a fullwidth glyph (＋) has a taller line
-   box than Archivo's, so line-height 1 plus flex centering is what keeps the text
-   off the floor of its own box instead of the padding deciding for it. */
-#fs-modal button,
-#fs-modal input[type="text"] {
-  height: var(--ctl-h);
-  padding-top: 0;
-  padding-bottom: 0;
-}
-/* a field's text is positioned by its line box, not centered like a button's
-   label: one line as tall as the content box (the height minus its two 1px
-   borders) is what puts a 13px name in the middle of a 32px box. This is the
-   measured rule, not a guess — the ink of the label sat 7px high without it. */
-#fs-modal input[type="text"] { line-height: calc(var(--ctl-h) - 2px); }
-#fs-modal button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-  white-space: nowrap;
-}
+/* The picker's connect bar, toolbar and name bar are three rows of one machine,
+   and every box in them is the dialog's control box — the rule under
+   `.modal-box`, above (the heights here used to be 33, 35 and 38). Nothing in
+   this dialog sizes a control of its own any more: that is the point. */
 #fs-modal input[type="text"] { min-width: 0; }
-.fs-toolbar { display: flex; gap: var(--s2); margin-bottom: var(--s3); }
+.fs-toolbar { display: flex; align-items: center; gap: var(--s2); margin-bottom: var(--s3); }
 /* the way up is an icon, so it is a square: one arrow, one box, no label to
    wrap. The glyph is `→` turned a quarter anticlockwise, not the `▸` caret the
    sheet uses elsewhere: this face draws `▸` at 6x7px — a full stop with a point
@@ -2498,7 +2527,6 @@ label.hidden-toggle input[type="checkbox"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-#fs-toolbar label.hidden-toggle { align-self: center; }
 /* beat #fs-toolbar input { flex: 1 } so the checkbox stays its natural size */
 #fs-toolbar label.hidden-toggle input { flex: none; }
 #fs-list {
