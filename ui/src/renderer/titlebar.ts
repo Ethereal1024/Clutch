@@ -15,7 +15,8 @@ import { state } from "./state";
 import { busy } from "./stream-view";
 import { currentProject, openProject } from "./project";
 import { tabActivate, tabClose, tabCloseAll, tabCloseOthers, tabReopen, closedTabCount, tabMarkState } from "./tab-bar";
-import { NARROW_Q, shellPanel, setShellPanel, toggleHidden } from "./workspace-panel";
+import { NARROW_Q, shellPanel, setShellPanel, showShellPanel, toggleHidden } from "./workspace-panel";
+import { revealPlugins } from "./dock";
 import { openSettings, showSettingsTab, corruptRecord } from "./settings";
 import { openFsBrowser } from "./fs-browser";
 import { setTrustArmed, trustArmed } from "./permissions";
@@ -54,9 +55,14 @@ register({
   // desktop: collapse/show the aside; phone: the aside IS the drawer
   run: () => {
     if (NARROW_Q.matches) setShellPanel(!shellPanel.classList.contains("drawer-open"));
-    else shellPanel.classList.toggle("panel-hidden");
+    else if (shellPanel.classList.contains("panel-hidden")) showShellPanel();
+    else shellPanel.classList.add("panel-hidden");
   },
 });
+// the plugin page lives in the sidebar now, so it gets the sidebar's own door: a
+// reader who looked for it where it used to be (a settings tab) has to find it
+// from the menu that names panels
+register({ id: "toggle-plugins", run: () => revealPlugins() });
 register({ id: "toggle-statusbar", run: () => $("#statusbar")?.classList.toggle("hidden") });
 register({ id: "toggle-hidden", run: () => toggleHidden() });
 

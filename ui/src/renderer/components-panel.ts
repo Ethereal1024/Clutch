@@ -1,5 +1,14 @@
-// the plugin tab: what the two places hold, and what this client can still give
-// them
+// the plugins view of the right dock: what the two places hold, and what this
+// client can still give them
+//
+// WHERE THIS LIVES. It is a group of the sidebar (ui/index.html `#dock-plugins`,
+// stacked under the workspace tree, ui/src/renderer/dock.ts puts either one away),
+// not a tab of the settings dialog. Two reasons, and the second one is the
+// requirement: a dialog covers the tab strip, so it cannot show anything ABOUT the
+// tab that is open; and what this page shows is exactly that — the components on
+// the machine the open session runs on. `plugSetSlot` follows the strip
+// (`clutch:tab-state`), so switching tabs re-reads for the new tab's session
+// instead of leaving the previous one's inventory under a tab that never had it.
 //
 // There is no machine picker here, and no machine named, because there is nothing
 // to pick: WHERE a component goes is a fact of its declaration (`destinationOf`
@@ -43,6 +52,7 @@
 
 import { $ } from "./dom";
 import { askConfirm } from "./settings";
+import { activeSlotId } from "./slots";
 
 export const plugBodyEl = $("#plug-body");
 export const plugFilterEl = $("#plug-filter");
@@ -53,6 +63,17 @@ export const plugMirrorSaveBtn = $("#mirror-save");
 export const plugMirrorNoteEl = $("#mirror-note");
 
 export const plugState = {
+  // WHICH session this page is about: the active tab's slot (ui/src/renderer/
+  // slots.ts `activeSlotId`, an empty string for a window with no tabs). One tab
+  // is one session and two tabs can sit on two machines, so what the list holds
+  // is a fact of the tab that is open — every read and every write names this,
+  // and the pane follows the strip (plugSetSlot below).
+  slot: "",
+  // which read is the CURRENT one. Switching tabs abandons the read in flight, so
+  // each chain carries the number it started with and drops its answer when a
+  // newer read has taken over — otherwise the previous tab's machine would paint
+  // itself into the new tab's list.
+  readSeq: 0,
   // the list has answered once — a place that was never read is not a place that
   // holds nothing, and this is the bit that tells the two apart
   read: false,
@@ -1279,7 +1300,7 @@ export function plugReadSettings(name) {
   plugState.formPending = name;
   renderPlugins();
   api
-    .settings(name)
+    .settings(name, plugState.slot)
     .then((r) => {
       if (seq !== plugState.formSeq) return; // closed, or another row asked since
       plugState.formPending = null;
@@ -1312,7 +1333,7 @@ export function plugWriteSetting(name, key, value) {
   form.saved = null;
   renderPlugins();
   api
-    .setSetting(name, { [key]: value })
+    .setSetting(name, { [key]: value }, plugState.slot)
     .then((r) => {
       if (seq !== plugState.formSeq) return; // the form was closed while it flew
       form.busy = null;
@@ -1706,7 +1727,7 @@ export async function plugRemove(held) {
   renderPlugins();
   let res;
   try {
-    res = await api.remove(held.name);
+    res = await api.remove(held.name, {}, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed: still the failure path, still with a reason
     res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
@@ -1745,7 +1766,7 @@ export async function plugRemoveVersion(held, record) {
   renderPlugins();
   let res;
   try {
-    res = await api.remove(held.name, { version });
+    res = await api.remove(held.name, { version }, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed: still the failure path, still with a reason
     res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
@@ -1770,7 +1791,7 @@ export function plugReadVersions(name) {
   renderPlugins();
   let out;
   Promise.resolve()
-    .then(() => api.versions(name))
+    .then(() => api.versions(name, plugState.slot))
     .then((r) => {
       out = { name, rows: (r && Array.isArray(r.versions) ? r.versions : []), error: (r && r.error) || null };
     })
@@ -1819,7 +1840,7 @@ export async function plugSwitch(held) {
   renderPlugins();
   let res;
   try {
-    res = await api.setDisabled(held.name, disabled);
+    res = await api.setDisabled(held.name, disabled, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed: still the failure path, still with a reason
     res = { ok: false, name: held.name, error: (e && e.message) || String(e) };
@@ -1918,7 +1939,7 @@ export async function plugInstall(entry) {
   renderPlugins();
   let res;
   try {
-    res = await api.install(entry.name);
+    res = await api.install(entry.name, plugState.slot);
   } catch (e) {
     // the IPC hop itself failed (window gone, main process gone): still the
     // failure path, not a silent no-op
@@ -1999,6 +2020,19 @@ export function renderPlugins() {
 export function plugRead({ force = false } = {}) {
   const api = window.clutchComponents;
   if (!api || plugState.pending) return; // no channel, or a read already running
+  // The read is for the slot the pane is showing NOW, and its answers are this
+  // page's only while that is still the slot on screen: `plugSetSlot` takes the
+  // number on, so a reply from the tab we left is dropped instead of painted.
+  const seq = ++plugState.readSeq;
+  const slot = plugState.slot;
+  const current = () => seq === plugState.readSeq;
+  // one half landed: draw what has arrived, unless this whole read is somebody
+  // else's now (then the count belongs to the read that took over)
+  const settled = () => {
+    if (!current()) return;
+    plugState.pending--;
+    renderPlugins();
+  };
   plugState.sessionError = null;
   plugState.sessionHeldError = null;
   plugState.clientError = null;
@@ -2009,8 +2043,9 @@ export function plugRead({ force = false } = {}) {
   plugState.pending = mirrors ? 3 : 2;
   renderPlugins();
   api
-    .list()
+    .list(slot)
     .then((r) => {
+      if (!current()) return;
       plugState.sessionBase = r.sessionBase || "";
       // each half answers on its own, and the rows that DID arrive are drawn: a
       // place that could not be read is not a place holding nothing, and an empty
@@ -2025,28 +2060,26 @@ export function plugRead({ force = false } = {}) {
       plugState.read = true;
     })
     .catch((e) => {
+      if (!current()) return;
       plugState.sessionError = (e && e.message) || String(e);
       plugState.read = true;
     })
-    .then(() => {
-      plugState.pending--;
-      renderPlugins();
-    });
+    .then(settled);
   api
     .market({ force })
     .then((m) => {
+      if (!current()) return;
       plugState.market = m;
     })
     .catch((e) => {
+      if (!current()) return;
       plugState.marketError = (e && e.message) || String(e);
     })
-    .then(() => {
-      plugState.pending--;
-      renderPlugins();
-    });
+    .then(settled);
   if (mirrors) {
     mirrors
       .then((m) => {
+        if (!current()) return;
         plugState.mirrors = (m && m.mirrors) || [];
         // the list's own reason, when it could not be read at all (a file this
         // machine cannot open): the section says so instead of drawing "none"
@@ -2054,13 +2087,11 @@ export function plugRead({ force = false } = {}) {
         plugState.mirrorForced = (m && m.forced) || "";
       })
       .catch((e) => {
+        if (!current()) return;
         plugState.mirrors = null;
         plugState.mirrorsError = (e && e.message) || String(e);
       })
-      .then(() => {
-        plugState.pending--;
-        renderPlugins();
-      });
+      .then(settled);
   }
 }
 
@@ -2166,21 +2197,70 @@ plugReloadBtn.addEventListener("click", () => {
   plugState.result = null; // a reload is a request for facts, not a report to keep
   plugRead({ force: true });
 });
-// the tab is the entry point: opening it is what makes the page go and look
-$("#settings-tab-plugins").addEventListener("click", () => pluginTabShown());
 
+// Being SHOWN is the entry point: the group's head being opened
+// (ui/src/renderer/dock.ts), the reload above, or a tab switch (below). A dialog
+// tab used to be it, and a dialog is exactly the surface this page had to leave —
+// it covers the strip that says which session the list is about.
 export function pluginTabShown() {
   plugRead();
 }
 
-// Whether the plugins pane is the one on screen: the modal is open and its tab is
-// the one selected (ui/src/renderer/settings.ts owns both, ui/index.html draws them).
-export function plugPaneVisible() {
-  const pane = $("#settings-pane-plugins");
-  const box = $("#settings-modal");
-  if (!pane || !box) return false;
-  return !pane.classList.contains("hidden") && !box.classList.contains("hidden");
+// WHICH session the pane is about (one tab = one slot, ui/src/renderer/slots.ts).
+// Two tabs are two sessions, and two sessions can sit on two machines: what a
+// machine holds is a fact of THAT machine, so the list follows the tab strip
+// instead of staying on whichever tab first opened it. Called on every
+// `clutch:tab-state` with the tab that is now open; an unchanged slot is a badge
+// moving in the background and costs nothing.
+export function plugSetSlot(slot) {
+  const next = String(slot || "");
+  if (next === plugState.slot) return;
+  plugState.slot = next;
+  // everything about a machine goes with the machine it described: what the tab
+  // we left held is not this tab's answer, and drawing it while the new read
+  // travels is the lie in the direction a "cached" page would tell it
+  plugState.read = false;
+  plugState.sessionBase = "";
+  plugState.sessionError = null;
+  plugState.sessionHeldError = null;
+  plugState.held = [];
+  plugState.pass = null;
+  plugState.result = null;
+  plugState.busy = null;
+  plugState.versions = null;
+  plugState.versionsPending = null;
+  plugState.form = null;
+  plugState.formPending = null;
+  // abandon the read in flight — its answers are the tab we left (`readSeq`
+  // above), and its slot may be a machine this tab cannot even reach
+  plugState.readSeq++;
+  // ...and the two disclosures are the same kind of fact, one level down: a
+  // version list or a settings form still in flight is about the machine we left,
+  // so both numbers move and their late answers are dropped instead of installed
+  plugState.formSeq++;
+  plugState.versionsSeq++;
+  plugState.pending = 0;
+  renderPlugins();
+  // a pane nobody is looking at is read when somebody opens it, not before: a
+  // hidden list would spend a network read on nothing (the same discipline as the
+  // mirror list and the two events below)
+  if (plugPaneVisible()) plugRead();
 }
+
+// Whether this list is on screen at all: the sidebar is open (ui/index.html
+// `#right`, `.panel-hidden` when it is put away) and its plugins group is not
+// folded to its head (`.dock-collapsed`, dock.ts owns the toggle). Asked from
+// `classList` rather than from layout so it answers the same in a page that has
+// no `closest()` and no geometry — the tests' DOM is one of those.
+export function plugPaneVisible() {
+  const group = $("#dock-plugins");
+  const side = $("#right");
+  if (!group || !side) return false;
+  return !group.classList.contains("dock-collapsed") && !side.classList.contains("panel-hidden");
+}
+
+document.addEventListener("clutch:tab-state", () => plugSetSlot(activeSlotId()));
+plugSetSlot(activeSlotId());
 
 // A session that MOVES is a different session machine, so what the session half of
 // this list holds is stale the moment the backend base changes — a tunnel that
@@ -2189,7 +2269,10 @@ export function plugPaneVisible() {
 // somebody is looking at is read again, because a hidden one would spend a network
 // read on nothing (the same discipline as the mirror list above).
 if (window.clutchApi && window.clutchApi.onBaseChanged) {
-  window.clutchApi.onBaseChanged(() => {
+  window.clutchApi.onBaseChanged((change) => {
+    // ...and only when it is THIS tab's session that moved: two tabs are two
+    // slots, and the other tab's hop is not this list's news
+    if (change && change.slotId !== undefined && String(change.slotId || "") !== plugState.slot) return;
     if (!plugPaneVisible()) return;
     // the market did not move with the session (a release list) and neither did
     // this client plugin domain: only the two inventories are re-read, and the

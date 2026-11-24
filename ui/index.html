@@ -62,6 +62,7 @@
         View
         <div class="tb-dropdown">
           <div class="tb-dd-item" data-action="toggle-right">Workspace Panel</div>
+          <div class="tb-dd-item" data-action="toggle-plugins">Plugins Panel</div>
           <div class="tb-dd-item" data-action="toggle-statusbar">Status Bar</div>
           <div class="tb-dd-sep"></div>
           <div class="tb-dd-item" data-action="toggle-hidden">Show Hidden Files</div>
@@ -142,18 +143,17 @@
   <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-box">
       <h3 id="settings-title">Settings</h3>
-      <!-- three surfaces in one modal: the model this client runs, the model's
-           VOICE (what each of the two places holds, and what can be given it),
-           and the build's name plate. The tab strip is what keeps each one out
-           of the others' way; ui/js/settings.js owns the switch and the About
-           pane, ui/js/components-panel.js fills the second one. -->
+      <!-- two surfaces in one modal: the model this client runs, and the build's
+           name plate. This box used to hold a third — the plugin page — and it
+           moved out (aside#right, `<aside>` below): which components a session has
+           is a fact of THAT session, and a dialog covers the tab strip that says
+           which session you are looking at. ui/js/settings.js owns the switch,
+           ui/src/renderer/components-panel.ts owns the sidebar's plugin group. -->
       <div class="modal-tabs" role="tablist">
         <button id="settings-tab-llm" class="modal-tab active" type="button" role="tab"
           aria-selected="true" aria-controls="settings-pane-llm">Model</button>
-        <button id="settings-tab-plugins" class="modal-tab" type="button" role="tab"
-          aria-selected="false" aria-controls="settings-pane-plugins">Plugins</button>
         <!-- the build's own name plate: a place a user goes to read a number off,
-             not a form. It is the third tab because it is the last thing anyone
+             not a form. It is the last tab because it is the last thing anyone
              opens, and it is the FIRST thing a report asks for. -->
         <button id="settings-tab-about" class="modal-tab" type="button" role="tab"
           aria-selected="false" aria-controls="settings-pane-about">About</button>
@@ -166,46 +166,6 @@
         <button id="llm-profile-edit" title="edit the selected profile">Edit</button>
         <button id="llm-profile-del" title="delete the selected profile">Delete</button>
       </div>
-      </div>
-      <div id="settings-pane-plugins" class="modal-pane hidden" role="tabpanel" aria-labelledby="settings-tab-plugins">
-        <!-- Where every source this build ships is read from (report: "downloads
-             and uploads to the server still need a VPN — the domestic mirror never
-             took effect"). The knob used to exist only as CLUTCH_SOURCE_MIRROR or a
-             hand-written ~/.clutch/settings.json key, and on Android HOME is the
-             app's own filesDir: neither is reachable on a phone. It is a CLIENT
-             setting (this window's network, ui/net-fetch.js reads it per fetch), so
-             it is drawn above the component list rather than among its rows — and
-             it is the only door to it there is. -->
-        <div class="plug-mirror">
-          <label for="mirror-input">Source mirror</label>
-          <div class="fs-conn-row">
-            <input id="mirror-input" type="text" autocomplete="off" spellcheck="false"
-              placeholder="https://accelerator.example/ — empty reads github.com directly" />
-            <!-- the field is saved, not typed-at-the-backend: it is a decision with
-                 a network consequence, so it is one deliberate act -->
-            <button id="mirror-save" class="ghost" type="button"
-              title="save the mirror and read the sources again">Save</button>
-          </div>
-          <!-- the verdict on that save (what it applies to, or why it was refused):
-               the same `role="status"` line the pane uses above the list -->
-          <p id="mirror-note" class="plug-mirror-note" role="status" aria-live="polite"></p>
-        </div>
-        <!-- no machine is named here, and none is offered: WHERE a component goes
-             is a fact of its declaration (ui/components.js destinationOf), the same
-             one in every session, so there is nothing to choose and nothing to
-             report. The rows carry the only machine-dependent fact there is —
-             whether the place that would receive the bytes can be reached. -->
-        <div class="plug-head">
-          <!-- the label is a glyph (↻), which reads as nothing: the button carries
-               the words its title spells out -->
-          <button id="plug-reload" class="ghost" type="button" aria-label="read the components and the market again" title="read the components and the market again">↻</button>
-        </div>
-        <!-- the page's one status line: reads in flight, and the verdict on a write
-             whose row is gone. It is announced as it changes (`role="status"`), the
-             way #notice is. -->
-        <p id="plug-note" class="plug-note" role="status" aria-live="polite"></p>
-        <div id="plug-filter" class="plug-filter"></div>
-        <div id="plug-body" class="plug-body scroll"></div>
       </div>
       <div id="settings-pane-about" class="modal-pane hidden" role="tabpanel" aria-labelledby="settings-tab-about">
         <!-- What this build IS. The number is read from ui/version.js — a stamp the
@@ -514,19 +474,86 @@
     </section>
 
     <aside id="right">
-      <!-- device report #2/#3: the panel's dismissal is a bare ✕ at the head's
-           right edge — never mid-row, never boxed. The project actions live in
-           the titlebar's File menu, so the panel carries the tree alone. -->
-      <div class="panel-head">
-        <span class="panel-title">workspace</span>
-        <div class="panel-tools">
-          <label class="hidden-toggle" title="show hidden (dot) files">
-            <input type="checkbox" id="tree-hidden-toggle" /> show hidden
-          </label>
-          <button id="shell-close-btn" class="shell-close-btn" title="close the panel" aria-label="close the panel">✕</button>
+      <!-- The right sidebar is a DOCK: groups stacked top to bottom, the way VS
+           Code's sidebar stacks its views, and each group is a head plus a body —
+           a title you can collapse it by (the caret is the state) and the one
+           surface under it. Two groups: the workspace tree, and the plugins this
+           session can reach. They are ONE column because they answer the same
+           question about the same thing — the tab that is open — and because the
+           plugin page's rows are a list, like the tree, not a dialog's form.
+
+           WHICH session the plugin group is about follows the TAB, not the window
+           (ui/src/renderer/components-panel.ts plugSetSlot): two tabs are two
+           sessions on possibly two machines, and what is installed is a fact of the
+           machine the session's commands run on. That is why it could not stay in
+           the settings dialog — a dialog covers the strip that names the tab it
+           would be reporting on. -->
+      <div id="dock-workspace" class="dock-group" data-group="workspace">
+        <!-- device report #2/#3: the panel's dismissal is a bare ✕ at the head's
+             right edge — never mid-row, never boxed. The project actions live in
+             the titlebar's File menu, so the panel carries the tree alone. -->
+        <div class="panel-head">
+          <button id="dock-toggle-workspace" class="panel-title dock-toggle" type="button"
+            aria-expanded="true" aria-controls="tree"
+            title="collapse the workspace">workspace</button>
+          <div class="panel-tools">
+            <label class="hidden-toggle" title="show hidden (dot) files">
+              <input type="checkbox" id="tree-hidden-toggle" /> show hidden
+            </label>
+            <button id="shell-close-btn" class="shell-close-btn" title="close the panel" aria-label="close the panel">✕</button>
+          </div>
+        </div>
+        <div id="tree" class="dock-body scroll"></div>
+      </div>
+
+      <div id="dock-plugins" class="dock-group" data-group="plugins">
+        <div class="panel-head">
+          <button id="dock-toggle-plugins" class="panel-title dock-toggle" type="button"
+            aria-expanded="true" aria-controls="plug-pane"
+            title="collapse the plugins">plugins</button>
+          <div class="panel-tools">
+            <!-- a VIEW action, in the view's own head (VS Code puts it there and
+                 its label is a glyph that reads as nothing, so the button carries
+                 the words its title spells out) -->
+            <button id="plug-reload" class="ghost" type="button" aria-label="read the components and the market again" title="read the components and the market again">↻</button>
+          </div>
+        </div>
+        <div id="plug-pane" class="dock-body plug-pane">
+          <!-- Where every source this build ships is read from (report: "downloads
+               and uploads to the server still need a VPN — the domestic mirror never
+               took effect"). The knob used to exist only as CLUTCH_SOURCE_MIRROR or a
+               hand-written ~/.clutch/settings.json key, and on Android HOME is the
+               app's own filesDir: neither is reachable on a phone. It is a CLIENT
+               setting (this window's network, ui/net-fetch.js reads it per fetch), so
+               it is drawn above the component list rather than among its rows — and
+               it is the only door to it there is. -->
+          <div class="plug-mirror">
+            <label for="mirror-input">Source mirror</label>
+            <div class="fs-conn-row">
+              <input id="mirror-input" type="text" autocomplete="off" spellcheck="false"
+                placeholder="https://accelerator.example/ — empty reads github.com directly" />
+              <!-- the field is saved, not typed-at-the-backend: it is a decision with
+                   a network consequence, so it is one deliberate act -->
+              <button id="mirror-save" class="ghost" type="button"
+                title="save the mirror and read the sources again">Save</button>
+            </div>
+            <!-- the verdict on that save (what it applies to, or why it was refused):
+                 the same `role="status"` line the pane uses above the list -->
+            <p id="mirror-note" class="plug-mirror-note" role="status" aria-live="polite"></p>
+          </div>
+          <!-- no machine is named here, and none is offered: WHERE a component goes
+               is a fact of its declaration (ui/components.js destinationOf), the same
+               one in every session, so there is nothing to choose and nothing to
+               report. The rows carry the only machine-dependent fact there is —
+               whether the place that would receive the bytes can be reached. -->
+          <!-- the page's one status line: reads in flight, and the verdict on a write
+               whose row is gone. It is announced as it changes (`role="status"`), the
+               way #notice is. -->
+          <p id="plug-note" class="plug-note" role="status" aria-live="polite"></p>
+          <div id="plug-filter" class="plug-filter"></div>
+          <div id="plug-body" class="plug-body scroll"></div>
         </div>
       </div>
-      <div id="tree" class="scroll"></div>
     </aside>
   </main>
 

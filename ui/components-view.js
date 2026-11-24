@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/components-view.ts and run `npm run build:host`.
-// source sha256: bfc2688537b30179028b5a554cbbc7a7da0cd29644435eef5e90de6e5a9e7efc
+// source sha256: b64a7ca0b4034daa9381de9ff96fc1b7fe60c8121ea517d6759dd5bddfa807ba
 
 // the plugin page's backend: what each component's declaration puts where, what
 // those places hold, what this client could give them, and the writes that move
@@ -29,7 +29,9 @@
 //                                                 runs its commands through
 //   plugins()         => ui/plugin-host.js        THIS client's plugin domain
 //                      (or null)                 (null on a host that has none)
-//   windowKind(win)   => "local" | "tunnel" | null  which session this window holds
+//   windowKind(win, slot) => "local" | "tunnel" | null  which machine one of the
+//                                                 window's slots (a tab) runs on
+//   slotBase(win, slot)   => "http://…"           that slot's supervisor URL
 //   ensureSupervisor()=> true | false             start THIS machine's supervisor
 //                      (absent on a host that owns none — the phone, N4)
 //   log(...)          => sink
@@ -64,7 +66,11 @@ const NO_CLIENT = "this shell has no client plugin domain, and that component is
 const NO_CLIENT_STORE = "its settings live on the machine that runs it, and this one is held by the client — there is nowhere here to store them";
 function createComponentsView(deps) {
     const { supervisorBase, tunnelStatus = () => ({}), plugins = null, // a function: this client plugin domain, or null where it has none
-    windowKind = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, 
+    // which machine one of a WINDOW's slots (one tab = one slot) sits on, and the
+    // supervisor URL that slot's machine answers on — the two facts that make an
+    // answer be about the tab whose page asked (host-core.ts backendKind /
+    // supervisorBaseFor, both already per slot)
+    windowKind = null, slotBase = null, ensureSupervisor = null, log = () => { }, lib = defaultLib, mirrorStore = defaultMirrors, 
     // The last automatic components pass this host ran, or null: one object
     // `{at, base, installed, retired, deferred, errors}` (ui/tunnel-connect.js
     // keeps it, the connect's own pass fills it). Asked per read, because the
@@ -77,14 +83,25 @@ function createComponentsView(deps) {
     // the URL the window's API calls go to: a window whose session sits on the far
     // side of a tunnel installs THERE (the tunnel's own supervisor URL), and a
     // window with a local session installs here.
-    function target(win = null) {
+    //
+    // `slot` is WHICH of the window's sessions is asking. One tab is one slot
+    // (ui/src/renderer/slots.ts), and two tabs can be pinned to two machines, so
+    // what a sidebar list holds is only true of the tab it was read for: the page
+    // names its tab's slot on every call, and an empty slot is the window's default
+    // session (every call site that predates tabs).
+    function target(win = null, slot = "") {
         const ts = tunnelStatus() || {};
-        const remote = ts.active && ts.url ? String(ts.url) : "";
-        const kind = win && windowKind ? windowKind(win) : null;
+        const live = ts.active && ts.url ? String(ts.url) : "";
+        const kind = win && windowKind ? windowKind(win, slot) : null;
+        if (kind === "tunnel")
+            return { kind: "remote", base: (win && slotBase ? slotBase(win, slot) : "") || live };
+        // a slot pinned to "local" stays local even while the window holds a tunnel
+        if (kind === "local")
+            return { kind: "local", base: supervisorBase() };
         // no session claimed yet (kind null): the tunnel, if any, is still the
         // machine this window is about
-        if (kind === "tunnel" || (!kind && remote))
-            return { kind: "remote", base: remote };
+        if (live)
+            return { kind: "remote", base: live };
         return { kind: "local", base: supervisorBase() };
     }
     // A target with no URL is not an unreadable machine, it is no machine yet.
@@ -174,8 +191,8 @@ function createComponentsView(deps) {
     // machine may not answer while this client still lists its plugins, and an
     // empty list must never be drawn as "nothing is installed" when the truth is
     // "that machine could not be asked".
-    async function list(win = null) {
-        const t = target(win);
+    async function list(win = null, slot = "") {
+        const t = target(win, slot);
         // Four facts, not two, because a page has two different things to do with
         // them: whether each place can be AIMED AT at all (`error`, `client`), and
         // separately whether its own list arrived (`inventoryError`,
@@ -349,7 +366,7 @@ function createComponentsView(deps) {
     // the declaration answer (`destinationOf`) and is the same in every session, so
     // there is no machine to pick and none to report. A declaration that
     // contradicts itself is refused here, before any byte is built or sent.
-    async function install(name, win = null, { progress = null } = {}) {
+    async function install(name, win = null, { progress = null } = {}, slot = "") {
         const say = (stage, extra = {}) => {
             if (progress)
                 progress({ stage, name, ...extra });
@@ -366,7 +383,7 @@ function createComponentsView(deps) {
         const where = rule.destinationOf(spec);
         if (where.error)
             return { ok: false, name, error: where.error };
-        return where.place === rule.PLACE_CLIENT ? clientInstall(spec, say) : sessionInstall(spec, win, say);
+        return where.place === rule.PLACE_CLIENT ? clientInstall(spec, say) : sessionInstall(spec, win, say, slot);
     }
     // This client half: the bytes come HERE and stay here. There is no supervisor
     // in this path at all — a plugin is installed by the app process itself
@@ -458,9 +475,9 @@ function createComponentsView(deps) {
     // checked here first as well, so a component that machine already holds at
     // exactly this version and digest costs no transfer — the same shortcut the
     // automatic pass takes.
-    async function sessionInstall(spec, win, say) {
+    async function sessionInstall(spec, win, say, slot = "") {
         const name = spec.name;
-        const t = target(win);
+        const t = target(win, slot);
         const problem = trouble(t);
         if (problem)
             return { ok: false, name, error: problem };
@@ -570,7 +587,7 @@ function createComponentsView(deps) {
     // `resolved` marking the one it would run. Same shape as list(): the reason a
     // read failed travels INSIDE the answer, because an empty list of versions and
     // "the machine could not be asked" are not the same fact.
-    async function versions(name, win = null) {
+    async function versions(name, win = null, slot = "") {
         const there = await placeOf(name);
         if (there.error)
             return { name, place: null, versions: [], error: there.error };
@@ -586,7 +603,7 @@ function createComponentsView(deps) {
                 return { name, place: rule.PLACE_CLIENT, versions: [], error: (e && e.message) || String(e) };
             }
         }
-        const t = target(win);
+        const t = target(win, slot);
         const problem = trouble(t);
         if (problem)
             return { name, place: rule.PLACE_SESSION, versions: [], error: problem };
@@ -609,7 +626,7 @@ function createComponentsView(deps) {
     // already true), and a refusal as `error`, which is what arrives when something
     // is running the component: this client cannot stop a process on another
     // machine, and the host will not delete code out from under one.
-    async function remove(name, { version = "" } = {}, win = null) {
+    async function remove(name, { version = "" } = {}, win = null, slot = "") {
         const there = await placeOf(name);
         if (there.error)
             return { ok: false, name, error: there.error };
@@ -631,7 +648,7 @@ function createComponentsView(deps) {
                 return { ok: false, name, error: (e && e.message) || String(e) };
             }
         }
-        const t = target(win);
+        const t = target(win, slot);
         const problem = trouble(t);
         if (problem)
             return { ok: false, name, error: problem };
@@ -663,7 +680,7 @@ function createComponentsView(deps) {
     // component at all, which is an answer rather than a failure — the request was
     // already true there — and the page has to say so, because it means the machine
     // it was aimed at was not the machine to switch.
-    async function setDisabled(name, disabled, win = null) {
+    async function setDisabled(name, disabled, win = null, slot = "") {
         const there = await placeOf(name);
         if (there.error)
             return { ok: false, name, error: there.error };
@@ -685,7 +702,7 @@ function createComponentsView(deps) {
                 return { ok: false, name, error: (e && e.message) || String(e) };
             }
         }
-        const t = target(win);
+        const t = target(win, slot);
         const problem = trouble(t);
         if (problem)
             return { ok: false, name, error: problem };
@@ -712,14 +729,14 @@ function createComponentsView(deps) {
     // (agent/tools/settings.py) — so a component the client itself holds has none
     // here. That is an answer rather than a failure, and the page draws the reason
     // the same way it draws any other refusal.
-    async function settings(name, win = null) {
+    async function settings(name, win = null, slot = "") {
         const there = await placeOf(name);
         if (there.error)
             return { ok: false, name, error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
             return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_STORE };
         }
-        const t = target(win);
+        const t = target(win, slot);
         const problem = trouble(t);
         if (problem)
             return { ok: false, name, error: problem };
@@ -742,14 +759,14 @@ function createComponentsView(deps) {
     // a form redraws from what the machine now holds rather than from what it sent.
     // The verdict is the host's: a key it does not declare, or a value its schema
     // cannot take, comes back as its own sentence in `error` and writes nothing.
-    async function setSetting(name, values, win = null) {
+    async function setSetting(name, values, win = null, slot = "") {
         const there = await placeOf(name);
         if (there.error)
             return { ok: false, name, error: there.error };
         if (there.place === rule.PLACE_CLIENT) {
             return { ok: false, name, place: rule.PLACE_CLIENT, error: NO_CLIENT_STORE };
         }
-        const t = target(win);
+        const t = target(win, slot);
         const problem = trouble(t);
         if (problem)
             return { ok: false, name, error: problem };

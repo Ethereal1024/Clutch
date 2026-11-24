@@ -223,7 +223,11 @@ const IDS = [
   "plug-note",
   "plug-reload",
   "plug-filter",
-  "settings-tab-plugins",
+  // the right dock's group and the aside it lives in: the pane reads only while it
+  // is on screen (components-panel.ts plugPaneVisible), and a test has to be able
+  // to fold the group the way dock.ts does
+  "dock-plugins",
+  "right",
   // the source-mirror row the pane draws above the list (report: "downloads and
   // uploads still needed a VPN" — the field is the only door to the knob)
   "mirror-input",
@@ -256,7 +260,7 @@ const COMPONENTS = [
 // `pass` is the fake of what the connect's automatic components pass did
 // (ui/components-view.js `list()` -> `pass`). Omitted, this machine has had no
 // pass yet, which is a different fact from "a pass that did nothing".
-function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", pass = null, settings = null } = {}) {
+function page({ held = [], heldError = null, listError = null, target = LOCAL, entries = COMPONENTS, errors = [], unreachable = false, store = {}, session = {}, mirror = null, client = false, clientError = null, clientHeldError = null, heldPlace = "session", entryPlace = "session", pass = null, settings = null, slot = "" } = {}) {
   const dom = makeDocument(IDS);
   const world = {
     listCalls: 0,
@@ -291,10 +295,27 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     mirrorAdds: [],
     mirrorRemoves: [],
     mirrorControl: null, // a deferred read, for the "still reading" frame
+    // WHICH tab's session each channel call named (components-panel.ts
+    // plugState.slot): one tab is one session, and two tabs can be two machines,
+    // so this is the fact that decides whether a write lands where it says it does
+    // `slot` is decided before the module runs, because the pane names the open
+    // tab on the reads it starts at load time (an empty tab list is ""
+    slot,
+    slots: [],
+    listDefer: false,
+    listDeferreds: [],
   };
   const api = {
-    list: async () => {
+    list: async (slot = "") => {
       world.listCalls++;
+      world.slots.push(["list", slot]);
+      // a read this runner can hold open, so a reply can arrive AFTER the strip has
+      // moved (the tab that asked is not the tab on screen any more)
+      if (world.listDefer) {
+        const d = defer();
+        world.listDeferreds.push(d);
+        return d.promise;
+      }
       if (listError) throw new Error(listError);
       // the shape ui/components-view.js list() answers in: two places, and for
       // each one the difference between "cannot be aimed at" (`error` / no
@@ -317,25 +338,29 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
       // the two words name a pair that cannot exist
       return { entries: entries.map((e) => ({ place: entryPlace, problem: "", read: true, ...e })), errors, unreachable, origin: "remote", note: "" };
     },
-    install: async (name) => {
+    install: async (name, slot = "") => {
       world.installCalls.push(name);
+      world.slots.push(["install", slot]);
       if (world.control) return world.control.promise;
       return world.reply;
     },
-    remove: async (name, opts) => {
+    remove: async (name, opts, slot = "") => {
       world.removeCalls.push(name);
       world.removeOpts.push(opts || null);
+      world.slots.push(["remove", slot]);
       if (world.control) return world.control.promise;
       return world.removeReply;
     },
-    versions: async (name) => {
+    versions: async (name, slot = "") => {
       world.versionsCalls.push(name);
+      world.slots.push(["versions", slot]);
       if (world.versionsControl) return world.versionsControl.promise;
       return world.versionsReply;
     },
     onProgress: (cb) => { world.progress = cb; },
-    setDisabled: async (name, disabled) => {
+    setDisabled: async (name, disabled, slot = "") => {
       world.switchCalls.push([name, disabled]);
+      world.slots.push(["setDisabled", slot]);
       if (world.control) return world.control.promise;
       return world.switchReply;
     },
@@ -351,14 +376,16 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     world.settingsReads = [];
     world.settingWrites = [];
     world.settingsDoc = doc;
-    api.settings = async (name) => {
+    api.settings = async (name, slot = "") => {
       world.settingsReads.push(name);
+      world.slots.push(["settings", slot]);
       if (world.settingsControl) return world.settingsControl.promise;
       if (settings.readError) return { ok: false, name, error: settings.readError };
       return { ok: true, name, schema: doc.schema, values: { ...doc.values } };
     };
-    api.setSetting = async (name, patch) => {
+    api.setSetting = async (name, patch, slot = "") => {
       world.settingWrites.push([name, patch]);
+      world.slots.push(["setSetting", slot]);
       if (world.settingWriteControl) return world.settingWriteControl.promise;
       if (settings.writeError) return { ok: false, name, error: settings.writeError };
       for (const [key, value] of Object.entries(patch || {})) doc.values[key] = value;
@@ -380,14 +407,16 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     world.settingsReads = [];
     world.settingWrites = [];
     world.settingsDoc = doc;
-    api.settings = async (name) => {
+    api.settings = async (name, slot = "") => {
       world.settingsReads.push(name);
+      world.slots.push(["settings", slot]);
       if (world.settingsControl) return world.settingsControl.promise;
       if (settings.readError) return { ok: false, name, error: settings.readError };
       return { ok: true, name, schema: doc.schema, values: { ...doc.values } };
     };
-    api.setSetting = async (name, patch) => {
+    api.setSetting = async (name, patch, slot = "") => {
       world.settingWrites.push([name, patch]);
+      world.slots.push(["setSetting", slot]);
       if (world.settingWriteControl) return world.settingWriteControl.promise;
       if (settings.writeError) return { ok: false, name, error: settings.writeError };
       for (const [key, value] of Object.entries(patch || {})) doc.values[key] = value;
@@ -450,6 +479,9 @@ function page({ held = [], heldError = null, listError = null, target = LOCAL, e
     // the panel is drawn in, not about the machine the profile remembers (⑤)
     sessionStorage: { getItem: (k) => (k in session ? session[k] : null), setItem() {}, removeItem() {} },
     askConfirm: async (opts) => { world.confirms.push(opts); return world.answer; },
+    // WHICH tab is open (ui/src/renderer/slots.ts activeSlotId): the pane names it
+    // on every read and every write, and follows it on `clutch:tab-state`
+    activeSlotId: () => world.slot,
     $: (sel) => dom.document.querySelector(sel),
     renderPlugins: null, // the real one, declared in the file
   };
@@ -2139,6 +2171,90 @@ const CODE = mod ? rendererScript("components-panel") : "";
     broke.settingsBtns()[0].click();
     await settle();
     check(/could not be read — the supervisor did not answer/.test(broke.text()), "a read that failed is a reason, not an empty form");
+  }
+
+  // ---- the pane follows the TAB -------------------------------------------------
+  // One tab is one session, and two sessions can sit on two machines (ui/src/
+  // renderer/slots.ts, which is why this page had to leave the settings dialog: a
+  // dialog covers the strip that says which session it is reporting on). So which
+  // machine the list is about is the STRIP's answer: every read and every write
+  // names the open tab's slot, a tab switch reads for the new tab, and an answer
+  // that arrives after the strip has moved is dropped rather than painted under the
+  // tab the reader is now looking at.
+  {
+    const p = page({ slot: "tab-a", held: [{ name: "clutch-workspace", version: "0.1.0+5f900739", place: "session", disabled: false }] });
+    await settle();
+    await p.open();
+    check(p.world.slots.length > 0 && p.world.slots.every((c) => c[1] === "tab-a"), "every read names the open tab's slot, not the window's");
+
+    // a write is the same fact one level down: it has to land on the machine the
+    // tab on screen is on, or the page would install onto one it is not showing
+    p.world.slot = "tab-b";
+    p.world.reply = { ok: true, status: "installed", version: "0.1.0+x", digest: "x" };
+    vm.runInContext("plugSetSlot('tab-b')", p.ctx);
+    await settle();
+    p.buttons()[0].click();
+    await settle();
+    const installs = p.world.slots.filter((c) => c[0] === "install");
+    check(installs.length === 1 && installs[0].join(":") === "install:tab-b", "and a write follows the tab, not the tab that opened the page");
+
+    // the same slot again is a badge moving in the background: a tab that starts or
+    // stops running is still the same machine, and costs no read
+    const before = p.world.listCalls;
+    vm.runInContext("plugSetSlot('tab-b')", p.ctx);
+    await settle();
+    check(p.world.listCalls === before, "a tab state for the slot already on screen costs no read");
+
+    // a reply from the tab that is GONE describes a machine this tab may not even
+    // be able to reach: the read answers in two halves, and the strip can move
+    // between them
+    const late = page({ held: [] });
+    late.world.slot = "tab-a";
+    late.world.listDefer = true;
+    vm.runInContext("plugSetSlot('tab-a')", late.ctx); // in flight, and held
+    await settle();
+    vm.runInContext("plugSetSlot('tab-b')", late.ctx);
+    await settle();
+    check(late.world.listDeferreds.length === 2, "the switch starts a read of its own");
+    late.world.listDeferreds[0].res({
+      sessionBase: "http://box-a.example",
+      held: [{ place: "session", name: "clutch-a-only", version: "0.1.0+aaaa" }],
+      error: null,
+    });
+    await settle();
+    check(!/clutch-a-only/.test(late.text()), "an answer from the tab we left is dropped, not painted under the new one");
+    late.world.listDeferreds[1].res({
+      sessionBase: "http://box-b.example",
+      held: [{ place: "session", name: "clutch-b-only", version: "0.1.0+bbbb" }],
+      error: null,
+    });
+    await settle();
+    check(/clutch-b-only/.test(late.text()), "…while the new tab's own answer is what the pane draws");
+  }
+
+  // ---- a pane nobody is looking at asks nothing --------------------------------
+  // The pane lives in the sidebar now (ui/index.html `#dock-plugins`), so "on
+  // screen" is two facts: the aside is not put away, and its plugin group is not
+  // folded to its head. The read is deferred to the moment somebody opens it —
+  // dock.ts calls pluginTabShown() on exactly that — and a hidden list spends no
+  // network read on nothing.
+  {
+    const folded = page();
+    folded.el("dock-plugins").classList.add("dock-collapsed");
+    folded.world.slot = "tab-a";
+    vm.runInContext("plugSetSlot('tab-a')", folded.ctx);
+    await settle();
+    check(folded.world.listCalls === 0, "a folded plugin group is not read when the tab changes");
+    folded.el("dock-plugins").classList.remove("dock-collapsed");
+    await folded.open(); // what dock.ts does when the group is opened
+    check(folded.world.listCalls === 1, "and opening the group is what asks for it");
+
+    const away = page();
+    away.el("right").classList.add("panel-hidden");
+    away.world.slot = "tab-a";
+    vm.runInContext("plugSetSlot('tab-a')", away.ctx);
+    await settle();
+    check(away.world.listCalls === 0, "a sidebar that is put away is the same fact one level up");
   }
 
   summary("components-panel: the plugin tab's writes (destination, confirm text, verdicts, re-read)");

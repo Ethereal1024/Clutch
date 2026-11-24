@@ -1701,16 +1701,42 @@ mjx-container[display="true"] {
 #right {
   /* device report: the sidebar read too wide for what it holds (a file tree),
      so it kept a column of dead space next to the stream. Trimmed to 300px;
-     the tree truncates long names rather than growing the panel. */
+     the tree truncates long names rather than growing the panel. The plugin
+     group's rows are written for a column, not a dialog, for the same reason
+     (ui/style.css `#plug-pane`). */
   width: 300px;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   background: var(--bg2);
   transition: width var(--quick);
+  min-height: 0;
+  overflow: hidden; /* every group scrolls in itself (its body is the region) */
 }
 /* desktop panel collapsed: hide the aside entirely */
 #right.panel-hidden { display: none; }
+
+/* ---- the dock: groups stacked in the sidebar ---------------------------------
+   One column, groups top to bottom, the way VS Code's sidebar stacks its views.
+   Two groups share the height while both are open (a tree wants depth, the
+   plugin list scrolls: equal halves, each with its own scroll region), and a
+   collapsed group is its head and nothing else — 30px of title, the state a
+   reader uses to put one view away and give the height to the other.
+   WHICH group is open is remembered per window (ui/src/renderer/dock.ts), not
+   per tab: the layout is about the reader's screen, while what a group SHOWS is
+   about the tab (see #plug-pane below). */
+.dock-group { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; }
+.dock-group + .dock-group { border-top: 1px solid var(--border); }
+.dock-group.dock-collapsed { flex: 0 0 auto; }
+.dock-group.dock-collapsed > .panel-head { border-bottom: none; }
+.dock-group.dock-collapsed > .dock-body { display: none; }
+/* ...and stated once more with the sidebar's id in it, because a view says its own
+   layout with an id (`#plug-pane` below: `display: flex`) and an id outweighs any
+   number of classes: without this the fold would still not hide that body — the
+   class-only rule above loses the cascade, and a "collapsed" group kept its list
+   on screen and its height. The fold is the PARENT's state, so it has to win. */
+#right .dock-group.dock-collapsed > .dock-body { display: none; }
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -1723,12 +1749,39 @@ mjx-container[display="true"] {
   font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--muted); flex-shrink: 0; line-height: 1;
 }
+/* ...and the accent rule marks the SIDEBAR's edge, once: a second one under the
+   first would read as a selected row rather than as the panel's own border. The
+   border keeps its width, so both titles sit on the same x. */
+.dock-group + .dock-group > .panel-head { border-left-color: transparent; }
 /* the row contract every head shares: a label on the left, its tools pushed to
    the right edge. Unscoped on purpose — a head that reuses this markup inherits
    the alignment instead of re-deriving it, which is how a ✕ ends up sitting next
    to its title instead of at the edge it dismisses. */
 .panel-title { flex: none; }
 .panel-tools { margin-left: auto; display: flex; align-items: center; gap: var(--s2); }
+/* the title IS the collapse control (VS Code collapses a view from its own
+   header), so it keeps the head's type and gives up the button box. The caret is
+   the state, and it is the only thing that says a group can be put away at all. */
+.panel-title.dock-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  line-height: inherit;
+  cursor: pointer;
+}
+.panel-title.dock-toggle::before { content: "▾"; font-size: 9px; color: var(--muted); }
+.panel-title.dock-toggle[aria-expanded="false"]::before { content: "▸"; }
+.panel-title.dock-toggle:hover { color: var(--text); }
+.panel-title.dock-toggle:hover::before { color: var(--text); }
+.panel-title.dock-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 #tree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 8px 12px; }
 .tree-node {
   font-family: var(--font-mono); font-size: 13px;
@@ -1856,8 +1909,8 @@ mjx-container[display="true"] {
   line-height: 1;
   white-space: nowrap;
 }
-/* the same one-line focus as `#task-input:focus`, for every field in a modal — the
-   plugin tab's filter box is one of these boxes, not a case of its own */
+/* the same one-line focus as `#task-input:focus`, for every field in a modal. The
+   plugin list is not in one any more and states its own (`#plug-pane input:focus`). */
 .modal-box input:focus { outline: none; border-color: var(--accent); }
 .modal-box p { margin: 10px 0 0; line-height: 1.5; }
 /* a dialog's foot is one row of that control, centered in the row — not left on
@@ -1910,8 +1963,8 @@ mjx-container[display="true"] {
 /* the box's height is the pane's height plus this box's chrome, and its panes are
    different lengths — so switching tabs resizes the box. ui/js/settings.js
    drives that height from there, one frame at a time, and the reason it cannot be
-   a rule here is that the height keeps moving after the tab lands: the plugin pane
-   is filled by a read that answers twice (the machine, then the market). */
+   a rule here is that the height keeps moving after the tab lands: the About pane
+   is filled by a read that answers when the version check does. */
 
 /* settings modal: the tab strip over its panes. The strip is the modal's own
    chrome, so it takes no field spacing and its active rule sits ON the line. */
@@ -2004,8 +2057,7 @@ mjx-container[display="true"] {
    is why it is drawn above the machine they are for. It is `flex: none` like the
    head and the note (see the group below): a field that has scrolled away is a
    field you cannot reach at the moment the list under it explains why you want it.
-   The input keeps the modal's field look and gives up its `width: 100%` to the
-   flex row's Save button. */
+   The input gives up its `width: 100%` to the flex row's Save button. */
 .plug-mirror {
   display: flex;
   flex-direction: column;
@@ -2013,37 +2065,85 @@ mjx-container[display="true"] {
   padding-bottom: var(--s3);
   border-bottom: 1px solid var(--border);
 }
-.plug-mirror input { flex: 1; width: auto; min-width: 0; }
+/* the eyebrow and the field box used to be the dialog's — `.modal-box label` and
+   `.modal-box input` reached in here because the pane WAS a tab of that box. The
+   pane is a sidebar view now (ui/index.html `#dock-plugins`) and owns both, so the
+   two rooms it moved into cannot drift apart: this is the same eyebrow every head
+   on the page wears, and the same field as the filter box below. */
+.plug-mirror > label {
+  display: block;
+  margin: 0 0 var(--s1);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+/* height and vertical padding come from the shared control row (`.fs-conn-row
+   input[type="text"]` beside the Save button) — only the box itself is stated here */
+.plug-mirror input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding-left: var(--row-gutter);
+  padding-right: var(--row-gutter);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
 .plug-mirror-note { margin: var(--s1) 0 0; font-size: var(--fs-xs); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
 .plug-mirror-note.error { color: var(--danger); }
-/* plugin tab: what the two places hold, and the market */
-/* the head holds ONE control and no machine: the reload sits at the right end of
-   a line that no longer names where the bytes go (there is nothing to name and
-   nothing to choose — ui/index.html says why) */
-.plug-head { display: flex; align-items: center; justify-content: flex-end; gap: var(--s3); }
+/* plugin list: what the two places hold, and the market */
+/* the reload is this group's ONE tool and it sits in the group's head
+   (ui/index.html `#dock-plugins .panel-tools`), where VS Code keeps a view's
+   actions: a glyph the size of every other dismissal in the window, not a form
+   control's box — the head is --head-h tall and a --ctl-h button would fill it.
+   Nothing here names where the bytes go: there is nothing to name and nothing to
+   choose (ui/index.html says why). */
 #plug-reload {
   flex: none;
-  width: var(--ctl-h);
-  height: var(--ctl-h);
+  width: var(--close-size);
+  height: var(--close-size);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   /* the glyph is type, so it is sized from the type scale — the 14px it carried
      was a size the scale does not have */
-  font-size: var(--fs-lg);
+  font-size: var(--fs-md);
 }
 .plug-note { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--muted); min-height: var(--fs-lg); overflow-wrap: anywhere; }
 .plug-note.error { color: var(--accent); }
-/* the plugin tab: the reload, the note, the filter row — and then the ONE list,
-   which is the only thing that scrolls. Those three are `flex: none` so they are
-   always on screen; a list tall enough to carry its own filter row off the screen
-   is a list you cannot filter. */
-#settings-pane-plugins:not(.hidden) {
+/* the plugin group's body: the mirror row, the note, the filter row — and then the
+   ONE list, which is the only thing that scrolls. Those three are `flex: none` so
+   they are always on screen; a list tall enough to carry its own filter row off the
+   screen is a list you cannot filter.
+   It is a SIDEBAR column now (300px, ui/index.html `#dock-plugins`), not a 420px
+   dialog pane: the padding is the sidebar's one step rather than the box's 24px,
+   and `.dock-body` is what gives it its height. The `:not(.hidden)` half of the
+   old selector is gone with the dialog — a group is shown or put away by its head
+   (`.dock-collapsed`), and a pane hidden that way is `display: none` already. */
+#plug-pane {
   display: flex;
   flex-direction: column;
+  min-height: 0;
   overflow: hidden;
+  padding: var(--s3);
 }
-.plug-head, .plug-note, #plug-filter { flex: none; }
+/* the pane's paragraph rhythm, said once for the pane that now owns its own
+   margins. Every line on this page is a `p` — a row's sentence, the note, an empty
+   state — and they all sit one step from what is above them; the 10px the dialog
+   gave them was off the scale, and the per-class rules below give way to this one
+   for the same reason they always did (it carries a type selector). */
+#plug-pane p { margin: var(--s2) 0 0; line-height: 1.5; }
+/* the lit-border focus of every field on the page, and no ring — the same look
+   `#task-input:focus` and every modal field carry. The pane is not in a modal any
+   more, so it states the rule here instead of inheriting `.modal-box input:focus`. */
+#plug-pane input:focus,
+#plug-pane select:focus { outline: none; border-color: var(--accent); }
+.plug-note, #plug-filter { flex: none; }
 .plug-mirror { flex: none; }
 .plug-body { margin-top: var(--s3); flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 /* the filter row: the views of the ONE list, plus a box to narrow it by name. It
@@ -2093,15 +2193,24 @@ mjx-container[display="true"] {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
 }
-/* the box's focus look is `.modal-box input:focus` up in the modal block: the lit
-   border and no ring, like every other field in that box. It is a field in the box,
+/* the box's focus look is `#plug-pane input:focus` up in the pane block: the lit
+   border and no ring, like every other field on the page. It is a field on the page,
    not a case of its own — this spot used to carry a rule of its own for it. */
 .plug-section { margin-bottom: var(--s4); }
 /* the section head is the MACHINE's name — DATA, not a field label — so it is the
-   one heading on this page that must not be set in caps. `.modal-box h4` uppercases
-   every heading it meets, which is right for a label and wrong here: the same
-   screen then read `SSH ubuntu@box` in the head and `SSH UBUNTU@BOX` under it. */
-.plug-section-title { margin: var(--s5) 0 var(--s3); font-size: var(--fs-md); text-transform: none; letter-spacing: 0; }
+   one heading on this page that must not be set in caps: the same screen would
+   otherwise read `SSH ubuntu@box` in the head and `SSH UBUNTU@BOX` under it. The
+   face it shares with a dialog's h4 was `.modal-box h4`'s while this page was a tab
+   of that box; the page is a sidebar view now, so it wears that face itself. */
+.plug-section-title {
+  margin: var(--s5) 0 var(--s3);
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
 /* the counts behind the machine's name: the same line, a quieter voice — they say
    how much is behind the title, and they must not read as part of the title (the
    section head is the machine; a count never is) */

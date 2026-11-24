@@ -417,8 +417,8 @@ export async function openSettings() {
   // url/key/model fields live in the profile editor; nothing to prefill here
   renderLlmProfiles(localStorage.getItem("clutch_llm_active") || "");
   paintAbout(); // no read, no wait: the pane's three facts are already on this page
-  // always open on the model tab: the plugin page is a place a user goes, not
-  // the place they land (and its lists are re-read when they do)
+  // always open on the model tab: About is a place a user goes, not the place
+  // they land
   showSettingsTab("llm");
 }
 export function closeSettings() {
@@ -478,17 +478,21 @@ export function paintAbout() {
 }
 
 // ---- the settings modal's panes ----
-// A tab strip over one modal box: "Model" (the LLM profile form), "Plugins"
-// (ui/src/renderer/components-panel.ts) and "About" (the three facts above). Purely visual —
-// this only moves a class; the plugin pane draws itself when it becomes visible,
-// and the About pane is painted on its own tab's click below.
+// A tab strip over one modal box: "Model" (the LLM profile form) and "About" (the
+// three facts above). Purely visual — this only moves a class, and the About pane
+// is painted on its own tab's click below.
+//
+// There were three. "Plugins" is not one any more: what a session's machine holds
+// is a fact ABOUT the tab that is open, and a dialog covers the strip that names
+// the tab it would be reporting on. It is a group of the right dock now
+// (ui/src/renderer/components-panel.ts, ui/src/renderer/dock.ts).
 //
 // The strip is a real `role="tablist"` in index.html, and `aria-selected` is the
 // half of it a class cannot say: `.active` paints the tab, `aria-selected` is how
 // the pane that is showing is announced. No tab is removed from the tab order and
-// there are no arrow keys — with three of them, Tab reaches the others, which is
-// what a reader expects anyway.
-export const SETTINGS_TABS = ["llm", "plugins", "about"];
+// there are no arrow keys — with two of them, Tab reaches the other, which is what
+// a reader expects anyway.
+export const SETTINGS_TABS = ["llm", "about"];
 
 // ---- the box follows its pane ----
 // The panes are different lengths and the box is only as tall as the one that
@@ -501,11 +505,10 @@ export const SETTINGS_TABS = ["llm", "plugins", "about"];
 //
 // What a CSS transition cannot do here is what this has to follow. The height
 // belongs to no element of its own — it is whichever pane is showing plus the
-// box's own chrome — and it keeps moving after the tab lands: the plugin pane is
-// filled by a read that answers twice (the machine, then the market), so its list
-// arrives AFTER the switch. A transition aimed at a height measured at the switch
-// would travel to the wrong number and then jump; this one is aimed, once per
-// frame, at whatever the box wants on that frame.
+// box's own chrome — and no rule can name it while both panes are in the same
+// flow. A transition aimed at a height measured at the switch would travel to the
+// wrong number and then jump; this one is aimed, once per frame, at whatever the
+// box wants on that frame.
 export const SETTINGS_HEIGHT_MS = 420; // --size
 export let settingsHeightAnim = null; // { box, raf, from, t0 } while the box is travelling
 
@@ -581,10 +584,9 @@ export function showSettingsTab(name) {
   swap();
   const anim = { box, from, raf: 0, t0: 0 };
   settingsHeightAnim = anim;
-  // the first step is the NEXT frame on purpose: this tab has a second listener
-  // (ui/src/renderer/components-panel.ts, loaded after this file) and it draws the plugin
-  // pane's reading state in this same task — the height to travel to is the one
-  // that state asks for, not the empty pane's
+  // the first step is the NEXT frame on purpose: the pane that has just been
+  // shown has not been laid out yet in this task, and the height to travel to is
+  // the one it has after layout, not the one the box holds mid-swap
   anim.raf = requestAnimationFrame((t) => settingsHeightStep(anim, t));
 }
 for (const t of SETTINGS_TABS) {

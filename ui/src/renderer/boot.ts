@@ -27,6 +27,7 @@ import "./conn-flow";
 import "./conn-lost";
 import "./permissions";
 import "./workspace-panel";
+import "./dock";
 import "./sse-stream";
 import "./project";
 import "./fs-browser";

@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit ui/src/renderer/*.ts and run `npm run build`.
-// sources sha256: 46c5dfd07514b14f25a20c4f37b22723fa320b3a14ec918480dc825577610e10
+// sources sha256: 7612352f9fcebd5f771425042066eb618d270b2eb781907aa819ae76dc35ea2e
 // Entry: src/renderer/boot.ts — its imports are the load order.
 (() => {
   // src/renderer/bridge-shim.ts
@@ -813,8 +813,8 @@
       fsFirstLoad = false;
     } catch (e) {
       if (token !== state.fsListToken) return;
-      const remembered = localStorage.getItem("clutch_fs_last_dir");
-      if (remembered && path === remembered) {
+      const remembered2 = localStorage.getItem("clutch_fs_last_dir");
+      if (remembered2 && path === remembered2) {
         localStorage.removeItem("clutch_fs_last_dir");
         loadDir("");
         return;
@@ -958,6 +958,15 @@
   function paintShellPanel(open) {
     shellPanel.classList.toggle("drawer-open", open);
     shellBackdrop.classList.toggle("open", open);
+    if (open) document.dispatchEvent(new CustomEvent("clutch:panel-shown"));
+  }
+  function showShellPanel() {
+    if (NARROW_Q.matches) {
+      setShellPanel(true);
+      return;
+    }
+    shellPanel.classList.remove("panel-hidden");
+    document.dispatchEvent(new CustomEvent("clutch:panel-shown"));
   }
   var panelHistoryEntry = false;
   var consumingEntry = false;
@@ -4902,7 +4911,7 @@
     if (stream.classList.contains("loading") && ev.type === "state_update") {
       return;
     }
-    const paint = () => {
+    const paint2 = () => {
       if (ev && ev.type !== "text_delta") flushTextRender();
       if (ev && ev.type !== "reasoning_delta") flushThinkingRender();
       if (["user_message", "text_delta", "reasoning_delta", "final", "step_start"].includes(ev.type)) {
@@ -4919,10 +4928,10 @@
       }
     };
     if (catchUp && !pageSink) {
-      state.owedRecords.push(paint);
+      state.owedRecords.push(paint2);
       return;
     }
-    paint();
+    paint2();
   }
   function applyStreamEvent(ev) {
     if (ev.type === "compaction_delta") {
@@ -5470,7 +5479,7 @@
     set("about-platform", aboutPlatform());
     set("about-backend", aboutBackend());
   }
-  var SETTINGS_TABS = ["llm", "plugins", "about"];
+  var SETTINGS_TABS = ["llm", "about"];
   var SETTINGS_HEIGHT_MS = 420;
   var settingsHeightAnim = null;
   function settingsBoxWants(box) {
@@ -6790,6 +6799,17 @@
   var plugMirrorSaveBtn = $("#mirror-save");
   var plugMirrorNoteEl = $("#mirror-note");
   var plugState = {
+    // WHICH session this page is about: the active tab's slot (ui/src/renderer/
+    // slots.ts `activeSlotId`, an empty string for a window with no tabs). One tab
+    // is one session and two tabs can sit on two machines, so what the list holds
+    // is a fact of the tab that is open — every read and every write names this,
+    // and the pane follows the strip (plugSetSlot below).
+    slot: "",
+    // which read is the CURRENT one. Switching tabs abandons the read in flight, so
+    // each chain carries the number it started with and drops its answer when a
+    // newer read has taken over — otherwise the previous tab's machine would paint
+    // itself into the new tab's list.
+    readSeq: 0,
     // the list has answered once — a place that was never read is not a place that
     // holds nothing, and this is the bit that tells the two apart
     read: false,
@@ -7560,7 +7580,7 @@
     plugState.form = null;
     plugState.formPending = name;
     renderPlugins();
-    api.settings(name).then((r) => {
+    api.settings(name, plugState.slot).then((r) => {
       if (seq !== plugState.formSeq) return;
       plugState.formPending = null;
       plugState.form = r && r.ok ? { name, schema: r.schema || {}, values: r.values || {}, busy: null, error: null, saved: null } : { name, schema: {}, values: {}, busy: null, error: r && r.error || "the machine gave no answer", saved: null };
@@ -7581,7 +7601,7 @@
     form.error = null;
     form.saved = null;
     renderPlugins();
-    api.setSetting(name, { [key]: value }).then((r) => {
+    api.setSetting(name, { [key]: value }, plugState.slot).then((r) => {
       if (seq !== plugState.formSeq) return;
       form.busy = null;
       if (r && r.ok) {
@@ -7868,7 +7888,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.remove(held.name);
+      res = await api.remove(held.name, {}, plugState.slot);
     } catch (e) {
       res = { ok: false, name: held.name, error: e && e.message || String(e) };
     }
@@ -7896,7 +7916,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.remove(held.name, { version });
+      res = await api.remove(held.name, { version }, plugState.slot);
     } catch (e) {
       res = { ok: false, name: held.name, error: e && e.message || String(e) };
     }
@@ -7915,7 +7935,7 @@
     plugState.versionsPending = name;
     renderPlugins();
     let out;
-    Promise.resolve().then(() => api.versions(name)).then((r) => {
+    Promise.resolve().then(() => api.versions(name, plugState.slot)).then((r) => {
       out = { name, rows: r && Array.isArray(r.versions) ? r.versions : [], error: r && r.error || null };
     }).catch((e) => {
       out = { name, rows: [], error: e && e.message || String(e) };
@@ -7950,7 +7970,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.setDisabled(held.name, disabled);
+      res = await api.setDisabled(held.name, disabled, plugState.slot);
     } catch (e) {
       res = { ok: false, name: held.name, error: e && e.message || String(e) };
     }
@@ -8028,7 +8048,7 @@
     renderPlugins();
     let res;
     try {
-      res = await api.install(entry.name);
+      res = await api.install(entry.name, plugState.slot);
     } catch (e) {
       res = { ok: false, name: entry.name, error: e && e.message || String(e) };
     }
@@ -8079,6 +8099,14 @@
   function plugRead({ force = false } = {}) {
     const api = window.clutchComponents;
     if (!api || plugState.pending) return;
+    const seq = ++plugState.readSeq;
+    const slot = plugState.slot;
+    const current = () => seq === plugState.readSeq;
+    const settled = () => {
+      if (!current()) return;
+      plugState.pending--;
+      renderPlugins();
+    };
     plugState.sessionError = null;
     plugState.sessionHeldError = null;
     plugState.clientError = null;
@@ -8088,7 +8116,8 @@
     const mirrors = api.mirrors ? api.mirrors() : null;
     plugState.pending = mirrors ? 3 : 2;
     renderPlugins();
-    api.list().then((r) => {
+    api.list(slot).then((r) => {
+      if (!current()) return;
       plugState.sessionBase = r.sessionBase || "";
       plugState.sessionError = r.error || null;
       plugState.sessionHeldError = r.inventoryError || null;
@@ -8099,32 +8128,28 @@
       plugState.pass = r.pass || null;
       plugState.read = true;
     }).catch((e) => {
+      if (!current()) return;
       plugState.sessionError = e && e.message || String(e);
       plugState.read = true;
-    }).then(() => {
-      plugState.pending--;
-      renderPlugins();
-    });
+    }).then(settled);
     api.market({ force }).then((m) => {
+      if (!current()) return;
       plugState.market = m;
     }).catch((e) => {
+      if (!current()) return;
       plugState.marketError = e && e.message || String(e);
-    }).then(() => {
-      plugState.pending--;
-      renderPlugins();
-    });
+    }).then(settled);
     if (mirrors) {
       mirrors.then((m) => {
+        if (!current()) return;
         plugState.mirrors = m && m.mirrors || [];
         plugState.mirrorsError = m && m.error || null;
         plugState.mirrorForced = m && m.forced || "";
       }).catch((e) => {
+        if (!current()) return;
         plugState.mirrors = null;
         plugState.mirrorsError = e && e.message || String(e);
-      }).then(() => {
-        plugState.pending--;
-        renderPlugins();
-      });
+      }).then(settled);
     }
   }
   function plugMirrorStored() {
@@ -8191,18 +8216,43 @@
     plugState.result = null;
     plugRead({ force: true });
   });
-  $("#settings-tab-plugins").addEventListener("click", () => pluginTabShown());
   function pluginTabShown() {
     plugRead();
   }
-  function plugPaneVisible() {
-    const pane2 = $("#settings-pane-plugins");
-    const box = $("#settings-modal");
-    if (!pane2 || !box) return false;
-    return !pane2.classList.contains("hidden") && !box.classList.contains("hidden");
+  function plugSetSlot(slot) {
+    const next = String(slot || "");
+    if (next === plugState.slot) return;
+    plugState.slot = next;
+    plugState.read = false;
+    plugState.sessionBase = "";
+    plugState.sessionError = null;
+    plugState.sessionHeldError = null;
+    plugState.held = [];
+    plugState.pass = null;
+    plugState.result = null;
+    plugState.busy = null;
+    plugState.versions = null;
+    plugState.versionsPending = null;
+    plugState.form = null;
+    plugState.formPending = null;
+    plugState.readSeq++;
+    plugState.formSeq++;
+    plugState.versionsSeq++;
+    plugState.pending = 0;
+    renderPlugins();
+    if (plugPaneVisible()) plugRead();
   }
+  function plugPaneVisible() {
+    const group = $("#dock-plugins");
+    const side = $("#right");
+    if (!group || !side) return false;
+    return !group.classList.contains("dock-collapsed") && !side.classList.contains("panel-hidden");
+  }
+  document.addEventListener("clutch:tab-state", () => plugSetSlot(activeSlotId()));
+  plugSetSlot(activeSlotId());
   if (window.clutchApi && window.clutchApi.onBaseChanged) {
-    window.clutchApi.onBaseChanged(() => {
+    window.clutchApi.onBaseChanged((change) => {
+      if (change && change.slotId !== void 0 && String(change.slotId || "") !== plugState.slot) return;
       if (!plugPaneVisible()) return;
       plugState.result = null;
       plugRead();
@@ -8228,6 +8278,72 @@
       };
       renderPlugins();
     });
+  }
+
+  // src/renderer/dock.ts
+  var STORE = "clutch_dock_groups";
+  var SPECS = [
+    { id: "workspace", head: "#dock-toggle-workspace", group: "#dock-workspace" },
+    { id: "plugins", head: "#dock-toggle-plugins", group: "#dock-plugins", opened: () => pluginTabShown() }
+  ];
+  function remembered() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(STORE) || "{}");
+      return raw && typeof raw === "object" ? raw : {};
+    } catch (e) {
+      return {};
+    }
+  }
+  var saved = remembered();
+  var groups = SPECS.map((spec) => ({
+    ...spec,
+    head: $(spec.head),
+    group: $(spec.group),
+    open: saved[spec.id] !== false
+  }));
+  function byId2(id) {
+    return groups.find((g) => g.id === id) || null;
+  }
+  function save() {
+    const layout = {};
+    for (const g of groups) layout[g.id] = g.open;
+    localStorage.setItem(STORE, JSON.stringify(layout));
+  }
+  function paint(g) {
+    g.group.classList.toggle("dock-collapsed", !g.open);
+    g.head.setAttribute("aria-expanded", g.open ? "true" : "false");
+    g.head.setAttribute("title", (g.open ? "collapse the " : "expand the ") + g.id);
+  }
+  function setOpen(g, open) {
+    if (g.open === open) return;
+    g.open = open;
+    paint(g);
+    save();
+    if (open && g.opened) g.opened();
+  }
+  function dockOpen(id, open) {
+    const g = byId2(id);
+    if (g) setOpen(g, open);
+  }
+  function dockIsOpen(id) {
+    const g = byId2(id);
+    return Boolean(g && g.open);
+  }
+  document.addEventListener("clutch:panel-shown", () => {
+    for (const g of groups) if (g.open && g.opened) g.opened();
+  });
+  function revealPlugins() {
+    const onScreen = NARROW_Q.matches ? shellPanel.classList.contains("drawer-open") : !shellPanel.classList.contains("panel-hidden");
+    if (!onScreen) {
+      showShellPanel();
+      if (!dockIsOpen("plugins")) dockOpen("plugins", true);
+      return;
+    }
+    dockOpen("plugins", !dockIsOpen("plugins"));
+  }
+  for (const g of groups) {
+    paint(g);
+    g.head.addEventListener("click", () => setOpen(g, !g.open));
   }
 
   // src/renderer/status-bar.ts
@@ -8646,9 +8762,11 @@ Closing its tab stops the task and writes an aborted ending to the project log.`
     // desktop: collapse/show the aside; phone: the aside IS the drawer
     run: () => {
       if (NARROW_Q.matches) setShellPanel(!shellPanel.classList.contains("drawer-open"));
-      else shellPanel.classList.toggle("panel-hidden");
+      else if (shellPanel.classList.contains("panel-hidden")) showShellPanel();
+      else shellPanel.classList.add("panel-hidden");
     }
   });
+  register({ id: "toggle-plugins", run: () => revealPlugins() });
   register({ id: "toggle-statusbar", run: () => $("#statusbar")?.classList.toggle("hidden") });
   register({ id: "toggle-hidden", run: () => toggleHidden() });
   register({ id: "tab-new", run: () => openFsBrowser("open") });

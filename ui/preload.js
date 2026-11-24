@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/preload.ts and run `npm run build:host`.
-// source sha256: 7723380247e0db0432bb1c877e455adf4263c81d276dbd88d3071a20d92df6bb
+// source sha256: 2810af1878028b83261311f666b91cc442e80ca27d0ead3ab82c0c4a6431420e
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -36,21 +36,26 @@ contextBridge.exposeInMainWorld("clutchSettings", {
     // rebuild the ~/.clutch/settings.json mirror when it is missing (self-heal)
     ensure: (data) => ipcRenderer.invoke("settings:ensure", data),
 });
-// the plugin tab's channel: what each of the two places holds, what can be given
+// the plugin list's channel: what each of the two places holds, what can be given
 // either one, the writes (an install onto one, a removal off it, and the switch
 // that stops driving a component there or starts it again), and the mirrors a
 // failed fetch is retried through. Everything crosses ui/main.js, which picks the
 // place from the component's own declaration (ui/components-view.js) — the
 // renderer never writes anything itself and never chooses a machine.
+//
+// The verbs that touch a MACHINE take the slotId of the tab whose page is asking
+// (the same spelling `clutchRun` uses): one tab is one session, two tabs can sit
+// on two machines, and what a machine holds is only true of the tab that asked.
+// The mirror verbs do not — a mirror is this window's network, not a machine's.
 contextBridge.exposeInMainWorld("clutchComponents", {
-    list: () => ipcRenderer.invoke("components:list"),
+    list: (slotId) => ipcRenderer.invoke("components:list", slotId),
     market: (opts) => ipcRenderer.invoke("components:market", opts),
-    install: (name) => ipcRenderer.invoke("components:install", name),
-    versions: (name) => ipcRenderer.invoke("components:versions", name),
-    remove: (name, opts) => ipcRenderer.invoke("components:remove", name, opts),
-    setDisabled: (name, disabled) => ipcRenderer.invoke("components:set-disabled", name, disabled),
-    settings: (name) => ipcRenderer.invoke("components:settings", name),
-    setSetting: (name, values) => ipcRenderer.invoke("components:set-setting", name, values),
+    install: (name, slotId) => ipcRenderer.invoke("components:install", name, slotId),
+    versions: (name, slotId) => ipcRenderer.invoke("components:versions", name, slotId),
+    remove: (name, opts, slotId) => ipcRenderer.invoke("components:remove", name, opts, slotId),
+    setDisabled: (name, disabled, slotId) => ipcRenderer.invoke("components:set-disabled", name, disabled, slotId),
+    settings: (name, slotId) => ipcRenderer.invoke("components:settings", name, slotId),
+    setSetting: (name, values, slotId) => ipcRenderer.invoke("components:set-setting", name, values, slotId),
     mirrors: () => ipcRenderer.invoke("components:mirrors"),
     addMirror: (url) => ipcRenderer.invoke("components:mirror-add", url),
     removeMirror: (url) => ipcRenderer.invoke("components:mirror-remove", url),

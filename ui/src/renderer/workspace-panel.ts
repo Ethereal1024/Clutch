@@ -54,6 +54,26 @@ export const NARROW_Q = window.matchMedia("(max-width: 640px)");
 export function paintShellPanel(open) {
   shellPanel.classList.toggle("drawer-open", open);
   shellBackdrop.classList.toggle("open", open);
+  // coming ON screen is news for what the panel holds, and not for its shell: a
+  // dock group that was drawing while put away was never read (this page does not
+  // spend a read on a list nobody is looking at), so the fact is announced the way
+  // a tab switch is and the dock decides what to ask for (dock.ts). The same event
+  // is dispatched by showShellPanel below, which is the desktop door — one event,
+  // because a sidebar coming back is one thing in either shell.
+  if (open) document.dispatchEvent(new CustomEvent("clutch:panel-shown"));
+}
+
+// The TWO ways this panel is on screen say it in one place: the desktop aside is a
+// column the View menu puts back (`panel-hidden`), the phone's is the drawer. What
+// a panel SHOWS when it comes back is not the shell's business, so the difference
+// between the two ends here.
+export function showShellPanel() {
+  if (NARROW_Q.matches) {
+    setShellPanel(true);
+    return;
+  }
+  shellPanel.classList.remove("panel-hidden");
+  document.dispatchEvent(new CustomEvent("clutch:panel-shown"));
 }
 
 // The panel is a surface OVER the app, not a page: the phone's back button has

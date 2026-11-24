@@ -4,7 +4,7 @@
    rule, it only shrinks/re-flows what cannot fit a 360-430 CSS-px column.
    Conservative on purpose: every selector here restates one style.css owns;
    we only touch layout (width/padding/order/display) and the control/type SCALE
-   itself (the --ctl-* / --fs-* names the plugin tab's rules are written against
+   itself (the --ctl-* / --fs-* names the plugin list's rules are written against
    — those two spaces are load-bearing: a slash written tight against the star
    would END this comment on the line above, and the prose after it plus the
    @media block below would then be parsed as one qualified rule with a nonsense
@@ -91,7 +91,10 @@
     padding: 6px 10px;
     min-height: 44px;
   }
+  /* both heads' dismissal-sized controls grow for the thumb the same way: the
+     workspace tree's ✕ and the plugin list's reload are one family in one column */
   .shell-close-btn { --close-size: 32px; font-size: 15px; }
+  #plug-reload { --close-size: 32px; font-size: var(--fs-lg); }
 
   /* ---- column layout: input bar on top, stream below ---- */
 
@@ -191,16 +194,16 @@
     overflow-y: auto;
   }
   /* the settings modal is the one box that does NOT scroll as a whole: it is a
-     flex column with a cap, and the pane inside it (the plugin list) is the scroll
-     region. Capping its height here instead would put a scrollbar inside a
-     scrollbar on the phone. */
+     flex column with a cap, and the `.modal-pane` inside it is the scroll region
+     (`#settings-modal .modal-pane` in style.css). Capping its height here instead
+     would put a scrollbar inside a scrollbar on the phone. */
   #settings-modal .modal-box {
     width: calc(100vw - 24px);
     /* and it keeps a band of backdrop above and below: the phone is the screen
        where a box that runs edge to edge reads as a second page rather than as
        something laid over the one you were reading (the drawer in the right
        panel is capped for the same reason). What is left of the height goes to
-       the list, which scrolls in itself. */
+       the pane, which scrolls in itself. */
     max-height: calc(100vh - 96px);
   }
 
@@ -210,18 +213,18 @@
     max-width: 420px;
   }
 
-  /* the plugin list scrolls INSIDE the capped box on a phone too — the head, the
-     filter row and the Close button stay where the thumb can reach them, which is
+  /* the plugin list scrolls INSIDE the drawer on a phone — the group's head, the
+     mirror row and the filter row stay where the thumb can reach them, which is
      the one thing a full-screen-height list takes away */
   .plug-body {
     -webkit-overflow-scrolling: touch;
   }
-  /* the phone's CONTROL SCALE, said once. The plugin tab's rules in style.css are
+  /* the phone's CONTROL SCALE, said once. The plugin list's rules in style.css are
      written against these names — they are the only rules in the sheet that are —
      so raising the names here replaces the second copy of every size that used to
      live below: a chip, the filter box, a row button and the reload icon all grow
      together, which is what a finger needs (36px, not a pointer's 26px). */
-  #settings-pane-plugins {
+  #plug-pane {
     --ctl-h: 40px;
     --ctl-h-sm: 36px;
     --tap: 36px;

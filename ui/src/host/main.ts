@@ -121,6 +121,11 @@ function redeclare(res) {
 // call sites that predate tabs (and the first tab of every window) keep working.
 const slotKey = (winId, slotId = "") => (slotId ? `${winId}::${slotId}` : String(winId));
 
+// A slot id arriving over IPC: a tab id, or nothing at all for the window's
+// default session. Anything that is not a string is that same default — a page
+// that has not been told which tab it is showing cannot name somebody else's.
+const slotOf = (slotId) => (typeof slotId === "string" ? slotId : "");
+
 // run:start / run:state take a slotId AND the page's payload. Keep the old
 // one-argument spelling working: `run:start(payload)` means the default slot.
 function slotArgs(first, second) {
@@ -205,7 +210,11 @@ pluginLink.useHost(pluginHost);
 const componentsView = createComponentsView({
   supervisorBase: () => `http://127.0.0.1:${SUPERVISOR_PORT}`,
   tunnelStatus: () => tunnel.tunnelStatus(),
-  windowKind: (wc) => hostCore.backendKind(wc.id),
+  windowKind: (wc, slotId) => hostCore.backendKind(wc.id, slotId),
+  // the supervisor that slot's machine answers on: the tunnel's far end for a tab
+  // pinned to a hop, THIS machine's otherwise (host-core.ts already keeps that
+  // per slot, so nothing here decides it a second time)
+  slotBase: (wc, slotId) => hostCore.supervisorBaseFor(wc.id, slotId),
   plugins: () => pluginHost,
   componentsPass: () => tunnel.state.componentsPass,
   ensureSupervisor,
@@ -444,39 +453,52 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    // the plugin tab: what each of the two places holds and what this client knows.
-    // Reads, so a failure comes back inside the answer (the page draws the
+    // the plugin list: what each of the two places holds and what this client
+    // knows. Reads, so a failure comes back inside the answer (the page draws the
     // reason) instead of rejecting the invoke.
-    ipcMain.handle("components:list", async (e) => componentsView.list(e.sender));
+    //
+    // Every one of these names the SLOT (one tab) the page is showing, because
+    // the session half of the answer is a fact of the machine that tab runs on:
+    // two tabs are two slots and can be pinned to two machines
+    // (ui/src/renderer/slots.ts), and a list drawn for the wrong one is a list of
+    // somebody else's components. An absent slot is the window's default session,
+    // the spelling every call site predates tabs with.
+    ipcMain.handle("components:list", async (e, slotId) =>
+      componentsView.list(e.sender, slotOf(slotId))
+    );
     ipcMain.handle("components:market", async (_e, opts) => componentsView.market(opts || {}));
     // the reverse verbs, named the way the host names them: `versions` asks what
     // one machine holds, `remove` asks it to let one go (the host may refuse —
     // something is running it — and that arrives as the error inside the answer).
-    ipcMain.handle("components:versions", async (e, name) =>
-      componentsView.versions(String(name || ""), e.sender)
+    ipcMain.handle("components:versions", async (e, name, slotId) =>
+      componentsView.versions(String(name || ""), e.sender, slotOf(slotId))
     );
-    ipcMain.handle("components:remove", async (e, name, opts) =>
-      redeclare(await componentsView.remove(String(name || ""), opts || {}, e.sender))
+    ipcMain.handle("components:remove", async (e, name, opts, slotId) =>
+      redeclare(await componentsView.remove(String(name || ""), opts || {}, e.sender, slotOf(slotId)))
     );
     // the switch: the one write here that is reversible, so the state is sent
     // rather than a verb translated (ui/components-view.js setDisabled)
-    ipcMain.handle("components:set-disabled", async (e, name, disabled) =>
-      redeclare(await componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender))
+    ipcMain.handle("components:set-disabled", async (e, name, disabled, slotId) =>
+      redeclare(
+        await componentsView.setDisabled(String(name || ""), Boolean(disabled), e.sender, slotOf(slotId))
+      )
     );
     // the knobs a component declares: the form is generated from THIS answer, so
     // the page knows no setting by name (ui/components-view.js settings)
-    ipcMain.handle("components:settings", async (e, name) => componentsView.settings(String(name || ""), e.sender));
-    ipcMain.handle("components:set-setting", async (e, name, values) =>
-      redeclare(await componentsView.setSetting(String(name || ""), values, e.sender))
+    ipcMain.handle("components:settings", async (e, name, slotId) =>
+      componentsView.settings(String(name || ""), e.sender, slotOf(slotId))
     );
-    ipcMain.handle("components:install", async (e, name) =>
+    ipcMain.handle("components:set-setting", async (e, name, values, slotId) =>
+      redeclare(await componentsView.setSetting(String(name || ""), values, e.sender, slotOf(slotId)))
+    );
+    ipcMain.handle("components:install", async (e, name, slotId) =>
       redeclare(await componentsView.install(String(name || ""), e.sender, {
         // one line at a time to the window that asked; a closed window is not an
         // error, it is a page that stopped caring
         progress: (stage) => {
           if (!e.sender.isDestroyed()) e.sender.send("components:progress", stage);
         },
-      }))
+      }, slotOf(slotId)))
     );
 
     // the mirrors a failed fetch is retried through: a read of the list this
