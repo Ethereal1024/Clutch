@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run.ts and run `npm run build:host`.
-// source sha256: 216ca2ca923ee493cbcc4e74aa002601f04da9457718e821ea33acffe3ea8a36
+// source sha256: 5afd11cf50c032fdf656643ad1cef27a18d081c70ce319bfb280f21b7c047774
 
 "use strict";
 // The run: the doing that the fold only describes.
@@ -383,6 +383,17 @@ function createRun(ports) {
             let res;
             try {
                 res = await runTool({ call, signal: inflight.signal });
+            }
+            catch (e) {
+                // A call that died because Stop aborted it is the stop's doing, exactly
+                // like an aborted model call in speak() above: the turn closes as
+                // aborted instead of the abort surfacing as a failed run. A long remote
+                // command is where this shows — Stop drops its request, the port throws
+                // something that is not a tool result, and without this the page painted
+                // "run failed" on the very turn the user had just cancelled.
+                if (stopped)
+                    return await finish("aborted", "cancelled");
+                throw e;
             }
             finally {
                 inflight = null;

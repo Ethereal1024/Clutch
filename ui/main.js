@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/main.ts and run `npm run build:host`.
-// source sha256: 1ea74aaeaecbbe70b41f3697c36f11240854c2cdec6c573cbbd31ce2a3b2d168
+// source sha256: 2824e0913199f948dc760c947a295c2bdb6ee9fdc220fb06e25cc0610074e204
 
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -308,8 +308,22 @@ function flushAllRuns() {
 // the loop was stopped, call step() once more so the loop can write the
 // `aborted` final durable line. A missed final leaves the .clc open, and the
 // next cold start would resume a turn that was deliberately cancelled.
-async function stopAndFlush(run) {
+//
+// `driving` says a drive of this same instance is ALREADY in flight — the
+// page's own run:run / run:drive, or a resume. Then the flush must only record
+// the stop: its drive()/step() would be a second wheel on the turn, the loop
+// refuses that with `run_active` (the busy guard in ui/src/host/run.ts), and
+// the refusal used to cost the run claim (the catch in run-session.ts released
+// it). The turn still unwinding then appended its `aborted` final into a
+// session that no longer owned the file, the append answered 409
+// `not_running` (agent/api/base.py), and the page painted that as "run failed:
+// POST …/api/log answered 409". Nothing is lost by not driving here: the wheel
+// in flight sees `stopped` and writes the final itself (ui/src/host/run.ts
+// work()/speak()/runCalls()), then hands the claim back when the fold is idle.
+async function stopAndFlush(run, opts = {}) {
     run.stop();
+    if (opts.driving)
+        return;
     try {
         await run.drive();
     }
@@ -692,7 +706,13 @@ else {
             if (!inst)
                 return { ok: true }; // nothing running
             try {
-                await stopAndFlush(inst.run);
+                // Stop is never refused, and it is never a second driver either: when
+                // this window is already driving the turn (inst.driving, the flag
+                // refuseIfDriving names — set by run:run, run:drive, run:step,
+                // run:start), the wheel in flight writes the aborted final itself. A
+                // flush here would be the second one and the loser of the race would
+                // drop the claim the winner still needs (stopAndFlush's comment).
+                await stopAndFlush(inst.run, { driving: !!inst.driving });
                 return { ok: true };
             }
             catch (err) {

@@ -98,6 +98,15 @@ function fakeSession(opts = {}) {
   let leaseAnswer = null;
   // The lease answers a test is holding open (see holdLease() below).
   let leaseGate = null;
+  // opts.enforceClaim: the session's own write rule (agent/api/base.py
+  // `_write_refusal`) — only the session HOLDING the run claim may append to the
+  // log. A refused append is recorded in `refusals`, so a test can name the 409
+  // the page would have painted instead of guessing at it.
+  const refusals = [];
+  let claimed = false;
+  // The tool answers a test is holding open (see holdExec() below): the only
+  // way to have the loop BUSY inside a call while a second entry point arrives.
+  let execGate = null;
   function appendLog(event) {
     const line = { offset: nextOffset, event };
     nextOffset += 1 + JSON.stringify(event).length;
@@ -150,6 +159,21 @@ function fakeSession(opts = {}) {
 
       // POST /api/log — the log append port
       if (req.method === "POST" && req.url === "/api/log") {
+        // The session's own gate, opt-in because most sections here are about the
+        // loop and not about the claim: an append from a session that does not
+        // hold the run is refused with the very 409 `not_running` the fix-train
+        // Stop bug surfaced (agent/api/base.py `_write_refusal`).
+        if (opts.enforceClaim && !claimed) {
+          refusals.push({ url: req.url, event: (body && body.event) || null });
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "this session is not running the project; its lines belong to the run",
+              code: "not_running",
+            })
+          );
+          return;
+        }
         const line = appendLog((body && body.event) || {});
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(line));
@@ -163,14 +187,21 @@ function fakeSession(opts = {}) {
         const claim = body || {};
         leaseCalls.push(claim);
         const decide = () => {
-          if (typeof leaseAnswer === "function") return leaseAnswer(claim);
-          if (claim.busy) {
-            return {
+          let answer;
+          if (typeof leaseAnswer === "function") {
+            answer = leaseAnswer(claim);
+          } else if (claim.busy) {
+            answer = {
               status: 200,
               body: { busy: true, project: claim.project || null, lease_ms: claim.ttl_ms || 120000 },
             };
+          } else {
+            answer = { status: 200, body: { busy: false, project: claim.project || null, released: true } };
           }
-          return { status: 200, body: { busy: false, project: claim.project || null, released: true } };
+          // the session's own bookkeeping (agent/api/run_state.py): a granted
+          // claim is what lets /api/log write, a release takes that away again
+          if (answer.status === 200) claimed = Boolean(claim.busy);
+          return answer;
         };
         // A CLAIM the test holds open: the only way to have two entry points in
         // flight at once without a model call to keep them there. Releases are
@@ -194,6 +225,13 @@ function fakeSession(opts = {}) {
 
       // POST /api/exec — the tool run port (records mode in body)
       if (req.method === "POST" && req.url === "/api/exec") {
+        // A call a test is holding open: the loop is BUSY inside it until
+        // holdExec()'s release, which is what a long remote command looks like
+        // from here.
+        if (execGate) {
+          execGate.push({ id: (body && body.tool_call_id) || "", res });
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -240,6 +278,25 @@ function fakeSession(opts = {}) {
         },
       };
     },
+    // Park TOOL calls until release(), then answer them all as a successful
+    // command. Used to keep the loop inside a call while a second entry point
+    // arrives — the Stop-flush race (section 23).
+    holdExec() {
+      execGate = [];
+      return {
+        pending: () => (execGate ? execGate.length : 0),
+        release() {
+          const queue = execGate || [];
+          execGate = null;
+          for (const w of queue) {
+            w.res.writeHead(200, { "Content-Type": "application/json" });
+            w.res.end(JSON.stringify({ tool_call_id: w.id, content: "ok", is_error: false, diff: "" }));
+          }
+        },
+      };
+    },
+    // The appends the session refused while opts.enforceClaim was on.
+    refusals,
     setDeclsAnswer(a) {
       declsAnswer = a;
     },
@@ -1064,6 +1121,81 @@ async function main() {
         "nothing was written: this is the marker's shape, not a second loop"
       );
     } finally {
+      restore();
+      await close(fake.server);
+    }
+  }
+
+  // 23. Stop arriving while a drive is still in flight keeps the claim — the
+  //     fix-train 409. The page's own drive is the wheel writing the turn; a
+  //     stop's flush that becomes a second wheel is refused with `run_active`
+  //     by the loop (ui/src/host/run.ts), and that refusal used to take the
+  //     claim away (run-session released it in the catch), after which the
+  //     aborted final answered 409 `not_running` (agent/api/base.py) and the
+  //     page painted "run failed: POST …/api/log answered 409". The fake
+  //     session enforces the real write rule here, so a claim dropped by the
+  //     losing wheel is the failure this section names.
+  {
+    const restore = stubEnv("test-model", "chat", "");
+    const fake = fakeSession({
+      enforceClaim: true,
+      sessionBody: {
+        mode: "work",
+        shell: "posix-sh",
+        components: "",
+        contextWindowBytes: 500_000,
+        memory: { path: "/p", bytes: 1 },
+      },
+    });
+    const port = await listen(fake.server);
+    const gate = fake.holdExec();
+    try {
+      // A turn left open with one remote call in flight: the page's state at the
+      // moment the user presses Stop on a long fix-train command.
+      fake.appendEvent({ type: "user_message", content: "train the fix" });
+      fake.appendEvent({
+        type: "assistant_message",
+        content: "",
+        tool_calls: [{ id: "c1", name: "shell", arguments: '{"command":"sleep 600"}' }],
+      });
+      const run = await createSessionRun({ base: `http://127.0.0.1:${port}`, project: "/p" });
+      const drive = run.drive().then(
+        (out) => ({ out, err: null }),
+        (err) => ({ out: null, err })
+      );
+      for (let i = 0; i < 400 && gate.pending() === 0; i++) await new Promise((r) => setTimeout(r, 5));
+      check(gate.pending() === 1, "the drive reached the remote call: the loop is busy inside it");
+      const claims = fake.leaseCalls.filter((c) => c && c.busy === true).length;
+      check(claims === 1, `the working drive holds the claim (got ${claims} claims)`);
+
+      // Stop, then the flush — the second wheel that used to steal the claim.
+      run.stop();
+      let flushErr = null;
+      try {
+        await run.drive();
+      } catch (e) {
+        flushErr = e;
+      }
+      check(flushErr && flushErr.code === "run_active", `the flush is refused as a second wheel: ${flushErr && flushErr.code}`);
+      check(
+        !fake.leaseCalls.some((c) => c && c.busy === false),
+        "the refused flush did not give the slot back — the wheel in flight still owns the turn"
+      );
+
+      // The loop abandons the command and the wheel in flight closes the turn.
+      gate.release();
+      const res = await drive;
+      check(!res.err, `the drive closes the turn instead of failing: ${res.err && res.err.message}`);
+      check(fake.refusals.length === 0, `no append was refused (got ${JSON.stringify(fake.refusals)})`);
+      const finals = fake.logLines.filter((l) => l.event && l.event.type === "final");
+      check(
+        finals.length === 1 && finals[0].event.status === "aborted",
+        `the aborted final landed (got ${JSON.stringify(finals.map((l) => l.event))})`
+      );
+      const releases = fake.leaseCalls.filter((c) => c && c.busy === false);
+      check(releases.length === 1, `the slot goes back once the turn is closed (got ${releases.length} releases)`);
+    } finally {
+      gate.release(); // an un-answered parked request would keep close() waiting
       restore();
       await close(fake.server);
     }

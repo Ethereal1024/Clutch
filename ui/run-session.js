@@ -1,5 +1,5 @@
 // GENERATED FILE — do not edit; edit src/host/run-session.ts and run `npm run build:host`.
-// source sha256: 5f99e93c98a971ca49f60b0b74c4ef3bce137c664f3c302f8beae1e3ad4d6566
+// source sha256: 3a4c3bd6dc1875cd257efc4ccfb7dfeef444360a7fb7eba0b9136b3e9d76419f
 
 // Composition root for one session's run loop (P3-2 wiring).
 //
@@ -385,6 +385,23 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
         }
         heartbeat();
     }
+    // A rejected entry point is not always the end of the turn. `run_active` is
+    // the exception that matters: it means this window's OTHER wheel is already
+    // driving the same turn (the Stop flush that arrives before the drive under it
+    // unwinds — ui/src/host/main.ts stopAndFlush), and releasing here took the
+    // claim away from that wheel while it was still writing its `aborted` final.
+    // The append then answered 409 `not_running` (agent/api/base.py) and the page
+    // painted the server's refusal as "run failed: POST …/api/log answered 409".
+    // So that one case asks the LOG instead (settle): open keeps the claim, idle
+    // gives it back. Every other failure gives the slot back at once — a start on
+    // an already open turn, or a session that went away, wrote nothing and must
+    // not leave the session reporting busy (section 19 of tests/run-session).
+    async function settleFailure(e) {
+        if (e && e.code === "run_active")
+            await settle();
+        else
+            await release();
+    }
     // "A turn is being driven on this device right now" (P5-2). Not the same fact
     // as the lease: the lease also stays held between two page calls while the turn
     // is open (settle keeps the heartbeat), and a phone must not keep its CPU awake
@@ -420,7 +437,7 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
                 return out;
             }
             catch (e) {
-                await release();
+                await settleFailure(e); // run_active keeps the claim: the other wheel is still writing
                 throw e;
             }
         }
@@ -438,7 +455,7 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
                 return out;
             }
             catch (e) {
-                await release();
+                await settleFailure(e); // run_active keeps the claim: the other wheel is still writing
                 throw e;
             }
         }
@@ -456,7 +473,7 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
                 return out;
             }
             catch (e) {
-                await release();
+                await settleFailure(e); // run_active keeps the claim: the other wheel is still writing
                 throw e;
             }
         }
@@ -474,7 +491,7 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
                 return out;
             }
             catch (e) {
-                await release();
+                await settleFailure(e); // run_active keeps the claim: the other wheel is still writing
                 throw e;
             }
         }
@@ -483,9 +500,12 @@ async function createSessionRun({ base, mode: modeOverride, project, onEvent, wa
         }
     }
     // Stop stays SYNCHRONOUS: ui/main.js's stopAndFlush() calls it and then steps,
-    // which is where the aborted final is written and settle() sees idle. A stop
-    // that never gets that step leaves the turn open on disk and lets the lease
-    // expire by itself — the honest picture either way.
+    // which is where the aborted final is written and settle() sees idle — but
+    // only when no drive of this instance is in flight. With one in flight, that
+    // wheel writes the final itself and the flush must not drive again
+    // (ui/src/host/main.ts stopAndFlush, `driving`). A stop that never gets that
+    // step leaves the turn open on disk and lets the lease expire by itself — the
+    // honest picture either way.
     function stop() {
         loop.stop();
     }

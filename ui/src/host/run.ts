@@ -390,6 +390,15 @@ function createRun(ports) {
       let res;
       try {
         res = await runTool({ call, signal: inflight.signal });
+      } catch (e) {
+        // A call that died because Stop aborted it is the stop's doing, exactly
+        // like an aborted model call in speak() above: the turn closes as
+        // aborted instead of the abort surfacing as a failed run. A long remote
+        // command is where this shows — Stop drops its request, the port throws
+        // something that is not a tool result, and without this the page painted
+        // "run failed" on the very turn the user had just cancelled.
+        if (stopped) return await finish("aborted", "cancelled");
+        throw e;
       } finally {
         inflight = null;
       }
