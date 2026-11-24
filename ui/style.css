@@ -628,12 +628,24 @@ button.primary.stop-mode:hover:not(:disabled) { background: #fbe6e6; border-colo
    dead control: `:disabled` keeps the primary's full strength instead of
    `button:disabled`'s 0.4, which would dim the very thing that is reporting. */
 #run-btn.sending:disabled { opacity: 1; cursor: progress; }
+/* The label and the ring are centered by the BOX, not by the text baseline. The
+   ring used to be an inline-block sitting on the baseline (`vertical-align: -1px`),
+   and that grew the line box by a pixel: measured, "Sending" painted its centre at
+   848.5 while "▶ Run" painted 847.5 in the same 29px box — the word sank the moment
+   the wait began, which is exactly when a control should look stillest. This is the
+   one control in the row that can grow an inline adornment, so it is the one that
+   says the group's centering explicitly: two items, one centre line, no baseline
+   arithmetic for the ring to take part in. */
+#run-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 #run-btn.sending::before {
   content: "";
   display: inline-block;
   width: 10px; height: 10px;
   margin-right: 6px;
-  vertical-align: -1px;
   border: 2px solid rgba(15, 15, 16, 0.22); /* --ink, a quarter, on the primary's --text */
   border-top-color: var(--accent);
   border-radius: 50%;
